@@ -2,11 +2,36 @@
 title: Contract Amendment Request — JetStream lane subject pattern
 raisedBy: Story 1.5 implementation agent (claude-opus-4-7)
 raisedAt: 2026-05-13
-status: Open — awaits Winston adjudication
-severity: Low (does not block Story 1.5 acceptance; affects future lane semantics)
+resolvedAt: 2026-05-14
+status: RESOLVED — Winston applied Resolution 1 (broaden bootstrap to `ops.>`)
+severity: was Low (did not block Story 1.5 acceptance)
 ---
 
 # Contract Amendment Request — Lane Subject Pattern
+
+## Resolution (Winston, 2026-05-14)
+
+Resolution 1 applied as part of the primordial-IDs runtime-generation
+refactor (which already touched `internal/bootstrap/primordial.go`).
+Bootstrap now provisions the `core-operations` stream with
+`Subjects: ["ops.>"]` — a single multi-segment wildcard that covers
+all per-lane subjects per Contract #2 §2.3. The previous `["ops.*",
+"ops.meta.>"]` pair would have been rejected by NATS anyway (overlapping
+subjects in one stream — err_code=10052), caught during the refactor's
+verification.
+
+Note: the Processor consumer filter in `internal/processor/step1_consume.go`
+is still single-segment (`["ops.default", "ops.urgent", "ops.system"]`).
+Both single-segment publishes (`ops.default`) and multi-segment publishes
+(`ops.default.<requestId>`) now land in the stream; the consumer filter
+matches only the former. Updating the consumer filter to `ops.<lane>.>`
+is a small follow-up that any story touching `step1_consume.go` can pick
+up — keeping the filter narrower than the stream subject is also valid
+defensive design and not blocking.
+
+---
+
+## Original Request (preserved for audit)
 
 ## Issue
 
@@ -78,3 +103,98 @@ in logs and traces).
   resolutions above must land in either bootstrap or the contract).
 
 No change made to either bootstrap or `data-contracts.md` by this agent.
+
+---
+
+# Contract Amendment Request — DDL meta-vertex lookup key + envelope `class` field (Story 1.6)
+
+raisedBy: Story 1.6 implementation agent (claude-opus-4-7)
+raisedAt: 2026-05-13
+status: Open — awaits Winston adjudication
+severity: Medium (workable today; needs alignment before Story 1.7/1.10)
+
+## Issue 1 — Logical key `vtx.meta.<class>` not contract-compliant
+
+Story 1.6 handoff brief decision #6 instructs scripts be discovered via
+`vtx.meta.<class>` and `vtx.meta.<class>.script`. Contract #1 §1.5 +
+data-contracts.md "DDL Class Lookup" specify that meta-vertices are
+keyed by **NanoID** (e.g., `vtx.meta.Hj4kPmRtw9nbCxz5vQ2y`) with a
+separate `canonicalName` aspect, and class-based lookup happens via an
+in-memory DDL cache (`map[CanonicalNameKey]MetaVertexKey`) built at
+startup by scanning `vtx.meta.>`.
+
+The brief's `vtx.meta.<class>` is not a valid Contract #1 key for two
+reasons:
+- "class" (e.g., `identity`) is not a NanoID (20 chars from custom
+  alphabet); it would not pass `substrate.IsValidNanoID`.
+- It collapses two distinct concepts (canonical name and primary key)
+  into one string.
+
+## What Story 1.6 did
+
+Implemented `step4_hydrate.go` reading the logical key
+`vtx.meta.<class>` and `vtx.meta.<class>.script` directly via
+`Conn.KVGet` (which does NOT validate key shape — bypasses
+`substrate.AspectKey`'s `mustValidate*` panics). This is functional for
+Story 1.6's commit-path proof but is NOT contract-compliant storage. A
+`MetaVertex` lookup map is exposed to scripts via the `ddl` global
+keyed by class name; the underlying `Key` is the logical
+`vtx.meta.<class>` string.
+
+## Issue 2 — Envelope needs a `class` hint until DDL cache lands
+
+Without a startup DDL cache, the Hydrator cannot derive the
+operation's class from `operationType` alone. Story 1.6 added an
+optional top-level `class` field to `OperationEnvelope` (falls back to
+`payload.class`). A missing class results in
+`HydrationError{Code: "MissingClass"}` to fail loudly rather than
+silently picking a wrong DDL.
+
+This field is NOT in Contract #2 §2.1 today. Phase 1 evolution
+options:
+1. Add `class` to the envelope permanently (small Phase 1 amendment).
+2. Remove `class` once Story 1.10 lands the DDL cache and the
+   Processor can derive class from `operationType` (DDL meta-vertices
+   declare `permittedCommands`; the cache can build a reverse index).
+3. Keep `class` as a non-binding hint even after 1.10 lands — useful
+   for clients that want to assert which DDL they expect.
+
+## Proposed Resolutions
+
+**For Issue 1:**
+1. Update `data-contracts.md` to acknowledge a Story-1.6-temporary
+   "shadow key" `vtx.meta.<class>` used by Hydrator until Story 1.10's
+   DDL cache lands. Mark for removal at 1.10.
+2. Bring forward part of Story 1.10's DDL cache work into Story 1.7
+   (combined with DDL validation step 6) — replace `vtx.meta.<class>`
+   reads with a cache lookup by canonical name to the real NanoID key.
+
+**For Issue 2:**
+1. Amend Contract #2 §2.1 to add `class` as an optional field,
+   documented as "DDL hint for steps 4-6; required in Phase 1 until
+   the Processor's DDL cache can derive class from operationType
+   (Story 1.10)".
+
+## Recommendation
+
+- Issue 1: Resolution 2 (bring cache forward to 1.7/1.10). The shadow
+  key works for 1.6 but is technical debt that DDL validation in 1.7
+  cannot cleanly use — the validator must read DDLs by their real
+  NanoID keys to enforce schema and provenance integrity.
+- Issue 2: Amend the contract to add `class` as optional. Cheap,
+  forward-compatible, useful for clients.
+
+## Action Taken in Story 1.6 (pending adjudication)
+
+- Top-level `Class string \`json:"class,omitempty"\`` added to
+  `internal/processor/envelope.go::OperationEnvelope`. Marked in the
+  doc-comment as pending Story 1.10 alignment.
+- `internal/processor/step4_hydrate.go::metaVertexKeyForClass` builds
+  the shadow key `vtx.meta.<class>` directly as a string. Doc-comment
+  flags the gap.
+- Tests in `step4_hydrate_test.go` and `step45_e2e_test.go` seed
+  shadow keys directly — they are NOT routed through
+  `substrate.AspectKey` (which would panic).
+
+Story 1.7 should NOT land DDL validation against these shadow keys
+without resolving Issue 1 first.

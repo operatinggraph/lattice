@@ -230,12 +230,40 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 
 func (cp *CommitPath) handleStubFailure(_ context.Context, msg jetstream.Msg, env *OperationEnvelope, step string, err error) MessageOutcome {
 	cp.deps.Metrics.OpsRejected.Add(1)
-	cp.deps.Logger.Warn("stubbed step returned error",
+	cp.deps.Logger.Warn("step returned error",
 		"step", step, "requestId", env.RequestID, "error", err)
-	cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeInternalError,
-		fmt.Sprintf("step %s failed: %s", step, err.Error()), nil))
-	_ = msg.TermWithReason("stub step error: " + err.Error())
+
+	code, details := classifyStepError(err)
+	cp.replyTo(msg, BuildRejectedReply(env.RequestID, code,
+		fmt.Sprintf("step %s failed: %s", step, err.Error()), details))
+	_ = msg.TermWithReason(string(code) + ": " + err.Error())
 	return OutcomeRejected
+}
+
+// classifyStepError maps a typed step-4/5 error onto the wire-shape
+// ErrorCode plus a details map. Falls back to InternalError for
+// untyped failures.
+func classifyStepError(err error) (ErrorCode, map[string]any) {
+	var hErr *HydrationError
+	if errors.As(err, &hErr) {
+		return ErrCodeHydrationFailed, map[string]any{
+			"code":       hErr.Code,
+			"missingKey": hErr.MissingKey,
+		}
+	}
+	var sErr *ScriptError
+	if errors.As(err, &sErr) {
+		d := map[string]any{
+			"code":    sErr.Code,
+			"message": sErr.Message,
+		}
+		if sErr.Line > 0 {
+			d["line"] = sErr.Line
+			d["column"] = sErr.Column
+		}
+		return ErrCodeScriptFailed, d
+	}
+	return ErrCodeInternalError, nil
 }
 
 // replyTo publishes a reply envelope on msg.Reply() if a reply subject
@@ -307,8 +335,8 @@ func MakeStubPipeline(conn *substrate.Conn, coreBucket, healthBucket string, aut
 		CoreBucket:  coreBucket,
 		HealthKV:    healthBucket,
 		Authorizer:  authz,
-		Hydrator:    &StubHydrator{logger: logger},
-		Executor:    &StubExecutor{logger: logger},
+		Hydrator:    NewHydrator(conn, coreBucket, logger),
+		Executor:    NewExecutor(NewStarlarkRunner(0, 0), logger),
 		Validator:   &StubValidator{logger: logger},
 		Committer:   committer,
 		Events:      &StubEventPublisher{logger: logger},

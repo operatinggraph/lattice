@@ -27,8 +27,19 @@ import (
 
 func main() {
 	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
+	bootstrapJSONPath := envOrDefault("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	// Load this deployment's primordial IDs from lattice.bootstrap.json
+	// (written by cmd/bootstrap on first `make up`). The IDs are
+	// runtime-generated per deployment, so we cannot reference compile-time
+	// constants — we must read the JSON.
+	if err := bootstrap.Load(bootstrapJSONPath); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot load primordial IDs from %s: %v\n", bootstrapJSONPath, err)
+		fmt.Fprintln(os.Stderr, "Suggestion: ensure `make up` has completed; lattice.bootstrap.json must exist.")
+		os.Exit(1)
+	}
 
 	nc, err := nats.Connect(natsURL)
 	if err != nil {

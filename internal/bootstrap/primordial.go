@@ -27,10 +27,16 @@ const (
 	WeaverClaimsBucket = "weaver-claims"
 
 	// JetStream stream names.
-	CoreOpsStreamName    = "core-operations"
-	OpsMetaStreamName    = "ops-meta"
-	OpsWildcardSubject   = "ops.*"
-	OpsMetaSubject       = "ops.meta.>"
+	CoreOpsStreamName = "core-operations"
+	OpsMetaStreamName = "ops-meta"
+
+	// JetStream subjects. Per Contract #2 §2.3, lane subjects are
+	// `ops.<lane>.>` (multi-segment). The `ops.>` wildcard covers all
+	// lanes including future ones. Story 1.5's CONTRACT-AMENDMENT-REQUEST
+	// flagged the old single-segment `ops.*` pattern as inconsistent with
+	// Contract #2; this resolves it.
+	OpsWildcardSubject = "ops.>"
+	OpsMetaSubject     = "ops.meta.>" // retained for explicit meta-stream documentation
 )
 
 // Seeder holds the NATS JetStream context and performs all primordial writes.
@@ -130,7 +136,7 @@ func (s *Seeder) provisionStreams(ctx context.Context) error {
 		{
 			Name:        CoreOpsStreamName,
 			Description: "Core operations stream — Processor consumes from here",
-			Subjects:    []string{OpsWildcardSubject, OpsMetaSubject},
+			Subjects:    []string{OpsWildcardSubject}, // "ops.>" covers all lanes including "ops.meta.>" per Contract #2 §2.3
 		},
 	}
 	for _, sc := range streams {

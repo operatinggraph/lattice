@@ -14,27 +14,14 @@ import (
 // defining them now is to lock the wiring so future stories swap
 // implementations without disturbing the commit_path driver.
 
-// Hydrator (step 4) — JIT Hydration. Pre-fetches the read set declared in
-// envelope.contextHint.reads into a working-set cache. Story 1.6.
+// Hydrator (step 4) — JIT Hydration. Real implementation in step4_hydrate.go.
 type Hydrator interface {
 	Hydrate(ctx context.Context, env *OperationEnvelope) (HydratedState, error)
 }
 
-// HydratedState is the placeholder return — Story 1.6 expands it.
-type HydratedState struct{}
-
-// Executor (step 5) — Starlark execution. Runs the operation's script
-// with the hydrated state and returns the (MutationBatch, EventList) per
-// Contract #3. Story 1.6.
+// Executor (step 5) — Starlark execution. Real implementation in step5_execute.go.
 type Executor interface {
 	Execute(ctx context.Context, env *OperationEnvelope, state HydratedState) (ScriptResult, error)
-}
-
-// ScriptResult is the placeholder return — Story 1.6 expands to the full
-// Contract #3 shape.
-type ScriptResult struct {
-	Mutations []any
-	Events    []any
 }
 
 // Validator (step 6+7) — DDL JSON Schema validation, write-scope check,
@@ -76,19 +63,8 @@ type Acker interface {
 // Story 1.5 can exercise the JetStream consume → tracker write → ack path
 // end-to-end while leaving real logic for the future stories.
 
-type StubHydrator struct{ logger *slog.Logger }
-
-func (s *StubHydrator) Hydrate(_ context.Context, env *OperationEnvelope) (HydratedState, error) {
-	s.logger.Info("step 4: stubbed", "step", "hydrate", "requestId", env.RequestID)
-	return HydratedState{}, nil
-}
-
-type StubExecutor struct{ logger *slog.Logger }
-
-func (s *StubExecutor) Execute(_ context.Context, env *OperationEnvelope, _ HydratedState) (ScriptResult, error) {
-	s.logger.Info("step 5: stubbed", "step", "execute", "requestId", env.RequestID)
-	return ScriptResult{}, nil
-}
+// StubHydrator and StubExecutor were removed in Story 1.6 — real
+// implementations live in step4_hydrate.go and step5_execute.go.
 
 type StubValidator struct{ logger *slog.Logger }
 

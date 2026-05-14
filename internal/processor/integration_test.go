@@ -93,8 +93,8 @@ func newPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, logger
 		CoreBucket:  testCoreBucket,
 		HealthKV:    testHealthBucket,
 		Authorizer:  authz,
-		Hydrator:    &StubHydrator{logger: logger},
-		Executor:    &StubExecutor{logger: logger},
+		Hydrator:    NewHydrator(conn, testCoreBucket, logger),
+		Executor:    NewExecutor(NewStarlarkRunner(0, 0), logger),
 		Validator:   &StubValidator{logger: logger},
 		Committer:   committer,
 		Events:      &StubEventPublisher{logger: logger},
@@ -136,7 +136,25 @@ func newTestEnvelope(requestID string) *OperationEnvelope {
 		OperationType: "CreateIdentity",
 		Actor:         "vtx.identity." + testNanoID2,
 		SubmittedAt:   "2026-05-13T10:00:00Z",
+		Class:         "identity",
 		Payload:       json.RawMessage(`{"name":"Andrew"}`),
+	}
+}
+
+// seedNoopScript writes a vtx.meta.<class> DDL meta-vertex and a
+// vtx.meta.<class>.script aspect containing a no-op Starlark script.
+// Used by integration tests that just need step 4+5 to pass through.
+func seedNoopScript(t *testing.T, ctx context.Context, conn *substrate.Conn, class string) {
+	t.Helper()
+	ddlKey := "vtx.meta." + class
+	scriptKey := ddlKey + ".script"
+	ddlDoc := []byte(`{"class":"meta.ddl.vertexType","isDeleted":false,"data":{"canonicalName":"` + class + `","permittedCommands":["CreateIdentity"]}}`)
+	scriptDoc := []byte(`{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    return {\"mutations\": [], \"events\": []}\n"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, ddlKey, ddlDoc); err != nil {
+		t.Fatalf("seed DDL %s: %v", ddlKey, err)
+	}
+	if _, err := conn.KVPut(ctx, testCoreBucket, scriptKey, scriptDoc); err != nil {
+		t.Fatalf("seed script %s: %v", scriptKey, err)
 	}
 }
 
@@ -183,6 +201,7 @@ func setupTestPipeline(t *testing.T) (context.Context, *substrate.Conn, *CommitP
 	}
 	t.Cleanup(conn.Close)
 	provisionHarness(t, ctx, conn)
+	seedNoopScript(t, ctx, conn, "identity")
 	cp, cons, metrics := newPipeline(t, ctx, conn, testLogger())
 	return ctx, conn, cp, cons, metrics
 }
@@ -297,8 +316,8 @@ func TestIntegration_TrackerWriteConflictIsAckedAsDuplicate(t *testing.T) {
 		CoreBucket:  testCoreBucket,
 		HealthKV:    testHealthBucket,
 		Authorizer:  authz,
-		Hydrator:    &StubHydrator{logger: logger},
-		Executor:    &StubExecutor{logger: logger},
+		Hydrator:    NewHydrator(conn, testCoreBucket, logger),
+		Executor:    NewExecutor(NewStarlarkRunner(0, 0), logger),
 		Validator:   &StubValidator{logger: logger},
 		Committer:   racy,
 		Events:      &StubEventPublisher{logger: logger},

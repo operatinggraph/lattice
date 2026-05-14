@@ -1,0 +1,444 @@
+package processor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	starlarklib "go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
+)
+
+// DefaultScriptWallBudget is the default wall-clock execution budget for a
+// single script invocation. NFR-P4 targets 100ms p99; the wall budget here
+// gives headroom for hot paths. Configurable via PROCESSOR_SCRIPT_WALL_MS.
+const DefaultScriptWallBudget = 250 * time.Millisecond
+
+// DefaultScriptMaxSteps is the secondary safeguard against infinite loops
+// in Starlark. Set generously — the wall-clock is the primary fence.
+const DefaultScriptMaxSteps = 1_000_000
+
+// StarlarkRunner compiles and executes a script against a ScriptContext.
+// Construction is cheap; reuse one instance across many operations.
+type StarlarkRunner struct {
+	WallBudget time.Duration
+	MaxSteps   int64
+}
+
+// NewStarlarkRunner returns a runner with the default budgets.
+func NewStarlarkRunner(wallBudget time.Duration, maxSteps int64) *StarlarkRunner {
+	if wallBudget <= 0 {
+		wallBudget = DefaultScriptWallBudget
+	}
+	if maxSteps <= 0 {
+		maxSteps = DefaultScriptMaxSteps
+	}
+	return &StarlarkRunner{WallBudget: wallBudget, MaxSteps: maxSteps}
+}
+
+// Run executes the script in sc.ScriptSource with sc as the input. The
+// returned ScriptResult is the parsed return value of the script's
+// `execute(state, op)` function.
+//
+// Failure modes mapped to ScriptError:
+//   - compile failure                      → Code="ScriptError"
+//   - resolve error (undefined name `os`)  → Code="SandboxViolation"
+//   - runtime error                        → Code="ScriptError"
+//   - context cancelled / wall budget hit  → Code="ScriptTimeout"
+//   - return value not Contract #3-shaped  → Code="InvalidReturnShape"
+func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResult, error) {
+	rid := sc.Operation.RequestID
+
+	// Build globals.
+	globals := starlarklib.StringDict{
+		"state":  vertexMapToStarlark(sc.Hydrated),
+		"op":     operationEnvelopeToStarlark(sc.Operation),
+		"ddl":    ddlMapToStarlark(sc.DDLLookup),
+		"nanoid": nanoidModule(rid),
+	}
+
+	// Compile. Resolve errors (referencing `os`, `time`, etc. without binding)
+	// fire here because go.starlark.net resolves names at compile time when
+	// `globals.Has` is supplied as the predeclared probe.
+	_, prog, err := starlarklib.SourceProgram("<script>", sc.ScriptSource, globals.Has)
+	if err != nil {
+		return ScriptResult{}, classifyStarlarkError(err, rid)
+	}
+
+	// Per-call thread with cancellation wired to ctx + wall budget.
+	wallCtx, cancel := context.WithTimeout(ctx, r.WallBudget)
+	defer cancel()
+
+	thread := &starlarklib.Thread{
+		Name: "processor:" + rid,
+		// Load is intentionally nil — `load(...)` calls fail.
+	}
+	thread.SetMaxExecutionSteps(uint64(r.MaxSteps))
+
+	// Cancel the Starlark thread when ctx fires.
+	cancelCh := make(chan struct{})
+	defer close(cancelCh)
+	go func() {
+		select {
+		case <-wallCtx.Done():
+			thread.Cancel(wallCtx.Err().Error())
+		case <-cancelCh:
+		}
+	}()
+
+	// Define globals (compiles and runs top-level statements like `def execute`).
+	defined, err := prog.Init(thread, globals)
+	if err != nil {
+		return ScriptResult{}, classifyStarlarkError(err, rid)
+	}
+
+	executeFn, ok := defined["execute"]
+	if !ok {
+		return ScriptResult{}, &ScriptError{
+			Code:               "InvalidReturnShape",
+			Message:            "script must define an `execute(state, op)` function",
+			OperationRequestID: rid,
+		}
+	}
+
+	out, err := starlarklib.Call(thread, executeFn, starlarklib.Tuple{
+		globals["state"], globals["op"],
+	}, nil)
+	if err != nil {
+		// If the wall budget fired, prefer the timeout classification.
+		if wallCtx.Err() != nil && errors.Is(wallCtx.Err(), context.DeadlineExceeded) {
+			return ScriptResult{}, &ScriptError{
+				Code:               "ScriptTimeout",
+				Message:            fmt.Sprintf("script exceeded wall budget %s", r.WallBudget),
+				OperationRequestID: rid,
+			}
+		}
+		return ScriptResult{}, classifyStarlarkError(err, rid)
+	}
+
+	return parseScriptResult(out, rid)
+}
+
+// classifyStarlarkError maps go.starlark.net error types onto our typed
+// ScriptError. The key signal for "sandbox violation" is starlark's
+// resolve.ErrorList (compile-time) or an EvalError whose backtrace shows
+// an undefined name — we treat unbound globals as SandboxViolation
+// because the only way a script references an undefined global is by
+// trying to use a forbidden module (os, time, http, ...).
+func classifyStarlarkError(err error, rid string) *ScriptError {
+	msg := err.Error()
+
+	// Resolve errors arrive as resolve.ErrorList — go.starlark.net's
+	// SourceProgram wraps them. The string contains "undefined:" for the
+	// classic sandbox violation case.
+	if strings.Contains(msg, "undefined:") {
+		line, col := extractStarlarkPosition(err)
+		return &ScriptError{
+			Code:               "SandboxViolation",
+			Message:            msg,
+			Line:               line,
+			Column:             col,
+			OperationRequestID: rid,
+		}
+	}
+	// `load` calls fail with "cannot load <module>: load not implemented".
+	if strings.Contains(msg, "load not implemented") || strings.Contains(msg, "load:") {
+		line, col := extractStarlarkPosition(err)
+		return &ScriptError{
+			Code:               "SandboxViolation",
+			Message:            msg,
+			Line:               line,
+			Column:             col,
+			OperationRequestID: rid,
+		}
+	}
+	// Anything else — syntax error, runtime fail() call, division by zero, etc.
+	line, col := extractStarlarkPosition(err)
+	return &ScriptError{
+		Code:               "ScriptError",
+		Message:            msg,
+		Line:               line,
+		Column:             col,
+		OperationRequestID: rid,
+	}
+}
+
+// extractStarlarkPosition tries to pull line/column from a starlark
+// EvalError or SyntaxError. Returns (0,0) if not available.
+func extractStarlarkPosition(err error) (int, int) {
+	type positioner interface{ Position() (string, int, int) }
+	var p positioner
+	if errors.As(err, &p) {
+		_, line, col := p.Position()
+		return line, col
+	}
+	var evalErr *starlarklib.EvalError
+	if errors.As(err, &evalErr) && len(evalErr.CallStack) > 0 {
+		pos := evalErr.CallStack[len(evalErr.CallStack)-1].Pos
+		return int(pos.Line), int(pos.Col)
+	}
+	return 0, 0
+}
+
+// parseScriptResult converts the Starlark return value into a ScriptResult.
+// The script must return {"mutations": [...], "events": [...]} per
+// Contract #3 §3.1.
+func parseScriptResult(val starlarklib.Value, rid string) (ScriptResult, error) {
+	d, ok := val.(*starlarklib.Dict)
+	if !ok {
+		return ScriptResult{}, &ScriptError{
+			Code:               "InvalidReturnShape",
+			Message:            fmt.Sprintf("script must return a dict, got %s", val.Type()),
+			OperationRequestID: rid,
+		}
+	}
+	muts, err := parseMutations(d, rid)
+	if err != nil {
+		return ScriptResult{}, err
+	}
+	evs, err := parseEvents(d, rid)
+	if err != nil {
+		return ScriptResult{}, err
+	}
+	return ScriptResult{Mutations: muts, Events: evs}, nil
+}
+
+func parseMutations(d *starlarklib.Dict, rid string) ([]MutationOp, error) {
+	raw, found, _ := d.Get(starlarklib.String("mutations"))
+	if !found {
+		return nil, nil
+	}
+	list, ok := raw.(*starlarklib.List)
+	if !ok {
+		return nil, &ScriptError{Code: "InvalidReturnShape",
+			Message: "'mutations' must be a list", OperationRequestID: rid}
+	}
+	out := make([]MutationOp, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		md, ok := list.Index(i).(*starlarklib.Dict)
+		if !ok {
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message: fmt.Sprintf("mutations[%d] must be a dict", i), OperationRequestID: rid}
+		}
+		op, err := dictString(md, "op")
+		if err != nil {
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message: fmt.Sprintf("mutations[%d]: %s", i, err.Error()), OperationRequestID: rid}
+		}
+		if op != "create" && op != "update" && op != "tombstone" {
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message: fmt.Sprintf("mutations[%d].op must be create|update|tombstone, got %q", i, op),
+				OperationRequestID: rid}
+		}
+		key, err := dictString(md, "key")
+		if err != nil {
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message: fmt.Sprintf("mutations[%d]: %s", i, err.Error()), OperationRequestID: rid}
+		}
+		m := MutationOp{Op: op, Key: key}
+		if op == "create" || op == "update" {
+			docRaw, hasDoc, _ := md.Get(starlarklib.String("document"))
+			if hasDoc {
+				dd, ok := docRaw.(*starlarklib.Dict)
+				if !ok {
+					return nil, &ScriptError{Code: "InvalidReturnShape",
+						Message: fmt.Sprintf("mutations[%d].document must be a dict", i),
+						OperationRequestID: rid}
+				}
+				m.Document = starlarkDictToGoMap(dd)
+			}
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func parseEvents(d *starlarklib.Dict, rid string) ([]EventSpec, error) {
+	raw, found, _ := d.Get(starlarklib.String("events"))
+	if !found {
+		return nil, nil
+	}
+	list, ok := raw.(*starlarklib.List)
+	if !ok {
+		return nil, &ScriptError{Code: "InvalidReturnShape",
+			Message: "'events' must be a list", OperationRequestID: rid}
+	}
+	out := make([]EventSpec, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		ed, ok := list.Index(i).(*starlarklib.Dict)
+		if !ok {
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message: fmt.Sprintf("events[%d] must be a dict", i), OperationRequestID: rid}
+		}
+		class, err := dictString(ed, "class")
+		if err != nil {
+			return nil, &ScriptError{Code: "InvalidReturnShape",
+				Message: fmt.Sprintf("events[%d]: %s", i, err.Error()), OperationRequestID: rid}
+		}
+		ev := EventSpec{Class: class, Data: map[string]interface{}{}}
+		dataRaw, hasData, _ := ed.Get(starlarklib.String("data"))
+		if hasData {
+			if dd, ok := dataRaw.(*starlarklib.Dict); ok {
+				ev.Data = starlarkDictToGoMap(dd)
+			}
+		}
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+// ---- Starlark value conversion ----
+
+func vertexMapToStarlark(m map[string]VertexDoc) *starlarklib.Dict {
+	d := new(starlarklib.Dict)
+	for k, v := range m {
+		fields := starlarklib.StringDict{
+			"key":       starlarklib.String(v.Key),
+			"class":     starlarklib.String(v.Class),
+			"isDeleted": starlarklib.Bool(v.IsDeleted),
+			"data":      goMapToStarlarkDict(v.Data),
+		}
+		if v.VertexKey != "" {
+			fields["vertexKey"] = starlarklib.String(v.VertexKey)
+		}
+		if v.LocalName != "" {
+			fields["localName"] = starlarklib.String(v.LocalName)
+		}
+		_ = d.SetKey(starlarklib.String(k), starlarkstruct.FromStringDict(starlarkstruct.Default, fields))
+	}
+	return d
+}
+
+func operationEnvelopeToStarlark(op *OperationEnvelope) *starlarkstruct.Struct {
+	payloadFields := starlarklib.StringDict{}
+	if len(op.Payload) > 0 {
+		// op.Payload is a json.RawMessage — parse lazily into a generic
+		// map for Starlark exposure.
+		if m, ok := jsonToGenericMap(op.Payload); ok {
+			for k, v := range m {
+				payloadFields[k] = goValueToStarlark(v)
+			}
+		}
+	}
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlarklib.StringDict{
+		"requestId":     starlarklib.String(op.RequestID),
+		"lane":          starlarklib.String(string(op.Lane)),
+		"operationType": starlarklib.String(op.OperationType),
+		"actor":         starlarklib.String(op.Actor),
+		"submittedAt":   starlarklib.String(op.SubmittedAt),
+		"payload":       starlarkstruct.FromStringDict(starlarkstruct.Default, payloadFields),
+	})
+}
+
+func ddlMapToStarlark(m map[string]MetaVertex) *starlarklib.Dict {
+	d := new(starlarklib.Dict)
+	for k, v := range m {
+		perm := starlarklib.NewList(nil)
+		for _, c := range v.PermittedCommands {
+			_ = perm.Append(starlarklib.String(c))
+		}
+		_ = d.SetKey(starlarklib.String(k), starlarkstruct.FromStringDict(starlarkstruct.Default, starlarklib.StringDict{
+			"canonicalName":     starlarklib.String(v.CanonicalName),
+			"permittedCommands": perm,
+		}))
+	}
+	return d
+}
+
+func goMapToStarlarkDict(m map[string]interface{}) *starlarklib.Dict {
+	d := new(starlarklib.Dict)
+	for k, v := range m {
+		_ = d.SetKey(starlarklib.String(k), goValueToStarlark(v))
+	}
+	return d
+}
+
+func goValueToStarlark(v interface{}) starlarklib.Value {
+	switch x := v.(type) {
+	case nil:
+		return starlarklib.None
+	case string:
+		return starlarklib.String(x)
+	case bool:
+		return starlarklib.Bool(x)
+	case int:
+		return starlarklib.MakeInt(x)
+	case int64:
+		return starlarklib.MakeInt64(x)
+	case float64:
+		// Try to preserve int-typed JSON numbers (Go decodes all JSON
+		// numbers as float64).
+		if x == float64(int64(x)) {
+			return starlarklib.MakeInt64(int64(x))
+		}
+		return starlarklib.Float(x)
+	case map[string]interface{}:
+		return goMapToStarlarkDict(x)
+	case []interface{}:
+		l := starlarklib.NewList(nil)
+		for _, item := range x {
+			_ = l.Append(goValueToStarlark(item))
+		}
+		return l
+	default:
+		return starlarklib.String(fmt.Sprintf("%v", x))
+	}
+}
+
+func starlarkValueToGo(v starlarklib.Value) interface{} {
+	switch x := v.(type) {
+	case starlarklib.NoneType:
+		return nil
+	case starlarklib.String:
+		return string(x)
+	case starlarklib.Bool:
+		return bool(x)
+	case starlarklib.Int:
+		i, ok := x.Int64()
+		if !ok {
+			return x.String()
+		}
+		return i
+	case starlarklib.Float:
+		return float64(x)
+	case *starlarklib.Dict:
+		return starlarkDictToGoMap(x)
+	case *starlarklib.List:
+		out := make([]interface{}, x.Len())
+		for i := 0; i < x.Len(); i++ {
+			out[i] = starlarkValueToGo(x.Index(i))
+		}
+		return out
+	default:
+		return x.String()
+	}
+}
+
+func starlarkDictToGoMap(d *starlarklib.Dict) map[string]interface{} {
+	out := make(map[string]interface{}, d.Len())
+	for _, item := range d.Items() {
+		k, ok := item[0].(starlarklib.String)
+		if !ok {
+			continue
+		}
+		out[string(k)] = starlarkValueToGo(item[1])
+	}
+	return out
+}
+
+func dictString(d *starlarklib.Dict, key string) (string, error) {
+	val, found, err := d.Get(starlarklib.String(key))
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("missing required field %q", key)
+	}
+	s, ok := val.(starlarklib.String)
+	if !ok {
+		return "", fmt.Errorf("field %q must be string, got %s", key, val.Type())
+	}
+	return strings.TrimSpace(string(s)), nil
+}

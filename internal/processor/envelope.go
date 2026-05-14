@@ -47,8 +47,13 @@ type OperationEnvelope struct {
 	Actor         string          `json:"actor"`
 	SubmittedAt   string          `json:"submittedAt"`
 	Payload       json.RawMessage `json:"payload"`
-	ContextHint   *ContextHint    `json:"contextHint,omitempty"`
-	AuthContext   *AuthContext    `json:"authContext,omitempty"`
+	// Class is the optional class hint for Story 1.6 DDL lookup. Once
+	// the DDL cache lands (Story 1.10) this becomes derivable from
+	// operationType and the field can be removed. See
+	// cmd/processor/CONTRACT-AMENDMENT-REQUEST.md (1.6 entry).
+	Class       string       `json:"class,omitempty"`
+	ContextHint *ContextHint `json:"contextHint,omitempty"`
+	AuthContext *AuthContext `json:"authContext,omitempty"`
 }
 
 // ErrorCode is the closed enumeration of operation-reply error codes per
@@ -61,6 +66,9 @@ const (
 	ErrCodeAuthDenied          ErrorCode = "AuthDenied"
 	ErrCodeAuthContextMismatch ErrorCode = "AuthContextMismatch"
 	ErrCodeInternalError       ErrorCode = "InternalError"
+	// Story 1.6 error codes for steps 4/5 typed failures.
+	ErrCodeHydrationFailed ErrorCode = "HydrationFailed"
+	ErrCodeScriptFailed    ErrorCode = "ScriptFailed"
 )
 
 // Status is the reply envelope status enum per Contract #2 §2.4.

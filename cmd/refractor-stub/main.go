@@ -59,13 +59,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	primordialKeys := bootstrap.PrimordialVertexKeys()
-	seen := make(map[string]bool, len(primordialKeys))
-	required := make(map[string]bool, len(primordialKeys))
-	for _, k := range primordialKeys {
-		required[k] = true
-	}
-	logger.Info("watching for primordial keys", "count", len(primordialKeys))
+	// Count-only readiness gate: refractor-stub does NOT need to know the
+	// specific primordial NanoIDs (which are randomly generated per
+	// deployment by cmd/bootstrap). It waits for `PrimordialVertexKeyCount`
+	// unique keys to land in Core KV, then writes the readiness signal.
+	//
+	// Rationale: at `make up` from a clean state, only cmd/bootstrap writes
+	// to Core KV before refractor-stub exits, so the count is an exact and
+	// race-free signal. Reading lattice.bootstrap.json would create a
+	// startup race (refractor-stub starts before cmd/bootstrap writes the
+	// file).
+	expected := bootstrap.PrimordialVertexKeyCount
+	seen := make(map[string]bool, expected)
+	logger.Info("watching for primordial keys", "expectedCount", expected)
 
 	// Watch ALL keys in Core KV (watcher delivers existing + new entries).
 	watcher, err := coreKV.WatchAll(ctx)
@@ -88,18 +94,17 @@ func main() {
 				continue
 			}
 			key := entry.Key()
-			if required[key] {
-				if !seen[key] {
-					seen[key] = true
-					logger.Info("observed primordial key", "key", key,
-						"seen", len(seen), "required", len(primordialKeys))
-				}
+			if !seen[key] {
+				seen[key] = true
+				logger.Info("observed Core KV key", "key", key,
+					"seen", len(seen), "expected", expected)
 			}
 
-			// Check if all required keys are now present.
-			if len(seen) == len(primordialKeys) {
-				logger.Info("all primordial keys observed — writing readiness signal")
-				if writeErr := writeReadinessSignal(ctx, healthKV, logger); writeErr != nil {
+			// Count-only gate: ready when `expected` unique keys are present.
+			if len(seen) >= expected {
+				logger.Info("primordial key count reached — writing readiness signal",
+					"count", len(seen))
+				if writeErr := writeReadinessSignal(ctx, healthKV, len(seen), logger); writeErr != nil {
 					logger.Error("failed to write readiness signal", "error", writeErr)
 					os.Exit(1)
 				}
@@ -128,7 +133,7 @@ type ReadinessSignal struct {
 	Issues      []any  `json:"issues"`
 }
 
-func writeReadinessSignal(ctx context.Context, healthKV jetstream.KeyValue, logger *slog.Logger) error {
+func writeReadinessSignal(ctx context.Context, healthKV jetstream.KeyValue, observedCount int, logger *slog.Logger) error {
 	now := time.Now().UTC()
 	doc := ReadinessSignal{
 		Key:         bootstrap.HealthBootstrapCompleteKey,
@@ -140,7 +145,7 @@ func writeReadinessSignal(ctx context.Context, healthKV jetstream.KeyValue, logg
 		StartedAt:   now.Format(time.RFC3339Nano),
 		Uptime:      "PT0S",
 		Metrics: map[string]any{
-			"primordial_keys_observed": len(bootstrap.PrimordialVertexKeys()),
+			"primordial_keys_observed": observedCount,
 		},
 		Issues: []any{},
 	}

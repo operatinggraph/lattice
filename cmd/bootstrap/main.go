@@ -12,8 +12,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,20 +26,6 @@ import (
 const defaultBootstrapJSONPath = "./lattice.bootstrap.json"
 const defaultReadyTimeoutSec = 30
 
-// BootstrapConfig is persisted to lattice.bootstrap.json per Contract #7 §7.3.
-// Fixed IDs are used for primordial entities (see internal/bootstrap/nanoid.go).
-type BootstrapConfig struct {
-	PlatformVersion      string    `json:"platformVersion"`
-	BootstrapDate        time.Time `json:"bootstrapDate"`
-	BootstrapIdentityKey string    `json:"bootstrapIdentityKey"`
-	PlatformActorKey     string    `json:"platformActorKey"`
-	MetaRootKey          string    `json:"metaRootKey"`
-	CapabilityLensKey    string    `json:"capabilityLensKey"`
-	CapabilityRoleIndex  string    `json:"capabilityRoleIndexKey"`
-	BootstrapOpKey       string    `json:"bootstrapOpKey"`
-	RoleKeys             map[string]string `json:"roleKeys"`
-}
-
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -50,6 +34,24 @@ func main() {
 	timeoutSec := envIntOrDefault("BOOTSTRAP_READY_TIMEOUT_SEC", defaultReadyTimeoutSec)
 
 	logger.Info("lattice bootstrap starting", "natsURL", natsURL, "bootstrapJSON", bootstrapJSONPath)
+
+	// Load existing primordial IDs from lattice.bootstrap.json if it exists
+	// (idempotent re-run after a successful prior bootstrap), otherwise
+	// generate fresh per-deployment unique NanoIDs in memory. The JSON is
+	// persisted ONLY AFTER SeedPrimordial succeeds, so an interrupted
+	// bootstrap doesn't leave a stale file pointing to nonexistent keys.
+	freshlyGenerated, err := bootstrap.LoadOrGenerate(bootstrapJSONPath)
+	if err != nil {
+		logger.Error("failed to load or generate primordial IDs", "error", err)
+		os.Exit(1)
+	}
+	if freshlyGenerated {
+		logger.Info("generated fresh primordial IDs for this deployment (in-memory)",
+			"bootstrapIdentity", bootstrap.BootstrapIdentityKey)
+	} else {
+		logger.Info("loaded existing primordial IDs from lattice.bootstrap.json",
+			"bootstrapIdentity", bootstrap.BootstrapIdentityKey)
+	}
 
 	// Connect to NATS with retry (containers may be slow to accept connections
 	// even after healthcheck passes).
@@ -76,24 +78,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Check if lattice.bootstrap.json already exists → skip seeding.
-	alreadyBootstrapped := fileExists(bootstrapJSONPath)
-	if alreadyBootstrapped {
-		logger.Info("lattice.bootstrap.json found — skipping primordial seeding (idempotent re-run)")
-	} else {
+	if freshlyGenerated {
 		logger.Info("seeding primordial Core KV entries")
 		if err := seeder.SeedPrimordial(ctx); err != nil {
 			logger.Error("primordial seeding failed", "error", err)
 			os.Exit(1)
 		}
-
-		// Persist lattice.bootstrap.json.
-		cfg := buildBootstrapConfig()
-		if err := writeBootstrapJSON(bootstrapJSONPath, cfg); err != nil {
-			logger.Error("failed to write lattice.bootstrap.json", "error", err)
+		// Persist JSON only AFTER successful seeding. Order matters:
+		// presence of lattice.bootstrap.json must imply Core KV is seeded.
+		if err := bootstrap.Persist(bootstrapJSONPath); err != nil {
+			logger.Error("failed to persist lattice.bootstrap.json", "error", err)
 			os.Exit(1)
 		}
-		logger.Info("lattice.bootstrap.json written", "path", bootstrapJSONPath)
+		logger.Info("lattice.bootstrap.json persisted", "path", bootstrapJSONPath)
+	} else {
+		logger.Info("primordial seeding skipped — already done on prior run")
 	}
 
 	// Wait for readiness gate: refractor-stub writes health.bootstrap.complete.
@@ -108,40 +107,6 @@ func main() {
 	}
 
 	logger.Info("Lattice ready — primordial bootstrap complete")
-}
-
-// buildBootstrapConfig assembles the config from the fixed primordial constants.
-func buildBootstrapConfig() BootstrapConfig {
-	return BootstrapConfig{
-		PlatformVersion:      "1.0",
-		BootstrapDate:        bootstrap.BootstrapTime,
-		BootstrapIdentityKey: bootstrap.BootstrapIdentityKey,
-		PlatformActorKey:     bootstrap.PlatformActorKey,
-		MetaRootKey:          bootstrap.MetaRootKey,
-		CapabilityLensKey:    bootstrap.CapabilityLensKey,
-		CapabilityRoleIndex:  bootstrap.CapabilityRoleIndexLensKey,
-		BootstrapOpKey:       bootstrap.BootstrapOpKey,
-		RoleKeys: map[string]string{
-			"consumer":         bootstrap.RoleConsumerKey,
-			"frontOfHouse":     bootstrap.RoleFrontOfHouseKey,
-			"backOfHouse":      bootstrap.RoleBackOfHouseKey,
-			"operator":         bootstrap.RoleOperatorKey,
-			"platformInternal": bootstrap.RolePlatformIntlKey,
-		},
-	}
-}
-
-func writeBootstrapJSON(path string, cfg BootstrapConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return !errors.Is(err, os.ErrNotExist)
 }
 
 func envOrDefault(key, def string) string {
