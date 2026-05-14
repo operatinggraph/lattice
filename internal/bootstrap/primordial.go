@@ -27,16 +27,18 @@ const (
 	WeaverClaimsBucket = "weaver-claims"
 
 	// JetStream stream names.
-	CoreOpsStreamName = "core-operations"
-	OpsMetaStreamName = "ops-meta"
+	CoreOpsStreamName    = "core-operations"
+	OpsMetaStreamName    = "ops-meta"
+	CoreEventsStreamName = "core-events"
 
 	// JetStream subjects. Per Contract #2 §2.3, lane subjects are
 	// `ops.<lane>.>` (multi-segment). The `ops.>` wildcard covers all
 	// lanes including future ones. Story 1.5's CONTRACT-AMENDMENT-REQUEST
 	// flagged the old single-segment `ops.*` pattern as inconsistent with
 	// Contract #2; this resolves it.
-	OpsWildcardSubject = "ops.>"
-	OpsMetaSubject     = "ops.meta.>" // retained for explicit meta-stream documentation
+	OpsWildcardSubject    = "ops.>"
+	OpsMetaSubject        = "ops.meta.>" // retained for explicit meta-stream documentation
+	EventsWildcardSubject = "events.>"   // Story 1.8: Processor step-9 event fan-out
 )
 
 // Seeder holds the NATS JetStream context and performs all primordial writes.
@@ -137,6 +139,20 @@ func (s *Seeder) provisionStreams(ctx context.Context) error {
 			Name:        CoreOpsStreamName,
 			Description: "Core operations stream — Processor consumes from here",
 			Subjects:    []string{OpsWildcardSubject}, // "ops.>" covers all lanes including "ops.meta.>" per Contract #2 §2.3
+		},
+		{
+			// Story 1.8: Processor step-9 event fan-out. Events are
+			// short-lived per Contract #3 lifetime norms; 7-day MaxAge is
+			// the Phase 1 default. AllowAtomicPublish enables the
+			// substrate.PublishBatch step-9 path (sequential-with-retry
+			// batch publish — see internal/processor/step9_publish.go).
+			Name:               CoreEventsStreamName,
+			Description:        "Core events stream — Processor publishes business events here at step 9",
+			Subjects:           []string{EventsWildcardSubject},
+			Retention:          jetstream.LimitsPolicy,
+			Storage:            jetstream.FileStorage,
+			MaxAge:             7 * 24 * time.Hour,
+			AllowAtomicPublish: true,
 		},
 	}
 	for _, sc := range streams {

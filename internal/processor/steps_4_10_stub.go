@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -49,11 +51,23 @@ type EventPublisher interface {
 	Publish(ctx context.Context, env *OperationEnvelope, result ScriptResult) error
 }
 
-// Acker (step 10) — acks the JetStream message. Story 1.8 may keep this
-// as a thin shim; the interface is here so fault-injection tests can
-// substitute crashy implementations.
+// Acker (step 10) — acks the JetStream message. Story 1.8 wires a real
+// AckerImpl (see step10_ack.go); fault-injection tests substitute a
+// FailAfterN-wrapped implementation.
 type Acker interface {
 	Ack(ctx context.Context) error
+}
+
+// AckerFactory builds a per-message Acker. The commit_path constructs
+// one Acker per delivered jetstream.Msg so the Acker holds the msg
+// reference internally (Architecture Decision #4). The factory pattern
+// is the seam tests use to inject a FailAfterN wrapper around the real
+// AckerImpl.
+type AckerFactory func(msg jetstream.Msg, logger *slog.Logger) Acker
+
+// DefaultAckerFactory returns a real AckerImpl. Tests inject a wrapper.
+func DefaultAckerFactory(msg jetstream.Msg, logger *slog.Logger) Acker {
+	return NewAcker(msg, logger)
 }
 
 // --- Stub implementations ---

@@ -26,6 +26,7 @@ type Deps struct {
 	Validator   Validator
 	Committer   Committer
 	Events      EventPublisher
+	AckerFactory AckerFactory
 	Metrics     *Metrics
 	Heartbeater *HealthHeartbeater
 	Logger      *slog.Logger
@@ -62,6 +63,9 @@ func NewCommitPath(deps Deps) *CommitPath {
 	}
 	if deps.Clock == nil {
 		deps.Clock = time.Now
+	}
+	if deps.AckerFactory == nil {
+		deps.AckerFactory = DefaultAckerFactory
 	}
 	return &CommitPath{deps: deps}
 }
@@ -243,20 +247,36 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		return OutcomeRetryable
 	}
 
+	// --- Step 9: event publication. ---
+	// Commit (step 8) is durable. If step 9 fails after retries, we
+	// nak so JetStream redelivers; step 2's tracker short-circuit makes
+	// the redelivered attempt a no-op-from-the-mutation-perspective and
+	// step 9 will run again from a clean state. The reply for the
+	// caller is deferred until step 10 succeeds — Contract #2 §2.4
+	// anchors durability at step 8, but Story 1.8 confirms reply is
+	// still emitted after step 9 completes successfully (the architect's
+	// decision was: reply after commit but observable success of the
+	// whole 10-step path requires step 9 too).
 	if cp.deps.Events != nil {
 		if err := cp.deps.Events.Publish(ctx, env, result); err != nil {
-			// Events failed but commit succeeded — tracker exists; on
-			// redelivery, step 2 will short-circuit. Log and proceed to
-			// ack so we don't reprocess. (Story 1.8 hardens this.)
-			cp.deps.Logger.Warn("step 9: event publish failed (commit already durable)",
+			cp.deps.Logger.Warn("step 9: event publish failed (commit already durable); nak for redelivery",
 				"requestId", env.RequestID, "error", err)
+			_ = msg.Nak()
+			return OutcomeRetryable
 		}
 	}
 
 	cp.deps.Metrics.OpsCommitted.Add(1)
 	cp.replyTo(msg, BuildAcceptedReply(env.RequestID, now))
-	if ackErr := msg.Ack(); ackErr != nil {
+
+	// --- Step 10: explicit Acker boundary. ---
+	acker := cp.deps.AckerFactory(msg, cp.deps.Logger)
+	if ackErr := acker.Ack(ctx); ackErr != nil {
 		cp.deps.Logger.Warn("step 10: ack failed", "requestId", env.RequestID, "error", ackErr)
+		// Ack failure: JetStream will redeliver; tracker short-circuits.
+		// We still consider the operation accepted from the caller's
+		// perspective because step 8 was durable + reply was sent.
+		return OutcomeAccepted
 	}
 	cp.deps.Logger.Info("step 10: ack", "requestId", env.RequestID)
 	return OutcomeAccepted
@@ -385,7 +405,7 @@ func MakeStubPipeline(conn *substrate.Conn, coreBucket, healthBucket string, aut
 		Executor:    NewExecutor(NewStarlarkRunner(0, 0), logger),
 		Validator:   NewValidator(ddls, logger),
 		Committer:   committer,
-		Events:      &StubEventPublisher{logger: logger},
+		Events:      NewEventPublisher(conn, logger),
 		Metrics:     metrics,
 		Heartbeater: hb,
 		Logger:      logger,

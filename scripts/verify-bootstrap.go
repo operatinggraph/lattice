@@ -170,6 +170,44 @@ func main() {
 		fmt.Printf("  OK  health.bootstrap.complete\n")
 	}
 
+	// 5a. Check JetStream streams exist (Story 1.8 adds core-events for
+	// the Processor's step-9 event fan-out).
+	allStreams := []string{
+		bootstrap.CoreOpsStreamName,
+		bootstrap.CoreEventsStreamName,
+	}
+	for _, streamName := range allStreams {
+		stream, err := js.Stream(ctx, streamName)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING JetStream stream: %s (%v)", streamName, err))
+			continue
+		}
+		info, err := stream.Info(ctx)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("STREAM info failed: %s (%v)", streamName, err))
+			continue
+		}
+		if streamName == bootstrap.CoreEventsStreamName {
+			// Assert core-events accepts events.> and has the expected
+			// retention shape.
+			foundSubject := false
+			for _, s := range info.Config.Subjects {
+				if s == bootstrap.EventsWildcardSubject {
+					foundSubject = true
+					break
+				}
+			}
+			if !foundSubject {
+				failures = append(failures, fmt.Sprintf("STREAM %s missing subject %s (got %v)",
+					streamName, bootstrap.EventsWildcardSubject, info.Config.Subjects))
+			}
+			if info.Config.MaxAge == 0 {
+				failures = append(failures, fmt.Sprintf("STREAM %s has no MaxAge — events should expire (Phase 1 default 7d)", streamName))
+			}
+		}
+		fmt.Printf("  OK  stream: %s\n", streamName)
+	}
+
 	// 5. Check KV buckets exist.
 	allBuckets := []string{
 		bootstrap.CoreKVBucket,

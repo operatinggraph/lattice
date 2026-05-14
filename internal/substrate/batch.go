@@ -152,6 +152,82 @@ type apiErr struct {
 	Description string `json:"description"`
 }
 
+// PublishOp describes a single message inside a non-conditional batch
+// publish to JetStream (Story 1.8 step 9). Unlike BatchOp, PublishOp
+// targets arbitrary JetStream subjects (e.g. `events.identity.created`)
+// rather than KV-bucket subjects, and it does not carry revision
+// conditions — the batch is unconditional. Ordering within the batch is
+// preserved by `Nats-Batch-Sequence` (1..N), and either the entire
+// batch lands or none of it does.
+//
+// Note: the destination subjects must all belong to the SAME JetStream
+// stream (the atomic-batch primitive is stream-scoped). For the
+// Processor's event publish, all subjects share the `events.>` filter
+// on the `core-events` stream.
+type PublishOp struct {
+	Subject string
+	Data    []byte
+	Header  map[string]string // optional extra headers
+}
+
+// PublishBatchAck mirrors BatchAck for a non-conditional batch publish.
+type PublishBatchAck struct {
+	Stream   string
+	Sequence uint64
+	BatchID  string
+	Count    uint64
+}
+
+// PublishBatch publishes ops as a single JetStream atomic batch to
+// arbitrary subjects (no revision conditions, no per-key TTL). All
+// subjects must belong to the same JetStream stream — typically the
+// `core-events` stream's `events.>` filter for the Processor's step 9.
+//
+// Order is preserved via `Nats-Batch-Sequence` (1..N). On failure, no
+// message is durably stored — semantics are all-or-nothing per the
+// Story 1.1 spike findings (Behavioral Test 3b documented this).
+func (c *Conn) PublishBatch(ops []PublishOp, timeout time.Duration) (*PublishBatchAck, error) {
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("substrate: PublishBatch: empty op list")
+	}
+	for i, op := range ops {
+		if op.Subject == "" {
+			return nil, fmt.Errorf("substrate: PublishBatch: op[%d] missing subject", i)
+		}
+	}
+
+	batchID, err := NewNanoID()
+	if err != nil {
+		return nil, fmt.Errorf("substrate: PublishBatch: generate batch id: %w", err)
+	}
+
+	msgs := make([]*nats.Msg, len(ops))
+	for i, op := range ops {
+		m := nats.NewMsg(op.Subject)
+		m.Data = op.Data
+		m.Header = nats.Header{}
+		for k, v := range op.Header {
+			m.Header.Set(k, v)
+		}
+		msgs[i] = m
+	}
+
+	ack, err := publishAtomicBatch(c.nc, batchID, msgs, timeout)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAtomicBatchRejected, err)
+	}
+	if ack.Error != nil {
+		return nil, fmt.Errorf("%w: code=%d err_code=%d: %s",
+			ErrAtomicBatchRejected, ack.Error.Code, ack.Error.ErrCode, ack.Error.Description)
+	}
+	return &PublishBatchAck{
+		Stream:   ack.Stream,
+		Sequence: ack.Sequence,
+		BatchID:  batchID,
+		Count:    ack.BatchSize,
+	}, nil
+}
+
 // publishAtomicBatch is the raw-protocol atomic-batch publisher ported
 // from the Story 1.1 spike. All-but-last messages are fire-and-forget;
 // the last carries Nats-Batch-Commit and is sent via RequestMsg so the

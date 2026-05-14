@@ -191,6 +191,34 @@ func driveOne(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.
 	}
 }
 
+// driveOneAny runs the consumer until any outcome is emitted, then
+// returns it. Used by NFR-R1 tests where the post-fault redelivery
+// could land as Accepted (first attempt's step 8 didn't run) OR
+// Duplicate (step 8 did run before the fault).
+func driveOneAny(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.Consumer) MessageOutcome {
+	t.Helper()
+	got := make(chan MessageOutcome, 1)
+	cc, err := cons.Consume(func(m jetstream.Msg) {
+		outcome := cp.HandleMessage(ctx, m)
+		select {
+		case got <- outcome:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	defer cc.Stop()
+	select {
+	case outcome := <-got:
+		time.Sleep(100 * time.Millisecond)
+		return outcome
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for any outcome")
+		return ""
+	}
+}
+
 func setupTestPipeline(t *testing.T) (context.Context, *substrate.Conn, *CommitPath, jetstream.Consumer, *Metrics) {
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
