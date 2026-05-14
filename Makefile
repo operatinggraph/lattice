@@ -15,7 +15,7 @@ BOOTSTRAP_JSON ?= ./lattice.bootstrap.json
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up down verify-bootstrap build vet test processor run-processor clean logs ps
+.PHONY: up down verify-bootstrap build vet test test-bypass processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -73,6 +73,16 @@ run-processor: processor
 test:
 	@echo "==> go test ./..."
 	go test ./...
+
+## test-bypass — Run the Phase 1 Gate 2 adversarial bypass test suite.
+## Requires a running Docker stack (make up). Exits 0 only when all 4 bypass
+## categories are BLOCKED. Writes gate2-report.txt and the Health KV marker.
+.PHONY: test-bypass
+test-bypass:
+	@$(MAKE) down
+	@$(MAKE) up
+	@$(MAKE) verify-bootstrap
+	go test ./internal/bypass/... -v -count=1
 
 ## vet — Run go vet on all packages.
 vet:
