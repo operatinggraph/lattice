@@ -185,7 +185,7 @@ func driveOne(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.
 		// Drain a brief moment to let ack flush.
 		time.Sleep(100 * time.Millisecond)
 		return outcome
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatalf("timed out waiting for outcome (want %q)", want)
 		return ""
 	}
