@@ -92,10 +92,11 @@ test-bypass:
 	@$(MAKE) verify-bootstrap
 	go test ./internal/bypass/... -v -count=1
 
-## vet — Run go vet on all packages.
+## vet — Run go vet on all packages except vendored ANTLR-generated parsers
+## (which contain expected unreachable-code patterns from the generator).
 vet:
-	@echo "==> go vet ./..."
-	go vet ./...
+	@echo "==> go vet ./... (excluding vendored ANTLR parsers)"
+	go vet $$(go list ./... | grep -v 'internal/refractor/ruleengine/full/cypher')
 
 ## clean — Remove compiled binaries.
 clean:

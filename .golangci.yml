@@ -10,6 +10,7 @@ linters:
   exclusions:
     paths:
       - internal/spike
+      - internal/refractor/ruleengine/full/cypher
     rules:
       - linters: [staticcheck]
         text: "QF1001"
