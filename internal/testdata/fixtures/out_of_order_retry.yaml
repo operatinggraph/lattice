@@ -1,0 +1,43 @@
+description: "Out-of-order retry: non-anchor arrives before anchor, anchor produces correct final result"
+
+rule:
+  id: out-of-order-retry
+  team: test-team
+  match: "MATCH (a:agreement)-[:HAS_PARTY]->(i:identity) RETURN a.id AS agreement_id, i.name AS party_name"
+  into:
+    target: nats_kv
+    bucket: target-bucket
+    key: agreement_id
+
+adjacency:
+  - node_id: "node_agreement_abc"
+    edges:
+      - coreKvKey: "node_edge_rel1"
+        edgeId: "rel1"
+        name: "HAS_PARTY"
+        direction: "outbound"
+        otherNodeId: "node_identity_i1"
+  - node_id: "node_identity_i1"
+    edges:
+      - coreKvKey: "node_edge_rel1"
+        edgeId: "rel1"
+        name: "HAS_PARTY"
+        direction: "inbound"
+        otherNodeId: "node_agreement_abc"
+
+inputs:
+  - key: "node_identity_i1"
+    payload:
+      name: "Alice"
+      isDeleted: false
+  - key: "node_agreement_abc"
+    payload:
+      id: "abc"
+      isDeleted: false
+
+expect:
+  nats_kv:
+    - key: "abc"
+      value:
+        agreement_id: "abc"
+        party_name: "Alice"

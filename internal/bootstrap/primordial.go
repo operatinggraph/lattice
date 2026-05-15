@@ -20,11 +20,12 @@ import (
 
 const (
 	// KV bucket names.
-	CoreKVBucket       = "core-kv"
-	HealthKVBucket     = "health-kv"
-	CapabilityKVBucket = "capability-kv"
-	WeaverStateBucket  = "weaver-state"
-	WeaverClaimsBucket = "weaver-claims"
+	CoreKVBucket           = "core-kv"
+	HealthKVBucket         = "health-kv"
+	CapabilityKVBucket     = "capability-kv"
+	WeaverStateBucket      = "weaver-state"
+	WeaverClaimsBucket     = "weaver-claims"
+	RefractorAdjacencyKV   = "refractor-adjacency" // Story 2.1: Refractor's internal adjacency store (private, not a Lens target)
 
 	// JetStream stream names.
 	CoreOpsStreamName    = "core-operations"
@@ -70,6 +71,7 @@ func (s *Seeder) ProvisionBuckets(ctx context.Context) error {
 		{CapabilityKVBucket, "Lattice Capability KV — Refractor projection targets", true},
 		{WeaverStateBucket, "Lattice Weaver State KV", true},
 		{WeaverClaimsBucket, "Lattice Weaver Claims KV", true},
+		{RefractorAdjacencyKV, "Refractor internal adjacency store (private)", false},
 	}
 
 	for _, b := range buckets {
@@ -413,6 +415,32 @@ func addLensAspects(entries *[]kvEntry, lensKey string, def LensDefinition) erro
 		}
 		*entries = append(*entries, kvEntry{key: key, value: val})
 	}
+	return nil
+}
+
+// MarkBootstrapComplete writes the `health.bootstrap.complete` marker
+// to the Health KV bucket. Historically this was refractor-stub's job;
+// after Story 2.1 deleted refractor-stub (MORPH-DEVIATIONS Deviation 9)
+// the marker write moved to cmd/bootstrap itself — see Story 2.1b
+// housekeeping.
+//
+// The marker value is a tiny JSON blob with a wall-clock timestamp so
+// operators can read it via `nats kv get health-kv health.bootstrap.complete`.
+func MarkBootstrapComplete(ctx context.Context, nc *nats.Conn, logger *slog.Logger) error {
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("jetstream.New: %w", err)
+	}
+	kv, err := js.KeyValue(ctx, HealthKVBucket)
+	if err != nil {
+		return fmt.Errorf("open Health KV: %w", err)
+	}
+	payload := fmt.Sprintf(`{"completedAt":%q,"writer":"cmd/bootstrap"}`,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if _, err := kv.Put(ctx, HealthBootstrapCompleteKey, []byte(payload)); err != nil {
+		return fmt.Errorf("put %s: %w", HealthBootstrapCompleteKey, err)
+	}
+	logger.Info("bootstrap readiness marker written", "key", HealthBootstrapCompleteKey)
 	return nil
 }
 

@@ -1,0 +1,23 @@
+description: "OPTIONAL MATCH null: no matching edge produces null for optional columns"
+
+rule:
+  id: optional-match-null
+  team: test-team
+  match: "MATCH (a:agreement) OPTIONAL MATCH (a)-[:HAS_CONTACT]->(c:contact) RETURN a.id AS agreement_id, c.email AS contact_email"
+  into:
+    target: nats_kv
+    bucket: target-bucket
+    key: agreement_id
+
+inputs:
+  - key: "node_agreement_abc123"
+    payload:
+      id: "abc"
+      isDeleted: false
+
+expect:
+  nats_kv:
+    - key: "abc"
+      value:
+        agreement_id: "abc"
+        contact_email: null

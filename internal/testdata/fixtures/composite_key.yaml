@@ -1,0 +1,24 @@
+description: "Composite key: two-field key joined with '/' in NATS KV"
+
+rule:
+  id: composite-key
+  team: test-team
+  match: "MATCH (a:agreement) RETURN a.teamId AS team_id, a.id AS agreement_id"
+  into:
+    target: nats_kv
+    bucket: target-bucket
+    key: [team_id, agreement_id]
+
+inputs:
+  - key: "node_agreement_abc123"
+    payload:
+      id: "abc"
+      teamId: "team1"
+      isDeleted: false
+
+expect:
+  nats_kv:
+    - key: "team1/abc"
+      value:
+        team_id: "team1"
+        agreement_id: "abc"

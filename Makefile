@@ -24,12 +24,12 @@ up:
 	@echo "==> Containers healthy."
 	@echo "==> Building bootstrap binary..."
 	go build -o bin/bootstrap ./cmd/bootstrap
-	@echo "==> Building refractor-stub binary..."
-	go build -o bin/refractor-stub ./cmd/refractor-stub
-	@echo "==> Starting refractor-stub in background..."
-	NATS_URL=$(NATS_URL) ./bin/refractor-stub &
+	@echo "==> Building refractor binary (Story 2.1)..."
+	go build -o bin/refractor ./cmd/refractor
 	@echo "==> Running bootstrap..."
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap
+	@echo "==> Starting refractor in background..."
+	NATS_URL=$(NATS_URL) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" ./bin/refractor >refractor.log 2>&1 </dev/null &
 	@echo "==> Lattice ready."
 
 ## down — Tear down all containers and remove the bootstrap JSON.
@@ -39,8 +39,8 @@ down:
 	docker compose down --remove-orphans
 	@echo "==> Removing bootstrap JSON (if present)..."
 	rm -f $(BOOTSTRAP_JSON)
-	@echo "==> Killing any background refractor-stub processes..."
-	-pkill -f "bin/refractor-stub" 2>/dev/null || true
+	@echo "==> Killing any background refractor processes..."
+	-pkill -f "bin/refractor" 2>/dev/null || true
 	@echo "==> Down complete."
 
 ## verify-bootstrap — Assert all primordial keys exist with correct envelopes.
@@ -54,7 +54,7 @@ build:
 	go build ./...
 	mkdir -p bin
 	go build -o bin/bootstrap ./cmd/bootstrap
-	go build -o bin/refractor-stub ./cmd/refractor-stub
+	go build -o bin/refractor ./cmd/refractor
 	go build -o bin/processor ./cmd/processor
 
 ## processor — Build the Processor binary (Story 1.5).
@@ -70,9 +70,17 @@ run-processor: processor
 	NATS_URL=$(NATS_URL) ./bin/processor
 
 ## test — Run all Go unit + integration tests.
+## NOTE (Story 2.1b Gap 4): -p 1 serializes test-package execution.
+## Embedded NATS / JetStream fixtures across many packages each spin up
+## an in-process server; with default GOMAXPROCS parallelism many
+## servers run concurrently and exhaust file-descriptor/memory budgets
+## on the runner, manifesting as KV-put "context deadline exceeded"
+## timeouts in the bypass + substrate suites. Fixtures already use
+## Port = -1 (random) so port collisions are not the underlying cause;
+## -p 1 is the targeted fix until Phase 2 reduces fixture cost.
 test:
-	@echo "==> go test ./..."
-	go test ./...
+	@echo "==> go test ./... -p 1"
+	go test ./... -p 1
 
 ## test-bypass — Run the Phase 1 Gate 2 adversarial bypass test suite.
 ## Requires a running Docker stack (make up). Exits 0 only when all 4 bypass

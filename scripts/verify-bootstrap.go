@@ -215,6 +215,7 @@ func main() {
 		bootstrap.CapabilityKVBucket,
 		bootstrap.WeaverStateBucket,
 		bootstrap.WeaverClaimsBucket,
+		bootstrap.RefractorAdjacencyKV,
 	}
 	for _, bucket := range allBuckets {
 		_, err := js.KeyValue(ctx, bucket)

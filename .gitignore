@@ -23,6 +23,10 @@ coverage.html
 /lattice
 /lattice-refractor
 /lattice-processor
+# Stray top-level refractor binary (`go build ./cmd/refractor` without -o).
+# Canonical build target is bin/refractor (see Makefile).
+/refractor
+refractor.log
 
 # Editor / IDE
 .idea/

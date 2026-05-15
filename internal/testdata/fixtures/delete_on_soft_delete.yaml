@@ -1,0 +1,34 @@
+description: "Soft-delete then reversal: isDeleted=true produces hard delete, reversal re-upserts"
+
+rule:
+  id: delete-on-soft-delete
+  team: test-team
+  match: "MATCH (a:agreement) RETURN a.id AS agreement_id, a.name AS agreement_name"
+  into:
+    target: nats_kv
+    bucket: target-bucket
+    key: agreement_id
+
+inputs:
+  - key: "node_agreement_abc123"
+    payload:
+      id: "abc"
+      name: "Acme"
+      isDeleted: false
+  - key: "node_agreement_abc123"
+    payload:
+      id: "abc"
+      name: "Acme"
+      isDeleted: true
+  - key: "node_agreement_abc123"
+    payload:
+      id: "abc"
+      name: "Acme Updated"
+      isDeleted: false
+
+expect:
+  nats_kv:
+    - key: "abc"
+      value:
+        agreement_id: "abc"
+        agreement_name: "Acme Updated"

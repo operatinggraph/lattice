@@ -1,0 +1,11 @@
+# Sample Materializer rule - occupancy view
+# Full rule schema defined in Story 1.3
+id: occupancy-view
+team: facilities
+match: |
+  MATCH (r:room)-[:HAS_OCCUPANT]->(p:person)
+  RETURN r.id AS room_id, p.name AS occupant_name
+into:
+  target: nats_kv
+  bucket: occupancy-view
+  key: room_id

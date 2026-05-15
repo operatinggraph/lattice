@@ -95,14 +95,27 @@ func main() {
 		logger.Info("primordial seeding skipped — already done on prior run")
 	}
 
-	// Wait for readiness gate: refractor-stub writes health.bootstrap.complete.
+	// Story 2.1b housekeeping: refractor-stub was deleted in Story 2.1
+	// (MORPH-DEVIATIONS Deviation 9) — it was the historical writer of
+	// `health.bootstrap.complete`. The real Refractor binary is started
+	// AFTER cmd/bootstrap exits (Makefile order), so it cannot write the
+	// marker that cmd/bootstrap waits on. Resolution: cmd/bootstrap now
+	// writes the marker itself once primordial seeding (or skip-because-
+	// already-seeded) is complete; the subsequent WaitForBootstrapComplete
+	// becomes a sanity check that catches its own write — preserving the
+	// gate's semantics for downstream poll-based readiness consumers.
+	if err := bootstrap.MarkBootstrapComplete(ctx, nc, logger); err != nil {
+		logger.Error("write readiness marker failed", "error", err)
+		os.Exit(1)
+	}
+
 	logger.Info("waiting for readiness gate", "timeout", fmt.Sprintf("%ds", timeoutSec))
 	readyCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	if err := bootstrap.WaitForBootstrapComplete(readyCtx, nc, logger); err != nil {
 		logger.Error("readiness gate failed", "error", err,
-			"suggestion", "check refractor-stub logs; try `make down && make up`")
+			"suggestion", "try `make down && make up`")
 		os.Exit(1)
 	}
 
