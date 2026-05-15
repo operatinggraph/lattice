@@ -1,4 +1,4 @@
-package engine
+package simple
 
 // No testing.Short() skip — all parser tests are infrastructure-free (ADR-6).
 

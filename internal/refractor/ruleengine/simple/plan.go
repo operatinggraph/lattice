@@ -1,4 +1,4 @@
-package engine
+package simple
 
 // Column describes one projected output column from the RETURN clause.
 type Column struct {

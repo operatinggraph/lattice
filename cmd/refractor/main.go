@@ -23,7 +23,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
 	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
@@ -146,12 +146,12 @@ func main() {
 	}
 
 	startPipeline := func(r *lens.Rule) {
-		q, err := engine.Parse(r.Match)
+		q, err := simple.Parse(r.Match)
 		if err != nil {
 			logger.Error("parse lens cypher", "lensId", r.ID, "err", err)
 			return
 		}
-		plan, err := engine.Compile(q, r.Into.Key)
+		plan, err := simple.Compile(q, r.Into.Key)
 		if err != nil {
 			logger.Error("compile lens query plan", "lensId", r.ID, "err", err)
 			return
@@ -164,6 +164,7 @@ func main() {
 
 		reporter := health.New(healthKVHandle, r.ID, r.Team)
 		reporter.SetRuleSequence(r.Sequence)
+		reporter.SetRuleEngine(r.ResolvedEngine)
 
 		p, err := pipeline.New(r.ID, r.Team, r.Into.Target, plan, coreKVBucket, adjKV, coreKV, adpt, reporter)
 		if err != nil {
@@ -222,14 +223,15 @@ func main() {
 				return
 			}
 			entry.reporter.SetRuleSequence(newLens.Sequence)
+			entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
 			logger.Info("lens INTO hot-reloaded", "lensId", newLens.ID)
 		case lens.MatchChange:
-			q, err := engine.Parse(newLens.Match)
+			q, err := simple.Parse(newLens.Match)
 			if err != nil {
 				logger.Error("parse updated match", "lensId", newLens.ID, "err", err)
 				return
 			}
-			newPlan, err := engine.Compile(q, newLens.Into.Key)
+			newPlan, err := simple.Compile(q, newLens.Into.Key)
 			if err != nil {
 				logger.Error("compile updated plan", "lensId", newLens.ID, "err", err)
 				return
@@ -244,6 +246,7 @@ func main() {
 					logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
 				}
 				entry.reporter.SetRuleSequence(newLens.Sequence)
+				entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
 			}
 		}
 	}

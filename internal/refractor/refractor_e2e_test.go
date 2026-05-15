@@ -62,7 +62,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -148,9 +148,9 @@ func TestRefractor_E2E_P99(t *testing.T) {
 
 	// --- pipeline + lens setup ---
 	// Build the projection plan: MATCH (c:contract) RETURN c.id, c.name
-	q, err := engine.Parse("MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name")
+	q, err := simple.Parse("MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name")
 	require.NoError(t, err)
-	plan, err := engine.Compile(q, []string{"contract_id"})
+	plan, err := simple.Compile(q, []string{"contract_id"})
 	require.NoError(t, err)
 
 	adpt, err := adapter.New(targetKV, []string{"contract_id"})

@@ -1,4 +1,4 @@
-package engine
+package simple
 
 // EdgeDirection represents the direction of a relationship traversal in a pattern.
 type EdgeDirection int

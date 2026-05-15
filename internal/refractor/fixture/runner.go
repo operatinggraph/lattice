@@ -13,7 +13,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/adjacency"
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 )
 
 // RunFixture seeds adjKV and coreKV from fix, evaluates each input in list order,
@@ -27,9 +27,9 @@ func RunFixture(t *testing.T, fix *Fixture, adjKV, coreKV, targetKV jetstream.Ke
 	ctx := context.Background()
 
 	// Step 1: Compile query plan.
-	ast, err := engine.Parse(fix.Rule.Match)
+	ast, err := simple.Parse(fix.Rule.Match)
 	require.NoError(t, err, "fixture: parse match query")
-	plan, err := engine.Compile(ast, fix.Rule.Into.Key)
+	plan, err := simple.Compile(ast, fix.Rule.Into.Key)
 	require.NoError(t, err, "fixture: compile query plan")
 
 	// Step 2: Seed adjacency KV before delivering any inputs so edge lookups
@@ -68,14 +68,14 @@ func RunFixture(t *testing.T, fix *Fixture, adjKV, coreKV, targetKV jetstream.Ke
 		}
 
 		isDeleted, _ := input.Payload["isDeleted"].(bool)
-		entry := engine.NodeEntry{
+		entry := simple.NodeEntry{
 			CoreKVKey:  input.Key,
 			NodeLabel:  label,
 			IsDeleted:  isDeleted,
 			Properties: input.Payload,
 		}
 
-		results, err := engine.Evaluate(ctx, plan, entry, adjKV, coreKV)
+		results, err := simple.Evaluate(ctx, plan, entry, adjKV, coreKV)
 		require.NoError(t, err, "fixture: evaluate key=%s", input.Key)
 
 		for _, result := range results {

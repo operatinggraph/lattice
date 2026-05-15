@@ -11,7 +11,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
@@ -446,11 +446,11 @@ func (s *Service) validateRule(ctx context.Context, ruleID string) ControlRespon
 		return ControlResponse{Error: fmt.Sprintf("rule %q not loaded", ruleID)}
 	}
 
-	query, err := engine.Parse(r.Match)
+	query, err := simple.Parse(r.Match)
 	if err != nil {
 		return ControlResponse{Error: fmt.Sprintf("validate: parse match: %s", err)}
 	}
-	plan, err := engine.Compile(query, r.Into.Key)
+	plan, err := simple.Compile(query, r.Into.Key)
 	if err != nil {
 		return ControlResponse{Error: fmt.Sprintf("validate: compile plan: %s", err)}
 	}
@@ -521,7 +521,7 @@ func (s *Service) validateRule(ctx context.Context, ruleID string) ControlRespon
 
 // buildEmptyValidateResult returns a ValidateResult with all fields absent (sampleSize=0).
 // Used when Core KV is unreachable or empty.
-func buildEmptyValidateResult(columns []engine.Column) *ValidateResult {
+func buildEmptyValidateResult(columns []simple.Column) *ValidateResult {
 	reports := make([]FieldReport, 0, len(columns))
 	warnings := make([]string, 0)
 	seen := make(map[string]bool)

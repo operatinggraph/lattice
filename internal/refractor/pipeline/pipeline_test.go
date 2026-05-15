@@ -18,7 +18,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/failure"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
@@ -128,11 +128,11 @@ func pollUntil(t *testing.T, timeout time.Duration, check func() bool) {
 }
 
 // compileSimplePlan compiles a single-node MATCH plan (no edges, no traversal).
-func compileSimplePlan(t *testing.T, query string, keyFields []string) *engine.QueryPlan {
+func compileSimplePlan(t *testing.T, query string, keyFields []string) *simple.QueryPlan {
 	t.Helper()
-	ast, err := engine.Parse(query)
+	ast, err := simple.Parse(query)
 	require.NoError(t, err)
-	plan, err := engine.Compile(ast, keyFields)
+	plan, err := simple.Compile(ast, keyFields)
 	require.NoError(t, err)
 	return plan
 }
@@ -226,9 +226,9 @@ func (a *structuralAdapter) Close() error                                     { 
 
 // TestPipeline_New_NilAdapter verifies that New returns an error when adapter is nil.
 func TestPipeline_New_NilAdapter(t *testing.T) {
-	ast, err := engine.Parse("MATCH (a:agreement) RETURN a.id AS agreement_id")
+	ast, err := simple.Parse("MATCH (a:agreement) RETURN a.id AS agreement_id")
 	require.NoError(t, err)
-	plan, err := engine.Compile(ast, []string{"agreement_id"})
+	plan, err := simple.Compile(ast, []string{"agreement_id"})
 	require.NoError(t, err)
 
 	_, err = pipeline.New("rule-1", "team-a", "nats_kv", plan, "CORE", nil, nil, nil, nil)

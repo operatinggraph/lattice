@@ -35,6 +35,10 @@ type Entry struct {
 	ErrorCount     uint64  `json:"errorCount"`     // cumulative DLQ writes; preserved across restarts
 	LastError      *string `json:"lastError"`      // null when no error; non-nil with latest error message
 	LastUpdated    string  `json:"lastUpdated"`    // RFC3339 UTC
+	// RuleEngine is the engine name that successfully parsed this rule's match
+	// body (Story 3.1a). Cached via SetRuleEngine and re-emitted on every
+	// status transition. Empty string when not yet set (forward-compat).
+	RuleEngine string `json:"ruleEngine,omitempty"`
 }
 
 // Reporter reads and writes health KV entries for a single rule.
@@ -43,8 +47,9 @@ type Reporter struct {
 	kv             jetstream.KeyValue
 	ruleID         string
 	team           string
-	mu             sync.RWMutex // protects activeSequence
+	mu             sync.RWMutex // protects activeSequence + ruleEngine
 	activeSequence uint64       // cached rule sequence; set via SetRuleSequence
+	ruleEngine     string       // cached resolved engine name; set via SetRuleEngine
 	writeMu        sync.Mutex   // serializes all read-modify-write KV operations
 }
 
@@ -62,6 +67,22 @@ func (r *Reporter) SetRuleSequence(seq uint64) {
 	r.activeSequence = seq
 }
 
+// SetRuleEngine caches the resolved engine name for this rule. Thread-safe.
+// The cached value is included in the next health write and surfaced on the
+// SetActive INFO log per Story 3.1a Decision #5.
+func (r *Reporter) SetRuleEngine(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ruleEngine = name
+}
+
+// RuleEngine returns the cached resolved engine name. Thread-safe.
+func (r *Reporter) RuleEngine() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ruleEngine
+}
+
 // ActiveSequence returns the cached active rule sequence. Thread-safe.
 // Used by pipeline to fill the RuleSequence field of DLQ messages.
 func (r *Reporter) ActiveSequence() uint64 {
@@ -75,6 +96,7 @@ func (r *Reporter) ActiveSequence() uint64 {
 func (r *Reporter) SetActive(ctx context.Context) error {
 	r.mu.RLock()
 	seq := r.activeSequence
+	eng := r.ruleEngine
 	r.mu.RUnlock()
 
 	r.writeMu.Lock()
@@ -96,13 +118,15 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		ErrorCount:     existing.ErrorCount, // preserved across restarts
 		LastError:      nil,                 // JSON null
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
+		RuleEngine:     eng,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
 	}
 	slog.Info("health: rule active",
 		"ruleId", r.ruleID, "team", r.team,
-		"activeSequence", seq, "errorCount", entry.ErrorCount)
+		"activeSequence", seq, "errorCount", entry.ErrorCount,
+		"ruleEngine", eng)
 	return nil
 }
 
@@ -137,6 +161,7 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		ErrorCount:     existing.ErrorCount, // preserved
 		LastError:      lastErrPtr,          // null when no error message; non-nil otherwise
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
+		RuleEngine:     r.RuleEngine(),
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -175,6 +200,7 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		ErrorCount:     existing.ErrorCount, // preserved
 		LastError:      nil,                 // JSON null
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
+		RuleEngine:     r.RuleEngine(),
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err

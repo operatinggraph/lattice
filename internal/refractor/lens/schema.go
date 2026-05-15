@@ -1,13 +1,34 @@
 package lens
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 )
+
+// defaultRegistry is the package-level engine registry used by Parse() to
+// resolve the engine that owns a given Rule's body. Story 3.1a wires only
+// the simple engine (real) and full engine (stub); 3.1b will replace the
+// full stub with the visitor + executor implementation.
+//
+// Tests may override via SetRegistry to inject alternative engines (e.g.
+// always-failing simple to exercise the absent-fallback path).
+var defaultRegistry ruleengine.Registry = ruleengine.NewRegistry(simple.New(), full.New())
+
+// SetRegistry replaces the package-level engine registry used by Parse().
+// It returns the previous registry so tests can restore it. Test-only.
+func SetRegistry(r ruleengine.Registry) ruleengine.Registry {
+	prev := defaultRegistry
+	defaultRegistry = r
+	return prev
+}
 
 // KeyField holds one or more field names that form the rule output key.
 // In YAML it can be a single string ("agreement_id") or an array (["team_id", "agreement_id"]).
@@ -67,6 +88,21 @@ type Rule struct {
 	Into  IntoConfig  `yaml:"into"`
 	Retry RetryConfig `yaml:"retry"`
 
+	// RuleEngine is the explicit engine selector (Story 3.1a). Valid values:
+	//   "simple"  — v1 Materializer-derived parser (only engine functional in 3.1a).
+	//   "full"    — v2 openCypher engine (stub in 3.1a — always rejects).
+	//   ""        — absent; selection falls back simple-then-full.
+	RuleEngine string `yaml:"ruleEngine"`
+
+	// ResolvedEngine is the engine name that successfully parsed Match during
+	// validation. Populated by Parse(); blank until Parse() returns successfully.
+	// Not from YAML.
+	ResolvedEngine string `yaml:"-"`
+
+	// AttemptedEngines is the ordered list of engines consulted during
+	// selection. Populated by Parse() for log/health surfaces.
+	AttemptedEngines []string `yaml:"-"`
+
 	// Sequence is the NATS JetStream stream sequence number of the message that
 	// activated this rule version. Set at load time by the Loader from message
 	// metadata; zero until the rule is received from the stream.
@@ -90,13 +126,50 @@ func Parse(data []byte) (*Rule, error) {
 	if r.Match == "" {
 		return nil, fmt.Errorf("rule validation: match is required")
 	}
-	query, err := engine.Parse(r.Match)
-	if err != nil {
-		return nil, fmt.Errorf("rule validation: invalid match query: %w", err)
+	// Validate ruleEngine field shape (the registry will surface unknown
+	// values via SelectionError, but we catch obviously-bogus inputs here
+	// so callers see a stable error message).
+	switch r.RuleEngine {
+	case "", ruleengine.EngineSimple, ruleengine.EngineFull:
+		// ok
+	default:
+		return nil, fmt.Errorf("rule validation: ruleEngine must be %q, %q, or empty; got %q",
+			ruleengine.EngineSimple, ruleengine.EngineFull, r.RuleEngine)
 	}
-	if _, err := engine.Compile(query, r.Into.Key); err != nil {
-		return nil, fmt.Errorf("rule validation: invalid query plan: %w", err)
+
+	// Resolve the engine per Decision #3 (explicit-simple, explicit-full,
+	// absent-fallback). Selection failure is surfaced as InvalidRule.
+	_, _, attempted, selErr := defaultRegistry.SelectForLens(ruleengine.LensDefinition{
+		ID:         r.ID,
+		RuleBody:   r.Match,
+		RuleEngine: r.RuleEngine,
+	})
+	r.AttemptedEngines = attempted
+	if selErr != nil {
+		var se *ruleengine.SelectionError
+		if errors.As(selErr, &se) {
+			return nil, fmt.Errorf("rule validation: invalid match query: %w", se)
+		}
+		return nil, fmt.Errorf("rule validation: invalid match query: %w", selErr)
 	}
+	// On success the resolved engine is the LAST attempted name (simple if
+	// it succeeded directly; full if simple failed and full succeeded).
+	r.ResolvedEngine = attempted[len(attempted)-1]
+
+	// Story 3.1a: only the simple engine performs further compile-stage
+	// validation (key fields, traversal cycles, etc.). The stub full engine
+	// would have already rejected at Parse() — if we get here with
+	// ResolvedEngine=="full" then 3.1b's real engine ran and we trust it.
+	if r.ResolvedEngine == ruleengine.EngineSimple {
+		query, err := simple.Parse(r.Match)
+		if err != nil {
+			return nil, fmt.Errorf("rule validation: invalid match query: %w", err)
+		}
+		if _, err := simple.Compile(query, r.Into.Key); err != nil {
+			return nil, fmt.Errorf("rule validation: invalid query plan: %w", err)
+		}
+	}
+
 	if len(r.Into.Key) == 0 {
 		return nil, fmt.Errorf("rule validation: into.key is required")
 	}
@@ -126,6 +199,11 @@ func Parse(data []byte) (*Rule, error) {
 	} else {
 		r.Into.QueryTimeout = 30 * time.Second
 	}
+
+	slog.Info("lens: rule engine resolved",
+		"lensId", r.ID,
+		"resolvedEngine", r.ResolvedEngine,
+		"attemptedEngines", r.AttemptedEngines)
 
 	return &r, nil
 }

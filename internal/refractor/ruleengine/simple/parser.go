@@ -1,9 +1,9 @@
-// Package engine implements the v1 openCypher parser and query compiler.
+// Package simple implements the v1 openCypher parser and query compiler.
 //
 // Parse is a pure function: string → (*Query, error).
 // It has no NATS dependency, performs no I/O, and has no side effects (ADR-6).
 // All tests in this package run without any infrastructure.
-package engine
+package simple
 
 import (
 	"fmt"

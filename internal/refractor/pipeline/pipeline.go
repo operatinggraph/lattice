@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/refractor/engine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/failure"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -43,7 +43,7 @@ type Pipeline struct {
 	ruleID       string
 	team         string
 	adapterName  string // "nats_kv" or "postgres" — used for logging only
-	plan         *engine.QueryPlan
+	plan         *simple.QueryPlan
 	coreKVBucket string // Core KV bucket name; used to strip the $KV prefix from subjects
 	adjKV        jetstream.KeyValue
 	coreKV       jetstream.KeyValue
@@ -101,7 +101,7 @@ type Pipeline struct {
 // Returns an error if adpt is nil.
 func New(
 	ruleID, team, adapterName string,
-	plan *engine.QueryPlan,
+	plan *simple.QueryPlan,
 	coreKVBucket string,
 	adjKV, coreKV jetstream.KeyValue,
 	adpt adapter.Adapter,
@@ -139,7 +139,7 @@ func (p *Pipeline) currentAdapter() adapter.Adapter {
 	return p.adpt
 }
 
-func (p *Pipeline) currentPlan() *engine.QueryPlan {
+func (p *Pipeline) currentPlan() *simple.QueryPlan {
 	p.planMu.RLock()
 	defer p.planMu.RUnlock()
 	return p.plan
@@ -150,7 +150,7 @@ func (p *Pipeline) currentPlan() *engine.QueryPlan {
 // message will use newPlan. Returns an error if newPlan is nil.
 // Used by the orchestrator when a MATCH change is detected, so that the subsequent
 // operator-triggered rebuild re-scans Core KV with the updated query.
-func (p *Pipeline) HotReloadPlan(newPlan *engine.QueryPlan) error {
+func (p *Pipeline) HotReloadPlan(newPlan *simple.QueryPlan) error {
 	if newPlan == nil {
 		return errors.New("pipeline: HotReloadPlan: newPlan must not be nil")
 	}
@@ -631,7 +631,7 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 	}
 
 	isDeleted, _ := props["isDeleted"].(bool)
-	entry := engine.NodeEntry{
+	entry := simple.NodeEntry{
 		CoreKVKey:  key,
 		NodeLabel:  label,
 		IsDeleted:  isDeleted,
@@ -639,7 +639,7 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 	}
 
 	// Evaluate.
-	results, err := engine.Evaluate(ctx, p.currentPlan(), entry, p.adjKV, p.coreKV)
+	results, err := simple.Evaluate(ctx, p.currentPlan(), entry, p.adjKV, p.coreKV)
 	if err != nil {
 		slog.Error("pipeline: evaluate",
 			"ruleId", p.ruleID, "team", p.team, "entityId", key,
@@ -948,7 +948,7 @@ func (p *Pipeline) setHealthActive(ctx context.Context) {
 // writeAudit appends an audit entry after a successful write. It is a no-op when
 // auditWriter is nil (optional feature, AC6). Errors are logged as Warn — a failed
 // audit entry must never interrupt message processing (the write already succeeded).
-func (p *Pipeline) writeAudit(ctx context.Context, entityID string, result engine.EvalResult) {
+func (p *Pipeline) writeAudit(ctx context.Context, entityID string, result simple.EvalResult) {
 	if p.auditWriter == nil {
 		return
 	}
@@ -1068,14 +1068,14 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjEntry jetstream.KeyVa
 	}
 
 	isDeleted, _ := props["isDeleted"].(bool)
-	entry := engine.NodeEntry{
+	entry := simple.NodeEntry{
 		CoreKVKey:  nodeKey,
 		NodeLabel:  label,
 		IsDeleted:  isDeleted,
 		Properties: props,
 	}
 
-	results, err := engine.Evaluate(ctx, p.currentPlan(), entry, p.adjKV, p.coreKV)
+	results, err := simple.Evaluate(ctx, p.currentPlan(), entry, p.adjKV, p.coreKV)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
