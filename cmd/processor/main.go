@@ -8,7 +8,7 @@
 // Environment:
 //
 //	NATS_URL              NATS server URL (default: nats://localhost:4222)
-//	LATTICE_AUTH_MODE     stub (default) | capability (Story 3.3, not yet wired)
+//	LATTICE_AUTH_MODE     capability (default, Story 3.3+) | stub (test/dev — emits stub-auth-active alert)
 //	PROCESSOR_INSTANCE    instance id (default: auto-generated proc-<NanoID>)
 //	PROCESSOR_DURABLE     JetStream durable consumer name (default: processor-main)
 //	PROCESSOR_STREAM      JetStream stream name (default: core-operations)
@@ -50,7 +50,11 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
-	authMode := processor.AuthMode(envOrDefault("LATTICE_AUTH_MODE", string(processor.AuthModeStub)))
+	// Story 3.3: default LATTICE_AUTH_MODE flips from `stub` to `capability`.
+	// The stub mode remains available behind an explicit env knob for
+	// dev/test deployments; operators selecting it see WARN logs + a
+	// Health KV `stub-auth-active` alert.
+	authMode := processor.AuthMode(envOrDefault("LATTICE_AUTH_MODE", string(processor.AuthModeCapability)))
 
 	instance := os.Getenv("PROCESSOR_INSTANCE")
 	if instance == "" {
@@ -92,7 +96,7 @@ func run(logger *slog.Logger) error {
 	}
 	defer conn.Close()
 
-	cp, hb, err := processor.MakeStubPipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, authMode, logger, instance)
+	cp, hb, err := processor.MakePipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, bootstrap.CapabilityKVBucket, authMode, logger, instance)
 	if err != nil {
 		return err
 	}

@@ -162,8 +162,17 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		_ = msg.TermWithReason("auth denied: " + decision.Reason)
 		return OutcomeRejected
 	}
+	// Story 3.3 AC #3 / Decision #8: capture the resolved permission so
+	// downstream steps (step 9 event publication, Stories 3.4/3.5)
+	// receive auth provenance without re-reading Capability KV. The
+	// pointer is allocated by CapabilityAuthorizer; StubAuthorizer
+	// leaves it nil.
+	resolvedPermission := decision.Resolved
 	cp.deps.Logger.Info("step 3: authorized",
-		"requestId", env.RequestID, "stub", decision.Stub)
+		"requestId", env.RequestID, "stub", decision.Stub,
+		"authPath", resolvedPermissionPath(resolvedPermission),
+		"projectedAt", resolvedPermissionProjectedAt(resolvedPermission))
+	_ = resolvedPermission // wired through; downstream consumers in 3.4+
 
 	// --- Steps 4-10: stubbed pipeline. ---
 	var state HydratedState
@@ -282,6 +291,22 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	return OutcomeAccepted
 }
 
+// resolvedPermissionPath returns rp.Path or "stub" / "none" for log fields.
+func resolvedPermissionPath(rp *ResolvedPermission) string {
+	if rp == nil {
+		return "stub-or-none"
+	}
+	return rp.Path
+}
+
+// resolvedPermissionProjectedAt returns rp.ProjectedAt or "" for log fields.
+func resolvedPermissionProjectedAt(rp *ResolvedPermission) string {
+	if rp == nil {
+		return ""
+	}
+	return rp.ProjectedAt
+}
+
 func (cp *CommitPath) handleStubFailure(_ context.Context, msg jetstream.Msg, env *OperationEnvelope, step string, err error) MessageOutcome {
 	cp.deps.Metrics.OpsRejected.Add(1)
 	cp.deps.Logger.Warn("step returned error",
@@ -382,12 +407,43 @@ func (cp *CommitPath) Run(ctx context.Context, cons jetstream.Consumer) error {
 // The function name is retained for backwards compatibility with Story
 // 1.5's call sites; "stub" now refers only to the EventPublisher.
 func MakeStubPipeline(conn *substrate.Conn, coreBucket, healthBucket string, authMode AuthMode, logger *slog.Logger, instance string) (*CommitPath, *HealthHeartbeater, error) {
-	authz, err := SelectAuthorizer(authMode, logger)
+	return MakePipeline(conn, coreBucket, healthBucket, "", authMode, logger, instance)
+}
+
+// MakePipeline is the Story-3.3 wiring entry point. capabilityBucket is
+// the Capability KV bucket name; empty falls back to AuthModeStub
+// regardless of the requested mode (test-friendly default). authMode is
+// applied via SelectAuthorizerArgs so the Capability KV reader + alert
+// emitter are wired in one place.
+func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBucket string, authMode AuthMode, logger *slog.Logger, instance string) (*CommitPath, *HealthHeartbeater, error) {
+	metrics := &Metrics{}
+	hb := NewHealthHeartbeater(conn, healthBucket, instance, 10*time.Second, metrics, logger)
+	alertEmitter := NewHealthAlertEmitter(conn, healthBucket, logger)
+
+	// Story 3.3: capability mode requires the bucket name. When tests call
+	// the legacy MakeStubPipeline with capabilityBucket="" we fall back to
+	// stub so existing fixtures keep working without a Capability KV seed.
+	effectiveMode := authMode
+	if (authMode == AuthModeCapability || authMode == "") && capabilityBucket == "" {
+		effectiveMode = AuthModeStub
+	}
+
+	authz, err := SelectAuthorizerArgs(SelectAuthorizerOpts{
+		Mode:             effectiveMode,
+		Logger:           logger,
+		Reader:           conn,
+		CapabilityBucket: capabilityBucket,
+		Emitter:          alertEmitter,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	metrics := &Metrics{}
-	hb := NewHealthHeartbeater(conn, healthBucket, instance, 10*time.Second, metrics, logger)
+
+	// Wire the heartbeat's per-tick capability-auth signals when the real
+	// authorizer is active.
+	if ca, ok := authz.(*CapabilityAuthorizer); ok {
+		hb.AttachCapabilityAuthorizer(ca)
+	}
 
 	// Build the DDL cache from a full scan of Core KV's `vtx.meta.>`.
 	ddls := NewDDLCache(conn, coreBucket, logger)

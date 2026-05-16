@@ -77,6 +77,22 @@ const (
 	// Story 1.7 error codes for steps 6/8 typed failures.
 	ErrCodeDDLViolation     ErrorCode = "DDLViolation"
 	ErrCodeRevisionConflict ErrorCode = "RevisionConflict"
+	// Story 3.3 error codes for step-3 Capability KV auth.
+	// ErrCodeAuthFreshnessExceeded fires when the Capability KV projection
+	// for the actor is staler than the freshness ceiling (5 × NFR-P3 by
+	// default). Hard denial — operation rejected so the actor doesn't see
+	// auth state from an arbitrarily-out-of-date projection. See Contract
+	// #6 §6.8 spirit + Decision #6 in the Story 3.3 brief.
+	ErrCodeAuthFreshnessExceeded ErrorCode = "AuthFreshnessExceeded"
+	// ErrCodeAuthInfrastructureFailure is reserved for surfacing a real
+	// NATS / Capability KV outage to the reply path. The Story 3.3
+	// CapabilityAuthorizer returns an `error` (not a Decision) when the
+	// KV GET fails for any reason other than ErrKeyNotFound; the commit
+	// path's existing authorizer-error branch maps that to InternalError
+	// today. This code is the typed alternative for callers that want to
+	// distinguish "auth-plane broken" from "any other internal error" —
+	// wired through if/when 3.5 (traceability) needs it.
+	ErrCodeAuthInfrastructureFailure ErrorCode = "AuthInfrastructureFailure"
 )
 
 // Status is the reply envelope status enum per Contract #2 §2.4.
