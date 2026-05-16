@@ -33,6 +33,10 @@ type Deps struct {
 	// Clock is the wall clock the commit path uses for tracker timestamps
 	// and reply CommittedAt. Tests override it.
 	Clock func() time.Time
+	// DenialBuilder constructs FR22-structured denial details for auth-denied
+	// rejections (Story 3.4). Nil when capability mode is not active (stub
+	// mode) — in that case denials fall back to the pre-3.4 minimal reply.
+	DenialBuilder *DenialResponseBuilder
 }
 
 // CommitPath drives steps 1-3 (and stubbed 4-10) for a single envelope.
@@ -158,7 +162,15 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		}
 		cp.deps.Logger.Info("step 3: authorization denied; rejecting",
 			"requestId", env.RequestID, "code", string(code), "reason", decision.Reason)
-		cp.replyTo(msg, BuildRejectedReply(env.RequestID, code, decision.Reason, nil))
+		// Story 3.4 (FR22): enrich denial reply with structured fields when
+		// the DenialBuilder is wired (capability mode). Stub mode leaves
+		// DenialBuilder nil and falls back to the minimal reply.
+		var denialDetails map[string]any
+		if cp.deps.DenialBuilder != nil {
+			dd := cp.deps.DenialBuilder.BuildDenialDetails(ctx, env, decision, decision.Doc)
+			denialDetails = DenialDetailsAsMap(dd)
+		}
+		cp.replyTo(msg, BuildRejectedReply(env.RequestID, code, decision.Reason, denialDetails))
 		_ = msg.TermWithReason("auth denied: " + decision.Reason)
 		return OutcomeRejected
 	}
@@ -451,20 +463,28 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 		return nil, nil, fmt.Errorf("ddl cache refresh: %w", err)
 	}
 
+	// Story 3.4 (FR22): wire DenialResponseBuilder when capability mode is
+	// active. Stub mode leaves it nil (no structured denial response needed).
+	var denialBuilder *DenialResponseBuilder
+	if capabilityBucket != "" {
+		denialBuilder = NewDenialResponseBuilder(conn, capabilityBucket, logger)
+	}
+
 	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now)
 	cp := NewCommitPath(Deps{
-		Conn:        conn,
-		CoreBucket:  coreBucket,
-		HealthKV:    healthBucket,
-		Authorizer:  authz,
-		Hydrator:    NewHydratorWithCache(conn, coreBucket, ddls, logger),
-		Executor:    NewExecutor(NewStarlarkRunner(0, 0), logger),
-		Validator:   NewValidator(ddls, logger),
-		Committer:   committer,
-		Events:      NewEventPublisher(conn, logger),
-		Metrics:     metrics,
-		Heartbeater: hb,
-		Logger:      logger,
+		Conn:          conn,
+		CoreBucket:    coreBucket,
+		HealthKV:      healthBucket,
+		Authorizer:    authz,
+		Hydrator:      NewHydratorWithCache(conn, coreBucket, ddls, logger),
+		Executor:      NewExecutor(NewStarlarkRunner(0, 0), logger),
+		Validator:     NewValidator(ddls, logger),
+		Committer:     committer,
+		Events:        NewEventPublisher(conn, logger),
+		Metrics:       metrics,
+		Heartbeater:   hb,
+		Logger:        logger,
+		DenialBuilder: denialBuilder,
 	})
 	return cp, hb, nil
 }

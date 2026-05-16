@@ -49,6 +49,12 @@ type Decision struct {
 	// observability. Strictly internal — never bled into
 	// OperationEnvelope or OperationReply.
 	Resolved *ResolvedPermission
+	// Doc is the parsed CapabilityDoc from the Capability KV GET. Set on
+	// all non-NoCapabilityEntry denial paths so that Story 3.4's
+	// DenialResponseBuilder can access doc.Roles for actorRoles without
+	// an additional KV read. Nil on StubAuthorizer + NoCapabilityEntry
+	// + infrastructure-failure paths. Strictly internal.
+	Doc *CapabilityDoc
 }
 
 // Authorizer is the step-3 interface. Story 3.3 lights up the real

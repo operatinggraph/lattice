@@ -198,6 +198,8 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 
 	// Freshness gate (Decision #6).
 	if dec, hit := a.checkFreshness(ctx, env, doc); hit {
+		// Doc is available; thread it for FR22 denial response construction.
+		dec.Doc = doc
 		return dec, nil
 	}
 
@@ -210,6 +212,10 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 	dec := a.dispatch(env, doc, resolved)
 	if dec.Authorized {
 		dec.Resolved = resolved
+	} else {
+		// Thread the doc through the denial for Story 3.4 FR22 response
+		// construction (actorRoles sourced from doc.Roles without re-read).
+		dec.Doc = doc
 	}
 	return dec, nil
 }
