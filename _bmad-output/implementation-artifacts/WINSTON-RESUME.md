@@ -59,9 +59,9 @@ After reading those four, you have full context. **Do NOT read large planning ar
     - "Stop after Y" → ship Y then halt for budget reset
     - "Commit" → stage changes + commit + push
 
-## Current State (as of 2026-05-15, commit 0b8ec0a)
+## Current State (as of 2026-05-15, commit 99017ca)
 
-**Stories shipped: 15 / 32+** (the `+` denotes stories added outside the original 31-story plan: Story 2.3 hardening, and Story 3.1 split into 3.1a + 3.1b-i + 3.1b-ii). Epics 1 and 2 complete with Gates 1, 2, and AC #10 e2e all green.
+**Stories shipped: 17 / 32+** (the `+` denotes stories added outside the original 31-story plan: Story 2.3 hardening; Story 3.1 split into 3.1a + 3.1b-i + 3.1b-ii; Story 3.2 split into 3.2a + 3.2b). Story 3.3 may be in flight or shipped at the time you read this — check `git log --oneline | head -5` to confirm whether commit after 99017ca is "Story 3.3" or not.
 
 | # | Story | Tier | Budget | Actual (outer) | Notes |
 |---|---|---|---|---|---|
@@ -80,9 +80,11 @@ After reading those four, you have full context. **Do NOT read large planning ar
 | 2.3 | Pipeline key-shape adaptation (Deviation 13 fix) | Sonnet | 75K | 102K | OVERRUN; Story 3.2 unblocked |
 | 3.1a | Engine boundary + selection | Opus | 70K | 90K | OVERRUN |
 | 3.1b-i | Cypher visitor + AST (parse-only) | Opus | 70K | 142K | 2× OVERRUN; bootstrap CapabilityLens parses |
-| 3.1b-ii | Cypher executor + bootstrap e2e | Opus | 100K | 172K | OVERRUN; **p99 = 11.7ms** (42× under NFR-P3) |
+| 3.1b-ii | Cypher executor + bootstrap e2e | Opus | 100K | 172K | OVERRUN; p99 = 11.7ms (42× under NFR-P3) |
+| 3.2a | Capability Lens live activation (single identity) | Opus | 120K | 262K | 2.2× OVERRUN; primordial→CoreKVSource bridge added; p99=9.6ms |
+| 3.2b | Capability Lens AC closure (multi-id, link bridge, fan-out, NFR-P3, contract test) | Opus | 150K | 253K | OVERRUN; **multi-id p99 = 5.7ms** (88× under NFR-P3) |
 
-**Token totals: ~1,988K / 3,517K (57%) for 15/32+ stories (47%).** Token efficiency now tracking ~10 points behind story-progress, but quality bar maintained across all gates.
+**Token totals: ~2,503K / 3,517K (71%) for 17/32+ stories (53%).** Token efficiency now tracking ~18 points behind story-progress, but quality bar maintained across all gates. (Add Story 3.3 outer-telemetry actual to tracker Row 3.3 when it lands — sub-agent self-reports systematically run 30-50% low.)
 
 ## Repo Structure Snapshot
 
@@ -92,67 +94,70 @@ After reading those four, you have full context. **Do NOT read large planning ar
 - `internal/bootstrap/` — primordial entity definitions; provisions core-operations + core-events streams and 6 KV buckets including `refractor-adjacency`
 - `internal/substrate/` — shared NATS/KV/NanoID primitives (incl. `ClassifyKey`, `ParseVertexKey`, atomic + non-atomic batch publish)
 - `internal/processor/` — full commit-path (steps 1-10) + NFR-R1 fault-injection harness
-- `internal/refractor/` — morphed Materializer (12 packages: adapter, adjacency, config, consumer, control, engine [legacy], failure, fixture, health, lens, pipeline, subjects)
-- `internal/refractor/ruleengine/` — Story 3.1 engine split: `simple/` (Materializer carryover) + `full/` (openCypher visitor + executor) + `full/cypher/` (vendored ANTLR-generated parser)
+- `internal/refractor/` — morphed Materializer + Capability Lens production wiring (13 packages: adapter, adjacency, capabilityenv [3.2a — per-Lens envelope wrappers], config, consumer, control, engine [legacy], failure, fixture, health, lens, pipeline, subjects). Adjacency bootstrapper (`consumer/bootstrap.go`) translates Contract #1 link envelopes (3.2b). Pipeline (`pipeline/{evaluate.go, actor_enumerator.go, latency.go}`) routes per-engine, fans out non-actor CDC events to affected actors, and emits per-Lens latency ring-buffer summaries.
+- `internal/refractor/ruleengine/` — Story 3.1 engine split: `simple/` (Materializer carryover) + `full/` (openCypher visitor + executor) + `full/cypher/` (vendored ANTLR-generated parser). Contract-conformance byte-test at `full/capability_lens_contract_test.go` (3.2b) is the schema-drift safety net.
 - `internal/bypass/` — Phase 1 Gate 2 adversarial test suite
 - `internal/testutil/` — `FailAfterN` fault injection wrappers
 - `internal/spike/{nats-batch,starlark}/` — Story 1.1/1.2 spike code (frozen reference; lint excludes)
-- `scripts/verify-bootstrap.go` — 32+ assertions on primordial Core KV state
+- `scripts/verify-bootstrap.go` — 34 assertions on primordial Core KV state (Story 3.2a added the two `spec` aspects per seeded lens)
 - `_bmad-output/planning-artifacts/` — PRD, architecture, contracts, epics, **MORPH-DEVIATIONS.md, refractor-gap-analysis.md** (LARGE — avoid reading)
 - `_bmad-output/implementation-artifacts/` — handoff briefs + token tracker (small — read freely)
 - `.github/workflows/ci.yml` — CI on push to main + all PRs
 - `.golangci.yml` — v2 config; errcheck disabled; spike + vendored-cypher excluded
 - `Makefile` — `make up/down/verify-bootstrap/test/test-bypass/vet`; `vet` uses `-unreachable=false` for vendored cypher; `test` uses `-p 1` (per Deviation 14, fixture resource pressure)
 
-## Open Items / Carries for Story 3.2
+## Open Items / Carries
 
-Story 3.2 is **Capability Lens Activation & Capability KV Projection** (Opus, ~140K). It inherits these carries from the gap analysis and the 3.1 series:
+**Story 3.3 is in flight or just landed.** Brief at `_bmad-output/implementation-artifacts/story-3.3-handoff-brief.md`. Check `git log --oneline | head -3` — if you see a commit after `99017ca` for Story 3.3, it shipped; otherwise the sub-agent (agentId `a1bca9072016a6539`) was running when the prior session paused. To check status: read the most recent commits and `internal/processor/step3_auth*.go` for the presence of `CapabilityAuthorizer`. If the sub-agent finished but its work was NOT committed, look at `git status` for uncommitted changes that match the 3.3 deliverables list; verify gates and commit per the same pattern as 3.2a/3.2b.
 
-1. **C1 convergence (3.1b-ii TODO):** production execution path still calls `simple.Evaluate` directly because the engine-neutral `RuleEngine.Execute` signature doesn't carry KV handles or model `[]EvalResult+Delete` semantics. Story 3.2 needs to reshape the interface or route through `full.Engine.ExecuteWith` for live Capability Lens activation. TODO comment at the call site in `internal/refractor/pipeline/pipeline.go`.
+**Residual carries from 3.2b (for Story 3.3 and beyond — context for 3.4-3.7):**
 
-2. **Adjacency KV key validator (highest-priority carry from 3.1b-ii closing summary):** `subjects.AdjKey` forbids dots, so `adjacency.Build/Neighbors` cannot directly take Contract #1 `vtx.<type>.<id>` keys. Tests use synthetic Materializer-style keys to work around. The simple engine has the same latent constraint. Story 3.2's live pipeline activation MUST resolve — either relax the validator or translate keys at the executor/builder layer.
+1. **Actor enumerator over-fans on dense graphs.** Undirected adjacency BFS with no relation-type whitelist. Correct but pessimistic. Phase 2 optimization: relation-type-aware enumeration.
 
-3. **`EventContext.Parameters` is populated by test harness only** in 3.1b-ii. Story 3.2 must wire `$actorKey`, `$now`, `$projectedAt` from live event/clock at the production caller.
+2. **Link-envelope tombstone re-projection is indirect.** Pipeline's `KindLink` branch acks-and-drops link CDC events; re-projection only fires when an affected actor's adj-watch entry re-triggers OR when the actor vertex is re-written. Multi-identity e2e compensates by re-writing the identity. Production benefit: link-envelope-triggered fan-out invocation. Deferred.
 
-4. **Adapter document-envelope reshape (Deliverable #12 from 2.1, OPEN):** projection output to NATS-KV target adapter doesn't wrap rows in `substrate.DocumentEnvelope`. Would require adapter interface signature change (which 2.1 Decision #8 forbade). May or may not be Capability KV's concern — if Contract #6 requires a specific Capability KV document shape, Story 3.2 closes this.
+3. **`projectedFromRevisions` is partial-coverage** (anchor + lens-def only). Full source-vertex tracking is opportunistic.
 
-5. **MORPH-DEVIATIONS.md open carries:** Deviations 5 (substrate inner-package migration), 11 (single-aspect lens spec assumption), 11a (Rule→Lens Go-type cleanup), 13 (now RESOLVED). All are noted as deferrable; not blocking Story 3.2.
+4. **Latency ring buffer is per-pipeline-instance.** Multi-instance aggregation is Phase 2 (multi-cell).
 
-## Procedure for Story 3.2
+5. **Hot-reload routing is tested by inspection only.** Production seeded lenses don't hot-reload, so a focused test would diverge from the live path.
 
-1. Andrew confirms ready.
-2. You author `story-3.2-handoff-brief.md`. Read these inputs:
-   - `_bmad-output/planning-artifacts/refractor-gap-analysis.md` Appendix A row 3.2 + §2.2 + §2.3 + §2.4 + §2.5
-   - `_bmad-output/planning-artifacts/data-contracts.md` Contract #6 (Capability KV — three-section model: platformPermissions, serviceAccess, ephemeralGrants)
-   - `_bmad-output/planning-artifacts/epics.md` Story 3.2 only
-   - The C1 + Adjacency-validator + Parameters carries from this resume
-3. Decide scope-vs-split: 3.2 might naturally split (similar to 3.1) — live activation + Capability KV write are the two halves. Use your judgment.
-4. Launch sub-agent (Opus, ~140K budget tracking-only, background) with the brief.
+**MORPH-DEVIATIONS.md open carries** (unchanged from earlier): Deviations 5 (substrate inner-package migration), 11 (single-aspect lens spec assumption), 11a (Rule→Lens Go-type cleanup). All deferrable; not blocking Epic 3.
+
+## Procedure for Each Story Going Forward
+
+1. Andrew confirms ready (or has already authorized autonomous proceed).
+2. You author `story-N.M-handoff-brief.md`. Use the most recent brief (3.2b or 3.3) as the template. Required inputs vary per story; cite the specific Contract # / §, the specific epics.md Story section, and any predecessor brief.
+3. Decide scope-vs-split mid-draft. 3.1 and 3.2 both split; 3.3 is a single brief.
+4. Launch sub-agent (Opus or Sonnet per locked tier, ~budget K tracking-only, background) with the brief.
 5. When sub-agent completes:
-   - Verify deliverables present
-   - Run `go build` / `make vet` / `go test ./... -p 1 -count=1` / `make verify-bootstrap` / `make test-bypass`
+   - Verify deliverables present (`git status` + spot-check key files)
+   - Run `go build` / `make vet` / `make verify-bootstrap` / `make test-bypass` / `go test ./... -p 1 -count=1`
    - Read sub-agent's CONTRACT-AMENDMENT-REQUEST.md / MORPH-DEVIATIONS.md changes
-   - Propose commit message to Andrew
-   - Commit + push on Andrew's approval
-   - Wait for CI green
-6. Update token tracker with outer-telemetry numbers (sub-agent self-estimate is always low).
+   - Update token tracker Row with OUTER telemetry (not sub-agent self-report — systematically 30-50% low)
+   - Propose commit message to Andrew (or commit autonomously if Andrew has said so for the current sequence)
+   - Commit + push; wait for CI green
+6. Move to next story in sequence.
 
-## Subsequent Epic 3 Stories
+## Subsequent Epic 3 Stories (after 3.3 lands)
 
-- **3.3:** Processor step 3 — Capability KV authorization (Opus, ~125K). Replaces StubAuthorizer; reads Capability KV written by 3.2.
-- **3.4:** Structured denial response FR22 (Sonnet, ~95K)
+- **3.4:** Structured denial response FR22 (Sonnet, ~95K) — consumes Capability KV secondary key `cap.role-by-operation.<op>` (Story 3.2b produced; Story 3.3 attached resolved permission to op-context for traceability)
 - **3.5:** Three-plane auth failure traceability FR23 (Sonnet, ~95K)
 - **3.6:** Role-scoped access domain + audit FR24/FR25 (Sonnet, ~100K)
-- **3.7:** Phase 1 Gate 3 — Capability Lens adversarial suite (Sonnet, ~110K)
+- **3.7:** Phase 1 Gate 3 — Capability Lens adversarial suite (Sonnet, ~110K) — closes Epic 3 with the 4-attack-vector adversarial test against the real auth stack.
 
-Per the gap analysis Appendix A: 3.4 / 3.5 / 3.6 / 3.7 have **no Refractor prerequisite** — they can run any order after 3.3.
+Per the gap analysis Appendix A: 3.4 / 3.5 / 3.6 / 3.7 have **no Refractor prerequisite** — they can run any order after 3.3. The natural sequence is 3.4 → 3.5 → 3.6 → 3.7 but parallel sub-agents on independent stories is viable if you want to compress the schedule.
+
+## Token Policy Reminder
+
+Per 2026-05-15 change: **budget is TRACKED, NOT ENFORCED.** Briefs include stuck-loop halt criteria, not budget halts. Trust outer task-notification `total_tokens` over sub-agent self-reports. Pattern is consistent across Phase 1 (30-50% under-reporting). Record both numbers in the tracker; the outer is the truth.
 
 ## Final Notes
 
 - **`make verify-bootstrap` is the regression gate.** Every story that touches bootstrap or substrate must keep it green.
 - **`make test-bypass` is the Phase 1 Gate 2 regression gate.** Every story must keep all 4 categories BLOCKED.
-- **The empirical perf numbers** from 2.1b's e2e (p99=10.3ms vs 500ms) and 3.1b-ii's bootstrap-Lens e2e (p99=11.7ms vs 500ms) are the architectural foundation. If a story claims a perf regression in those tests, take it seriously.
+- **The empirical perf numbers** from 2.1b (p99=10.3ms), 3.1b-ii (p99=11.7ms, synthetic-keys bootstrap Lens), 3.2a (p99=9.6ms, single-id live), and 3.2b (p99=5.7ms, multi-id live with fan-out) are the architectural foundation. All sit ~50-90× under the NFR-P3 500ms budget. If a story claims a perf regression in those tests, take it seriously.
 - **Andrew is hands-on with architecture.** He has Obsidian notes from earlier brainstorming; when he says "we already decided X" or "check the brainstorming" or "look at the data-contract not the brief," he means it. The brief is YOUR translation, not the truth — defer to the contract or to Andrew's correction.
 - **CI flake pattern:** JetStream redelivery + tracker dedup roundtrip is slow on GitHub Actions runners (5+ seconds for what's <500ms locally). If a NFR-R1 fault test times out in CI, bump the timeout (`driveOne` and `driveOneAny` in `internal/processor/integration_test.go` are both at 30s as of 0b8ec0a).
 
-When you've read the four files listed at the top, send a one-line message: "Winston online — read state through commit 0b8ec0a; ready for Andrew's command."
+When you've read the four files listed at the top, send a one-line message: "Winston online — read state through commit 99017ca (Story 3.2 fully shipped; Story 3.3 status: check `git log --oneline | head -3`); ready for Andrew's command."
