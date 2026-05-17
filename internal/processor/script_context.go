@@ -76,11 +76,18 @@ type HydratedState struct {
 }
 
 // ScriptResult is the parsed return value of step 5 (Execute). The
-// commit path passes it forward to step 6 (Validate) — which is still
-// stubbed in Story 1.6.
+// commit path passes it forward to step 6 (Validate).
+//
+// ResponseDetail (Story 4.2): optional structured data the script wants
+// to surface to the caller in the success reply. The script populates
+// this via a top-level "response" dict key in its return value. The
+// commit path threads it into the OperationReply.Detail field.
+// IMPORTANT: ResponseDetail MUST NOT be logged — it may contain
+// sensitive tokens (e.g. plaintext claim keys, NFR-S6/S7 compliance).
 type ScriptResult struct {
-	Mutations []MutationOp
-	Events    []EventSpec
+	Mutations      []MutationOp
+	Events         []EventSpec
+	ResponseDetail map[string]any
 }
 
 // HydrationError is the typed step-4 failure surfaced when a contextHint

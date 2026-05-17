@@ -33,6 +33,19 @@ func BuildAcceptedReplyWithRevisions(requestID string, committedAt time.Time, re
 	return r
 }
 
+// BuildAcceptedReplyWithDetail extends BuildAcceptedReply with a script-
+// supplied detail map (Story 4.2). The detail map is surfaced as-is to the
+// caller and MUST NOT be logged (NFR-S6/S7 — may carry sensitive tokens).
+// A nil or empty detail map is a no-op (produces the same reply as
+// BuildAcceptedReply).
+func BuildAcceptedReplyWithDetail(requestID string, committedAt time.Time, detail map[string]any) OperationReply {
+	r := BuildAcceptedReply(requestID, committedAt)
+	if len(detail) > 0 {
+		r.Detail = detail
+	}
+	return r
+}
+
 // BuildDuplicateReply constructs a `duplicate` reply from an existing
 // tracker.
 func BuildDuplicateReply(requestID string, original *Tracker) OperationReply {

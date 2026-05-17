@@ -135,6 +135,12 @@ type OperationReply struct {
 	// a successful atomic batch. Populated on `accepted` replies in
 	// Story 1.7+. Useful for client RYOW polling.
 	Revisions map[string]uint64 `json:"revisions,omitempty"`
+	// Detail: optional structured data the script surfaced via its
+	// "response" return key (Story 4.2 extension). May contain
+	// sensitive tokens (e.g. plaintext claim keys). MUST NOT be logged
+	// by any middleware or interceptor (NFR-S6/S7 compliance).
+	// Only present on accepted replies when the script populated it.
+	Detail map[string]any `json:"detail,omitempty"`
 }
 
 // ParseEnvelope unmarshals raw bytes and validates required fields per

@@ -298,7 +298,11 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	}
 
 	cp.deps.Metrics.OpsCommitted.Add(1)
-	cp.replyTo(msg, BuildAcceptedReply(env.RequestID, now))
+	// Surface script ResponseDetail in the success reply (Story 4.2).
+	// Detail may carry sensitive tokens (e.g. plaintext claim keys) —
+	// NFR-S6/S7: we do NOT log it. BuildAcceptedReplyWithDetail is a
+	// no-op when detail is nil/empty, so existing ops are unaffected.
+	cp.replyTo(msg, BuildAcceptedReplyWithDetail(env.RequestID, now, result.ResponseDetail))
 
 	// --- Step 10: explicit Acker boundary. ---
 	acker := cp.deps.AckerFactory(msg, cp.deps.Logger)

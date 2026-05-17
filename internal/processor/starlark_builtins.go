@@ -3,6 +3,7 @@ package processor
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"math/rand/v2"
 
@@ -85,6 +86,62 @@ func deterministicNanoID(src *rand.PCG, n int) string {
 		}
 	}
 	return string(out)
+}
+
+// cryptoModule returns a Starlark struct exposing:
+//   - crypto.sha256(s)        → lowercase hex-encoded SHA-256 digest (64 chars)
+//   - crypto.sha256NanoID(s)  → 20-char NanoID-alphabet ID derived from SHA-256(s)
+//
+// Both functions are pure (side-effect-free, deterministic) and consistent
+// with the sandbox principles established in Story 1.6:
+//   - no I/O, no os access, no time, no randomness
+//   - output is fully determined by input
+//
+// sha256(s): stores hashes of sensitive tokens in Core KV without leaking
+// plaintext. Story 4.3 will use the same builtin to hash a submitted
+// plaintext for comparison.
+//
+// sha256NanoID(s): derives a valid Contract #1 NanoID from SHA-256(s),
+// used to build deterministic index-vertex keys (vtx.identityIndex.<id>)
+// that satisfy substrate.ClassifyKey (which requires NanoID-alphabet chars
+// in the 3rd segment). The contact-type prefix in the hash input (e.g.
+// "email:..." vs "phone:...") prevents cross-type collisions.
+func cryptoModule() *starlarkstruct.Struct {
+	sha256Fn := starlarklib.NewBuiltin("sha256", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+		if len(args) != 1 || len(kwargs) != 0 {
+			return nil, errBuiltin("crypto.sha256(s) takes exactly 1 positional argument")
+		}
+		s, ok := args[0].(starlarklib.String)
+		if !ok {
+			return nil, errBuiltin("crypto.sha256: argument must be a string, got " + args[0].Type())
+		}
+		sum := sha256.Sum256([]byte(string(s)))
+		return starlarklib.String(hex.EncodeToString(sum[:])), nil
+	})
+
+	sha256NanoIDFn := starlarklib.NewBuiltin("sha256NanoID", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+		if len(args) != 1 || len(kwargs) != 0 {
+			return nil, errBuiltin("crypto.sha256NanoID(s) takes exactly 1 positional argument")
+		}
+		s, ok := args[0].(starlarklib.String)
+		if !ok {
+			return nil, errBuiltin("crypto.sha256NanoID: argument must be a string, got " + args[0].Type())
+		}
+		sum := sha256.Sum256([]byte(string(s)))
+		// Use the SHA-256 bytes as a PCG seed to generate a valid NanoID.
+		// This is deterministic: same input → same output, always.
+		seed := [2]uint64{
+			binary.BigEndian.Uint64(sum[0:8]),
+			binary.BigEndian.Uint64(sum[8:16]),
+		}
+		pcg := rand.NewPCG(seed[0], seed[1])
+		return starlarklib.String(deterministicNanoID(pcg, substrate.NanoIDLength)), nil
+	})
+
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlarklib.StringDict{
+		"sha256":       sha256Fn,
+		"sha256NanoID": sha256NanoIDFn,
+	})
 }
 
 // jsonToGenericMap parses raw JSON into map[string]interface{}.

@@ -57,6 +57,9 @@ func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResul
 		"op":     operationEnvelopeToStarlark(sc.Operation),
 		"ddl":    ddlMapToStarlark(sc.DDLLookup),
 		"nanoid": nanoidModule(rid),
+		// crypto.sha256(s) — pure SHA-256 hash builtin (Story 4.2).
+		// Deterministic, side-effect-free: safe under sandbox principles.
+		"crypto": cryptoModule(),
 	}
 
 	// Compile. Resolve errors (referencing `os`, `time`, etc. without binding)
@@ -185,7 +188,11 @@ func extractStarlarkPosition(err error) (int, int) {
 
 // parseScriptResult converts the Starlark return value into a ScriptResult.
 // The script must return {"mutations": [...], "events": [...]} per
-// Contract #3 §3.1.
+// Contract #3 §3.1. An optional "response" dict key carries structured
+// data to surface in the success reply (Story 4.2 extension).
+//
+// NOTE: ResponseDetail is NOT logged by the executor (NFR-S6/S7 —
+// it may carry sensitive tokens such as plaintext claim keys).
 func parseScriptResult(val starlarklib.Value, rid string) (ScriptResult, error) {
 	d, ok := val.(*starlarklib.Dict)
 	if !ok {
@@ -203,7 +210,15 @@ func parseScriptResult(val starlarklib.Value, rid string) (ScriptResult, error) 
 	if err != nil {
 		return ScriptResult{}, err
 	}
-	return ScriptResult{Mutations: muts, Events: evs}, nil
+	// Optional "response" dict — Story 4.2 extension. Never validate strictly;
+	// absent = nil; non-dict = silently ignored (don't break existing scripts).
+	var detail map[string]any
+	if respRaw, found, _ := d.Get(starlarklib.String("response")); found {
+		if respDict, ok := respRaw.(*starlarklib.Dict); ok {
+			detail = starlarkDictToGoMap(respDict)
+		}
+	}
+	return ScriptResult{Mutations: muts, Events: evs, ResponseDetail: detail}, nil
 }
 
 func parseMutations(d *starlarklib.Dict, rid string) ([]MutationOp, error) {

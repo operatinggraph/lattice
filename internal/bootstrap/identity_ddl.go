@@ -225,13 +225,133 @@ def execute(state, op):
         }}]
         return {"mutations": mutations, "events": events}
 
-    # Stub branches for 4.2-4.5 operations.
     if ot == "CreateUnclaimedIdentity":
-        fail("NotYetImplemented: Story 4.2: CreateUnclaimedIdentity")
+        # --- Input validation ---
+        name = p.name if hasattr(p, "name") else None
+        if name == None or type(name) != type("") or len(name.strip()) == 0:
+            fail("InvalidArgument: name: required, maxLen 200")
+        name = name.strip()
+        if len(name) > 200:
+            fail("InvalidArgument: name: required, maxLen 200")
+
+        raw_email = p.email if hasattr(p, "email") else None
+        raw_phone = p.phone if hasattr(p, "phone") else None
+
+        # Normalize email: trim + lowercase.
+        email = None
+        if raw_email != None and type(raw_email) == type(""):
+            e = raw_email.strip().lower()
+            if len(e) > 0:
+                email = e
+
+        # Normalize phone: strip non-digit / non-+.
+        phone = None
+        if raw_phone != None and type(raw_phone) == type(""):
+            stripped = ""
+            for ch in raw_phone.elems():
+                if ch >= "0" and ch <= "9":
+                    stripped += ch
+                elif ch == "+":
+                    stripped += ch
+            if len(stripped) > 0:
+                phone = stripped
+
+        if email == None and phone == None:
+            fail("InvalidArgument: email or phone: at least one required")
+
+        # --- Duplicate detection via index vertices ---
+        # Index keys use crypto.sha256NanoID to produce valid Contract #1
+        # NanoID-alphabet keys (substrate.ClassifyKey requires this).
+        # Contact-type prefix ("email:" / "phone:") prevents cross-type collision.
+        # The caller pre-computes these keys in contextHint.reads (Decision #6).
+        # If caller omitted them, state lookup returns None → no duplicate flag
+        # (best-effort Phase 1; Story 4.4 batch is the safety net).
+        duplicate = False
+        if email != None:
+            email_index_key = "vtx.identityindex." + crypto.sha256NanoID("email:" + email)
+            email_hit = state[email_index_key] if email_index_key in state else None
+            if email_hit != None and (not hasattr(email_hit, "isDeleted") or not email_hit.isDeleted):
+                duplicate = True
+        if phone != None:
+            phone_index_key = "vtx.identityindex." + crypto.sha256NanoID("phone:" + phone)
+            phone_hit = state[phone_index_key] if phone_index_key in state else None
+            if phone_hit != None and (not hasattr(phone_hit, "isDeleted") or not phone_hit.isDeleted):
+                duplicate = True
+
+        # --- Generate identity key + claim key (call order matters: counter advances) ---
+        # First nanoid.new() → identity_id; second → claim_key_plaintext.
+        identity_id = nanoid.new()
+        identity_key = "vtx.identity." + identity_id
+        claim_key_plaintext = nanoid.new()
+        claim_key_hash = crypto.sha256(claim_key_plaintext)
+
+        initial_state = "flagged-for-review" if duplicate else "unclaimed"
+
+        # --- Build MutationBatch ---
+        mutations = [
+            {"op": "create", "key": identity_key,
+             "document": {"class": "identity", "isDeleted": False, "data": {}}},
+            {"op": "create", "key": identity_key + ".name",
+             "document": {"class": "name", "vertexKey": identity_key, "localName": "name",
+                          "isDeleted": False, "data": {"value": name}}},
+            {"op": "create", "key": identity_key + ".state",
+             "document": {"class": "state", "vertexKey": identity_key, "localName": "state",
+                          "isDeleted": False, "data": {"value": initial_state}}},
+            {"op": "create", "key": identity_key + ".claimKey",
+             "document": {"class": "claimKey", "vertexKey": identity_key, "localName": "claimKey",
+                          "isDeleted": False, "data": {"hash": claim_key_hash, "algo": "sha256"}}},
+        ]
+        if email != None:
+            mutations.append({"op": "create", "key": identity_key + ".email",
+                "document": {"class": "email", "vertexKey": identity_key, "localName": "email",
+                             "isDeleted": False, "data": {"value": email}}})
+            # Only create the index vertex if it doesn't already exist.
+            # If it exists (duplicate detected via state read), skip creation to
+            # avoid AtomicBatch CreateOnly conflict on the already-existing index entry.
+            if email_index_key not in state:
+                mutations.append({"op": "create", "key": email_index_key,
+                    "document": {"class": "identityindex", "isDeleted": False,
+                                 "data": {"contactType": "email", "identityKey": identity_key}}})
+        if phone != None:
+            mutations.append({"op": "create", "key": identity_key + ".phone",
+                "document": {"class": "phone", "vertexKey": identity_key, "localName": "phone",
+                             "isDeleted": False, "data": {"value": phone}}})
+            # Only create if not already existing.
+            if phone_index_key not in state:
+                mutations.append({"op": "create", "key": phone_index_key,
+                    "document": {"class": "identityindex", "isDeleted": False,
+                                 "data": {"contactType": "phone", "identityKey": identity_key}}})
+
+        # --- EventList ---
+        events = [{"class": "IdentityCreated", "data": {
+            "identityKey": identity_key,
+            "state": initial_state,
+            "duplicate": duplicate,
+        }}]
+        if duplicate:
+            events.append({"class": "IdentityFlaggedForReview", "data": {
+                "identityKey": identity_key,
+                "reason": "duplicate-contact",
+            }})
+
+        # --- Response (plaintext claim key delivered to caller out-of-band) ---
+        # NFR-S6: claimKey plaintext appears ONLY here in the response.
+        # The .claimKey aspect stores the SHA-256 hash only.
+        return {
+            "mutations": mutations,
+            "events": events,
+            "response": {
+                "identityKey": identity_key,
+                "claimKey": claim_key_plaintext,
+                "possibleDuplicateFlag": duplicate,
+            },
+        }
+
+    # Stub branches for 4.3-4.5 operations.
     if ot == "ClaimIdentity":
         fail("NotYetImplemented: Story 4.3: ClaimIdentity")
     if ot == "FlagIdentityForReview":
-        fail("NotYetImplemented: Story 4.2: FlagIdentityForReview")
+        fail("NotYetImplemented: Story 4.3: FlagIdentityForReview")
     if ot == "ApproveIdentityMerge":
         fail("NotYetImplemented: Story 4.5: ApproveIdentityMerge")
     if ot == "MergeIdentity":
