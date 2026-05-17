@@ -1,18 +1,18 @@
 # Phase 1 Progress
 
-**Updated:** 2026-05-17, after Story 4.1 (commit 3cb5a06). **Epic 4 underway.**
+**Updated:** 2026-05-17, after Story 4.2 (commit 7462fc7). **Epic 4 in progress (2/5).**
 
 This file tracks **what's shipped, what's next, what's still open**. Operating rules and workflow live in [`WINSTON-RESUME.md`](./WINSTON-RESUME.md). Token-by-token accounting lives in [`token-usage-tracker.md`](./token-usage-tracker.md).
 
 ## Current State
 
-**Stories shipped: 23 / 32+** (the `+` denotes stories added outside the original 31-story plan: Story 2.3 hardening; Story 3.1 split into 3.1a + 3.1b-i + 3.1b-ii; Story 3.2 split into 3.2a + 3.2b).
+**Stories shipped: 24 / 32+** (the `+` denotes stories added outside the original 31-story plan: Story 2.3 hardening; Story 3.1 split into 3.1a + 3.1b-i + 3.1b-ii; Story 3.2 split into 3.2a + 3.2b).
 
-**Latest commit on main:** `3cb5a06` (Story 4.1 — Identity Domain DDL & State Machine).
+**Latest commit on main:** `7462fc7` (Story 4.2 — Staff Creates Unclaimed Identity / FR1).
 
-**Epic 3 closed; Epic 4 in progress** (1/5 stories complete).
+**Epic 3 closed; Epic 4 in progress** (2/5 stories complete).
 
-**Token totals so far:** ~3,298K / 3,517K (94%) for 23/32+ stories (72%). Token efficiency tracks ~22 points behind story-progress; quality bar maintained across all gates.
+**Token totals so far:** ~3,363K / 3,517K (96%) for 24/32+ stories (75%). 4.2 was the first Epic-4 Sonnet underrun (65K vs 90K budget); quality bar maintained across all gates.
 
 ## Shipped Story Index
 
@@ -44,11 +44,11 @@ Quick reference; full details in token-usage-tracker.md.
 | 3.6 | Role-scoped access domain (FR24/25) | 22a132f | 5 DDLs + 12 operator perms + §6.13 |
 | 3.7 | Capability Lens adversarial suite (Gate 3) | ecb2e68 | 4/4 DEFENDED; Epic 3 closed |
 | 4.1 | Identity Domain DDL & State Machine | 3cb5a06 | 1 DDL + 5 perms + 10 grants + state machine; verify-bootstrap 154 OK |
+| 4.2 | Staff Creates Unclaimed Identity (FR1) | 7462fc7 | crypto.sha256 + sha256NanoID + duplicate index vertices; 65K Sonnet UNDERRUN |
 
 ## Upcoming Sequence
 
-**Epic 4 — Identity & Member Lifecycle (in progress, 1/5 complete):**
-- **4.2** Staff Creates Unclaimed Identity FR1 (Sonnet, ~90K)
+**Epic 4 — Identity & Member Lifecycle (in progress, 2/5 complete):**
 - **4.3** Two-Phase Identity Claim FR2/FR5 (Sonnet, ~100K)
 - **4.4** Duplicate Identity Detection FR3 (Sonnet, ~110K)
 - **4.5** Staff-Approved Identity Merge FR4 (Opus, ~135K)
