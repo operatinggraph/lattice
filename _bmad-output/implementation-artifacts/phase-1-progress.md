@@ -1,18 +1,18 @@
 # Phase 1 Progress
 
-**Updated:** 2026-05-16, after Story 3.6 (commit 22a132f + 49b6aaf), Story 3.7 in flight.
+**Updated:** 2026-05-17, after Story 3.7 (commit ecb2e68 + 008b420 lint cleanup). **Epic 3 closed.**
 
 This file tracks **what's shipped, what's next, what's still open**. Operating rules and workflow live in [`WINSTON-RESUME.md`](./WINSTON-RESUME.md). Token-by-token accounting lives in [`token-usage-tracker.md`](./token-usage-tracker.md).
 
 ## Current State
 
-**Stories shipped: 21 / 32+** (the `+` denotes stories added outside the original 31-story plan: Story 2.3 hardening; Story 3.1 split into 3.1a + 3.1b-i + 3.1b-ii; Story 3.2 split into 3.2a + 3.2b).
+**Stories shipped: 22 / 32+** (the `+` denotes stories added outside the original 31-story plan: Story 2.3 hardening; Story 3.1 split into 3.1a + 3.1b-i + 3.1b-ii; Story 3.2 split into 3.2a + 3.2b).
 
-**Latest commit on main:** `49b6aaf` (Story 3.6 handoff + tracker update; Story 3.6 implementation at 22a132f).
+**Latest commit on main:** `008b420` (lint cleanup after Story 3.7 ecb2e68).
 
-**In flight:** Story 3.7 (Phase 1 Gate 3 — Capability Lens Adversarial Test Suite). Sub-agent launched 2026-05-16.
+**Epic 3 closed.** All Phase 1 Gate 3 attack vectors DEFENDED. Next work is Epic 4 (Identity & Member Lifecycle).
 
-**Token totals so far:** ~2,964K / 3,517K (84%) for 21/32+ stories (66%). Token efficiency tracks ~18 points behind story-progress; quality bar maintained across all gates.
+**Token totals so far:** ~3,093K / 3,517K (88%) for 22/32+ stories (69%). Token efficiency tracks ~19 points behind story-progress; quality bar maintained across all gates.
 
 ## Shipped Story Index
 
@@ -42,11 +42,9 @@ Quick reference; full details in token-usage-tracker.md.
 | 3.4 | Structured denial response (FR22) | 09e218e | DenialResponseBuilder + role coverage |
 | 3.5 | Three-plane auth trace (FR23) | 19bd508 | AuthTraceEmitter + KVPutWithTTL |
 | 3.6 | Role-scoped access domain (FR24/25) | 22a132f | 5 DDLs + 12 operator perms + §6.13 |
+| 3.7 | Capability Lens adversarial suite (Gate 3) | ecb2e68 | 4/4 DEFENDED; Epic 3 closed |
 
 ## Upcoming Sequence
-
-**Epic 3 closure:**
-- **3.7** (Sonnet, ~110K) — Phase 1 Gate 3 — Capability Lens adversarial suite. **In flight.**
 
 **Epic 4 — Identity & Member Lifecycle (next epic):**
 - **4.1** Identity Domain DDL & State Machine (Opus, ~120K)
@@ -74,6 +72,7 @@ Quick reference; full details in token-usage-tracker.md.
 - **3.5**: Cypher rule body hash deferred to Phase 2 (Phase 1 uses `sha256(lensKey+"@"+projectedAt)` fingerprint).
 - **3.5**: `lattice auth-trace` CLI deferred to Story 6.1; `LookupAuthTrace` helper available for the wrap.
 - **3.6**: AC text `assignedRole` resolved to `holdsRole` per cypher consistency; documented in data-contracts.md §6.13. Phase 2 may re-canonicalize.
+- **3.7 Vector #1**: Phase 1 defense is Refractor reprojection only. NATS-account-level write restriction on Capability KV (Contract #6 §6.1) is the Phase 2 hardening — adds substrate-level enforcement on top of the current overwrite-by-reprojection guarantee.
 
 ### Residual carries from 3.2b (still open for 3.7+ / Phase 2)
 
