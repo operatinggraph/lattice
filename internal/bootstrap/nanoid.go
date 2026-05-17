@@ -127,6 +127,22 @@ var (
 	PermRemoveReportingChainID      string
 	PermRemoveReportingChainKey     string
 
+	// Story 4.1: Identity domain DDL meta-vertex.
+	DDLIdentityID  string // vtx.meta.<NanoID>, canonicalName="identity"
+	DDLIdentityKey string
+
+	// Story 4.1: Five new permission vertex IDs + keys for identity ops.
+	PermCreateUnclaimedIdentityID  string
+	PermCreateUnclaimedIdentityKey string
+	PermClaimIdentityID            string
+	PermClaimIdentityKey           string
+	PermFlagIdentityForReviewID    string
+	PermFlagIdentityForReviewKey   string
+	PermApproveIdentityMergeID     string
+	PermApproveIdentityMergeKey    string
+	PermScanIdentityDuplicatesID   string
+	PermScanIdentityDuplicatesKey  string
+
 	// Derived link keys.
 	BootstrapHoldsRoleLinkKey string
 	PlatformHoldsRoleLinkKey  string
@@ -168,6 +184,14 @@ type PrimordialIDsRaw struct {
 	PermRevokePermission     string `json:"permRevokePermission"`
 	PermAssignReportingChain string `json:"permAssignReportingChain"`
 	PermRemoveReportingChain string `json:"permRemoveReportingChain"`
+
+	// Story 4.1: Identity domain DDL meta-vertex + 5 identity permission IDs.
+	DDLIdentity                string `json:"ddlIdentity"`
+	PermCreateUnclaimedIdentity string `json:"permCreateUnclaimedIdentity"`
+	PermClaimIdentity          string `json:"permClaimIdentity"`
+	PermFlagIdentityForReview  string `json:"permFlagIdentityForReview"`
+	PermApproveIdentityMerge   string `json:"permApproveIdentityMerge"`
+	PermScanIdentityDuplicates string `json:"permScanIdentityDuplicates"`
 }
 
 // BootstrapFile is the wire format of lattice.bootstrap.json.
@@ -246,6 +270,13 @@ func currentRaw() PrimordialIDsRaw {
 		PermRevokePermission:     PermRevokePermissionID,
 		PermAssignReportingChain: PermAssignReportingChainID,
 		PermRemoveReportingChain: PermRemoveReportingChainID,
+		// Story 4.1.
+		DDLIdentity:                 DDLIdentityID,
+		PermCreateUnclaimedIdentity: PermCreateUnclaimedIdentityID,
+		PermClaimIdentity:           PermClaimIdentityID,
+		PermFlagIdentityForReview:   PermFlagIdentityForReviewID,
+		PermApproveIdentityMerge:    PermApproveIdentityMergeID,
+		PermScanIdentityDuplicates:  PermScanIdentityDuplicatesID,
 	}
 }
 
@@ -297,6 +328,13 @@ func generate() (PrimordialIDsRaw, error) {
 		&raw.PermRevokePermission,
 		&raw.PermAssignReportingChain,
 		&raw.PermRemoveReportingChain,
+		// Story 4.1: identity DDL + 5 identity permissions.
+		&raw.DDLIdentity,
+		&raw.PermCreateUnclaimedIdentity,
+		&raw.PermClaimIdentity,
+		&raw.PermFlagIdentityForReview,
+		&raw.PermApproveIdentityMerge,
+		&raw.PermScanIdentityDuplicates,
 	}
 	for _, dst := range targets {
 		id, err := substrate.NewNanoID()
@@ -345,6 +383,13 @@ func populate(raw PrimordialIDsRaw) error {
 		{"permRevokePermission", raw.PermRevokePermission},
 		{"permAssignReportingChain", raw.PermAssignReportingChain},
 		{"permRemoveReportingChain", raw.PermRemoveReportingChain},
+		// Story 4.1: identity DDL + 5 identity permissions.
+		{"ddlIdentity", raw.DDLIdentity},
+		{"permCreateUnclaimedIdentity", raw.PermCreateUnclaimedIdentity},
+		{"permClaimIdentity", raw.PermClaimIdentity},
+		{"permFlagIdentityForReview", raw.PermFlagIdentityForReview},
+		{"permApproveIdentityMerge", raw.PermApproveIdentityMerge},
+		{"permScanIdentityDuplicates", raw.PermScanIdentityDuplicates},
 	}
 	for _, f := range fields {
 		if !substrate.IsValidNanoID(f.val) {
@@ -421,6 +466,20 @@ func populate(raw PrimordialIDsRaw) error {
 	PermRemoveReportingChainID = raw.PermRemoveReportingChain
 	PermRemoveReportingChainKey = "vtx.permission." + PermRemoveReportingChainID
 
+	// Story 4.1: populate identity DDL meta-vertex + 5 permission vertices.
+	DDLIdentityID = raw.DDLIdentity
+	DDLIdentityKey = "vtx.meta." + DDLIdentityID
+	PermCreateUnclaimedIdentityID = raw.PermCreateUnclaimedIdentity
+	PermCreateUnclaimedIdentityKey = "vtx.permission." + PermCreateUnclaimedIdentityID
+	PermClaimIdentityID = raw.PermClaimIdentity
+	PermClaimIdentityKey = "vtx.permission." + PermClaimIdentityID
+	PermFlagIdentityForReviewID = raw.PermFlagIdentityForReview
+	PermFlagIdentityForReviewKey = "vtx.permission." + PermFlagIdentityForReviewID
+	PermApproveIdentityMergeID = raw.PermApproveIdentityMerge
+	PermApproveIdentityMergeKey = "vtx.permission." + PermApproveIdentityMergeID
+	PermScanIdentityDuplicatesID = raw.PermScanIdentityDuplicates
+	PermScanIdentityDuplicatesKey = "vtx.permission." + PermScanIdentityDuplicatesID
+
 	return nil
 }
 
@@ -472,12 +531,65 @@ func PrimordialVertexKeys() []string {
 		DDLHoldsRoleKey,
 		DDLGrantsPermissionKey,
 		DDLReportsToKey,
+		// Story 4.1: Identity domain DDL meta-vertex.
+		DDLIdentityKey,
 	}
 	// Story 3.6: 12 per-op permission vertices.
 	keys = append(keys, RoleMgmtPermissionKeys()...)
 	// Story 3.6: 12 grantsPermission links to operator role.
 	keys = append(keys, RoleMgmtGrantLinkKeys()...)
+	// Story 4.1: 5 identity-domain permission vertices.
+	keys = append(keys, IdentityPermissionKeys()...)
+	// Story 4.1: 10 grantsPermission links to per-role grants.
+	keys = append(keys, IdentityGrantLinkKeys()...)
 	return keys
+}
+
+// IdentityPermissionKeys returns the 5 per-op permission vertex keys
+// for the identity domain (Story 4.1).
+func IdentityPermissionKeys() []string {
+	return []string{
+		PermCreateUnclaimedIdentityKey,
+		PermClaimIdentityKey,
+		PermFlagIdentityForReviewKey,
+		PermApproveIdentityMergeKey,
+		PermScanIdentityDuplicatesKey,
+	}
+}
+
+// IdentityGrantLinkKeys returns the 10 grantsPermission link keys for
+// the identity domain (Story 4.1).
+//
+// Grant matrix:
+//   - CreateUnclaimedIdentity → frontOfHouse, backOfHouse, operator (3)
+//   - ClaimIdentity           → consumer (1)
+//   - FlagIdentityForReview   → frontOfHouse, backOfHouse, operator (3)
+//   - ApproveIdentityMerge    → operator (1)
+//   - ScanIdentityDuplicates  → backOfHouse, operator (2)
+//
+// Link key: lnk.permission.<permID>.grantsPermission.role.<roleID>
+// "permission" < "role" alphabetically → permission is younger vertex.
+func IdentityGrantLinkKeys() []string {
+	mkLink := func(permID, roleID string) string {
+		return "lnk.permission." + permID + ".grantsPermission.role." + roleID
+	}
+	return []string{
+		// CreateUnclaimedIdentity → frontOfHouse, backOfHouse, operator.
+		mkLink(PermCreateUnclaimedIdentityID, RoleFrontOfHouseID),
+		mkLink(PermCreateUnclaimedIdentityID, RoleBackOfHouseID),
+		mkLink(PermCreateUnclaimedIdentityID, RoleOperatorID),
+		// ClaimIdentity → consumer.
+		mkLink(PermClaimIdentityID, RoleConsumerID),
+		// FlagIdentityForReview → frontOfHouse, backOfHouse, operator.
+		mkLink(PermFlagIdentityForReviewID, RoleFrontOfHouseID),
+		mkLink(PermFlagIdentityForReviewID, RoleBackOfHouseID),
+		mkLink(PermFlagIdentityForReviewID, RoleOperatorID),
+		// ApproveIdentityMerge → operator.
+		mkLink(PermApproveIdentityMergeID, RoleOperatorID),
+		// ScanIdentityDuplicates → backOfHouse, operator.
+		mkLink(PermScanIdentityDuplicatesID, RoleBackOfHouseID),
+		mkLink(PermScanIdentityDuplicatesID, RoleOperatorID),
+	}
 }
 
 // RoleMgmtPermissionKeys returns the 12 per-op permission vertex keys
@@ -528,5 +640,6 @@ func RoleMgmtGrantLinkKeys() []string {
 // gate (avoids needing to load lattice.bootstrap.json before the file is
 // written by cmd/bootstrap — which would create a startup race).
 // Story 3.6 adds 5 DDL meta-vertex keys + 12 permission keys + 12 link keys = 29
-// Total: 15 (prior) + 5 + 12 + 12 = 44
-const PrimordialVertexKeyCount = 44
+// Story 4.1 adds 1 DDL meta-vertex key + 5 permission keys + 10 link keys = 16
+// Total: 15 (prior) + 5 + 12 + 12 + 1 + 5 + 10 = 60
+const PrimordialVertexKeyCount = 60

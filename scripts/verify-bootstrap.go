@@ -332,6 +332,146 @@ func main() {
 		fmt.Printf("  OK  %s\n", linkKey)
 	}
 
+	// 8a. Story 4.1: Assert identity DDL meta-vertex + 4 aspects.
+	idDDL := bootstrap.IdentityDDL()
+	fmt.Printf("\nChecking identity DDL meta-vertex (Story 4.1)...\n")
+	{
+		vtxEntry, err := coreKV.Get(ctx, idDDL.Key)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity DDL vertex: %s (%v)", idDDL.Key, err))
+		} else {
+			var vtxEnv map[string]any
+			if err := json.Unmarshal(vtxEntry.Value(), &vtxEnv); err != nil {
+				failures = append(failures, fmt.Sprintf("INVALID JSON for identity DDL vertex %s: %v", idDDL.Key, err))
+			} else {
+				if cls, _ := vtxEnv["class"].(string); cls != idDDL.Class {
+					failures = append(failures, fmt.Sprintf("identity DDL vertex %s class=%q, want %q",
+						idDDL.Key, cls, idDDL.Class))
+				}
+				fmt.Printf("  OK  %s (class=%s)\n", idDDL.Key, idDDL.Class)
+			}
+		}
+		// .canonicalName aspect — must have data.value == "identity".
+		cnKey := idDDL.Key + ".canonicalName"
+		if aspEntry, err := coreKV.Get(ctx, cnKey); err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity DDL aspect: %s (%v)", cnKey, err))
+		} else {
+			var aspEnv map[string]any
+			_ = json.Unmarshal(aspEntry.Value(), &aspEnv)
+			data, _ := aspEnv["data"].(map[string]any)
+			if val, _ := data["value"].(string); val != idDDL.CanonicalName {
+				failures = append(failures, fmt.Sprintf("identity DDL aspect %s canonicalName=%q, want %q",
+					cnKey, val, idDDL.CanonicalName))
+			} else {
+				fmt.Printf("  OK  %s\n", cnKey)
+			}
+		}
+		// .permittedCommands aspect — must contain all 8 op types.
+		pcKey := idDDL.Key + ".permittedCommands"
+		if aspEntry, err := coreKV.Get(ctx, pcKey); err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity DDL aspect: %s (%v)", pcKey, err))
+		} else {
+			var aspEnv map[string]any
+			_ = json.Unmarshal(aspEntry.Value(), &aspEnv)
+			data, _ := aspEnv["data"].(map[string]any)
+			cmds, _ := data["commands"].([]any)
+			got := map[string]bool{}
+			for _, c := range cmds {
+				if s, ok := c.(string); ok {
+					got[s] = true
+				}
+			}
+			for _, want := range idDDL.PermittedCommands {
+				if !got[want] {
+					failures = append(failures, fmt.Sprintf("identity DDL %s missing permittedCommand: %s",
+						pcKey, want))
+				}
+			}
+			if len(failures) == 0 || !strings.Contains(strings.Join(failures, "\n"), pcKey) {
+				fmt.Printf("  OK  %s (%d commands)\n", pcKey, len(idDDL.PermittedCommands))
+			}
+		}
+		// .description aspect.
+		descKey := idDDL.Key + ".description"
+		if _, err := coreKV.Get(ctx, descKey); err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity DDL aspect: %s (%v)", descKey, err))
+		} else {
+			fmt.Printf("  OK  %s\n", descKey)
+		}
+		// .script aspect — must have non-empty source.
+		scriptKey := idDDL.Key + ".script"
+		if aspEntry, err := coreKV.Get(ctx, scriptKey); err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity DDL aspect: %s (%v)", scriptKey, err))
+		} else {
+			var aspEnv map[string]any
+			_ = json.Unmarshal(aspEntry.Value(), &aspEnv)
+			data, _ := aspEnv["data"].(map[string]any)
+			src, _ := data["source"].(string)
+			if strings.TrimSpace(src) == "" {
+				failures = append(failures, fmt.Sprintf("identity DDL aspect %s has empty source", scriptKey))
+			} else {
+				fmt.Printf("  OK  %s (script len=%d)\n", scriptKey, len(src))
+			}
+		}
+	}
+
+	// 8b. Story 4.1: Assert 5 identity-domain permission vertices.
+	idPerms := bootstrap.IdentityPermissions()
+	fmt.Printf("\nChecking %d identity-domain permission vertices...\n", len(idPerms))
+	for _, perm := range idPerms {
+		permEntry, err := coreKV.Get(ctx, perm.Key)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity permission vertex: %s (%v)", perm.Key, err))
+			continue
+		}
+		var permEnv map[string]any
+		if err := json.Unmarshal(permEntry.Value(), &permEnv); err != nil {
+			failures = append(failures, fmt.Sprintf("INVALID JSON for identity permission %s: %v", perm.Key, err))
+			continue
+		}
+		if cls, _ := permEnv["class"].(string); cls != "permission" {
+			failures = append(failures, fmt.Sprintf("identity permission %s class=%q, want permission",
+				perm.Key, cls))
+		}
+		data, _ := permEnv["data"].(map[string]any)
+		if ot, _ := data["operationType"].(string); ot != perm.OperationType {
+			failures = append(failures, fmt.Sprintf("identity permission %s operationType=%q, want %q",
+				perm.Key, ot, perm.OperationType))
+		}
+		if scope, _ := data["scope"].(string); scope != perm.Scope {
+			failures = append(failures, fmt.Sprintf("identity permission %s scope=%q, want %q",
+				perm.Key, scope, perm.Scope))
+		}
+		fmt.Printf("  OK  %s (operationType=%s scope=%s)\n", perm.Key, perm.OperationType, perm.Scope)
+	}
+
+	// 8c. Story 4.1: Assert 10 grantsPermission links for identity domain.
+	idGrants := bootstrap.IdentityGrantLinkKeys()
+	fmt.Printf("\nChecking %d identity-domain grant links...\n", len(idGrants))
+	for _, linkKey := range idGrants {
+		lnkEntry, err := coreKV.Get(ctx, linkKey)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("MISSING identity grant link: %s (%v)", linkKey, err))
+			continue
+		}
+		var lnkEnv map[string]any
+		if err := json.Unmarshal(lnkEntry.Value(), &lnkEnv); err != nil {
+			failures = append(failures, fmt.Sprintf("INVALID JSON for identity grant link %s: %v", linkKey, err))
+			continue
+		}
+		if cls, _ := lnkEnv["class"].(string); cls != "grantsPermission" {
+			failures = append(failures, fmt.Sprintf("identity grant link %s class=%q, want grantsPermission",
+				linkKey, cls))
+		}
+		if !strings.HasPrefix(linkKey, "lnk.permission.") || !strings.Contains(linkKey, ".grantsPermission.role.") {
+			failures = append(failures, fmt.Sprintf("identity grant link %s has unexpected key shape", linkKey))
+		}
+		if isDeleted, _ := lnkEnv["isDeleted"].(bool); isDeleted {
+			failures = append(failures, fmt.Sprintf("identity grant link %s is tombstoned", linkKey))
+		}
+		fmt.Printf("  OK  %s\n", linkKey)
+	}
+
 	// 9. Story 3.6: Verify canonical roles still have description aspects (Story 1.3).
 	canonicalRoles := bootstrap.CanonicalRoles()
 	fmt.Printf("\nChecking %d canonical role description aspects...\n", len(canonicalRoles))

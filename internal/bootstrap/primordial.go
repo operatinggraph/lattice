@@ -457,6 +457,67 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		}
 	}
 
+	// Story 4.1: identity domain DDL meta-vertex + 4 aspects.
+	{
+		ddl := IdentityDDL()
+		vtxVal, vtxErr := MakeVertexEnvelope(ddl.Key, ddl.Class, map[string]any{})
+		if err := add(ddl.Key, vtxVal, vtxErr); err != nil {
+			return nil, err
+		}
+		cnKey := ddl.Key + ".canonicalName"
+		cnVal, cnErr := MakeAspectEnvelope(cnKey, ddl.Key, "canonicalName", "canonicalName",
+			map[string]any{"value": ddl.CanonicalName})
+		if err := add(cnKey, cnVal, cnErr); err != nil {
+			return nil, err
+		}
+		pcKey := ddl.Key + ".permittedCommands"
+		pcVal, pcErr := MakeAspectEnvelope(pcKey, ddl.Key, "permittedCommands", "permittedCommands",
+			map[string]any{"commands": ddl.PermittedCommands})
+		if err := add(pcKey, pcVal, pcErr); err != nil {
+			return nil, err
+		}
+		descKey := ddl.Key + ".description"
+		descVal, descErr := MakeAspectEnvelope(descKey, ddl.Key, "description", "description",
+			map[string]any{"text": ddl.Description})
+		if err := add(descKey, descVal, descErr); err != nil {
+			return nil, err
+		}
+		scriptKey := ddl.Key + ".script"
+		scriptVal, scriptErr := MakeAspectEnvelope(scriptKey, ddl.Key, "script", "script",
+			map[string]any{"source": ddl.Script})
+		if err := add(scriptKey, scriptVal, scriptErr); err != nil {
+			return nil, err
+		}
+	}
+
+	// Story 4.1: 5 identity-domain permission vertices.
+	for _, perm := range IdentityPermissions() {
+		permData := map[string]any{
+			"operationType": perm.OperationType,
+			"scope":         perm.Scope,
+			"note":          perm.Note,
+		}
+		permVal, permErr := MakeVertexEnvelope(perm.Key, "permission", permData)
+		if err := add(perm.Key, permVal, permErr); err != nil {
+			return nil, err
+		}
+	}
+
+	// Story 4.1: 10 grantsPermission links per the identity-domain role
+	// matrix. Link key: lnk.permission.<permID>.grantsPermission.role.<roleID>
+	// "permission" < "role" alphabetically → permission is younger vertex.
+	for _, g := range IdentityGrants() {
+		linkKey := "lnk.permission." + g.PermID + ".grantsPermission.role." + g.RoleID
+		linkVal, linkErr := MakeLinkEnvelope(
+			linkKey,
+			"vtx.permission."+g.PermID,
+			"vtx.role."+g.RoleID,
+			"grantsPermission", "grantsPermission", map[string]any{})
+		if err := add(linkKey, linkVal, linkErr); err != nil {
+			return nil, err
+		}
+	}
+
 	return entries, nil
 }
 
