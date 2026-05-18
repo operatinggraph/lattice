@@ -171,7 +171,7 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 		return entry.Revision()
 	}
 	lensDefKey := "vtx.meta." + capabilityRule.ID
-	p.SetEnvelopeFn(capabilityenv.NewWrapper(lensDefKey, projectionRevision))
+	p.SetEnvelopeFn(capabilityenv.NewWrapper(lensDefKey, projectionRevision, nil))
 
 	require.NoError(t, manager.Add(ctx, capabilityRule.ID))
 	cons := manager.Consumer(capabilityRule.ID)

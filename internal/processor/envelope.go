@@ -27,8 +27,19 @@ func (l Lane) valid() bool {
 }
 
 // ContextHint mirrors Contract #2 §2.5 — declared read set.
+//
+// ScanPrefixes (Story 4.4): when non-empty, the hydrator performs a prefix scan
+// over Core KV for each prefix and bulk-loads all matching entries into the
+// script's state global. Phase 1 only supports "vtx.identity." and
+// "lnk.identity." as prefixes; other prefixes return
+// HydrationError("scan-prefix-not-supported"). For "vtx.identity." the hydrator
+// also loads 4 hard-coded aspects (.name/.email/.phone/.state) per vertex.
+// For "lnk.identity." 6-segment link keys are loaded as-is.
+// Soft cap: > 1000 keys per prefix returns HydrationError("scan-too-large").
+// NFR-SC1: operator cells target ≤500 identities.
 type ContextHint struct {
-	Reads []string `json:"reads,omitempty"`
+	Reads        []string `json:"reads,omitempty"`
+	ScanPrefixes []string `json:"scanPrefixes,omitempty"`
 }
 
 // AuthContext mirrors Contract #2 §2.8 — auth path declaration.

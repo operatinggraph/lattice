@@ -168,6 +168,25 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			}
 			hydrated[key] = doc
 		}
+
+		// 4b. ScanPrefixes bulk load (Story 4.4).
+		//
+		// When contextHint.scanPrefixes is set, enumerate all keys under each
+		// prefix and load them into the script state. Phase 1 restricts
+		// allowed prefixes to "vtx.identity." and "lnk.identity." — the only
+		// consumers. Other prefixes are rejected to limit blast radius.
+		// For "vtx.identity." the hydrator also loads 4 hard-coded aspects
+		// (.name/.email/.phone/.state) per vertex. For "lnk.identity." all
+		// 6-segment link keys are loaded as-is (no aspect expansion).
+		// Soft cap: >1000 keys per prefix → HydrationError.
+		for _, p := range env.ContextHint.ScanPrefixes {
+			if p == "" {
+				continue
+			}
+			if err := h.hydrateScanPrefix(ctx, rid, p, hydrated); err != nil {
+				return HydratedState{}, err
+			}
+		}
 	}
 
 	h.Logger.Info("step 4: hydrated",
@@ -186,6 +205,135 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			ScriptClass:  class,
 		},
 	}, nil
+}
+
+// identityScanAspects lists the aspect localNames the hydrator bulk-loads
+// for each identity vertex when ScanPrefixes contains "vtx.identity.".
+// Hard-coded for Phase 1; the only consumer of ScanPrefixes is
+// ScanIdentityDuplicates. 4 aspects cover match criteria + state transition.
+var identityScanAspects = []string{"name", "email", "phone", "state"}
+
+// hydrateScanPrefix implements one prefix scan for the ScanPrefixes bulk-load
+// path (Story 4.4). Allowed prefixes: "vtx.identity." and "lnk.identity.".
+//
+// For "vtx.identity.": filters to 3-segment vertex keys and loads each vertex
+// + 4 hard-coded aspects (.name/.email/.phone/.state). Non-existing aspect
+// keys are silently skipped (optional aspects).
+//
+// For "lnk.identity.": filters to 6-segment link keys (lnk.<type>.<id>.<rel>.<type>.<id>)
+// and loads each link envelope as-is. The script uses these for idempotency
+// checks on prior duplicateOf pairs without extra round-trips.
+//
+// Soft cap: >1000 matching keys per prefix → HydrationError("scan-too-large").
+func (h *HydratorImpl) hydrateScanPrefix(ctx context.Context, rid, prefix string, hydrated map[string]VertexDoc) error {
+	const (
+		scanPrefixIdentityVtx = "vtx.identity."
+		scanPrefixIdentityLnk = "lnk.identity."
+	)
+	if prefix != scanPrefixIdentityVtx && prefix != scanPrefixIdentityLnk {
+		return &HydrationError{
+			Code:               "scan-prefix-not-supported",
+			MissingKey:         prefix,
+			OperationRequestID: rid,
+		}
+	}
+
+	allKeys, err := h.Conn.KVListKeys(ctx, h.CoreBucket)
+	if err != nil {
+		return fmt.Errorf("step4 scanPrefix: list keys: %w", err)
+	}
+
+	if prefix == scanPrefixIdentityVtx {
+		// Collect 3-segment vertex keys: vtx.identity.<id>
+		var vtxKeys []string
+		for _, k := range allKeys {
+			if !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			// 3-segment key: suffix after "vtx.identity." has no dots.
+			suffix := k[len(prefix):]
+			if strings.Contains(suffix, ".") {
+				continue // aspect key — skip
+			}
+			vtxKeys = append(vtxKeys, k)
+		}
+		if len(vtxKeys) > 1000 {
+			return &HydrationError{
+				Code:               "scan-too-large",
+				MissingKey:         fmt.Sprintf("count=%d", len(vtxKeys)),
+				OperationRequestID: rid,
+			}
+		}
+		// Load each vertex + 4 aspects.
+		for _, vtxKey := range vtxKeys {
+			keysToLoad := make([]string, 0, 1+len(identityScanAspects))
+			keysToLoad = append(keysToLoad, vtxKey)
+			for _, asp := range identityScanAspects {
+				keysToLoad = append(keysToLoad, vtxKey+"."+asp)
+			}
+			for _, k := range keysToLoad {
+				if _, already := hydrated[k]; already {
+					continue // already loaded via contextHint.reads
+				}
+				entry, err := h.Conn.KVGet(ctx, h.CoreBucket, k)
+				if err != nil {
+					if errors.Is(err, substrate.ErrKeyNotFound) {
+						if k == vtxKey {
+							// Vertex disappeared between list and read — skip silently.
+							break
+						}
+						continue // optional aspect missing
+					}
+					return fmt.Errorf("step4 scanPrefix: read %s: %w", k, err)
+				}
+				doc, err := parseVertexDoc(entry.Value, k)
+				if err != nil {
+					return fmt.Errorf("step4 scanPrefix: parse %s: %w", k, err)
+				}
+				hydrated[k] = doc
+			}
+		}
+		return nil
+	}
+
+	// prefix == scanPrefixIdentityLnk
+	// Collect 6-segment link keys: lnk.identity.<id>.duplicateOf.identity.<id>
+	var lnkKeys []string
+	for _, k := range allKeys {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		// 6-segment key has exactly 5 dots.
+		if strings.Count(k, ".") != 5 {
+			continue
+		}
+		lnkKeys = append(lnkKeys, k)
+	}
+	if len(lnkKeys) > 1000 {
+		return &HydrationError{
+			Code:               "scan-too-large",
+			MissingKey:         fmt.Sprintf("count=%d", len(lnkKeys)),
+			OperationRequestID: rid,
+		}
+	}
+	for _, lnkKey := range lnkKeys {
+		if _, already := hydrated[lnkKey]; already {
+			continue
+		}
+		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, lnkKey)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				continue // link disappeared between list and read
+			}
+			return fmt.Errorf("step4 scanPrefix: read %s: %w", lnkKey, err)
+		}
+		doc, err := parseVertexDoc(entry.Value, lnkKey)
+		if err != nil {
+			return fmt.Errorf("step4 scanPrefix: parse %s: %w", lnkKey, err)
+		}
+		hydrated[lnkKey] = doc
+	}
+	return nil
 }
 
 // resolveClass extracts the operation's class for DDL lookup.

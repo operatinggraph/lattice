@@ -53,13 +53,16 @@ func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResul
 
 	// Build globals.
 	globals := starlarklib.StringDict{
-		"state":  vertexMapToStarlark(sc.Hydrated),
+		"state":  vertexMapToStarlarkWithHydrated(sc.Hydrated),
 		"op":     operationEnvelopeToStarlark(sc.Operation),
 		"ddl":    ddlMapToStarlark(sc.DDLLookup),
 		"nanoid": nanoidModule(rid),
 		// crypto.sha256(s) — pure SHA-256 hash builtin (Story 4.2).
 		// Deterministic, side-effect-free: safe under sandbox principles.
 		"crypto": cryptoModule(),
+		// strings.levenshtein + strings.levenshtein_ratio — pure string-math
+		// builtins (Story 4.4). Deterministic, side-effect-free.
+		"strings": stringsModule(),
 	}
 
 	// Compile. Resolve errors (referencing `os`, `time`, etc. without binding)
@@ -328,8 +331,76 @@ func parseEvents(d *starlarklib.Dict, rid string) ([]EventSpec, error) {
 
 // ---- Starlark value conversion ----
 
-func vertexMapToStarlark(m map[string]VertexDoc) *starlarklib.Dict {
+// stateMapValue is the Starlark `state` global exposed to scripts.
+//
+// It wraps a *starlarklib.Dict (the hydrated vertex/aspect map) and adds a
+// `keys_with_prefix(prefix)` method. The wrapper passes all dict operations
+// (subscript, `in`, `.get()`, etc.) through to the underlying dict so
+// existing scripts remain unaffected. Story 4.4 adds `keys_with_prefix` to
+// support the ScanIdentityDuplicates enumeration path.
+//
+// Interface compliance:
+//
+//	Mapping   — via Get (supports `state[key]` and `key in state`)
+//	Iterable  — via Iterate (supports `for k in state`)
+//	HasAttrs  — via Attr (supports `state.keys_with_prefix(...)`)
+type stateMapValue struct {
+	d    *starlarklib.Dict
+	keys []string // ordered snapshot of keys for keys_with_prefix
+}
+
+func (s *stateMapValue) String() string        { return s.d.String() }
+func (s *stateMapValue) Type() string          { return "state" }
+func (s *stateMapValue) Freeze()               { s.d.Freeze() }
+func (s *stateMapValue) Truth() starlarklib.Bool { return s.d.Truth() }
+func (s *stateMapValue) Hash() (uint32, error) { return 0, fmt.Errorf("state is not hashable") }
+
+// Get implements starlarklib.Mapping — supports `state[key]` and `key in state`.
+func (s *stateMapValue) Get(k starlarklib.Value) (v starlarklib.Value, found bool, err error) {
+	return s.d.Get(k)
+}
+
+// Iterate implements starlarklib.Iterable — supports `for k in state`.
+func (s *stateMapValue) Iterate() starlarklib.Iterator {
+	return s.d.Iterate()
+}
+
+// AttrNames implements starlarklib.HasAttrs.
+func (s *stateMapValue) AttrNames() []string {
+	return []string{"keys_with_prefix"}
+}
+
+// Attr implements starlarklib.HasAttrs — exposes `state.keys_with_prefix`.
+func (s *stateMapValue) Attr(name string) (starlarklib.Value, error) {
+	if name == "keys_with_prefix" {
+		return starlarklib.NewBuiltin("keys_with_prefix", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+			if len(args) != 1 || len(kwargs) != 0 {
+				return nil, errBuiltin("state.keys_with_prefix(prefix) takes exactly 1 positional argument")
+			}
+			prefix, ok := args[0].(starlarklib.String)
+			if !ok {
+				return nil, errBuiltin("state.keys_with_prefix: prefix must be a string, got " + args[0].Type())
+			}
+			p := string(prefix)
+			result := starlarklib.NewList(nil)
+			for _, k := range s.keys {
+				if strings.HasPrefix(k, p) {
+					_ = result.Append(starlarklib.String(k))
+				}
+			}
+			return result, nil
+		}), nil
+	}
+	// Delegate other attribute accesses (like .get, .keys, etc.) to the dict.
+	return s.d.Attr(name)
+}
+
+// vertexMapToStarlarkWithHydrated builds the `state` global for a script.
+// Returns a *stateMapValue wrapping the key→VertexDoc dict. The wrapper
+// exposes keys_with_prefix in addition to all standard dict operations.
+func vertexMapToStarlarkWithHydrated(m map[string]VertexDoc) *stateMapValue {
 	d := new(starlarklib.Dict)
+	keys := make([]string, 0, len(m))
 	for k, v := range m {
 		fields := starlarklib.StringDict{
 			"key":       starlarklib.String(v.Key),
@@ -344,8 +415,9 @@ func vertexMapToStarlark(m map[string]VertexDoc) *starlarklib.Dict {
 			fields["localName"] = starlarklib.String(v.LocalName)
 		}
 		_ = d.SetKey(starlarklib.String(k), starlarkstruct.FromStringDict(starlarkstruct.Default, fields))
+		keys = append(keys, k)
 	}
-	return d
+	return &stateMapValue{d: d, keys: keys}
 }
 
 func operationEnvelopeToStarlark(op *OperationEnvelope) *starlarkstruct.Struct {

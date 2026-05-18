@@ -176,7 +176,7 @@ func TestCapabilityLens_ContractConformance(t *testing.T) {
 
 	// --- wrap through the production envelope (Story 3.2a / Contract #6 §6.2) ---
 	wrapper := capabilityenv.NewWrapper("vtx.meta.test-lens",
-		func(k string) uint64 { return 42 })
+		func(k string) uint64 { return 42 }, nil)
 	envRow, envKeys, envErr := wrapper(row, keys, params)
 	require.NoError(t, envErr, "envelope wrapping must succeed")
 	require.NotNil(t, envRow)

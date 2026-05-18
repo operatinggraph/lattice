@@ -467,7 +467,261 @@ def execute(state, op):
     if ot == "TombstoneIdentity":
         fail("NotYetImplemented: Story 4.5: TombstoneIdentity")
     if ot == "ScanIdentityDuplicates":
-        fail("NotYetImplemented: Story 4.4: ScanIdentityDuplicates")
+        # -----------------------------------------------------------------------
+        # ScanIdentityDuplicates — Duplicate Identity Detection (FR3, Story 4.4)
+        # -----------------------------------------------------------------------
+        # Three match criteria (Phase 1):
+        #   1. exact-email  — both non-empty, lowercased, trimmed, equal.
+        #   2. exact-phone  — both non-empty, digits+'+' stripped, equal.
+        #   3. levenshtein-name — ratio(norm(a.name), norm(b.name)) >= threshold.
+        # Normalization: name=lowercase+trim, email=lowercase+trim,
+        #   phone=strip non-digit/non-'+'.
+        # Default threshold: 0.85 (operator-overridable via payload.levenshteinThreshold).
+        # Merged and tombstoned identities are excluded from the candidate pool.
+        #
+        # Output model: one canonical LINK per pair (symmetric; not two aspects).
+        # Link key: lnk.identity.<lowID>.duplicateOf.identity.<highID>
+        #   where lowID/highID are NanoIDs sorted lexicographically.
+        # Link class: "duplicateOf". Link data: {criteria, confidence,
+        #   scanRequestId, flaggedAt}.
+        #
+        # Idempotency: state.read(linkKey) — skip pair if non-tombstoned link
+        # exists. Hydrator pre-loads all lnk.identity.* so this is a cheap
+        # in-memory check (no round-trips). Per Decision #15 in brief, this
+        # comment block + response detail constitute the canonical algorithm spec.
+        # -----------------------------------------------------------------------
+
+        # --- Input: optional threshold override ---
+        threshold = 0.85
+        if hasattr(p, "levenshteinThreshold"):
+            t = p.levenshteinThreshold
+            if type(t) == type(0) or type(t) == type(0.0):
+                t = float(t)
+                if t < 0.0 or t > 1.0:
+                    fail("InvalidArgument: levenshteinThreshold: out of [0,1]")
+                threshold = t
+
+        # --- Enumerate identities loaded by hydrator scan-prefix ---
+        # state.keys_with_prefix returns ALL keys with the prefix, including
+        # aspect keys. Filter to 3-segment vertex keys only.
+        all_keys = state.keys_with_prefix("vtx.identity.")
+        identity_keys = []
+        for k in all_keys:
+            # 3-segment: vtx.identity.<id> — suffix after "vtx.identity." has no dot
+            suffix = k[len("vtx.identity."):]
+            if "." not in suffix:
+                identity_keys.append(k)
+
+        # --- Build normalized identity records (skip merged/tombstoned) ---
+        records = []
+        for ikey in identity_keys:
+            vtx = state[ikey] if ikey in state else None
+            if vtx == None or (hasattr(vtx, "isDeleted") and vtx.isDeleted):
+                continue
+
+            # Read pre-loaded aspects.
+            st_doc = state[ikey + ".state"] if (ikey + ".state") in state else None
+            current_state = None
+            if st_doc != None and st_doc.data != None and "value" in st_doc.data:
+                current_state = st_doc.data["value"]
+
+            # Skip merged identities entirely (Decision #7).
+            if current_state == "merged":
+                continue
+
+            name_doc = state[ikey + ".name"] if (ikey + ".name") in state else None
+            name_norm = ""
+            if name_doc != None and name_doc.data != None and "value" in name_doc.data:
+                raw = name_doc.data["value"]
+                if type(raw) == type(""):
+                    name_norm = raw.strip().lower()
+
+            email_doc = state[ikey + ".email"] if (ikey + ".email") in state else None
+            email_norm = ""
+            if email_doc != None and email_doc.data != None and "value" in email_doc.data:
+                raw = email_doc.data["value"]
+                if type(raw) == type(""):
+                    email_norm = raw.strip().lower()
+
+            phone_doc = state[ikey + ".phone"] if (ikey + ".phone") in state else None
+            phone_norm = ""
+            if phone_doc != None and phone_doc.data != None and "value" in phone_doc.data:
+                raw = phone_doc.data["value"]
+                if type(raw) == type(""):
+                    stripped = ""
+                    for ch in raw.elems():
+                        if ch >= "0" and ch <= "9":
+                            stripped += ch
+                        elif ch == "+":
+                            stripped += ch
+                    phone_norm = stripped
+
+            records.append({
+                "key": ikey,
+                "name_norm": name_norm,
+                "email_norm": email_norm,
+                "phone_norm": phone_norm,
+                "current_state": current_state,
+            })
+
+        # --- Pairwise comparison (i < j, O(N^2) acceptable at N<=500) ---
+        pairs = []  # list of {aKey, bKey, criteria, confidence}
+
+        n = len(records)
+        for i in range(n):
+            for j in range(i + 1, n):
+                a = records[i]
+                b = records[j]
+                criteria = []
+                confidence = 0.0
+
+                # Exact email match.
+                if a["email_norm"] != "" and b["email_norm"] != "" and a["email_norm"] == b["email_norm"]:
+                    criteria.append("exact-email")
+                    confidence = 1.0
+
+                # Exact phone match.
+                if a["phone_norm"] != "" and b["phone_norm"] != "" and a["phone_norm"] == b["phone_norm"]:
+                    if "exact-phone" not in criteria:
+                        criteria.append("exact-phone")
+                    confidence = 1.0
+
+                # Levenshtein name match.
+                if a["name_norm"] != "" and b["name_norm"] != "":
+                    ratio = strings.levenshtein_ratio(a["name_norm"], b["name_norm"])
+                    if ratio >= threshold:
+                        if "levenshtein-name" not in criteria:
+                            criteria.append("levenshtein-name")
+                        if ratio > confidence:
+                            confidence = ratio
+
+                if len(criteria) > 0:
+                    pairs.append({
+                        "aKey": a["key"],
+                        "bKey": b["key"],
+                        "criteria": criteria,
+                        "confidence": confidence,
+                    })
+
+        # --- Idempotency check + build mutations/events ---
+        mutations = []
+        events = []
+        skipped_existing = 0
+        skipped_flagged = 0
+        cnt_email = 0
+        cnt_phone = 0
+        cnt_lev = 0
+        scan_request_id = op.requestId
+        flagged_at = op.submittedAt
+        new_pairs = []
+
+        for pair in pairs:
+            a_key = pair["aKey"]
+            b_key = pair["bKey"]
+
+            # --- Canonical link key (symmetric — one link per pair) ---
+            # Extract NanoID suffix from vtx.identity.<NanoID>.
+            a_id = a_key[len("vtx.identity."):]
+            b_id = b_key[len("vtx.identity."):]
+            # Sort lexicographically to get a stable canonical key.
+            if a_id < b_id:
+                low_id = a_id
+                high_id = b_id
+            else:
+                low_id = b_id
+                high_id = a_id
+            link_key = "lnk.identity." + low_id + ".duplicateOf.identity." + high_id
+
+            # Idempotency: skip if non-tombstoned link already exists.
+            # Hydrator pre-loaded all lnk.identity.* envelopes — cheap lookup.
+            existing_link = state[link_key] if link_key in state else None
+            if existing_link != None and not (hasattr(existing_link, "isDeleted") and existing_link.isDeleted):
+                skipped_existing += 1
+                continue
+
+            new_pairs.append(pair)
+
+            # Count by criterion for breakdown.
+            for c in pair["criteria"]:
+                if c == "exact-email":
+                    cnt_email += 1
+                elif c == "exact-phone":
+                    cnt_phone += 1
+                elif c == "levenshtein-name":
+                    cnt_lev += 1
+
+            # --- Single link mutation per pair ---
+            mutations.append({"op": "create", "key": link_key,
+                "document": {"class": "duplicateOf", "isDeleted": False,
+                             "data": {
+                                 "criteria": pair["criteria"],
+                                 "confidence": pair["confidence"],
+                                 "scanRequestId": scan_request_id,
+                                 "flaggedAt": flagged_at,
+                             }}})
+
+            # --- State mutations: transition each member if not already flagged ---
+            a_state = None
+            b_state = None
+            for rec in records:
+                if rec["key"] == a_key:
+                    a_state = rec["current_state"]
+                elif rec["key"] == b_key:
+                    b_state = rec["current_state"]
+
+            if a_state != "flagged-for-review":
+                mutations.append({"op": "update", "key": a_key + ".state",
+                    "document": {"class": "state", "vertexKey": a_key,
+                                 "localName": "state", "isDeleted": False,
+                                 "data": {"value": "flagged-for-review"}}})
+            else:
+                skipped_flagged += 1
+
+            if b_state != "flagged-for-review":
+                mutations.append({"op": "update", "key": b_key + ".state",
+                    "document": {"class": "state", "vertexKey": b_key,
+                                 "localName": "state", "isDeleted": False,
+                                 "data": {"value": "flagged-for-review"}}})
+            else:
+                skipped_flagged += 1
+
+            # Event per flagged pair — includes linkKey per brief §4.
+            events.append({"class": "IdentityDuplicateCandidateFlagged", "data": {
+                "linkKey": link_key,
+                "aKey": a_key,
+                "bKey": b_key,
+                "criteria": pair["criteria"],
+                "confidence": pair["confidence"],
+            }})
+
+        # Build pairs summary for response (use new_pairs — non-skipped).
+        pairs_summary = []
+        for pair in new_pairs:
+            pairs_summary.append({
+                "aKey": pair["aKey"],
+                "bKey": pair["bKey"],
+                "criteria": pair["criteria"],
+                "confidence": pair["confidence"],
+            })
+
+        return {
+            "mutations": mutations,
+            "events": events,
+            "response": {
+                "totalScanned": len(records),
+                "candidatesFound": len(new_pairs),
+                "skippedExistingPairs": skipped_existing,
+                "skippedAlreadyFlagged": skipped_flagged,
+                "breakdown": {
+                    "exact-email": cnt_email,
+                    "exact-phone": cnt_phone,
+                    "levenshtein-name": cnt_lev,
+                },
+                "pairs": pairs_summary,
+                "levenshteinThreshold": threshold,
+                "scanRequestId": scan_request_id,
+            },
+        }
 
     fail("identity DDL: unknown operationType: " + ot)
 `

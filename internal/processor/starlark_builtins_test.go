@@ -232,3 +232,111 @@ func TestCryptoSha256NanoID_Deterministic(t *testing.T) {
 		}
 	}
 }
+
+// --- strings.levenshtein ---
+
+// TestStringsLevenshtein_KnownDistances verifies classical DP edit distances
+// against well-known test vectors. Story 4.4 builtin.
+func TestStringsLevenshtein_KnownDistances(t *testing.T) {
+	mod := stringsModule()
+	fn, err := mod.Attr("levenshtein")
+	if err != nil || fn == nil {
+		t.Fatalf("strings.levenshtein attr: %v", err)
+	}
+	thread := &starlarklib.Thread{Name: "test"}
+
+	call := func(a, b string) int {
+		t.Helper()
+		result, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String(a), starlarklib.String(b)}, nil)
+		if err != nil {
+			t.Fatalf("strings.levenshtein(%q, %q): %v", a, b, err)
+		}
+		got, ok := result.(starlarklib.Int)
+		if !ok {
+			t.Fatalf("strings.levenshtein returned %T, want Int", result)
+		}
+		i, _ := got.Int64()
+		return int(i)
+	}
+
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"", "", 0},
+		{"abc", "abc", 0},          // identical → 0
+		{"abc", "abx", 1},          // single substitution → 1
+		{"abc", "abcd", 1},         // single insertion → 1
+		{"abc", "ab", 1},           // single deletion → 1
+		{"kitten", "sitting", 3},   // classic example
+		{"saturday", "sunday", 3},  // classic example
+	}
+	for _, tc := range cases {
+		got := call(tc.a, tc.b)
+		if got != tc.want {
+			t.Errorf("levenshtein(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestStringsLevenshtein_WrongArity verifies arity rejection.
+func TestStringsLevenshtein_WrongArity(t *testing.T) {
+	mod := stringsModule()
+	fn, _ := mod.Attr("levenshtein")
+	thread := &starlarklib.Thread{Name: "test"}
+
+	// 0 args
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{}, nil); err == nil {
+		t.Error("levenshtein() with 0 args: expected error, got nil")
+	}
+	// 3 args
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String("a"), starlarklib.String("b"), starlarklib.String("c")}, nil); err == nil {
+		t.Error("levenshtein(a,b,c): expected error, got nil")
+	}
+}
+
+// --- strings.levenshtein_ratio ---
+
+// TestStringsLevenshteinRatio_Values verifies ratio computation for known inputs.
+func TestStringsLevenshteinRatio_Values(t *testing.T) {
+	mod := stringsModule()
+	fn, err := mod.Attr("levenshtein_ratio")
+	if err != nil || fn == nil {
+		t.Fatalf("strings.levenshtein_ratio attr: %v", err)
+	}
+	thread := &starlarklib.Thread{Name: "test"}
+
+	call := func(a, b string) float64 {
+		t.Helper()
+		result, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String(a), starlarklib.String(b)}, nil)
+		if err != nil {
+			t.Fatalf("strings.levenshtein_ratio(%q, %q): %v", a, b, err)
+		}
+		got, ok := result.(starlarklib.Float)
+		if !ok {
+			t.Fatalf("strings.levenshtein_ratio returned %T, want Float", result)
+		}
+		return float64(got)
+	}
+
+	// Both empty → 1.0.
+	if r := call("", ""); r != 1.0 {
+		t.Errorf("levenshtein_ratio('','') = %v, want 1.0", r)
+	}
+	// Identical non-empty → 1.0.
+	if r := call("smith", "smith"); r != 1.0 {
+		t.Errorf("levenshtein_ratio('smith','smith') = %v, want 1.0", r)
+	}
+	// One substitution in a 5-char string: ratio = 1 - 1/5 = 0.8.
+	if r := call("smith", "smyth"); r < 0.8 {
+		t.Errorf("levenshtein_ratio('smith','smyth') = %v, want >= 0.8", r)
+	}
+	// Completely different same-length strings: ratio should be << 1.
+	if r := call("abc", "xyz"); r > 0.5 {
+		t.Errorf("levenshtein_ratio('abc','xyz') = %v, expected < 0.5", r)
+	}
+	// Empty + non-empty → 0.0.
+	if r := call("", "hello"); r != 0.0 {
+		t.Errorf("levenshtein_ratio('','hello') = %v, want 0.0", r)
+	}
+}
