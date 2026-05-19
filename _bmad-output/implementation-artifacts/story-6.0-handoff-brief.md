@@ -317,3 +317,81 @@ Halt for:
 2. Closing summary as Deliverable #5
 
 **DO NOT commit. DO NOT push.** Winston commits + pushes after review.
+
+---
+
+## Deliverable #5 — Closing Summary
+
+**Session date:** 2026-05-19
+**Model:** Sonnet (claude-sonnet-4-6)
+**Token estimate:** ~32K (budget was 30K; within 20% overrun threshold; marked COMPLETE)
+
+### What shipped
+
+| File | Lines | Status |
+|------|-------|--------|
+| `docs/components/_index.md` | 38 | Created |
+| `docs/components/processor.md` | 195 | Created |
+| `docs/components/refractor.md` | 213 | Created |
+| `docs/components/substrate.md` | 190 | Created |
+| Token tracker Row 6.0 | — | Updated |
+
+All 5 deliverables from the brief's checklist are met.
+
+### Code files consulted for verification
+
+- `internal/processor/commit_path.go` — 10-step pipeline, `Deps`, `MakePipeline`, `HandleMessage` outcomes
+- `internal/processor/step3_auth.go` — `AuthMode`, `Decision`, `StubAuthorizer`, `CapabilityAuthorizer`, `SelectAuthorizerArgs`
+- `internal/processor/envelope.go` — `OperationEnvelope`, `Lane`, `ContextHint`, `ErrorCode`, `ParseEnvelope`
+- `internal/processor/reply.go` — `OperationReply`, `BuildAcceptedReply*`, `BuildRejectedReply`, `BuildDuplicateReply`
+- `internal/processor/starlark_runner.go` — sandbox globals (`state`, `op`, `ddl`, `nanoid`, `crypto`, `strings`), `StarlarkRunner.Run`, `classifyStarlarkError`
+- `internal/substrate/doc.go` — package godoc and design principles
+- `internal/substrate/nanoid.go` — `Alphabet` (58 chars), `NanoIDLength`, `NewNanoID`, `IsValidNanoID`
+- `internal/substrate/keys.go` — `VertexKey`, `AspectKey`, `LinkKey`, `ClassifyKey`, `Parse*Key`, segment validators
+- `internal/substrate/kv.go` — `KVGet`, `KVPut`, `KVCreate`, `KVUpdate`, `KVListKeys`, `KVPutWithTTL`, `KVDelete`
+- `internal/substrate/batch.go` — `AtomicBatch`, `PublishBatch`, `BatchOp`, `PublishOp`, cross-bucket constraint
+- `internal/substrate/conn.go` — `Connect`, `Wrap`, `NATS()`, `JetStream()`, lazy bucket cache
+- `internal/substrate/errors.go` — `ErrKeyNotFound`, `ErrRevisionConflict`, `ErrAtomicBatchRejected`
+- `cmd/refractor/main.go` (lines 1–220) — `full.New()` at line 191, `adjacencyKVBucket = "refractor-adjacency"`, `startPipeline` engine routing
+- `internal/refractor/ruleengine/full/full.go` — `Engine`, `Parse`, ANTLR4 import, grammar walk
+- `internal/refractor/lens/corekv_source.go` — `CoreKVSource`, `LensSpec`, `translateSpec`, `dispatchSpec`, pending-spec buffer
+- `internal/refractor/capabilityenv/envelope.go` — `NewWrapper`, `capabilityKey`, `projectedFromRevisions`, `pendingReview` field, `NewRoleIndexWrapper`
+
+### Factual spot-checks performed
+
+| Claim | Verification | Result |
+|-------|-------------|--------|
+| Alphabet is 58 chars | `python3 -c "print(len(...))"` against `nanoid.go` constant | PASS |
+| `DefaultScriptWallBudget = 250ms` | `grep` in `starlark_runner.go` | PASS |
+| Full engine uses `antlr4-go/antlr/v4` | `grep` in `ruleengine/full/full.go` | PASS |
+| Control plane on `materializer.control` | `grep` in `internal/refractor/subjects/subjects.go` | PASS |
+| Adjacency bucket is `refractor-adjacency` | `grep` in `cmd/refractor/main.go` | PASS |
+
+### Deviations from the brief's spec
+
+**None material.** Line counts are slightly below the brief's targets due to
+dense table formatting (tables compress line count vs. prose for equivalent
+content). All required sections and headings are present. The brief's
+prescribed section headings are used verbatim.
+
+Minor additions beyond the spec (additive, not deviating):
+- Processor page: added `KVCreate` and `KVUpdate` to the substrate section (these are exported by substrate and referenced by the Processor's committer path).
+- Substrate page: included `KVCreate` and `KVUpdate` in the exported surface table (they are in `kv.go` and are part of the exported API).
+- Refractor page: added `NewRoleIndexWrapper` context to the capabilityenv section (it is in the same file as `NewWrapper` and is relevant to the Contract #6 §6.1 secondary key shape).
+
+### Open questions / CAR entries raised
+
+None. No `CONTRACT-AMENDMENT-REQUEST.md` entries raised. All factual checks
+passed without material discrepancy between the brief's spec and the code.
+
+### Phase 1 carries documented in the pages
+
+- `materializer.*` subject tokens (Story 2.4a rename — noted in `refractor.md`)
+- `pendingReview` field eviction (Story 4.6 — noted in `refractor.md`)
+- `strings.levenshtein` in Starlark sandbox deprecated (Story 4.6 — noted in `processor.md`)
+- `ScanPrefixes` deprecation (Story 4.6 — noted in `processor.md`)
+- Levenshtein UDFs as future-extension (Story 4.6 — noted in `refractor.md`)
+- `AdjacencyForNode` as planned substrate addition post-Story 4.7 (noted in `substrate.md`)
+- `SubscribeKVChanges` as planned substrate addition for Story 2.4b (noted in `substrate.md`)
+- Real NATS auth (Phase 2 — noted in `processor.md` and `substrate.md`)
+- Control plane NATS Services migration (Story 2.4b — noted in `refractor.md`)

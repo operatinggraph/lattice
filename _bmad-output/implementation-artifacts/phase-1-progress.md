@@ -6,7 +6,7 @@ This file tracks **what's shipped, what's next, what's still open**. Operating r
 
 ## Current State
 
-**Stories shipped: 28** (recomputed from per-row tracker; original plan was 31 stories, splits added 4 — 2.1+2.1b, 3.1→3.1a+3.1b-i+3.1b-ii, 3.2→3.2a+3.2b — and Story 2.3 was added between 2.2 and 3.1).
+**Stories shipped: 29** (recomputed from per-row tracker; original plan was 31 stories, splits added 4 — 2.1+2.1b, 3.1→3.1a+3.1b-i+3.1b-ii, 3.2→3.2a+3.2b — and Story 2.3 was added between 2.2 and 3.1).
 
 **Latest commit on main:** `b314677` (Story 4.5 — Staff-Approved Identity Merge / FR4).
 
@@ -47,18 +47,19 @@ Quick reference; full details in token-usage-tracker.md.
 | 4.2 | Staff Creates Unclaimed Identity (FR1) | 7462fc7 | crypto.sha256 + sha256NanoID + duplicate index vertices; 65K Sonnet UNDERRUN |
 | 4.3 | Two-Phase Identity Claim (FR2, FR5) | 677747c | crypto.constant_time_equal + RecordClaimAttempt + generic ClaimKeyInvalid + credentialindex; two-session OVERRUN |
 | 4.4 | Duplicate Identity Detection (FR3) | e89c4f7 | strings.levenshtein + ScanPrefixes hydrator + canonical duplicateOf link + capabilityenv pendingReview; two-session OVERRUN |
-| 4.5 | Staff-Approved Identity Merge (FR4) | pending | ApproveIdentityMerge (review) + MergeIdentity (link rekey + state→merged + mergedInto); lnk. global-scan hydrator; 12 integration tests across capability+stub auth; 215K single-session OVERRUN; Epic 4 CLOSED |
+| 4.5 | Staff-Approved Identity Merge (FR4) | b314677 | ApproveIdentityMerge (review) + MergeIdentity (link rekey + state→merged + mergedInto); lnk. global-scan hydrator; 12 integration tests across capability+stub auth; 215K single-session OVERRUN; Epic 4 CLOSED |
+| 6.0 | Component Reference Pages | pending | docs/components/{_index,processor,refractor,substrate}.md (636 lines total); closes lattice-architecture.md:23 gap; 97K OVERRUN (3× budget; docs-only) |
 
 ## Upcoming Sequence
 
 **Epic 4 — Identity & Member Lifecycle: CLOSED (5/5)** — realignment pending in 4.6 + 4.7.
 
 **Course-correction stories (2026-05-19; ahead of Epic 5):**
-- **6.0** Component reference pages — `docs/components/{processor,refractor,substrate}.md` + `_index.md` (docs-only, ~30K) — handoff brief pending
-- **4.6** Capability Package format + installer + identity-hygiene package (Opus, ~180K) — handoff brief pending
-- **4.7** Kernel minimization + rbac-domain + identity-domain packages (Opus, ~150K) — handoff brief pending
-- **2.4a** Refractor token eviction — mechanical rename sweep (Sonnet, ~90K) — handoff brief pending
-- **2.4b** Refractor Lattice-native source plane — durable JetStream consumer for lens defs + NATS Services control plane (Opus, ~100K) — handoff brief pending
+- ✅ **6.0** Component reference pages — `docs/components/{processor,refractor,substrate}.md` + `_index.md` — **SHIPPED** (97K Sonnet; 3× docs-budget OVERRUN)
+- **4.6** Capability Package format + installer + identity-hygiene package (Opus, ~180K) — brief ready; next
+- **4.7** Kernel minimization + rbac-domain + identity-domain packages (Opus, ~150K) — brief ready
+- **2.4a** Refractor token eviction — mechanical rename sweep (Sonnet, ~90K) — brief ready
+- **2.4b** Refractor Lattice-native source plane — durable JetStream consumer for lens defs + NATS Services control plane (Opus, ~100K) — brief ready
 
 **Epic 5 — DDL Self-Description & AI Agent Cold-Start:**
 - **5.1** DDL Self-Description Aspects FR19 (Opus, ~115K)

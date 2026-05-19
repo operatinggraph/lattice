@@ -53,6 +53,7 @@ updateCadence: Per implementation session at close
 | 5.1 | DDL Self-Description Aspects (FR19 substrate) | Opus | — | 115K | — | — | PENDING | — | |
 | 5.2 | Cold-Start AI Agent Traversal & Operation Submission | Sonnet | — | 115K | — | — | PENDING | — | FR19 north-star integration test. |
 | 5.3 | Compensating Operation & DDL Rollback (Gate 4) | Opus | — | 130K | — | — | PENDING | — | Phase 1 Gate 4 closure. |
+| 6.0 | Component Reference Pages (Processor, Refractor, Substrate) | Sonnet | Sonnet (claude-sonnet-4-6) | 30K | ~97K | +67K | OVERRUN | 2026-05-19 | Outer telemetry from task notification (total_tokens=97,191). Sub-agent self-estimate was 32K (67% under-reporting — wider than the typical Sonnet 20-30% gap; this story involved heavy code-reading to verify factual claims, which inflated reads beyond budget assumption). Docs-only session. 4 files created: docs/components/_index.md (38 lines), processor.md (195 lines), refractor.md (213 lines), substrate.md (190 lines). All 5 deliverables met. Factual spot-checks passed for all four pages: Alphabet=58 chars, DefaultScriptWallBudget=250ms, antlr4-go confirmed in full/full.go, materializer.control subject confirmed in subjects/subjects.go, adjacencyKVBucket="refractor-adjacency" confirmed in cmd/refractor/main.go. Phase 1 carry documented: materializer token (Story 2.4a), pendingReview field eviction (Story 4.6), levenshtein UDFs as future-extension (Story 4.6), AdjacencyForNode as planned substrate addition (post-Story 4.7). No drift detected at review: deprecation notes correctly tied to specific stories; no `grantsPermission` references; vtx.meta.<NanoID> shape used correctly; no planning-artifact edits. |
 | 6.1 | Lattice CLI Tool (FR45) | Sonnet | — | 120K | — | — | PENDING | — | |
 | 6.2 | Health KV Schema & Completeness (FR46, FR52) | Sonnet | — | 90K | — | — | PENDING | — | |
 | 6.3 | Deployment Isolation Specification (FR48) | Sonnet | — | 70K | — | — | PENDING | — | |
@@ -63,9 +64,9 @@ updateCadence: Per implementation session at close
 | Tier | Budget (K tokens) | Actual (K tokens) | Δ | Stories complete |
 |---|---|---|---|---|
 | Opus | 1,890 | 2,611 | +721 | 15 shipped (planned 13; splits added 2) |
-| Sonnet | 1,627 | 1,540 | -87 | 13 shipped (planned 19) |
+| Sonnet | 1,627 | 1,637 | +10 | 14 shipped (planned 19) |
 | Haiku | 0 | 0 | 0 | 0 / 0 |
-| **Phase 1 Total** | **3,517** | **4,151** | **+634** | **28 shipped / 32+ planned** (Story 4.5 complete; Epic 4 closed; +5 new stories from 2026-05-19 course correction not yet planned-row) |
+| **Phase 1 Total** | **3,517** | **4,248** | **+731** | **29 shipped / 32+ planned** (Story 6.0 complete — first of 5 course-correction stories; 4 remain: 4.6, 4.7, 2.4a, 2.4b before Epic 5) |
 
 > **Source-of-truth rule:** these rolling totals are RE-COMPUTED from the per-row Actual column at every Epic close, NOT spot-incremented. Use `awk -F'|' '/^\| [0-9]/ {gsub(/[ ~K]/,"",$7); if ($7 ~ /^[0-9]+$/) sum += $7} END {print sum}' token-usage-tracker.md` to verify. The phase-1-progress.md totals must agree with this block; if they drift, this block wins.
 >
