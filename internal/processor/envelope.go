@@ -28,18 +28,14 @@ func (l Lane) valid() bool {
 
 // ContextHint mirrors Contract #2 §2.5 — declared read set.
 //
-// ScanPrefixes (Story 4.4): when non-empty, the hydrator performs a prefix scan
-// over Core KV for each prefix and bulk-loads all matching entries into the
-// script's state global. Phase 1 only supports "vtx.identity." and
-// "lnk.identity." as prefixes; other prefixes return
-// HydrationError("scan-prefix-not-supported"). For "vtx.identity." the hydrator
-// also loads 4 hard-coded aspects (.name/.email/.phone/.state) per vertex.
-// For "lnk.identity." 6-segment link keys are loaded as-is.
-// Soft cap: > 1000 keys per prefix returns HydrationError("scan-too-large").
-// NFR-SC1: operator cells target ≤500 identities.
+// Graph topology that a write-path op needs is delivered as command
+// parameters: a Lens projects the topology into its own output bucket,
+// the *client* reads the lens, and the discovered keys travel back
+// through the operation envelope as command parameters declared in
+// `Reads`. The script validates each declared key against Core KV
+// (envelope class, endpoint touch, not tombstoned) before acting on it.
 type ContextHint struct {
-	Reads        []string `json:"reads,omitempty"`
-	ScanPrefixes []string `json:"scanPrefixes,omitempty"`
+	Reads []string `json:"reads,omitempty"`
 }
 
 // AuthContext mirrors Contract #2 §2.8 — auth path declaration.
@@ -153,10 +149,35 @@ type OperationReply struct {
 	// Story 1.7+. Useful for client RYOW polling.
 	Revisions map[string]uint64 `json:"revisions,omitempty"`
 	// Detail: optional structured data the script surfaced via its
-	// "response" return key (Story 4.2 extension). May contain
-	// sensitive tokens (e.g. plaintext claim keys). MUST NOT be logged
-	// by any middleware or interceptor (NFR-S6/S7 compliance).
-	// Only present on accepted replies when the script populated it.
+	// "response" return key. May contain sensitive tokens (e.g.
+	// plaintext claim keys). MUST NOT be logged by any middleware or
+	// interceptor (NFR-S6/S7 compliance). Only present on accepted
+	// replies when the script populated it.
+	//
+	// Convention-enforced semantics:
+	//
+	//   ALLOWED  (commit-trace shape):
+	//     - Identifiers that already exist in the commit (linkKey,
+	//       primary/secondary keys, requestId echoes).
+	//     - Counts and ratios computed from the commit batch
+	//       (mutationCount, linksMigrated, linkCollisionsMerged,
+	//       eventCount, etc.).
+	//     - One-time-use tokens delivered *only* in the reply
+	//       (plaintext claimKey on CreateUnclaimedIdentity is the
+	//       canonical exception — it is created server-side, has no
+	//       Core-KV plaintext counterpart, and the reply is the
+	//       single delivery channel).
+	//
+	//   FORBIDDEN (business data leak):
+	//     - Identity .name / .email / .phone aspect values.
+	//     - mergedInto target keys when the caller did not author the
+	//       merge (NFR-S6 anti-enumeration).
+	//     - Any aspect value the actor would otherwise need a
+	//       Capability-Lens-authorized read to obtain.
+	//
+	// Reviewers (Winston + brief authors) maintain compliance; the
+	// processor does not enforce in code. New op authors: cite this
+	// block in your script's Detail-building section.
 	Detail map[string]any `json:"detail,omitempty"`
 }
 
@@ -199,4 +220,3 @@ func ParseEnvelope(data []byte) (*OperationEnvelope, error) {
 	}
 	return &env, nil
 }
-

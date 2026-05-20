@@ -1,12 +1,4 @@
-// Unit tests for the capabilityenv wrapper (Story 4.4 — pendingReview injection).
-//
-// Tests:
-//  1. TestWrapper_PendingReview_FlaggedForReview  — stateReader returns "flagged-for-review"
-//     → envelope must contain pendingReview: true.
-//  2. TestWrapper_PendingReview_Absent_WhenUnclaimed — stateReader returns "unclaimed"
-//     → envelope must NOT contain a pendingReview key.
-//  3. TestWrapper_PendingReview_NilStateReader — stateReader is nil
-//     → envelope must NOT contain pendingReview (backward-compatible path).
+// Unit tests for the capabilityenv wrapper.
 package capabilityenv
 
 import (
@@ -33,70 +25,35 @@ func makeParams() map[string]any {
 // Valid 20-char NanoID-alphabet keys used in tests.
 // Alphabet: ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789
 const (
-	testFlaggedActorID  = "ABCDEFGHJKLMNPQRSTUa" // 20 valid chars
-	testUnclaimedActorID = "ABCDEFGHJKLMNPQRSTUb"
-	testNilReaderActorID = "ABCDEFGHJKLMNPQRSTUc"
-	testRoleActorID      = "ABCDEFGHJKLMNPQRSTUd"
+	testIdentityActorID = "ABCDEFGHJKLMNPQRSTUa"
+	testRoleActorID     = "ABCDEFGHJKLMNPQRSTUd"
 )
 
-// TestWrapper_PendingReview_FlaggedForReview: when stateReader returns
-// "flagged-for-review", the envelope must carry pendingReview: true.
-func TestWrapper_PendingReview_FlaggedForReview(t *testing.T) {
-	actorKey := "vtx.identity." + testFlaggedActorID
+// TestWrapper_BuildsEnvelopeForIdentityActor: happy path — the wrapper
+// produces a Contract #6 §6.2 envelope with the expected fields populated
+// from the row + lens-def key.
+func TestWrapper_BuildsEnvelopeForIdentityActor(t *testing.T) {
+	actorKey := "vtx.identity." + testIdentityActorID
 
-	stateReader := func(k string) string {
-		if k == actorKey {
-			return "flagged-for-review"
-		}
-		return ""
-	}
-
-	fn := NewWrapper("vtx.meta.test-lens", func(string) uint64 { return 0 }, stateReader)
-	env, _, err := fn(makeRow(actorKey), map[string]any{}, makeParams())
+	fn := NewWrapper("vtx.meta.test-lens", func(string) uint64 { return 0 })
+	env, keys, err := fn(makeRow(actorKey), map[string]any{}, makeParams())
 	if err != nil {
 		t.Fatalf("wrapper returned error: %v", err)
 	}
 	if env == nil {
 		t.Fatal("wrapper returned nil envelope")
 	}
-	pending, hasPending := env["pendingReview"]
-	if !hasPending {
-		t.Fatal("envelope missing pendingReview field for flagged-for-review identity")
+	if got, want := env["actor"], actorKey; got != want {
+		t.Errorf("actor = %v, want %v", got, want)
 	}
-	if pending != true {
-		t.Fatalf("pendingReview = %v, want true", pending)
+	if got, want := env["version"], Version; got != want {
+		t.Errorf("version = %v, want %v", got, want)
 	}
-}
-
-// TestWrapper_PendingReview_Absent_WhenUnclaimed: when stateReader returns
-// "unclaimed", pendingReview must be absent (not false, not zero — absent).
-func TestWrapper_PendingReview_Absent_WhenUnclaimed(t *testing.T) {
-	actorKey := "vtx.identity." + testUnclaimedActorID
-
-	stateReader := func(k string) string { return "unclaimed" }
-
-	fn := NewWrapper("vtx.meta.test-lens", func(string) uint64 { return 0 }, stateReader)
-	env, _, err := fn(makeRow(actorKey), map[string]any{}, makeParams())
-	if err != nil {
-		t.Fatalf("wrapper returned error: %v", err)
+	if _, has := env["pendingReview"]; has {
+		t.Error("envelope must NOT carry pendingReview after Story 4.6 walk-back")
 	}
-	if _, hasPending := env["pendingReview"]; hasPending {
-		t.Fatalf("pendingReview must be absent for unclaimed identity, got %v", env["pendingReview"])
-	}
-}
-
-// TestWrapper_PendingReview_NilStateReader: when stateReader is nil (pre-4.4
-// call sites), pendingReview must be absent — backward compatibility.
-func TestWrapper_PendingReview_NilStateReader(t *testing.T) {
-	actorKey := "vtx.identity." + testNilReaderActorID
-
-	fn := NewWrapper("vtx.meta.test-lens", func(string) uint64 { return 0 }, nil)
-	env, _, err := fn(makeRow(actorKey), map[string]any{}, makeParams())
-	if err != nil {
-		t.Fatalf("wrapper returned error: %v", err)
-	}
-	if _, hasPending := env["pendingReview"]; hasPending {
-		t.Fatalf("pendingReview must be absent when stateReader is nil, got %v", env["pendingReview"])
+	if keys["key"] == nil {
+		t.Error("keys[\"key\"] is unset")
 	}
 }
 
@@ -105,7 +62,7 @@ func TestWrapper_PendingReview_NilStateReader(t *testing.T) {
 func TestWrapper_SkipsNonIdentityActorKey(t *testing.T) {
 	actorKey := "vtx.role." + testRoleActorID
 
-	fn := NewWrapper("vtx.meta.test-lens", func(string) uint64 { return 0 }, nil)
+	fn := NewWrapper("vtx.meta.test-lens", func(string) uint64 { return 0 })
 	row := map[string]any{
 		"actorKey":            actorKey,
 		"platformPermissions": []any{},

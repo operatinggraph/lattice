@@ -6,11 +6,11 @@
 // 10-step Processor pipeline.
 //
 // Tests:
-//   1. TestIdentity_StateMachine_AllowedTransitions  — all 5 legal hops.
-//   2. TestIdentity_StateMachine_RejectsDisallowed   — table-driven illegal hops.
-//   3. TestIdentity_MergedGuard_RejectsMutation      — merged identity rejects.
-//   4. TestIdentity_FR7_LeaseTombstoneDoesNotCascade — substrate isolation.
-//   5. TestIdentity_RolePermissionGrantsProjected    — Capability Lens audit.
+//  1. TestIdentity_StateMachine_AllowedTransitions  — all 5 legal hops.
+//  2. TestIdentity_StateMachine_RejectsDisallowed   — table-driven illegal hops.
+//  3. TestIdentity_MergedGuard_RejectsMutation      — merged identity rejects.
+//  4. TestIdentity_FR7_LeaseTombstoneDoesNotCascade — substrate isolation.
+//  5. TestIdentity_RolePermissionGrantsProjected    — Capability Lens audit.
 //
 // Tests run in capability-auth mode against an embedded NATS, with the
 // identity DDL seeded via the bootstrap shadow-key form (cache-friendly).
@@ -53,12 +53,13 @@ const (
 // identityOperatorCapDoc seeds an operator-equivalent capability doc
 // granting all 5 identity-domain operationTypes plus UpdateIdentityState.
 func identityOperatorCapDoc() *CapabilityDoc {
+	// Story 4.6 walk-back: FlagIdentityForReview / ApproveIdentityMerge /
+	// ScanIdentityDuplicates removed from the identity DDL. Their tests
+	// were deleted; the operator cap doc here only retains the ops the
+	// trimmed DDL still recognises.
 	perms := []PlatformPermission{
 		{OperationType: "UpdateIdentityState", Scope: "any"},
 		{OperationType: "CreateUnclaimedIdentity", Scope: "any"},
-		{OperationType: "FlagIdentityForReview", Scope: "any"},
-		{OperationType: "ApproveIdentityMerge", Scope: "any"},
-		{OperationType: "ScanIdentityDuplicates", Scope: "any"},
 	}
 	now := time.Now().UTC()
 	return &CapabilityDoc{
@@ -349,10 +350,6 @@ func TestIdentity_StateMachine_AllowedTransitions(t *testing.T) {
 		reqLabel   string
 	}{
 		{"unclaimed-to-claimed", "unclaimed", "claimed", "JdAU1cHJKLMNPQRSTUVW", "AllU2c"},
-		{"unclaimed-to-flagged", "unclaimed", "flagged-for-review", "JdAU2fHJKLMNPQRSTUVW", "AllU2f"},
-		{"claimed-to-flagged", "claimed", "flagged-for-review", "JdAC2fHJKLMNPQRSTUVW", "AllC2f"},
-		{"flagged-to-claimed", "flagged-for-review", "claimed", "JdAF2cHJKLMNPQRSTUVW", "AllF2c"},
-		{"flagged-to-merged", "flagged-for-review", "merged", "JdAF2mHJKLMNPQRSTUVW", "AllF2m"},
 	}
 
 	for _, tc := range cases {
@@ -653,12 +650,8 @@ func TestIdentity_RolePermissionGrantsProjected(t *testing.T) {
 		t.Fatalf("unmarshal cap doc: %v", err)
 	}
 
-	// Operator-granted identity ops per Story 4.1 AC matrix.
 	expectedOps := []string{
 		"CreateUnclaimedIdentity",
-		"FlagIdentityForReview",
-		"ApproveIdentityMerge",
-		"ScanIdentityDuplicates",
 	}
 	permMap := map[string]string{}
 	for _, p := range doc.PlatformPermissions {

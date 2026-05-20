@@ -1,0 +1,21 @@
+name: identity-hygiene
+version: 0.1.0
+description: |
+  Duplicate-identity detection (duplicateCandidates Lens, enriched with
+  per-secondary incident-edge enumeration) + operator-approved merge
+  (MergeIdentity op).
+depends:
+  - identity-domain   # in-bootstrap identity DDL; Phase 1 warns-and-proceeds
+declares:
+  ddls:
+    - canonicalName: identityHygiene
+      class: meta.ddl.vertexType
+  lenses:
+    - canonicalName: duplicateCandidates
+      adapter: nats-kv
+      bucket: duplicate-candidates
+      engine: full
+  permissions:
+    - operationType: MergeIdentity
+      scope: any
+      grantsTo: [operator]

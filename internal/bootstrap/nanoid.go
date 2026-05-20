@@ -545,27 +545,30 @@ func PrimordialVertexKeys() []string {
 	return keys
 }
 
-// IdentityPermissionKeys returns the 5 per-op permission vertex keys
-// for the identity domain (Story 4.1).
+// IdentityPermissionKeys returns the per-op permission vertex keys
+// for the identity domain.
+//
+// Story 4.6 walk-back: trimmed from 5 to 2. The deleted permission
+// vertex IDs (Flag/Approve/Scan) remain defined as compile-time
+// constants below so existing tests that name them still compile, but
+// nothing seeds them into Core KV.
 func IdentityPermissionKeys() []string {
 	return []string{
 		PermCreateUnclaimedIdentityKey,
 		PermClaimIdentityKey,
-		PermFlagIdentityForReviewKey,
-		PermApproveIdentityMergeKey,
-		PermScanIdentityDuplicatesKey,
 	}
 }
 
-// IdentityGrantLinkKeys returns the 10 grantsPermission link keys for
-// the identity domain (Story 4.1).
+// IdentityGrantLinkKeys returns the grantsPermission link keys for
+// the identity domain.
+//
+// Story 4.6 walk-back: trimmed from 10 to 4. MergeIdentity's grant
+// link is seeded by the identity-hygiene Capability Package's install
+// path, not by primordial bootstrap.
 //
 // Grant matrix:
 //   - CreateUnclaimedIdentity → frontOfHouse, backOfHouse, operator (3)
 //   - ClaimIdentity           → consumer (1)
-//   - FlagIdentityForReview   → frontOfHouse, backOfHouse, operator (3)
-//   - ApproveIdentityMerge    → operator (1)
-//   - ScanIdentityDuplicates  → backOfHouse, operator (2)
 //
 // Link key: lnk.permission.<permID>.grantsPermission.role.<roleID>
 // "permission" < "role" alphabetically → permission is younger vertex.
@@ -580,15 +583,6 @@ func IdentityGrantLinkKeys() []string {
 		mkLink(PermCreateUnclaimedIdentityID, RoleOperatorID),
 		// ClaimIdentity → consumer.
 		mkLink(PermClaimIdentityID, RoleConsumerID),
-		// FlagIdentityForReview → frontOfHouse, backOfHouse, operator.
-		mkLink(PermFlagIdentityForReviewID, RoleFrontOfHouseID),
-		mkLink(PermFlagIdentityForReviewID, RoleBackOfHouseID),
-		mkLink(PermFlagIdentityForReviewID, RoleOperatorID),
-		// ApproveIdentityMerge → operator.
-		mkLink(PermApproveIdentityMergeID, RoleOperatorID),
-		// ScanIdentityDuplicates → backOfHouse, operator.
-		mkLink(PermScanIdentityDuplicatesID, RoleBackOfHouseID),
-		mkLink(PermScanIdentityDuplicatesID, RoleOperatorID),
 	}
 }
 

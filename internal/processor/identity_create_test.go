@@ -473,10 +473,12 @@ func TestCreateUnclaimed_NormalizesEmailCase(t *testing.T) {
 	}
 }
 
-// TestCreateUnclaimed_DuplicateEmail_FlagsForReview: pre-seeds an index
-// vertex for x@y.com; second create with same email → state=flagged-for-review,
-// IdentityFlaggedForReview event recorded.
-func TestCreateUnclaimed_DuplicateEmail_FlagsForReview(t *testing.T) {
+// TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed: Story 4.6 walk-back —
+// the flagged-for-review state has been retired. Duplicate detection is now
+// lens-projected (identity-hygiene package's duplicateCandidates Lens), so a
+// duplicate create simply records duplicate=true in the IdentityCreated event
+// and leaves state=unclaimed. No IdentityFlaggedForReview event is emitted.
+func TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed(t *testing.T) {
 	ctx, conn := setupCreateTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-dup-email")
 
@@ -518,33 +520,31 @@ func TestCreateUnclaimed_DuplicateEmail_FlagsForReview(t *testing.T) {
 	publishCreateOp(t, conn, env)
 	driveOne(t, ctx, cp, cons, OutcomeAccepted)
 
-	// State aspect must be flagged-for-review.
+	// State aspect must remain unclaimed (Story 4.6 walk-back).
 	stateData := readAspectData(t, ctx, conn, identityKey+".state")
-	if got, _ := stateData["value"].(string); got != "flagged-for-review" {
-		t.Fatalf("state = %q, want flagged-for-review", got)
+	if got, _ := stateData["value"].(string); got != "unclaimed" {
+		t.Fatalf("state = %q, want unclaimed (Story 4.6: no auto-flagging)", got)
 	}
 
-	// Tracker must record both IdentityCreated and IdentityFlaggedForReview.
+	// Tracker must record IdentityCreated; IdentityFlaggedForReview is no
+	// longer emitted.
 	te, err := conn.KVGet(ctx, iciTestBucket, TrackerKey(reqID))
 	if err != nil {
 		t.Fatalf("tracker not found: %v", err)
 	}
 	tr, _ := ParseTracker(te.Value)
 	ecs, _ := tr.Data["eventClasses"].([]interface{})
-	createdFound, flaggedFound := false, false
+	createdFound := false
 	for _, ec := range ecs {
 		if ec == "IdentityCreated" {
 			createdFound = true
 		}
 		if ec == "IdentityFlaggedForReview" {
-			flaggedFound = true
+			t.Errorf("Story 4.6: IdentityFlaggedForReview must not be emitted; got eventClasses=%v", ecs)
 		}
 	}
 	if !createdFound {
 		t.Fatalf("IdentityCreated not in tracker eventClasses: %v", ecs)
-	}
-	if !flaggedFound {
-		t.Fatalf("IdentityFlaggedForReview not in tracker eventClasses: %v", ecs)
 	}
 }
 

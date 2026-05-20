@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -255,27 +254,9 @@ func main() {
 		switch r.CanonicalName {
 		case "capability":
 			lensDefKey := "vtx.meta." + r.ID
-			// Story 4.4 — stateReader reads the identity's .state aspect from
-			// Core KV to populate pendingReview: true in the cap envelope when
-			// the identity is flagged-for-review.
-			stateReader := func(actorKey string) string {
-				stateKey := actorKey + ".state"
-				entry, err := coreKV.Get(context.Background(), stateKey)
-				if err != nil || entry == nil {
-					return ""
-				}
-				var doc struct {
-					Data map[string]any `json:"data"`
-				}
-				if err := json.Unmarshal(entry.Value(), &doc); err != nil {
-					return ""
-				}
-				if s, ok := doc.Data["value"].(string); ok {
-					return s
-				}
-				return ""
-			}
-			p.SetEnvelopeFn(capabilityenv.NewWrapper(lensDefKey, projectionRevision, stateReader))
+			// Story 4.6 walk-back: stateReader / pendingReview removed.
+			// See capabilityenv.NewWrapper docstring.
+			p.SetEnvelopeFn(capabilityenv.NewWrapper(lensDefKey, projectionRevision))
 			// Story 3.2b §3 — cross-vertex fan-out enumerator. Non-identity
 			// CDC events are expanded into the set of affected actors via
 			// adjacency BFS (depth + actor-set caps per Decision #3).

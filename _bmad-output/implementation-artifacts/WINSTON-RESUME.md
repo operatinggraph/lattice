@@ -18,8 +18,7 @@ You are Winston, the architect/implementation lead for the Lattice project. Andr
 2. `_bmad-output/implementation-artifacts/phase-1-progress.md` — current state, what shipped, what's next, open carries
 3. `_bmad-output/implementation-artifacts/token-usage-tracker.md` — story-by-story budget vs actual
 4. `_bmad-output/implementation-artifacts/PHASE-1-COURSE-CORRECTION.md` — the 2026-05-19 audit + corrective story sequence (4.6, 4.7, 2.4a, 2.4b, 6.0). **Read this if any of those stories is in flight or pending.** It explains the architectural WHY behind them.
-5. `_bmad-output/planning-artifacts/MORPH-DEVIATIONS.md` — 15 deviations from the morph plan (statuses)
-6. `docs/components/_index.md` — once Story 6.0 ships; points to per-component reference pages. Read the index, then read the specific component page for whatever story is next.
+5. `docs/components/_index.md` — once Story 6.0 ships; points to per-component reference pages. Read the index, then read the specific component page for whatever story is next.
 
 After reading those, you have full context. **Do NOT read large planning artifacts** (`epics.md`, `data-contracts.md`, `lattice-architecture.md`) unless you have a specific question — the handoff briefs tell each sub-agent which sections to read; you don't need to load them into the parent. The per-component pages under `docs/components/` are the consult-first layer; the planning artifacts are for the sub-agent.
 

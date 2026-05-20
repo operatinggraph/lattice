@@ -41,12 +41,11 @@ var DefaultLanes = []string{"default"}
 // vertices referenced by the rule's traversal; for 3.2a we record only
 // the anchor + lens-def revisions per Decision #7.
 //
-// stateReader (Story 4.4, optional — may be nil): returns the current
-// value of the identity's `state` aspect (e.g. "flagged-for-review").
-// When it returns "flagged-for-review", the envelope receives
-// `pendingReview: true` per Contract #6 §6.14. Absence == false —
-// the field is omitted from the envelope when not flagged.
-func NewWrapper(lensDefKey string, projectionRevision func(actorKey string) uint64, stateReader func(actorKey string) string) pipeline.EnvelopeFn {
+// Duplicate-identity review is handled out-of-band: the
+// identity-hygiene package's `duplicateCandidates` Lens projects
+// flagged pairs into its own KV bucket. The cap envelope carries no
+// review-state field.
+func NewWrapper(lensDefKey string, projectionRevision func(actorKey string) uint64) pipeline.EnvelopeFn {
 	return func(row map[string]any, keys map[string]any, params map[string]any) (map[string]any, map[string]any, error) {
 		// The cypher's RETURN produces a non-null `actorKey` only when
 		// the anchor `MATCH (identity:identity {key: $actorKey})`
@@ -79,14 +78,6 @@ func NewWrapper(lensDefKey string, projectionRevision func(actorKey string) uint
 			"serviceAccess":          emptyArrayIfNil(row["serviceAccess"]),
 			"ephemeralGrants":        emptyArrayIfNil(row["ephemeralGrants"]),
 			"roles":                  emptyArrayIfNil(row["roles"]),
-		}
-
-		// Story 4.4 — pendingReview: true when state == "flagged-for-review".
-		// Omitted entirely (absence == false) when not flagged.
-		if stateReader != nil {
-			if stateReader(actorKey) == "flagged-for-review" {
-				envelope["pendingReview"] = true
-			}
 		}
 
 		newKeys := map[string]any{"key": envelope["key"]}

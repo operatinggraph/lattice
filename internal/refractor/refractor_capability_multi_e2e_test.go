@@ -160,7 +160,7 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	require.Equal(t, ruleengine.EngineFull, capabilityRule.ResolvedEngine)
 	require.NotNil(t, capabilityRule.CompiledRule)
 	capP.UseFullEngine(fullEngine, capabilityRule.CompiledRule)
-	capP.SetEnvelopeFn(capabilityenv.NewWrapper("vtx.meta."+capabilityRule.ID, projectionRevision, nil))
+	capP.SetEnvelopeFn(capabilityenv.NewWrapper("vtx.meta."+capabilityRule.ID, projectionRevision))
 	capP.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
 	capLatency := pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize)
 	capP.SetLatencyBuffer(capLatency)

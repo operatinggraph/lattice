@@ -1080,8 +1080,107 @@ func (ex *executor) evalFunctionCall(b binding, fc *FunctionCall) (any, error) {
 		return []any{v}, nil
 	case "count":
 		return int64(1), nil
+	case "levenshteindist":
+		// levenshteinDist(a, b) → int — classical Wagner-Fischer edit distance.
+		// Pure / deterministic / O(N*M) time + O(min(N,M)) space.
+		// Both args must be strings; nil args return nil.
+		if len(fc.Args) != 2 {
+			return nil, fmt.Errorf("full engine: levenshteinDist takes exactly 2 arguments")
+		}
+		av, err := ex.evalExpr(b, fc.Args[0])
+		if err != nil {
+			return nil, err
+		}
+		bv, err := ex.evalExpr(b, fc.Args[1])
+		if err != nil {
+			return nil, err
+		}
+		if av == nil || bv == nil {
+			return nil, nil
+		}
+		as, aok := av.(string)
+		bs, bok := bv.(string)
+		if !aok || !bok {
+			return nil, fmt.Errorf("full engine: levenshteinDist arguments must be strings, got %T and %T", av, bv)
+		}
+		return int64(levenshteinDistance(as, bs)), nil
+	case "levenshteinratio":
+		// levenshteinRatio(a, b) → float64 in [0.0, 1.0].
+		// 1.0 when identical (incl. both empty); 0.0 when one is empty
+		// and other is non-empty.
+		if len(fc.Args) != 2 {
+			return nil, fmt.Errorf("full engine: levenshteinRatio takes exactly 2 arguments")
+		}
+		av, err := ex.evalExpr(b, fc.Args[0])
+		if err != nil {
+			return nil, err
+		}
+		bv, err := ex.evalExpr(b, fc.Args[1])
+		if err != nil {
+			return nil, err
+		}
+		if av == nil || bv == nil {
+			return nil, nil
+		}
+		as, aok := av.(string)
+		bs, bok := bv.(string)
+		if !aok || !bok {
+			return nil, fmt.Errorf("full engine: levenshteinRatio arguments must be strings, got %T and %T", av, bv)
+		}
+		la, lb := len(as), len(bs)
+		maxLen := la
+		if lb > maxLen {
+			maxLen = lb
+		}
+		if maxLen == 0 {
+			return float64(1.0), nil
+		}
+		dist := levenshteinDistance(as, bs)
+		return 1.0 - float64(dist)/float64(maxLen), nil
 	}
 	return nil, fmt.Errorf("full engine: unsupported function %q", fc.Name)
+}
+
+// levenshteinDistance computes the classical Wagner-Fischer edit distance
+// between strings a and b. Uses a rolling-row approach for O(min(|a|,|b|))
+// space. Cost: insert=1, delete=1, substitute=1. Operates over runes so
+// multi-byte UTF-8 sequences count as single characters.
+func levenshteinDistance(a, b string) int {
+	ra := []rune(a)
+	rb := []rune(b)
+	if len(ra) > len(rb) {
+		ra, rb = rb, ra
+	}
+	n, m := len(ra), len(rb)
+	if n == 0 {
+		return m
+	}
+	prev := make([]int, n+1)
+	curr := make([]int, n+1)
+	for j := 0; j <= n; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= m; i++ {
+		curr[0] = i
+		for j := 1; j <= n; j++ {
+			cost := 1
+			if rb[i-1] == ra[j-1] {
+				cost = 0
+			}
+			del := prev[j] + 1
+			ins := curr[j-1] + 1
+			sub := prev[j-1] + cost
+			curr[j] = del
+			if ins < curr[j] {
+				curr[j] = ins
+			}
+			if sub < curr[j] {
+				curr[j] = sub
+			}
+		}
+		prev, curr = curr, prev
+	}
+	return prev[n]
 }
 
 // evalPatternComprehension implements `[(x)-[:t]->(y) | projection]`.

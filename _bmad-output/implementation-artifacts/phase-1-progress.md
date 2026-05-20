@@ -1,18 +1,18 @@
 # Phase 1 Progress
 
-**Updated:** 2026-05-19, after Story 4.5 (commit `b314677`) + 2026-05-19 course correction. **Epic 4 CLOSED (5/5)** but with architectural-realignment carry — see [PHASE-1-COURSE-CORRECTION.md](./PHASE-1-COURSE-CORRECTION.md).
+**Updated:** 2026-05-20, after Story 4.6 (Capability Package format + identity-hygiene). **Epic 4 CLOSED (5/5)** + 2 of 5 course-correction stories shipped (6.0, 4.6); 3 remain (4.7, 2.4a, 2.4b) before Epic 5 — see [PHASE-1-COURSE-CORRECTION.md](./PHASE-1-COURSE-CORRECTION.md).
 
 This file tracks **what's shipped, what's next, what's still open**. Operating rules and workflow live in [`WINSTON-RESUME.md`](./WINSTON-RESUME.md). Token-by-token accounting lives in [`token-usage-tracker.md`](./token-usage-tracker.md).
 
 ## Current State
 
-**Stories shipped: 29** (recomputed from per-row tracker; original plan was 31 stories, splits added 4 — 2.1+2.1b, 3.1→3.1a+3.1b-i+3.1b-ii, 3.2→3.2a+3.2b — and Story 2.3 was added between 2.2 and 3.1).
+**Stories shipped: 30** (recomputed from per-row tracker; original plan was 31 stories, splits added 4 — 2.1+2.1b, 3.1→3.1a+3.1b-i+3.1b-ii, 3.2→3.2a+3.2b — Story 2.3 was added between 2.2 and 3.1, and 5 course-correction stories added 2026-05-19; of those, 6.0 + 4.6 are now shipped).
 
-**Latest commit on main:** `b314677` (Story 4.5 — Staff-Approved Identity Merge / FR4).
+**Latest commit on main:** `12b7574` (Story 6.0 — component reference pages); Story 4.6 commit pending push.
 
-**Epic 3 closed; Epic 4 CLOSED** (5/5 stories complete) — with realignment carry tracked in [PHASE-1-COURSE-CORRECTION.md](./PHASE-1-COURSE-CORRECTION.md) (the 2026-05-19 audit found Epic 4 drifted from the "operations write, lenses read" architecture; corrective stories 4.6 + 4.7 are queued before Epic 5).
+**Epic 3 closed; Epic 4 CLOSED** (5/5 original stories) + Story 4.6 (course correction) shipped: introduced the Capability Package mechanism, the identity-hygiene package (first installable), and walked back Epic 4's read-as-op accommodations. The realignment is the architectural lesson from the 2026-05-19 audit: graph topology flows Lens → Client → Command parameter → Processor-validates-against-Core-KV. Capability KV is the *one* contract-defined Processor↔lens-output read; it is NOT a generalizable pattern.
 
-**Token totals so far:** **~4,151K actual / 3,517K original-plan-budget (118%) for 28 / 32+ stories (88%).** Re-computed from per-row tracker actuals (28 rows × Actual column). Five new stories added 2026-05-19 from course correction (6.0, 4.6, 4.7, 2.4a, 2.4b — see Upcoming Sequence below) are not yet reflected in budget total. Quality bar maintained across all shipped gates.
+**Token totals so far:** **~4,731K actual / 3,697K plan-budget (128%) for 30 / 32+ stories (94%).** Re-computed from per-row tracker actuals. Story 4.6 took 3 sub-agent rounds (2.7× budget at 483K) — two prior rounds built and reverted boundary-violating designs (R1: Processor reading Adjacency KV; R2: Processor reading a `identityMergePlan` lens by known key). R3 landed the correct shape. Honest cost of the architectural learning; the pattern is now codified in the package_test.go forbidden-token regression guard. Quality bar maintained across all gates.
 
 ## Shipped Story Index
 
@@ -48,16 +48,17 @@ Quick reference; full details in token-usage-tracker.md.
 | 4.3 | Two-Phase Identity Claim (FR2, FR5) | 677747c | crypto.constant_time_equal + RecordClaimAttempt + generic ClaimKeyInvalid + credentialindex; two-session OVERRUN |
 | 4.4 | Duplicate Identity Detection (FR3) | e89c4f7 | strings.levenshtein + ScanPrefixes hydrator + canonical duplicateOf link + capabilityenv pendingReview; two-session OVERRUN |
 | 4.5 | Staff-Approved Identity Merge (FR4) | b314677 | ApproveIdentityMerge (review) + MergeIdentity (link rekey + state→merged + mergedInto); lnk. global-scan hydrator; 12 integration tests across capability+stub auth; 215K single-session OVERRUN; Epic 4 CLOSED |
-| 6.0 | Component Reference Pages | pending | docs/components/{_index,processor,refractor,substrate}.md (636 lines total); closes lattice-architecture.md:23 gap; 97K OVERRUN (3× budget; docs-only) |
+| 6.0 | Component Reference Pages | 12b7574 | docs/components/{_index,processor,refractor,substrate}.md (636 lines total); closes lattice-architecture.md:23 gap; 97K OVERRUN (3× budget; docs-only) |
+| 4.6 | Capability Package + Identity-Hygiene | pending | docs/components/_packages.md + cmd/lattice-pkg/ + internal/pkgmgr/ (5 installer tests) + packages/identity-hygiene/ (single lens enriched with edge enumeration; MergeIdentity takes `edges` as command parameter, validates against Core KV). Walked back Epic 4 accommodations: ScanPrefixes, keys_with_prefix, strings.* module, pendingReview, flagged-for-review state all deleted. Identity DDL trimmed 8→3 ops, 1131→448 LOC. Levenshtein moved to cypher executor UDFs. 3 sub-agent rounds; 483K OVERRUN (2.7× budget). |
 
 ## Upcoming Sequence
 
 **Epic 4 — Identity & Member Lifecycle: CLOSED (5/5)** — realignment pending in 4.6 + 4.7.
 
 **Course-correction stories (2026-05-19; ahead of Epic 5):**
-- ✅ **6.0** Component reference pages — `docs/components/{processor,refractor,substrate}.md` + `_index.md` — **SHIPPED** (97K Sonnet; 3× docs-budget OVERRUN)
-- **4.6** Capability Package format + installer + identity-hygiene package (Opus, ~180K) — brief ready; next
-- **4.7** Kernel minimization + rbac-domain + identity-domain packages (Opus, ~150K) — brief ready
+- ✅ **6.0** Component reference pages — **SHIPPED** (97K Sonnet; 3× docs-budget OVERRUN)
+- ✅ **4.6** Capability Package format + installer + identity-hygiene package — **SHIPPED** (483K Opus across 3 rounds; 2.7× OVERRUN; architectural-boundary learnings codified)
+- **4.7** Kernel minimization + rbac-domain + identity-domain packages (Opus, ~150K) — brief ready; next
 - **2.4a** Refractor token eviction — mechanical rename sweep (Sonnet, ~90K) — brief ready
 - **2.4b** Refractor Lattice-native source plane — durable JetStream consumer for lens defs + NATS Services control plane (Opus, ~100K) — brief ready
 
@@ -81,8 +82,10 @@ Quick reference; full details in token-usage-tracker.md.
 - **3.5**: `lattice auth-trace` CLI deferred to Story 6.1; `LookupAuthTrace` helper available for the wrap.
 - **3.6**: AC text `assignedRole` resolved to `holdsRole` per cypher consistency; documented in data-contracts.md §6.13. Phase 2 may re-canonicalize.
 - **3.7 Vector #1**: Phase 1 defense is Refractor reprojection only. NATS-account-level write restriction on Capability KV (Contract #6 §6.1) is the Phase 2 hardening — adds substrate-level enforcement on top of the current overwrite-by-reprojection guarantee.
-- **4.5 carry — `MergeIdentity` grant unseeded**: `permittedCommands` includes `MergeIdentity` but no `PermMergeIdentity` vertex / no role grant was seeded by 4.1. Phase 1 worked around this with stub-mode integration tests for `MergeIdentity`. A small follow-up story (Story 5.x candidate) must seed `PermMergeIdentity → operator` + the grant link, and rebaseline verify-bootstrap from 154 OK to ~156 OK.
+- **4.5 carry — `MergeIdentity` grant unseeded**: ~~`permittedCommands` includes `MergeIdentity` but no `PermMergeIdentity` vertex / no role grant was seeded by 4.1.~~ **CLOSED by Story 4.6:** the identity-hygiene Capability Package declares both the `MergeIdentity` permission vertex and the `MergeIdentity → operator` grant link, installed via `lattice-pkg install packages/identity-hygiene`.
 - **4.5 carry — `TombstoneIdentity` stub**: still returns `NotYetImplemented`. AC for 4.5 did not require it; Phase 1 closure may need it; Phase 2 candidate.
+- **4.6 carry — identity-hygiene Surface-B integration tests**: 8 end-to-end tests (lens projection variants, MergeIdentity happy-path, fabricated/non-touching/tombstoned edge rejections, post-merge redirect) require a full Refractor + Processor + installed-package harness that doesn't exist yet. Unit/structural tests landed; e2e deferred until a package-aware test fixture exists. Recommended pre-Story-4.7 (4.7 will install rbac-domain + identity-domain packages and benefit from the same fixture).
+- **4.6 carry — `lattice candidates list` CLI verb**: out of scope for 4.6 (CLI tooling is Story 6.1). Until then, operators read the `duplicate-candidates` bucket directly and construct `MergeIdentity{primary, secondary, edges: secondaryInboundEdges + secondaryOutboundEdges}` by hand.
 - **4.5 carry — `SplitIdentities` (un-merge)**: out of Phase 1 per AC. Phase 2+.
 - **4.5 carry — Refractor reprojection NFR-P3 test for merge**: brief §5 listed `TestMergeIdentity_CapKVReprojection_NFR_P3`; sub-agent deferred citing duplication with existing `refractor_capability_multi_e2e_test.go` + 3.2b adjacency-bridge coverage. Accepted as soft trade; revisit if a real reprojection-on-merge regression slips later.
 - **4.5 carry — capabilityenv `merged: true, mergedInto: <primary>` field**: not added. Existing reprojection on `state` aspect mutation suffices for AC. Add if a Phase 2 consumer needs it.

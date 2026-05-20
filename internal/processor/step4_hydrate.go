@@ -27,7 +27,8 @@ import (
 //  3. Load the script source (carried on the cache entry). Empty
 //     script → EmptyScript / NoScriptForClass depending on whether
 //     the underlying DDL declared a script aspect at all.
-//  4. Hydrate every key in envelope.contextHint.reads.
+//  4. Hydrate every key in envelope.contextHint.reads (known-key reads
+//     only)
 type HydratorImpl struct {
 	Conn       *substrate.Conn
 	CoreBucket string
@@ -168,25 +169,6 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			}
 			hydrated[key] = doc
 		}
-
-		// 4b. ScanPrefixes bulk load (Story 4.4).
-		//
-		// When contextHint.scanPrefixes is set, enumerate all keys under each
-		// prefix and load them into the script state. Phase 1 restricts
-		// allowed prefixes to "vtx.identity." and "lnk.identity." — the only
-		// consumers. Other prefixes are rejected to limit blast radius.
-		// For "vtx.identity." the hydrator also loads 4 hard-coded aspects
-		// (.name/.email/.phone/.state) per vertex. For "lnk.identity." all
-		// 6-segment link keys are loaded as-is (no aspect expansion).
-		// Soft cap: >1000 keys per prefix → HydrationError.
-		for _, p := range env.ContextHint.ScanPrefixes {
-			if p == "" {
-				continue
-			}
-			if err := h.hydrateScanPrefix(ctx, rid, p, hydrated); err != nil {
-				return HydratedState{}, err
-			}
-		}
 	}
 
 	h.Logger.Info("step 4: hydrated",
@@ -205,156 +187,6 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			ScriptClass:  class,
 		},
 	}, nil
-}
-
-// identityScanAspects lists the aspect localNames the hydrator bulk-loads
-// for each identity vertex when ScanPrefixes contains "vtx.identity.".
-// Hard-coded for Phase 1; the only consumer of ScanPrefixes is
-// ScanIdentityDuplicates (4.4) and ApproveIdentityMerge (4.5). 5 aspects
-// cover match criteria, state transition, and credential-binding presence.
-// .credentialBinding (4.5) is read as an existence check so the review op
-// can report hasCredentialBinding without back-channel reads.
-var identityScanAspects = []string{"name", "email", "phone", "state", "credentialBinding"}
-
-// hydrateScanPrefix implements one prefix scan for the ScanPrefixes bulk-load
-// path. Allowed prefixes (Phase 1 — extended as Identity stories grow):
-//
-//   - "vtx.identity." (4.4): 3-segment vertex keys + 5 hard-coded aspects.
-//   - "lnk.identity." (4.4): 6-segment link keys anchored on identity-as-src.
-//   - "lnk." (4.5):          ALL 6-segment link keys anywhere in the bucket,
-//     so MergeIdentity can find inbound links to secondary regardless of
-//     which endpoint position they occupy.
-//
-// For "vtx.identity.": filters to 3-segment vertex keys and loads each vertex
-// + 5 hard-coded aspects (.name/.email/.phone/.state/.credentialBinding).
-// Non-existing aspect keys are silently skipped (optional aspects).
-//
-// For "lnk.identity." and "lnk.": filters to 6-segment link keys
-// (lnk.<type>.<id>.<rel>.<type>.<id>) and loads each link envelope as-is.
-// No aspect expansion — links don't have aspects.
-//
-// Soft caps:
-//   - "vtx.identity." + "lnk.identity.": >1000 matching keys → "scan-too-large"
-//   - "lnk." (4.5 global):                >5000 matching keys → "scan-too-large"
-//     (NFR-SC1: ≤500 identities × modest link density keeps this well under)
-func (h *HydratorImpl) hydrateScanPrefix(ctx context.Context, rid, prefix string, hydrated map[string]VertexDoc) error {
-	const (
-		scanPrefixIdentityVtx = "vtx.identity."
-		scanPrefixIdentityLnk = "lnk.identity."
-		scanPrefixAllLinks    = "lnk." // Story 4.5: MergeIdentity global link scan
-	)
-	if prefix != scanPrefixIdentityVtx && prefix != scanPrefixIdentityLnk && prefix != scanPrefixAllLinks {
-		return &HydrationError{
-			Code:               "scan-prefix-not-supported",
-			MissingKey:         prefix,
-			OperationRequestID: rid,
-		}
-	}
-
-	allKeys, err := h.Conn.KVListKeys(ctx, h.CoreBucket)
-	if err != nil {
-		return fmt.Errorf("step4 scanPrefix: list keys: %w", err)
-	}
-
-	if prefix == scanPrefixIdentityVtx {
-		// Collect 3-segment vertex keys: vtx.identity.<id>
-		var vtxKeys []string
-		for _, k := range allKeys {
-			if !strings.HasPrefix(k, prefix) {
-				continue
-			}
-			// 3-segment key: suffix after "vtx.identity." has no dots.
-			suffix := k[len(prefix):]
-			if strings.Contains(suffix, ".") {
-				continue // aspect key — skip
-			}
-			vtxKeys = append(vtxKeys, k)
-		}
-		if len(vtxKeys) > 1000 {
-			return &HydrationError{
-				Code:               "scan-too-large",
-				MissingKey:         fmt.Sprintf("count=%d", len(vtxKeys)),
-				OperationRequestID: rid,
-			}
-		}
-		// Load each vertex + 4 aspects.
-		for _, vtxKey := range vtxKeys {
-			keysToLoad := make([]string, 0, 1+len(identityScanAspects))
-			keysToLoad = append(keysToLoad, vtxKey)
-			for _, asp := range identityScanAspects {
-				keysToLoad = append(keysToLoad, vtxKey+"."+asp)
-			}
-			for _, k := range keysToLoad {
-				if _, already := hydrated[k]; already {
-					continue // already loaded via contextHint.reads
-				}
-				entry, err := h.Conn.KVGet(ctx, h.CoreBucket, k)
-				if err != nil {
-					if errors.Is(err, substrate.ErrKeyNotFound) {
-						if k == vtxKey {
-							// Vertex disappeared between list and read — skip silently.
-							break
-						}
-						continue // optional aspect missing
-					}
-					return fmt.Errorf("step4 scanPrefix: read %s: %w", k, err)
-				}
-				doc, err := parseVertexDoc(entry.Value, k)
-				if err != nil {
-					return fmt.Errorf("step4 scanPrefix: parse %s: %w", k, err)
-				}
-				hydrated[k] = doc
-			}
-		}
-		return nil
-	}
-
-	// prefix == scanPrefixIdentityLnk OR scanPrefixAllLinks
-	// Collect 6-segment link keys (exactly 5 dots).
-	//   - "lnk.identity.":  src-anchored on identity (4.4 ScanIdentityDuplicates).
-	//   - "lnk." (global):  ALL links in the bucket so MergeIdentity (4.5) can
-	//     find inbound links to secondary regardless of endpoint position.
-	// Soft caps differ: 1000 for the narrow scan, 5000 for the global scan.
-	var lnkKeys []string
-	for _, k := range allKeys {
-		if !strings.HasPrefix(k, prefix) {
-			continue
-		}
-		// 6-segment key has exactly 5 dots.
-		if strings.Count(k, ".") != 5 {
-			continue
-		}
-		lnkKeys = append(lnkKeys, k)
-	}
-	softCap := 1000
-	if prefix == scanPrefixAllLinks {
-		softCap = 5000
-	}
-	if len(lnkKeys) > softCap {
-		return &HydrationError{
-			Code:               "scan-too-large",
-			MissingKey:         fmt.Sprintf("count=%d prefix=%s", len(lnkKeys), prefix),
-			OperationRequestID: rid,
-		}
-	}
-	for _, lnkKey := range lnkKeys {
-		if _, already := hydrated[lnkKey]; already {
-			continue
-		}
-		entry, err := h.Conn.KVGet(ctx, h.CoreBucket, lnkKey)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue // link disappeared between list and read
-			}
-			return fmt.Errorf("step4 scanPrefix: read %s: %w", lnkKey, err)
-		}
-		doc, err := parseVertexDoc(entry.Value, lnkKey)
-		if err != nil {
-			return fmt.Errorf("step4 scanPrefix: parse %s: %w", lnkKey, err)
-		}
-		hydrated[lnkKey] = doc
-	}
-	return nil
 }
 
 // resolveClass extracts the operation's class for DDL lookup.
