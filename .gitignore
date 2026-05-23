@@ -27,6 +27,9 @@ coverage.html
 # Canonical build target is bin/<name> (see Makefile).
 /refractor
 /processor
+/verify-package-rbac
+/verify-package-identity
+/verify-package-identity-hygiene
 /bootstrap
 refractor.log
 

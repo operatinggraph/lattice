@@ -203,8 +203,8 @@ func main() {
 			fail(isKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
-			if strings.TrimSpace(data["schema"].(string)) == "" {
-				fail(isKey, "inputSchema empty")
+			if s, ok2 := data["schema"].(string); !ok2 || strings.TrimSpace(s) == "" {
+				fail(isKey, "inputSchema empty or wrong type")
 			} else {
 				ok(isKey + " present")
 			}
@@ -214,8 +214,8 @@ func main() {
 			fail(osKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
-			if strings.TrimSpace(data["schema"].(string)) == "" {
-				fail(osKey, "outputSchema empty")
+			if s, ok2 := data["schema"].(string); !ok2 || strings.TrimSpace(s) == "" {
+				fail(osKey, "outputSchema empty or wrong type")
 			} else {
 				ok(osKey + " present")
 			}
