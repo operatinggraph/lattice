@@ -89,15 +89,15 @@ func TestNatsKVAdapter_Upsert_SingleKey(t *testing.T) {
 
 func TestNatsKVAdapter_Upsert_CompositeKey(t *testing.T) {
 	kv := startKV(t)
-	a := newAdapter(t, kv, []string{"team_id", "agreement_id"})
+	a := newAdapter(t, kv, []string{"account_id", "agreement_id"})
 
-	keys := map[string]any{"team_id": "team-001", "agreement_id": "abc123"}
+	keys := map[string]any{"account_id": "acct-001", "agreement_id": "abc123"}
 	row := map[string]any{"name": "Widget Agreement"}
 
 	err := a.Upsert(context.Background(), keys, row)
 	require.NoError(t, err)
 
-	entry, err := kv.Get(context.Background(), "team-001/abc123")
+	entry, err := kv.Get(context.Background(), "acct-001.abc123")
 	require.NoError(t, err)
 
 	var got map[string]any
@@ -127,9 +127,9 @@ func TestNatsKVAdapter_Upsert_Idempotent(t *testing.T) {
 
 func TestNatsKVAdapter_Upsert_AbsentKeyField(t *testing.T) {
 	kv := startKV(t)
-	a := newAdapter(t, kv, []string{"id", "team_id"})
+	a := newAdapter(t, kv, []string{"id", "account_id"})
 
-	// "team_id" is absent from the keys map.
+	// "account_id" is absent from the keys map.
 	err := a.Upsert(context.Background(), map[string]any{"id": "e1"}, map[string]any{"x": 1})
 	require.Error(t, err)
 }

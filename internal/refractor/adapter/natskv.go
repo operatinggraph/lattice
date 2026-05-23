@@ -21,7 +21,8 @@ type NatsKVAdapter struct {
 
 // New creates a NatsKVAdapter that writes to kv.
 // keyOrder must match the rule's into.key field list and determines the order
-// in which key values are concatenated to form the KV key (e.g. ["team_id","agreement_id"] → "team-001/abc123").
+// in which key values are concatenated to form the KV key
+// (e.g. ["account_id","agreement_id"] → "acct-001.abc123").
 func New(kv jetstream.KeyValue, keyOrder []string) (*NatsKVAdapter, error) {
 	if len(keyOrder) == 0 {
 		return nil, errors.New("natskv: keyOrder must not be empty")
@@ -29,7 +30,9 @@ func New(kv jetstream.KeyValue, keyOrder []string) (*NatsKVAdapter, error) {
 	return &NatsKVAdapter{kv: kv, keyOrder: keyOrder}, nil
 }
 
-// buildKey concatenates key field values in keyOrder order, joined with "/".
+// buildKey concatenates key field values in keyOrder order, joined with ".".
+// Lattice key shape convention (Contract #1) uses "." as the segment
+// separator throughout — vtx.<type>.<id>.<aspect>, lnk.<…>, cap.identity.<id>.
 // Returns an error if any key field is absent from keys.
 func (a *NatsKVAdapter) buildKey(keys map[string]any) (string, error) {
 	parts := make([]string, len(a.keyOrder))
@@ -40,7 +43,7 @@ func (a *NatsKVAdapter) buildKey(keys map[string]any) (string, error) {
 		}
 		parts[i] = fmt.Sprintf("%v", val)
 	}
-	return strings.Join(parts, "/"), nil
+	return strings.Join(parts, "."), nil
 }
 
 // Upsert serializes row to JSON and writes it to the KV bucket under the constructed key,
