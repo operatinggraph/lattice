@@ -181,11 +181,11 @@ func TestManager_TwoConsumers_Independent(t *testing.T) {
 	// Verify distinct durable names via consumer info.
 	infoV1, err := consV1.Info(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "materializer-agreement-summary-v1", infoV1.Config.Durable)
+	assert.Equal(t, "refractor-agreement-summary-v1", infoV1.Config.Durable)
 
 	infoV2, err := consV2.Info(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "materializer-agreement-summary-v2", infoV2.Config.Durable)
+	assert.Equal(t, "refractor-agreement-summary-v2", infoV2.Config.Durable)
 }
 
 // TestManager_RemoveV1_LeavesV2 verifies that removing v1's consumer does not affect

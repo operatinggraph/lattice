@@ -17,7 +17,7 @@ import (
 // auditStreamMaxAge is the default retention period for audit stream messages.
 const auditStreamMaxAge = 7 * 24 * time.Hour
 
-// AuditEntry is the JSON payload appended to materializer.audit.<ruleId> on each
+// AuditEntry is the JSON payload appended to lattice.refractor.audit.<lensId> on each
 // successful write. All field names are camelCase per FR21 convention.
 type AuditEntry struct {
 	EntityID      string `json:"entityId"`
@@ -48,7 +48,7 @@ func NewAuditWriter(js jetstream.JetStream, ruleID string) *AuditWriter {
 
 // EnsureStream creates or updates the JetStream audit stream for this rule.
 // Idempotent — safe to call on every process startup. Must be called before WriteAudit.
-// Stream name: "AUDIT_<ruleID>"; subject: materializer.audit.<ruleId>.
+// Stream name: "AUDIT_<ruleID>"; subject: lattice.refractor.audit.<lensId>.
 // Retention: LimitsPolicy with 7-day MaxAge (NFR6 — not instantly purgeable).
 func (a *AuditWriter) EnsureStream(ctx context.Context) error {
 	cfg := jetstream.StreamConfig{

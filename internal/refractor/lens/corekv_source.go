@@ -15,6 +15,12 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
+// UpdateCallback is called when an existing rule is updated (not on first load).
+// old is a snapshot of the previous version; new is the updated version.
+// kind is the result of ClassifyUpdate(old, new).
+// The callback is called outside the source's mutex, after the rule is indexed and ACK'd.
+type UpdateCallback func(old, new *Rule, kind UpdateKind)
+
 // CoreKVSource watches Core KV under `vtx.meta.>` and routes only those
 // updates whose envelope class is `meta.lens` to the lens loader. Other
 // meta classes (`meta.ddl.*`, `meta.event.*`, etc.) are skipped silently
@@ -309,7 +315,7 @@ func (s *CoreKVSource) dispatchSpec(lensID string, body []byte, revision uint64)
 }
 
 // translateSpec converts a LensSpec into a *Rule that the existing
-// Materializer pipeline machinery can consume. Returns an error if
+// Refractor pipeline machinery can consume. Returns an error if
 // required fields are missing or the target config can't be unmarshalled.
 func translateSpec(spec *LensSpec) (*Rule, error) {
 	if spec.ID == "" {

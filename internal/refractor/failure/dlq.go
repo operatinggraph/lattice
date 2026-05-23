@@ -25,11 +25,13 @@ type DLQMessage struct {
 	RawPayload   string `json:"rawPayload"`   // original NATS message body as string
 }
 
-// Publish writes msg to the DLQ stream for the given team and ruleID.
-// The stream is created (idempotent) if absent. Subject: subjects.DLQ(team, ruleID).
+// Publish writes msg to the DLQ stream for the given ruleID.
+// The stream is created (idempotent) if absent. Subject: subjects.DLQ(ruleID).
+// team parameter is retained for call-site compatibility but is no longer used
+// in the subject — team segment was removed per Deviation 4 (Story 2.4a).
 func Publish(ctx context.Context, js jetstream.JetStream, team, ruleID string, msg DLQMessage) error {
-	subject := subjects.DLQ(team, ruleID)
-	streamName := "MATERIALIZER_DLQ_" + strings.ToUpper(ruleID)
+	subject := subjects.DLQ(ruleID)
+	streamName := "REFRACTOR_DLQ_" + strings.ToUpper(ruleID)
 	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:     streamName,
 		Subjects: []string{subject},

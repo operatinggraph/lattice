@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	adjConsumerName    = "materializer-adjacency"
+	adjConsumerName    = "refractor-adjacency"
 	bootstrapReconnect = 5 * time.Second
 )
 

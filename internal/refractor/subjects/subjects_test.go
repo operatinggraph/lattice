@@ -6,61 +6,21 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRules(t *testing.T) {
-	tests := []struct {
-		team, ruleID, want string
-	}{
-		{"agreement-team", "agreement-summary", "materializer.rules.agreement-team.agreement-summary"},
-		{"facilities", "occupancy-view", "materializer.rules.facilities.occupancy-view"},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, Rules(tt.team, tt.ruleID))
-	}
-}
-
-func TestRules_InvalidInputPanics(t *testing.T) {
-	assert.Panics(t, func() { Rules("", "rule") })
-	assert.Panics(t, func() { Rules("team", "") })
-	assert.Panics(t, func() { Rules("team.a", "rule") })
-	assert.Panics(t, func() { Rules("team", "rule*") })
-	assert.Panics(t, func() { Rules("team", "rule>") })
-	assert.Panics(t, func() { Rules("team a", "rule") })
-}
-
-func TestHealth(t *testing.T) {
-	tests := []struct {
-		ruleID, want string
-	}{
-		{"agreement-summary", "materializer.health.agreement-summary"},
-		{"occupancy-view", "materializer.health.occupancy-view"},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.want, Health(tt.ruleID))
-	}
-}
-
 func TestDLQ(t *testing.T) {
 	tests := []struct {
-		team, ruleID, want string
+		lensID, want string
 	}{
-		{"agreement-team", "agreement-summary", "materializer.dlq.agreement-team.agreement-summary"},
-		{"facilities", "occupancy-view", "materializer.dlq.facilities.occupancy-view"},
+		{"agreement-summary", "lattice.refractor.dlq.agreement-summary"},
+		{"occupancy-view", "lattice.refractor.dlq.occupancy-view"},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, DLQ(tt.team, tt.ruleID))
+		assert.Equal(t, tt.want, DLQ(tt.lensID))
 	}
 }
 
 func TestDLQ_InvalidInputPanics(t *testing.T) {
-	assert.Panics(t, func() { DLQ("", "rule") })
-	assert.Panics(t, func() { DLQ("team", "") })
-	assert.Panics(t, func() { DLQ("team.a", "rule") })
-}
-
-func TestHealth_InvalidInputPanics(t *testing.T) {
-	assert.Panics(t, func() { Health("") })
-	assert.Panics(t, func() { Health("lens.id") })
-	assert.Panics(t, func() { Health("rule*") })
+	assert.Panics(t, func() { DLQ("") })
+	assert.Panics(t, func() { DLQ("lens.id") })
 }
 
 func TestMetrics_InvalidInputPanics(t *testing.T) {
@@ -75,13 +35,13 @@ func TestAudit_InvalidInputPanics(t *testing.T) {
 
 func TestMetrics(t *testing.T) {
 	tests := []struct {
-		ruleID, want string
+		lensID, want string
 	}{
-		{"agreement-summary", "materializer.metrics.agreement-summary"},
-		{"occupancy-view", "materializer.metrics.occupancy-view"},
+		{"agreement-summary", "lattice.refractor.metrics.agreement-summary"},
+		{"occupancy-view", "lattice.refractor.metrics.occupancy-view"},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, Metrics(tt.ruleID))
+		assert.Equal(t, tt.want, Metrics(tt.lensID))
 	}
 }
 
@@ -107,17 +67,18 @@ func TestAdjKey_InvalidInputPanics(t *testing.T) {
 
 func TestAudit(t *testing.T) {
 	tests := []struct {
-		ruleID, want string
+		lensID, want string
 	}{
-		{"agreement-summary", "materializer.audit.agreement-summary"},
-		{"occupancy-view", "materializer.audit.occupancy-view"},
+		{"agreement-summary", "lattice.refractor.audit.agreement-summary"},
+		{"occupancy-view", "lattice.refractor.audit.occupancy-view"},
 	}
 	for _, tt := range tests {
-		assert.Equal(t, tt.want, Audit(tt.ruleID))
+		assert.Equal(t, tt.want, Audit(tt.lensID))
 	}
 }
 
 func TestControl(t *testing.T) {
+	// materializer.control is NOT renamed in 2.4a — Story 2.4b owns this migration.
 	assert.Equal(t, "materializer.control", Control())
 }
 

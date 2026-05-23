@@ -107,26 +107,6 @@ func TestLoad_InvalidYAML(t *testing.T) {
 	assert.Contains(t, err.Error(), "decode config")
 }
 
-func TestLoad_HealthKVBucket_Default(t *testing.T) {
-	path := writeConfig(t, validConfig) // validConfig has no health_kv_bucket
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	assert.Equal(t, "materializer-health", cfg.HealthKVBucket, "absent health_kv_bucket should default to materializer-health")
-}
-
-func TestLoad_HealthKVBucket_Explicit(t *testing.T) {
-	path := writeConfig(t, `
-nats:
-  url: nats://localhost:4222
-core_kv_bucket: core
-adj_kv_bucket: adjacency
-health_kv_bucket: my-health
-`)
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	assert.Equal(t, "my-health", cfg.HealthKVBucket)
-}
-
 func TestLoad_EnvURLOverridesEmptyFile(t *testing.T) {
 	// File has no URL, but env provides it — should succeed
 	path := writeConfig(t, "nats: {}\ncore_kv_bucket: core\nadj_kv_bucket: adjacency\n")

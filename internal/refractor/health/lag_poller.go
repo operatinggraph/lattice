@@ -20,7 +20,7 @@ import (
 // after NewLagPoller returns have no effect on running pollers.
 var MetricsInterval = 5 * time.Second
 
-// LagMetric is the JSON payload published to materializer.metrics.<ruleId> on each poll.
+// LagMetric is the JSON payload published to lattice.refractor.metrics.<lensId> on each poll.
 // All field names are camelCase per FR21 convention.
 type LagMetric struct {
 	RuleID      string `json:"ruleId"`
@@ -29,7 +29,7 @@ type LagMetric struct {
 	Timestamp   string `json:"timestamp"` // RFC3339 UTC
 }
 
-// LagPoller publishes per-rule consumer lag metrics to materializer.metrics.<ruleId>
+// LagPoller publishes per-lens consumer lag metrics to lattice.refractor.metrics.<lensId>
 // at the interval captured from MetricsInterval at construction time.
 // It also updates the health KV consumerLag field on each cycle.
 // Call Start in a dedicated goroutine.

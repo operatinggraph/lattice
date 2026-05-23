@@ -13,7 +13,7 @@ import (
 )
 
 // Manager creates and tracks per-rule durable consumers on the Core KV stream.
-// Each consumer uses a NATS queue group so that multiple Materializer instances
+// Each consumer uses a NATS queue group so that multiple Refractor instances
 // distribute load without duplicate message processing (NFR12).
 type Manager struct {
 	js         jetstream.JetStream
@@ -33,9 +33,9 @@ func NewManager(js jetstream.JetStream, coreKVBucket string) *Manager {
 	}
 }
 
-// Add creates a durable NATS consumer named "materializer-<ruleID>" with a
+// Add creates a durable NATS consumer named "refractor-<ruleID>" with a
 // matching queue group for the given rule and registers it. If a consumer for
-// ruleID already exists locally, Add is a no-op. Multiple Materializer instances
+// ruleID already exists locally, Add is a no-op. Multiple Refractor instances
 // calling Add with the same ruleID converge to the same durable consumer in
 // NATS — CreateOrUpdateConsumer is idempotent and the queue group ensures
 // exactly-once delivery across instances (NFR12).
@@ -164,9 +164,9 @@ func (m *Manager) Stop(ctx context.Context) {
 }
 
 // ruleConsumerName returns the durable name and queue group name for a rule consumer.
-// The format "materializer-<ruleID>" is specified by AC#3.
+// The format "refractor-<ruleID>" (Story 2.4a rename from "materializer-<ruleID>").
 // Note: ruleID must not be "adjacency" as that would collide with the adjacency
-// consumer name used by the Bootstrapper ("materializer-adjacency").
+// consumer name used by the Bootstrapper ("refractor-adjacency").
 func ruleConsumerName(ruleID string) string {
-	return "materializer-" + ruleID
+	return "refractor-" + ruleID
 }

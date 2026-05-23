@@ -16,31 +16,23 @@ func validateToken(name, s string) {
 	}
 }
 
-func Rules(team, ruleID string) string {
-	validateToken("team", team)
-	validateToken("ruleID", ruleID)
-	return fmt.Sprintf("materializer.rules.%s.%s", team, ruleID)
+// DLQ returns the NATS subject for the Refractor DLQ for the given lensId.
+// Team segment removed per Deviation 4 (team is vestigial in the post-morph code).
+func DLQ(lensID string) string {
+	validateToken("lensID", lensID)
+	return fmt.Sprintf("lattice.refractor.dlq.%s", lensID)
 }
 
-func Health(ruleID string) string {
-	validateToken("ruleID", ruleID)
-	return fmt.Sprintf("materializer.health.%s", ruleID)
+// Metrics returns the NATS subject for Refractor per-lens consumer lag metrics.
+func Metrics(lensID string) string {
+	validateToken("lensID", lensID)
+	return fmt.Sprintf("lattice.refractor.metrics.%s", lensID)
 }
 
-func DLQ(team, ruleID string) string {
-	validateToken("team", team)
-	validateToken("ruleID", ruleID)
-	return fmt.Sprintf("materializer.dlq.%s.%s", team, ruleID)
-}
-
-func Metrics(ruleID string) string {
-	validateToken("ruleID", ruleID)
-	return fmt.Sprintf("materializer.metrics.%s", ruleID)
-}
-
-func Audit(ruleID string) string {
-	validateToken("ruleID", ruleID)
-	return fmt.Sprintf("materializer.audit.%s", ruleID)
+// Audit returns the NATS subject for the Refractor per-lens audit stream.
+func Audit(lensID string) string {
+	validateToken("lensID", lensID)
+	return fmt.Sprintf("lattice.refractor.audit.%s", lensID)
 }
 
 func AdjKey(nodeID string) string {
@@ -48,9 +40,9 @@ func AdjKey(nodeID string) string {
 	return fmt.Sprintf("adj.%s", nodeID)
 }
 
-// Control returns the NATS subject for the Materializer control API service.
+// Control returns the NATS subject for the Refractor control API service.
 // All control operations (validate, rebuild, pause, resume, delete) are sent to this subject.
-// The full NATS request-reply service is implemented in Epic 5.
+// NOTE: this subject is NOT renamed in 2.4a — Story 2.4b migrates it to NATS Services.
 func Control() string {
 	return "materializer.control"
 }

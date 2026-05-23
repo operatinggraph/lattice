@@ -89,8 +89,8 @@ type Pipeline struct {
 	retryBaseBackoff time.Duration
 	retryJS          jetstream.JetStream // for DLQ escalation after retry exhaustion
 
-	// Lag poller (optional). When non-nil, publishes per-rule consumer lag metrics
-	// to materializer.metrics.<ruleId> at health.MetricsInterval.
+	// Lag poller (optional). When non-nil, publishes per-lens consumer lag metrics
+	// to lattice.refractor.metrics.<lensId> at health.MetricsInterval.
 	// Set via SetLagPoller before calling Run.
 	lagPoller *health.LagPoller
 
@@ -1047,7 +1047,7 @@ func (p *Pipeline) writeAudit(ctx context.Context, entityID string, result simpl
 	}
 }
 
-// runAdjWatch watches the Materializer-owned adjacency KV for new or updated
+// runAdjWatch watches the Refractor adjacency KV for new or updated
 // entries. When adj.<nodeId> is committed by the bootstrapper, the pipeline
 // fetches the corresponding Core KV node (read-only) and re-evaluates it so
 // that output reflects the now-current adjacency without any write to Core KV
@@ -1107,7 +1107,7 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjEntry jetstream.KeyVa
 		return
 	}
 
-	// Point-read the Core KV node. Materializer is a pure consumer of Core KV —
+	// Point-read the Core KV node. Refractor is a pure consumer of Core KV —
 	// this is a read, not a write (ADR-16).
 	coreEntry, err := p.coreKV.Get(ctx, nodeKey)
 	if err != nil {

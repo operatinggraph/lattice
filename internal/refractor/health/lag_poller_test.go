@@ -83,7 +83,7 @@ func startPoller(lp *health.LagPoller, ctx context.Context) *sync.WaitGroup {
 }
 
 // TestLagPoller_PublishesMetric verifies that LagPoller publishes a valid LagMetric
-// JSON message to materializer.metrics.<ruleId> (FR23, AC1).
+// JSON message to lattice.refractor.metrics.<lensId> (FR23, AC1).
 func TestLagPoller_PublishesMetric(t *testing.T) {
 	env := startLagServer(t)
 
@@ -156,7 +156,7 @@ func TestLagPoller_UpdatesHealthKV(t *testing.T) {
 }
 
 // TestLagPoller_PerRuleIsolation verifies that two pollers publish only to their own
-// materializer.metrics.<ruleId> subjects with no cross-contamination (NFR13, AC3).
+// lattice.refractor.metrics.<lensId> subjects with no cross-contamination (NFR13, AC3).
 func TestLagPoller_PerRuleIsolation(t *testing.T) {
 	env := startLagServer(t)
 

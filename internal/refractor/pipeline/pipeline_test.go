@@ -424,8 +424,8 @@ func TestPipeline_InfrastructurePause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel() })
 	cons, err := env.js.CreateOrUpdateConsumer(ctx, "KV_"+coreKVBucket, jetstream.ConsumerConfig{
-		Durable:       "materializer-rule-infra",
-		DeliverGroup:  "materializer-rule-infra",
+		Durable:       "refractor-lens-infra",
+		DeliverGroup:  "refractor-lens-infra",
 		FilterSubject: "$KV." + coreKVBucket + ".>",
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
@@ -890,7 +890,7 @@ func TestPipeline_TerminalWritePublishesDLQAndContinues(t *testing.T) {
 	var dlqMsg failure.DLQMessage
 	var gotMsg bool
 	deadline := time.Now().Add(5 * time.Second)
-	streamName := "MATERIALIZER_DLQ_RULE-TERMINAL"
+	streamName := "REFRACTOR_DLQ_RULE-TERMINAL"
 	for time.Now().Before(deadline) && !gotMsg {
 		cons, err := env.js.OrderedConsumer(ctx, streamName, jetstream.OrderedConsumerConfig{})
 		if err != nil {
@@ -956,7 +956,7 @@ func TestPipeline_NilAuditWriter_NoOp(t *testing.T) {
 }
 
 // TestPipeline_AuditEntry_WrittenOnSuccess verifies that a successful upsert causes
-// exactly one audit entry to be published on materializer.audit.<ruleId> (AC1, AC4).
+// exactly one audit entry to be published on lattice.refractor.audit.<lensId> (AC1, AC4).
 func TestPipeline_AuditEntry_WrittenOnSuccess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
@@ -1040,7 +1040,7 @@ func TestPipeline_NoAuditEntry_OnWriteFailure(t *testing.T) {
 
 // TestPipeline_SetLagPoller_StartsMetricsPublishing verifies that when SetLagPoller is
 // configured before Run, the lag poller goroutine starts alongside the pipeline and
-// publishes metrics to materializer.metrics.<ruleId> (P-2.3 integration seam test).
+// publishes metrics to lattice.refractor.metrics.<lensId> (P-2.3 integration seam test).
 func TestPipeline_SetLagPoller_StartsMetricsPublishing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
@@ -1207,8 +1207,8 @@ func TestPipeline_Resume_OverridesInfraPause(t *testing.T) {
 	t.Cleanup(cancel)
 
 	cons, err := env.js.CreateOrUpdateConsumer(ctx, "KV_"+coreKVBucket, jetstream.ConsumerConfig{
-		Durable:       "materializer-rule-resume-infra",
-		DeliverGroup:  "materializer-rule-resume-infra",
+		Durable:       "refractor-lens-resume-infra",
+		DeliverGroup:  "refractor-lens-resume-infra",
 		FilterSubject: "$KV." + coreKVBucket + ".>",
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,

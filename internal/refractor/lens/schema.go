@@ -80,10 +80,10 @@ type RetryConfig struct {
 	Backoff     string `yaml:"backoff"`      // ISO 8601 duration, e.g. "PT5S"
 }
 
-// Rule is the parsed, validated representation of a Materializer rule.
+// Rule is the parsed, validated representation of a Lens (formerly Materializer-domain "Rule").
 type Rule struct {
 	ID            string      `yaml:"id"`
-	Team          string      `yaml:"team"`
+	Team          string      `yaml:"team"` // vestigial — always empty in post-morph code; kept for YAML backward compat but not validated (Deviation 4, Story 2.4a)
 	Match         string      `yaml:"match"`
 	Into          IntoConfig  `yaml:"into"`
 	Retry         RetryConfig `yaml:"retry"`
@@ -134,9 +134,6 @@ func Parse(data []byte) (*Rule, error) {
 	}
 	if r.ID == "" {
 		return nil, fmt.Errorf("rule validation: id is required")
-	}
-	if r.Team == "" {
-		return nil, fmt.Errorf("rule validation: team is required")
 	}
 	if r.Match == "" {
 		return nil, fmt.Errorf("rule validation: match is required")

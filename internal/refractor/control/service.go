@@ -38,7 +38,7 @@ type Pauser interface {
 }
 
 // RuleGetter is a read-only interface for looking up loaded rules by ID.
-// *lens.Loader satisfies this via its Get method.
+// *lens.CoreKVSource satisfies this via its Get method (formerly *lens.Loader).
 type RuleGetter interface {
 	Get(ruleID string) (*lens.Rule, bool)
 }
@@ -61,7 +61,7 @@ type Deleter interface {
 	Delete(ctx context.Context) error
 }
 
-// ControlRequest is the JSON payload sent to materializer.control for all operations.
+// ControlRequest is the JSON payload sent to the control subject (materializer.control until 2.4b) for all operations.
 type ControlRequest struct {
 	Op       string `json:"op"`                 // operation: "health" | "validate" | "rebuild" | "pause" | "resume" | "delete"
 	RuleID   string `json:"ruleId"`             // target rule identifier
@@ -128,7 +128,7 @@ type FieldReport struct {
 
 // Service coordinates control operations (pause, resume, health query, validate, rebuild, delete).
 // It maintains a registry of active pipeline interfaces keyed by ruleID.
-// The orchestrator (cmd/materializer) registers each pipeline when it starts and unregisters it when it stops.
+// The orchestrator (cmd/refractor) registers each pipeline when it starts and unregisters it when it stops.
 //
 // Zero-downtime migration pattern (FR32): two rules with different IDs may run simultaneously.
 // Register both rules before cutting over application traffic, then delete the old rule when
@@ -160,7 +160,7 @@ func NewService() *Service {
 }
 
 // SetRuleGetter registers the rule lookup interface used by the validate op.
-// *lens.Loader satisfies RuleGetter. Thread-safe; may be called at any time.
+// *lens.CoreKVSource satisfies RuleGetter. Thread-safe; may be called at any time.
 func (s *Service) SetRuleGetter(rg RuleGetter) {
 	s.mu.Lock()
 	s.ruleGetter = rg
@@ -277,9 +277,10 @@ func (s *Service) ResumeRule(ctx context.Context, ruleID string) error {
 }
 
 // StartNATSListener registers a NATS queue subscription on subjects.Control()
-// ("materializer.control") that handles JSON control requests. The queue group
-// "materializer-control" ensures exactly one instance handles each request when
-// multiple Materializer processes are running (stateless, NFR14).
+// (currently "materializer.control" — 2.4b will migrate to NATS Services) that
+// handles JSON control requests. The queue group "refractor-control" ensures
+// exactly one instance handles each request when multiple Refractor processes
+// are running (stateless, NFR14).
 // The subscription is unsubscribed when ctx is cancelled.
 // Returns an error if the subscription cannot be established or if already started.
 func (s *Service) StartNATSListener(ctx context.Context, nc *nats.Conn) error {
@@ -290,7 +291,7 @@ func (s *Service) StartNATSListener(ctx context.Context, nc *nats.Conn) error {
 	}
 	s.mu.Unlock()
 
-	sub, err := nc.QueueSubscribe(subjects.Control(), "materializer-control", s.handleControlMsg)
+	sub, err := nc.QueueSubscribe(subjects.Control(), "refractor-control", s.handleControlMsg)
 	if err != nil {
 		return fmt.Errorf("control: subscribe to %s: %w", subjects.Control(), err)
 	}

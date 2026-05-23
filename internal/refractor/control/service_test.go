@@ -81,7 +81,7 @@ func TestControl_ResumeRule_CallsResumer(t *testing.T) {
 	js := startControlTestServer(t)
 
 	ctx := context.Background()
-	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "materializer-health-ctrl"})
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-ctrl"})
 	require.NoError(t, err)
 	reporter := health.New(kv, "rule-ctrl", "team-a")
 
@@ -132,7 +132,7 @@ func TestControl_Health_ReturnsEntry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "materializer-health-5-1"})
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-5-1"})
 	require.NoError(t, err)
 	reporter := health.New(kv, "rule-5-1", "team-5-1")
 	require.NoError(t, reporter.SetActive(ctx))
@@ -524,7 +524,7 @@ func TestControl_Resume_ReturnsAck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "materializer-health-resume-ack"})
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-resume-ack"})
 	require.NoError(t, err)
 	reporter := health.New(kv, "resume-rule-1", "team-a")
 
@@ -649,7 +649,7 @@ func TestControl_TwoRules_BothRegistered(t *testing.T) {
 	t.Cleanup(cancel)
 
 	// Create health KV entries for both rules.
-	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "materializer-health-two-rules"})
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-two-rules"})
 	require.NoError(t, err)
 	reporterV1 := health.New(kv, "agreement-summary-v1", "team-a")
 	reporterV2 := health.New(kv, "agreement-summary-v2", "team-a")
@@ -684,7 +684,7 @@ func TestControl_TwoRules_DeleteV1_LeavesV2(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "materializer-health-del-v1"})
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-del-v1"})
 	require.NoError(t, err)
 	reporterV1 := health.New(kv, "agreement-summary-v1", "team-a")
 	reporterV2 := health.New(kv, "agreement-summary-v2", "team-a")
@@ -764,7 +764,7 @@ func TestControl_Delete_UnregistersRule(t *testing.T) {
 	t.Cleanup(cancel)
 
 	// Register a full set: resumer + reporter + deleter.
-	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "materializer-health-del-unreg"})
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-del-unreg"})
 	require.NoError(t, err)
 	reporter := health.New(kv, "delete-unreg-rule", "team-a")
 	require.NoError(t, reporter.SetActive(ctx))

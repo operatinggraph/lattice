@@ -71,7 +71,7 @@ func TestPublish_WritesCorrectFields(t *testing.T) {
 	require.NoError(t, err)
 
 	// Read back the message via an ordered consumer on the DLQ stream.
-	cons, err := js.OrderedConsumer(ctx, "MATERIALIZER_DLQ_TEST-RULE", jetstream.OrderedConsumerConfig{})
+	cons, err := js.OrderedConsumer(ctx, "REFRACTOR_DLQ_TEST-RULE", jetstream.OrderedConsumerConfig{})
 	require.NoError(t, err)
 
 	batch, err := cons.Fetch(1, jetstream.FetchMaxWait(2*time.Second))

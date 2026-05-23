@@ -240,3 +240,130 @@ Halt for:
 4. Closing summary
 
 **DO NOT commit. DO NOT push.** Winston commits + pushes after review.
+
+---
+
+## Closing Summary — Story 2.4a Implementation
+
+**Session date:** 2026-05-22  
+**Implementer:** claude-sonnet-4-6 (sub-agent)
+
+### Files Touched
+
+| File | Action |
+|---|---|
+| `internal/refractor/subjects/subjects.go` | EDITED — deleted `Rules`, `Health` functions; renamed `DLQ`/`Metrics`/`Audit` subject strings; dropped team parameter from `DLQ` |
+| `internal/refractor/subjects/subjects_test.go` | EDITED — removed tests for deleted functions; updated expected subject strings |
+| `internal/refractor/lens/schema.go` | EDITED — doc comment rename; removed `team` validation in `Parse()`; added vestigial note on `Team` field |
+| `internal/refractor/lens/schema_test.go` | EDITED — replaced `TestParse_MissingTeam` (expected error) with `TestParse_NoTeam_Accepted` (expects success) |
+| `internal/refractor/lens/loader.go` | DELETED — legacy JetStream-rules-stream loader, dead code post-Story 2.1 |
+| `internal/refractor/lens/loader_test.go` | DELETED — tests for deleted loader |
+| `internal/refractor/lens/corekv_source.go` | EDITED — added `UpdateCallback` type (moved from deleted loader.go); rewrote "Materializer pipeline machinery" behavior comment; comment update |
+| `internal/refractor/consumer/bootstrap.go` | EDITED — `adjConsumerName` renamed `materializer-adjacency` → `refractor-adjacency` |
+| `internal/refractor/consumer/manager.go` | EDITED — `ruleConsumerName` returns `refractor-<ruleID>` (was `materializer-<ruleID>`); comments updated |
+| `internal/refractor/consumer/manager_test.go` | EDITED — durable name assertions updated to `refractor-*` |
+| `internal/refractor/config/config.go` | EDITED — deleted `HealthKVBucket` field and its default |
+| `internal/refractor/config/config_test.go` | EDITED — deleted `TestLoad_HealthKVBucket_Default` and `TestLoad_HealthKVBucket_Explicit` tests |
+| `internal/refractor/failure/dlq.go` | EDITED — stream name `MATERIALIZER_DLQ_*` → `REFRACTOR_DLQ_*`; subject via updated `DLQ(ruleID)` (no team) |
+| `internal/refractor/failure/dlq_test.go` | EDITED — stream name assertion updated |
+| `internal/refractor/failure/retry_test.go` | EDITED — stream name assertion updated |
+| `internal/refractor/failure/classify.go` | EDITED — behavior comment rewrite |
+| `internal/refractor/pipeline/pipeline.go` | EDITED — 3 comment rewrites (metrics subject, adj watch, core KV consumer) |
+| `internal/refractor/pipeline/pipeline_test.go` | EDITED — durable names (`refractor-lens-infra`, `refractor-lens-resume-infra`); stream name (`REFRACTOR_DLQ_RULE-TERMINAL`); 2 comment rewrites |
+| `internal/refractor/health/audit_writer.go` | EDITED — 2 comment rewrites (subject namespace) |
+| `internal/refractor/health/lag_poller.go` | EDITED — 2 comment rewrites (subject namespace) |
+| `internal/refractor/health/lag_poller_test.go` | EDITED — 2 comment rewrites (subject namespace) |
+| `internal/refractor/control/service.go` | EDITED — 4 comment rewrites (control subject, queue group, orchestrator reference) + queue group renamed `materializer-control` → `refractor-control` |
+| `internal/refractor/control/service_test.go` | EDITED — 6 test bucket names renamed from `materializer-health-*` to `refractor-test-*` |
+
+### Subjects Renamed / Deleted (vs. Brief §1)
+
+| Subject | Disposition | Actual |
+|---|---|---|
+| `materializer.rules.<team>.<lensId>` | DELETED | ✅ `Rules()` function removed from subjects.go |
+| `materializer.health.<lensId>` | DELETED | ✅ `Health()` function removed from subjects.go |
+| `materializer.audit.<lensId>` | → `lattice.refractor.audit.<lensId>` | ✅ |
+| `materializer.metrics.<lensId>` | → `lattice.refractor.metrics.<lensId>` | ✅ |
+| `materializer.dlq.<team>.<lensId>` | → `lattice.refractor.dlq.<lensId>` | ✅ team segment removed |
+| `materializer.control` | UNCHANGED (2.4b) | ✅ left in place |
+
+### Durable Consumer + Stream + KV Bucket Renames Applied
+
+| Token | Old | New |
+|---|---|---|
+| Adjacency consumer | `materializer-adjacency` | `refractor-adjacency` |
+| Rule consumer prefix | `materializer-<ruleID>` | `refractor-<ruleID>` |
+| DLQ stream prefix | `MATERIALIZER_DLQ_<ruleID>` | `REFRACTOR_DLQ_<ruleID>` |
+| Control queue group | `materializer-control` | `refractor-control` |
+| Loader durable name | `materializer-rule-loader` | DELETED (loader.go deleted) |
+| Loader stream name | `MATERIALIZER_RULES` | DELETED (loader.go deleted) |
+| Pipeline infra durable (tests) | `materializer-rule-infra` | `refractor-lens-infra` |
+| Pipeline resume durable (tests) | `materializer-rule-resume-infra` | `refractor-lens-resume-infra` |
+| `HealthKVBucket` | `materializer-health` (default) | DELETED (field removed from config) |
+| Control test buckets | `materializer-health-*` | `refractor-test-*` |
+
+### `team` Field Call Sites Cleaned
+
+- `subjects.DLQ(team, lensID)` → `subjects.DLQ(lensID)` — team parameter removed from function signature
+- `subjects.Rules()` — deleted (entire function gone)
+- `Parse()` validation — `if r.Team == ""` check removed (3 lines deleted)
+- `TestParse_MissingTeam` — replaced with `TestParse_NoTeam_Accepted`
+- `Team` field retained in struct with YAML tag for backward compat but no longer validated (~2 call sites affected semantically)
+
+### Comment Rewrites Scope
+
+Approximately 20 comment lines rewritten across 8 files. Morph-provenance comments (`Materializer-derived`, `Materializer-style`) kept intact in `ruleengine/`, `adjacency/`, `lens/`, `consumer/bootstrap.go`, `cmd/refractor/main.go`.
+
+### Verification Gate Results
+
+| Gate | Result | Notes |
+|---|---|---|
+| `go build ./...` | ✅ PASS | |
+| `make vet` | ✅ PASS | |
+| `go test ./internal/refractor/... -count=1` | ✅ PASS (17 packages) | |
+| `go test ./... -p 1 -count=1` | ✅ PASS (all 27 packages) | |
+| `make verify-kernel` | SKIPPED — Docker not running | Needs `make up` |
+| `make verify-package-rbac` | SKIPPED — NATS not available | Needs `make up` |
+| `make verify-package-identity` | SKIPPED — NATS not available | Needs `make up` |
+| `make verify-package-identity-hygiene` | SKIPPED — NATS not available | Needs `make up` |
+| `make test-bypass` | SKIPPED — NATS not available | Needs `make up` |
+| `make test-capability-adversarial` | SKIPPED — NATS not available | Needs `make up` |
+
+All Docker-dependent gates require Winston to run `make up` first.
+
+### Forbidden-Token Grep Result (verbatim)
+
+```
+$ grep -rn "AdjacencyReads|LinkScans|ScanPrefixes|WithAdjacencyBucket|AdjacencyForNode|keys_with_prefix" internal/ cmd/ packages/
+
+/Users/andrewsolgan/Documents/GitHub/Lattice/internal/processor/starlark_runner.go:372:// dict. Story 4.6 walk-back removed the `keys_with_prefix` custom
+/Users/andrewsolgan/Documents/GitHub/Lattice/packages/identity-domain/package_test.go:43:    for _, forbidden := range []string{"KVListKeys", "list_keys", "keys_with_prefix"} {
+/Users/andrewsolgan/Documents/GitHub/Lattice/packages/rbac-domain/package_test.go:54:        "KVListKeys", "list_keys", "scan(", "keys_with_prefix",
+```
+
+Zero operational hits — all three matches are in comments or test fixture strings that assert the token's ABSENCE (forbidden-token enforcement). Guardrail passes.
+
+### Final Materializer Grep Audit (verbatim)
+
+```
+$ grep -rni "materializer" internal/refractor/ cmd/refractor/
+```
+
+18 lines remain. All fall into the three allowed categories:
+- **Morph-provenance** (9 hits): `ruleengine/ruleengine.go`, `ruleengine/full/executor.go` (×2), `ruleengine/full/executor_test.go`, `ruleengine/simple/evaluator.go` (×2), `adjacency/builder.go`, `consumer/bootstrap.go`, `cmd/refractor/main.go`
+- **`materializer.control` subject** (4 hits): `subjects/subjects.go`, `subjects/subjects_test.go` (×2), `control/service.go` (×2) — intentionally NOT renamed in 2.4a; Story 2.4b owns the control plane migration
+- **Rename provenance comments** (5 hits): `lens/schema.go` (×2), `consumer/manager.go`, `control/service.go` comments explaining the 2.4a rename
+
+### Deviations from Brief
+
+None. All §1–§6 work items completed as specified.
+
+The `UpdateCallback` type was defined in the deleted `loader.go` and was still needed by `corekv_source.go`. It was moved into `corekv_source.go` (same package) — a mechanical relocation with no behavior change.
+
+### Open CARs
+
+None.
+
+### Token Self-Estimate
+
+~60K tokens (calibrate +25% for outer telemetry → ~75K actual).

@@ -51,7 +51,9 @@ into:
 	assert.Contains(t, err.Error(), "id")
 }
 
-func TestParse_MissingTeam(t *testing.T) {
+func TestParse_NoTeam_Accepted(t *testing.T) {
+	// team is vestigial in the post-morph code (Deviation 4, Story 2.4a).
+	// Absent team must not cause a parse error.
 	y := []byte(`
 id: test-rule
 match: MATCH (r:room) RETURN r.id AS room_id
@@ -60,9 +62,10 @@ into:
   bucket: test
   key: room_id
 `)
-	_, err := lens.Parse(y)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "team")
+	r, err := lens.Parse(y)
+	require.NoError(t, err)
+	assert.Equal(t, "test-rule", r.ID)
+	assert.Empty(t, r.Team)
 }
 
 func TestParse_MatchWithoutReturn(t *testing.T) {

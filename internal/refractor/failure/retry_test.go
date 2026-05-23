@@ -266,7 +266,7 @@ func TestRetryQueue_ExhaustsToDLQ_Integration(t *testing.T) {
 	var gotMsg bool
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && !gotMsg {
-		cons, err := js.OrderedConsumer(ctx, "MATERIALIZER_DLQ_RULE-EXHAUSTED", jetstream.OrderedConsumerConfig{})
+		cons, err := js.OrderedConsumer(ctx, "REFRACTOR_DLQ_RULE-EXHAUSTED", jetstream.OrderedConsumerConfig{})
 		if err != nil {
 			time.Sleep(50 * time.Millisecond)
 			continue

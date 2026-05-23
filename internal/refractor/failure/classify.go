@@ -9,7 +9,7 @@ import (
 )
 
 // Category classifies an error into one of four routing tiers.
-// All error classification in Materializer routes through Classify — no other
+// All error classification in the Refractor routes through Classify — no other
 // package should perform local error classification (architecture.md rule).
 type Category uint8
 
