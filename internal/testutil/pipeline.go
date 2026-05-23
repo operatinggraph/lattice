@@ -100,6 +100,10 @@ type PipelineConfig struct {
 	Durable      string // consumer durable name; must be unique per test
 	Instance     string // health-heartbeater instance label; defaults to durable
 	ClaimEmitter processor.ClaimAttemptEmitter
+	// FilterSubjects overrides the JetStream consumer's filter subjects.
+	// Defaults to []string{"ops.default"} when empty. Use []string{"ops.meta"}
+	// for meta-lane pipelines (CreateMetaVertex / TombstoneMetaVertex).
+	FilterSubjects []string
 }
 
 // CapabilityPipeline builds a CommitPath wired with the real
@@ -150,10 +154,14 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		deps.ClaimEmitter = cfg.ClaimEmitter
 	}
 	cp := processor.NewCommitPath(deps)
+	filterSubjects := cfg.FilterSubjects
+	if len(filterSubjects) == 0 {
+		filterSubjects = []string{"ops.default"}
+	}
 	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
 		StreamName:     HarnessOpsStream,
 		Durable:        cfg.Durable,
-		FilterSubjects: []string{"ops.default"},
+		FilterSubjects: filterSubjects,
 		AckWait:        5 * time.Second,
 	}, logger)
 	if err != nil {
