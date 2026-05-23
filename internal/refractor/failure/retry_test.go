@@ -67,7 +67,6 @@ func TestRetryQueue_SuccessOnSecondAttempt(t *testing.T) {
 	done := make(chan struct{})
 	e := &failure.RetryEntry{
 		RuleID:      "rule-1",
-		Team:        "team-a",
 		EntityID:    "entity-1",
 		Stage:       "write",
 		MaxAttempts: 5,
@@ -109,7 +108,6 @@ func TestRetryQueue_ExhaustsToNilDLQ_NoPanic(t *testing.T) {
 
 	e := &failure.RetryEntry{
 		RuleID:      "rule-dlq",
-		Team:        "team-a",
 		EntityID:    "entity-dlq",
 		Stage:       "write",
 		MaxAttempts: 2,
@@ -153,7 +151,6 @@ func TestRetryQueue_DrainOnContextCancel(t *testing.T) {
 	// Enqueue an entry with a very long backoff so it will never fire.
 	e := &failure.RetryEntry{
 		RuleID:      "rule-cancel",
-		Team:        "team-a",
 		EntityID:    "entity-cancel",
 		Stage:       "write",
 		MaxAttempts: 5,
@@ -189,7 +186,6 @@ func TestRetryQueue_BackoffDoubles(t *testing.T) {
 	callCount := 0
 	e := &failure.RetryEntry{
 		RuleID:      "rule-double",
-		Team:        "team-a",
 		EntityID:    "entity-double",
 		Stage:       "write",
 		MaxAttempts: 5,
@@ -249,7 +245,6 @@ func TestRetryQueue_ExhaustsToDLQ_Integration(t *testing.T) {
 
 	e := &failure.RetryEntry{
 		RuleID:      "rule-exhausted",
-		Team:        "team-x",
 		EntityID:    "entity-ex",
 		Stage:       "write",
 		MaxAttempts: 2,

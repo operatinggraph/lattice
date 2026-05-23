@@ -14,7 +14,6 @@ import (
 // at RunFixture time (not at Load time) so Load stays infrastructure-free.
 type FixtureRule struct {
 	ID    string          `yaml:"id"`
-	Team  string          `yaml:"team"`
 	Match string          `yaml:"match"`
 	Into  lens.IntoConfig `yaml:"into"`
 }
@@ -65,7 +64,7 @@ type Fixture struct {
 
 // Load reads and parses the YAML fixture at path.
 // Returns an error if the file cannot be read, fails YAML parsing,
-// or is missing required fields (lens.id, lens.team, lens.match,
+// or is missing required fields (lens.id, lens.match,
 // lens.into.target, lens.into.key).
 func Load(path string) (*Fixture, error) {
 	data, err := os.ReadFile(path)
@@ -78,9 +77,6 @@ func Load(path string) (*Fixture, error) {
 	}
 	if fix.Rule.ID == "" {
 		return nil, fmt.Errorf("fixture: lens.id is required")
-	}
-	if fix.Rule.Team == "" {
-		return nil, fmt.Errorf("fixture: lens.team is required")
 	}
 	if fix.Rule.Match == "" {
 		return nil, fmt.Errorf("fixture: lens.match is required")

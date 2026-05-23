@@ -83,7 +83,6 @@ type RetryConfig struct {
 // Rule is the parsed, validated representation of a Lens (formerly Materializer-domain "Rule").
 type Rule struct {
 	ID            string      `yaml:"id"`
-	Team          string      `yaml:"team"` // vestigial — always empty in post-morph code; kept for YAML backward compat but not validated (Deviation 4, Story 2.4a)
 	Match         string      `yaml:"match"`
 	Into          IntoConfig  `yaml:"into"`
 	Retry         RetryConfig `yaml:"retry"`

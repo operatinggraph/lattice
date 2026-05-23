@@ -27,7 +27,6 @@ const (
 // satisfying the FR21 requirement for null (not empty string) in active entries.
 type Entry struct {
 	RuleID         string  `json:"ruleId"`
-	Team           string  `json:"team"`
 	Status         string  `json:"status"`         // "active" | "paused" | "rebuilding"
 	PauseReason    *string `json:"pauseReason"`    // null when active; "infra", "structural", or "manual" when paused
 	ActiveSequence uint64  `json:"activeSequence"` // NATS sequence of the active rule version
@@ -46,7 +45,6 @@ type Entry struct {
 type Reporter struct {
 	kv             jetstream.KeyValue
 	ruleID         string
-	team           string
 	mu             sync.RWMutex // protects activeSequence + ruleEngine
 	activeSequence uint64       // cached rule sequence; set via SetRuleSequence
 	ruleEngine     string       // cached resolved engine name; set via SetRuleEngine
@@ -54,8 +52,8 @@ type Reporter struct {
 }
 
 // New creates a Reporter for the given rule. kv must be the health KV bucket.
-func New(kv jetstream.KeyValue, ruleID, team string) *Reporter {
-	return &Reporter{kv: kv, ruleID: ruleID, team: team}
+func New(kv jetstream.KeyValue, ruleID string) *Reporter {
+	return &Reporter{kv: kv, ruleID: ruleID}
 }
 
 // SetRuleSequence caches the NATS sequence number of the currently-active rule version.
@@ -110,7 +108,6 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
-		Team:           r.team,
 		Status:         "active",
 		PauseReason:    nil, // JSON null
 		ActiveSequence: seq,
@@ -124,7 +121,7 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		return err
 	}
 	slog.Info("health: rule active",
-		"ruleId", r.ruleID, "team", r.team,
+		"ruleId", r.ruleID,
 		"activeSequence", seq, "errorCount", entry.ErrorCount,
 		"ruleEngine", eng)
 	return nil
@@ -153,7 +150,6 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
-		Team:           r.team,
 		Status:         "paused",
 		PauseReason:    &reason, // non-nil *string
 		ActiveSequence: seq,
@@ -167,7 +163,7 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		return err
 	}
 	slog.Info("health: rule paused",
-		"ruleId", r.ruleID, "team", r.team,
+		"ruleId", r.ruleID,
 		"pauseReason", reason, "lastError", lastError)
 	return nil
 }
@@ -192,7 +188,6 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 	}
 	entry := Entry{
 		RuleID:         r.ruleID,
-		Team:           r.team,
 		Status:         "rebuilding",
 		PauseReason:    nil, // JSON null — rebuilding is not a pause
 		ActiveSequence: seq,
@@ -205,7 +200,7 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 	if err := r.put(ctx, entry); err != nil {
 		return err
 	}
-	slog.Info("health: rule rebuilding", "ruleId", r.ruleID, "team", r.team)
+	slog.Info("health: rule rebuilding", "ruleId", r.ruleID)
 	return nil
 }
 
@@ -224,12 +219,11 @@ func (r *Reporter) RecordError(ctx context.Context, errMsg string) error {
 	existing.LastError = &errMsg
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
-	existing.Team = r.team
 	if writeErr := r.put(ctx, existing); writeErr != nil {
 		return writeErr
 	}
 	slog.Info("health: error recorded",
-		"ruleId", r.ruleID, "team", r.team,
+		"ruleId", r.ruleID,
 		"errorCount", existing.ErrorCount, "lastError", errMsg)
 	return nil
 }
@@ -244,7 +238,7 @@ func (r *Reporter) Delete(ctx context.Context) error {
 	if err := r.kv.Delete(ctx, r.ruleID); err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {
 		return fmt.Errorf("health: delete entry %s: %w", r.ruleID, err)
 	}
-	slog.Info("health: rule deleted", "ruleId", r.ruleID, "team", r.team)
+	slog.Info("health: rule deleted", "ruleId", r.ruleID)
 	return nil
 }
 
@@ -267,7 +261,6 @@ func (r *Reporter) SetConsumerLag(ctx context.Context, lag uint64) error {
 	existing.ActiveSequence = seq
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
-	existing.Team = r.team
 	return r.put(ctx, existing)
 }
 
@@ -279,13 +272,13 @@ func (r *Reporter) GetStatus(ctx context.Context) (Entry, error) {
 }
 
 // readExisting reads and unmarshals the current health KV entry for this rule.
-// Returns a zero Entry (status="active", ruleId and team set) on ErrKeyNotFound.
+// Returns a zero Entry (status="active", ruleId set) on ErrKeyNotFound.
 // Returns an error only for unexpected read or unmarshal failures.
 func (r *Reporter) readExisting(ctx context.Context) (Entry, error) {
 	e, err := r.kv.Get(ctx, r.ruleID)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return Entry{Status: "active", RuleID: r.ruleID, Team: r.team}, nil
+			return Entry{Status: "active", RuleID: r.ruleID}, nil
 		}
 		return Entry{}, fmt.Errorf("health: read existing %s: %w", r.ruleID, err)
 	}

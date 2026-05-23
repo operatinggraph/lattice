@@ -67,7 +67,7 @@ func TestPublish_WritesCorrectFields(t *testing.T) {
 		RawPayload:   `{"id":"entity-1"}`,
 	}
 
-	err := failure.Publish(ctx, js, "team-a", "test-rule", msg)
+	err := failure.Publish(ctx, js, "test-rule", msg)
 	require.NoError(t, err)
 
 	// Read back the message via an ordered consumer on the DLQ stream.

@@ -341,7 +341,6 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 
 	r := &Rule{
 		ID:            spec.ID,
-		Team:          "lattice", // Story 2.1 retains a constant Team (see MORPH-DEVIATIONS Deviation 4)
 		Match:         spec.CypherRule,
 		RuleEngine:    spec.Engine,
 		CanonicalName: spec.CanonicalName,

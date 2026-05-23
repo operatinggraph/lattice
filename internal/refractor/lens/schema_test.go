@@ -15,7 +15,6 @@ import (
 func validRuleYAML() []byte {
 	return []byte(`
 id: occupancy-view
-team: facilities
 match: |
   MATCH (r:room)-[:HAS_OCCUPANT]->(p:person)
   RETURN r.id AS room_id, p.name AS occupant_name
@@ -30,7 +29,6 @@ func TestParse_ValidRule(t *testing.T) {
 	r, err := lens.Parse(validRuleYAML())
 	require.NoError(t, err)
 	assert.Equal(t, "occupancy-view", r.ID)
-	assert.Equal(t, "facilities", r.Team)
 	assert.Contains(t, strings.ToUpper(r.Match), "RETURN")
 	assert.Equal(t, "nats_kv", r.Into.Target)
 	assert.Equal(t, "occupancy-view", r.Into.Bucket)
@@ -39,7 +37,6 @@ func TestParse_ValidRule(t *testing.T) {
 
 func TestParse_MissingID(t *testing.T) {
 	y := []byte(`
-team: facilities
 match: MATCH (r:room) RETURN r.id AS room_id
 into:
   target: nats_kv
@@ -52,8 +49,8 @@ into:
 }
 
 func TestParse_NoTeam_Accepted(t *testing.T) {
-	// team is vestigial in the post-morph code (Deviation 4, Story 2.4a).
-	// Absent team must not cause a parse error.
+	// team field is no longer part of the Rule struct (Story 2.4b).
+	// YAML with or without a team key must parse successfully (forward/backward compat).
 	y := []byte(`
 id: test-rule
 match: MATCH (r:room) RETURN r.id AS room_id
@@ -65,13 +62,11 @@ into:
 	r, err := lens.Parse(y)
 	require.NoError(t, err)
 	assert.Equal(t, "test-rule", r.ID)
-	assert.Empty(t, r.Team)
 }
 
 func TestParse_MatchWithoutReturn(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (r:room)-[:HAS_OCCUPANT]->(p:person)
 into:
   target: nats_kv
@@ -88,7 +83,6 @@ func TestParse_InvalidMatchSyntax(t *testing.T) {
 	// engine.Parse integration path and the "rule validation: invalid match query" wrapping.
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement-[:HAS_PARTY]->(i:identity) RETURN a.id AS id
 into:
   target: nats_kv
@@ -103,7 +97,6 @@ into:
 func TestParse_RetryConfig(t *testing.T) {
 	y := []byte(`
 id: agreement-summary
-team: agreements
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: nats_kv
@@ -122,7 +115,6 @@ retry:
 func TestParse_CompositeKeyArray(t *testing.T) {
 	y := []byte(`
 id: agreement-summary
-team: agreements
 match: MATCH (a:agreement) RETURN a.team AS team_id, a.id AS agreement_id
 into:
   target: nats_kv
@@ -139,7 +131,6 @@ into:
 func TestParse_CompositeKeyString(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: nats_kv
@@ -155,7 +146,6 @@ func TestParse_UnknownExtraFields(t *testing.T) {
 	// Extra/unknown fields must not cause errors — forward/backward compat (NFR22)
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: nats_kv
@@ -172,7 +162,6 @@ another_unknown:
 func TestParse_MissingKey(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: nats_kv
@@ -186,7 +175,6 @@ into:
 func TestParse_InvalidTarget(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: redis
@@ -209,7 +197,6 @@ func TestParse_RetryOptional(t *testing.T) {
 func TestParse_PostgresTarget(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -225,7 +212,6 @@ into:
 func TestParse_NatsKV_MissingBucket(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: nats_kv
@@ -239,7 +225,6 @@ into:
 func TestParse_Postgres_MissingDSN(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -254,7 +239,6 @@ into:
 func TestParse_Postgres_MissingTable(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -270,7 +254,6 @@ func TestParse_QueryTimeout_Default(t *testing.T) {
 	// A postgres rule with no query_timeout should default to 30s.
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -286,7 +269,6 @@ into:
 func TestParse_QueryTimeout_Custom(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -303,7 +285,6 @@ into:
 func TestParse_QueryTimeout_Invalid(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -327,7 +308,6 @@ func TestParse_QueryTimeout_NatsKV_DefaultApplied(t *testing.T) {
 func TestParse_KeyArrayEmptyElement(t *testing.T) {
 	y := []byte(`
 id: test-rule
-team: test-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: nats_kv

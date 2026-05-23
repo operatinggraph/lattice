@@ -93,7 +93,7 @@ func TestLagPoller_PublishesMetric(t *testing.T) {
 
 	const ruleID = "rule-publish"
 	cons := env.makeConsumer(t, "core-pub", ruleID)
-	reporter := health.New(env.healthKV, ruleID, "team-a")
+	reporter := health.New(env.healthKV, ruleID)
 
 	msgCh := make(chan *nats.Msg, 5)
 	sub, err := env.nc.ChanSubscribe(subjects.Metrics(ruleID), msgCh)
@@ -103,7 +103,7 @@ func TestLagPoller_PublishesMetric(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lp := health.NewLagPoller(env.nc, cons, reporter, ruleID, "team-a")
+	lp := health.NewLagPoller(env.nc, cons, reporter, ruleID)
 	_ = startPoller(lp, ctx)
 
 	// Wait up to 2s for the first metric message.
@@ -112,7 +112,6 @@ func TestLagPoller_PublishesMetric(t *testing.T) {
 		var m health.LagMetric
 		require.NoError(t, json.Unmarshal(msg.Data, &m), "metric payload must be valid JSON")
 		assert.Equal(t, ruleID, m.RuleID)
-		assert.Equal(t, "team-a", m.Team)
 		assert.NotEmpty(t, m.Timestamp, "Timestamp must be set")
 		_, parseErr := time.Parse(time.RFC3339, m.Timestamp)
 		assert.NoError(t, parseErr, "Timestamp must be valid RFC3339")
@@ -131,7 +130,7 @@ func TestLagPoller_UpdatesHealthKV(t *testing.T) {
 
 	const ruleID = "rule-kv"
 	cons := env.makeConsumer(t, "core-kv", ruleID)
-	reporter := health.New(env.healthKV, ruleID, "team-a")
+	reporter := health.New(env.healthKV, ruleID)
 
 	// Establish an initial health entry.
 	require.NoError(t, reporter.SetActive(context.Background()))
@@ -141,7 +140,7 @@ func TestLagPoller_UpdatesHealthKV(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lp := health.NewLagPoller(env.nc, cons, reporter, ruleID, "team-a")
+	lp := health.NewLagPoller(env.nc, cons, reporter, ruleID)
 	_ = startPoller(lp, ctx)
 
 	// Wait for SetConsumerLag to update LastUpdated beyond the initial value.
@@ -179,8 +178,8 @@ func TestLagPoller_PerRuleIsolation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	lpA := health.NewLagPoller(env.nc, consA, nil, ruleA, "team-a")
-	lpB := health.NewLagPoller(env.nc, consB, nil, ruleB, "team-b")
+	lpA := health.NewLagPoller(env.nc, consA, nil, ruleA)
+	lpB := health.NewLagPoller(env.nc, consB, nil, ruleB)
 	wgA := startPoller(lpA, ctx)
 	wgB := startPoller(lpB, ctx)
 
@@ -237,7 +236,7 @@ func TestLagPoller_StopsOnContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	lp := health.NewLagPoller(env.nc, cons, nil, ruleID, "team-a")
+	lp := health.NewLagPoller(env.nc, cons, nil, ruleID)
 	wg := startPoller(lp, ctx)
 
 	// Let at least one message publish before cancelling.
@@ -276,7 +275,7 @@ func TestLagPoller_ContinuesDuringPause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lp := health.NewLagPoller(env.nc, cons, nil, ruleID, "team-a")
+	lp := health.NewLagPoller(env.nc, cons, nil, ruleID)
 	_ = startPoller(lp, ctx)
 
 	// Receive at least 3 consecutive messages to prove continuous autonomous polling.

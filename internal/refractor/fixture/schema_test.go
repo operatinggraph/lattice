@@ -23,7 +23,6 @@ func TestLoad_BasicUpsert(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "basic-upsert", fix.Rule.ID)
-	assert.Equal(t, "test-team", fix.Rule.Team)
 	assert.NotEmpty(t, fix.Rule.Match)
 	assert.Equal(t, "nats_kv", fix.Rule.Into.Target)
 	assert.Equal(t, []string{"agreement_id"}, []string(fix.Rule.Into.Key))
@@ -44,7 +43,7 @@ func TestLoad_BasicUpsert(t *testing.T) {
 func TestLoad_MissingRuleID(t *testing.T) {
 	content := `
 rule:
-  team: test-team
+
   match: "MATCH (a:agreement) RETURN a.id AS agreement_id"
   into:
     target: nats_kv
@@ -64,7 +63,7 @@ func TestLoad_MissingIntoKey(t *testing.T) {
 	content := `
 rule:
   id: test
-  team: test-team
+
   match: "MATCH (a:agreement) RETURN a.id AS agreement_id"
   into:
     target: nats_kv
@@ -83,7 +82,7 @@ func TestLoad_MissingMatch(t *testing.T) {
 	content := `
 rule:
   id: test
-  team: test-team
+
   into:
     target: nats_kv
     bucket: b
@@ -103,7 +102,7 @@ func TestLoad_CompositeKey(t *testing.T) {
 description: "composite key fixture"
 rule:
   id: composite-test
-  team: test-team
+
   match: "MATCH (a:agreement) RETURN a.teamId AS team_id, a.id AS agreement_id"
   into:
     target: nats_kv
@@ -124,7 +123,7 @@ func TestLoad_WithAdjacency(t *testing.T) {
 description: "adjacency seed fixture"
 rule:
   id: adj-test
-  team: test-team
+
   match: "MATCH (a:agreement)-[:HAS_PARTY]->(i:identity) RETURN a.id AS agreement_id, i.name AS party_name"
   into:
     target: nats_kv
@@ -167,7 +166,7 @@ func TestLoad_DeletedExpectEntry(t *testing.T) {
 description: "fixture with deleted expect entry"
 rule:
   id: del-test
-  team: test-team
+
   match: "MATCH (a:agreement) RETURN a.id AS agreement_id"
   into:
     target: nats_kv

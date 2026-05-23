@@ -159,7 +159,7 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 	adpt, err := adapter.New(targetKV, capabilityRule.Into.Key)
 	require.NoError(t, err)
 
-	p, err := pipeline.New(capabilityRule.ID, capabilityRule.Team, "nats_kv",
+	p, err := pipeline.New(capabilityRule.ID, "nats_kv",
 		nil, bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(t, err)
 	p.UseFullEngine(full.New(), capabilityRule.CompiledRule)

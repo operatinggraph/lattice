@@ -43,7 +43,6 @@ type ConsumerResetter interface {
 // Each rule runs its own Pipeline in an independent goroutine (NFR13).
 type Pipeline struct {
 	ruleID       string
-	team         string
 	adapterName  string // "nats_kv" or "postgres" — used for logging only
 	plan         *simple.QueryPlan
 	coreKVBucket string // Core KV bucket name; used to strip the $KV prefix from subjects
@@ -137,7 +136,7 @@ type EnvelopeFn func(row map[string]any, keys map[string]any, params map[string]
 // reporter may be nil — health KV reads/writes are skipped when nil.
 // Returns an error if adpt is nil.
 func New(
-	ruleID, team, adapterName string,
+	ruleID, adapterName string,
 	plan *simple.QueryPlan,
 	coreKVBucket string,
 	adjKV, coreKV jetstream.KeyValue,
@@ -153,7 +152,6 @@ func New(
 	}
 	p := &Pipeline{
 		ruleID:              ruleID,
-		team:                team,
 		adapterName:         adapterName,
 		plan:                plan,
 		coreKVBucket:        coreKVBucket,
@@ -335,7 +333,7 @@ func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
 			case <-resumeCh:
 				p.clearResumeCh()
 				slog.Info("pipeline: manual pause cleared by resume",
-					"ruleId", p.ruleID, "team", p.team)
+					"ruleId", p.ruleID)
 			}
 			// Resumed — fall through to pendingCons check and normal loop.
 			continue
@@ -368,12 +366,12 @@ func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
 		switch cat {
 		case failure.CatInfra:
 			slog.Warn("pipeline: infrastructure failure, pausing",
-				"ruleId", p.ruleID, "team", p.team, "err", drainErr)
+				"ruleId", p.ruleID, "err", drainErr)
 			p.setHealthPaused(ctx, health.PauseReasonInfra, drainErr)
 			cat, probeErr := p.runInfraProbeLoop(ctx)
 			if cat == failure.CatStructural {
 				slog.Error("pipeline: structural error during probe, pausing until resume or shutdown",
-					"ruleId", p.ruleID, "team", p.team, "err", probeErr)
+					"ruleId", p.ruleID, "err", probeErr)
 				p.setHealthPaused(ctx, health.PauseReasonStructural, probeErr)
 				resumeCh := p.initResumeCh()
 				select {
@@ -383,7 +381,7 @@ func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
 				case <-resumeCh:
 					p.clearResumeCh()
 					slog.Info("pipeline: structural pause (probe) cleared by resume",
-						"ruleId", p.ruleID, "team", p.team)
+						"ruleId", p.ruleID)
 				}
 				// Resumed — fall through to setHealthActive and continue the Run loop.
 			}
@@ -394,7 +392,7 @@ func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
 
 		case failure.CatStructural:
 			slog.Error("pipeline: structural failure, pausing until resume or shutdown",
-				"ruleId", p.ruleID, "team", p.team, "err", drainErr)
+				"ruleId", p.ruleID, "err", drainErr)
 			p.setHealthPaused(ctx, health.PauseReasonStructural, drainErr)
 			resumeCh := p.initResumeCh()
 			select {
@@ -404,7 +402,7 @@ func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
 			case <-resumeCh:
 				p.clearResumeCh()
 				slog.Info("pipeline: structural pause cleared by resume",
-					"ruleId", p.ruleID, "team", p.team)
+					"ruleId", p.ruleID)
 			}
 
 		default:
@@ -533,11 +531,11 @@ func (p *Pipeline) restoreHealthState(ctx context.Context) bool {
 	switch *entry.PauseReason {
 	case health.PauseReasonInfra:
 		slog.Info("pipeline: restoring infra pause from health KV, entering probe loop",
-			"ruleId", p.ruleID, "team", p.team)
+			"ruleId", p.ruleID)
 		cat, probeErr := p.runInfraProbeLoop(ctx)
 		if cat == failure.CatStructural {
 			slog.Error("pipeline: structural error during probe on restart, pausing until resume or shutdown",
-				"ruleId", p.ruleID, "team", p.team, "err", probeErr)
+				"ruleId", p.ruleID, "err", probeErr)
 			p.setHealthPaused(ctx, health.PauseReasonStructural, probeErr)
 			resumeCh := p.initResumeCh()
 			select {
@@ -547,7 +545,7 @@ func (p *Pipeline) restoreHealthState(ctx context.Context) bool {
 			case <-resumeCh:
 				p.clearResumeCh()
 				slog.Info("pipeline: structural pause (probe on restart) cleared by resume",
-					"ruleId", p.ruleID, "team", p.team)
+					"ruleId", p.ruleID)
 				// Resumed — fall through to setHealthActive and return false so Run continues.
 			}
 		}
@@ -558,7 +556,7 @@ func (p *Pipeline) restoreHealthState(ctx context.Context) bool {
 
 	case health.PauseReasonStructural:
 		slog.Info("pipeline: restoring structural pause from health KV, blocking until resume or shutdown",
-			"ruleId", p.ruleID, "team", p.team)
+			"ruleId", p.ruleID)
 		resumeCh := p.initResumeCh()
 		select {
 		case <-ctx.Done():
@@ -567,14 +565,14 @@ func (p *Pipeline) restoreHealthState(ctx context.Context) bool {
 		case <-resumeCh:
 			p.clearResumeCh()
 			slog.Info("pipeline: structural pause cleared by resume on startup restore",
-				"ruleId", p.ruleID, "team", p.team)
+				"ruleId", p.ruleID)
 			// Resumed — health KV already set active by Resume(); return false so Run continues.
 			return false
 		}
 
 	case health.PauseReasonManual:
 		slog.Info("pipeline: restoring manual pause from health KV, blocking until resume or shutdown",
-			"ruleId", p.ruleID, "team", p.team)
+			"ruleId", p.ruleID)
 		resumeCh := p.initResumeCh()
 		select {
 		case <-ctx.Done():
@@ -583,7 +581,7 @@ func (p *Pipeline) restoreHealthState(ctx context.Context) bool {
 		case <-resumeCh:
 			p.clearResumeCh()
 			slog.Info("pipeline: manual pause cleared by resume on startup restore",
-				"ruleId", p.ruleID, "team", p.team)
+				"ruleId", p.ruleID)
 			// Resumed — health KV already set active by Resume(); return false so Run continues.
 			return false
 		}
@@ -690,7 +688,7 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 	var props map[string]any
 	if err := json.Unmarshal(msg.Data(), &props); err != nil {
 		slog.Error("pipeline: unmarshal payload",
-			"ruleId", p.ruleID, "team", p.team, "entityId", key,
+			"ruleId", p.ruleID, "entityId", key,
 			"stage", "pipeline", "adapter", p.adapterName, "err", err)
 		if nakErr := msg.Nak(); nakErr != nil {
 			slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
@@ -722,7 +720,7 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 	results, err := p.evaluateForEntry(ctx, entry)
 	if err != nil {
 		slog.Error("pipeline: evaluate",
-			"ruleId", p.ruleID, "team", p.team, "entityId", key,
+			"ruleId", p.ruleID, "entityId", key,
 			"stage", "traversal", "adapter", p.adapterName, "err", err)
 		cat := failure.Classify(err)
 		if cat == failure.CatInfra || cat == failure.CatStructural {
@@ -765,7 +763,7 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 				op = "delete"
 			}
 			slog.Error("pipeline: "+op,
-				"ruleId", p.ruleID, "team", p.team, "entityId", key,
+				"ruleId", p.ruleID, "entityId", key,
 				"stage", "write", "adapter", p.adapterName, "err", writeErr)
 
 			if cat == failure.CatInfra || cat == failure.CatStructural {
@@ -795,7 +793,6 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 				}
 				e := &failure.RetryEntry{
 					RuleID:       p.ruleID,
-					Team:         p.team,
 					EntityID:     key,
 					Stage:        "write",
 					RawPayload:   msg.Data(),
@@ -846,7 +843,7 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 	}
 
 	slog.Info("pipeline: processed",
-		"ruleId", p.ruleID, "team", p.team, "entityId", key,
+		"ruleId", p.ruleID, "entityId", key,
 		"stage", "pipeline", "adapter", p.adapterName)
 	if err := msg.Ack(); err != nil {
 		slog.Error("pipeline: ack failed", "ruleId", p.ruleID, "err", err)
@@ -920,7 +917,7 @@ func (p *Pipeline) Resume(ctx context.Context) {
 func (p *Pipeline) publishTerminalDLQ(ctx context.Context, msg jetstream.Msg, entityID, stage string, origErr error) {
 	if p.retryJS == nil {
 		slog.Error("pipeline: terminal failure, no JetStream for DLQ — entity dropped",
-			"ruleId", p.ruleID, "team", p.team, "entityId", entityID,
+			"ruleId", p.ruleID, "entityId", entityID,
 			"stage", stage, "err", origErr)
 		return
 	}
@@ -945,9 +942,9 @@ func (p *Pipeline) publishTerminalDLQ(ctx context.Context, msg jetstream.Msg, en
 	}
 	// Use WithoutCancel so a DLQ publish triggered during shutdown still completes.
 	pubCtx := context.WithoutCancel(ctx)
-	if err := failure.Publish(pubCtx, p.retryJS, p.team, p.ruleID, dlqMsg); err != nil {
+	if err := failure.Publish(pubCtx, p.retryJS, p.ruleID, dlqMsg); err != nil {
 		slog.Error("pipeline: terminal DLQ publish failed",
-			"ruleId", p.ruleID, "team", p.team, "entityId", entityID,
+			"ruleId", p.ruleID, "entityId", entityID,
 			"stage", stage, "err", err)
 	} else if p.reporter != nil {
 		// AC3: increment health KV error count after each DLQ write.
@@ -971,7 +968,7 @@ func (p *Pipeline) runInfraProbeLoop(ctx context.Context) (failure.Category, err
 	case <-p.forceResumeCh:
 	default:
 	}
-	slog.Info("pipeline: entering probe loop", "ruleId", p.ruleID, "team", p.team)
+	slog.Info("pipeline: entering probe loop", "ruleId", p.ruleID)
 	for {
 		select {
 		case <-ctx.Done():
@@ -980,23 +977,23 @@ func (p *Pipeline) runInfraProbeLoop(ctx context.Context) (failure.Category, err
 			// Resume() was called while we were in the probe loop (AC4).
 			// Treat as recovered so Run re-enters the normal fetch loop.
 			slog.Info("pipeline: infra probe loop overridden by resume op",
-				"ruleId", p.ruleID, "team", p.team)
+				"ruleId", p.ruleID)
 			return failure.CatTransient, nil
 		case <-time.After(ProbeInterval):
 			err := p.currentAdapter().Probe(ctx)
 			if err == nil {
-				slog.Info("pipeline: target store recovered, resuming", "ruleId", p.ruleID, "team", p.team)
+				slog.Info("pipeline: target store recovered, resuming", "ruleId", p.ruleID)
 				return failure.CatTransient, nil
 			}
 			// Classify the probe error: a structural error (e.g. bucket deleted while paused)
 			// must escalate to a permanent structural pause rather than retrying indefinitely.
 			if failure.Classify(err) == failure.CatStructural {
 				slog.Error("pipeline: structural error discovered during probe, escalating",
-					"ruleId", p.ruleID, "team", p.team, "stage", "probe", "err", err)
+					"ruleId", p.ruleID, "stage", "probe", "err", err)
 				return failure.CatStructural, err
 			}
 			slog.Warn("pipeline: target store not yet available, probing again",
-				"ruleId", p.ruleID, "team", p.team, "stage", "probe")
+				"ruleId", p.ruleID, "stage", "probe")
 		}
 	}
 }
@@ -1178,12 +1175,12 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjEntry jetstream.KeyVa
 				return
 			}
 			slog.Warn("pipeline: adj watch: write",
-				"ruleId", p.ruleID, "team", p.team, "key", nodeKey, "err", writeErr)
+				"ruleId", p.ruleID, "key", nodeKey, "err", writeErr)
 			// Continue — remaining results are independent; adapter writes are idempotent.
 			continue
 		}
 		slog.Info("pipeline: adj watch: re-evaluated",
-			"ruleId", p.ruleID, "team", p.team, "entityId", nodeKey,
+			"ruleId", p.ruleID, "entityId", nodeKey,
 			"stage", "pipeline", "adapter", p.adapterName)
 	}
 }

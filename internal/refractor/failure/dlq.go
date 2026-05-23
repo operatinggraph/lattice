@@ -27,9 +27,7 @@ type DLQMessage struct {
 
 // Publish writes msg to the DLQ stream for the given ruleID.
 // The stream is created (idempotent) if absent. Subject: subjects.DLQ(ruleID).
-// team parameter is retained for call-site compatibility but is no longer used
-// in the subject — team segment was removed per Deviation 4 (Story 2.4a).
-func Publish(ctx context.Context, js jetstream.JetStream, team, ruleID string, msg DLQMessage) error {
+func Publish(ctx context.Context, js jetstream.JetStream, ruleID string, msg DLQMessage) error {
 	subject := subjects.DLQ(ruleID)
 	streamName := "REFRACTOR_DLQ_" + strings.ToUpper(ruleID)
 	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{

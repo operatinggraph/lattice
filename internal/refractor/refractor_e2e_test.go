@@ -156,7 +156,7 @@ func TestRefractor_E2E_P99(t *testing.T) {
 	adpt, err := adapter.New(targetKV, []string{"contract_id"})
 	require.NoError(t, err)
 
-	p, err := pipeline.New(lensID, "lattice", "nats_kv", plan, coreBucket, adjKV, coreKV, adpt, nil)
+	p, err := pipeline.New(lensID, "nats_kv", plan, coreBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, manager.Add(ctx, lensID))

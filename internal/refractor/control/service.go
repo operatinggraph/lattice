@@ -64,14 +64,13 @@ type Deleter interface {
 
 // ControlRequest is the JSON payload sent to control endpoints. Op and RuleID
 // are now expressed in the request subject (lattice.ctrl.refractor.<lensId>.<op>),
-// so on the wire only the operation-specific fields (Team, Truncate) carry
+// so on the wire only the operation-specific fields (Truncate) carry
 // meaning. The Op and RuleID fields are retained for backwards compatibility
 // with tooling that still constructs the legacy single-subject payload — when
 // the subject path provides values the subject path wins.
 type ControlRequest struct {
 	Op       string `json:"op,omitempty"`       // legacy; subject path is authoritative
 	RuleID   string `json:"ruleId,omitempty"`   // legacy; subject path is authoritative
-	Team     string `json:"team,omitempty"`     // optional; used for context in "validate" op
 	Truncate bool   `json:"truncate,omitempty"` // used by "rebuild" op; default false
 }
 

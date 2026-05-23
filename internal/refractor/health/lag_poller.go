@@ -24,7 +24,6 @@ var MetricsInterval = 5 * time.Second
 // All field names are camelCase per FR21 convention.
 type LagMetric struct {
 	RuleID      string `json:"ruleId"`
-	Team        string `json:"team"`
 	ConsumerLag uint64 `json:"consumerLag"`
 	Timestamp   string `json:"timestamp"` // RFC3339 UTC
 }
@@ -39,7 +38,6 @@ type LagPoller struct {
 	consumer jetstream.Consumer
 	reporter *Reporter     // may be nil — health KV update skipped when nil
 	ruleID   string
-	team     string
 	interval time.Duration // captured from MetricsInterval at NewLagPoller time
 }
 
@@ -47,7 +45,7 @@ type LagPoller struct {
 // Panics if nc or consumer is nil (both are required for correct operation).
 // reporter may be nil — health KV updates are skipped in that case.
 // The polling interval is captured from MetricsInterval at call time.
-func NewLagPoller(nc *nats.Conn, consumer jetstream.Consumer, reporter *Reporter, ruleID, team string) *LagPoller {
+func NewLagPoller(nc *nats.Conn, consumer jetstream.Consumer, reporter *Reporter, ruleID string) *LagPoller {
 	if nc == nil {
 		panic("health: NewLagPoller: nc must not be nil")
 	}
@@ -63,7 +61,6 @@ func NewLagPoller(nc *nats.Conn, consumer jetstream.Consumer, reporter *Reporter
 		consumer: consumer,
 		reporter: reporter,
 		ruleID:   ruleID,
-		team:     team,
 		interval: iv,
 	}
 }
@@ -115,7 +112,6 @@ func (lp *LagPoller) poll(ctx context.Context) {
 
 	msg := LagMetric{
 		RuleID:      lp.ruleID,
-		Team:        lp.team,
 		ConsumerLag: lag,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}

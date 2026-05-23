@@ -52,7 +52,6 @@ func BootstrapLens() *Rule {
 	}
 	return &Rule{
 		ID:    BootstrapLensID,
-		Team:  "lattice",
 		Match: "MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name",
 		Into: IntoConfig{
 			Target:          "postgres",

@@ -152,7 +152,7 @@ func newHealthReporter(t *testing.T, env *pipelineEnv, ruleID string) *health.Re
 	t.Helper()
 	kv, err := env.js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{Bucket: "HEALTH-" + ruleID})
 	require.NoError(t, err)
-	return health.New(kv, ruleID, "team-test")
+	return health.New(kv, ruleID)
 }
 
 // startPipeline adds a rule consumer and starts the pipeline in a goroutine.
@@ -231,7 +231,7 @@ func TestPipeline_New_NilAdapter(t *testing.T) {
 	plan, err := simple.Compile(ast, []string{"agreement_id"})
 	require.NoError(t, err)
 
-	_, err = pipeline.New("rule-1", "team-a", "nats_kv", plan, "CORE", nil, nil, nil, nil)
+	_, err = pipeline.New("rule-1", "nats_kv", plan, "CORE", nil, nil, nil, nil)
 	assert.Error(t, err, "expected error when adapter is nil")
 }
 
@@ -245,7 +245,7 @@ func TestPipeline_Upsert(t *testing.T) {
 
 	targetKV, adpt := newTargetKV(t, env, "target-upsert", []string{"agreement_id"})
 
-	p, err := pipeline.New("rule-1", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
+	p, err := pipeline.New("rule-1", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
 	require.NoError(t, err)
 	startPipeline(t, env, p, "rule-1")
 
@@ -273,7 +273,7 @@ func TestPipeline_Delete(t *testing.T) {
 
 	targetKV, adpt := newTargetKV(t, env, "target-delete", []string{"agreement_id"})
 
-	p, err := pipeline.New("rule-2", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
+	p, err := pipeline.New("rule-2", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
 	require.NoError(t, err)
 	startPipeline(t, env, p, "rule-2")
 
@@ -307,7 +307,7 @@ func TestPipeline_ErrorNak(t *testing.T) {
 		[]string{"agreement_id"})
 
 	ea := &errAdapter{}
-	p, err := pipeline.New("rule-err", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ea, nil)
+	p, err := pipeline.New("rule-err", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ea, nil)
 	require.NoError(t, err)
 	startPipeline(t, env, p, "rule-err")
 
@@ -330,7 +330,7 @@ func TestPipeline_GracefulShutdown(t *testing.T) {
 		[]string{"agreement_id"})
 
 	_, adpt := newTargetKV(t, env, "target-shutdown", []string{"agreement_id"})
-	p, err := pipeline.New("rule-sd", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
+	p, err := pipeline.New("rule-sd", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adpt, nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -371,9 +371,9 @@ func TestPipeline_MultiRule_Independent(t *testing.T) {
 		[]string{"identity_name"})
 	targetB, adptB := newTargetKV(t, env, "target-rule-b", []string{"identity_name"})
 
-	pA, err := pipeline.New("rule-a", "team-x", "nats_kv", planA, coreKVBucket, env.adjKV, env.coreKV, adptA, nil)
+	pA, err := pipeline.New("rule-a", "nats_kv", planA, coreKVBucket, env.adjKV, env.coreKV, adptA, nil)
 	require.NoError(t, err)
-	pB, err := pipeline.New("rule-b", "team-x", "nats_kv", planB, coreKVBucket, env.adjKV, env.coreKV, adptB, nil)
+	pB, err := pipeline.New("rule-b", "nats_kv", planB, coreKVBucket, env.adjKV, env.coreKV, adptB, nil)
 	require.NoError(t, err)
 
 	startPipeline(t, env, pA, "rule-a")
@@ -417,7 +417,7 @@ func TestPipeline_InfrastructurePause(t *testing.T) {
 	ia := &infraAdapter{recoverAt: 2}
 
 	reporter := newHealthReporter(t, env, "rule-infra")
-	p, err := pipeline.New("rule-infra", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ia, reporter)
+	p, err := pipeline.New("rule-infra", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ia, reporter)
 	require.NoError(t, err)
 
 	// Create consumer with short AckWait so the unacked infra message is redelivered quickly.
@@ -473,7 +473,7 @@ func TestPipeline_StructuralPause(t *testing.T) {
 
 	sa := &structuralAdapter{}
 	reporter := newHealthReporter(t, env, "rule-structural")
-	p, err := pipeline.New("rule-structural", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, sa, reporter)
+	p, err := pipeline.New("rule-structural", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, sa, reporter)
 	require.NoError(t, err)
 
 	startPipeline(t, env, p, "rule-structural")
@@ -523,7 +523,7 @@ func TestPipeline_HealthKV_StartupRestore_Infra(t *testing.T) {
 	// Override with a real adapter that writes to targetKV so we can verify processing resumes.
 	// For this test we just check that the pipeline transitions from paused→active.
 
-	p, err := pipeline.New("rule-restore", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, targetAdpt, reporter)
+	p, err := pipeline.New("rule-restore", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, targetAdpt, reporter)
 	require.NoError(t, err)
 	// Swap adapter for probe — use a wrapper that delegates probe to ia but writes to targetAdpt.
 	_ = ia // referenced above; probe logic tested separately
@@ -578,7 +578,7 @@ func TestPipeline_HealthKV_StartupRestore_Structural(t *testing.T) {
 	reporter := newHealthReporter(t, env, "rule-restore-structural")
 	require.NoError(t, reporter.SetPaused(context.Background(), health.PauseReasonStructural, "simulated structural restart"))
 
-	p, err := pipeline.New("rule-restore-structural", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, rec, reporter)
+	p, err := pipeline.New("rule-restore-structural", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, rec, reporter)
 	require.NoError(t, err)
 
 	startPipeline(t, env, p, "rule-restore-structural")
@@ -613,7 +613,7 @@ func TestPipeline_StructuralPauseResumes(t *testing.T) {
 
 	sa := &structuralOnceAdapter{}
 	reporter := newHealthReporter(t, env, "rule-resume")
-	p, err := pipeline.New("rule-resume", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, sa, reporter)
+	p, err := pipeline.New("rule-resume", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, sa, reporter)
 	require.NoError(t, err)
 
 	startPipeline(t, env, p, "rule-resume")
@@ -703,7 +703,7 @@ func TestPipeline_HotReloadInto_NextMessageUsesNewAdapter(t *testing.T) {
 	adptA := &recorderAdapter{}
 	adptB := &recorderAdapter{}
 
-	p, err := pipeline.New("rule-hotreload", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adptA, nil)
+	p, err := pipeline.New("rule-hotreload", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, adptA, nil)
 	require.NoError(t, err)
 	startPipeline(t, env, p, "rule-hotreload")
 
@@ -732,7 +732,7 @@ func TestPipeline_HotReloadInto_NilAdapterReturnsError(t *testing.T) {
 		[]string{"agreement_id"})
 	// Use a pool with fake DSN — no real NATS needed for this unit check.
 	adpt := &recorderAdapter{}
-	p, err := pipeline.New("rule-nil", "team-a", "nats_kv", plan, "CORE", nil, nil, adpt, nil)
+	p, err := pipeline.New("rule-nil", "nats_kv", plan, "CORE", nil, nil, adpt, nil)
 	require.NoError(t, err)
 	assert.Error(t, p.HotReloadInto(nil), "HotReloadInto(nil) must return an error")
 }
@@ -752,7 +752,7 @@ func TestPipeline_HotReloadPlan_NextMessageUsesNewPlan(t *testing.T) {
 		[]string{"agreement_name"})
 
 	ra := &recorderAdapter{}
-	p, err := pipeline.New("rule-hotreload-plan", "team-a", "nats_kv", planA, coreKVBucket, env.adjKV, env.coreKV, ra, nil)
+	p, err := pipeline.New("rule-hotreload-plan", "nats_kv", planA, coreKVBucket, env.adjKV, env.coreKV, ra, nil)
 	require.NoError(t, err)
 	startPipeline(t, env, p, "rule-hotreload-plan")
 
@@ -783,7 +783,7 @@ func TestPipeline_HotReloadPlan_NilPlanReturnsError(t *testing.T) {
 		"MATCH (a:agreement) RETURN a.id AS agreement_id",
 		[]string{"agreement_id"})
 	adpt := &recorderAdapter{}
-	p, err := pipeline.New("rule-nil-plan", "team-a", "nats_kv", plan, "CORE", nil, nil, adpt, nil)
+	p, err := pipeline.New("rule-nil-plan", "nats_kv", plan, "CORE", nil, nil, adpt, nil)
 	require.NoError(t, err)
 	assert.Error(t, p.HotReloadPlan(nil), "HotReloadPlan(nil) must return an error")
 }
@@ -807,7 +807,7 @@ func TestPipeline_TransientWriteEnqueuesRetry(t *testing.T) {
 
 	rq := failure.NewRetryQueue()
 
-	p, err := pipeline.New("rule-retry", "team-a", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ea, nil)
+	p, err := pipeline.New("rule-retry", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ea, nil)
 	require.NoError(t, err)
 	p.SetRetryQueue(rq, nil, 3, time.Millisecond)
 
@@ -867,8 +867,7 @@ func TestPipeline_TerminalWritePublishesDLQAndContinues(t *testing.T) {
 	rq := failure.NewRetryQueue()
 
 	const ruleID = "rule-terminal"
-	const team = "team-a"
-	p, err := pipeline.New(ruleID, team, "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ta, nil)
+	p, err := pipeline.New(ruleID, "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ta, nil)
 	require.NoError(t, err)
 	// SetRetryQueue provides the JetStream handle used for Terminal DLQ publish.
 	p.SetRetryQueue(rq, env.js, 3, time.Millisecond)
@@ -938,7 +937,7 @@ func TestPipeline_NilAuditWriter_NoOp(t *testing.T) {
 	plan := compileSimplePlan(t, "MATCH (n:agreement) RETURN n.id AS agreement_id", []string{"agreement_id"})
 	targetKV, adpt := newTargetKV(t, env, "TARGET-AUDIT-NIL", []string{"agreement_id"})
 
-	p, err := pipeline.New(ruleID, "team-test", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New(ruleID, "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, adpt, nil)
 	require.NoError(t, err)
 	// Deliberately do NOT call p.SetAuditWriter — auditWriter remains nil.
@@ -967,7 +966,7 @@ func TestPipeline_AuditEntry_WrittenOnSuccess(t *testing.T) {
 	plan := compileSimplePlan(t, "MATCH (n:agreement) RETURN n.id AS agreement_id", []string{"agreement_id"})
 	_, adpt := newTargetKV(t, env, "TARGET-AUDIT-SUCCESS", []string{"agreement_id"})
 
-	p, err := pipeline.New(ruleID, "team-test", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New(ruleID, "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, adpt, nil)
 	require.NoError(t, err)
 
@@ -1013,7 +1012,7 @@ func TestPipeline_NoAuditEntry_OnWriteFailure(t *testing.T) {
 	plan := compileSimplePlan(t, "MATCH (n:agreement) RETURN n.id AS agreement_id", []string{"agreement_id"})
 
 	// Use an adapter that always fails — no successful writes possible.
-	p, err := pipeline.New(ruleID, "team-test", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New(ruleID, "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, &errAdapter{}, nil)
 	require.NoError(t, err)
 
@@ -1055,7 +1054,7 @@ func TestPipeline_SetLagPoller_StartsMetricsPublishing(t *testing.T) {
 	plan := compileSimplePlan(t, "MATCH (n:agreement) RETURN n.id AS agreement_id", []string{"agreement_id"})
 	_, adpt := newTargetKV(t, env, "TARGET-LAG-WIRE", []string{"agreement_id"})
 
-	p, err := pipeline.New(ruleID, "team-test", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New(ruleID, "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, adpt, nil)
 	require.NoError(t, err)
 
@@ -1071,7 +1070,7 @@ func TestPipeline_SetLagPoller_StartsMetricsPublishing(t *testing.T) {
 	lagCons := env.manager.Consumer(ruleID)
 	require.NotNil(t, lagCons)
 
-	lp := health.NewLagPoller(env.nc, lagCons, nil, ruleID, "team-test")
+	lp := health.NewLagPoller(env.nc, lagCons, nil, ruleID)
 	p.SetLagPoller(lp)
 
 	// Start the pipeline (env.manager.Add is idempotent for the same ruleID).
@@ -1102,7 +1101,7 @@ func TestPipeline_ManualPause_HaltsAndResumes(t *testing.T) {
 
 	ra := &recorderAdapter{}
 	reporter := newHealthReporter(t, env, "rule-manual-pause")
-	p, err := pipeline.New("rule-manual-pause", "team-a", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New("rule-manual-pause", "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, ra, reporter)
 	require.NoError(t, err)
 
@@ -1161,7 +1160,7 @@ func TestPipeline_Pause_SetsHealthManual(t *testing.T) {
 
 	ra := &recorderAdapter{}
 	reporter := newHealthReporter(t, env, "rule-pause-health")
-	p, err := pipeline.New("rule-pause-health", "team-a", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New("rule-pause-health", "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, ra, reporter)
 	require.NoError(t, err)
 
@@ -1216,7 +1215,7 @@ func TestPipeline_Resume_OverridesInfraPause(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	p, err := pipeline.New("rule-resume-infra", "team-a", "nats_kv", plan, coreKVBucket,
+	p, err := pipeline.New("rule-resume-infra", "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, ia, reporter)
 	require.NoError(t, err)
 

@@ -13,7 +13,6 @@ import (
 func baseRule() *lens.Rule {
 	r, err := lens.Parse([]byte(`
 id: hot-rule
-team: hot-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -31,7 +30,6 @@ func TestClassifyUpdate_SameMatchDifferentTable(t *testing.T) {
 	old := baseRule()
 	newRule, err := lens.Parse([]byte(`
 id: hot-rule
-team: hot-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id
 into:
   target: postgres
@@ -51,7 +49,6 @@ func TestClassifyUpdate_SameMatchDifferentKey_Composite(t *testing.T) {
 	// ClassifyUpdate must return IntoOnly because only Into.Key changed.
 	oldRule, err := lens.Parse([]byte(`
 id: hot-rule
-team: hot-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id, a.name AS name
 into:
   target: postgres
@@ -63,7 +60,6 @@ into:
 
 	newRule, err := lens.Parse([]byte(`
 id: hot-rule
-team: hot-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id, a.name AS name
 into:
   target: postgres
@@ -83,7 +79,6 @@ func TestClassifyUpdate_MatchChanged(t *testing.T) {
 	old := baseRule()
 	newRule, err := lens.Parse([]byte(`
 id: hot-rule
-team: hot-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id, a.name AS name
 into:
   target: postgres
@@ -101,7 +96,6 @@ func TestClassifyUpdate_BothMatchAndIntoChanged(t *testing.T) {
 	old := baseRule()
 	newRule, err := lens.Parse([]byte(`
 id: hot-rule
-team: hot-team
 match: MATCH (a:agreement) RETURN a.id AS agreement_id, a.name AS name
 into:
   target: postgres

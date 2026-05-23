@@ -154,7 +154,7 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	capAdpt, err := adapter.New(capTargetKV, capabilityRule.Into.Key)
 	require.NoError(t, err)
 
-	capP, err := pipeline.New(capabilityRule.ID, capabilityRule.Team, "nats_kv",
+	capP, err := pipeline.New(capabilityRule.ID, "nats_kv",
 		nil, bootstrap.CoreKVBucket, adjKV, coreKV, capAdpt, nil)
 	require.NoError(t, err)
 	require.Equal(t, ruleengine.EngineFull, capabilityRule.ResolvedEngine)
@@ -178,7 +178,7 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	require.NoError(t, err)
 	idxAdpt, err := adapter.New(idxTargetKV, roleIndexRule.Into.Key)
 	require.NoError(t, err)
-	idxP, err := pipeline.New(roleIndexRule.ID, roleIndexRule.Team, "nats_kv",
+	idxP, err := pipeline.New(roleIndexRule.ID, "nats_kv",
 		nil, bootstrap.CoreKVBucket, adjKV, coreKV, idxAdpt, nil)
 	require.NoError(t, err)
 	require.Equal(t, ruleengine.EngineFull, roleIndexRule.ResolvedEngine)

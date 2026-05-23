@@ -82,7 +82,7 @@ func TestControl_ResumeRule_CallsResumer(t *testing.T) {
 	ctx := context.Background()
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-ctrl"})
 	require.NoError(t, err)
-	reporter := health.New(kv, "rule-ctrl", "team-a")
+	reporter := health.New(kv, "rule-ctrl")
 
 	svc.Register("rule-ctrl", mr, reporter)
 
@@ -119,7 +119,7 @@ func TestControl_Unregister(t *testing.T) {
 // what production clients do post-2.4b.
 func sendControlRequest(t *testing.T, nc *nats.Conn, req control.ControlRequest) control.ControlResponse {
 	t.Helper()
-	body := control.ControlRequest{Team: req.Team, Truncate: req.Truncate}
+	body := control.ControlRequest{Truncate: req.Truncate}
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
 	subj := control.ControlSubject(req.RuleID, req.Op)
@@ -139,7 +139,7 @@ func TestControl_Health_ReturnsEntry(t *testing.T) {
 
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-5-1"})
 	require.NoError(t, err)
-	reporter := health.New(kv, "rule-5-1", "team-5-1")
+	reporter := health.New(kv, "rule-5-1")
 	require.NoError(t, reporter.SetActive(ctx))
 
 	svc := control.NewService()
@@ -153,7 +153,6 @@ func TestControl_Health_ReturnsEntry(t *testing.T) {
 	require.NotNil(t, resp.Entry, "Entry must be non-nil on health success")
 	assert.Equal(t, "rule-5-1", resp.RuleID)
 	assert.Equal(t, "active", resp.Status)
-	assert.Equal(t, "team-5-1", resp.Team)
 }
 
 // TestControl_Health_UnknownRule verifies that requesting health for an unregistered
@@ -229,7 +228,6 @@ func (m *mockRuleGetter) Get(ruleID string) (*lens.Rule, bool) {
 func validateTestLens(id, match string) *lens.Rule {
 	return &lens.Rule{
 		ID:    id,
-		Team:  "test-team",
 		Match: match,
 		Into: lens.IntoConfig{
 			Target: "nats_kv",
@@ -537,7 +535,7 @@ func TestControl_Resume_ReturnsAck(t *testing.T) {
 
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-resume-ack"})
 	require.NoError(t, err)
-	reporter := health.New(kv, "resume-rule-1", "team-a")
+	reporter := health.New(kv, "resume-rule-1")
 
 	svc := control.NewService()
 	mr := &mockResumer{}
@@ -662,8 +660,8 @@ func TestControl_TwoRules_BothRegistered(t *testing.T) {
 	// Create health KV entries for both rules.
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-two-rules"})
 	require.NoError(t, err)
-	reporterV1 := health.New(kv, "agreement-summary-v1", "team-a")
-	reporterV2 := health.New(kv, "agreement-summary-v2", "team-a")
+	reporterV1 := health.New(kv, "agreement-summary-v1")
+	reporterV2 := health.New(kv, "agreement-summary-v2")
 	require.NoError(t, reporterV1.SetActive(ctx))
 	require.NoError(t, reporterV2.SetActive(ctx))
 
@@ -697,8 +695,8 @@ func TestControl_TwoRules_DeleteV1_LeavesV2(t *testing.T) {
 
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-del-v1"})
 	require.NoError(t, err)
-	reporterV1 := health.New(kv, "agreement-summary-v1", "team-a")
-	reporterV2 := health.New(kv, "agreement-summary-v2", "team-a")
+	reporterV1 := health.New(kv, "agreement-summary-v1")
+	reporterV2 := health.New(kv, "agreement-summary-v2")
 	require.NoError(t, reporterV1.SetActive(ctx))
 	require.NoError(t, reporterV2.SetActive(ctx))
 
@@ -777,7 +775,7 @@ func TestControl_Delete_UnregistersRule(t *testing.T) {
 	// Register a full set: resumer + reporter + deleter.
 	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "refractor-test-del-unreg"})
 	require.NoError(t, err)
-	reporter := health.New(kv, "delete-unreg-rule", "team-a")
+	reporter := health.New(kv, "delete-unreg-rule")
 	require.NoError(t, reporter.SetActive(ctx))
 
 	svc := control.NewService()

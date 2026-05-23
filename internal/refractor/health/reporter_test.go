@@ -46,7 +46,7 @@ func startHealthKV(t *testing.T) jetstream.KeyValue {
 
 func TestReporter_GetStatus_FreshKV(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	entry, err := r.GetStatus(context.Background())
 	require.NoError(t, err)
@@ -56,7 +56,7 @@ func TestReporter_GetStatus_FreshKV(t *testing.T) {
 
 func TestReporter_SetActive(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.SetActive(context.Background()))
 
@@ -66,14 +66,13 @@ func TestReporter_SetActive(t *testing.T) {
 	assert.Nil(t, entry.PauseReason)
 	assert.Nil(t, entry.LastError)
 	assert.Equal(t, "my-rule", entry.RuleID)
-	assert.Equal(t, "team-a", entry.Team)
 	assert.Equal(t, uint64(0), entry.ErrorCount)
 	assert.NotEmpty(t, entry.LastUpdated, "LastUpdated must be set")
 }
 
 func TestReporter_SetPaused_Infra(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.SetPaused(context.Background(), "infra", "nats: connection closed"))
 
@@ -89,7 +88,7 @@ func TestReporter_SetPaused_Infra(t *testing.T) {
 
 func TestReporter_SetPaused_Structural(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.SetPaused(context.Background(), "structural", "bucket not found"))
 
@@ -102,7 +101,7 @@ func TestReporter_SetPaused_Structural(t *testing.T) {
 
 func TestReporter_SetPaused_ThenSetActive(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.SetPaused(context.Background(), "infra", "connection lost"))
 	require.NoError(t, r.SetActive(context.Background()))
@@ -116,7 +115,7 @@ func TestReporter_SetPaused_ThenSetActive(t *testing.T) {
 
 func TestReporter_LastUpdated_IsRFC3339(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 	require.NoError(t, r.SetActive(context.Background()))
 
 	entry, err := r.GetStatus(context.Background())
@@ -130,7 +129,7 @@ func TestReporter_LastUpdated_IsRFC3339(t *testing.T) {
 // does NOT reset the cumulative error count (NFR4 / AC4).
 func TestReporter_SetActive_PreservesErrorCount(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "first error"))
 	require.NoError(t, r.RecordError(context.Background(), "second error"))
@@ -148,7 +147,7 @@ func TestReporter_SetActive_PreservesErrorCount(t *testing.T) {
 // increments errorCount by exactly 1 and updates lastError.
 func TestReporter_RecordError_IncrementsCount(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "first"))
 	require.NoError(t, r.RecordError(context.Background(), "second"))
@@ -165,7 +164,7 @@ func TestReporter_RecordError_IncrementsCount(t *testing.T) {
 // pauseReason to null even if errors were previously recorded.
 func TestReporter_SetActive_ClearsLastError(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "boom"))
 
@@ -183,7 +182,7 @@ func TestReporter_SetActive_ClearsLastError(t *testing.T) {
 // the sequence and it appears in the next health write.
 func TestReporter_SetRuleSequence_AppearsInEntry(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	r.SetRuleSequence(42)
 	require.NoError(t, r.SetActive(context.Background()))
@@ -197,7 +196,7 @@ func TestReporter_SetRuleSequence_AppearsInEntry(t *testing.T) {
 // that it is preserved by SetActive.
 func TestReporter_SetConsumerLag(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	// First, establish an active entry.
 	require.NoError(t, r.SetActive(context.Background()))
@@ -220,7 +219,7 @@ func TestReporter_SetConsumerLag(t *testing.T) {
 // preserves ErrorCount and ConsumerLag, and sets PauseReason and LastError to null (AC4).
 func TestReporter_SetRebuilding(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	// Pre-populate with an error and a consumer lag so we can verify preservation.
 	require.NoError(t, r.SetActive(context.Background()))
@@ -237,7 +236,6 @@ func TestReporter_SetRebuilding(t *testing.T) {
 	assert.Equal(t, uint64(1), entry.ErrorCount, "errorCount must be preserved")
 	assert.Equal(t, uint64(50), entry.ConsumerLag, "consumerLag must be preserved")
 	assert.Equal(t, "my-rule", entry.RuleID)
-	assert.Equal(t, "team-a", entry.Team)
 	assert.NotEmpty(t, entry.LastUpdated, "LastUpdated must be set")
 }
 
@@ -245,7 +243,7 @@ func TestReporter_SetRebuilding(t *testing.T) {
 // rebuilding → active with preserved counts (AC4, AC5).
 func TestReporter_SetRebuilding_ThenSetActive(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	require.NoError(t, r.RecordError(context.Background(), "prior error"))
 	require.NoError(t, r.SetRebuilding(context.Background()))
@@ -263,7 +261,7 @@ func TestReporter_SetRebuilding_ThenSetActive(t *testing.T) {
 // GetStatus returns the default "active" zero entry (ErrKeyNotFound path) (FR39).
 func TestReporter_Delete(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	// Write an entry first so there is something to delete.
 	require.NoError(t, r.SetActive(context.Background()))
@@ -288,7 +286,7 @@ func TestReporter_Delete(t *testing.T) {
 // is a no-op and does not return an error.
 func TestReporter_Delete_NoEntry(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "never-written-rule", "team-a")
+	r := health.New(kv, "never-written-rule")
 
 	// Delete without any prior write: must not error.
 	require.NoError(t, r.Delete(context.Background()))
@@ -298,7 +296,7 @@ func TestReporter_Delete_NoEntry(t *testing.T) {
 // are safe to call concurrently (no race detector errors).
 func TestReporter_ActiveSequence_ThreadSafe(t *testing.T) {
 	kv := startHealthKV(t)
-	r := health.New(kv, "my-rule", "team-a")
+	r := health.New(kv, "my-rule")
 
 	done := make(chan struct{})
 	go func() {

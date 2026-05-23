@@ -225,11 +225,11 @@ func main() {
 			return
 		}
 
-		reporter := health.New(healthKVHandle, r.ID, r.Team)
+		reporter := health.New(healthKVHandle, r.ID)
 		reporter.SetRuleSequence(r.Sequence)
 		reporter.SetRuleEngine(r.ResolvedEngine)
 
-		p, err := pipeline.New(r.ID, r.Team, r.Into.Target, plan, coreKVBucket, adjKV, coreKV, adpt, reporter)
+		p, err := pipeline.New(r.ID, r.Into.Target, plan, coreKVBucket, adjKV, coreKV, adpt, reporter)
 		if err != nil {
 			logger.Error("create pipeline", "lensId", r.ID, "err", err)
 			return
@@ -284,7 +284,7 @@ func main() {
 		}
 		cons := manager.Consumer(r.ID)
 
-		lp := health.NewLagPoller(nc, cons, reporter, r.ID, r.Team)
+		lp := health.NewLagPoller(nc, cons, reporter, r.ID)
 		p.SetLagPoller(lp)
 
 		lensCtx, cancel := context.WithCancel(ctx)

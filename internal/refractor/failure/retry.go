@@ -18,7 +18,6 @@ import (
 type RetryEntry struct {
 	// Identification
 	RuleID     string
-	Team       string
 	EntityID   string
 	Stage      string // "write"
 	RawPayload []byte // original NATS message body stored for DLQ diagnostic context
@@ -226,7 +225,7 @@ func (q *RetryQueue) escalateToDLQ(ctx context.Context, e *RetryEntry, lastErr e
 	// Use WithoutCancel so a DLQ publish triggered at shutdown (when ctx may already
 	// be cancelled) still completes rather than being silently discarded.
 	pubCtx := context.WithoutCancel(ctx)
-	if err := Publish(pubCtx, e.JS, e.Team, e.RuleID, msg); err != nil {
+	if err := Publish(pubCtx, e.JS, e.RuleID, msg); err != nil {
 		slog.Error("failure: DLQ publish failed after retry exhaustion",
 			"ruleId", e.RuleID, "entityId", e.EntityID, "err", err)
 	} else if e.OnDLQPublished != nil {
