@@ -7,8 +7,9 @@
 // identity-hygiene package has been correctly installed. Asserts:
 //
 //  1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//  4 DDL aspects: .canonicalName=identityHygiene,
-//                 .permittedCommands=[MergeIdentity], .description, .script
+//  8 DDL aspects: .canonicalName=identityHygiene,
+//                 .permittedCommands=[MergeIdentity], .description, .script,
+//                 .inputSchema, .outputSchema, .fieldDescription, .examples (Story 5.1)
 //  1 Lens meta-vertex (vtx.meta.<NanoID>) with class=meta.lens
 //  5 Lens aspects: .canonicalName=duplicateCandidates, .spec (contains
 //    secondaryInboundEdges + secondaryOutboundEdges + levenshteinRatio),
@@ -170,6 +171,16 @@ func main() {
 				fail(scriptKey, "script source is empty")
 			} else {
 				ok(scriptKey + " non-empty")
+			}
+		}
+
+		// 5a. Story 5.1: self-description aspects.
+		for _, asp := range []string{"inputSchema", "outputSchema", "fieldDescription", "examples"} {
+			k := hygieneDDLKey + "." + asp
+			if _, err := hygieneGetEnvelope(ctx, coreKV, k); err != nil {
+				fail(k, fmt.Sprintf("missing: %v", err))
+			} else {
+				ok(k + " present")
 			}
 		}
 	}

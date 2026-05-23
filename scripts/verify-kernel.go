@@ -3,19 +3,24 @@
 // verify-kernel.go — assertion tool for `make verify-kernel`.
 //
 // Connects to a running Lattice NATS instance and checks that all
-// post-Story-4.7 KERNEL Core KV keys exist with correct envelopes per
-// Contract #1 §1.3. The kernel set is intentionally small (~33 entries):
+// post-Story-5.1 KERNEL Core KV keys exist with correct envelopes per
+// Contract #1 §1.3. The kernel set after Story 5.1 (~68 entries):
 //
 //	 1 bootstrap op tracker
 //	 1 admin identity vertex
-//	 1 meta-meta-DDL vertex + 4 aspects (canonicalName/permittedCommands/description/script)
+//	 1 meta-meta-DDL vertex + 8 aspects
+//	   (canonicalName/permittedCommands/description/script +
+//	    inputSchema/outputSchema/fieldDescription/examples)
 //	 2 Lens definitions × 5 aspects each
+//	 5 aspect-type meta-vertices × 7 aspects each
+//	   (canonicalName + description + inputSchema + outputSchema +
+//	    fieldDescription + examples)
 //	 1 operator role vertex + canonicalName + description
 //	 3 meta-permission vertices
 //	 3 grantedBy links (meta-perm → operator)
 //	 1 admin → operator holdsRole link
 //
-// Total ≈ 33 OK lines.
+// Total ≈ 68 OK lines.
 //
 // Package gates (verify-package-rbac etc.) cover package-installed
 // DDLs / lenses / permissions / grants separately.
@@ -110,13 +115,35 @@ func main() {
 		fmt.Printf("  OK  %s\n", key)
 	}
 
-	// 2. Meta-meta DDL aspects (4 aspects per kernel DDL).
-	for _, aspect := range []string{"canonicalName", "permittedCommands", "description", "script"} {
+	// 2. Meta-meta DDL aspects (8 aspects — 4 structural + 4 self-description).
+	for _, aspect := range []string{
+		"canonicalName", "permittedCommands", "description", "script",
+		"inputSchema", "outputSchema", "fieldDescription", "examples",
+	} {
 		k := bootstrap.MetaRootKey + "." + aspect
 		if _, err := coreKV.Get(ctx, k); err != nil {
 			failures = append(failures, fmt.Sprintf("MISSING meta-DDL aspect: %s (%v)", k, err))
 		} else {
 			fmt.Printf("  OK  %s\n", k)
+		}
+	}
+
+	// 2a. Story 5.1: five aspect-type meta-vertices, each with 6 aspects.
+	aspectTypeKeys := []string{
+		bootstrap.AspectTypeDescriptionKey,
+		bootstrap.AspectTypeInputSchemaKey,
+		bootstrap.AspectTypeOutputSchemaKey,
+		bootstrap.AspectTypeFieldDescriptionKey,
+		bootstrap.AspectTypeExamplesKey,
+	}
+	for _, vtxKey := range aspectTypeKeys {
+		for _, asp := range []string{"canonicalName", "description", "inputSchema", "outputSchema", "fieldDescription", "examples"} {
+			k := vtxKey + "." + asp
+			if _, err := coreKV.Get(ctx, k); err != nil {
+				failures = append(failures, fmt.Sprintf("MISSING aspect-type meta-vertex aspect: %s (%v)", k, err))
+			} else {
+				fmt.Printf("  OK  %s\n", k)
+			}
 		}
 	}
 

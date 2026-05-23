@@ -6,8 +6,9 @@
 // identity-domain package has been correctly installed. Asserts:
 //
 //  1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//  4 DDL aspects: .canonicalName=identity, .permittedCommands (3 ops),
-//                 .description, .script
+//  8 DDL aspects: .canonicalName=identity, .permittedCommands (3 ops),
+//                 .description, .script,
+//                 .inputSchema, .outputSchema, .fieldDescription, .examples (Story 5.1)
 //  3 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
 //    UpdateIdentityState, ClaimIdentity
 //  5 grantedBy link keys:
@@ -212,6 +213,16 @@ func main() {
 				fail(scriptKey, "script source is empty")
 			} else {
 				ok(scriptKey + " non-empty")
+			}
+		}
+
+		// 6a. Story 5.1: self-description aspects.
+		for _, asp := range []string{"inputSchema", "outputSchema", "fieldDescription", "examples"} {
+			k := identityDDLKey + "." + asp
+			if _, err := identityGetEnvelope(ctx, coreKV, k); err != nil {
+				fail(k, fmt.Sprintf("missing: %v", err))
+			} else {
+				ok(k + " present")
 			}
 		}
 	}

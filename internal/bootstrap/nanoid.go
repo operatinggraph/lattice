@@ -85,6 +85,20 @@ var (
 	PermTombstoneMetaVertexID  string
 	PermTombstoneMetaVertexKey string
 
+	// Story 5.1: five aspect-type meta-vertex NanoIDs. These are the
+	// primordial DDLs for the self-description aspect classes
+	// (description, inputSchema, outputSchema, fieldDescription, examples).
+	AspectTypeDescriptionID       string
+	AspectTypeDescriptionKey      string
+	AspectTypeInputSchemaID       string
+	AspectTypeInputSchemaKey      string
+	AspectTypeOutputSchemaID      string
+	AspectTypeOutputSchemaKey     string
+	AspectTypeFieldDescriptionID  string
+	AspectTypeFieldDescriptionKey string
+	AspectTypeExamplesID          string
+	AspectTypeExamplesKey         string
+
 	// Derived link keys.
 	BootstrapHoldsRoleLinkKey string
 )
@@ -107,6 +121,13 @@ type PrimordialIDsRaw struct {
 	PermCreateMetaVertex    string `json:"permCreateMetaVertex"`
 	PermUpdateMetaVertex    string `json:"permUpdateMetaVertex"`
 	PermTombstoneMetaVertex string `json:"permTombstoneMetaVertex"`
+
+	// Story 5.1 aspect-type meta-vertex NanoIDs.
+	AspectTypeDescription       string `json:"aspectTypeDescription"`
+	AspectTypeInputSchema        string `json:"aspectTypeInputSchema"`
+	AspectTypeOutputSchema       string `json:"aspectTypeOutputSchema"`
+	AspectTypeFieldDescription   string `json:"aspectTypeFieldDescription"`
+	AspectTypeExamples           string `json:"aspectTypeExamples"`
 }
 
 // BootstrapFile is the wire format of lattice.bootstrap.json.
@@ -155,15 +176,20 @@ func Persist(path string) error {
 // currentRaw rebuilds a PrimordialIDsRaw from the populated package vars.
 func currentRaw() PrimordialIDsRaw {
 	return PrimordialIDsRaw{
-		BootstrapOp:             BootstrapOpID,
-		BootstrapIdentity:       BootstrapIdentityID,
-		MetaRoot:                MetaRootID,
-		CapabilityLens:          CapabilityLensID,
-		CapabilityRoleIndexLens: CapabilityRoleIndexLensID,
-		RoleOperator:            RoleOperatorID,
-		PermCreateMetaVertex:    PermCreateMetaVertexID,
-		PermUpdateMetaVertex:    PermUpdateMetaVertexID,
-		PermTombstoneMetaVertex: PermTombstoneMetaVertexID,
+		BootstrapOp:                BootstrapOpID,
+		BootstrapIdentity:          BootstrapIdentityID,
+		MetaRoot:                   MetaRootID,
+		CapabilityLens:             CapabilityLensID,
+		CapabilityRoleIndexLens:    CapabilityRoleIndexLensID,
+		RoleOperator:               RoleOperatorID,
+		PermCreateMetaVertex:       PermCreateMetaVertexID,
+		PermUpdateMetaVertex:       PermUpdateMetaVertexID,
+		PermTombstoneMetaVertex:    PermTombstoneMetaVertexID,
+		AspectTypeDescription:      AspectTypeDescriptionID,
+		AspectTypeInputSchema:      AspectTypeInputSchemaID,
+		AspectTypeOutputSchema:     AspectTypeOutputSchemaID,
+		AspectTypeFieldDescription: AspectTypeFieldDescriptionID,
+		AspectTypeExamples:         AspectTypeExamplesID,
 	}
 }
 
@@ -193,6 +219,11 @@ func generate() (PrimordialIDsRaw, error) {
 		&raw.PermCreateMetaVertex,
 		&raw.PermUpdateMetaVertex,
 		&raw.PermTombstoneMetaVertex,
+		&raw.AspectTypeDescription,
+		&raw.AspectTypeInputSchema,
+		&raw.AspectTypeOutputSchema,
+		&raw.AspectTypeFieldDescription,
+		&raw.AspectTypeExamples,
 	}
 	for _, dst := range targets {
 		id, err := substrate.NewNanoID()
@@ -219,6 +250,11 @@ func populate(raw PrimordialIDsRaw) error {
 		{"permCreateMetaVertex", raw.PermCreateMetaVertex},
 		{"permUpdateMetaVertex", raw.PermUpdateMetaVertex},
 		{"permTombstoneMetaVertex", raw.PermTombstoneMetaVertex},
+		{"aspectTypeDescription", raw.AspectTypeDescription},
+		{"aspectTypeInputSchema", raw.AspectTypeInputSchema},
+		{"aspectTypeOutputSchema", raw.AspectTypeOutputSchema},
+		{"aspectTypeFieldDescription", raw.AspectTypeFieldDescription},
+		{"aspectTypeExamples", raw.AspectTypeExamples},
 	}
 	for _, f := range fields {
 		if !substrate.IsValidNanoID(f.val) {
@@ -239,6 +275,17 @@ func populate(raw PrimordialIDsRaw) error {
 	PermUpdateMetaVertexKey = "vtx.permission." + PermUpdateMetaVertexID
 	PermTombstoneMetaVertexID = raw.PermTombstoneMetaVertex
 	PermTombstoneMetaVertexKey = "vtx.permission." + PermTombstoneMetaVertexID
+
+	AspectTypeDescriptionID = raw.AspectTypeDescription
+	AspectTypeDescriptionKey = "vtx.meta." + AspectTypeDescriptionID
+	AspectTypeInputSchemaID = raw.AspectTypeInputSchema
+	AspectTypeInputSchemaKey = "vtx.meta." + AspectTypeInputSchemaID
+	AspectTypeOutputSchemaID = raw.AspectTypeOutputSchema
+	AspectTypeOutputSchemaKey = "vtx.meta." + AspectTypeOutputSchemaID
+	AspectTypeFieldDescriptionID = raw.AspectTypeFieldDescription
+	AspectTypeFieldDescriptionKey = "vtx.meta." + AspectTypeFieldDescriptionID
+	AspectTypeExamplesID = raw.AspectTypeExamples
+	AspectTypeExamplesKey = "vtx.meta." + AspectTypeExamplesID
 
 	// Derive keys.
 	BootstrapOpKey = "vtx.op." + BootstrapOpID
@@ -271,10 +318,9 @@ func persist(path string, raw PrimordialIDsRaw) error {
 	return nil
 }
 
-// PrimordialVertexKeys returns the post-Story-4.7 kernel's vertex keys —
-// only those entries the kernel itself seeds. After 4.7 this is a small
-// fixed set; package-installed DDLs/Lenses/permissions are addressed
-// separately by `verify-package-*` gates.
+// PrimordialVertexKeys returns the post-Story-5.1 kernel's top-level vertex
+// keys — only those entries the kernel itself seeds. Package-installed
+// DDLs/Lenses/permissions are addressed separately by `verify-package-*` gates.
 func PrimordialVertexKeys() []string {
 	return []string{
 		// bootstrap op tracker
@@ -297,12 +343,18 @@ func PrimordialVertexKeys() []string {
 		"lnk.permission." + PermUpdateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
 		"lnk.permission." + PermTombstoneMetaVertexID + ".grantedBy.role." + RoleOperatorID,
 		BootstrapHoldsRoleLinkKey,
+		// Story 5.1: 5 aspect-type meta-vertices (self-description DDLs)
+		AspectTypeDescriptionKey,
+		AspectTypeInputSchemaKey,
+		AspectTypeOutputSchemaKey,
+		AspectTypeFieldDescriptionKey,
+		AspectTypeExamplesKey,
 	}
 }
 
 // PrimordialVertexKeyCount is the count of TOP-LEVEL kernel keys (the
 // ones in PrimordialVertexKeys()). Used as a count-only readiness gate
 // where loading lattice.bootstrap.json would race startup. After Story
-// 4.7 this is just the kernel set (13 entries — 1 op + 1 admin + 1
-// meta-DDL + 2 lenses + 1 role + 3 meta-perms + 4 links).
-const PrimordialVertexKeyCount = 13
+// 5.1 this is 18 entries: 1 op + 1 admin + 1 meta-DDL + 2 lenses +
+// 1 role + 3 meta-perms + 4 links + 5 aspect-type meta-vertices.
+const PrimordialVertexKeyCount = 18

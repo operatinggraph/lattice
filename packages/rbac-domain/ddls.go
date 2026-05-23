@@ -59,6 +59,50 @@ func DDLs() []pkgmgr.DDLSpec {
 				"RevokePermission follow operator-action semantics and are distinct from " +
 				"the link's canonical name.",
 			Script: rbacDDLScript,
+			InputSchema: `{"type":"object","properties":` +
+				`{"name":{"type":"string","description":"Role canonical name (CreateRole)."},` +
+				`"description":{"type":"string","description":"Human-readable role or permission description."},` +
+				`"roleKey":{"type":"string","description":"vtx.role.<NanoID> — target role (UpdateRole/TombstoneRole/AssignRole/RevokeRole/GrantPermission/RevokePermission)."},` +
+				`"operationType":{"type":"string","description":"The operationType this permission gates (CreatePermission/UpdatePermission)."},` +
+				`"scope":{"type":"string","enum":["any","self"],"description":"Permission scope (CreatePermission/UpdatePermission). Defaults to any."},` +
+				`"note":{"type":"string","description":"Optional human-readable note for the permission vertex."},` +
+				`"permKey":{"type":"string","description":"vtx.permission.<NanoID> — target permission (UpdatePermission/TombstonePermission/GrantPermission/RevokePermission)."},` +
+				`"actorKey":{"type":"string","description":"vtx.<type>.<NanoID> — the actor to assign/revoke a role for (AssignRole/RevokeRole)."}}}`,
+			OutputSchema: `{"type":"object","properties":` +
+				`{"roleKey":{"type":"string","description":"vtx.role.<NanoID> of the created/updated/tombstoned role."},` +
+				`"permissionKey":{"type":"string","description":"vtx.permission.<NanoID> of the created/updated/tombstoned permission."},` +
+				`"linkKey":{"type":"string","description":"Link key written for holdsRole or grantedBy operations."},` +
+				`"alreadyAssigned":{"type":"boolean","description":"True if AssignRole was a no-op (link already existed alive)."},` +
+				`"alreadyGranted":{"type":"boolean","description":"True if GrantPermission was a no-op (link already existed alive)."}}}`,
+			FieldDescription: map[string]string{
+				"name":          "Canonical name for the new role. Used in holdsRole link shape and audit queries.",
+				"description":   "Optional plain-language description of the role's purpose or permission's semantics.",
+				"roleKey":       "Full vtx.role.<NanoID> key of an existing role vertex.",
+				"operationType": "The operationType string this permission authorizes (e.g. CreateRole, MergeIdentity).",
+				"scope":         "Permission scope: 'any' allows the operation on any target; 'self' restricts to the actor's own resources.",
+				"note":          "Optional note stored in the permission vertex's data field.",
+				"permKey":       "Full vtx.permission.<NanoID> key of an existing permission vertex.",
+				"actorKey":      "Full vtx.<type>.<NanoID> key of the actor receiving or losing a role assignment.",
+			},
+			Examples: []pkgmgr.ExampleSpec{
+				{
+					Name:    "CreateRole — operator creates a consumer role",
+					Payload: map[string]any{"name": "consumer", "description": "Default customer-facing role with read-only access."},
+					ExpectedOutcome: "Creates vtx.role.<NanoID> with class=role, " +
+						"writes .canonicalName=consumer and .description aspects. Returns roleKey.",
+				},
+				{
+					Name:    "AssignRole — assign consumer role to an identity",
+					Payload: map[string]any{"actorKey": "vtx.identity.<actorNanoID>", "roleKey": "vtx.role.<roleNanoID>"},
+					ExpectedOutcome: "Writes lnk.identity.<actorNanoID>.holdsRole.role.<roleNanoID> with class=holdsRole. " +
+						"Returns linkKey. Idempotent: alreadyAssigned=true if link existed.",
+				},
+				{
+					Name:    "GrantPermission — grant CreateRole permission to operator role",
+					Payload: map[string]any{"permKey": "vtx.permission.<permNanoID>", "roleKey": "vtx.role.<operatorNanoID>"},
+					ExpectedOutcome: "Writes lnk.permission.<permNanoID>.grantedBy.role.<operatorNanoID> with class=grantedBy. Returns linkKey.",
+				},
+			},
 		},
 	}
 }

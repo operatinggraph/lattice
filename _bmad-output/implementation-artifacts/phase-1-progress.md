@@ -70,7 +70,7 @@ Quick reference; full details in token-usage-tracker.md.
 **Course correction sequence complete.** Epic 5 unblocked.
 
 **Epic 5 — DDL Self-Description & AI Agent Cold-Start:**
-- **5.1** DDL Self-Description Aspects FR19 (Opus, ~115K)
+- ✅ **5.1** DDL Self-Description Aspects FR19 — **IN REVIEW** (Sonnet; 5 primordial aspect-type meta-vertices; MetaRootDDLScript enforces MissingSelfDescription; pkgmgr fail-fast; all 3 Phase-1 packages carry all 4 new fields; 2 e2e integration tests)
 - **5.2** Cold-Start AI Agent Traversal (Sonnet, ~115K)
 - **5.3** Compensating Op + DDL Rollback (Opus, ~130K) — Gate 4
 

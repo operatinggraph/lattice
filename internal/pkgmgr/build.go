@@ -40,7 +40,23 @@ func (i *Installer) buildInstallBatch(
 		declared = append(declared, key)
 	}
 
-	// DDL meta-vertices + 4 canonical aspects.
+	// Fail-fast: validate all DDLSpec self-description fields before writing any entries.
+	for idx, d := range def.DDLs {
+		if d.InputSchema == "" {
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: InputSchema required (Story 5.1)", idx, d.CanonicalName)
+		}
+		if d.OutputSchema == "" {
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: OutputSchema required (Story 5.1)", idx, d.CanonicalName)
+		}
+		if len(d.FieldDescription) == 0 {
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: FieldDescription required (Story 5.1)", idx, d.CanonicalName)
+		}
+		if len(d.Examples) == 0 {
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: Examples required (Story 5.1)", idx, d.CanonicalName)
+		}
+	}
+
+	// DDL meta-vertices + canonical aspects (4 structural + 4 self-description).
 	for idx, d := range def.DDLs {
 		ddlKey := metaVertexPrefix + ddlIDs[idx]
 		class := d.Class
@@ -80,6 +96,46 @@ func (i *Installer) buildInstallBatch(
 			return nil, nil, err
 		}
 		addCreate(ddlKey+".script", sc)
+		// Story 5.1: inputSchema
+		fdMap := make(map[string]any, len(d.FieldDescription))
+		for k, v := range d.FieldDescription {
+			fdMap[k] = v
+		}
+		exList := make([]any, len(d.Examples))
+		for j, ex := range d.Examples {
+			exList[j] = map[string]any{
+				"name":            ex.Name,
+				"payload":         ex.Payload,
+				"expectedOutcome": ex.ExpectedOutcome,
+			}
+		}
+		is, err := i.makeAspectEnvelope(ddlKey+".inputSchema", ddlKey, "inputSchema", "inputSchema",
+			map[string]any{"schema": d.InputSchema}, createdByOp, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCreate(ddlKey+".inputSchema", is)
+		// outputSchema
+		os, err := i.makeAspectEnvelope(ddlKey+".outputSchema", ddlKey, "outputSchema", "outputSchema",
+			map[string]any{"schema": d.OutputSchema}, createdByOp, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCreate(ddlKey+".outputSchema", os)
+		// fieldDescription
+		fd, err := i.makeAspectEnvelope(ddlKey+".fieldDescription", ddlKey, "fieldDescription", "fieldDescription",
+			map[string]any{"fieldDescriptions": fdMap}, createdByOp, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCreate(ddlKey+".fieldDescription", fd)
+		// examples
+		ex, err := i.makeAspectEnvelope(ddlKey+".examples", ddlKey, "examples", "examples",
+			map[string]any{"examples": exList}, createdByOp, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		addCreate(ddlKey+".examples", ex)
 	}
 
 	// Lens meta-vertices + canonical aspects.

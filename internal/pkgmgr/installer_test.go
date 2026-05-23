@@ -85,6 +85,12 @@ func sampleDef(version string) Definition {
 				PermittedCommands: []string{"SampleOp"},
 				Description:       "sample",
 				Script:            "def execute(state, op):\n    return {\"mutations\": [], \"events\": []}\n",
+				InputSchema:       `{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`,
+				OutputSchema:      `{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}`,
+				FieldDescription:  map[string]string{"id": "Sample entity ID."},
+				Examples: []ExampleSpec{
+					{Name: "SampleOp example", Payload: map[string]any{"id": "abc"}, ExpectedOutcome: "Creates sample vertex."},
+				},
 			},
 		},
 		Lenses: []LensSpec{

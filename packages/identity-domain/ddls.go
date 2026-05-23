@@ -32,6 +32,40 @@ func DDLs() []pkgmgr.DDLSpec {
 				"mergedInto (vertex-key reference, set only by identity-hygiene package's MergeIdentity). " +
 				"State machine + IdentityMerged guard enforced in .script.",
 			Script: identityDDLScript,
+			InputSchema: `{"type":"object","properties":` +
+				`{"name":{"type":"string","maxLength":200,"description":"Person's display name. Required for CreateUnclaimedIdentity."},` +
+				`"email":{"type":"string","description":"Email address, case-insensitive normalized. At least one of email/phone required."},` +
+				`"phone":{"type":"string","description":"Phone number, E.164 digits only. At least one of email/phone required."},` +
+				`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — target identity for UpdateIdentityState."},` +
+				`"newState":{"type":"string","enum":["claimed"],"description":"Target state for UpdateIdentityState. Only unclaimed→claimed is permitted."},` +
+				`"claimKey":{"type":"string","description":"One-time-use claim key plaintext (ClaimIdentity). Must match stored hash."},` +
+				`"targetIdentityKey":{"type":"string","description":"vtx.identity.<NanoID> of the unclaimed identity to claim (ClaimIdentity)."}}}`,
+			OutputSchema: `{"type":"object","properties":` +
+				`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of the created or claimed identity."},` +
+				`"claimKey":{"type":"string","description":"Plaintext one-time claim key returned only on CreateUnclaimedIdentity."},` +
+				`"possibleDuplicateFlag":{"type":"boolean","description":"True when an existing live identity with the same email or phone was found during create."}}}`,
+			FieldDescription: map[string]string{
+				"name":              "Person's display name. Required on CreateUnclaimedIdentity. Stored as sensitive aspect.",
+				"email":             "Email address. Stored lowercase-normalized. Used as a deduplication index key.",
+				"phone":             "Phone number. Stored as E.164 digit string. Used as a deduplication index key.",
+				"identityKey":       "Full vtx.identity.<NanoID> key of an existing identity vertex.",
+				"newState":          "Desired state after UpdateIdentityState. State machine: unclaimed → claimed only.",
+				"claimKey":          "The plaintext one-time claim key issued during CreateUnclaimedIdentity. Used for ClaimIdentity verification.",
+				"targetIdentityKey": "Full vtx.identity.<NanoID> of the unclaimed identity the calling actor wants to claim.",
+			},
+			Examples: []pkgmgr.ExampleSpec{
+				{
+					Name:    "CreateUnclaimedIdentity — new customer with email",
+					Payload: map[string]any{"name": "Alice Smith", "email": "alice@example.com"},
+					ExpectedOutcome: "Creates vtx.identity.<NanoID> with class=identity, writes name/email/state/claimKey aspects. " +
+						"Returns identityKey, claimKey plaintext, possibleDuplicateFlag.",
+				},
+				{
+					Name:    "ClaimIdentity — actor claims their identity",
+					Payload: map[string]any{"targetIdentityKey": "vtx.identity.<NanoID>", "claimKey": "<plaintextKey>"},
+					ExpectedOutcome: "Verifies claimKey hash, writes credentialBinding aspect, transitions state unclaimed→claimed, tombstones claimKey aspect.",
+				},
+			},
 		},
 	}
 }

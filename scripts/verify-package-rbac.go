@@ -6,13 +6,14 @@
 // rbac-domain package has been correctly installed. Asserts:
 //
 //  1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//  4 DDL aspects: .canonicalName=rbac, .permittedCommands (10 ops), .description, .script
+//  8 DDL aspects: .canonicalName=rbac, .permittedCommands (10 ops), .description, .script,
+//                 .inputSchema, .outputSchema, .fieldDescription, .examples (Story 5.1)
 // 10 permission vertices (vtx.permission.<NanoID>) — one per op
 // 10 grantedBy link keys (each permission → operator role)
 //  1 package vertex (vtx.package.<NanoID>)
 //  1 package manifest aspect (vtx.package.<NanoID>.manifest) with name=rbac-domain
 //
-// Total target: ~30 OK lines.
+// Total target: ~34 OK lines.
 //
 // Exit 0: all assertions pass.
 // Exit 1: one or more assertions failed.
@@ -194,6 +195,42 @@ func main() {
 			} else {
 				ok(scriptKey + " non-empty")
 			}
+		}
+
+		// 6a. Story 5.1: self-description aspects.
+		isKey := rbacDDLKey + ".inputSchema"
+		if env, err := getEnvelope(ctx, coreKV, isKey); err != nil {
+			fail(isKey, fmt.Sprintf("missing: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			if strings.TrimSpace(data["schema"].(string)) == "" {
+				fail(isKey, "inputSchema empty")
+			} else {
+				ok(isKey + " present")
+			}
+		}
+		osKey := rbacDDLKey + ".outputSchema"
+		if env, err := getEnvelope(ctx, coreKV, osKey); err != nil {
+			fail(osKey, fmt.Sprintf("missing: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			if strings.TrimSpace(data["schema"].(string)) == "" {
+				fail(osKey, "outputSchema empty")
+			} else {
+				ok(osKey + " present")
+			}
+		}
+		fdKey := rbacDDLKey + ".fieldDescription"
+		if _, err := getEnvelope(ctx, coreKV, fdKey); err != nil {
+			fail(fdKey, fmt.Sprintf("missing: %v", err))
+		} else {
+			ok(fdKey + " present")
+		}
+		exKey := rbacDDLKey + ".examples"
+		if _, err := getEnvelope(ctx, coreKV, exKey); err != nil {
+			fail(exKey, fmt.Sprintf("missing: %v", err))
+		} else {
+			ok(exKey + " present")
 		}
 	}
 

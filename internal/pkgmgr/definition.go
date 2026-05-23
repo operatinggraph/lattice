@@ -93,6 +93,32 @@ type DDLSpec struct {
 	// Script is the Starlark source. Each permittedCommand should have
 	// a branch; the runner returns ScriptError for unrecognized ops.
 	Script string
+
+	// Story 5.1: self-description aspects. Required for all DDL classes.
+
+	// InputSchema is the JSON Schema string for this DDL's operation payload.
+	InputSchema string
+
+	// OutputSchema is the JSON Schema string for this DDL's operation response.
+	OutputSchema string
+
+	// FieldDescription maps payload field paths to plain-language descriptions.
+	FieldDescription map[string]string
+
+	// Examples is an ordered list of named usage examples for this DDL.
+	Examples []ExampleSpec
+}
+
+// ExampleSpec is a single named usage example for a DDL operation.
+type ExampleSpec struct {
+	// Name is a short descriptive label for this example.
+	Name string
+
+	// Payload is the example operation payload sent by the client.
+	Payload map[string]any
+
+	// ExpectedOutcome is plain English describing what the platform does.
+	ExpectedOutcome string
 }
 
 // LensSpec is one Lens meta-vertex declaration.

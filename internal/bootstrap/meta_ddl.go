@@ -53,6 +53,30 @@ def required_string(p, name):
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
 
+def need_str(p, name):
+    if not hasattr(p, name):
+        fail("MissingSelfDescription: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("MissingSelfDescription: " + name + ": required non-empty string")
+    return v.strip()
+
+def required_dict(p, name):
+    if not hasattr(p, name):
+        fail("MissingSelfDescription: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type({}):
+        fail("MissingSelfDescription: " + name + ": required non-empty object")
+    return v
+
+def required_list(p, name):
+    if not hasattr(p, name):
+        fail("MissingSelfDescription: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type([]):
+        fail("MissingSelfDescription: " + name + ": required list")
+    return v
+
 def vertex_alive(state, key):
     if key not in state:
         return False
@@ -80,15 +104,19 @@ def execute(state, op):
         target_class = required_string(p, "targetClass")
         canonical_name = required_string(p, "canonicalName")
         if is_ddl_class(target_class):
-            # DDL meta-vertex: requires permittedCommands + description + script.
+            # DDL meta-vertex: requires permittedCommands + all 5 self-description aspects.
             permitted = p.permittedCommands if hasattr(p, "permittedCommands") else None
             if permitted == None or type(permitted) != type([]):
                 fail("InvalidArgument: permittedCommands: required list of strings")
             for c in permitted:
                 if type(c) != type(""):
                     fail("InvalidArgument: permittedCommands: each entry must be a string")
-            description = required_string(p, "description")
-            script_src = required_string(p, "script")
+            description   = required_string(p, "description")
+            script_src    = required_string(p, "script")
+            input_schema  = need_str(p, "inputSchema")
+            output_schema = need_str(p, "outputSchema")
+            field_desc    = required_dict(p, "fieldDescription")
+            examples      = required_list(p, "examples")
 
             meta_id = nanoid.new()
             meta_key = "vtx.meta." + meta_id
@@ -102,6 +130,14 @@ def execute(state, op):
                             "description", {"text": description}),
                 make_aspect(meta_key + ".script", meta_key, "script",
                             "script", {"source": script_src}),
+                make_aspect(meta_key + ".inputSchema", meta_key, "inputSchema",
+                            "inputSchema", {"schema": input_schema}),
+                make_aspect(meta_key + ".outputSchema", meta_key, "outputSchema",
+                            "outputSchema", {"schema": output_schema}),
+                make_aspect(meta_key + ".fieldDescription", meta_key, "fieldDescription",
+                            "fieldDescription", {"fieldDescriptions": field_desc}),
+                make_aspect(meta_key + ".examples", meta_key, "examples",
+                            "examples", {"examples": examples}),
             ]
             events = [{"class": "MetaVertexCreated",
                        "data": {"metaKey": meta_key, "targetClass": target_class,

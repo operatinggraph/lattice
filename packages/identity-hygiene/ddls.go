@@ -59,6 +59,46 @@ func DDLs() []pkgmgr.DDLSpec {
 				"duplicateCandidates Lens) and is validated against Core KV by " +
 				"the script. ResponseDetail is commit-trace only (no business data).",
 			Script: identityHygieneScript,
+			InputSchema: `{"type":"object","required":["primary","secondary","edges"],"properties":` +
+				`{"primary":{"type":"string","description":"vtx.identity.<NanoID> of the surviving identity."},` +
+				`"secondary":{"type":"string","description":"vtx.identity.<NanoID> of the identity to be merged and tombstoned."},` +
+				`"edges":{"type":"array","items":{"type":"string"},"description":"Link vertex keys touching secondary, obtained from duplicateCandidates Lens output."},` +
+				`"aspectConflictResolution":{"type":"object","description":"Optional. Map of aspect name (name|email|phone) to 'secondary-wins' to overwrite the primary aspect with the secondary's value.","additionalProperties":{"type":"string","enum":["secondary-wins"]}}}}`,
+			OutputSchema: `{"type":"object","required":["primary","secondary","mutationCount","linksMigrated","linksTombstonedOnly","linkCollisionsMerged","eventCount"],"properties":` +
+				`{"primary":{"type":"string"},"secondary":{"type":"string"},` +
+				`"mutationCount":{"type":"integer","description":"Total KV mutations in the committed batch."},` +
+				`"linksMigrated":{"type":"integer","description":"Links rekeyed from secondary to primary endpoint."},` +
+				`"linksTombstonedOnly":{"type":"integer","description":"Self-loop links tombstoned without rekeying."},` +
+				`"linkCollisionsMerged":{"type":"integer","description":"Rekeyed links skipped because the new key already existed alive."},` +
+				`"eventCount":{"type":"integer"}}}`,
+			FieldDescription: map[string]string{
+				"primary":                  "The surviving identity. All rekeyed edges will reference this identity's NanoID after merge.",
+				"secondary":                "The identity being merged. Its state is set to 'merged'; its edges are rekeyed to primary.",
+				"edges":                    "Ordered list of link vertex keys (lnk.*) that touch secondary. Obtained from the duplicateCandidates Lens entry's secondaryInboundEdges + secondaryOutboundEdges fields.",
+				"aspectConflictResolution": "Optional per-aspect overwrite policy. Use 'secondary-wins' to copy the secondary's aspect value onto primary (e.g. prefer secondary phone number).",
+			},
+			Examples: []pkgmgr.ExampleSpec{
+				{
+					Name: "MergeIdentity — merge duplicate without aspect conflict resolution",
+					Payload: map[string]any{
+						"primary":   "vtx.identity.<primaryNanoID>",
+						"secondary": "vtx.identity.<secondaryNanoID>",
+						"edges":     []any{"lnk.identity.<secondaryNanoID>.holdsRole.role.<roleNanoID>"},
+					},
+					ExpectedOutcome: "Tombstones secondary holdsRole link, creates rekeyed link under primary. " +
+						"Sets secondary.state=merged, secondary.mergedInto=primary. Returns commit-trace response.",
+				},
+				{
+					Name: "MergeIdentity — with secondary-wins phone overwrite",
+					Payload: map[string]any{
+						"primary":                  "vtx.identity.<primaryNanoID>",
+						"secondary":                "vtx.identity.<secondaryNanoID>",
+						"edges":                    []any{},
+						"aspectConflictResolution": map[string]any{"phone": "secondary-wins"},
+					},
+					ExpectedOutcome: "Sets secondary.state=merged. Overwrites primary.phone with secondary.phone value.",
+				},
+			},
 		},
 	}
 }

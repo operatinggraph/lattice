@@ -234,7 +234,7 @@ func (s *Seeder) SeedPrimordial(ctx context.Context) error {
 		})
 	}
 
-	ack, err := conn.AtomicBatch(ops, 10*time.Second)
+	ack, err := conn.AtomicBatch(ops, 30*time.Second)
 	if err != nil {
 		// If the batch was rejected because a key already exists (e.g., a
 		// concurrent bootstrapper raced us), fall back to the idempotent
@@ -347,6 +347,57 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	if err := add(rootScriptKey, rsv, rsErr); err != nil {
 		return nil, err
 	}
+	// Story 5.1: 4 additional self-description aspects for the root DDL.
+	rootInputSchemaKey := MetaRootKey + ".inputSchema"
+	risa, risaErr := MakeAspectEnvelope(rootInputSchemaKey, MetaRootKey, "inputSchema", "inputSchema",
+		map[string]any{"schema": `{"type":"object","required":["targetClass","canonicalName"],"properties":{"targetClass":{"type":"string","description":"One of meta.ddl.vertexType|linkType|aspectType|eventType|meta.lens"},"canonicalName":{"type":"string"},"permittedCommands":{"type":"array","items":{"type":"string"}},"description":{"type":"string"},"script":{"type":"string"},"inputSchema":{"type":"string"},"outputSchema":{"type":"string"},"fieldDescription":{"type":"object"},"examples":{"type":"array"},"spec":{"type":"string"}}}`})
+	if err := add(rootInputSchemaKey, risa, risaErr); err != nil {
+		return nil, err
+	}
+	rootOutputSchemaKey := MetaRootKey + ".outputSchema"
+	rosa, rosaErr := MakeAspectEnvelope(rootOutputSchemaKey, MetaRootKey, "outputSchema", "outputSchema",
+		map[string]any{"schema": `{"type":"object","properties":{"metaKey":{"type":"string"}},"required":["metaKey"]}`})
+	if err := add(rootOutputSchemaKey, rosa, rosaErr); err != nil {
+		return nil, err
+	}
+	rootFDKey := MetaRootKey + ".fieldDescription"
+	rfd, rfdErr := MakeAspectEnvelope(rootFDKey, MetaRootKey, "fieldDescription", "fieldDescription",
+		map[string]any{"fieldDescriptions": map[string]any{
+			"targetClass":       "The meta-vertex class to create. DDL classes: meta.ddl.vertexType, meta.ddl.linkType, meta.ddl.aspectType, meta.ddl.eventType. Lens class: meta.lens.",
+			"canonicalName":     "The unique canonical name for this DDL. Used by Processor DDL cache for class lookup.",
+			"permittedCommands": "List of operationType strings that may produce mutations of this vertex type.",
+			"description":       "Plain-language markdown description of this DDL's purpose and behaviour.",
+			"script":            "Starlark source for the DDL's execute(state, op) function.",
+			"inputSchema":       "JSON Schema string for the operation payload accepted by this DDL.",
+			"outputSchema":      "JSON Schema string for the operation response produced by this DDL.",
+			"fieldDescription":  "Map of fieldPath to plain-language description for each payload field.",
+			"examples":          "Array of {name, payload, expectedOutcome} usage examples.",
+		}})
+	if err := add(rootFDKey, rfd, rfdErr); err != nil {
+		return nil, err
+	}
+	rootExamplesKey := MetaRootKey + ".examples"
+	rex, rexErr := MakeAspectEnvelope(rootExamplesKey, MetaRootKey, "examples", "examples",
+		map[string]any{"examples": []any{
+			map[string]any{
+				"name": "CreateMetaVertex — new DDL",
+				"payload": map[string]any{
+					"targetClass":       "meta.ddl.vertexType",
+					"canonicalName":     "book",
+					"permittedCommands": []string{"CreateBook", "UpdateBook"},
+					"description":       "Book vertex DDL. Carries title, author, isbn aspects.",
+					"script":            "def execute(state, op): ...",
+					"inputSchema":       `{"type":"object","required":["title"],"properties":{"title":{"type":"string"}}}`,
+					"outputSchema":      `{"type":"object","required":["bookKey"],"properties":{"bookKey":{"type":"string"}}}`,
+					"fieldDescription":  map[string]any{"title": "Book title, max 500 chars."},
+					"examples":          []any{},
+				},
+				"expectedOutcome": "Creates vtx.meta.<NanoID> with class=meta.ddl.vertexType and 9 aspect keys.",
+			},
+		}})
+	if err := add(rootExamplesKey, rex, rexErr); err != nil {
+		return nil, err
+	}
 
 	// 5. Capability Lens definition.
 	capLens := CapabilityLensDefinition()
@@ -365,6 +416,14 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		return nil, err
 	}
 	if err := addLensAspects(&entries, CapabilityRoleIndexLensKey, roleIdxLens); err != nil {
+		return nil, err
+	}
+
+	// 6a. Story 5.1: five aspect-type meta-vertices — the DDLs for the
+	// self-description aspect classes. Each has class=meta.ddl.aspectType
+	// and carries all 5 descriptive aspects itself (bootstrapped primordially
+	// to avoid a chicken-and-egg dependency with post-bootstrap DDL enforcement).
+	if err := seedAspectTypeMeta(&entries, add); err != nil {
 		return nil, err
 	}
 
@@ -442,6 +501,160 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// seedAspectTypeMeta seeds the five aspect-type meta-vertices for Story 5.1.
+// These are the primordial DDLs for the self-description aspect classes:
+// description, inputSchema, outputSchema, fieldDescription, examples.
+// Each carries all 5 descriptive aspects (bootstrapped directly so the
+// enforcement rule in CreateMetaVertex can reference them without circularity).
+func seedAspectTypeMeta(entries *[]kvEntry, add func(string, []byte, error) error) error {
+	type aspectTypeDef struct {
+		key         string
+		name        string
+		description string
+		inputSchema  string
+		outputSchema string
+		fieldDescriptions map[string]any
+		examples    []any
+	}
+	defs := []aspectTypeDef{
+		{
+			key:         AspectTypeDescriptionKey,
+			name:        "description",
+			description: "Plain-language markdown description for a DDL meta-vertex, lens, role, or aspect type. Stored at vtx.meta.<X>.description. Max 10KB.",
+			inputSchema:  `{"type":"object","properties":{"text":{"type":"string","maxLength":10240}},"required":["text"]}`,
+			outputSchema: `{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`,
+			fieldDescriptions: map[string]any{
+				"text": "The markdown-formatted description content. Used by AI agents and humans to understand the entity.",
+			},
+			examples: []any{
+				map[string]any{
+					"name":            "identity DDL description",
+					"payload":         map[string]any{"text": "Identity vertex. Carries name, email, phone, state, claimKey, credentialBinding, mergedInto aspects."},
+					"expectedOutcome": "Stored at vtx.meta.<id>.description; readable by AI traversers.",
+				},
+			},
+		},
+		{
+			key:         AspectTypeInputSchemaKey,
+			name:        "inputSchema",
+			description: "JSON Schema object describing the valid input payload for a DDL operation. Stored at vtx.meta.<X>.inputSchema.",
+			inputSchema:  `{"type":"object","properties":{"schema":{"type":"string"}},"required":["schema"]}`,
+			outputSchema: `{"type":"object","properties":{"schema":{"type":"string"}},"required":["schema"]}`,
+			fieldDescriptions: map[string]any{
+				"schema": "The JSON Schema for the operation's input payload, serialized as a string.",
+			},
+			examples: []any{
+				map[string]any{
+					"name":            "CreateRole inputSchema",
+					"payload":         map[string]any{"schema": `{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"}},"required":["name"]}`},
+					"expectedOutcome": "Validates CreateRole payloads; rejects missing `name`.",
+				},
+			},
+		},
+		{
+			key:         AspectTypeOutputSchemaKey,
+			name:        "outputSchema",
+			description: "JSON Schema object describing the structure of the operation's response payload. Stored at vtx.meta.<X>.outputSchema.",
+			inputSchema:  `{"type":"object","properties":{"schema":{"type":"string"}},"required":["schema"]}`,
+			outputSchema: `{"type":"object","properties":{"schema":{"type":"string"}},"required":["schema"]}`,
+			fieldDescriptions: map[string]any{
+				"schema": "The JSON Schema for the operation's response, serialized as a string.",
+			},
+			examples: []any{
+				map[string]any{
+					"name":            "CreateRole outputSchema",
+					"payload":         map[string]any{"schema": `{"type":"object","properties":{"roleKey":{"type":"string"}},"required":["roleKey"]}`},
+					"expectedOutcome": "Documents that CreateRole returns a roleKey.",
+				},
+			},
+		},
+		{
+			key:         AspectTypeFieldDescriptionKey,
+			name:        "fieldDescription",
+			description: "Map of field paths to plain-language descriptions. Enables AI agents to understand each input field for a DDL operation. Stored at vtx.meta.<X>.fieldDescription.",
+			inputSchema:  `{"type":"object","properties":{"fieldDescriptions":{"type":"object","additionalProperties":{"type":"string"}}},"required":["fieldDescriptions"]}`,
+			outputSchema: `{"type":"object","properties":{"fieldDescriptions":{"type":"object","additionalProperties":{"type":"string"}}},"required":["fieldDescriptions"]}`,
+			fieldDescriptions: map[string]any{
+				"fieldDescriptions": "A map where each key is a field path (e.g. `name`, `actorKey`) and each value is a plain-language description.",
+			},
+			examples: []any{
+				map[string]any{
+					"name": "CreateRole fieldDescription",
+					"payload": map[string]any{"fieldDescriptions": map[string]any{
+						"name":        "The canonical name for the new role (e.g. `consumer`, `backOfHouse`).",
+						"description": "Optional human-readable description of the role's purpose.",
+					}},
+					"expectedOutcome": "Helps AI agents understand each CreateRole parameter.",
+				},
+			},
+		},
+		{
+			key:         AspectTypeExamplesKey,
+			name:        "examples",
+			description: "Array of named usage examples for a DDL operation. Each includes a sample payload and expected outcome. Stored at vtx.meta.<X>.examples.",
+			inputSchema:  `{"type":"object","properties":{"examples":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"payload":{"type":"object"},"expectedOutcome":{"type":"string"}},"required":["name","payload","expectedOutcome"]}}},"required":["examples"]}`,
+			outputSchema: `{"type":"object","properties":{"examples":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"payload":{"type":"object"},"expectedOutcome":{"type":"string"}},"required":["name","payload","expectedOutcome"]}}},"required":["examples"]}`,
+			fieldDescriptions: map[string]any{
+				"examples":              "Array of example invocations.",
+				"examples[].name":       "Short descriptive name for this example.",
+				"examples[].payload":    "The operation payload sent by the client.",
+				"examples[].expectedOutcome": "Plain English description of what the platform does.",
+			},
+			examples: []any{
+				map[string]any{
+					"name": "examples self-example",
+					"payload": map[string]any{"examples": []any{
+						map[string]any{
+							"name":            "CreateRole example",
+							"payload":         map[string]any{"name": "barista"},
+							"expectedOutcome": "Creates vtx.role.<NanoID> with canonicalName=barista.",
+						},
+					}},
+					"expectedOutcome": "This is the examples aspect for the examples aspect type — recursive but valid.",
+				},
+			},
+		},
+	}
+
+	for _, d := range defs {
+		vtxVal, vtxErr := MakeVertexEnvelope(d.key, "meta.ddl.aspectType", map[string]any{})
+		if err := add(d.key, vtxVal, vtxErr); err != nil {
+			return err
+		}
+		cnVal, cnErr := MakeAspectEnvelope(d.key+".canonicalName", d.key, "canonicalName", "canonicalName",
+			map[string]any{"value": d.name})
+		if err := add(d.key+".canonicalName", cnVal, cnErr); err != nil {
+			return err
+		}
+		descVal, descErr := MakeAspectEnvelope(d.key+".description", d.key, "description", "description",
+			map[string]any{"text": d.description})
+		if err := add(d.key+".description", descVal, descErr); err != nil {
+			return err
+		}
+		isVal, isErr := MakeAspectEnvelope(d.key+".inputSchema", d.key, "inputSchema", "inputSchema",
+			map[string]any{"schema": d.inputSchema})
+		if err := add(d.key+".inputSchema", isVal, isErr); err != nil {
+			return err
+		}
+		osVal, osErr := MakeAspectEnvelope(d.key+".outputSchema", d.key, "outputSchema", "outputSchema",
+			map[string]any{"schema": d.outputSchema})
+		if err := add(d.key+".outputSchema", osVal, osErr); err != nil {
+			return err
+		}
+		fdVal, fdErr := MakeAspectEnvelope(d.key+".fieldDescription", d.key, "fieldDescription", "fieldDescription",
+			map[string]any{"fieldDescriptions": d.fieldDescriptions})
+		if err := add(d.key+".fieldDescription", fdVal, fdErr); err != nil {
+			return err
+		}
+		exVal, exErr := MakeAspectEnvelope(d.key+".examples", d.key, "examples", "examples",
+			map[string]any{"examples": d.examples})
+		if err := add(d.key+".examples", exVal, exErr); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addLensAspects appends aspect entries for a Lens definition vertex.
