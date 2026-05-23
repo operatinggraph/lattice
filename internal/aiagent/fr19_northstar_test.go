@@ -23,6 +23,7 @@ package aiagent_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,7 +65,8 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 	seederCapDoc := buildCapDoc(seederActorKey, "cap.identity."+northStarSeederActorID,
 		[]processor.PlatformPermission{
 			{OperationType: "CreateMetaVertex", Scope: "any"},
-		})
+		},
+		[]string{bootstrap.RoleOperatorKey})
 	testutil.SeedCapDoc(t, ctx, conn, seederCapDoc)
 
 	// Pipeline for meta-lane (CreateMetaVertex goes to ops.meta).
@@ -101,16 +103,32 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 	if tracker.Data["status"] != "committed" {
 		t.Fatalf("tracker status: got %v want committed", tracker.Data["status"])
 	}
+	// Extract the meta-vertex key the seeder actually wrote — used below
+	// to cross-check that DiscoverDDL returns *the same* key (AC4: "the
+	// traverser returns the same key the seeder got"). For a
+	// CreateMetaVertex op, the primary mutation key is the new
+	// vtx.meta.<NanoID> vertex.
+	seederMutationKeys, _ := tracker.Data["mutationKeys"].([]interface{})
+	if len(seederMutationKeys) == 0 {
+		t.Fatalf("seeder tracker has no mutationKeys: %v", tracker.Data)
+	}
+	expectedDDLKey, _ := seederMutationKeys[0].(string)
+	if expectedDDLKey == "" || !strings.HasPrefix(expectedDDLKey, "vtx.meta.") {
+		t.Fatalf("seeder mutationKeys[0] not a vtx.meta.* key: %v", seederMutationKeys[0])
+	}
 
 	// ---- Step 2: Seed the AI agent's capability doc ----
 	//
 	// In production, the Capability Lens would project this. In the test
 	// harness we seed it directly (same pattern as all integration tests
 	// since Story 3.x).
+	// Agent holds no platform role — its authorization is permission-based
+	// only (the seeder granted the new op type directly into the cap doc).
 	agentCapDoc := buildCapDoc(agentActorKey, "cap.identity."+northStarAgentActorID,
 		[]processor.PlatformPermission{
 			{OperationType: canonicalName, Scope: "any"},
-		})
+		},
+		nil)
 	testutil.SeedCapDoc(t, ctx, conn, agentCapDoc)
 
 	// ---- Step 3: Cold-start traversal ----
@@ -142,6 +160,12 @@ func TestFR19_ColdStartAIAgentTraversal(t *testing.T) {
 	}
 	if ddlKey == "" {
 		t.Fatal("DiscoverDDL returned empty key")
+	}
+	// AC4 cross-check: the agent's traversal must land on *the same*
+	// meta-vertex the seeder committed — not some pre-existing
+	// coincidentally-named vertex.
+	if ddlKey != expectedDDLKey {
+		t.Fatalf("DiscoverDDL key mismatch: got %q, seeder wrote %q", ddlKey, expectedDDLKey)
 	}
 
 	// 3d: Read the five self-description aspects.
@@ -251,7 +275,7 @@ func TestFR19_NFR_S10_SameProcessorPath(t *testing.T) {
 	capKey := "cap.identity." + "NFRs10AgentID000001"
 
 	// Seed an empty cap doc — no permissions.
-	emptyCapDoc := buildCapDoc(agentActorKey, capKey, []processor.PlatformPermission{})
+	emptyCapDoc := buildCapDoc(agentActorKey, capKey, []processor.PlatformPermission{}, nil)
 	testutil.SeedCapDoc(t, ctx, conn, emptyCapDoc)
 
 	// Try to submit CreateMetaVertex (which the agent's cap doc doesn't grant).
@@ -279,8 +303,12 @@ func TestFR19_NFR_S10_SameProcessorPath(t *testing.T) {
 
 // ---- helpers ----
 
-// buildCapDoc constructs a minimal processor.CapabilityDoc for test use.
-func buildCapDoc(actorKey, capKey string, perms []processor.PlatformPermission) *processor.CapabilityDoc {
+// buildCapDoc constructs a minimal processor.CapabilityDoc for test
+// use. Callers pass the roles the actor holds — the seeder identity
+// gets `[]string{bootstrap.RoleOperatorKey}` (it grants permissions);
+// AI agent actors get `[]string{}` (they receive permissions but hold
+// no platform role).
+func buildCapDoc(actorKey, capKey string, perms []processor.PlatformPermission, roles []string) *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
 		Key:                    capKey,
@@ -292,7 +320,7 @@ func buildCapDoc(actorKey, capKey string, perms []processor.PlatformPermission) 
 		PlatformPermissions:    perms,
 		ServiceAccess:          []processor.ServiceAccessEntry{},
 		EphemeralGrants:        []processor.EphemeralGrant{},
-		Roles:                  []string{bootstrap.RoleOperatorKey},
+		Roles:                  roles,
 	}
 }
 
@@ -359,10 +387,11 @@ func buildCreateMetaVertexPayload(t *testing.T, canonicalName string) map[string
 //   - number  → 1.0
 //   - boolean → true
 //
-// Unknown types fall back to the JSON `null` literal — the script's
-// own type-check will reject if that's wrong, which is the correct
-// failure mode (the agent constructed something the schema didn't
-// promise was valid).
+// Unknown property types `t.Fatal` — extend the helper rather than
+// silently producing a `null` and relying on the script to catch it.
+// Same goes for an empty `required` list: that would let an empty
+// payload through trivially, defeating the FR19 schema-driven
+// construction loop, so the helper hard-fails there too.
 func buildPayloadFromSchema(t *testing.T, inputSchema string) map[string]any {
 	t.Helper()
 	var schema struct {

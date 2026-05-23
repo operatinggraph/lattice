@@ -177,7 +177,7 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	// description aspect: data.text
 	descEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".description")
 	if err != nil {
-		return nil, fmt.Errorf("%w: description at %s: %v", ErrAspectMissing, ddlKey, err)
+		return nil, fmt.Errorf("%w: description at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var descDoc struct {
 		Data struct{ Text string `json:"text"` } `json:"data"`
@@ -190,7 +190,7 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	// inputSchema aspect: data.schema
 	isEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".inputSchema")
 	if err != nil {
-		return nil, fmt.Errorf("%w: inputSchema at %s: %v", ErrAspectMissing, ddlKey, err)
+		return nil, fmt.Errorf("%w: inputSchema at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var isDoc struct {
 		Data struct{ Schema string `json:"schema"` } `json:"data"`
@@ -203,7 +203,7 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	// outputSchema aspect: data.schema
 	osEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".outputSchema")
 	if err != nil {
-		return nil, fmt.Errorf("%w: outputSchema at %s: %v", ErrAspectMissing, ddlKey, err)
+		return nil, fmt.Errorf("%w: outputSchema at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var osDoc struct {
 		Data struct{ Schema string `json:"schema"` } `json:"data"`
@@ -216,7 +216,7 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	// fieldDescription aspect: data.fieldDescriptions (map[string]string)
 	fdEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".fieldDescription")
 	if err != nil {
-		return nil, fmt.Errorf("%w: fieldDescription at %s: %v", ErrAspectMissing, ddlKey, err)
+		return nil, fmt.Errorf("%w: fieldDescription at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var fdDoc struct {
 		Data struct {
@@ -231,7 +231,7 @@ func (t *Traverser) ReadDDLAspects(ctx context.Context, ddlKey string) (*DDLAspe
 	// examples aspect: data.examples ([]ExampleEntry)
 	exEntry, err := t.conn.KVGet(ctx, t.coreBucket, ddlKey+".examples")
 	if err != nil {
-		return nil, fmt.Errorf("%w: examples at %s: %v", ErrAspectMissing, ddlKey, err)
+		return nil, fmt.Errorf("%w: examples at %s: %w", ErrAspectMissing, ddlKey, err)
 	}
 	var exDoc struct {
 		Data struct {
