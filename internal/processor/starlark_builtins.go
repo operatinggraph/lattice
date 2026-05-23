@@ -57,14 +57,30 @@ func errBuiltin(msg string) error {
 	return &starlarklib.EvalError{Msg: msg}
 }
 
-// seedFromRequestID derives two uint64s from sha256(requestId). The
+// SeedFromRequestID derives two uint64s from sha256(requestId). The
 // PCG32 PRNG requires two seeds; we use the first 16 bytes of the hash.
-func seedFromRequestID(requestID string) [2]uint64 {
+// Exported so external test packages can reproduce NanoIDs generated
+// by the Starlark `nanoid.new()` builtin for a given requestId — the
+// same algorithm the Processor uses at commit time.
+func SeedFromRequestID(requestID string) [2]uint64 {
 	sum := sha256.Sum256([]byte(requestID))
 	return [2]uint64{
 		binary.BigEndian.Uint64(sum[0:8]),
 		binary.BigEndian.Uint64(sum[8:16]),
 	}
+}
+
+// seedFromRequestID is the unexported alias retained for internal callers.
+func seedFromRequestID(requestID string) [2]uint64 {
+	return SeedFromRequestID(requestID)
+}
+
+// DeterministicNanoID emits an n-character NanoID from substrate.Alphabet
+// using rejection sampling against a 6-bit mask, seeded from pcg.
+// Exported so external test packages can reproduce the NanoIDs generated
+// by `nanoid.new()` / `nanoid.short()` at Starlark runtime.
+func DeterministicNanoID(src *rand.PCG, n int) string {
+	return deterministicNanoID(src, n)
 }
 
 // deterministicNanoID emits an n-character NanoID from substrate.Alphabet
