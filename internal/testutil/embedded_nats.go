@@ -1,17 +1,7 @@
-// Story 4.7 cleanup — embedded NATS + drive helpers for external test
-// packages.
-//
-// Test packages outside `internal/processor` (e.g.,
-// `packages/identity-domain` and `packages/rbac-domain`) need the same
-// embedded-NATS fixture + consumer-drive loop that the processor
-// integration tests use. They previously lived in
-// `internal/processor/integration_test.go` (unexported, _test.go
-// scope). Story 4.7 moves the package-scope tests to the packages
-// themselves; this file makes the supporting test plumbing reusable.
-//
-// These helpers are NOT in a _test.go file because external test
-// packages can only import non-test files. The helpers are still
-// strictly test-only: callers must pass *testing.T.
+// Package testutil provides embedded NATS and Processor-pipeline helpers
+// for test packages outside internal/processor that need the same fixture
+// infrastructure. Helpers here are test-only (callers must pass *testing.T)
+// but live in non-test files so external test packages can import them.
 package testutil
 
 import (
@@ -30,16 +20,20 @@ import (
 
 // StartEmbeddedNATS spins up an in-process JetStream-enabled NATS server
 // and returns its client URL. The server is shut down via t.Cleanup.
+//
+// Each call allocates a unique StoreDir under t.TempDir() so that
+// concurrently running test packages do not share the JetStream file store.
+// Without an explicit StoreDir, NATS defaults to os.TempDir()/jetstream,
+// which is shared across all processes and causes cross-package contamination
+// when tests run in parallel.
 func StartEmbeddedNATS(t *testing.T) string {
 	t.Helper()
 	opts := natsserver.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
 	s := natsserver.RunServer(&opts)
 	t.Cleanup(func() {
-		if jsCfg := s.JetStreamConfig(); jsCfg != nil {
-			defer os.RemoveAll(jsCfg.StoreDir)
-		}
 		s.Shutdown()
 		_ = server.VERSION
 	})

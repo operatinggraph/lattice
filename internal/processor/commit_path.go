@@ -398,11 +398,25 @@ func classifyStepError(err error) (ErrorCode, map[string]any) {
 	return ErrCodeInternalError, nil
 }
 
-// replyTo publishes a reply envelope on msg.Reply() if a reply subject
-// was provided. Errors are logged (the commit is already durable, so
-// failure to reply is observability-only).
+// replySubject returns the subject to publish replies to for a delivered
+// JetStream message. JetStream pull consumers rewrite msg.Reply() to the
+// stream's ACK subject; callers that want a direct reply carry their inbox
+// in the Lattice-Reply-Inbox header, which takes precedence.
+func replySubject(msg jetstream.Msg) string {
+	if hdr := msg.Headers(); hdr != nil {
+		if inbox := hdr.Get("Lattice-Reply-Inbox"); inbox != "" {
+			return inbox
+		}
+	}
+	return msg.Reply()
+}
+
+// replyTo publishes a reply envelope to the caller's reply subject.
+// Errors are logged (the commit is already durable, so failure to reply
+// is observability-only).
 func (cp *CommitPath) replyTo(msg jetstream.Msg, reply OperationReply) {
-	if msg.Reply() == "" {
+	subject := replySubject(msg)
+	if subject == "" {
 		return
 	}
 	b, err := MarshalReply(reply)
@@ -410,13 +424,14 @@ func (cp *CommitPath) replyTo(msg jetstream.Msg, reply OperationReply) {
 		cp.deps.Logger.Warn("reply marshal failed", "error", err)
 		return
 	}
-	if err := cp.deps.Conn.NATS().Publish(msg.Reply(), b); err != nil {
-		cp.deps.Logger.Warn("reply publish failed", "subject", msg.Reply(), "error", err)
+	if err := cp.deps.Conn.NATS().Publish(subject, b); err != nil {
+		cp.deps.Logger.Warn("reply publish failed", "subject", subject, "error", err)
 	}
 }
 
 func (cp *CommitPath) maybeReplyMalformed(msg jetstream.Msg, requestID, reason string) {
-	if msg.Reply() == "" {
+	subject := replySubject(msg)
+	if subject == "" {
 		return
 	}
 	rid := requestID
@@ -432,7 +447,7 @@ func (cp *CommitPath) maybeReplyMalformed(msg jetstream.Msg, requestID, reason s
 	if err != nil {
 		return
 	}
-	_ = cp.deps.Conn.NATS().Publish(msg.Reply(), b)
+	_ = cp.deps.Conn.NATS().Publish(subject, b)
 }
 
 // Run drives a Consume loop until ctx is cancelled. The callback wires

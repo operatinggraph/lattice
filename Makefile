@@ -15,7 +15,7 @@ BOOTSTRAP_JSON ?= ./lattice.bootstrap.json
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene build vet test test-bypass test-capability-adversarial test-rollback processor run-processor clean logs ps
+.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene build vet test test-bypass test-capability-adversarial test-rollback test-cli processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -26,6 +26,8 @@ up:
 	go build -o bin/bootstrap ./cmd/bootstrap
 	@echo "==> Building refractor binary (Story 2.1)..."
 	go build -o bin/refractor ./cmd/refractor
+	@echo "==> Building lattice CLI..."
+	go build -o bin/lattice ./cmd/lattice
 	@echo "==> Running bootstrap..."
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap
 	@echo "==> Starting refractor in background..."
@@ -84,6 +86,11 @@ build:
 	go build -o bin/bootstrap ./cmd/bootstrap
 	go build -o bin/refractor ./cmd/refractor
 	go build -o bin/processor ./cmd/processor
+	go build -o bin/lattice ./cmd/lattice
+
+## test-cli — Run the lattice CLI unit + E2E tests.
+test-cli:
+	go test ./cmd/lattice/... -v -p 1 -count=1
 
 ## processor — Build the Processor binary (Story 1.5).
 processor:
