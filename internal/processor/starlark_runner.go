@@ -8,6 +8,7 @@ import (
 	"time"
 
 	starlarklib "go.starlark.net/starlark"
+	starlarkjson "go.starlark.net/lib/json"
 	"go.starlark.net/starlarkstruct"
 )
 
@@ -57,13 +58,14 @@ func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResul
 		"op":     operationEnvelopeToStarlark(sc.Operation),
 		"ddl":    ddlMapToStarlark(sc.DDLLookup),
 		"nanoid": nanoidModule(rid),
-		// crypto.sha256(s) — pure SHA-256 hash builtin (Story 4.2).
-		// Deterministic, side-effect-free: safe under sandbox principles.
+		// crypto.sha256(s) — pure SHA-256 hash builtin. Deterministic,
+		// side-effect-free: safe under sandbox principles.
 		"crypto": cryptoModule(),
-		// Story 4.6 walk-back: strings.* module retired. Levenshtein moved
-		// to the cypher executor (levenshteinDist / levenshteinRatio UDFs)
-		// where lens projection lives. Starlark write-path scripts no
-		// longer have access to it.
+		// json.decode(s) / json.encode(v) — standard Starlark JSON module.
+		// Pure (no I/O, deterministic): safe under sandbox principles.
+		// Used by MetaRootDDLScript's meta.lens branch to parse the spec
+		// payload field into a structured dict for the .spec aspect data.
+		"json": starlarkjson.Module,
 	}
 
 	// Compile. Resolve errors (referencing `os`, `time`, etc. without binding)
@@ -162,11 +164,11 @@ func classifyStarlarkError(err error, rid string) *ScriptError {
 			OperationRequestID: rid,
 		}
 	}
-	// ClaimKeyInvalid: structured error from the ClaimIdentity script branch
-	// (Story 4.3). The script calls fail("ClaimKeyInvalid: <outcome>") where
-	// outcome is the internal diagnostic detail. We parse it here so the
-	// executor can emit the specific outcome to Health KV before stripping it
-	// from the caller reply (NFR-S6 anti-enumeration).
+	// ClaimKeyInvalid: structured error from the ClaimIdentity script branch.
+	// The script calls fail("ClaimKeyInvalid: <outcome>") where outcome is the
+	// internal diagnostic detail. We parse it here so the executor can emit
+	// the specific outcome to Health KV before stripping it from the caller
+	// reply (NFR-S6 anti-enumeration).
 	if idx := strings.Index(msg, "ClaimKeyInvalid: "); idx >= 0 {
 		detail := strings.TrimSpace(msg[idx+len("ClaimKeyInvalid: "):])
 		// Strip any trailing ") or similar Starlark backtrace decoration.
@@ -214,7 +216,7 @@ func extractStarlarkPosition(err error) (int, int) {
 // parseScriptResult converts the Starlark return value into a ScriptResult.
 // The script must return {"mutations": [...], "events": [...]} per
 // Contract #3 §3.1. An optional "response" dict key carries structured
-// data to surface in the success reply (Story 4.2 extension).
+// data to surface in the success reply.
 //
 // NOTE: ResponseDetail is NOT logged by the executor (NFR-S6/S7 —
 // it may carry sensitive tokens such as plaintext claim keys).
@@ -235,7 +237,7 @@ func parseScriptResult(val starlarklib.Value, rid string) (ScriptResult, error) 
 	if err != nil {
 		return ScriptResult{}, err
 	}
-	// Optional "response" dict — Story 4.2 extension. Never validate strictly;
+	// Optional "response" dict. Never validate strictly;
 	// absent = nil; non-dict = silently ignored (don't break existing scripts).
 	var detail map[string]any
 	if respRaw, found, _ := d.Get(starlarklib.String("response")); found {
@@ -291,8 +293,8 @@ func parseMutations(d *starlarklib.Dict, rid string) ([]MutationOp, error) {
 				m.Document = starlarkDictToGoMap(dd)
 			}
 		}
-		// MF-1 (Story 5.3): extract optional expectedRevision integer so
-		// step8_commit.go can propagate the revision assertion to AtomicBatch.
+		// Extract optional expectedRevision integer so step8_commit.go can
+		// propagate the revision assertion to AtomicBatch.
 		if rev, found, _ := md.Get(starlarklib.String("expectedRevision")); found && rev != starlarklib.None {
 			if revInt, ok := rev.(starlarklib.Int); ok {
 				if v, ok := revInt.Uint64(); ok {
@@ -377,9 +379,8 @@ func (s *stateMapValue) AttrNames() []string {
 	return s.d.AttrNames()
 }
 
-// Attr implements starlarklib.HasAttrs — delegates to the underlying
-// dict. Story 4.6 walk-back removed the `keys_with_prefix` custom
-// attribute; all dict-native attrs still flow through.
+// Attr implements starlarklib.HasAttrs — delegates to the underlying dict.
+// All dict-native attrs flow through (no custom attributes are added).
 func (s *stateMapValue) Attr(name string) (starlarklib.Value, error) {
 	return s.d.Attr(name)
 }

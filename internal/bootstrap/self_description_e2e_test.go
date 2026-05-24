@@ -189,14 +189,24 @@ func TestSelfDescription_CreateMetaVertexRequiresAllFiveAspects(t *testing.T) {
 			wantErr:     "",
 		},
 		{
-			name: "meta.lens class — no self-description required",
+			name: "meta.lens class — valid LensSpec JSON string accepted",
 			payloadJSON: `{
 				"targetClass": "meta.lens",
 				"canonicalName": "myLens",
 				"description": "A lens.",
-				"spec": "MATCH (n) RETURN n"
+				"spec": "{\"cypherRule\":\"MATCH (b:book) RETURN b.id AS book_id\",\"targetType\":\"postgres\",\"targetConfig\":{\"dsn\":\"postgres://localhost/test\",\"table\":\"books\",\"key\":[\"book_id\"]}}"
 			}`,
 			wantErr: "",
+		},
+		{
+			name: "meta.lens class — spec missing cypherRule rejected",
+			payloadJSON: `{
+				"targetClass": "meta.lens",
+				"canonicalName": "myLens",
+				"description": "A lens.",
+				"spec": "{\"targetType\":\"postgres\",\"targetConfig\":{\"dsn\":\"postgres://localhost/test\",\"table\":\"books\",\"key\":[\"book_id\"]}}"
+			}`,
+			wantErr: "spec.cypherRule: required",
 		},
 	}
 
@@ -220,5 +230,86 @@ func TestSelfDescription_CreateMetaVertexRequiresAllFiveAspects(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMetaLensSpec_CypherRuleInAspectData verifies that submitting a
+// CreateMetaVertex with targetClass=meta.lens and a valid spec JSON string
+// produces a .spec aspect mutation whose document data contains the
+// cypherRule key (not "source"). This is the SD-1 fix assertion.
+func TestMetaLensSpec_CypherRuleInAspectData(t *testing.T) {
+	runner := processor.NewStarlarkRunner(0, 0)
+	ctx := context.Background()
+
+	// specJSON is the raw LensSpec object string that becomes the "spec" field value.
+	// The JSON escaping is handled by encoding/json.Marshal so the payload is valid JSON.
+	specObj := map[string]any{
+		"cypherRule": "MATCH (b:book) RETURN b.id AS book_id, b.title AS title",
+		"targetType": "postgres",
+		"targetConfig": map[string]any{
+			"dsn":   "postgres://localhost/test",
+			"table": "books",
+			"key":   []string{"book_id"},
+		},
+	}
+	specBytes, err := json.Marshal(specObj)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	payload := map[string]any{
+		"targetClass":  "meta.lens",
+		"canonicalName": "books",
+		"description":  "Projects book vertices to the books Postgres table.",
+		"spec":         string(specBytes),
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	payloadJSON := string(payloadBytes)
+
+	sc := makeMetaRootCtx(payloadJSON)
+	result, err := runner.Run(ctx, sc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var specMutation *processor.MutationOp
+	for i := range result.Mutations {
+		m := &result.Mutations[i]
+		if strings.HasSuffix(m.Key, ".spec") {
+			specMutation = m
+			break
+		}
+	}
+	if specMutation == nil {
+		t.Fatalf("no .spec mutation found in result; mutations: %+v", result.Mutations)
+	}
+
+	doc := specMutation.Document
+	data, ok := doc["data"]
+	if !ok {
+		t.Fatalf(".spec mutation document missing 'data' key; document: %+v", doc)
+	}
+	dataMap, ok := data.(map[string]any)
+	if !ok {
+		t.Fatalf(".spec mutation document 'data' is not a map; got %T: %+v", data, data)
+	}
+
+	if _, hasCypherRule := dataMap["cypherRule"]; !hasCypherRule {
+		keys := make([]string, 0, len(dataMap))
+		for k := range dataMap {
+			keys = append(keys, k)
+		}
+		t.Errorf(".spec aspect data missing 'cypherRule'; keys present: %v", keys)
+	}
+	if _, hasSource := dataMap["source"]; hasSource {
+		t.Errorf(".spec aspect data contains old 'source' key — SD-1 fix not applied correctly")
+	}
+	if _, hasTargetType := dataMap["targetType"]; !hasTargetType {
+		t.Errorf(".spec aspect data missing 'targetType'")
+	}
+	if _, hasTargetConfig := dataMap["targetConfig"]; !hasTargetConfig {
+		t.Errorf(".spec aspect data missing 'targetConfig'")
 	}
 }

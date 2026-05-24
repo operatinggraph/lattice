@@ -10,8 +10,12 @@ package bootstrap
 //     meta.ddl.eventType → expects canonicalName, permittedCommands,
 //     description, script aspects in op.payload.aspects; assigns a fresh
 //     NanoID and writes the vertex + 4 aspects.
-//   - meta.lens → expects canonicalName, description, spec aspects (and
-//     optional adapter / bucket / engine); writes vertex + aspects.
+//   - meta.lens → expects canonicalName, description, and spec fields.
+//     spec must be a JSON string containing a LensSpec object with at
+//     least cypherRule, targetType, and targetConfig fields; the script
+//     decodes it with json.decode() and stores the resulting dict verbatim
+//     as the .spec aspect data so Refractor's CoreKVSource can unmarshal
+//     a LensSpec directly from the aspect.
 //   - any other targetClass → fails with UnknownMetaClass.
 //
 // Phase 1 scope: wired through Processor for the meta lane (ops.meta.*).
@@ -172,16 +176,16 @@ def execute(state, op):
 
         if target_class == "meta.lens":
             description = required_string(p, "description")
-            spec = required_string(p, "spec")
-            adapter = ""
-            bucket = ""
-            engine = ""
-            if hasattr(p, "adapter") and type(p.adapter) == type(""):
-                adapter = p.adapter
-            if hasattr(p, "bucket") and type(p.bucket) == type(""):
-                bucket = p.bucket
-            if hasattr(p, "engine") and type(p.engine) == type(""):
-                engine = p.engine
+            spec_str = required_string(p, "spec")
+            spec_obj = json.decode(spec_str)
+            if type(spec_obj) != type({}):
+                fail("InvalidArgument: spec: must be a JSON object string")
+            if "cypherRule" not in spec_obj:
+                fail("InvalidArgument: spec.cypherRule: required")
+            if "targetType" not in spec_obj:
+                fail("InvalidArgument: spec.targetType: required (postgres|nats_kv)")
+            if "targetConfig" not in spec_obj:
+                fail("InvalidArgument: spec.targetConfig: required")
 
             meta_id = nanoid.new()
             meta_key = "vtx.meta." + meta_id
@@ -191,9 +195,7 @@ def execute(state, op):
                             "canonicalName", {"value": canonical_name}),
                 make_aspect(meta_key + ".description", meta_key, "description",
                             "description", {"text": description}),
-                make_aspect(meta_key + ".spec", meta_key, "spec", "lensSpec",
-                            {"source": spec, "adapter": adapter, "bucket": bucket, "engine": engine}),
-                # Story 5.3: .compensation aspect for lens vertices.
+                make_aspect(meta_key + ".spec", meta_key, "spec", "lensSpec", spec_obj),
                 make_aspect(meta_key + ".compensation", meta_key, "compensation",
                             "compensation",
                             {"inverseOperationType": "TombstoneMetaVertex",

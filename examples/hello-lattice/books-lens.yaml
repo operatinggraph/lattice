@@ -1,0 +1,41 @@
+# books-lens.yaml — "books" Lens projection payload for Milestone 4.
+#
+# Usage (inline payload — no companion JSON file required):
+#   lattice op submit \
+#     --operation-type CreateMetaVertex \
+#     --lane meta \
+#     --actor <bootstrapActorKey> \
+#     --payload '{"targetClass":"meta.lens","canonicalName":"books","spec":"{...}"}'
+#
+# Obtain <bootstrapActorKey> via:
+#   lattice graph keys vtx.identity. # lists all identity keys
+#
+# The spec field must be a JSON string containing a LensSpec object.
+# The Starlark MetaRootDDLScript decodes it via json.decode() and stores
+# the resulting object verbatim as the .spec aspect data so the Refractor
+# CoreKVSource can unmarshal a LensSpec struct directly.
+#
+# Override POSTGRES_URL to target a non-default Postgres instance:
+#   export POSTGRES_URL=postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
+#
+operationType: CreateMetaVertex
+lane: meta
+actor: "{{BOOTSTRAP_ACTOR_KEY}}"    # replace with output of: lattice bootstrap inspect
+payload:
+  targetClass: meta.lens
+  canonicalName: books
+  description: |
+    Projects all book vertices to the Postgres books table.
+    Each book becomes one row with book_id (the vtx.book.* key) and title columns.
+  spec: |
+    {
+      "canonicalName": "books",
+      "targetType": "postgres",
+      "targetConfig": {
+        "dsn": "postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable",
+        "table": "books",
+        "key": ["book_id"]
+      },
+      "cypherRule": "MATCH (b:book) RETURN b.key AS book_id, b.title AS title",
+      "engine": "simple"
+    }

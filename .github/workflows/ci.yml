@@ -57,6 +57,14 @@ jobs:
           go test ./internal/bypass/... -v -run TestCapAdv -count=1
           go test ./internal/bypass/... -v -run TestGate3_Report -count=1
 
+      - name: Run Hello Lattice integration suite (Phase 1 Gate 5)
+        # Runs the five-milestone Hello Lattice vertical slice:
+        # DDL definition, book creation, Lens projection, Postgres query,
+        # and AI agent cold-start traversal. Writes the gate5 Health KV marker.
+        run: make test-hello-lattice
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
       - name: Run all tests (unit + integration)
         # -p 1: serialize test-package execution. Many fixtures spin
         # up embedded NATS+JetStream servers; default parallelism

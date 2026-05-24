@@ -15,7 +15,7 @@ BOOTSTRAP_JSON ?= ./lattice.bootstrap.json
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene build vet test test-bypass test-capability-adversarial test-rollback test-cli processor run-processor clean logs ps
+.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene build vet test test-bypass test-capability-adversarial test-rollback test-cli test-hello-lattice processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -141,6 +141,17 @@ test-capability-adversarial:
 	@$(MAKE) verify-kernel
 	go test ./internal/bypass/... -v -run TestCapAdv -count=1
 	go test ./internal/bypass/... -v -run TestGate3_Report -count=1
+
+## test-hello-lattice — Run the Phase 1 Gate 5 Hello Lattice integration test suite.
+## Requires a running Docker stack (make up) with Refractor live.
+## Exits 0 when all five milestones pass and the gate5 Health KV marker is written.
+.PHONY: test-hello-lattice
+POSTGRES_URL ?= postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
+
+test-hello-lattice:
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+	  POSTGRES_URL=$(POSTGRES_URL) \
+	  go test -tags integration ./internal/hellolattice/... -v -p 1 -count=1 -timeout 30m
 
 ## test-rollback — Run the Phase 1 Gate 4 compensating-op rollback test suite.
 ## Self-contained: uses embedded NATS, no Docker stack required.

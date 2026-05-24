@@ -535,6 +535,6 @@ func buildGate4LensPayload(t *testing.T, canonicalName string) map[string]any {
 		"canonicalName": canonicalName,
 		"description":   "Ephemeral Lens for Gate 4 rollback test.",
 		"spec": `{"id":"rollback-test-lens","canonicalName":"` + canonicalName +
-			`","targetType":"nats_kv","cypherRule":"MATCH (n:identity) RETURN n","engine":"simple"}`,
+			`","targetType":"nats_kv","targetConfig":{"bucket":"capability-kv","key":["key"]},"cypherRule":"MATCH (n:identity) RETURN n","engine":"simple"}`,
 	}
 }

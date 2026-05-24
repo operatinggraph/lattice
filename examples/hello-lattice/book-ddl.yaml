@@ -1,0 +1,60 @@
+# book-ddl.yaml — "book" entity type DDL payload for Milestone 2.
+#
+# Usage (inline payload — no companion JSON file required):
+#   lattice op submit \
+#     --operation-type CreateMetaVertex \
+#     --lane meta \
+#     --actor <bootstrapActorKey> \
+#     --payload '{"targetClass":"meta.ddl.vertexType","canonicalName":"book",...}'
+#
+# Obtain <bootstrapActorKey> via:
+#   lattice graph keys vtx.identity. # lists all identity keys
+#
+# This file documents the payload shape as a YAML reference.
+# The tutorial README shows the full inline --payload JSON string.
+#
+# The "book" DDL is a normal user-defined DDL — it is NOT seeded primordially.
+# Submit it at tutorial runtime via CreateMetaVertex on the meta lane.
+#
+operationType: CreateMetaVertex
+lane: meta
+actor: "{{BOOTSTRAP_ACTOR_KEY}}"    # replace with output of: lattice bootstrap inspect
+payload:
+  targetClass: meta.ddl.vertexType
+  canonicalName: book
+  permittedCommands:
+    - CreateBook
+  description: |
+    Book vertex DDL. A book carries a title.
+    The CreateBook command requires a non-empty title (max 500 chars).
+  script: |
+    def execute(state, op):
+        p = op.payload
+        if not hasattr(p, "title") or len(p.title.strip()) == 0:
+            fail("InvalidArgument: title: required non-empty string")
+        if len(p.title.strip()) > 500:
+            fail("InvalidArgument: title: exceeds 500 character limit")
+        title = p.title.strip()
+        book_id = nanoid.new()
+        book_key = "vtx.book." + book_id
+        mutations = [
+            {"op": "create", "key": book_key,
+             "document": {"class": "book", "isDeleted": False,
+                          "key": book_key,
+                          "title": title,
+                          "data": {"title": title}}},
+        ]
+        events = [{"class": "BookCreated", "data": {"bookKey": book_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"bookKey": book_key}}
+  inputSchema: |
+    {"type":"object","required":["title"],"properties":{"title":{"type":"string","maxLength":500}}}
+  outputSchema: |
+    {"type":"object","required":["bookKey"],"properties":{"bookKey":{"type":"string"}}}
+  fieldDescription:
+    title: "Book title, max 500 characters. Required."
+  examples:
+    - name: "CreateBook — minimal"
+      payload:
+        title: "The Pragmatic Programmer"
+      expectedOutcome: "Creates vtx.book.<NanoID>; returns bookKey."
