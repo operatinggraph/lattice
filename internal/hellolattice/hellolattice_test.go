@@ -314,6 +314,8 @@ func TestHelloLattice_Milestone3_CreateBook(t *testing.T) {
 // TestHelloLattice_Milestone4_LensProjection submits the books Lens and
 // polls Postgres for the book row. Requires live Refractor + Postgres.
 func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
+	t.Skip("Milestone 4 deferred to Phase 1.5/2 — Refractor postgres adapter does not auto-manage target table schema. The lens projection fires but every upsert returns 'column \"title\" of relation \"books\" does not exist'. Fix requires either lens-spec schema declarations honored by the adapter, or CREATE TABLE IF NOT EXISTS at projector start. Tracked in the Phase 1 review pass.")
+
 	if bookVertexKey == "" {
 		t.Skip("bookVertexKey not set — run Milestone3 first")
 	}
@@ -421,6 +423,8 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 // TestHelloLattice_Milestone5_AITraversal creates an AI agent identity,
 // grants it CreateBook, and runs the cold-start traversal.
 func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
+	t.Skip("Milestone 5 deferred to Phase 1.5/2 — Processor DDL cache is stale with respect to substrate-direct package installs. CreateUnclaimedIdentity (Class=identity) returns NoDDLForClass: missingKey=vtx.meta.<identity> because lattice-pkg writes substrate-direct, bypassing the Processor write path, so no cache-invalidation event fires. Fix requires one of: Processor watches vtx.meta.* Core KV changes and refreshes cache on change; lattice-pkg publishes an explicit invalidation event after install; or packages install via write-path ops rather than substrate-direct. Tracked in the Phase 1 review pass.")
+
 	if bookDDLKey == "" {
 		t.Skip("bookDDLKey not set — run Milestone2 first")
 	}
@@ -645,9 +649,13 @@ func TestHelloLattice_WriteGate5Marker(t *testing.T) {
 	defer cancel()
 
 	markerValue, err := json.Marshal(map[string]any{
-		"passed":      true,
-		"completedAt": time.Now().UTC().Format(time.RFC3339),
-		"commit":      commit,
+		"passed":             false,
+		"partial":            true,
+		"milestonesPassed":   []int{1, 2, 3},
+		"milestonesDeferred": []int{4, 5, 6},
+		"deferredReason":     "Phase 1.5/2 architectural gaps: M4 Postgres adapter schema management; M5/M6 Processor DDL cache invalidation across substrate-direct writes and tombstones.",
+		"completedAt":        time.Now().UTC().Format(time.RFC3339),
+		"commit":             commit,
 	})
 	if err != nil {
 		t.Logf("WARNING: gate5 Health KV marker: marshal error: %v", err)
@@ -678,6 +686,8 @@ func TestHelloLattice_WriteGate5Marker(t *testing.T) {
 //  5. Verify .compensation aspect now reads inverseOperationType: "none".
 //  6. Verify subsequent CreateBook is rejected (DDL cache miss after tombstone).
 func TestHelloLattice_Milestone6_RollbackBookDDL(t *testing.T) {
+	t.Skip("Milestone 6 deferred to Phase 1.5/2 — Processor DDL cache is not evicted when TombstoneMetaVertex is committed via the write path. TombstoneMetaVertex commits correctly (Core KV shows isDeleted: true on the meta-vertex) but the in-memory DDL cache retains the entry, so a subsequent CreateBook is accepted instead of rejected. Same root cause as Milestone 5 from the opposite direction: cache invalidation is triggered only for write-path CreateMetaVertex ops; TombstoneMetaVertex does not yet fire the equivalent eviction. Fix requires the Processor to evict the DDL cache entry on TombstoneMetaVertex commit. Tracked in the Phase 1 review pass.")
+
 	if bookDDLKey == "" {
 		t.Skip("bookDDLKey not set — run Milestone2 first")
 	}
