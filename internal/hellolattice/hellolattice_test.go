@@ -275,7 +275,12 @@ func TestHelloLattice_Milestone3_CreateBook(t *testing.T) {
 	reply := submitOp(t, ctx, "CreateBook", "book", processor.LaneDefault, bootstrap.BootstrapIdentityKey,
 		map[string]any{"title": "The Pragmatic Programmer"})
 	if reply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("CreateBook rejected: %v", reply)
+		errCode, errMsg := "", ""
+		if reply.Error != nil {
+			errCode = string(reply.Error.Code)
+			errMsg = reply.Error.Message
+		}
+		t.Fatalf("CreateBook rejected: status=%s code=%s msg=%q detail=%v", reply.Status, errCode, errMsg, reply.Detail)
 	}
 
 	// Extract bookKey from the reply.
@@ -335,7 +340,12 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 
 	reply := submitOp(t, ctx, "CreateMetaVertex", "root", processor.LaneMeta, bootstrap.BootstrapIdentityKey, payload)
 	if reply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("CreateMetaVertex(meta.lens) rejected: %v", reply)
+		errCode, errMsg := "", ""
+		if reply.Error != nil {
+			errCode = string(reply.Error.Code)
+			errMsg = reply.Error.Message
+		}
+		t.Fatalf("CreateMetaVertex(meta.lens) rejected: status=%s code=%s msg=%q detail=%v", reply.Status, errCode, errMsg, reply.Detail)
 	}
 
 	metaKey, _ := reply.Detail["metaKey"].(string)
@@ -379,6 +389,22 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
+			// Print the .spec aspect as stored in Core KV to aid diagnosis.
+			if specRaw, specErr := harnessConn.KVGet(ctx, bootstrap.CoreKVBucket, lensMetaKey+".spec"); specErr == nil {
+				t.Logf("lens .spec aspect (raw): %s", string(specRaw.Value))
+			} else {
+				t.Logf("lens .spec aspect: read error: %v", specErr)
+			}
+			// Tail the last 4 KB of refractor.log for immediate diagnosis.
+			if logBytes, logErr := os.ReadFile("../../refractor.log"); logErr == nil {
+				tail := logBytes
+				if len(tail) > 4096 {
+					tail = tail[len(tail)-4096:]
+				}
+				t.Logf("refractor.log (last 4KB):\n%s", string(tail))
+			} else {
+				t.Logf("refractor.log: read error: %v", logErr)
+			}
 			t.Fatalf("book row with title %q not found in Postgres within 500ms (NFR-P3); "+
 				"check that Refractor is running (make up) and lens was accepted", bookTitle)
 		}
@@ -410,7 +436,12 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	idReply := submitOp(t, ctx, "CreateUnclaimedIdentity", "identity", processor.LaneDefault,
 		bootstrap.BootstrapIdentityKey, map[string]any{})
 	if idReply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("CreateUnclaimedIdentity rejected: %v", idReply)
+		errCode, errMsg := "", ""
+		if idReply.Error != nil {
+			errCode = string(idReply.Error.Code)
+			errMsg = idReply.Error.Message
+		}
+		t.Fatalf("CreateUnclaimedIdentity rejected: status=%s code=%s msg=%q detail=%v", idReply.Status, errCode, errMsg, idReply.Detail)
 	}
 	agentKey, _ := idReply.Detail["identityKey"].(string)
 	if !strings.HasPrefix(agentKey, "vtx.identity.") {
@@ -423,7 +454,12 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	permReply := submitOp(t, ctx, "CreatePermission", "rbac", processor.LaneDefault,
 		bootstrap.BootstrapIdentityKey, map[string]any{"operationType": "CreateBook", "scope": "any"})
 	if permReply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("CreatePermission rejected: %v", permReply)
+		errCode, errMsg := "", ""
+		if permReply.Error != nil {
+			errCode = string(permReply.Error.Code)
+			errMsg = permReply.Error.Message
+		}
+		t.Fatalf("CreatePermission rejected: status=%s code=%s msg=%q detail=%v", permReply.Status, errCode, errMsg, permReply.Detail)
 	}
 	permKey, _ := permReply.Detail["permKey"].(string)
 	if !strings.HasPrefix(permKey, "vtx.permission.") {
@@ -435,7 +471,12 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	grantReply := submitOp(t, ctx, "GrantPermission", "rbac", processor.LaneDefault,
 		bootstrap.BootstrapIdentityKey, map[string]any{"permKey": permKey, "roleKey": bootstrap.RoleOperatorKey})
 	if grantReply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("GrantPermission rejected: %v", grantReply)
+		errCode, errMsg := "", ""
+		if grantReply.Error != nil {
+			errCode = string(grantReply.Error.Code)
+			errMsg = grantReply.Error.Message
+		}
+		t.Fatalf("GrantPermission rejected: status=%s code=%s msg=%q detail=%v", grantReply.Status, errCode, errMsg, grantReply.Detail)
 	}
 	t.Log("CreateBook granted to operator role")
 
@@ -443,7 +484,12 @@ func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
 	assignReply := submitOp(t, ctx, "AssignRole", "rbac", processor.LaneDefault,
 		bootstrap.BootstrapIdentityKey, map[string]any{"actorKey": agentKey, "roleKey": bootstrap.RoleOperatorKey})
 	if assignReply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("AssignRole rejected: %v", assignReply)
+		errCode, errMsg := "", ""
+		if assignReply.Error != nil {
+			errCode = string(assignReply.Error.Code)
+			errMsg = assignReply.Error.Message
+		}
+		t.Fatalf("AssignRole rejected: status=%s code=%s msg=%q detail=%v", assignReply.Status, errCode, errMsg, assignReply.Detail)
 	}
 	t.Log("Agent assigned to operator role")
 
@@ -536,7 +582,12 @@ capFound:
 	agentBookReply := submitOp(t, ctx, "CreateBook", "book", processor.LaneDefault, agentKey,
 		map[string]any{"title": agentBookTitle})
 	if agentBookReply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("agent CreateBook rejected: %v", agentBookReply)
+		errCode, errMsg := "", ""
+		if agentBookReply.Error != nil {
+			errCode = string(agentBookReply.Error.Code)
+			errMsg = agentBookReply.Error.Message
+		}
+		t.Fatalf("agent CreateBook rejected: status=%s code=%s msg=%q detail=%v", agentBookReply.Status, errCode, errMsg, agentBookReply.Detail)
 	}
 	agentBookKey, _ := agentBookReply.Detail["bookKey"].(string)
 	t.Logf("Agent created book: %s", agentBookKey)
@@ -667,7 +718,12 @@ func TestHelloLattice_Milestone6_RollbackBookDDL(t *testing.T) {
 		bootstrap.BootstrapIdentityKey, tombPayload,
 		&processor.ContextHint{Reads: []string{bookDDLKey}})
 	if tombReply.Status != processor.ReplyStatusAccepted {
-		t.Fatalf("TombstoneMetaVertex rejected: %v", tombReply)
+		errCode, errMsg := "", ""
+		if tombReply.Error != nil {
+			errCode = string(tombReply.Error.Code)
+			errMsg = tombReply.Error.Message
+		}
+		t.Fatalf("TombstoneMetaVertex rejected: status=%s code=%s msg=%q detail=%v", tombReply.Status, errCode, errMsg, tombReply.Detail)
 	}
 	t.Logf("TombstoneMetaVertex accepted for %s", bookDDLKey)
 
