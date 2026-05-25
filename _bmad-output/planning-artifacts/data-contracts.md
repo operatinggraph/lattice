@@ -959,6 +959,8 @@ T+24h+1ms: Resubmit with requestId=R → step 2 dedup finds nothing → fresh ex
 
 ## Contract #5 — Health KV Convention
 
+> **Phase 1 schema inventory** lives at `docs/observability/health-kv-schema.md` (Story 6.2). This contract describes the convention; the schema doc enumerates emitted keys per component, reserved namespaces, and the `lattice health summary` rollup semantics.
+
 Health KV is the operational observability plane. Every running component writes its own heartbeat to Health KV; readers (humans, CLI tooling at Phase 1; Lens projections at Phase 2+) observe component liveness and operational metrics. Health KV is a **soft convention at MVP** — Stream 7's Closed-loop Weaver auditor (deferred) is the first automated consumer, at which point the convention hardens into a hard contract.
 
 ### 5.1 Bucket and Key Pattern

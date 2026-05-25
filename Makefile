@@ -15,7 +15,7 @@ BOOTSTRAP_JSON ?= ./lattice.bootstrap.json
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene build vet test test-bypass test-capability-adversarial test-rollback test-cli test-hello-lattice processor run-processor clean logs ps
+.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene build vet test test-bypass test-capability-adversarial test-rollback test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -152,6 +152,13 @@ test-hello-lattice:
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
 	  POSTGRES_URL=$(POSTGRES_URL) \
 	  go test -tags integration ./internal/hellolattice/... -v -p 1 -count=1 -timeout 30m
+
+## test-health-completeness — Run the Health KV completeness integration test.
+## Requires a running Docker stack (make up) with Processor + Refractor live.
+## Asserts every non-event-driven Health KV key is present within 30s.
+.PHONY: test-health-completeness
+test-health-completeness:
+	NATS_URL=$(NATS_URL) go test -tags integration ./internal/healthkv/... -v -timeout 90s
 
 ## test-rollback — Run the Phase 1 Gate 4 compensating-op rollback test suite.
 ## Self-contained: uses embedded NATS, no Docker stack required.
