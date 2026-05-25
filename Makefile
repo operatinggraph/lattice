@@ -10,7 +10,7 @@
 
 SHELL := /bin/bash
 NATS_URL ?= nats://localhost:4222
-BOOTSTRAP_JSON ?= ./lattice.bootstrap.json
+BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
 
 # Load .env if it exists (ignored by git).
 -include .env
