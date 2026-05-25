@@ -212,6 +212,8 @@ Foundational truths the architecture rests on, stated precisely:
 
 **P6: Single-cell MVP is safe because the data model is cell-agnostic.** Key naming (`vtx.<type>.<id>`, `lnk.<youngerId>.<name>.<olderId>`) does not embed cell identity. Multi-cell is purely a routing/replication concern layered underneath — no data model or business logic changes required. Safety depends on the expected MVP data volume fitting within NATS KV single-bucket scalability limits (validated against Quantitative Targets above: up to 100K keys at MVP).
 
+> Deployment isolation model and Phase 3 scale-out path: see `docs/operations/deployment-isolation.md`.
+
 ## Starter / Foundation Evaluation
 
 ### Primary Technology Domain
