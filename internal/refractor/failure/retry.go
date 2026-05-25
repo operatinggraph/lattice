@@ -51,10 +51,16 @@ type RetryEntry struct {
 
 // RetryQueue is a deferred exponential-backoff retry queue for Transient write failures.
 // Call Run in a goroutine before calling Enqueue.
+//
+// Single-caller invariant: Run MUST be called from exactly one goroutine. Multiple
+// concurrent calls to Run would race on processDue execution — entries could be
+// executed more than once and the due-list collected under the lock could be stale
+// by the time it is executed. The running flag below enforces this at runtime.
 type RetryQueue struct {
 	mu      sync.Mutex
 	entries []*RetryEntry
 	trigger chan struct{} // buffered(1); wakes Run when a new entry is added
+	running bool         // guards against multiple concurrent Run callers
 }
 
 // NewRetryQueue returns a ready-to-use RetryQueue. Start Run in a goroutine before Enqueue.
@@ -94,7 +100,21 @@ func (q *RetryQueue) Enqueue(e *RetryEntry) {
 }
 
 // Run processes retry entries until ctx is cancelled. Run in a dedicated goroutine.
+// Panics if called concurrently from more than one goroutine (single-caller invariant).
 func (q *RetryQueue) Run(ctx context.Context) {
+	q.mu.Lock()
+	if q.running {
+		q.mu.Unlock()
+		panic("failure.RetryQueue: Run called from more than one goroutine")
+	}
+	q.running = true
+	q.mu.Unlock()
+	defer func() {
+		q.mu.Lock()
+		q.running = false
+		q.mu.Unlock()
+	}()
+
 	for {
 		delay := q.nextDelay()
 

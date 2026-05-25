@@ -13,8 +13,8 @@ import (
 
 // Neighbors returns the edge list for nodeID from the Adjacency KV.
 // Returns an empty (non-nil) slice if the node has no adjacency entry.
-func Neighbors(kv jetstream.KeyValue, nodeID string) ([]EdgeEntry, error) {
-	ctx := context.Background()
+// ctx is propagated to the KV read so the caller can cancel during shutdown.
+func Neighbors(ctx context.Context, kv jetstream.KeyValue, nodeID string) ([]EdgeEntry, error) {
 	key := subjects.AdjKey(nodeID)
 	entry, err := kv.Get(ctx, key)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {

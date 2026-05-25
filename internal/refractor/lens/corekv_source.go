@@ -24,32 +24,21 @@ const lensSourceDurableName = "refractor-lens-source"
 // The callback is called outside the source's mutex, after the rule is indexed and ACK'd.
 type UpdateCallback func(old, new *Rule, kind UpdateKind)
 
-// CoreKVSource subscribes to Core KV under `vtx.meta.>` via a Lattice-
-// native durable JetStream consumer (substrate.SubscribeKVChanges) and
-// routes only those updates whose envelope class is `meta.lens` to the
-// lens loader. Other meta classes (`meta.ddl.*`, `meta.event.*`, etc.)
-// are skipped silently — they belong to future routers, not the
-// Refractor (data-contracts.md §1.2 line 70).
+// CoreKVSource is the lens-definition source. It subscribes to Core KV under
+// `vtx.meta.>` via a Lattice-native durable JetStream consumer
+// (substrate.SubscribeKVChanges) and routes only those updates whose envelope
+// class is `meta.lens` to the lens loader. Other meta classes
+// (`meta.ddl.*`, `meta.event.*`, etc.) are skipped silently
+// (data-contracts.md §1.2 line 70).
 //
-// It pushes loaded / updated / deleted events through the supplied load
-// and update callbacks — the SAME callbacks the JetStream-backed Loader
-// uses, so the rest of the pipeline lifecycle is unchanged (handoff brief
-// Decision #5).
+// Lens definitions arrive via the normal Processor write path as
+// `vtx.meta.<NanoID>` (vertex, class `meta.lens`) + a
+// `vtx.meta.<NanoID>.spec` aspect carrying the LensSpec body.
 //
-// Story 2.1: this REPLACES the MATERIALIZER_RULES JetStream loader as the
-// source of lens definitions. Lens definitions arrive via the normal
-// Processor write path as `vtx.meta.<NanoID>` (vertex, class `meta.lens`)
-// + a `vtx.meta.<NanoID>.spec` aspect carrying the LensSpec body. CDC
-// delivers them here through the durable consumer subscription and the
-// class filter routes them to the loader (Story 2.1b correctness pass).
-//
-// Story 2.4b: migrated from jetstream.KeyValue.Watch (ephemeral, replays
-// full history on every connect) to substrate.SubscribeKVChanges (durable
-// JetStream consumer on the KV_<bucket> backing stream filtered to
-// `$KV.<bucket>.vtx.meta.>`). Sequence position now persists across
-// restarts. IncludeHistory=true is passed so the first connect after a
-// fresh deployment still loads the entire installed lens set; subsequent
-// restarts pick up from the durable ack floor.
+// The durable consumer (substrate.SubscribeKVChanges) persists its ack
+// floor across restarts. IncludeHistory=true is passed so the first
+// connect after a fresh deployment still loads the entire installed lens
+// set; subsequent restarts pick up from the ack floor.
 type CoreKVSource struct {
 	conn     *substrate.Conn
 	bucket   string
@@ -88,9 +77,8 @@ type LensSpec struct {
 	CypherRule    string          `json:"cypherRule"`    // openCypher MATCH/RETURN
 	OutputSchema  json.RawMessage `json:"outputSchema"`  // JSON schema for projection rows (passthrough)
 	// Engine is the explicit engine selector. "" (absent) triggers the
-	// simple-then-full fallback. Story 3.2a — set to "full" on the
-	// primordial Capability Lens specs so the full engine handles them
-	// without depending on simple's parser to fail first.
+	// simple-then-full fallback. Set to "full" on primordial Capability
+	// Lens specs so the full engine is used without falling back to simple.
 	Engine string `json:"engine,omitempty"`
 }
 
@@ -134,6 +122,16 @@ func (s *CoreKVSource) SetLoadCallback(fn func(*Rule)) { s.loadCB = fn }
 
 // SetUpdateCallback registers the update callback. Must be set before Start.
 func (s *CoreKVSource) SetUpdateCallback(fn UpdateCallback) { s.updateCB = fn }
+
+// Get returns the last-loaded Rule for ruleID and whether it was found.
+// Satisfies the control.RuleGetter interface so the validate control op can
+// inspect the active rule state without importing internal/lens.
+func (s *CoreKVSource) Get(ruleID string) (*Rule, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.known[ruleID]
+	return r, ok
+}
 
 // Start subscribes to lens-definition mutations via the substrate's
 // durable JetStream-consumer helper and launches the dispatch goroutine.
@@ -284,11 +282,10 @@ func (s *CoreKVSource) handle(evt substrate.KVEvent) {
 //
 // The body may either be a bare LensSpec JSON object (the legacy
 // Processor-written form) or a substrate aspect envelope whose `data`
-// field carries the LensSpec (the form bootstrap-seeded primordial
-// lenses use — Story 3.2a Phase D). Probe the shape: if the body
-// unmarshals to a struct with a non-empty `cypherRule`, take it
-// verbatim; otherwise look for `data.cypherRule` and re-decode from
-// that sub-object.
+// field carries the LensSpec (the form bootstrap-seeded primordial lenses
+// use). Probe the shape: if the body unmarshals to a struct with a non-empty
+// `cypherRule`, take it verbatim; otherwise look for `data.cypherRule` and
+// re-decode from that sub-object.
 func (s *CoreKVSource) dispatchSpec(lensID string, body []byte, revision uint64) {
 	specBody, err := unwrapSpecBody(body)
 	if err != nil {
@@ -380,10 +377,10 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		return nil, fmt.Errorf("lens %q: unknown targetType %q (expected postgres|nats_kv)", spec.ID, spec.TargetType)
 	}
 
-	// Story 3.2a: resolve the engine through the registry so the pipeline
-	// can route per-engine (Decision #2). On success populate
-	// ResolvedEngine + CompiledRule; on failure surface the SelectionError
-	// to the caller (dispatchSpec logs and drops the spec).
+	// Resolve the engine through the registry so the pipeline can route
+	// per-engine. On success populate ResolvedEngine + CompiledRule;
+	// on failure surface the SelectionError to the caller (dispatchSpec
+	// logs and drops the spec).
 	_, compiled, attempted, selErr := defaultRegistry.SelectForLens(ruleengine.LensDefinition{
 		ID:         r.ID,
 		RuleBody:   r.Match,
@@ -398,10 +395,10 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 	return r, nil
 }
 
-// unwrapSpecBody returns either the original body (bare LensSpec) or
-// the `data` sub-object (when the body is a substrate aspect envelope
-// that wraps the LensSpec under `data`). Per Story 3.2a Phase D the
-// primordial bootstrap seeds LensSpec via the aspect envelope path.
+// unwrapSpecBody returns either the original body (bare LensSpec) or the
+// `data` sub-object (when the body is a substrate aspect envelope that
+// wraps the LensSpec under `data`). Primordial bootstrap lenses seed
+// LensSpec via the aspect envelope path.
 func unwrapSpecBody(body []byte) ([]byte, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(body, &probe); err != nil {

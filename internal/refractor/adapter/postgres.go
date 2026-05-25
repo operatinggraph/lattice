@@ -228,10 +228,9 @@ func (a *PostgresAdapter) buildDeleteSQL(keys map[string]any) (string, []any, er
 		args[i] = v
 		clauses[i] = fmt.Sprintf("%s = $%d", quoteIdent(k), i+1)
 	}
-	// Story 2.1 AC #4: soft-delete instead of DELETE FROM. Tombstones use
-	// `is_deleted=true, deleted_at=NOW()` so privacy/lineage tracking is
-	// preserved. The target table must have `is_deleted boolean` and
-	// `deleted_at timestamptz` columns. Story 2.2 may relax this if needed.
+	// Soft-delete instead of DELETE FROM. Tombstones use `is_deleted=true,
+	// deleted_at=NOW()` so privacy/lineage tracking is preserved. The target
+	// table must have `is_deleted boolean` and `deleted_at timestamptz` columns.
 	sql := fmt.Sprintf(`UPDATE "%s" SET is_deleted=true, deleted_at=NOW() WHERE %s`, a.table, strings.Join(clauses, " AND "))
 	return sql, args, nil
 }

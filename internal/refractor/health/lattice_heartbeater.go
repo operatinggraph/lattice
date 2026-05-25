@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/asolgan/lattice/internal/substrate"
@@ -41,12 +42,11 @@ type LatticeHeartbeater struct {
 	// May be nil before any lens is active.
 	LagProvider func() map[string]uint64
 
-	// LensLatencyProvider optionally returns per-Lens projection
-	// latency stats (Story 3.2b §6 / Contract #5 §5.2 / NFR-P3). The
-	// map is keyed by Lens canonical name (e.g. "capability",
-	// "capabilityRoleIndex") and produces {mean,p95,p99,count} as
-	// nanosecond-precision durations. May be nil before any lens
-	// activates with a latency buffer installed.
+	// LensLatencyProvider optionally returns per-Lens projection latency
+	// stats (Contract #5 §5.2 / NFR-P3). The map is keyed by Lens canonical
+	// name (e.g. "capability", "capabilityRoleIndex") and produces
+	// {mean,p95,p99,count} as nanosecond-precision durations. May be nil
+	// before any lens activates with a latency buffer installed.
 	LensLatencyProvider func() map[string]LensLatencySnapshot
 }
 
@@ -114,12 +114,10 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 			metrics["lensLags"] = lensLags
 		}
 	}
-	// Story 3.2b §6: per-Lens projection latency under metrics.lensLatency.
-	// Each entry carries {count, mean, p95, p99} expressed in nanoseconds
-	// (Go's native time.Duration JSON encoding). The heartbeater emits
-	// only Lenses that have recorded at least one sample since startup.
-	// Skipping zero-sample lenses avoids reporting misleading zeros on
-	// quiet instances per Contract #5 §5.2 ("issues array" convention).
+	// Per-Lens projection latency under metrics.lensLatency (Contract #5 §5.2).
+	// Each entry carries {count, mean, p95, p99} expressed in nanoseconds.
+	// Only Lenses with at least one sample are emitted to avoid misleading
+	// zeros on quiet instances.
 	if h.LensLatencyProvider != nil {
 		stats := h.LensLatencyProvider()
 		if len(stats) > 0 {
@@ -166,12 +164,12 @@ func (h *LatticeHeartbeater) healthKey() string {
 	return "health.refractor." + h.instance
 }
 
-// formatISODuration is duplicated from internal/processor/health.go.
-// Story 2.2 may consolidate into substrate.
+// formatISODuration converts a duration to an ISO 8601 duration string (e.g. "PT2M30S").
 func formatISODuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
 	}
+	itoa := func(n int64) string { return strconv.FormatInt(n, 10) }
 	seconds := int64(d.Seconds())
 	if seconds < 60 {
 		return "PT" + itoa(seconds) + "S"
@@ -182,23 +180,4 @@ func formatISODuration(d time.Duration) string {
 	h := seconds / 3600
 	rem := seconds % 3600
 	return "PT" + itoa(h) + "H" + itoa(rem/60) + "M" + itoa(rem%60) + "S"
-}
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := make([]byte, 0, 20)
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	if neg {
-		buf = append([]byte{'-'}, buf...)
-	}
-	return string(buf)
 }

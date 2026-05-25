@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,17 +24,27 @@ func NewPoolManager() *PoolManager {
 // Acquire returns the existing pool for dsn, or creates a new one if none exists.
 // pgxpool.New uses lazy connections — no real connection attempt occurs at creation time;
 // the first Ping or query triggers the dial.
+// The DSN is canonicalized via pgxpool.ParseConfig before use as the map key so that
+// differently-ordered query-parameter strings targeting the same server share one pool.
 func (m *PoolManager) Acquire(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	// Normalize the DSN so that query-param order differences do not create
+	// duplicate pools for the same server (ADR-9 bounded connection count).
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("pool: parse DSN: %w", err)
+	}
+	canonicalKey := cfg.ConnString()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if p, ok := m.pools[dsn]; ok {
+	if p, ok := m.pools[canonicalKey]; ok {
 		return p, nil
 	}
 	p, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	m.pools[dsn] = p
+	m.pools[canonicalKey] = p
 	return p, nil
 }
 

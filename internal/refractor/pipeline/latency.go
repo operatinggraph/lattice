@@ -1,5 +1,5 @@
-// Story 3.2b §6 (Decision #5): per-Lens projection latency ring buffer.
-// Each Capability Lens pipeline owns one buffer; the heartbeater
+// Per-Lens projection latency ring buffer. Each pipeline that enables
+// latency tracking owns one buffer; the heartbeater
 // (health.LatticeHeartbeater) reads from it at tick and publishes
 // mean/p95/p99 under `health.refractor.<instance>.lens.<canonicalName>`.
 package pipeline

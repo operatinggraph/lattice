@@ -136,15 +136,10 @@ func (b *Bootstrapper) drain(ctx context.Context, mc jetstream.MessagesContext) 
 }
 
 // processMsg applies the appropriate disposition to a single Core KV message.
-//
-// Story 3.2b — Contract #1 link envelope bridge (Decision #1 / Phase A):
-// link envelopes (key shape `lnk.<srcType>.<srcId>.<linkName>.<dstType>.<dstId>`)
-// don't carry the legacy `nodeId` field, so they were silently skipped under the
-// 3.2a code path. The bridge detects link envelopes by key shape, parses the
-// 6-segment key, reads the envelope's `isDeleted` flag, and emits TWO
-// adjacency.CoreKVEvents — one outbound from src, one inbound from dst —
-// preserving the same shape the existing Materializer-style edge events use
-// so adjacency.Build is unchanged.
+// Link envelopes (key shape `lnk.<srcType>.<srcId>.<linkName>.<dstType>.<dstId>`)
+// are detected by key shape and bridged to TWO adjacency.CoreKVEvents — one
+// outbound from src, one inbound from dst. All other messages go through the
+// legacy CoreKVEvent path keyed on `nodeId`.
 func (b *Bootstrapper) processMsg(ctx context.Context, msg jetstream.Msg) {
 	// NATS KV tombstone entries (DEL/PURGE operations) have empty bodies — ack and skip.
 	if len(msg.Data()) == 0 {
@@ -160,7 +155,7 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg jetstream.Msg) {
 	// Branch on Contract #1 §1.5 key shape. Link envelopes feed the bridge;
 	// everything else falls through to the legacy `CoreKVEvent` path.
 	if substrate.ClassifyKey(key) == substrate.KindLink {
-		b.processLinkEnvelope(msg, key)
+		b.processLinkEnvelope(ctx, msg, key)
 		return
 	}
 
@@ -181,7 +176,19 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	if buildErr := adjacency.Build(b.adjKV, evt); buildErr != nil {
+	// Validate NodeID against the NATS-safe token pattern before passing to
+	// adjacency.Build, which calls subjects.AdjKey and panics on invalid chars.
+	// A single bad message must not crash the bootstrapper goroutine.
+	if strings.ContainsAny(evt.NodeID, ".*> \t\n\r") {
+		slog.Error("adjacency bootstrap: nodeId contains NATS-reserved characters — discarding",
+			"nodeId", evt.NodeID, "subject", msg.Subject())
+		if termErr := msg.Term(); termErr != nil {
+			slog.Error("adjacency bootstrap: term failed", "err", termErr)
+		}
+		return
+	}
+
+	if buildErr := adjacency.Build(ctx, b.adjKV, evt); buildErr != nil {
 		slog.Error("adjacency bootstrap: build", "err", buildErr, "subject", msg.Subject())
 		if nakErr := msg.Nak(); nakErr != nil {
 			slog.Error("adjacency bootstrap: nak failed", "err", nakErr)
@@ -197,11 +204,11 @@ func (b *Bootstrapper) processMsg(ctx context.Context, msg jetstream.Msg) {
 	}
 }
 
-// processLinkEnvelope is the Story 3.2b §1 link bridge — it translates one
-// Contract #1 link envelope into two directional adjacency.CoreKVEvents
-// (outbound from src, inbound from dst) and feeds them to adjacency.Build.
-// The link key is its own EdgeID (Contract #1 link keys are globally unique).
-func (b *Bootstrapper) processLinkEnvelope(msg jetstream.Msg, key string) {
+// processLinkEnvelope translates one Contract #1 link envelope into two
+// directional adjacency.CoreKVEvents (outbound from src, inbound from dst)
+// and feeds them to adjacency.Build. The link key is its own EdgeID
+// (Contract #1 link keys are globally unique).
+func (b *Bootstrapper) processLinkEnvelope(ctx context.Context, msg jetstream.Msg, key string) {
 	srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(key)
 	if !ok {
 		// Defensive — ClassifyKey already gated on this; never reachable.
@@ -250,7 +257,7 @@ func (b *Bootstrapper) processLinkEnvelope(msg jetstream.Msg, key string) {
 	}
 
 	for _, evt := range []adjacency.CoreKVEvent{outbound, inbound} {
-		if buildErr := adjacency.Build(b.adjKV, evt); buildErr != nil {
+		if buildErr := adjacency.Build(ctx, b.adjKV, evt); buildErr != nil {
 			slog.Error("adjacency bootstrap: link bridge: build",
 				"err", buildErr, "key", key, "nodeId", evt.NodeID, "direction", evt.Direction)
 			if nakErr := msg.Nak(); nakErr != nil {

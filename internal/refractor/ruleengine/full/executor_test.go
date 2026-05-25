@@ -117,6 +117,7 @@ func putVertex(t *testing.T, reg *fixtureRegistry, kv jetstream.KeyValue, name, 
 // fromName/toName must have been registered via putVertex.
 func putEdge(t *testing.T, reg *fixtureRegistry, adjKV jetstream.KeyValue, name, fromName, toName string) {
 	t.Helper()
+	ctx := context.Background()
 	fromID := reg.idByName[fromName]
 	toID := reg.idByName[toName]
 	require.NotEmpty(t, fromID, "fixture: %q not registered", fromName)
@@ -124,12 +125,12 @@ func putEdge(t *testing.T, reg *fixtureRegistry, adjKV jetstream.KeyValue, name,
 	fromType := reg.typeByID[fromID]
 	toType := reg.typeByID[toID]
 	edgeID := name + "_" + fromID + "_" + toID
-	require.NoError(t, adjacency.Build(adjKV, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
 		CoreKvKey: "lnk." + fromType + "." + fromID + "." + name + "." + toType + "." + toID,
 		EdgeID:    edgeID, Name: name,
 		Direction: "outbound", NodeID: fromID, OtherNodeID: toID, OtherType: toType,
 	}))
-	require.NoError(t, adjacency.Build(adjKV, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
 		CoreKvKey: "lnk." + fromType + "." + fromID + "." + name + "." + toType + "." + toID,
 		EdgeID:    edgeID, Name: name,
 		Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType,

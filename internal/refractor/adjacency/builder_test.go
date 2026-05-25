@@ -50,6 +50,7 @@ func TestBuild_SingleEdge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
+	ctx := context.Background()
 	kv := startAdjKV(t)
 
 	evt := adjacency.CoreKVEvent{
@@ -60,9 +61,9 @@ func TestBuild_SingleEdge(t *testing.T) {
 		NodeID:      "nodeA",
 		OtherNodeID: "nodeB",
 	}
-	require.NoError(t, adjacency.Build(kv, evt))
+	require.NoError(t, adjacency.Build(ctx, kv, evt))
 
-	edges, err := adjacency.Neighbors(kv, "nodeA")
+	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e1", edges[0].EdgeID)
@@ -76,18 +77,19 @@ func TestBuild_TwoEdgesSameNode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
+	ctx := context.Background()
 	kv := startAdjKV(t)
 
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.agreement-1", EdgeID: "e1", Name: "HAS_PARTY",
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeB",
 	}))
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.agreement-1", EdgeID: "e2", Name: "HAS_CONTACT",
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeC",
 	}))
 
-	edges, err := adjacency.Neighbors(kv, "nodeA")
+	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	assert.Len(t, edges, 2)
 
@@ -99,18 +101,19 @@ func TestBuild_UpsertReplacesExistingEdge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
+	ctx := context.Background()
 	kv := startAdjKV(t)
 
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.old", EdgeID: "e1", Name: "OLD_TYPE",
 		Direction: "inbound", NodeID: "nodeA", OtherNodeID: "nodeB",
 	}))
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.new", EdgeID: "e1", Name: "NEW_TYPE",
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeC",
 	}))
 
-	edges, err := adjacency.Neighbors(kv, "nodeA")
+	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e1", edges[0].EdgeID)
@@ -123,23 +126,24 @@ func TestBuild_DeleteEdge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
+	ctx := context.Background()
 	kv := startAdjKV(t)
 
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.agreement-1", EdgeID: "e1", Name: "HAS_PARTY",
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeB",
 	}))
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.agreement-1", EdgeID: "e2", Name: "HAS_CONTACT",
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeC",
 	}))
 
 	// Delete e1
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		EdgeID: "e1", NodeID: "nodeA", IsDeleted: true,
 	}))
 
-	edges, err := adjacency.Neighbors(kv, "nodeA")
+	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e2", edges[0].EdgeID)
@@ -149,20 +153,21 @@ func TestBuild_DeleteNonexistentEdge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
+	ctx := context.Background()
 	kv := startAdjKV(t)
 
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		CoreKvKey: "core.agreement-1", EdgeID: "e1", Name: "HAS_PARTY",
 		Direction: "outbound", NodeID: "nodeA", OtherNodeID: "nodeB",
 	}))
 
 	// Delete an edge that doesn't exist — should not error
-	require.NoError(t, adjacency.Build(kv, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, kv, adjacency.CoreKVEvent{
 		EdgeID: "nonexistent", NodeID: "nodeA", IsDeleted: true,
 	}))
 
 	// e1 must still be present
-	edges, err := adjacency.Neighbors(kv, "nodeA")
+	edges, err := adjacency.Neighbors(ctx, kv, "nodeA")
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	assert.Equal(t, "e1", edges[0].EdgeID)

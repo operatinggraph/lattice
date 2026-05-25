@@ -11,8 +11,8 @@ type Config struct {
 	NATS         NATSConfig `yaml:"nats"`
 	CoreKVBucket string     `yaml:"core_kv_bucket"`
 	AdjKVBucket  string     `yaml:"adj_kv_bucket"`
-	// HealthKVBucket removed in Story 2.4a — legacy side-channel bucket is vestigial;
-	// Health KV per Contract #5 is canonical.
+	// HealthKVBucket is not configured here; Health KV per Contract #5 is
+	// accessed via the substrate connection, not a config field.
 }
 
 type NATSConfig struct {

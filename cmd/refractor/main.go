@@ -1,7 +1,6 @@
-// refractor is the Lattice projection engine — the lift-and-shift of
-// Materializer's Stream 2 pipeline, adapted to consume Core KV CDC and
-// source lens definitions from `vtx.meta.>` (filtered by envelope
-// class `meta.lens` per data-contracts.md §1.2 line 70). Story 2.1.
+// refractor is the Lattice projection engine. It consumes Core KV CDC and
+// sources lens definitions from `vtx.meta.>` (filtered by envelope class
+// `meta.lens` per data-contracts.md §1.2 line 70).
 package main
 
 import (
@@ -45,7 +44,7 @@ type pipelineEntry struct {
 	done          chan struct{}
 	pipeline      *pipeline.Pipeline
 	reporter      *health.Reporter
-	canonicalName string // Story 3.2b §6 — keyed under lensLatency in heartbeats.
+	canonicalName string // keyed under lensLatency in heartbeats.
 }
 
 func main() {
@@ -94,7 +93,12 @@ func main() {
 	}
 
 	bootstrapper := consumer.NewBootstrapper(js, coreKVBucket, adjKV)
-	go func() { _ = bootstrapper.Run(ctx) }()
+	go func() {
+		if err := bootstrapper.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("adjacency bootstrap failed — no lenses will start", "err", err)
+			stop() // cancel the root context so main exits and the process can restart
+		}
+	}()
 
 	manager := consumer.NewManager(js, coreKVBucket)
 	poolManager := adapter.NewPoolManager()
@@ -107,7 +111,7 @@ func main() {
 		wg       sync.WaitGroup
 	)
 
-	// Story 3.2b §6 — per-Lens latency stats provider for the heartbeater.
+	// Per-Lens latency stats provider for the heartbeater.
 	// Falls back to a no-op when no pipeline has a latency buffer.
 	hb.LensLatencyProvider = func() map[string]health.LensLatencySnapshot {
 		mu.Lock()
@@ -156,10 +160,8 @@ func main() {
 	buildAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
 		switch r.Into.Target {
 		case "nats_kv":
-			// Story 3.2a Phase D: bootstrap pre-provisions buckets
-			// (e.g. capability-kv). Try Open before Create so primordial
-			// lenses can attach to existing buckets instead of failing
-			// with "bucket name already in use".
+			// Try Open before Create so pre-provisioned buckets (e.g. capability-kv)
+			// are reused instead of failing with "bucket name already in use".
 			targetKV, err := js.KeyValue(ctx, r.Into.Bucket)
 			if err != nil {
 				targetKV, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: r.Into.Bucket})
@@ -173,8 +175,8 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			// Ensure the target table exists with soft-delete columns. Story 2.1:
-			// idempotent CREATE IF NOT EXISTS keeps the bootstrap lens runnable.
+			// Ensure the target table exists with soft-delete columns;
+			// idempotent CREATE IF NOT EXISTS keeps all lenses runnable.
 			if err := ensurePostgresTable(ctx, pool, r.Into.Table, r.Into.Key); err != nil {
 				return nil, err
 			}
@@ -184,16 +186,14 @@ func main() {
 		}
 	}
 
-	// Story 3.2a Phase B/D — share a single full.Engine across all
-	// full-engine lenses (the engine itself is stateless; per-rule state
-	// lives in the CompiledRule passed to UseFullEngine).
+	// Share a single full.Engine across all full-engine lenses — the engine
+	// is stateless; per-rule state lives in the CompiledRule passed to UseFullEngine.
 	fullEngine := full.New()
 
 	// projectionRevisionFn reads the current Core KV revision for an
 	// arbitrary key. Used by the Capability envelope wrapper to populate
 	// `projectedFromRevisions`. Errors and absent keys collapse to 0,
-	// which the envelope drops (Story 3.2a Decision #7: partial
-	// coverage acceptable).
+	// which the envelope drops (partial coverage is acceptable).
 	projectionRevision := func(k string) uint64 {
 		entry, err := coreKV.Get(context.Background(), k)
 		if err != nil || entry == nil {
@@ -236,7 +236,7 @@ func main() {
 		}
 		p.SetConsumerResetter(manager)
 
-		// Wire full engine when selected. Story 3.2a — Decision #2.
+		// Wire full engine when selected.
 		if r.ResolvedEngine == ruleengine.EngineFull {
 			if r.CompiledRule == nil {
 				logger.Error("full engine selected but CompiledRule is nil", "lensId", r.ID)
@@ -245,32 +245,27 @@ func main() {
 			p.UseFullEngine(fullEngine, r.CompiledRule)
 		}
 
-		// Story 3.2a Phase C — install Capability KV envelope for the
-		// primary capability lens. The canonical name is the only stable
-		// identifier between the seeded LensDefinition and the runtime
-		// Rule. capabilityRoleIndex has a different RETURN shape and
-		// stays out of envelope wrapping for 3.2a (Story 3.2b will
-		// extend coverage if needed).
+		// Install per-lens envelope + fan-out + latency components. The canonical
+		// name is the only stable identifier between a seeded LensDefinition and
+		// the runtime Rule.
 		switch r.CanonicalName {
 		case "capability":
 			lensDefKey := "vtx.meta." + r.ID
-			// Story 4.6 walk-back: stateReader / pendingReview removed.
-			// See capabilityenv.NewWrapper docstring.
+			// Capability KV envelope rewrites each projection row into the
+			// Contract #6 §6.2 per-actor shape keyed at cap.identity.<id>.
 			p.SetEnvelopeFn(capabilityenv.NewWrapper(lensDefKey, projectionRevision))
-			// Story 3.2b §3 — cross-vertex fan-out enumerator. Non-identity
-			// CDC events are expanded into the set of affected actors via
-			// adjacency BFS (depth + actor-set caps per Decision #3).
+			// Cross-vertex fan-out: non-identity CDC events are expanded into the
+			// set of affected actors via adjacency BFS (depth + actor-set caps).
 			p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
-			// Story 3.2b §6 — per-Lens latency ring buffer for NFR-P3
-			// heartbeat emission (Decision #5).
+			// Per-Lens latency ring buffer for heartbeat NFR-P3 emission.
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 			logger.Info("capability envelope + fan-out + latency installed",
 				"lensId", r.ID, "lensDefKey", lensDefKey)
 		case "capabilityRoleIndex":
-			// Story 3.2b §2 — full activation. The envelope rewrites
-			// each row into Contract #6 §6.1 `cap.role-by-operation.<op>`
-			// shape and skips rows whose operationType is null/empty
-			// (replaces the 3.2a NullKeySkipper shim).
+			// The role-index envelope rewrites each row into the Contract #6 §6.1
+			// `cap.role-by-operation.<op>` shape and skips rows whose
+			// operationType is null/empty. capabilityRoleIndex does not use the
+			// per-actor envelope.
 			p.SetEnvelopeFn(capabilityenv.NewRoleIndexWrapper())
 			// Latency buffer also installed for the secondary Lens — the
 			// heartbeater emits stats per Lens regardless of envelope shape.
@@ -337,10 +332,8 @@ func main() {
 			entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
 			logger.Info("lens INTO hot-reloaded", "lensId", newLens.ID)
 		case lens.MatchChange:
-			// Story 3.2b §8 (Decision #8): mirror startPipeline's per-engine
-			// routing for hot-reload. The 3.2a updateCB only handled the
-			// simple-engine plan path; a full-engine lens whose MATCH
-			// changed would silently fall back to a stale stale plan.
+			// Mirror startPipeline's per-engine routing for hot-reload so both
+			// simple- and full-engine lenses are updated when MATCH changes.
 			mu.Lock()
 			entry, ok := registry[newLens.ID]
 			mu.Unlock()
@@ -400,6 +393,7 @@ func main() {
 		}
 	})
 	src.SetUpdateCallback(updateCB)
+	controlSvc.SetRuleGetter(src)
 	if err := src.Start(ctx); err != nil {
 		logger.Error("start core kv lens source", "err", err)
 		os.Exit(1)

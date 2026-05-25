@@ -2,8 +2,11 @@ package lens
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"time"
+
+	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 )
 
 // BootstrapLensEnvVar gates the hardcoded bootstrap lens. When set to a
@@ -45,14 +48,17 @@ func BootstrapEnabled() bool {
 // MATCH all `contract` vertices and project to Postgres table
 // `contract_view`. The DSN is sourced from the env var
 // REFRACTOR_PG_DSN at lens-load time. See handoff brief Decision #7.
+// Engine resolution is performed via defaultRegistry.SelectForLens so
+// that ResolvedEngine and CompiledRule are always set correctly.
 func BootstrapLens() *Rule {
 	dsn := os.Getenv("REFRACTOR_PG_DSN")
 	if dsn == "" {
 		dsn = "postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable"
 	}
-	return &Rule{
+	const match = "MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name"
+	r := &Rule{
 		ID:    BootstrapLensID,
-		Match: "MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name",
+		Match: match,
 		Into: IntoConfig{
 			Target:          "postgres",
 			DSN:             dsn,
@@ -62,6 +68,18 @@ func BootstrapLens() *Rule {
 			QueryTimeout:    5 * time.Second,
 		},
 	}
+	eng, compiled, attempted, err := defaultRegistry.SelectForLens(ruleengine.LensDefinition{
+		ID:       BootstrapLensID,
+		RuleBody: match,
+	})
+	if err != nil {
+		slog.Error("bootstrap lens: engine selection failed", "err", err)
+		return r
+	}
+	r.ResolvedEngine = eng.Name()
+	r.CompiledRule = compiled
+	r.AttemptedEngines = attempted
+	return r
 }
 
 // BootstrapLensSpecJSON returns the JSON `LensSpec` body the bootstrap

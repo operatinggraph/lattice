@@ -99,10 +99,11 @@ func contractPutVertex(t *testing.T, kv jetstream.KeyValue, typ, name string, ex
 
 func contractPutEdge(t *testing.T, adjKV jetstream.KeyValue, name, fromType, fromName, toType, toName string) {
 	t.Helper()
+	ctx := context.Background()
 	fromID := contractStableID(fromType + ":" + fromName)
 	toID := contractStableID(toType + ":" + toName)
 	edgeID := name + ":" + fromID + ":" + toID
-	require.NoError(t, adjacency.Build(adjKV, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
 		CoreKvKey:   edgeID,
 		EdgeID:      edgeID,
 		Name:        name,
@@ -111,7 +112,7 @@ func contractPutEdge(t *testing.T, adjKV jetstream.KeyValue, name, fromType, fro
 		OtherNodeID: toID,
 		OtherType:   toType,
 	}))
-	require.NoError(t, adjacency.Build(adjKV, adjacency.CoreKVEvent{
+	require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
 		CoreKvKey:   edgeID,
 		EdgeID:      edgeID,
 		Name:        name,

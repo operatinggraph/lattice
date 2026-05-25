@@ -45,7 +45,7 @@ func RunFixture(t *testing.T, fix *Fixture, adjKV, coreKV, targetKV jetstream.Ke
 				OtherNodeID: edge.OtherNodeID,
 				IsDeleted:   false,
 			}
-			require.NoError(t, adjacency.Build(adjKV, evt),
+			require.NoError(t, adjacency.Build(ctx, adjKV, evt),
 				"fixture: seed adjacency node_id=%s edgeId=%s", adjEntry.NodeID, edge.EdgeID)
 		}
 	}

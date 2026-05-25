@@ -16,15 +16,14 @@ import (
 )
 
 // ErrSkipProjection signals that an EnvelopeFn declined a row — the
-// pipeline drops it without writing or erroring. Story 3.2a: used by
-// the Capability envelope to suppress projections that the cypher
-// produced via aggregation over zero MATCH-bindings (no real actor).
+// pipeline drops it without writing or erroring. Used by the Capability
+// envelope to suppress projections the cypher produced over zero
+// MATCH-bindings (no real actor).
 var ErrSkipProjection = errors.New("pipeline: envelope: skip projection")
 
 // evaluateForEntry runs the per-engine evaluate path against entry and
-// returns the normalised []simple.EvalResult shape the existing write
-// loop expects. Story 3.2a — C1 convergence (Decision #2): the simple
-// engine path delegates to simple.Evaluate; the full engine path binds
+// returns the normalised []simple.EvalResult shape the write loop expects.
+// The simple engine delegates to simple.Evaluate; the full engine binds
 // `$actorKey`, `$now`, `$projectedAt` from the event/clock and calls
 // full.Engine.ExecuteWith. When an EnvelopeFn is installed, each row
 // is rewritten before being handed to the adapter.
@@ -35,15 +34,10 @@ func (p *Pipeline) evaluateForEntry(ctx context.Context, entry simple.NodeEntry)
 			return nil, fmt.Errorf("pipeline: full engine selected but engine/compiled rule unset for rule %q", p.ruleID)
 		}
 
-		// Story 3.2b §3/§5: cross-vertex fan-out + tombstone handling.
-		// On an actor (identity) event the legacy 3.2a single-execute
-		// path applies, including the soft-delete → Delete shortcut.
-		// On a non-actor event AND when an ActorEnumerator is
-		// installed, expand the event into the set of affected actors
-		// (depth+actor-cap bounded) and re-execute the cypher per
-		// affected actor — re-projecting their capability set with
-		// the soft-deleted topology naturally filtered out (the
-		// executor already filters soft-deleted reads).
+		// Cross-vertex fan-out: on a non-actor event with an ActorEnumerator
+		// installed, expand the event into the set of affected actors and
+		// re-execute the cypher per actor so their capability set is
+		// re-projected with the updated topology.
 		if p.actorEnumerator != nil {
 			eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 			if eventType != p.actorEnumerator.actorType {
@@ -51,16 +45,10 @@ func (p *Pipeline) evaluateForEntry(ctx context.Context, entry simple.NodeEntry)
 			}
 		}
 
-		// Story 3.2b §5: actor (identity) tombstone → emit a Delete
-		// against the Capability KV target key (`cap.<type>.<id>`) so
-		// the cap entry disappears from Capability KV. Only the
-		// actor-aware pipeline (capability lens, ActorEnumerator
-		// installed) takes this shortcut — for other lenses (e.g.
-		// capabilityRoleIndex) a vertex tombstone is just another
-		// CDC event the cypher should re-execute on. Falling into
-		// executeFullForActor in that case lets the cypher produce
-		// the natural re-projection without spuriously deleting a
-		// per-actor key the lens never wrote.
+		// Actor tombstone shortcut: emit a Delete against the Capability KV
+		// target key so the cap entry is removed when an identity vertex is
+		// soft-deleted. Only the actor-aware pipeline (ActorEnumerator installed)
+		// takes this path — other lenses let the cypher re-execute normally.
 		if entry.IsDeleted && p.actorEnumerator != nil {
 			delKey := capabilityKeyForActor(entry.CoreKVKey)
 			return []simple.EvalResult{{
@@ -157,24 +145,22 @@ func (p *Pipeline) executeFullForActor(ctx context.Context, actorKey string, nod
 			Row:    row,
 		})
 	}
-	// Story 3.2b §6: record per-event projection latency for the
-	// heartbeat aggregator (Decision #5). The buffer is cheap (single
-	// atomic-protected ring slot per insert) so calling it on every
-	// fan-out actor is fine.
+	// Record per-event projection latency for the heartbeat aggregator.
+	// The buffer is cheap (single atomic-protected ring slot per insert)
+	// so calling it on every fan-out actor is fine.
 	if p.latencyBuf != nil {
 		p.latencyBuf.Record(time.Since(start))
 	}
 	return results, nil
 }
 
-// evaluateFanOut handles the Story 3.2b §3 cross-vertex fan-out path:
-// the CDC event arrived on a non-actor vertex; enumerate affected
-// actors and re-execute the cypher per actor. Each actor's result set
-// is appended to the returned []EvalResult — the pipeline write loop
-// then handles each result row independently.
+// evaluateFanOut handles the cross-vertex fan-out path: the CDC event arrived
+// on a non-actor vertex; enumerate affected actors and re-execute the cypher
+// per actor. Each actor's result set is appended to the returned []EvalResult
+// — the pipeline write loop handles each result row independently.
 func (p *Pipeline) evaluateFanOut(ctx context.Context, entry simple.NodeEntry) ([]simple.EvalResult, error) {
 	eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
-	actorKeys, err := p.actorEnumerator.Enumerate(entry.CoreKVKey, eventType)
+	actorKeys, err := p.actorEnumerator.Enumerate(ctx, entry.CoreKVKey, eventType)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
 	}

@@ -128,7 +128,7 @@ func evaluateAnchor(ctx context.Context, plan *QueryPlan, anchorKey string, anch
 
 			// Look up edges from the FROM node.
 			fromAdjID := adjLookupID(fromKey)
-			neighbors, err := adjacency.Neighbors(adjKV, fromAdjID)
+			neighbors, err := adjacency.Neighbors(ctx, adjKV, fromAdjID)
 			if err != nil {
 				return nil, fmt.Errorf("evaluateAnchor: neighbors(%s): %w", fromAdjID, err)
 			}
@@ -225,7 +225,7 @@ func walkBackToAnchor(ctx context.Context, plan *QueryPlan, stepIdx int, startKe
 	var prevKeys []string
 	for _, nodeKey := range startKeys {
 		adjID := adjLookupID(nodeKey)
-		neighbors, err := adjacency.Neighbors(adjKV, adjID)
+		neighbors, err := adjacency.Neighbors(ctx, adjKV, adjID)
 		if err != nil {
 			return nil, fmt.Errorf("walkBack: neighbors(%s): %w", adjID, err)
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -63,16 +64,19 @@ func (a *NatsKVAdapter) Upsert(ctx context.Context, keys map[string]any, row map
 	return nil
 }
 
-// Delete writes a tombstone document with `isDeleted: true` instead of
-// physically deleting the KV entry. Story 2.1 AC #4: tombstones use
-// soft-delete semantics per Contract #1. Deleting a non-existent key
-// is still idempotent — we PUT a minimal tombstone document.
+// Delete writes a tombstone document with `isDeleted: true` and a `projectedAt`
+// timestamp instead of physically deleting the KV entry. Soft-delete semantics per
+// Contract #1 ensure downstream auth-freshness readers see a current timestamp and
+// can correctly classify the deletion. Deleting a non-existent key is idempotent.
 func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any) error {
 	key, err := a.buildKey(keys)
 	if err != nil {
 		return fmt.Errorf("natskv delete: %w", err)
 	}
-	tombstone := map[string]any{"isDeleted": true}
+	tombstone := map[string]any{
+		"isDeleted":   true,
+		"projectedAt": time.Now().UTC().Format(time.RFC3339),
+	}
 	data, err := json.Marshal(tombstone)
 	if err != nil {
 		return fmt.Errorf("natskv delete: marshal tombstone: %w", err)

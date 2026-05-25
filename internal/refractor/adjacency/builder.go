@@ -50,7 +50,8 @@ type CoreKVEvent struct {
 }
 
 // Build processes a CoreKVEvent and updates adj.<NodeID> in kv using CAS-with-retry.
-func Build(kv jetstream.KeyValue, evt CoreKVEvent) error {
+// ctx is propagated to all KV calls so the caller can cancel during shutdown.
+func Build(ctx context.Context, kv jetstream.KeyValue, evt CoreKVEvent) error {
 	key := subjects.AdjKey(evt.NodeID)
 	edge := EdgeEntry{
 		CoreKvKey:   evt.CoreKvKey,
@@ -60,11 +61,10 @@ func Build(kv jetstream.KeyValue, evt CoreKVEvent) error {
 		OtherNodeID: evt.OtherNodeID,
 		OtherType:   evt.OtherType,
 	}
-	return upsertEdge(kv, key, edge, evt.IsDeleted)
+	return upsertEdge(ctx, kv, key, edge, evt.IsDeleted)
 }
 
-func upsertEdge(kv jetstream.KeyValue, key string, edge EdgeEntry, remove bool) error {
-	ctx := context.Background()
+func upsertEdge(ctx context.Context, kv jetstream.KeyValue, key string, edge EdgeEntry, remove bool) error {
 	for {
 		var current AdjValue
 		var rev uint64

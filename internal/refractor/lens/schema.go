@@ -14,9 +14,7 @@ import (
 )
 
 // defaultRegistry is the package-level engine registry used by Parse() to
-// resolve the engine that owns a given Rule's body. Story 3.1a wires only
-// the simple engine (real) and full engine (stub); 3.1b will replace the
-// full stub with the visitor + executor implementation.
+// resolve the engine that owns a given Rule's body.
 //
 // Tests may override via SetRegistry to inject alternative engines (e.g.
 // always-failing simple to exercise the absent-fallback path).
@@ -88,14 +86,14 @@ type Rule struct {
 	Retry         RetryConfig `yaml:"retry"`
 	// CanonicalName mirrors the LensSpec.canonicalName field — used by
 	// downstream wiring (e.g. the cmd/refractor startPipeline path) to
-	// select target-specific envelopes (Story 3.2a Phase C). Not
-	// authoritative for routing; pipeline behaviour stays canonical-
-	// name-agnostic except for envelope selection.
+	// select target-specific envelopes. Not authoritative for routing;
+	// pipeline behaviour stays canonical-name-agnostic except for envelope
+	// selection.
 	CanonicalName string `yaml:"-"`
 
-	// RuleEngine is the explicit engine selector (Story 3.1a). Valid values:
-	//   "simple"  — v1 Materializer-derived parser (only engine functional in 3.1a).
-	//   "full"    — v2 openCypher engine (stub in 3.1a — always rejects).
+	// RuleEngine is the explicit engine selector. Valid values:
+	//   "simple"  — v1 Materializer-derived parser.
+	//   "full"    — v2 openCypher engine.
 	//   ""        — absent; selection falls back simple-then-full.
 	RuleEngine string `yaml:"ruleEngine"`
 
@@ -105,9 +103,8 @@ type Rule struct {
 	ResolvedEngine string `yaml:"-"`
 
 	// CompiledRule is the engine-specific compiled artifact produced by
-	// Parse() via the registry's SelectForLens. Story 3.2a wires the full
-	// engine through the pipeline; callers route on ResolvedEngine and
-	// pass this back to the matching engine's Execute path. May be nil
+	// Parse() via the registry's SelectForLens. Callers route on ResolvedEngine
+	// and pass this back to the matching engine's Execute path. May be nil
 	// for the simple engine (which re-compiles via simple.Compile against
 	// the Into.Key list) — see startPipeline in cmd/refractor for the
 	// per-engine routing.
@@ -168,11 +165,10 @@ func Parse(data []byte) (*Rule, error) {
 	r.ResolvedEngine = attempted[len(attempted)-1]
 	r.CompiledRule = compiled
 
-	// Engine-specific post-parse validation (Story 3.1b-ii C2 convergence).
-	// We reuse the *simple.CompiledRule's parsed AST returned from the
-	// registry instead of re-parsing — eliminating the duplicate parse call.
-	// The Compile step still runs because it needs the key fields, which
-	// the engine-neutral SelectForLens contract doesn't carry.
+	// Engine-specific post-parse validation. We reuse the *simple.CompiledRule's
+	// parsed AST returned from the registry instead of re-parsing — eliminating
+	// the duplicate parse call. The Compile step still runs because it needs the
+	// key fields, which the engine-neutral SelectForLens contract doesn't carry.
 	if r.ResolvedEngine == ruleengine.EngineSimple {
 		sc, ok := compiled.(*simple.CompiledRule)
 		if !ok {

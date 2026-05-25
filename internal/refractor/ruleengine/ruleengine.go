@@ -1,12 +1,8 @@
 // Package ruleengine defines the engine-neutral interface, registry, and
 // supporting types shared by the v1 "simple" engine (Materializer-derived)
-// and the v2 "full" engine (ANTLR-vendored openCypher; stubbed in 3.1a,
-// implemented in 3.1b).
-//
-// Story 3.1a scope: this package provides the boundary contract and the
-// selection-logic that resolves a Lens to one of the two engines. ANTLR
-// types stay isolated inside internal/refractor/ruleengine/full/cypher and
-// MUST NOT leak through this package.
+// and the v2 "full" engine (ANTLR-vendored openCypher). ANTLR types stay
+// isolated inside internal/refractor/ruleengine/full/cypher and MUST NOT
+// leak through this package.
 package ruleengine
 
 import (
@@ -35,14 +31,13 @@ type CompiledRule interface {
 }
 
 // EventContext carries the per-event inputs an engine needs to project a
-// result. Concrete shape is intentionally minimal in 3.1a; 3.1b adds the
-// Parameters map used by the full engine to bind `$name` references.
+// result. Parameters is used by the full engine to bind `$name` references.
 type EventContext struct {
 	// NodeKey is the KV key of the entity that changed (e.g. "agreement:42").
 	NodeKey string
 	// NodeProps holds the current properties of the changed entity.
 	NodeProps map[string]any
-	// Parameters resolves `$name` references in the rule body. Story 3.1b-ii.
+	// Parameters resolves `$name` references in the rule body.
 	// May be nil/empty — engines must tolerate missing maps and return a
 	// typed MissingParameterError when an unbound parameter is referenced.
 	Parameters map[string]any
@@ -50,8 +45,8 @@ type EventContext struct {
 
 // MissingParameterError indicates a `$name` reference in the rule body was
 // not bound by the caller via EventContext.Parameters. The full engine
-// surfaces this so the caller (Story 3.2) can distinguish a bug (missing
-// param wiring) from a graph-shape failure.
+// surfaces this so callers can distinguish a missing-wiring bug from a
+// graph-shape failure.
 type MissingParameterError struct {
 	Name string
 }
@@ -61,9 +56,8 @@ func (e *MissingParameterError) Error() string {
 	return fmt.Sprintf("missing parameter $%s", e.Name)
 }
 
-// ProjectionResult is one row produced by Execute. 3.1a does not consume
-// this — callers still use the simple engine's concrete EvalResult shape —
-// but the type is part of the shared interface so 3.1b can converge on it.
+// ProjectionResult is one row produced by Execute. Callers normalise this
+// into simple.EvalResult via pipeline.evaluateForEntry.
 type ProjectionResult struct {
 	Key    map[string]any
 	Values map[string]any

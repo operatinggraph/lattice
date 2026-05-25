@@ -1,10 +1,9 @@
-// Story 3.2b §3 (Decision #3): cross-vertex fan-out lives in the
-// pipeline, not the engine. When a CDC event arrives on a non-actor
-// vertex (e.g. a role, permission, service, location, task vertex),
-// the pipeline must enumerate the set of actor (identity) vertices
-// reachable from the mutated vertex via the topology relations the
-// Capability Lens cares about, then re-execute the cypher rule with
-// `$actorKey` bound to each affected actor.
+// Cross-vertex fan-out lives in the pipeline, not the engine. When a CDC
+// event arrives on a non-actor vertex (e.g. a role, permission, service,
+// location, or task vertex), the pipeline enumerates the set of actor
+// (identity) vertices reachable from the mutated vertex via the topology
+// relations the Capability Lens cares about, then re-executes the cypher
+// rule with `$actorKey` bound to each affected actor.
 //
 // The enumeration is depth-bounded (matching the executor's
 // variable-length traversal cap, default 10) and actor-cap-bounded
@@ -13,6 +12,7 @@
 package pipeline
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -86,8 +86,8 @@ func (e *ActorEnumerator) WithCaps(maxDepth, maxActors int) *ActorEnumerator {
 // by maxDepth and maxActors. eventVertexType is the type segment of
 // the event vertex; when it equals e.actorType the event itself is
 // returned as a singleton (the pipeline still re-projects it on the
-// fast path).
-func (e *ActorEnumerator) Enumerate(eventVertexKey, eventVertexType string) ([]string, error) {
+// fast path). ctx is propagated to adjacency KV reads.
+func (e *ActorEnumerator) Enumerate(ctx context.Context, eventVertexKey, eventVertexType string) ([]string, error) {
 	// Fast path: the event is already on an actor vertex. The pipeline
 	// re-executes the cypher against eventVertexKey via the normal route.
 	if eventVertexType == e.actorType {
@@ -117,7 +117,7 @@ func (e *ActorEnumerator) Enumerate(eventVertexKey, eventVertexType string) ([]s
 		if cur.depth >= e.maxDepth {
 			continue
 		}
-		edges, err := adjacency.Neighbors(e.adjKV, cur.nodeID)
+		edges, err := adjacency.Neighbors(ctx, e.adjKV, cur.nodeID)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline: actor enumerator: neighbours of %q: %w", cur.nodeID, err)
 		}

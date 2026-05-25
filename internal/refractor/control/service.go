@@ -15,6 +15,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 )
 
@@ -528,6 +529,16 @@ func (s *Service) validateRule(ctx context.Context, ruleID string) ControlRespon
 	r, ok := rg.Get(ruleID)
 	if !ok {
 		return ControlResponse{Error: fmt.Sprintf("rule %q not loaded", ruleID)}
+	}
+
+	// Full-engine lenses use openCypher syntax that the simple parser cannot handle.
+	// Return a best-effort note rather than a misleading parse error.
+	if r.ResolvedEngine == ruleengine.EngineFull {
+		return ControlResponse{Validate: &ValidateResult{
+			SampleSize:   0,
+			FieldReports: nil,
+			Warnings:     []string{"field-level validation is only available for simple-engine lenses; this lens uses the full openCypher engine"},
+		}}
 	}
 
 	query, err := simple.Parse(r.Match)

@@ -10,11 +10,8 @@ import (
 // Engine adapts the simple v1 parser/compiler to the engine-neutral
 // ruleengine.RuleEngine interface. It is registered with ruleengine.NewRegistry
 // at process startup and consulted by selection logic in lens validation.
-//
-// In Story 3.1a only Parse() is exercised by callers via SelectForLens —
-// Execute() is wired but the production execution path still calls the
-// concrete simple.Evaluate function with simple.QueryPlan directly. 3.1b
-// will reconcile the execution path to flow through this interface.
+// Only Parse() is exercised via SelectForLens; the production execution path
+// calls simple.Evaluate directly with a fully-compiled QueryPlan.
 type Engine struct{}
 
 // New returns a ready-to-register simple engine.
@@ -43,13 +40,11 @@ func (*Engine) Parse(ruleBody string) (ruleengine.CompiledRule, error) {
 	return &CompiledRule{Query: q}, nil
 }
 
-// Execute is wired to satisfy the interface but is not on the hot path in
-// 3.1a. Callers continue to invoke simple.Evaluate with a fully-compiled
-// QueryPlan. 3.1b will route execution through this method.
+// Execute satisfies ruleengine.RuleEngine. Production callers use simple.Evaluate
+// directly with a fully-compiled QueryPlan; this method is not on the hot path.
 func (*Engine) Execute(_ context.Context, cr ruleengine.CompiledRule, _ ruleengine.EventContext) (ruleengine.ProjectionResult, error) {
 	if _, ok := cr.(*CompiledRule); !ok {
 		return ruleengine.ProjectionResult{}, fmt.Errorf("simple.Engine.Execute: CompiledRule has wrong type %T", cr)
 	}
-	// 3.1b will replace this with a proper QueryPlan-driven Evaluate call.
-	return ruleengine.ProjectionResult{}, fmt.Errorf("simple.Engine.Execute: not wired in story 3.1a; callers still invoke simple.Evaluate directly")
+	return ruleengine.ProjectionResult{}, fmt.Errorf("simple.Engine.Execute: production callers use simple.Evaluate directly; this method is not on the hot path")
 }

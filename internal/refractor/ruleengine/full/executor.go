@@ -1,11 +1,10 @@
 // Package full's executor walks the Refractor-native AST against Core KV
 // (vertex/aspect data) and Adjacency KV (edges) to produce projection rows.
 //
-// This file lands the Story 3.1b-ii implementation. The design intentionally
-// stays close to the AST — there is no separate "plan" stage between Parse
-// and Execute. Execution proceeds clause-by-clause over a list of bindings;
-// each binding maps variable names to either a *nodeRef (graph node) or any
-// other value (post-WITH alias).
+// The design stays close to the AST — there is no separate "plan" stage
+// between Parse and Execute. Execution proceeds clause-by-clause over a
+// list of bindings; each binding maps variable names to either a *nodeRef
+// (graph node) or any other value (post-WITH alias).
 //
 // All Core KV reads filter `isDeleted: true` per Contract #1. All edge
 // lookups go through Adjacency KV via the adjacency package.
@@ -52,8 +51,8 @@ type executor struct {
 }
 
 // ExecuteWith runs cr against the given Core and Adjacency KVs, binding
-// `$name` references from ec.Parameters. The signature mirrors the simple
-// engine's Evaluate so Story 3.2 can call it from the pipeline.
+// `$name` references from ec.Parameters. Called by the pipeline for each
+// CDC event on the full-engine path.
 //
 // Returns one ProjectionResult per result row. Empty result => zero rows.
 func (e *Engine) ExecuteWith(
@@ -106,17 +105,10 @@ func (e *Engine) ExecuteWith(
 }
 
 // Execute satisfies ruleengine.RuleEngine. It is the single-row convenience
-// wrapper around ExecuteWith. Returns the FIRST projection row (and an
-// error if the executor produced more than one, since the engine-neutral
-// interface only yields a single ProjectionResult per call).
-//
-// Story 3.2 will route bulk projection through ExecuteWith directly.
-// Until then, single-row callers (e.g. the 3.1a selection-tests) use this.
+// Execute satisfies ruleengine.RuleEngine but cannot operate on a real graph
+// because the engine-neutral signature does not carry KV handles. The pipeline
+// calls ExecuteWith directly. Returning a typed error keeps the contract honest.
 func (e *Engine) Execute(_ context.Context, _ ruleengine.CompiledRule, _ ruleengine.EventContext) (ruleengine.ProjectionResult, error) {
-	// The engine-neutral RuleEngine.Execute doesn't carry the KV handles —
-	// the production execution path (Story 3.2) calls ExecuteWith directly.
-	// Returning a typed error here keeps the contract honest: this signature
-	// can't operate on a real graph.
 	return ruleengine.ProjectionResult{}, errors.New(
 		"full engine: Execute requires KV handles — call ExecuteWith from the pipeline")
 }
@@ -471,11 +463,13 @@ func (ex *executor) fetchNode(key string) (*nodeRef, error) {
 	if err := json.Unmarshal(entry.Value(), &props); err != nil {
 		return nil, fmt.Errorf("full engine: unmarshal %q: %w", key, err)
 	}
-	if deleted, _ := props["isDeleted"].(bool); deleted {
+	// A JSON "null" body unmarshals to a nil map. Treat as absent/tombstone —
+	// a null-body entry is likely a corrupted or transitional write.
+	if props == nil {
 		return nil, nil
 	}
-	if props == nil {
-		props = map[string]any{}
+	if deleted, _ := props["isDeleted"].(bool); deleted {
+		return nil, nil
 	}
 	props["key"] = key
 	return &nodeRef{key: key, props: props}, nil
@@ -533,7 +527,7 @@ func (ex *executor) traverseRel(b binding, from *nodeRef, rel RelPattern, to Nod
 			if _, nodeID, ok := substrate.ParseVertexKey(f.node.key); ok {
 				adjLookupID = nodeID
 			}
-			edges, err := adjacency.Neighbors(ex.adjKV, adjLookupID)
+			edges, err := adjacency.Neighbors(ex.ctx, ex.adjKV, adjLookupID)
 			if err != nil {
 				return nil, fmt.Errorf("full engine: neighbors(%s): %w", adjLookupID, err)
 			}
@@ -932,6 +926,21 @@ func (ex *executor) applyReturn(bindings []binding, r *Return) ([]ruleengine.Pro
 	if err != nil {
 		return nil, err
 	}
+	// Deduplicate rows when RETURN DISTINCT is specified. Rows are compared by
+	// their JSON-serialised content; order is preserved (first occurrence wins).
+	if r.Distinct {
+		seen := make(map[string]struct{}, len(rows))
+		deduped := rows[:0]
+		for _, row := range rows {
+			b, _ := json.Marshal(row)
+			key := string(b)
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				deduped = append(deduped, row)
+			}
+		}
+		rows = deduped
+	}
 	out := make([]ruleengine.ProjectionResult, 0, len(rows))
 	for _, row := range rows {
 		values := map[string]any{}
@@ -1003,6 +1012,19 @@ func (ex *executor) evalExpr(b binding, e Expr) (any, error) {
 				}
 			}
 			return true, nil
+		}
+		if x.Op == "XOR" {
+			trueCount := 0
+			for _, op := range x.Operands {
+				v, err := ex.evalExpr(b, op)
+				if err != nil {
+					return nil, err
+				}
+				if truthy(v) {
+					trueCount++
+				}
+			}
+			return trueCount == 1, nil
 		}
 		// OR
 		for _, op := range x.Operands {

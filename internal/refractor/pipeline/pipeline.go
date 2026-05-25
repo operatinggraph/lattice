@@ -49,30 +49,24 @@ type Pipeline struct {
 	adjKV        jetstream.KeyValue
 	coreKV       jetstream.KeyValue
 
-	// Story 3.2a — C1 convergence (per-engine routing, Decision #2).
 	// engineKind selects the evaluate code path; "simple" (default) drives
 	// the plan-based simple.Evaluate; "full" drives full.Engine.ExecuteWith
 	// against fullCR and the live event context. envelopeFn (when non-nil)
 	// rewrites each projection row into the on-wire envelope expected by
-	// the adapter target (Contract #6 §6.2 Capability KV shape for the
-	// Capability Lens).
+	// the adapter target (e.g. Contract #6 §6.2 Capability KV shape).
 	engineKind string
 	fullEngine *full.Engine
 	fullCR     ruleengine.CompiledRule
 	envelopeFn EnvelopeFn
 
-	// Story 3.2b §3 (Decision #3): cross-vertex fan-out.
-	// When non-nil and engineKind == Full, evaluateForEntry consults
-	// this enumerator on every CDC event whose vertex type does not
-	// match the enumerator's actorType, expanding the event into the
-	// set of affected actors and re-executing the cypher per actor.
-	// Nil leaves the legacy single-execute path (3.2a behaviour).
+	// actorEnumerator enables cross-vertex fan-out. When non-nil and
+	// engineKind == Full, evaluateForEntry expands every CDC event on a
+	// non-actor vertex into the set of affected actors and re-executes
+	// the cypher per actor. Nil uses the single-execute path.
 	actorEnumerator *ActorEnumerator
 
-	// Story 3.2b §6 — per-event projection latency ring buffer.
-	// Captures the (CDC → projection-write) latency for each evaluated
-	// event so the heartbeat can compute mean/p95/p99 per Lens. Nil
-	// when latency emission is disabled.
+	// latencyBuf captures the (CDC → projection-write) latency per event
+	// so the heartbeat can compute mean/p95/p99 per Lens. Nil disables.
 	latencyBuf *LatencyRingBuffer
 	adapterMu    sync.RWMutex    // protects adpt for concurrent hot-reload
 	adpt         adapter.Adapter // access via currentAdapter(); swap via HotReloadInto
@@ -123,12 +117,11 @@ type Pipeline struct {
 }
 
 // EnvelopeFn rewrites a projection-row map into the on-wire shape the
-// adapter writes. Story 3.2a uses it for the Contract #6 §6.2
-// Capability KV envelope. The function receives the raw RETURN-row map
-// produced by the engine plus the EventContext.Parameters (so it can
-// derive `projectedAt`, `$actorKey`, etc.) and returns the wrapped row
-// + a possibly-rewritten Key map. A nil EnvelopeFn is the legacy
-// "write the row verbatim" path.
+// adapter writes (e.g. Contract #6 §6.2 Capability KV envelope). The
+// function receives the raw RETURN-row map produced by the engine plus the
+// EventContext.Parameters (so it can derive `projectedAt`, `$actorKey`, etc.)
+// and returns the wrapped row + a possibly-rewritten Key map.
+// A nil EnvelopeFn writes the row verbatim.
 type EnvelopeFn func(row map[string]any, keys map[string]any, params map[string]any) (newRow, newKeys map[string]any, err error)
 
 // New creates a Pipeline for the given rule.
@@ -168,33 +161,30 @@ func New(
 }
 
 // UseFullEngine switches this pipeline's evaluate path to the full
-// openCypher engine (Story 3.2a — C1 convergence per Decision #2).
-// cr must be the *full.CompiledRule that lens.Parse / corekv_source
-// produced for this rule. Must be called before Run.
+// openCypher engine. cr must be the *full.CompiledRule that lens.Parse /
+// corekv_source produced for this rule. Must be called before Run.
 func (p *Pipeline) UseFullEngine(eng *full.Engine, cr ruleengine.CompiledRule) {
 	p.engineKind = ruleengine.EngineFull
 	p.fullEngine = eng
 	p.fullCR = cr
 }
 
-// SetEnvelopeFn installs the on-wire envelope wrapper (Story 3.2a
-// Phase C). Pass nil to clear. Must be called before Run.
+// SetEnvelopeFn installs the on-wire envelope wrapper. Pass nil to clear.
+// Must be called before Run.
 func (p *Pipeline) SetEnvelopeFn(fn EnvelopeFn) {
 	p.envelopeFn = fn
 }
 
-// SetActorEnumerator installs the cross-vertex fan-out enumerator for
-// the full-engine path (Story 3.2b §3 / Decision #3). When set,
-// evaluateForEntry expands every non-actor CDC event into the set of
-// affected actors and re-executes the cypher per actor.
+// SetActorEnumerator installs the cross-vertex fan-out enumerator for the
+// full-engine path. When set, evaluateForEntry expands every non-actor CDC
+// event into the set of affected actors and re-executes the cypher per actor.
 // Pass nil to disable. Must be called before Run.
 func (p *Pipeline) SetActorEnumerator(en *ActorEnumerator) {
 	p.actorEnumerator = en
 }
 
-// SetLatencyBuffer installs the per-Lens latency ring buffer
-// (Story 3.2b §6 / Decision #5). Pass nil to disable. Must be called
-// before Run.
+// SetLatencyBuffer installs the per-Lens latency ring buffer.
+// Pass nil to disable. Must be called before Run.
 func (p *Pipeline) SetLatencyBuffer(buf *LatencyRingBuffer) {
 	p.latencyBuf = buf
 }
@@ -712,11 +702,11 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 		Properties: props,
 	}
 
-	// Evaluate. Story 3.2a — C1 convergence (Decision #2): route per
-	// engine. The simple engine returns []EvalResult{Delete,Keys,Row};
-	// the full engine returns []ProjectionResult{Key,Values,Delete}.
-	// evaluateForEntry normalises and wraps (Phase C envelope) so the
-	// downstream write path sees a single []simple.EvalResult shape.
+	// Route to the appropriate engine. The simple engine returns
+	// []EvalResult{Delete,Keys,Row}; the full engine returns
+	// []ProjectionResult{Key,Values,Delete}. evaluateForEntry normalises
+	// and applies the envelope so the downstream write path sees a single
+	// []simple.EvalResult shape.
 	results, err := p.evaluateForEntry(ctx, entry)
 	if err != nil {
 		slog.Error("pipeline: evaluate",
@@ -798,10 +788,14 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 					RawPayload:   msg.Data(),
 					RuleSequence: capturedSeq,
 					WriteFn: func(rctx context.Context) error {
+						// Call currentAdapter() at retry time so that a hot-reload
+						// between the initial failure and the retry uses the live
+						// adapter target rather than the stale snapshot.
+						a := p.currentAdapter()
 						if capturedResult.Delete {
-							return adpt.Delete(rctx, capturedResult.Keys)
+							return a.Delete(rctx, capturedResult.Keys)
 						}
-						return adpt.Upsert(rctx, capturedResult.Keys, capturedResult.Row)
+						return a.Upsert(rctx, capturedResult.Keys, capturedResult.Row)
 					},
 					Attempt:     0,
 					MaxAttempts: p.retryMaxAttempts,
@@ -921,7 +915,7 @@ func (p *Pipeline) publishTerminalDLQ(ctx context.Context, msg jetstream.Msg, en
 			"stage", stage, "err", origErr)
 		return
 	}
-	// Fill RuleSequence from the reporter's cached active sequence (Story 4.1).
+	// Fill RuleSequence from the reporter's cached active sequence.
 	// Only format when non-zero; zero means SetRuleSequence was never called (keeps "" sentinel).
 	ruleSeq := ""
 	if p.reporter != nil {
@@ -1174,9 +1168,18 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjEntry jetstream.KeyVa
 			if ctx.Err() != nil {
 				return
 			}
-			slog.Warn("pipeline: adj watch: write",
-				"ruleId", p.ruleID, "key", nodeKey, "err", writeErr)
+			cat := failure.Classify(writeErr)
+			slog.Error("pipeline: adj watch: write",
+				"ruleId", p.ruleID, "key", nodeKey, "err", writeErr, "category", cat)
+			if p.reporter != nil {
+				if recErr := p.reporter.RecordError(ctx, writeErr.Error()); recErr != nil {
+					slog.Error("pipeline: adj watch: update health errorCount",
+						"ruleId", p.ruleID, "err", recErr)
+				}
+			}
 			// Continue — remaining results are independent; adapter writes are idempotent.
+			// Adj-watch events are not replayable from JetStream, so we do not pause here,
+			// but the error is recorded in health KV for operator visibility.
 			continue
 		}
 		slog.Info("pipeline: adj watch: re-evaluated",

@@ -1,8 +1,6 @@
-// Package full is the v2 openCypher rule engine — visitor + AST (parse
-// side) in 3.1b-i, with the executor landing in 3.1b-ii.
-//
-// Story 3.1b-i replaces 3.1a's stub Parse with the real lex/parse/walk
-// pipeline. Execute remains a typed-error stub until 3.1b-ii.
+// Package full is the v2 openCypher rule engine. It provides a real
+// lex/parse/walk pipeline (visitor + AST) and an executor that evaluates
+// the AST against Core KV and Adjacency KV.
 package full
 
 import (

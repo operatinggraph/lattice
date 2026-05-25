@@ -231,11 +231,11 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 	buildEdge := func(name, fromType, fromID, toType, toID string) {
 		linkKey := substrate.LinkKey(fromType, fromID, name, toType, toID)
 		edgeID := name + ":" + fromID + ":" + toID
-		require.NoError(t, adjacency.Build(adjKV, adjacency.CoreKVEvent{
+		require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
 			CoreKvKey: linkKey, EdgeID: edgeID, Name: name,
 			Direction: "outbound", NodeID: fromID, OtherNodeID: toID, OtherType: toType,
 		}))
-		require.NoError(t, adjacency.Build(adjKV, adjacency.CoreKVEvent{
+		require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
 			CoreKvKey: linkKey, EdgeID: edgeID, Name: name,
 			Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType,
 		}))
