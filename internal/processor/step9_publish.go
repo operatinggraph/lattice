@@ -11,13 +11,44 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
+// RebuildEventListFromClasses constructs a minimal EventList from the class
+// names and mutation keys stored in the idempotency tracker. Used on the
+// dedup-hit re-publish path (P1-002) when the original EventList is
+// unavailable. Each event receives a fresh NanoID (the original IDs are not
+// stored in the tracker), so this is a best-effort re-publish rather than
+// an exact replay.
+func RebuildEventListFromClasses(requestID string, classes []string, mutationKeys []string, at time.Time) (EventList, error) {
+	stamp := substrate.FormatTimestamp(at)
+	out := make(EventList, 0, len(classes))
+	for i, class := range classes {
+		if class == "" {
+			continue
+		}
+		id, err := substrate.NewNanoID()
+		if err != nil {
+			return nil, fmt.Errorf("rebuild event list: event %d: NanoID: %w", i, err)
+		}
+		target := ""
+		if i < len(mutationKeys) {
+			target = mutationKeys[i]
+		}
+		out = append(out, Event{
+			EventID:   id,
+			RequestID: requestID,
+			EventType: class,
+			TargetKey: target,
+			Payload:   map[string]interface{}{},
+			Timestamp: stamp,
+		})
+	}
+	return out, nil
+}
+
 // PublicationError is the typed step-9 failure surfaced when the batch
 // publish to `core-events` fails after all retries. Step 8 has already
-// committed durably; the commit_path treats a PublicationError as
-// fatal-but-retry-safe: the durable JetStream redelivery + step-2
-// tracker short-circuit ensures step 9 will be re-attempted on a clean
-// state-of-the-world after operator/Processor restart (Contract #4
-// §4.4 + NFR-R1).
+// committed durably. The commit path naks and JetStream redelivers; the
+// dedup short-circuit at step 2 detects the committed tracker and attempts
+// a best-effort re-publish before acking (Contract #4 §4.4 + NFR-R1).
 type PublicationError struct {
 	EventClass string
 	Subject    string
@@ -32,9 +63,8 @@ func (e *PublicationError) Error() string {
 
 func (e *PublicationError) Unwrap() error { return e.LastErr }
 
-// EventPublisherImpl is Story 1.8's step-9 implementation. It batch-
-// publishes every event in the result's EventList to `core-events` in
-// EventList order. Behavior:
+// EventPublisherImpl is the step-9 implementation. It batch-publishes every
+// event in the pre-built EventList to `core-events` in order. Behavior:
 //
 //  1. Skip step entirely if the EventList is empty (no events to publish).
 //  2. Build one PublishOp per event with subject `events.<class>` and
@@ -78,14 +108,11 @@ func NewEventPublisher(conn *substrate.Conn, logger *slog.Logger) *EventPublishe
 	}
 }
 
-// Publish implements EventPublisher (step 9). It assembles the EventList
-// from the validated ScriptResult and batch-publishes to `core-events`.
-func (p *EventPublisherImpl) Publish(ctx context.Context, env *OperationEnvelope, result ScriptResult) error {
-	now := p.Clock()
-	events, err := BuildEventList(env, result, now)
-	if err != nil {
-		return fmt.Errorf("step 9: build event list: %w", err)
-	}
+// Publish implements EventPublisher (step 9). It batch-publishes the
+// pre-built EventList to `core-events`. The EventList is built exactly once
+// at step 8 and passed here so event IDs are identical to those recorded in
+// the idempotency tracker.
+func (p *EventPublisherImpl) Publish(ctx context.Context, env *OperationEnvelope, events EventList) error {
 	if len(events) == 0 {
 		p.Logger.Info("step 9: no events to publish", "requestId", env.RequestID)
 		return nil
@@ -125,18 +152,23 @@ func (p *EventPublisherImpl) Publish(ctx context.Context, env *OperationEnvelope
 		lastErr = perr
 		p.Logger.Warn("step 9: batch publish failed; retrying",
 			"requestId", env.RequestID, "attempt", attempt+1, "error", perr)
+		attempt++
+		// Break immediately after the final attempt — no sleep on the last
+		// failure since no further retry will follow.
+		if attempt >= p.MaxRetries {
+			break
+		}
 		// Honor context cancellation between attempts.
 		if ctx.Err() != nil {
 			break
 		}
-		if attempt < len(p.BackoffSchedule) {
+		if attempt-1 < len(p.BackoffSchedule) {
 			select {
 			case <-ctx.Done():
 				lastErr = ctx.Err()
-			case <-time.After(p.BackoffSchedule[attempt]):
+			case <-time.After(p.BackoffSchedule[attempt-1]):
 			}
 		}
-		attempt++
 	}
 
 	firstClass := ""

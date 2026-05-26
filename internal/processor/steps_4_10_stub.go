@@ -10,11 +10,10 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// The interfaces in this file are Story 1.5 scaffolding for the commit
-// path's downstream steps. Stories 1.6, 1.7, 1.8 will provide real
-// implementations behind these same interface boundaries. The point of
-// defining them now is to lock the wiring so future stories swap
-// implementations without disturbing the commit_path driver.
+// Interface definitions for the commit path's downstream steps. Real
+// implementations live in the corresponding step*.go files. The interfaces
+// lock the wiring so implementations can change without disturbing the
+// commit_path driver.
 
 // Hydrator (step 4) — JIT Hydration. Real implementation in step4_hydrate.go.
 type Hydrator interface {
@@ -32,27 +31,33 @@ type Validator interface {
 	Validate(ctx context.Context, env *OperationEnvelope, result ScriptResult) error
 }
 
-// Committer (step 8) — assembles the atomic batch (tracker + real
-// mutations) and publishes it. Story 1.7.
+// Committer (step 8) — assembles the atomic batch (tracker + mutations)
+// and commits it to Core KV.
 type Committer interface {
 	Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error)
 }
 
-// CommitAck mirrors substrate.BatchAck for the commit path.
+// CommitAck mirrors substrate.BatchAck for the commit path. Events carries
+// the EventList built during step 8 so step 9 can publish the exact same
+// event IDs that were recorded in the tracker — BuildEventList is called
+// exactly once per operation.
 type CommitAck struct {
 	Stream   string
 	Sequence uint64
 	BatchID  string
 	Count    uint64
+	Events   EventList
 }
 
-// EventPublisher (step 9) — fans events out to `core-events`. Story 1.8.
+// EventPublisher (step 9) — fans events out to `core-events`.
+// Publish receives the EventList built at step 8 so no second NanoID
+// generation occurs; event IDs are identical to those stored in the tracker.
 type EventPublisher interface {
-	Publish(ctx context.Context, env *OperationEnvelope, result ScriptResult) error
+	Publish(ctx context.Context, env *OperationEnvelope, events EventList) error
 }
 
-// Acker (step 10) — acks the JetStream message. Story 1.8 wires a real
-// AckerImpl (see step10_ack.go); fault-injection tests substitute a
+// Acker (step 10) — acks the JetStream message. AckerImpl is the production
+// implementation (step10_ack.go); fault-injection tests substitute a
 // FailAfterN-wrapped implementation.
 type Acker interface {
 	Ack(ctx context.Context) error
@@ -72,13 +77,12 @@ func DefaultAckerFactory(msg jetstream.Msg, logger *slog.Logger) Acker {
 
 // --- Stub implementations ---
 //
-// Each stub logs "step N: stubbed" and returns a success-shaped value.
-// `commit_path.go` wires these into a working-but-incomplete pipeline so
-// Story 1.5 can exercise the JetStream consume → tracker write → ack path
-// end-to-end while leaving real logic for the future stories.
-
-// StubHydrator and StubExecutor were removed in Story 1.6 — real
-// implementations live in step4_hydrate.go and step5_execute.go.
+// Each stub logs "step N: stubbed" and returns a success-shaped value. Used
+// in test pipelines where the step under test is isolated and the remaining
+// steps should be no-ops.
+//
+// StubHydrator and StubExecutor have been removed — real implementations live
+// in step4_hydrate.go and step5_execute.go.
 
 type StubValidator struct{ logger *slog.Logger }
 
@@ -87,9 +91,8 @@ func (s *StubValidator) Validate(_ context.Context, env *OperationEnvelope, _ Sc
 	return nil
 }
 
-// StubCommitter performs the Story-1.5 single-message atomic batch: the
-// tracker write only. Story 1.7 will replace this with the full batch
-// (tracker + real mutations). The interface stays the same.
+// StubCommitter performs a tracker-only atomic batch (no business mutations).
+// Used in tests that exercise step-2/3 without needing real mutations.
 type StubCommitter struct {
 	conn   *substrate.Conn
 	bucket string
@@ -143,7 +146,7 @@ func NewStubEventPublisher(logger *slog.Logger) *StubEventPublisher {
 	return &StubEventPublisher{logger: logger}
 }
 
-func (s *StubEventPublisher) Publish(_ context.Context, env *OperationEnvelope, _ ScriptResult) error {
+func (s *StubEventPublisher) Publish(_ context.Context, env *OperationEnvelope, _ EventList) error {
 	s.logger.Info("step 9: stubbed", "step", "events", "requestId", env.RequestID)
 	return nil
 }

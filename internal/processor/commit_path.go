@@ -34,16 +34,16 @@ type Deps struct {
 	// and reply CommittedAt. Tests override it.
 	Clock func() time.Time
 	// DenialBuilder constructs FR22-structured denial details for auth-denied
-	// rejections (Story 3.4). Nil when capability mode is not active (stub
-	// mode) — in that case denials fall back to the pre-3.4 minimal reply.
+	// rejections. Nil when capability mode is not active — denials fall back
+	// to the minimal reply.
 	DenialBuilder *DenialResponseBuilder
-	// TraceEmitter writes three-plane auth trace records to Health KV per
-	// FR23 (Story 3.5). Nil when not wired (stub mode). Fire-and-forget:
-	// the emitter launches a goroutine so step 3 latency is unaffected.
+	// TraceEmitter writes three-plane auth trace records to Health KV per FR23.
+	// Nil when not wired (stub mode). Fire-and-forget: the emitter launches a
+	// goroutine so step 3 latency is unaffected.
 	TraceEmitter *AuthTraceEmitter
 	// ClaimEmitter records ClaimIdentity attempt outcomes to Health KV at
-	// health.processor.<instance>.claim-attempts.<outcome> (Story 4.3).
-	// Nil safe: a nil ClaimEmitter silently skips emission.
+	// health.processor.<instance>.claim-attempts.<outcome>. Nil safe: a nil
+	// ClaimEmitter silently skips emission.
 	ClaimEmitter ClaimAttemptEmitter
 }
 
@@ -65,7 +65,7 @@ func NewCommitPath(deps Deps) *CommitPath {
 		panic("processor: CommitPath requires Authorizer")
 	}
 	if deps.Committer == nil {
-		panic("processor: CommitPath requires Committer (StubCommitter is fine for Story 1.5)")
+		panic("processor: CommitPath requires Committer")
 	}
 	if deps.Metrics == nil {
 		deps.Metrics = &Metrics{}
@@ -144,6 +144,11 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		cp.deps.Logger.Info("DuplicateDetected: short-circuit at step 2",
 			"requestId", env.RequestID,
 			"trackerKey", TrackerKey(env.RequestID))
+		// Best-effort re-publish: if the tracker has eventClasses recorded but
+		// eventsPublishedAt is absent, step 9 never completed for this operation
+		// (commit durable, events not yet delivered). Attempt re-publish now
+		// before acking so the fan-out is not permanently lost.
+		cp.maybeRepublishEvents(ctx, env, dedup.Tracker)
 		cp.replyTo(msg, BuildDuplicateReply(env.RequestID, dedup.Tracker))
 		if ackErr := msg.Ack(); ackErr != nil {
 			cp.deps.Logger.Warn("ack on duplicate failed", "error", ackErr)
@@ -157,7 +162,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		cp.deps.Metrics.OpsRejected.Add(1)
 		cp.deps.Logger.Warn("step 3: authorizer error; rejecting",
 			"requestId", env.RequestID, "error", err)
-		cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeInternalError,
+		cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeAuthInfrastructureFailure,
 			"authorizer error", map[string]any{"underlying": err.Error()}))
 		_ = msg.TermWithReason("authorizer error: " + err.Error())
 		return OutcomeRejected
@@ -170,35 +175,32 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		}
 		cp.deps.Logger.Info("step 3: authorization denied; rejecting",
 			"requestId", env.RequestID, "code", string(code), "reason", decision.Reason)
-		// Story 3.4 (FR22): enrich denial reply with structured fields when
-		// the DenialBuilder is wired (capability mode). Stub mode leaves
-		// DenialBuilder nil and falls back to the minimal reply.
+		// Enrich denial reply with FR22-structured fields when the DenialBuilder
+		// is wired (capability mode). Stub mode leaves it nil → minimal reply.
 		var denialDetails map[string]any
 		if cp.deps.DenialBuilder != nil {
 			dd := cp.deps.DenialBuilder.BuildDenialDetails(ctx, env, decision, decision.Doc)
 			denialDetails = DenialDetailsAsMap(dd)
 		}
 		cp.replyTo(msg, BuildRejectedReply(env.RequestID, code, decision.Reason, denialDetails))
-		// Story 3.5 (FR23): emit three-plane auth trace record asynchronously.
-		// Fire-and-forget — does not block step 3 path (per AC).
+		// Emit FR23 three-plane auth trace record asynchronously.
+		// Fire-and-forget — does not block step 3 path.
 		cp.deps.TraceEmitter.Emit(env, decision)
 		_ = msg.TermWithReason("auth denied: " + decision.Reason)
 		return OutcomeRejected
 	}
-	// Story 3.3 AC #3 / Decision #8: capture the resolved permission so
-	// downstream steps (step 9 event publication, Stories 3.4/3.5)
-	// receive auth provenance without re-reading Capability KV. The
-	// pointer is allocated by CapabilityAuthorizer; StubAuthorizer
-	// leaves it nil.
+	// Capture the resolved permission so downstream steps receive auth provenance
+	// without re-reading Capability KV. Allocated by CapabilityAuthorizer; nil
+	// on the StubAuthorizer path.
 	resolvedPermission := decision.Resolved
 	cp.deps.Logger.Info("step 3: authorized",
 		"requestId", env.RequestID, "stub", decision.Stub,
 		"authPath", resolvedPermissionPath(resolvedPermission),
 		"projectedAt", resolvedPermissionProjectedAt(resolvedPermission))
-	// Story 3.5 (FR23): emit auth trace for allowed decisions when flag is ON.
-	// The emitter guards internally on traceAllowDecisions; nil emitter is a no-op.
+	// Emit FR23 auth trace for allowed decisions when flag is ON. The emitter
+	// guards internally on traceAllowDecisions; nil emitter is a no-op.
 	cp.deps.TraceEmitter.Emit(env, decision)
-	_ = resolvedPermission // wired through; downstream consumers in 3.4+
+	_ = resolvedPermission // threaded through for denial response + auth trace
 
 	// --- Steps 4-10: stubbed pipeline. ---
 	var state HydratedState
@@ -240,7 +242,8 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 
 	now := cp.deps.Clock()
 	tracker := NewTracker(env, now)
-	if _, err := cp.deps.Committer.Commit(ctx, env, result, tracker); err != nil {
+	commitAck, err := cp.deps.Committer.Commit(ctx, env, result, tracker)
+	if err != nil {
 		// If the commit failed because the tracker already exists, a
 		// previous redelivery committed and we're racing with our own
 		// idempotency: ack and emit a duplicate reply.
@@ -250,6 +253,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 				cp.deps.Metrics.OpsDuplicates.Add(1)
 				cp.deps.Logger.Info("commit: tracker already exists (concurrent redelivery); ack + duplicate reply",
 					"requestId", env.RequestID)
+				cp.maybeRepublishEvents(ctx, env, probe.Tracker)
 				cp.replyTo(msg, BuildDuplicateReply(env.RequestID, probe.Tracker))
 				_ = msg.Ack()
 				return OutcomeDuplicate
@@ -283,33 +287,31 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	}
 
 	// --- Step 9: event publication. ---
-	// Commit (step 8) is durable. If step 9 fails after retries, we
-	// nak so JetStream redelivers; step 2's tracker short-circuit makes
-	// the redelivered attempt a no-op-from-the-mutation-perspective and
-	// step 9 will run again from a clean state. The reply for the
-	// caller is deferred until step 10 succeeds — Contract #2 §2.4
-	// anchors durability at step 8, but Story 1.8 confirms reply is
-	// still emitted after step 9 completes successfully (the architect's
-	// decision was: reply after commit but observable success of the
-	// whole 10-step path requires step 9 too).
+	// Commit (step 8) is durable. If step 9 fails after all retries, we nak
+	// so JetStream redelivers. Step 2 will detect the tracker (DedupDuplicate)
+	// and the dedup short-circuit calls maybeRepublishEvents before acking —
+	// so events are delivered on best-effort on the redelivery path. The reply
+	// to the caller is deferred until step 9 + 10 complete on the primary path.
 	if cp.deps.Events != nil {
-		if err := cp.deps.Events.Publish(ctx, env, result); err != nil {
+		if err := cp.deps.Events.Publish(ctx, env, commitAck.Events); err != nil {
 			cp.deps.Logger.Warn("step 9: event publish failed (commit already durable); nak for redelivery",
 				"requestId", env.RequestID, "error", err)
 			_ = msg.Nak()
 			return OutcomeRetryable
 		}
+		// Mark events as published in the tracker so the dedup-hit re-publish
+		// path skips re-delivery on subsequent redeliveries.
+		cp.markEventsPublished(ctx, env.RequestID, tracker)
 	}
 
 	cp.deps.Metrics.OpsCommitted.Add(1)
-	// Story 4.3: emit claim-attempt success for ClaimIdentity ops only.
+	// Emit claim-attempt success for ClaimIdentity ops only.
 	if env.OperationType == "ClaimIdentity" && cp.deps.ClaimEmitter != nil {
 		cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, "success")
 	}
-	// Surface script ResponseDetail in the success reply (Story 4.2).
-	// Detail may carry sensitive tokens (e.g. plaintext claim keys) —
-	// NFR-S6/S7: we do NOT log it. BuildAcceptedReplyWithDetail is a
-	// no-op when detail is nil/empty, so existing ops are unaffected.
+	// Surface script ResponseDetail in the success reply. Detail may carry
+	// sensitive tokens (e.g. plaintext claim keys) — NFR-S6/S7: do NOT log it.
+	// BuildAcceptedReplyWithDetail is a no-op when detail is nil/empty.
 	cp.replyTo(msg, BuildAcceptedReplyWithDetail(env.RequestID, now, result.ResponseDetail))
 
 	// --- Step 10: explicit Acker boundary. ---
@@ -346,9 +348,8 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg jetstream.Msg, 
 	cp.deps.Logger.Warn("step returned error",
 		"step", step, "requestId", env.RequestID, "error", err)
 
-	// Story 4.3 (NFR-S6): emit specific ClaimKeyInvalid outcome to Health KV
-	// before building the reply. The reply carries only the generic
-	// ErrCodeClaimKeyInvalid code with no detail (anti-enumeration).
+	// Emit specific ClaimKeyInvalid outcome to Health KV (NFR-S6 anti-enumeration:
+	// the reply carries only the generic code with no detail).
 	var sErr *ScriptError
 	if errors.As(err, &sErr) && sErr.Code == "ClaimKeyInvalid" {
 		if cp.deps.ClaimEmitter != nil {
@@ -367,10 +368,10 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg jetstream.Msg, 
 // ErrorCode plus a details map. Falls back to InternalError for
 // untyped failures.
 //
-// ClaimKeyInvalid (Story 4.3 / NFR-S6): returns ErrCodeClaimKeyInvalid with
-// no detail so callers cannot enumerate specific failure reasons. The Detail
-// field on *ScriptError is the internal side-channel for Health KV emission
-// only; it must NOT appear in the response details map.
+// ClaimKeyInvalid (NFR-S6): returns ErrCodeClaimKeyInvalid with no detail so
+// callers cannot enumerate specific failure reasons. The Detail field on
+// *ScriptError is the internal side-channel for Health KV emission only; it
+// must NOT appear in the response details map.
 func classifyStepError(err error) (ErrorCode, map[string]any) {
 	var hErr *HydrationError
 	if errors.As(err, &hErr) {
@@ -450,6 +451,84 @@ func (cp *CommitPath) maybeReplyMalformed(msg jetstream.Msg, requestID, reason s
 	_ = cp.deps.Conn.NATS().Publish(subject, b)
 }
 
+// maybeRepublishEvents is the best-effort re-publish path for the dedup
+// short-circuit. When the tracker has eventClasses recorded but
+// eventsPublishedAt is absent, step 9 never completed for this operation
+// (commit was durable; events were not delivered). This method rebuilds a
+// minimal EventList from the tracker's recorded classes and mutation keys,
+// then calls Events.Publish. On success it writes the eventsPublishedAt
+// timestamp so subsequent redeliveries skip re-delivery.
+func (cp *CommitPath) maybeRepublishEvents(ctx context.Context, env *OperationEnvelope, t *Tracker) {
+	if cp.deps.Events == nil || t == nil || t.Data == nil {
+		return
+	}
+	// Skip if already published.
+	if _, ok := t.Data["eventsPublishedAt"].(string); ok {
+		return
+	}
+	rawClasses, ok := t.Data["eventClasses"]
+	if !ok {
+		return
+	}
+	classesRaw, ok := rawClasses.([]interface{})
+	if !ok {
+		return
+	}
+	if len(classesRaw) == 0 {
+		return
+	}
+	classes := make([]string, 0, len(classesRaw))
+	for _, c := range classesRaw {
+		if s, ok := c.(string); ok {
+			classes = append(classes, s)
+		}
+	}
+	var mutationKeys []string
+	if rawKeys, ok := t.Data["mutationKeys"]; ok {
+		if keysRaw, ok := rawKeys.([]interface{}); ok {
+			for _, k := range keysRaw {
+				if s, ok := k.(string); ok {
+					mutationKeys = append(mutationKeys, s)
+				}
+			}
+		}
+	}
+	events, err := RebuildEventListFromClasses(env.RequestID, classes, mutationKeys, cp.deps.Clock())
+	if err != nil {
+		cp.deps.Logger.Warn("dedup: rebuild event list failed; skipping re-publish",
+			"requestId", env.RequestID, "error", err)
+		return
+	}
+	if err := cp.deps.Events.Publish(ctx, env, events); err != nil {
+		cp.deps.Logger.Warn("dedup: best-effort re-publish failed",
+			"requestId", env.RequestID, "error", err)
+		return
+	}
+	cp.markEventsPublished(ctx, env.RequestID, Tracker{
+		Key:  t.Key,
+		Data: t.Data,
+	})
+}
+
+// markEventsPublished writes the eventsPublishedAt timestamp into the tracker
+// via an unconditional KVPut. This is a best-effort update — failure is
+// logged and tolerated (the events were published; the marker is for dedup
+// optimization only).
+func (cp *CommitPath) markEventsPublished(ctx context.Context, requestID string, t Tracker) {
+	if t.Data == nil {
+		t.Data = map[string]any{}
+	}
+	t.Data["eventsPublishedAt"] = substrate.FormatTimestamp(cp.deps.Clock())
+	b, err := t.Marshal()
+	if err != nil {
+		cp.deps.Logger.Warn("markEventsPublished: marshal failed", "requestId", requestID, "error", err)
+		return
+	}
+	if _, err := cp.deps.Conn.KVPut(ctx, cp.deps.CoreBucket, t.Key, b); err != nil {
+		cp.deps.Logger.Warn("markEventsPublished: KVPut failed", "requestId", requestID, "error", err)
+	}
+}
+
 // Run drives a Consume loop until ctx is cancelled. The callback wires
 // each delivered message through HandleMessage. Errors from Consume
 // itself are logged; the caller decides when to stop the consumer.
@@ -466,35 +545,30 @@ func (cp *CommitPath) Run(ctx context.Context, cons jetstream.Consumer) error {
 	return nil
 }
 
-// MakeStubPipeline assembles a complete Story-1.7 commit path with the
-// real Hydrator, Executor, Validator, and Committer wired against a
-// DDL cache built at startup. The event publisher remains stubbed
-// (Story 1.8). It exists so cmd/processor/main.go and the integration
-// tests share identical wiring.
-//
-// The function name is retained for backwards compatibility with Story
-// 1.5's call sites; "stub" now refers only to the EventPublisher.
+// MakeStubPipeline is a convenience wrapper over MakePipeline for callers that
+// do not need capability-auth (capabilityBucket="", traceAllowDecisions=false).
+// The "stub" in the name refers to the absent Capability KV integration, not
+// to stub implementations — all other components (Hydrator, Executor, Validator,
+// Committer, EventPublisher) are production-identical.
 func MakeStubPipeline(conn *substrate.Conn, coreBucket, healthBucket string, authMode AuthMode, logger *slog.Logger, instance string) (*CommitPath, *HealthHeartbeater, error) {
 	return MakePipeline(conn, coreBucket, healthBucket, "", authMode, false, logger, instance)
 }
 
-// MakePipeline is the Story-3.3 wiring entry point. capabilityBucket is
-// the Capability KV bucket name; empty falls back to AuthModeStub
-// regardless of the requested mode (test-friendly default). authMode is
-// applied via SelectAuthorizerArgs so the Capability KV reader + alert
-// emitter are wired in one place.
+// MakePipeline is the production wiring entry point. capabilityBucket is the
+// Capability KV bucket name; empty falls back to AuthModeStub regardless of
+// the requested mode (test-friendly default). authMode is applied via
+// SelectAuthorizerArgs so the Capability KV reader + alert emitter are wired
+// in one place.
 //
-// traceAllowDecisions (Story 3.5 FR23): when true, auth trace records are
-// also written for ALLOWED decisions. Defaults off (false) per AC — volume
-// implications for high-traffic deployments.
+// traceAllowDecisions (FR23): when true, auth trace records are also written
+// for ALLOWED decisions. Defaults off — volume implications for busy deployments.
 func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBucket string, authMode AuthMode, traceAllowDecisions bool, logger *slog.Logger, instance string) (*CommitPath, *HealthHeartbeater, error) {
 	metrics := &Metrics{}
 	hb := NewHealthHeartbeater(conn, healthBucket, instance, 10*time.Second, metrics, logger)
 	alertEmitter := NewHealthAlertEmitter(conn, healthBucket, logger)
 
-	// Story 3.3: capability mode requires the bucket name. When tests call
-	// the legacy MakeStubPipeline with capabilityBucket="" we fall back to
-	// stub so existing fixtures keep working without a Capability KV seed.
+	// Capability mode requires the bucket name. When capabilityBucket="" we fall
+	// back to stub so test fixtures work without a Capability KV seed.
 	effectiveMode := authMode
 	if (authMode == AuthModeCapability || authMode == "") && capabilityBucket == "" {
 		effectiveMode = AuthModeStub
@@ -523,22 +597,20 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 		return nil, nil, fmt.Errorf("ddl cache refresh: %w", err)
 	}
 
-	// Story 3.4 (FR22): wire DenialResponseBuilder when capability mode is
-	// active. Stub mode leaves it nil (no structured denial response needed).
+	// Wire DenialResponseBuilder (FR22) when capability mode is active.
 	var denialBuilder *DenialResponseBuilder
 	if capabilityBucket != "" {
 		denialBuilder = NewDenialResponseBuilder(conn, capabilityBucket, logger)
 	}
 
-	// Story 3.5 (FR23): wire AuthTraceEmitter when health bucket is available.
-	// The emitter writes to health-kv with per-key 1h TTL. Nil emitter is a
-	// no-op (safe to call Emit on nil *AuthTraceEmitter per the guard in Emit).
+	// Wire AuthTraceEmitter (FR23) when health bucket is available. Nil emitter
+	// is a no-op (safe to call Emit on nil *AuthTraceEmitter per the guard in Emit).
 	var traceEmitter *AuthTraceEmitter
 	if healthBucket != "" && instance != "" {
 		traceEmitter = NewAuthTraceEmitter(conn, healthBucket, instance, traceAllowDecisions, logger)
 	}
 
-	// Story 4.3: claim attempt emitter for ClaimIdentity Health KV signals.
+	// Wire claim attempt emitter for ClaimIdentity Health KV signals.
 	claimEmitter := NewClaimAttemptEmitter(conn, healthBucket, instance, logger)
 
 	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now)

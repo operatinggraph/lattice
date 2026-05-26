@@ -1,14 +1,12 @@
-// cmd/processor — Lattice Processor binary (Story 1.5 scope: steps 1-3).
+// cmd/processor — Lattice Processor binary.
 //
-// Connects to NATS, ensures the durable JetStream consumer exists, and
-// drives the commit path on each delivered operation envelope. Steps 4-10
-// are stubbed per the Story 1.5 handoff brief and replaced incrementally
-// by Stories 1.6 / 1.7 / 1.8.
+// Connects to NATS, ensures the durable JetStream consumer exists, and drives
+// the full 10-step commit path on each delivered operation envelope.
 //
 // Environment:
 //
 //	NATS_URL                          NATS server URL (default: nats://localhost:4222)
-//	LATTICE_AUTH_MODE                 capability (default, Story 3.3+) | stub (test/dev — emits stub-auth-active alert)
+//	LATTICE_AUTH_MODE                 capability (default) | stub (test/dev — emits stub-auth-active alert)
 //	LATTICE_AUTH_TRACE_ALLOW_DECISIONS  "true" to also trace ALLOWED decisions (default: "false" — denial-only per FR23)
 //	PROCESSOR_INSTANCE                instance id (default: auto-generated proc-<NanoID>)
 //	PROCESSOR_DURABLE                 JetStream durable consumer name (default: processor-main)
@@ -51,10 +49,9 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
-	// Story 3.3: default LATTICE_AUTH_MODE flips from `stub` to `capability`.
-	// The stub mode remains available behind an explicit env knob for
-	// dev/test deployments; operators selecting it see WARN logs + a
-	// Health KV `stub-auth-active` alert.
+	// Default LATTICE_AUTH_MODE is `capability`. The stub mode remains available
+	// behind an explicit env knob for dev/test deployments; operators selecting
+	// it see WARN logs + a Health KV `stub-auth-active` alert.
 	authMode := processor.AuthMode(envOrDefault("LATTICE_AUTH_MODE", string(processor.AuthModeCapability)))
 	traceAllowDecisions := os.Getenv("LATTICE_AUTH_TRACE_ALLOW_DECISIONS") == "true"
 
@@ -103,14 +100,10 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// Override heartbeat interval (MakeStubPipeline hard-codes 10s; we
-	// honor the env override if it's >= 10).
+	// Override heartbeat interval on the correctly-wired heartbeater from
+	// MakePipeline. SetInterval enforces the NFR-O1 10s minimum.
 	if hbSec > 10 {
-		hb = processor.NewHealthHeartbeater(conn, bootstrap.HealthKVBucket, instance, time.Duration(hbSec)*time.Second, nil, logger)
-		// Re-wire the metrics pointer through the new heartbeater is not
-		// possible without exporting cp.Deps.Metrics — accept the
-		// constant 10s for Story 1.5.
-		_ = hb
+		hb.SetInterval(time.Duration(hbSec) * time.Second)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

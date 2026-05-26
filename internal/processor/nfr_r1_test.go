@@ -598,11 +598,11 @@ type nfrEventPub struct {
 	trip  func() error
 }
 
-func (n *nfrEventPub) Publish(ctx context.Context, env *OperationEnvelope, result ScriptResult) error {
+func (n *nfrEventPub) Publish(ctx context.Context, env *OperationEnvelope, events EventList) error {
 	if err := n.trip(); err != nil {
 		return err
 	}
-	return n.inner.Publish(ctx, env, result)
+	return n.inner.Publish(ctx, env, events)
 }
 
 type nfrAcker struct {

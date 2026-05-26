@@ -24,10 +24,7 @@ func (e *DDLViolation) Error() string {
 		e.ViolatedConstraint, e.OperationRequestID, e.MutationKey, e.Detail)
 }
 
-// ValidatorImpl is the Story 1.7 step 6 validator. Replaces Story 1.5's
-// StubValidator.
-//
-// Per the Story 1.7 AC, step 6 enforces:
+// ValidatorImpl is the step-6 DDL validator. Step 6 enforces:
 //   - Key pattern validity (Contract #1 §1.1 — must parse via the
 //     substrate parsers).
 //   - permittedCommands when the affected DDL declares the constraint.

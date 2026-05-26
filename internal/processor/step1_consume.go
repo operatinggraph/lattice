@@ -18,10 +18,10 @@ type ConsumerConfig struct {
 	Durable string
 	// FilterSubjects restricts which subjects this consumer receives.
 	// Bootstrap provisions the stream as `ops.>` covering all lanes.
-	// Defaults to ops.default.>, ops.urgent.>, ops.system.>, and
-	// ops.meta.> so DDL-mutation operations (CreateMetaVertex,
-	// TombstoneMetaVertex, UpdateMetaVertex) are delivered alongside
-	// standard lane messages.
+	// Defaults to ops.default, ops.urgent, ops.system, and ops.meta —
+	// matching the two-segment form all publishers use. ops.meta covers
+	// DDL-mutation operations (CreateMetaVertex, TombstoneMetaVertex,
+	// UpdateMetaVertex) alongside standard lane messages.
 	FilterSubjects []string
 	// MaxAckPending caps in-flight messages. 0 → JetStream default.
 	MaxAckPending int
@@ -30,7 +30,7 @@ type ConsumerConfig struct {
 	AckWait time.Duration
 }
 
-// applyDefaults fills empty fields with Story-1.5 defaults.
+// applyDefaults fills empty fields with sensible defaults.
 func (cc *ConsumerConfig) applyDefaults() {
 	if cc.StreamName == "" {
 		cc.StreamName = "core-operations"
@@ -39,14 +39,12 @@ func (cc *ConsumerConfig) applyDefaults() {
 		cc.Durable = "processor-main"
 	}
 	if len(cc.FilterSubjects) == 0 {
-		// Align consumer filter with Contract #2 §2.3 per-lane
-		// multi-segment subjects (ops.<lane>.>). The stream is
-		// provisioned as `ops.>` so both single- and multi-segment
-		// publishes land in it. ops.meta.> carries DDL-mutation
-		// operations (CreateMetaVertex, TombstoneMetaVertex,
-		// UpdateMetaVertex) and must be included alongside the
-		// standard lanes so the Processor receives meta-lane messages.
-		cc.FilterSubjects = []string{"ops.default.>", "ops.urgent.>", "ops.system.>", "ops.meta.>"}
+		// Two-segment subjects match production publishers exactly:
+		// `ops.<lane>` is what submit.go, candidates.go, and all other
+		// publishers use. ops.meta carries DDL-mutation operations
+		// (CreateMetaVertex, TombstoneMetaVertex, UpdateMetaVertex) and
+		// must be included alongside the standard lanes.
+		cc.FilterSubjects = []string{"ops.default", "ops.urgent", "ops.system", "ops.meta"}
 	}
 	if cc.AckWait == 0 {
 		cc.AckWait = 30 * time.Second

@@ -4,17 +4,18 @@
 // through the 10-step commit path, and atomically commits mutations +
 // idempotency tracker to Core KV.
 //
-// Story 1.5 scope: steps 1-3 only.
+// The 10-step commit path:
 //
 //	step 1: consume an operation envelope (JetStream pull consumer)
 //	step 2: dedup against the idempotency tracker (Core KV vtx.op.<requestId>)
-//	step 3: authorize via the Authorizer interface (StubAuthorizer always allows)
-//
-// Steps 4-10 (Hydrate, Execute, Validate, Atomic Commit, Event Publish,
-// Ack) are defined as Go interfaces in steps_4_10_stub.go with no-op
-// implementations that log "step N: stubbed" and return success. Stories
-// 1.6, 1.7, 1.8 progressively replace these stubs with real logic — each
-// behind the same interface, so the wiring stays stable.
+//	step 3: authorize via the Authorizer interface (CapabilityAuthorizer or StubAuthorizer)
+//	step 4: hydrate the ScriptContext from Core KV
+//	step 5: execute the class Starlark script
+//	step 6: validate the ScriptResult against DDL constraints
+//	step 7: build the EventList
+//	step 8: atomically commit mutations + tracker to Core KV
+//	step 9: batch-publish events to core-events JetStream
+//	step 10: ack the JetStream message
 //
 // Wire layout:
 //

@@ -45,8 +45,7 @@ func TestEventPublisher_NoEventsShortCircuits(t *testing.T) {
 	provisionEvents(t, ctx, conn)
 	pub := NewEventPublisher(conn, testLogger())
 	env := newTestEnvelope(testNanoID1)
-	result := ScriptResult{} // no events
-	if err := pub.Publish(ctx, env, result); err != nil {
+	if err := pub.Publish(ctx, env, EventList{}); err != nil {
 		t.Fatalf("expected nil on empty events, got %v", err)
 	}
 }
@@ -63,7 +62,11 @@ func TestEventPublisher_HappyPath(t *testing.T) {
 			{Class: "identity.linked", Data: map[string]interface{}{"y": 2}},
 		},
 	}
-	if err := pub.Publish(ctx, env, result); err != nil {
+	events, err := BuildEventList(env, result, time.Now())
+	if err != nil {
+		t.Fatalf("BuildEventList: %v", err)
+	}
+	if err := pub.Publish(ctx, env, events); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
@@ -107,7 +110,11 @@ func TestEventPublisher_RetriesOnTransientFailure(t *testing.T) {
 	result := ScriptResult{
 		Events: []EventSpec{{Class: "test.event", Data: map[string]interface{}{}}},
 	}
-	if err := pub.Publish(ctx, env, result); err != nil {
+	events, err := BuildEventList(env, result, time.Now())
+	if err != nil {
+		t.Fatalf("BuildEventList: %v", err)
+	}
+	if err := pub.Publish(ctx, env, events); err != nil {
 		t.Fatalf("happy publish: %v", err)
 	}
 }
@@ -126,7 +133,11 @@ func TestEventPublisher_FailureSurfacesPublicationError(t *testing.T) {
 	result := ScriptResult{
 		Events: []EventSpec{{Class: "test.event", Data: map[string]interface{}{}}},
 	}
-	err := pub.Publish(ctx, env, result)
+	events, buildErr := BuildEventList(env, result, time.Now())
+	if buildErr != nil {
+		t.Fatalf("BuildEventList: %v", buildErr)
+	}
+	err := pub.Publish(ctx, env, events)
 	if err == nil {
 		t.Fatalf("expected PublicationError, got nil")
 	}

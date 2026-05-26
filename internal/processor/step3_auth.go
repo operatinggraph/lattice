@@ -7,23 +7,18 @@ import (
 )
 
 // AuthMode selects the step-3 Authorizer wired into the commit path.
-//
-// Story 3.3 default-flip: empty mode and `capability` both resolve to
-// the real Capability KV authorizer. `stub` remains available behind an
-// explicit env knob for unit-tier tests that don't care about auth
-// correctness (NFR-R1 fault injection, dedup, etc.) — production
-// deployments selecting it emit a security alert at every Authorize
-// call AND at startup so operators see the degradation in their
-// dashboards.
+// Empty mode and `capability` both resolve to the real Capability KV
+// authorizer. `stub` is available for unit-tier tests that don't need auth
+// correctness (fault injection, dedup tests, etc.) — production deployments
+// selecting it emit a security alert at every Authorize call AND at startup.
 type AuthMode string
 
 const (
-	// AuthModeStub is the Story 1.5 always-allow authorizer. After Story
-	// 3.3 it is a test/dev-only mode; production deploys must use
-	// AuthModeCapability (the default).
+	// AuthModeStub is the always-allow authorizer for test/dev use.
+	// Production deploys must use AuthModeCapability (the default).
 	AuthModeStub AuthMode = "stub"
-	// AuthModeCapability is the Story 3.3 Capability KV authorizer.
-	// Empty AuthMode also resolves to this mode (Story 3.3 default flip).
+	// AuthModeCapability is the Capability KV authorizer.
+	// Empty AuthMode also resolves to this mode.
 	AuthModeCapability AuthMode = "capability"
 )
 
@@ -41,36 +36,30 @@ type Decision struct {
 	// error codes (LaneUnauthorized, AuthDenied, AuthContextMismatch,
 	// AuthFreshnessExceeded).
 	Code ErrorCode
-	// Resolved is the per-operation permission entry that matched at
-	// step 3 (Story 3.3 AC #3 / Decision #8). Nil on denials and on the
-	// StubAuthorizer path. Consumers in Stories 3.4 (denial response)
-	// and 3.5 (auth failure traceability) thread this through the
-	// commit-path to step 9 event publication for downstream
-	// observability. Strictly internal — never bled into
-	// OperationEnvelope or OperationReply.
+	// Resolved is the per-operation permission entry that matched at step 3.
+	// Nil on denials and on the StubAuthorizer path. Threaded through the
+	// commit-path for downstream observability (denial response, auth trace).
+	// Strictly internal — never bled into OperationEnvelope or OperationReply.
 	Resolved *ResolvedPermission
-	// Doc is the parsed CapabilityDoc from the Capability KV GET. Set on
-	// all non-NoCapabilityEntry denial paths so that Story 3.4's
-	// DenialResponseBuilder can access doc.Roles for actorRoles without
-	// an additional KV read. Nil on StubAuthorizer + NoCapabilityEntry
-	// + infrastructure-failure paths. Strictly internal.
+	// Doc is the parsed CapabilityDoc from the Capability KV GET. Set on all
+	// non-NoCapabilityEntry denial paths so DenialResponseBuilder can access
+	// doc.Roles for actorRoles without an additional KV read. Nil on
+	// StubAuthorizer, NoCapabilityEntry, and infrastructure-failure paths.
+	// Strictly internal.
 	Doc *CapabilityDoc
 }
 
-// Authorizer is the step-3 interface. Story 3.3 lights up the real
-// CapabilityAuthorizer behind it; StubAuthorizer remains for unit tests.
+// Authorizer is the step-3 interface. CapabilityAuthorizer is the production
+// implementation; StubAuthorizer is for unit tests.
 type Authorizer interface {
 	Authorize(ctx context.Context, env *OperationEnvelope) (Decision, error)
 }
 
-// StubAuthorizer always returns Authorized=true, Stub=true. Reserved for
-// unit-tier tests after Story 3.3 — production deploys must select
-// AuthModeCapability (the new default).
-//
-// Story 3.3 Decision #7: each Authorize call still emits a WARN log AND
-// — once every stubAlertEveryNCalls calls — a Health KV alert under
-// `health.alerts.security.stub-auth-active` so the degradation is
-// visible in dashboards without flooding the bucket.
+// StubAuthorizer always returns Authorized=true, Stub=true. For unit-tier
+// tests only; production deploys must select AuthModeCapability (the default).
+// Each Authorize call emits a WARN log and — once every stubAlertEveryNCalls
+// calls — a Health KV alert under `health.alerts.security.stub-auth-active`
+// so the degradation is visible in dashboards without flooding the bucket.
 type StubAuthorizer struct {
 	logger  *slog.Logger
 	emitter AuthAlertEmitter
@@ -89,9 +78,8 @@ func NewStubAuthorizer(logger *slog.Logger) *StubAuthorizer {
 	return NewStubAuthorizerWithEmitter(logger, nil)
 }
 
-// NewStubAuthorizerWithEmitter is the Story 3.3 constructor that also
-// wires the Health KV alert emitter so operators see
-// `health.alerts.security.stub-auth-active` markers.
+// NewStubAuthorizerWithEmitter wires the Health KV alert emitter so operators
+// see `health.alerts.security.stub-auth-active` markers in dashboards.
 func NewStubAuthorizerWithEmitter(logger *slog.Logger, emitter AuthAlertEmitter) *StubAuthorizer {
 	if logger == nil {
 		logger = slog.Default()
@@ -104,7 +92,7 @@ func NewStubAuthorizerWithEmitter(logger *slog.Logger, emitter AuthAlertEmitter)
 
 // Authorize implements Authorizer.
 func (s *StubAuthorizer) Authorize(ctx context.Context, env *OperationEnvelope) (Decision, error) {
-	s.logger.Warn("STUB AUTH: allow-all (Story 1.5; replaced by Capability KV in Story 3.3)",
+	s.logger.Warn("STUB AUTH: allow-all; set LATTICE_AUTH_MODE=capability to enable Capability KV auth",
 		"requestId", env.RequestID,
 		"actor", env.Actor,
 		"operationType", env.OperationType,
@@ -123,13 +111,10 @@ func (s *StubAuthorizer) Authorize(ctx context.Context, env *OperationEnvelope) 
 }
 
 // SelectAuthorizer returns the Authorizer implementation matching mode.
-// Story 3.3 default flip: empty AND `capability` resolve to the real
-// CapabilityAuthorizer; `stub` is opt-in behind explicit env knob.
-//
-// `capability` mode requires a non-nil CapabilityReader + bucket; pass
-// them via SelectAuthorizerArgs. The legacy two-arg form is retained as
-// a thin wrapper that returns the StubAuthorizer for backwards
-// compatibility with tests that don't care about Capability KV.
+// Empty and `capability` both resolve to CapabilityAuthorizer; `stub` is
+// opt-in for tests. `capability` mode requires a non-nil CapabilityReader
+// + bucket — pass them via SelectAuthorizerArgs. The two-arg form is a thin
+// wrapper that falls back to StubAuthorizer for tests without Capability KV.
 func SelectAuthorizer(mode AuthMode, logger *slog.Logger) (Authorizer, error) {
 	return SelectAuthorizerArgs(SelectAuthorizerOpts{
 		Mode:   mode,
@@ -137,7 +122,7 @@ func SelectAuthorizer(mode AuthMode, logger *slog.Logger) (Authorizer, error) {
 	})
 }
 
-// SelectAuthorizerOpts is the Story-3.3 widened constructor input.
+// SelectAuthorizerOpts bundles the inputs to SelectAuthorizerArgs.
 type SelectAuthorizerOpts struct {
 	Mode             AuthMode
 	Logger           *slog.Logger

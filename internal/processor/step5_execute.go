@@ -5,11 +5,9 @@ import (
 	"log/slog"
 )
 
-// ExecutorImpl is the Story 1.6 implementation of step 5 (Starlark Execute).
-//
-// It runs the operation's class script (hydrated at step 4) against the
-// ScriptContext and returns the proposed ScriptResult. Story 1.6 does NOT
-// validate the result — Story 1.7 (step 6 DDL validation) takes that on.
+// ExecutorImpl is the step-5 implementation (Starlark Execute). It runs the
+// operation's class script (hydrated at step 4) against the ScriptContext and
+// returns the proposed ScriptResult. DDL validation of the result is step 6.
 type ExecutorImpl struct {
 	Runner *StarlarkRunner
 	Logger *slog.Logger

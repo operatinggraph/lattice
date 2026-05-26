@@ -1,17 +1,14 @@
-// Story 3.3 — Health KV alert emitter for security-sensitive Processor
-// events. Two alerts ship in 3.3:
+// Health KV alert emitter for security-sensitive Processor events:
 //
 //   - `stub-auth-active` — emitted at Processor startup AND every Nth
-//     Authorize call when AuthModeStub is selected (Decision #7)
+//     Authorize call when AuthModeStub is selected
 //   - `auth-freshness-exceeded` — emitted alongside the AuthFreshnessExceeded
 //     denial when a Capability KV projection is staler than 5×NFR-P3
 //
-// Key shape (Contract #5 alert convention):
-//   health.alerts.security.<alertCode>
+// Key shape (Contract #5 alert convention): health.alerts.security.<alertCode>
 //
-// Multiple bursts of the same alert OVERWRITE the previous entry — the
-// alert is "this is currently happening" not an audit log. Per-alert
-// audit history is Stream 7 territory (Phase 2+).
+// Multiple bursts of the same alert OVERWRITE the previous entry — the alert
+// represents "this is currently happening", not an audit log.
 package processor
 
 import (
@@ -27,7 +24,7 @@ import (
 // ClaimAttemptEmitter surfaces ClaimIdentity outcomes to Health KV at
 // health.processor.<instance>.claim-attempts.<outcome>. Separate from the
 // security-alert emitter because claim attempt counters are operational metrics,
-// not security alerts (Decision #6 in the Story 4.3 brief).
+// not security alerts.
 //
 // Outcome enum: success, invalid-key, wrong-state, flagged, merged,
 // credential-already-bound, no-target.

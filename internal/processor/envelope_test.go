@@ -1,7 +1,6 @@
 package processor
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -48,15 +47,18 @@ func TestParseEnvelope_RejectsMissingFields(t *testing.T) {
 	}
 }
 
-func TestParseEnvelope_RejectsUnknownFields(t *testing.T) {
+func TestParseEnvelope_ToleratesUnknownFields(t *testing.T) {
+	// ParseEnvelope is lenient about unknown fields for forward-compatibility
+	// with contract-additive envelope fields. Unknown fields are silently
+	// ignored on the runtime hot path; strictness lives in contract tests only.
 	raw := `{
         "requestId":"` + testNanoID1 + `","lane":"default","operationType":"X",
         "actor":"a","submittedAt":"t","payload":{},
         "bogusField": 42
     }`
 	_, err := ParseEnvelope([]byte(raw))
-	if err == nil || !strings.Contains(err.Error(), "bogusField") {
-		t.Fatalf("expected unknown-field rejection, got %v", err)
+	if err != nil {
+		t.Fatalf("expected unknown field to be tolerated, got error: %v", err)
 	}
 }
 

@@ -18,14 +18,11 @@ func TrackerKey(requestID string) string {
 // #4 §4.3). 24h is the architecture-locked default.
 const TrackerTTL = 24 * time.Hour
 
-// Tracker is the minimal tracker entry Story 1.5 writes at the stubbed
-// commit step. It is a deliberately small subset of the full Contract #4
-// §4.1 shape — `class`, `isDeleted`, `requestId`, `committed`,
-// `observedAt` plus the universal provenance triplet (self-referential,
-// per Contract #4 §4.1).
-//
-// Story 1.6/1.7 will replace this with the full Contract #4 shape once
-// real mutations + event classes are available to populate `data`.
+// Tracker is the Contract #4 §4.1 idempotency-tracker entry written at step 8.
+// Shape: `class`, `isDeleted`, `requestId`, `committed`, `observedAt` plus the
+// universal provenance triplet (self-referential, per Contract #4 §4.1).
+// The Committer enriches `data` with `mutationKeys`, `eventClasses`, and
+// (after step 9) `eventsPublishedAt` per Contract #4 §4.2.
 type Tracker struct {
 	Key              string         `json:"key"`
 	Class            string         `json:"class"`
@@ -39,8 +36,8 @@ type Tracker struct {
 	Data             map[string]any `json:"data"`
 }
 
-// NewTracker builds a Story-1.5 tracker entry for the given envelope.
-// `committedAt` is supplied so tests can fix the timestamp.
+// NewTracker builds a tracker entry for the given envelope.
+// committedAt is supplied so tests can fix the timestamp.
 func NewTracker(env *OperationEnvelope, committedAt time.Time) Tracker {
 	stamp := substrate.FormatTimestamp(committedAt)
 	key := TrackerKey(env.RequestID)

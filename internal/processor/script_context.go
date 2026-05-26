@@ -14,9 +14,8 @@ import (
 //   - Hydrated: vertex/aspect documents pre-fetched per `contextHint.reads`.
 //     Exposed as the `state` global dict (key -> struct).
 //   - DDLLookup: DDL meta-vertices keyed by canonicalName (e.g.,
-//     "identity"). Exposed as the `ddl` global dict. Story 1.6 populates
-//     only the operation's class; Story 1.10 hardens with a startup
-//     cache.
+//     "identity"). Exposed as the `ddl` global dict. Populated from the
+//     DDL cache built at startup and refreshed on DDL mutations.
 //   - ScriptSource: the Starlark source for the operation's class.
 //     Internal to the runner, not exposed to the script.
 //   - ScriptClass: the canonicalName of the class whose script will run.
@@ -42,10 +41,8 @@ type VertexDoc struct {
 	LocalName string `json:"localName,omitempty"`
 }
 
-// MetaVertex is the DDL meta-vertex projection used by Story 1.6's lookup.
-// Story 1.10 will expand this when the DDL cache lands; the fields exposed
-// here are the minimum the executing script and Story 1.7's validator
-// need.
+// MetaVertex is the DDL meta-vertex projection hydrated from the DDL cache.
+// Fields are the minimum the executing script and the DDL Validator need.
 type MetaVertex struct {
 	Key               string   `json:"-"`
 	CanonicalName     string   `json:"canonicalName"`
@@ -70,7 +67,6 @@ type EventSpec struct {
 
 // HydratedState is what step 4 (Hydrate) returns to the commit path. It
 // is the assembled ScriptContext, ready to be handed to step 5 (Execute).
-// Story 1.5 carried this as an empty struct; Story 1.6 expands it.
 type HydratedState struct {
 	Context ScriptContext
 }
@@ -78,12 +74,11 @@ type HydratedState struct {
 // ScriptResult is the parsed return value of step 5 (Execute). The
 // commit path passes it forward to step 6 (Validate).
 //
-// ResponseDetail (Story 4.2): optional structured data the script wants
-// to surface to the caller in the success reply. The script populates
-// this via a top-level "response" dict key in its return value. The
-// commit path threads it into the OperationReply.Detail field.
-// IMPORTANT: ResponseDetail MUST NOT be logged — it may contain
-// sensitive tokens (e.g. plaintext claim keys, NFR-S6/S7 compliance).
+// ResponseDetail is optional structured data the script surfaces to the caller
+// in the success reply. The script populates it via a top-level "response"
+// dict key in its return value; the commit path threads it into
+// OperationReply.Detail. MUST NOT be logged — may contain sensitive tokens
+// (NFR-S6/S7).
 type ScriptResult struct {
 	Mutations      []MutationOp
 	Events         []EventSpec
@@ -115,12 +110,12 @@ func (e *HydrationError) Unwrap() error { return e.Cause }
 // script compile/runtime errors, sandbox violations (which manifest as
 // resolve errors for unbound globals), and timeouts.
 //
-// Detail is a side-channel field used exclusively for ClaimKeyInvalid errors
-// (Story 4.3). The script encodes a specific outcome (e.g. "invalid-key",
-// "wrong-state") in the fail() message; classifyStarlarkError parses it into
-// this field. The executor reads Detail for Health KV emission then strips it
-// before the reply reaches the caller (NFR-S6 anti-enumeration: callers see
-// only Code="ClaimKeyInvalid" with no detail).
+// Detail is a side-channel field used exclusively for ClaimKeyInvalid errors.
+// The script encodes a specific outcome (e.g. "invalid-key", "wrong-state")
+// in the fail() message; classifyStarlarkError parses it into this field.
+// The commit path reads Detail for Health KV emission then strips it before
+// the reply reaches the caller (NFR-S6 anti-enumeration: callers see only
+// Code="ClaimKeyInvalid" with no detail).
 type ScriptError struct {
 	Code               string // "ScriptError" | "SandboxViolation" | "ScriptTimeout" | "InvalidReturnShape" | "ClaimKeyInvalid"
 	Message            string

@@ -1,8 +1,7 @@
-// Story 3.3 — Processor step 3 Capability KV authorization.
+// Processor step-3 Capability KV authorization.
 //
-// CapabilityAuthorizer replaces StubAuthorizer's allow-all behaviour with
-// a single NATS KV GET against `capability-kv` per Contract #6 §6.2 +
-// dispatch per §6.4-6.8.
+// CapabilityAuthorizer performs a single NATS KV GET against `capability-kv`
+// per Contract #6 §6.2 and dispatches per §6.4-6.8.
 //
 // Hot-path invariants:
 //   - exactly one KV GET per Authorize call
@@ -53,7 +52,7 @@ type CapabilityAuthorizerConfig struct {
 	// but still allows the operation. Staleness above StaleCeiling denies.
 	NFRP3 time.Duration
 	// StaleCeiling is the hard denial threshold for projection age.
-	// Default: 5 × NFR-P3 = 2500ms (Decision #6 in the Story 3.3 brief).
+	// Default: 5 × NFR-P3 = 2500ms.
 	StaleCeiling time.Duration
 	// LatencyBufferSize sizes the ring buffer used to summarise per-call
 	// latency at heartbeat tick. Default 128 (matches Refractor's pattern).
@@ -190,9 +189,8 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 	doc, err := ParseCapabilityDoc(entry.Value)
 	if err != nil {
 		// Parse failure indicates a producer / contract drift — should be
-		// caught by Story 3.2b's conformance test long before runtime.
-		// Surface as internal error rather than denial so operators see
-		// the real problem.
+		// caught by conformance tests long before runtime. Surface as internal
+		// error rather than denial so operators see the real problem.
 		return Decision{}, fmt.Errorf("capability kv parse %q: %w", capKey, err)
 	}
 
@@ -213,8 +211,8 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 	if dec.Authorized {
 		dec.Resolved = resolved
 	} else {
-		// Thread the doc through the denial for Story 3.4 FR22 response
-		// construction (actorRoles sourced from doc.Roles without re-read).
+		// Thread the doc through the denial for FR22 response construction
+		// (actorRoles sourced from doc.Roles without an additional KV read).
 		dec.Doc = doc
 	}
 	return dec, nil
@@ -333,9 +331,8 @@ func (a *CapabilityAuthorizer) matchPlatformPermission(env *OperationEnvelope, d
 				target = ac.Target
 			}
 			if target == "" {
-				// `self` scope requires a target so we can equate it
-				// with the actor. Treat absent target as a mismatch
-				// per the Story 3.3 brief Decision #11 note.
+				// `self` scope requires a target so we can equate it with
+				// the actor. Treat absent target as a context mismatch.
 				return Decision{
 					Authorized: false,
 					Code:       ErrCodeAuthContextMismatch,

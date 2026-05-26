@@ -8,7 +8,7 @@ import (
 // Capability KV entries. The producer is
 // `internal/refractor/capabilityenv.NewWrapper`; field names + JSON tags
 // here MUST stay in lockstep with that producer (the wrapper builds a
-// map[string]any literal). Story 3.2b's contract-conformance test
+// map[string]any literal). The contract-conformance test
 // (`refractor_capability_multi_e2e_test.go`) anchors the round-trip.
 //
 // Decisions:

@@ -9,9 +9,7 @@ import (
 )
 
 // BuildAcceptedReply constructs an `accepted` reply for a successful
-// step-8 commit. Story 1.7 swaps the Story-1.5 `accepted-stub` marker
-// for `decision: committed` and (optionally) carries the per-key
-// revision map for client RYOW polling.
+// step-8 commit with `decision: committed`.
 func BuildAcceptedReply(requestID string, committedAt time.Time) OperationReply {
 	return OperationReply{
 		RequestID:    requestID,
@@ -22,22 +20,10 @@ func BuildAcceptedReply(requestID string, committedAt time.Time) OperationReply 
 	}
 }
 
-// BuildAcceptedReplyWithRevisions extends BuildAcceptedReply with the
-// per-key revisions map returned by the atomic-batch commit. Empty
-// `revisions` is treated the same as the basic form.
-func BuildAcceptedReplyWithRevisions(requestID string, committedAt time.Time, revisions map[string]uint64) OperationReply {
-	r := BuildAcceptedReply(requestID, committedAt)
-	if len(revisions) > 0 {
-		r.Revisions = revisions
-	}
-	return r
-}
-
 // BuildAcceptedReplyWithDetail extends BuildAcceptedReply with a script-
-// supplied detail map (Story 4.2). The detail map is surfaced as-is to the
-// caller and MUST NOT be logged (NFR-S6/S7 — may carry sensitive tokens).
-// A nil or empty detail map is a no-op (produces the same reply as
-// BuildAcceptedReply).
+// supplied detail map. The detail map is surfaced as-is to the caller and
+// MUST NOT be logged (NFR-S6/S7 — may carry sensitive tokens). A nil or
+// empty detail map is a no-op.
 func BuildAcceptedReplyWithDetail(requestID string, committedAt time.Time, detail map[string]any) OperationReply {
 	r := BuildAcceptedReply(requestID, committedAt)
 	if len(detail) > 0 {

@@ -1,11 +1,7 @@
-// Story 3.3 — per-call latency ring buffer for Processor step 3.
-//
-// This is a Processor-local port of the Story 3.2b refractor pattern at
-// `internal/refractor/pipeline/latency.go`. We deliberately copy rather
-// than share: the Story 3.3 brief calls out the <40-LOC threshold for
-// extraction, and at one Processor consumer the shared package would be
-// premature factoring. If Loom/Weaver later need the same ring it
-// becomes a five-minute extraction.
+// Per-call latency ring buffer for Processor step 3. Ported from
+// `internal/refractor/pipeline/latency.go` — deliberately copied rather than
+// shared because at one consumer the shared package would be premature
+// factoring.
 package processor
 
 import (

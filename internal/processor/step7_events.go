@@ -7,17 +7,11 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// Event is one item in an EventList per Contract #3 §3.4 + the Story
-// 1.7 AC: each event has eventId (NanoID), requestId (from envelope),
-// eventType (canonical event class), targetKey (the mutation key the
-// event corresponds to — or empty for events without a direct mutation
-// counterpart), payload, and timestamp.
-//
-// Story 1.7 publishes a thin event shape; Story 1.8 wires the
-// `core-events` JetStream publish + DDL validation against the event
-// type's schema. The Validator currently passes events through without
-// schema validation (DDL cache may not have eventType entries until
-// later stories seed them).
+// Event is one item in an EventList per Contract #3 §3.4: each event has
+// eventId (NanoID), requestId (from envelope), eventType (canonical event
+// class), targetKey (the mutation key the event corresponds to — or empty
+// for events without a direct mutation counterpart), payload, and timestamp.
+// Events are published to `core-events` at step 9 via substrate.PublishBatch.
 type Event struct {
 	EventID   string                 `json:"eventId"`
 	RequestID string                 `json:"requestId"`
@@ -27,8 +21,8 @@ type Event struct {
 	Timestamp string                 `json:"timestamp"`
 }
 
-// EventList is the ordered list of events constructed from a
-// validated ScriptResult per Story 1.7 step 7.
+// EventList is the ordered list of events constructed from a validated
+// ScriptResult at step 7 (BuildEventList) and published at step 9.
 type EventList []Event
 
 // BuildEventList constructs the EventList for a validated MutationBatch

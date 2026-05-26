@@ -13,9 +13,8 @@ import (
 )
 
 // MetaVertexRef is the cached projection of a DDL meta-vertex. Built by
-// scanning `vtx.meta.>` at Processor startup and incrementally
-// maintained as `vtx.meta.>` mutations commit (synchronous invalidation
-// per Story 1.7 AC).
+// scanning `vtx.meta.>` at Processor startup and incrementally maintained
+// as `vtx.meta.>` mutations commit (synchronous invalidation at step 8).
 //
 // Per Contract #1 §1.7, a DDL meta-vertex is keyed by NanoID with a
 // `canonicalName` aspect carrying the lookup name (e.g., "identity").
@@ -25,9 +24,9 @@ import (
 type MetaVertexRef struct {
 	// MetaVertexKey is the canonical 3-segment key (vtx.meta.<NanoID>).
 	MetaVertexKey string
-	// CanonicalName is the value of the .canonicalName aspect (Story 1.7
-	// uses this as the lookup key). For Story 1.6 test fixtures keyed
-	// at `vtx.meta.<class>` the canonical name is `<class>`.
+	// CanonicalName is the value of the .canonicalName aspect used as the
+	// lookup key. For test fixtures keyed at `vtx.meta.<class>` the
+	// canonical name is `<class>`.
 	CanonicalName string
 	// Kind classifies the DDL: "vertexType", "aspectType", "linkType",
 	// "eventType". Derived from the meta-vertex class (e.g.,
@@ -167,9 +166,9 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	}
 	ref.Kind = deriveDDLKind(rootDoc.Class)
 
-	// Story 1.6 shadow-key fallback: if the root key's last segment is a
-	// canonical-name string (not a NanoID), treat that as the canonical
-	// name. This covers test fixtures seeded as `vtx.meta.<class>`.
+	// Shadow-key fallback: if the root key's last segment is a canonical-name
+	// string (not a NanoID), treat it as the canonical name. This covers test
+	// fixtures seeded as `vtx.meta.<class>`.
 	parts := strings.Split(root, ".")
 	if len(parts) == 3 && !substrate.IsValidNanoID(parts[2]) {
 		ref.CanonicalName = parts[2]
@@ -192,7 +191,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	}
 
 	// Fallback: root.data.canonicalName may carry the name directly
-	// (Story 1.6 test fixtures use this shape).
+	// (test fixtures use this shape when the aspect key is absent).
 	if ref.CanonicalName == "" && rootDoc.Data != nil {
 		if v, ok := rootDoc.Data["canonicalName"].(string); ok {
 			ref.CanonicalName = v
@@ -214,7 +213,7 @@ func (c *DDLCache) loadMetaVertex(ctx context.Context, root string, _ []string) 
 	} else if !errors.Is(err, substrate.ErrKeyNotFound) {
 		return ref, false, fmt.Errorf("read permittedCommands %s: %w", root, err)
 	}
-	// Fallback: root document data.permittedCommands (Story 1.6 fixture shape).
+	// Fallback: root document data.permittedCommands (used by test fixtures).
 	if len(ref.PermittedCommands) == 0 && rootDoc.Data != nil {
 		ref.PermittedCommands = extractStringSlice(rootDoc.Data["permittedCommands"])
 	}
@@ -281,8 +280,8 @@ func (c *DDLCache) LookupByMetaKey(metaKey string) (MetaVertexRef, bool) {
 
 // Invalidate re-loads a single meta-vertex (by root key) into the cache.
 // Called synchronously by the Committer after a successful step 8 batch
-// that touched `vtx.meta.>` keys (Story 1.7 AC: "DDL mutations lane
-// triggers synchronous Processor cache invalidation").
+// that touched `vtx.meta.>` keys (DDL mutations trigger synchronous cache
+// invalidation at step 8).
 //
 // metaRootKey is the 3-segment `vtx.meta.<id>` key. If the supplied key
 // is a 4-segment aspect key, the root is derived automatically.
@@ -295,20 +294,19 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		return fmt.Errorf("ddl cache: invalidate: key %q is not a meta-vertex key", metaRootKey)
 	}
 
-	// Determine the prior canonical name (if any) so we can drop the
-	// old entry from byName before re-inserting under whatever name
-	// the new state declares.
+	// Hold the write lock for the entire operation (including the KV read) to
+	// eliminate the TOCTOU window where two concurrent Invalidate calls could
+	// race on priorName and leave the cache indexed under a stale canonical name.
+	// Lock contention is acceptable — Invalidate is a rare DDL-commit path.
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	priorName, hadPrior := c.byMetaPK[metaRootKey]
-	c.mu.Unlock()
 
 	ref, ok, err := c.loadMetaVertex(ctx, metaRootKey, nil)
 	if err != nil {
 		return fmt.Errorf("ddl cache: invalidate %s: %w", metaRootKey, err)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if hadPrior {
 		delete(c.byName, priorName)
 		delete(c.byMetaPK, metaRootKey)

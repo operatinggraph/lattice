@@ -54,15 +54,10 @@ type OperationEnvelope struct {
 	Actor         string          `json:"actor"`
 	SubmittedAt   string          `json:"submittedAt"`
 	Payload       json.RawMessage `json:"payload"`
-	// Class is the Phase-1 transitional DDL hint. Story 1.6 added it as
-	// a stop-gap; Story 1.7 brought the DDL cache forward so the
-	// Hydrator + Validator can resolve class via the cache once the
-	// operationType→class derivation is wired (Story 1.10+). Until
-	// then `class` remains the supported way for clients to tell the
-	// Processor which DDL their operation targets — it stays `omitempty`
-	// so existing wire payloads are unaffected. See
-	// cmd/processor/CONTRACT-AMENDMENT-REQUEST.md (1.6 entry, resolved
-	// in 1.7) and data-contracts.md Contract #2 §2.1 addendum.
+	// Class is the DDL hint carrying the canonical class name for the
+	// operation (e.g., "identity", "org"). Clients must populate it so the
+	// Hydrator and Validator can resolve the correct DDL schema. It stays
+	// `omitempty` so existing wire payloads without it are unaffected.
 	Class       string       `json:"class,omitempty"`
 	ContextHint *ContextHint `json:"contextHint,omitempty"`
 	AuthContext *AuthContext `json:"authContext,omitempty"`
@@ -78,33 +73,27 @@ const (
 	ErrCodeAuthDenied          ErrorCode = "AuthDenied"
 	ErrCodeAuthContextMismatch ErrorCode = "AuthContextMismatch"
 	ErrCodeInternalError       ErrorCode = "InternalError"
-	// Story 1.6 error codes for steps 4/5 typed failures.
+	// Steps 4/5 typed failure codes.
 	ErrCodeHydrationFailed ErrorCode = "HydrationFailed"
 	ErrCodeScriptFailed    ErrorCode = "ScriptFailed"
-	// Story 1.7 error codes for steps 6/8 typed failures.
+	// Steps 6/8 typed failure codes.
 	ErrCodeDDLViolation     ErrorCode = "DDLViolation"
 	ErrCodeRevisionConflict ErrorCode = "RevisionConflict"
-	// Story 3.3 error codes for step-3 Capability KV auth.
+	// Step-3 Capability KV auth codes.
 	// ErrCodeAuthFreshnessExceeded fires when the Capability KV projection
 	// for the actor is staler than the freshness ceiling (5 × NFR-P3 by
 	// default). Hard denial — operation rejected so the actor doesn't see
-	// auth state from an arbitrarily-out-of-date projection. See Contract
-	// #6 §6.8 spirit + Decision #6 in the Story 3.3 brief.
+	// auth state from an arbitrarily-out-of-date projection (Contract #6 §6.8).
 	ErrCodeAuthFreshnessExceeded ErrorCode = "AuthFreshnessExceeded"
-	// ErrCodeAuthInfrastructureFailure is reserved for surfacing a real
-	// NATS / Capability KV outage to the reply path. The Story 3.3
-	// CapabilityAuthorizer returns an `error` (not a Decision) when the
-	// KV GET fails for any reason other than ErrKeyNotFound; the commit
-	// path's existing authorizer-error branch maps that to InternalError
-	// today. This code is the typed alternative for callers that want to
-	// distinguish "auth-plane broken" from "any other internal error" —
-	// wired through if/when 3.5 (traceability) needs it.
+	// ErrCodeAuthInfrastructureFailure surfaces a NATS / Capability KV outage
+	// to the reply path. The CapabilityAuthorizer returns an error (not a
+	// Decision) when the KV GET fails; the commit path maps that to this code
+	// so callers can distinguish "auth-plane broken" from other internal errors.
 	ErrCodeAuthInfrastructureFailure ErrorCode = "AuthInfrastructureFailure"
-	// ErrCodeClaimKeyInvalid is the generic rejection code for all
-	// ClaimIdentity failure modes (Story 4.3 / NFR-S6 anti-enumeration).
-	// Callers cannot distinguish wrong-key / wrong-state / already-bound /
-	// merged — all map to this single code. Specific outcomes surface only
-	// via Health KV at health.processor.<instance>.claim-attempts.<outcome>.
+	// ErrCodeClaimKeyInvalid is the generic rejection code for all ClaimIdentity
+	// failure modes (NFR-S6 anti-enumeration). Callers cannot distinguish
+	// wrong-key / wrong-state / already-bound / merged — all map to this single
+	// code. Specific outcomes surface only via Health KV.
 	ErrCodeClaimKeyInvalid ErrorCode = "ClaimKeyInvalid"
 )
 
@@ -126,13 +115,6 @@ type ReplyError struct {
 
 // OperationReply is the request-reply response the Processor sends back
 // to the operation submitter per Contract #2 §2.4.
-//
-// Story 1.7 swaps the Story-1.5 `decision: accepted-stub` marker for the
-// canonical `decision: committed` semantic — alongside a `revisions`
-// map that lets clients perform read-your-own-writes against the
-// committed keys' revisions. The Decision field is preserved as a
-// transitional disambiguator until the meta-lane request-reply contract
-// stabilises (Story 1.9+).
 type OperationReply struct {
 	RequestID           string      `json:"requestId"`
 	OpTrackerKey        string      `json:"opTrackerKey"`
@@ -140,13 +122,11 @@ type OperationReply struct {
 	CommittedAt         string      `json:"committedAt,omitempty"`
 	OriginalCommittedAt string      `json:"originalCommittedAt,omitempty"`
 	Error               *ReplyError `json:"error,omitempty"`
-	// Decision: "committed" (Story 1.7+ success), "accepted-stub"
-	// (Story 1.5 transitional — no longer emitted), "duplicate" when
+	// Decision is "committed" on accepted replies; "duplicate" when
 	// step 2 short-circuits.
 	Decision string `json:"decision,omitempty"`
-	// Revisions: per-key revision map returned by the substrate after
-	// a successful atomic batch. Populated on `accepted` replies in
-	// Story 1.7+. Useful for client RYOW polling.
+	// Revisions: per-key revision map returned by the substrate after a
+	// successful atomic batch. Useful for client RYOW polling.
 	Revisions map[string]uint64 `json:"revisions,omitempty"`
 	// Detail: optional structured data the script surfaced via its
 	// "response" return key. May contain sensitive tokens (e.g.
@@ -190,7 +170,6 @@ func ParseEnvelope(data []byte) (*OperationEnvelope, error) {
 	}
 	var env OperationEnvelope
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
 	if err := dec.Decode(&env); err != nil {
 		return nil, fmt.Errorf("envelope: json decode: %w", err)
 	}

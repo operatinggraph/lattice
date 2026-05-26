@@ -1,4 +1,4 @@
-// Story 3.5 — Three-Plane Auth Failure Traceability (FR23).
+// Three-Plane Auth Failure Traceability (FR23).
 //
 // AuthTraceEmitter writes per-operation auth trace records to Health KV
 // under `health.processor.<instance>.auth-trace.<requestId>` with a 1-hour
@@ -30,7 +30,7 @@
 // NFR-O4 compliance: the record carries all three planes' data in a single
 // Health KV entry; operators can retrieve via `lattice auth-trace <requestId>`.
 //
-// Contract #5 §5.1: key is in the health.* namespace; TTL=1h per Story 3.5 AC.
+// Contract #5 §5.1: key is in the health.* namespace; TTL=1h.
 package processor
 
 import (
@@ -114,7 +114,7 @@ type AuthTracePlane3 struct {
 // package depends on internal/substrate, not on internal/processor.
 const lensDefinitionKeyForCapabilityKV = "vtx.meta.lens.capability"
 
-// authTraceOneHourTTL is the TTL for auth-trace Health KV entries per Story 3.5 AC.
+// authTraceOneHourTTL is the TTL for auth-trace Health KV entries (Contract #5 §5.1).
 const authTraceOneHourTTL = time.Hour
 
 // AuthTraceWriter is the minimal write surface the AuthTraceEmitter needs.
@@ -137,7 +137,7 @@ type AuthTraceEmitter struct {
 // NewAuthTraceEmitter constructs the emitter. writer is typically a *substrate.Conn.
 // bucket is the Health KV bucket name. instance is the processor instance ID
 // (proc-<NanoID>). traceAllowDecisions controls whether allowed decisions are also
-// traced (defaults OFF per Story 3.5 AC).
+// traced (defaults OFF — high volume potential for busy deployments).
 func NewAuthTraceEmitter(writer AuthTraceWriter, bucket, instance string, traceAllowDecisions bool, logger *slog.Logger) *AuthTraceEmitter {
 	if logger == nil {
 		logger = slog.Default()
@@ -213,9 +213,8 @@ func (e *AuthTraceEmitter) buildRecord(env *OperationEnvelope, decision Decision
 	// allow paths via Decision.Resolved carrying CapKey + ProjectedAt).
 	if decision.Authorized && decision.Resolved != nil {
 		rec.Plane1 = buildPlane1FromResolved(decision.Resolved)
-		// On allow paths Decision.Doc is nil (per Story 3.3 design) — we can
-		// still populate Plane 2 + 3 from Resolved.CapKey (no doc revisions
-		// available, so emit empty).
+		// On allow paths Decision.Doc is nil — we can still populate Plane 2+3
+		// from Resolved.CapKey (no doc revisions available, so emit empty).
 		rec.Plane2 = AuthTracePlane2{}
 		rec.Plane3 = AuthTracePlane3{}
 	} else if decision.Doc != nil {

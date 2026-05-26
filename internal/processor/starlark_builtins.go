@@ -110,14 +110,12 @@ func deterministicNanoID(src *rand.PCG, n int) string {
 //   - crypto.sha256NanoID(s)            → 20-char NanoID-alphabet ID derived from SHA-256(s)
 //   - crypto.constant_time_equal(a, b)  → bool (constant-time byte comparison)
 //
-// Both functions are pure (side-effect-free, deterministic) and consistent
-// with the sandbox principles established in Story 1.6:
+// Both functions are pure (side-effect-free, deterministic) per sandbox rules:
 //   - no I/O, no os access, no time, no randomness
 //   - output is fully determined by input
 //
 // sha256(s): stores hashes of sensitive tokens in Core KV without leaking
-// plaintext. Story 4.3 will use the same builtin to hash a submitted
-// plaintext for comparison.
+// plaintext. Used to hash submitted plaintext for comparison in ClaimIdentity.
 //
 // sha256NanoID(s): derives a valid Contract #1 NanoID from SHA-256(s),
 // used to build deterministic index-vertex keys (vtx.identityIndex.<id>)
@@ -158,10 +156,11 @@ func cryptoModule() *starlarkstruct.Struct {
 
 	// constant_time_equal(a, b) → bool
 	//
-	// Compares two strings in constant time with respect to content. Length
-	// mismatch returns False immediately (not constant-time across length, but
-	// timing reveals only length, not content — acceptable Phase 1; document
-	// as a known limitation in the closing summary).
+	// Compares two strings in constant time with respect to content. Both
+	// operands MUST be fixed-length (e.g., NanoIDs or other fixed-size tokens).
+	// Length mismatch returns False immediately — timing leaks the length of
+	// the shorter operand. Do NOT use with variable-length secrets (passwords,
+	// arbitrary user input) where length must also be kept confidential.
 	//
 	// Implementation: crypto/subtle.ConstantTimeCompare (stdlib). Returns True
 	// iff both strings are identical, False otherwise. Sandboxed: pure function,

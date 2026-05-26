@@ -49,10 +49,9 @@ type HealthHeartbeater struct {
 	metrics   *Metrics
 	logger    *slog.Logger
 
-	// Story 3.3: per-tick step-3 capability auth signals. The
-	// CapabilityAuthorizer is wired by MakePipeline when AuthMode resolves
-	// to capability. step3-latency always emits; cap-staleness skips
-	// emission when zero samples in the window (Decision #4).
+	// Per-tick step-3 capability auth signals. The CapabilityAuthorizer is
+	// wired by MakePipeline when AuthMode resolves to capability. step3-latency
+	// always emits; cap-staleness skips emission when zero samples in the window.
 	capAuthorizer *CapabilityAuthorizer
 }
 
@@ -96,9 +95,18 @@ func (h *HealthHeartbeater) Run(ctx context.Context) {
 	}
 }
 
-// AttachCapabilityAuthorizer wires the Story-3.3 step-3 latency +
-// staleness ring buffers so each heartbeat tick emits the two derived
-// keys. Idempotent: calling twice replaces the prior authorizer.
+// SetInterval adjusts the heartbeat ticker interval before Run is called.
+// Must not be called after Run starts. Enforces the NFR-O1 minimum of 10s.
+func (h *HealthHeartbeater) SetInterval(d time.Duration) {
+	if d < 10*time.Second {
+		d = 10 * time.Second
+	}
+	h.interval = d
+}
+
+// AttachCapabilityAuthorizer wires the step-3 latency + staleness ring buffers
+// so each heartbeat tick emits the two derived keys. Idempotent: calling twice
+// replaces the prior authorizer.
 func (h *HealthHeartbeater) AttachCapabilityAuthorizer(ca *CapabilityAuthorizer) {
 	h.capAuthorizer = ca
 }
@@ -158,7 +166,7 @@ func (h *HealthHeartbeater) emit(ctx context.Context, status string) {
 		h.logger.Warn("health: write heartbeat", "key", h.healthKey(), "error", err)
 	}
 
-	// Story 3.3: per-tick capability-auth signals.
+	// Per-tick capability-auth signals.
 	h.emitCapabilityAuthSignals(ctx)
 }
 

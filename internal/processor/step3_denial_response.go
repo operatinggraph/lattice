@@ -1,4 +1,4 @@
-// Story 3.4 — Structured Denial Response (FR22).
+// Structured Denial Response (FR22).
 //
 // DenialResponseBuilder enriches the OperationReply.Error.Details map for
 // auth-denial responses per Contract #2 §2.6 + Contract #6 §6.12 + FR22.
@@ -175,9 +175,8 @@ func denialReason(dec Decision) string {
 // If the Decision carries a Resolved path (can happen when dispatch reached the
 // section and found an op-mismatch), use it. Otherwise infer from authContext.
 func resolveEvaluatedSection(dec Decision, _ *CapabilityDoc, env *OperationEnvelope) string {
-	// Resolved path — set by dispatch even on deny (e.g., service-found/op-absent
-	// sets resolved.Path="service" in a future enhancement; today Resolved is nil
-	// on all denials per Story 3.3 AC).
+	// Resolved path — set by dispatch even on deny. Today Resolved is nil on
+	// all denial paths (only populated on allow paths by CapabilityAuthorizer).
 	if dec.Resolved != nil && dec.Resolved.Path != "" {
 		return pathToSection(dec.Resolved.Path)
 	}

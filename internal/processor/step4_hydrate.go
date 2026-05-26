@@ -11,14 +11,10 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// HydratorImpl is the Story 1.6/1.7 implementation of step 4 (JIT
-// Hydrate).
-//
-// Story 1.7 swaps Story 1.6's shadow-key (`vtx.meta.<class>`) approach
-// for a DDL cache lookup. The cache resolves canonicalName → real
-// MetaVertexRef (NanoID-keyed), exposing the meta-vertex's
-// canonicalName, permittedCommands, script, and sensitivity flag in
-// one map lookup.
+// HydratorImpl is the step-4 (JIT Hydrate) implementation. The DDL cache
+// resolves canonicalName → MetaVertexRef (NanoID-keyed), exposing the
+// meta-vertex's canonicalName, permittedCommands, script, and sensitivity
+// flag in one map lookup.
 //
 // Responsibilities:
 //  1. Resolve the operation's class — `class` envelope field first,
@@ -43,10 +39,8 @@ func NewHydrator(conn *substrate.Conn, coreBucket string, logger *slog.Logger) *
 	return NewHydratorWithCache(conn, coreBucket, nil, logger)
 }
 
-// NewHydratorWithCache is the Story 1.7 constructor that injects the
-// DDL cache. Kept separate so existing tests using NewHydrator continue
-// to compile while production wiring routes through the cache-aware
-// constructor.
+// NewHydratorWithCache injects the DDL cache. Kept separate from NewHydrator
+// so existing tests that exercise contextHint-only paths can omit the cache.
 func NewHydratorWithCache(conn *substrate.Conn, coreBucket string, cache *DDLCache, logger *slog.Logger) *HydratorImpl {
 	if conn == nil {
 		panic("processor: NewHydrator requires Conn")
@@ -72,9 +66,8 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		}
 	}
 
-	// 2. Resolve DDL meta-vertex. Story 1.7: prefer the DDL cache when
-	// wired. Falls back to the Story-1.6 shadow-key read so tests that
-	// don't wire a cache continue to work.
+	// 2. Resolve DDL meta-vertex: prefer the DDL cache when wired.
+	// Falls back to the shadow-key read so tests without a cache work.
 	var (
 		ddlKey  string
 		metaVtx MetaVertex
@@ -191,11 +184,9 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 
 // resolveClass extracts the operation's class for DDL lookup.
 //
-// Story 1.6 strategy: the envelope's `class` field (added top-level for
-// 1.6 — see CONTRACT-AMENDMENT-REQUEST 1.6) is consulted first. If
-// absent, the payload's `class` field. If neither, we return an error
-// — every operation must declare its class until the DDL cache lands
-// in Story 1.10 and can infer it from operationType.
+// resolveClass extracts the DDL class name from the envelope. The top-level
+// `class` field is consulted first; the payload's `class` field is the
+// fallback. Every operation must declare its class.
 func resolveClass(env *OperationEnvelope) (string, error) {
 	if env.Class != "" {
 		return env.Class, nil
@@ -211,13 +202,12 @@ func resolveClass(env *OperationEnvelope) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("operation envelope must carry a top-level `class` field (or payload.class) for Story 1.6 hydration")
+	return "", fmt.Errorf("operation envelope must carry a top-level `class` field (or payload.class)")
 }
 
-// metaVertexKeyForClass returns the Story-1.6 logical DDL key. NOTE:
-// canonical Contract #1 keys meta-vertices by NanoID with a
-// `canonicalName` aspect — see CONTRACT-AMENDMENT-REQUEST 1.6 for the
-// gap this bridges. Story 1.10 swaps this for a real DDL cache.
+// metaVertexKeyForClass returns the shadow-key DDL path used when the DDL
+// cache is not wired (test fallback). Canonical Contract #1 meta-vertices
+// are keyed by NanoID; this form is for test fixtures keyed by class name.
 func metaVertexKeyForClass(class string) string {
 	return "vtx.meta." + class
 }

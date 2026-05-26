@@ -30,10 +30,7 @@ func (e *ConflictError) Error() string {
 
 func (e *ConflictError) Unwrap() error { return e.Cause }
 
-// CommitterImpl is the Story 1.7 step 8 implementation. Replaces Story
-// 1.5's StubCommitter.
-//
-// Behavior:
+// CommitterImpl is the step-8 implementation. Behavior:
 //  1. Build a single substrate.AtomicBatch op list:
 //     - one BatchOp per mutation (revision condition derived from
 //       mutation.op: create→0, update→expectedRevision, tombstone→
@@ -80,26 +77,22 @@ func NewCommitter(conn *substrate.Conn, coreBucket string, cache *DDLCache, logg
 	}
 }
 
-// Commit implements Committer. Builds the atomic batch from the
-// validated MutationBatch + tracker and submits it.
-//
-// The tracker passed in is the Story 1.5 minimal-shape tracker
-// constructed by the commit path. Story 1.7 enriches the tracker's
-// `data` with `mutationKeys` and `eventClasses` (Contract #4 §4.2)
-// before serialization — the commit path supplies the bare tracker so
-// the Committer holds the authoritative serialization moment.
+// Commit implements Committer. Builds the atomic batch from the validated
+// MutationBatch + tracker and submits it. The commit path supplies the bare
+// tracker; the Committer enriches `data` with `mutationKeys` and `eventClasses`
+// (Contract #4 §4.2) before serialization so it holds the authoritative
+// serialization moment.
 func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, result ScriptResult, tracker Tracker) (CommitAck, error) {
 	now := c.Clock()
 	rid := env.RequestID
 
-	// Enrich tracker with Contract #4 §4.2 fields the Story 1.7 commit
-	// path can populate authoritatively.
+	// Enrich tracker with Contract #4 §4.2 fields.
 	mutKeys := make([]string, 0, len(result.Mutations))
 	for _, m := range result.Mutations {
 		mutKeys = append(mutKeys, m.Key)
 	}
-	// Build the EventList for the eventClasses tracker field. We do not
-	// publish events here — Story 1.8 owns step 9.
+	// Build the EventList once here. The same list is returned in CommitAck
+	// so step 9 publishes identical event IDs to those recorded in the tracker.
 	events, err := BuildEventList(env, result, now)
 	if err != nil {
 		return CommitAck{}, fmt.Errorf("step 8: build event list: %w", err)
@@ -137,11 +130,9 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 				op.Revision = *m.ExpectedRevision
 			}
 			// If no expectedRevision is supplied, the BatchOp goes
-			// through unconditioned. Story 1.9+ will harden this by
-			// requiring the Hydrator's revision (Contract #3 §3.2 says
-			// "if omitted, Processor uses the revision read during step
-			// 4"). Story 1.7's scope per the brief stops at carrying
-			// the explicit override forward.
+			// through unconditioned. Contract #3 §3.2 says "if omitted,
+			// Processor uses the revision read during step 4" — this
+			// hardening is deferred; only explicit overrides are carried forward.
 		}
 		ops = append(ops, op)
 	}
@@ -169,8 +160,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 		return CommitAck{}, batchErr
 	}
 
-	// Synchronous DDL cache invalidation for any committed
-	// `vtx.meta.*` mutation (Story 1.7 AC).
+	// Synchronous DDL cache invalidation for any committed `vtx.meta.*` mutation.
 	if c.DDLs != nil && hasMetaVertexMutation(result.Mutations) {
 		for _, m := range result.Mutations {
 			if !strings.HasPrefix(m.Key, "vtx.meta.") {
@@ -197,6 +187,7 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 		Sequence: ack.Sequence,
 		BatchID:  ack.BatchID,
 		Count:    ack.Count,
+		Events:   events,
 	}, nil
 }
 
