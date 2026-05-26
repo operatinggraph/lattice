@@ -24,6 +24,15 @@ type KVEntry struct {
 
 // KVGet reads the named key from bucket. Returns ErrKeyNotFound if the key
 // does not exist (wrapped, so callers should use errors.Is).
+//
+// Core KV holds logically-deleted entries by design: an envelope written
+// with "isDeleted": true remains a live JetStream message and KVGet returns
+// it normally (err == nil, Value contains the tombstoned envelope). This is
+// intentional — the Refractor lens layer filters logical deletes; raw Core KV
+// consumers that need live-only access must inspect the envelope's isDeleted
+// field or consume through an appropriate Refractor lens.
+//
+// KVGet after a hard KVDelete (NATS tombstone) does return ErrKeyNotFound.
 func (c *Conn) KVGet(ctx context.Context, bucket, key string) (*KVEntry, error) {
 	kv, err := c.bucket(ctx, bucket)
 	if err != nil {
@@ -72,7 +81,7 @@ func (c *Conn) KVCreate(ctx context.Context, bucket, key string, value []byte) (
 	}
 	rev, err := kv.Create(ctx, key, value)
 	if err != nil {
-		if isRevisionConflict(err) {
+		if IsRevisionConflict(err) {
 			return 0, fmt.Errorf("%w: bucket=%s key=%s (create requires absent): %v",
 				ErrRevisionConflict, bucket, key, err)
 		}
@@ -94,7 +103,7 @@ func (c *Conn) KVUpdate(ctx context.Context, bucket, key string, value []byte, e
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return 0, fmt.Errorf("%w: bucket=%s key=%s", ErrKeyNotFound, bucket, key)
 		}
-		if isRevisionConflict(err) {
+		if IsRevisionConflict(err) {
 			return 0, fmt.Errorf("%w: bucket=%s key=%s expected=%d: %v",
 				ErrRevisionConflict, bucket, key, expectedRevision, err)
 		}
@@ -103,10 +112,17 @@ func (c *Conn) KVUpdate(ctx context.Context, bucket, key string, value []byte, e
 	return rev, nil
 }
 
-// KVListKeys returns all keys present in bucket. The order is unspecified.
-// Used by the Processor's DDL cache to enumerate `vtx.meta.>` at startup.
-// Heavy on large buckets — callers must scope to buckets where the full
-// key set is bounded (Core KV's meta-vertex sub-set qualifies).
+// KVListKeys returns all keys with live (non-tombstone) entries at the
+// JetStream level. The order is unspecified. Used by the Processor's DDL
+// cache to enumerate `vtx.meta.>` at startup. Heavy on large buckets —
+// callers must scope to buckets where the full key set is bounded (Core KV's
+// meta-vertex sub-set qualifies).
+//
+// KVListKeys does NOT filter logically-deleted envelopes (envelopes with
+// "isDeleted": true). Keys for soft-deleted entities (written via the
+// Processor commit path) are included in the result. Callers that only want
+// live entities must inspect the envelope's isDeleted field after KVGet, or
+// consume through a Refractor lens that applies the logical-delete filter.
 func (c *Conn) KVListKeys(ctx context.Context, bucket string) ([]string, error) {
 	kv, err := c.bucket(ctx, bucket)
 	if err != nil {
@@ -149,8 +165,12 @@ func (c *Conn) KVPutWithTTL(ctx context.Context, bucket, key string, value []byt
 	return pubAck.Sequence, nil
 }
 
-// KVDelete soft-deletes key (writes a delete marker). Subsequent reads
-// return ErrKeyNotFound.
+// KVDelete unconditionally soft-deletes key (writes a NATS KV delete
+// marker). Subsequent reads return ErrKeyNotFound. This is unconditional:
+// any concurrent write that occurred between the caller's last read and
+// this delete will be silently overwritten. Use KVDeleteRevision when
+// optimistic concurrency is required; reserve KVDelete for non-concurrent
+// operational cleanup (e.g. TTL-expired entries, test teardown).
 func (c *Conn) KVDelete(ctx context.Context, bucket, key string) error {
 	kv, err := c.bucket(ctx, bucket)
 	if err != nil {
@@ -162,11 +182,31 @@ func (c *Conn) KVDelete(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
-// isRevisionConflict matches the NATS revision-condition rejection both
-// from explicit error sentinels (when nats.go exposes them) and from raw
-// API error strings (the underlying mechanism is the "wrong last
-// sequence" reply, err_code=10071).
-func isRevisionConflict(err error) bool {
+// KVDeleteRevision soft-deletes key only if its current revision equals
+// expectedRevision. Returns ErrRevisionConflict if the revision does not
+// match (a concurrent write occurred). Use this in any path that validates
+// state before deciding to delete (optimistic-concurrency delete).
+func (c *Conn) KVDeleteRevision(ctx context.Context, bucket, key string, expectedRevision uint64) error {
+	kv, err := c.bucket(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if err := kv.Delete(ctx, key, jetstream.LastRevision(expectedRevision)); err != nil {
+		if IsRevisionConflict(err) {
+			return fmt.Errorf("%w: bucket=%s key=%s expected=%d: %v",
+				ErrRevisionConflict, bucket, key, expectedRevision, err)
+		}
+		return fmt.Errorf("substrate: KV delete-revision %s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// IsRevisionConflict reports whether err is a NATS revision-condition
+// rejection. It checks both the typed jetstream.ErrKeyExists sentinel
+// (current nats.go) and raw API error strings (older NATS server versions
+// that emit err_code=10071 as text). All Lattice components should use
+// this helper rather than duplicating the detection logic.
+func IsRevisionConflict(err error) bool {
 	if err == nil {
 		return false
 	}

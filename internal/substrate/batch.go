@@ -57,9 +57,9 @@ type BatchAck struct {
 // Either every op is durably committed or none are. On failure the
 // returned error wraps ErrAtomicBatchRejected.
 //
-// The atomic batch is implemented over the raw NATS protocol per the
-// Story 1.1 spike findings (the nats.go client does not expose a high-
-// level PublishBatch). This helper hides those mechanics from callers.
+// The atomic batch is implemented over the raw NATS protocol because the
+// nats.go client does not expose a high-level PublishBatch API. This helper
+// hides those mechanics from callers.
 //
 // Requirements:
 //
@@ -68,8 +68,8 @@ type BatchAck struct {
 //     the bootstrap path).
 //
 //   - All ops in a single AtomicBatch call must target the SAME bucket.
-//     Cross-bucket atomicity is not supported by NATS atomic batch
-//     (Story 1.1 spike documented this); pass one bucket per call.
+//     Cross-bucket atomicity is not supported by NATS atomic batch;
+//     pass one bucket per call.
 //
 //   - timeout bounds the round trip on the commit message. Choose a value
 //     consistent with the operation's lane SLA (Processor uses 5s by
@@ -153,7 +153,7 @@ type apiErr struct {
 }
 
 // PublishOp describes a single message inside a non-conditional batch
-// publish to JetStream (Story 1.8 step 9). Unlike BatchOp, PublishOp
+// publish to JetStream. Unlike BatchOp, PublishOp
 // targets arbitrary JetStream subjects (e.g. `events.identity.created`)
 // rather than KV-bucket subjects, and it does not carry revision
 // conditions — the batch is unconditional. Ordering within the batch is
@@ -184,8 +184,7 @@ type PublishBatchAck struct {
 // `core-events` stream's `events.>` filter for the Processor's step 9.
 //
 // Order is preserved via `Nats-Batch-Sequence` (1..N). On failure, no
-// message is durably stored — semantics are all-or-nothing per the
-// Story 1.1 spike findings (Behavioral Test 3b documented this).
+// message is durably stored — semantics are all-or-nothing.
 func (c *Conn) PublishBatch(ops []PublishOp, timeout time.Duration) (*PublishBatchAck, error) {
 	if len(ops) == 0 {
 		return nil, fmt.Errorf("substrate: PublishBatch: empty op list")
@@ -228,10 +227,10 @@ func (c *Conn) PublishBatch(ops []PublishOp, timeout time.Duration) (*PublishBat
 	}, nil
 }
 
-// publishAtomicBatch is the raw-protocol atomic-batch publisher ported
-// from the Story 1.1 spike. All-but-last messages are fire-and-forget;
-// the last carries Nats-Batch-Commit and is sent via RequestMsg so the
-// server's commit ack can be parsed.
+// publishAtomicBatch is the raw-protocol atomic-batch publisher.
+// All-but-last messages are fire-and-forget; the last carries
+// Nats-Batch-Commit and is sent via RequestMsg so the server's commit ack
+// can be parsed.
 func publishAtomicBatch(nc *nats.Conn, batchID string, messages []*nats.Msg, timeout time.Duration) (*pubAckResponse, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("empty batch")
@@ -262,5 +261,5 @@ func publishAtomicBatch(nc *nats.Conn, batchID string, messages []*nats.Msg, tim
 		}
 		return &ack, nil
 	}
-	return nil, fmt.Errorf("unreachable")
+	panic("substrate: publishAtomicBatch: unreachable")
 }

@@ -68,8 +68,8 @@ func TestSubscribeKVChanges_HappyPath(t *testing.T) {
 	if string(evt.Value) != string(body) {
 		t.Errorf("value: got %q want %q", evt.Value, body)
 	}
-	if evt.Sequence == 0 || evt.Sequence != rev {
-		t.Errorf("Sequence: got %d want %d", evt.Sequence, rev)
+	if evt.Revision == 0 || evt.Revision != rev {
+		t.Errorf("Revision: got %d want %d", evt.Revision, rev)
 	}
 	if evt.IsDeleted {
 		t.Errorf("IsDeleted: want false")

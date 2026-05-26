@@ -20,9 +20,8 @@ type KVEvent struct {
 	Bucket    string
 	Key       string
 	Value     []byte
-	Revision  uint64 // KV revision (== JetStream sequence for KV-backed streams)
+	Revision  uint64 // KV revision (equals the JetStream stream sequence for KV-backed streams)
 	IsDeleted bool   // value envelope's `isDeleted` field, or true on a KV tombstone
-	Sequence  uint64 // JetStream sequence of the underlying message
 }
 
 // SubscribeKVOptions configures (*Conn).SubscribeKVChanges. The zero value
@@ -55,11 +54,13 @@ type SubscribeKVOptions struct {
 // jetstream.KeyValue.Watch (which is ephemeral and replays full history
 // on every connect).
 //
-// keyPrefix may be a literal key, a token prefix (e.g. "vtx.meta."), or
-// a NATS wildcard expression already terminated with `>` (e.g.
-// "vtx.meta.>"). If the caller did not terminate with a wildcard,
-// SubscribeKVChanges appends `>` so the consumer's FilterSubject is a
-// legal subject pattern.
+// keyPrefix semantics:
+//   - "" — matches all keys (equivalent to ">")
+//   - "vtx.meta." — matches all keys under the vtx.meta prefix
+//   - "vtx.meta.>" or "vtx.*" — already a NATS wildcard, used verbatim
+//   - bare literal without trailing "." or wildcard — returns an error;
+//     callers must be explicit: append "." for prefix matching or ">" for
+//     all descendants
 //
 // On ctx.Done the consumer is deleted from the JetStream catalog and the
 // returned channel is closed. Unrecoverable subscription errors
@@ -101,7 +102,11 @@ func (c *Conn) SubscribeKVChanges(
 
 	streamName := "KV_" + bucket
 	subjectPrefix := "$KV." + bucket + "."
-	filterSubject := subjectPrefix + normalizePrefix(keyPrefix)
+	normalizedPrefix, err := normalizePrefix(keyPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: SubscribeKVChanges: %w", err)
+	}
+	filterSubject := subjectPrefix + normalizedPrefix
 
 	deliverPolicy := jetstream.DeliverNewPolicy
 	if opts.IncludeHistory {
@@ -121,26 +126,35 @@ func (c *Conn) SubscribeKVChanges(
 	}
 
 	out := make(chan KVEvent)
-	go c.runKVSubscription(ctx, cons, streamName, durableName, bucket, subjectPrefix, out, logger)
+	go c.runKVSubscription(ctx, cons, durableName, bucket, subjectPrefix, out, logger)
 	return out, nil
 }
 
 // normalizePrefix ensures the prefix ends in a wildcard token so that the
 // resulting FilterSubject is a legal NATS subject pattern. Callers may
-// pass any of: "", "vtx.meta.", "vtx.meta.>", "vtx.identity.foo".
-func normalizePrefix(p string) string {
+// pass any of: "", "vtx.meta.", "vtx.meta.>", "vtx.*".
+//
+// A bare literal without a trailing ".", ">", or "*" is ambiguous — it
+// is unclear whether the caller wants exact-match or prefix-and-children
+// semantics. normalizePrefix returns an error in that case, requiring the
+// caller to be explicit (append "." for prefix, or use ">" / "*" for
+// wildcard matching).
+func normalizePrefix(p string) (string, error) {
 	if p == "" {
-		return ">"
+		return ">", nil
 	}
 	if strings.HasSuffix(p, ">") || strings.HasSuffix(p, "*") {
-		return p
+		return p, nil
 	}
 	if strings.HasSuffix(p, ".") {
-		return p + ">"
+		return p + ">", nil
 	}
-	// Bare literal — match it exactly. (Callers wanting "prefix and
-	// children" should pass a trailing ".".)
-	return p
+	// Bare literal without a wildcard suffix: ambiguous — fail fast so the
+	// caller is explicit. For exact-match on a single key, append a
+	// wildcard sentinel such as ">" after a trailing ".". For prefix
+	// matching, append ".".
+	return "", fmt.Errorf("ambiguous keyPrefix %q: must end with '.', '>', or '*' "+
+		"(append '.' for prefix-and-children, or '>' for all descendants)", p)
 }
 
 // runKVSubscription drives the consumer iterator until ctx is cancelled
@@ -162,13 +176,11 @@ func normalizePrefix(p string) string {
 func (c *Conn) runKVSubscription(
 	ctx context.Context,
 	cons jetstream.Consumer,
-	streamName, durableName, bucket, subjectPrefix string,
+	durableName, bucket, subjectPrefix string,
 	out chan<- KVEvent,
 	logger *slog.Logger,
 ) {
 	defer close(out)
-	_ = streamName  // reserved for diagnostic logging
-	_ = durableName // reserved for diagnostic logging
 
 	mc, err := cons.Messages()
 	if err != nil {
@@ -227,7 +239,6 @@ func decodeKVMessage(msg jetstream.Msg, bucket, subjectPrefix string) KVEvent {
 	}
 	if meta, err := msg.Metadata(); err == nil {
 		evt.Revision = meta.Sequence.Stream
-		evt.Sequence = meta.Sequence.Stream
 	}
 	// KV tombstones land as empty-body messages with an operation header
 	// (KV-Operation: DEL or PURGE). Either way: empty body means

@@ -194,11 +194,11 @@ type FaultyEventPublisher struct {
 	Trip  func() error
 }
 
-func (f *FaultyEventPublisher) Publish(ctx context.Context, env *processor.OperationEnvelope, result processor.ScriptResult) error {
+func (f *FaultyEventPublisher) Publish(ctx context.Context, env *processor.OperationEnvelope, events processor.EventList) error {
 	if err := f.Trip(); err != nil {
 		return err
 	}
-	return f.Inner.Publish(ctx, env, result)
+	return f.Inner.Publish(ctx, env, events)
 }
 
 // FailEventPublisherAfterN returns an EventPublisher that fails on its

@@ -120,6 +120,28 @@ func ParseLinkKey(key string) (type1, id1, linkName, type2, id2 string, ok bool)
 	return parts[1], parts[2], parts[3], parts[4], parts[5], true
 }
 
+// CanonicalLinkOrder returns the younger and older vertex keys in the order
+// required by LinkKey. Per Contract #1 §1.1, the younger vertex (larger
+// createdAt timestamp) occupies the id1 position. If the timestamps are
+// equal, keys are ordered lexicographically to break ties deterministically.
+//
+// aCreatedAt and bCreatedAt must be RFC3339Nano strings as produced by
+// FormatTimestamp. Malformed timestamps fall back to lexicographic ordering
+// of the raw strings.
+func CanonicalLinkOrder(aKey, aCreatedAt, bKey, bCreatedAt string) (younger, older string) {
+	if aCreatedAt > bCreatedAt {
+		return aKey, bKey
+	}
+	if bCreatedAt > aCreatedAt {
+		return bKey, aKey
+	}
+	// Equal timestamps: break tie lexicographically.
+	if aKey >= bKey {
+		return aKey, bKey
+	}
+	return bKey, aKey
+}
+
 // splitVertexKey is the internal vertex-key parser.
 func splitVertexKey(key string) (vertexType, id string, ok bool) {
 	parts := strings.Split(key, ".")

@@ -236,7 +236,7 @@ func (s *Seeder) SeedPrimordial(ctx context.Context) error {
 		// concurrent bootstrapper raced us), fall back to the idempotent
 		// per-key check. This protects re-run safety while keeping the
 		// happy path single-batch.
-		if errors.Is(err, substrate.ErrAtomicBatchRejected) && looksLikeCreateConflict(err) {
+		if errors.Is(err, substrate.ErrAtomicBatchRejected) && substrate.IsRevisionConflict(err) {
 			s.logger.Info("atomic batch rejected (likely concurrent bootstrap) — falling back to per-key idempotent path",
 				"error", err)
 			return s.seedPrimordialPerKey(ctx, kv, entries)
@@ -257,7 +257,7 @@ func (s *Seeder) seedPrimordialPerKey(ctx context.Context, kv jetstream.KeyValue
 			continue
 		}
 		if _, putErr := kv.Create(ctx, e.key, e.value); putErr != nil {
-			if looksLikeCreateConflict(putErr) {
+			if substrate.IsRevisionConflict(putErr) {
 				s.logger.Info("key created concurrently, skipping", "key", e.key)
 				continue
 			}
@@ -268,18 +268,6 @@ func (s *Seeder) seedPrimordialPerKey(ctx context.Context, kv jetstream.KeyValue
 	return nil
 }
 
-func looksLikeCreateConflict(err error) bool {
-	// Check the typed sentinel first (covers current nats.go versions that
-	// wrap ErrKeyExists on kv.Create conflicts). The string fallbacks cover
-	// older NATS server versions that emit raw API error text instead.
-	if errors.Is(err, jetstream.ErrKeyExists) {
-		return true
-	}
-	s := err.Error()
-	return strings.Contains(s, "wrong last sequence") ||
-		strings.Contains(s, "key exists") ||
-		strings.Contains(s, "10071")
-}
 
 type kvEntry struct {
 	key   string

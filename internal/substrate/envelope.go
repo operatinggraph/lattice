@@ -68,6 +68,15 @@ func NewDocumentEnvelope(class, actor, opTracker string) DocumentEnvelope {
 // timestamp. Used by primordial bootstrap (deterministic time) and by
 // replay tooling (recovered timestamps).
 func NewDocumentEnvelopeAt(class, actor, opTracker string, ts time.Time) DocumentEnvelope {
+	if class == "" {
+		panic("substrate: NewDocumentEnvelopeAt: class must not be empty")
+	}
+	if actor == "" {
+		panic("substrate: NewDocumentEnvelopeAt: actor must not be empty")
+	}
+	if opTracker == "" {
+		panic("substrate: NewDocumentEnvelopeAt: opTracker must not be empty")
+	}
 	stamp := FormatTimestamp(ts)
 	return DocumentEnvelope{
 		Class:            class,
@@ -92,6 +101,12 @@ func (e *DocumentEnvelope) Update(actor, opTracker string) {
 
 // UpdateAt is the explicit-timestamp form of Update.
 func (e *DocumentEnvelope) UpdateAt(actor, opTracker string, ts time.Time) {
+	if actor == "" {
+		panic("substrate: UpdateAt: actor must not be empty")
+	}
+	if opTracker == "" {
+		panic("substrate: UpdateAt: opTracker must not be empty")
+	}
 	e.LastModifiedAt = FormatTimestamp(ts)
 	e.LastModifiedBy = actor
 	e.LastModifiedByOp = opTracker

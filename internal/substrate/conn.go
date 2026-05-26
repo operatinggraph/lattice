@@ -71,7 +71,11 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 		nc.Close()
 		return nil, fmt.Errorf("substrate: jetstream context: %w", err)
 	}
-	_ = ctx // reserved for future use (e.g., bounded connect via JS API ping)
+	// nats.Connect does not accept a context; context-based cancellation of the
+	// initial dial is not possible via the nats.go API. Callers that need to bound
+	// connection time should set ConnectOpts.MaxReconnects and ReconnectWait to
+	// limit the retry loop rather than relying on context deadlines.
+	_ = ctx
 	return &Conn{nc: nc, js: js, buckets: make(map[string]jetstream.KeyValue)}, nil
 }
 
@@ -104,19 +108,21 @@ func (c *Conn) Close() {
 // bucket returns a cached jetstream.KeyValue handle for the named bucket.
 // On the first call per bucket the handle is opened (not created); the
 // bucket must already exist (provision via the bootstrap path).
+//
+// The lock is held across the KeyValue() open call to prevent a TOCTOU
+// race where two concurrent first-callers both pass the cache miss check
+// and open duplicate handles. Lock contention is negligible because buckets
+// are opened once per process.
 func (c *Conn) bucket(ctx context.Context, name string) (jetstream.KeyValue, error) {
 	c.mu.Lock()
-	kv, ok := c.buckets[name]
-	c.mu.Unlock()
-	if ok {
+	defer c.mu.Unlock()
+	if kv, ok := c.buckets[name]; ok {
 		return kv, nil
 	}
 	kv, err := c.js.KeyValue(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("substrate: open KV bucket %q: %w", name, err)
 	}
-	c.mu.Lock()
 	c.buckets[name] = kv
-	c.mu.Unlock()
 	return kv, nil
 }
