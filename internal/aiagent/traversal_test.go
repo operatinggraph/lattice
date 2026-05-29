@@ -63,21 +63,10 @@ func putKV(t *testing.T, ctx context.Context, conn *substrate.Conn, bucket, key 
 	}
 }
 
-// seedDDLAspects seeds the vertex key and all seven self-description aspects
-// for a DDL key. The vertex itself is seeded as a live (isDeleted: false)
-// meta.ddl.vertexType entry so ReadDDLAspects' liveness pre-check passes.
-// Script defaults to a no-op execute stub; permittedCommands defaults to
-// []string{"TestOp"} unless the caller provides non-empty values via the
-// optional script/permittedCommands parameters.
-func seedDDLAspects(t *testing.T, ctx context.Context, conn *substrate.Conn, ddlKey, description, inputSchema, outputSchema string, fieldDescs map[string]string, examples []aiagent.ExampleEntry) {
-	t.Helper()
-	seedDDLAspectsFull(t, ctx, conn, ddlKey, description, inputSchema, outputSchema, fieldDescs, examples,
-		"def execute(state, op):\n    return {\"mutations\": [], \"events\": []}\n",
-		[]string{"TestOp"})
-}
-
 // seedDDLAspectsFull seeds the vertex key, all seven self-description aspects,
-// accepting explicit script and permittedCommands values.
+// accepting explicit script and permittedCommands values. The vertex itself is
+// seeded as a live (isDeleted: false) meta.ddl.vertexType entry so
+// ReadDDLAspects' liveness pre-check passes.
 func seedDDLAspectsFull(t *testing.T, ctx context.Context, conn *substrate.Conn, ddlKey, description, inputSchema, outputSchema string, fieldDescs map[string]string, examples []aiagent.ExampleEntry, script string, permittedCommands []string) {
 	t.Helper()
 
