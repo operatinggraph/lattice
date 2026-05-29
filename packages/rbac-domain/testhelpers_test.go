@@ -1,9 +1,8 @@
-// Story 4.7 cleanup — shared test helpers for the rbac-domain
-// Capability Package's external test suite.
+// Shared test helpers for the rbac-domain Capability Package's external
+// test suite.
 //
-// Mirrors packages/identity-domain/testhelpers_test.go: external test
-// package, real Phase-1 install, real Capability authorizer, seeded
-// staff + consumer cap docs.
+// External test package, real install, real Capability authorizer,
+// seeded staff + consumer cap docs.
 package rbacdomain_test
 
 import (

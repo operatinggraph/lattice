@@ -3,14 +3,13 @@
 //
 // See `docs/components/_packages.md` for the canonical spec.
 //
-// Phase 1 shape:
+// Shape:
 //   - Manifest is YAML (`manifest.yaml`); package definitions are Go
 //     (each package exports a `Package = pkgmgr.Definition{...}`).
 //   - One atomic batch per install against the `core-kv` bucket.
 //   - Operator credential is the admin actor NanoID read from
 //     `lattice.bootstrap.json`.
-//   - Substrate-direct; Phase 2 will replace the installer internals
-//     with operation-envelope submissions.
+//   - Install writes directly to core-kv (substrate-direct).
 package pkgmgr
 
 import (
@@ -35,8 +34,8 @@ type Definition struct {
 	// manifest field.
 	Description string
 
-	// Depends lists prerequisite package names. Phase 1 logs a warning
-	// and proceeds when a dependency is missing; Phase 2 will enforce.
+	// Depends lists prerequisite package names. The installer logs a
+	// warning and proceeds when a dependency is not verified.
 	Depends []string
 
 	// DDLs lists the DDL meta-vertices this package declares.
@@ -51,16 +50,12 @@ type Definition struct {
 
 	// PreInstall is an optional hook that runs BEFORE the atomic batch.
 	// Packages whose install needs Go-side seeding (e.g. identity-domain
-	// seeding its 3 user-facing roles via substrate-direct writes so the
-	// subsequent atomic batch's grants can reference them) provide this
-	// hook. ctx is the install ctx; conn is the live substrate
-	// connection; adminActor is the admin vtx.identity.<NanoID> key read
-	// from lattice.bootstrap.json. The hook MUST be idempotent — install
-	// retry after a partial failure re-invokes it.
-	//
-	// Phase 1 hook surface: a free function on the Definition. Phase 2
-	// (Story 5.3) will replace this with proper CreateRole-op submission
-	// once compensating-ops machinery is in place.
+	// seeding its 3 user-facing roles so the subsequent atomic batch's
+	// grants can reference them) provide this hook. ctx is the install
+	// ctx; conn is the live substrate connection; adminActor is the admin
+	// vtx.identity.<NanoID> key read from lattice.bootstrap.json.
+	// The hook MUST be idempotent — install retry after a partial failure
+	// re-invokes it.
 	PreInstall PreInstallFn
 }
 
@@ -94,7 +89,7 @@ type DDLSpec struct {
 	// a branch; the runner returns ScriptError for unrecognized ops.
 	Script string
 
-	// Story 5.1: self-description aspects. Required for all DDL classes.
+	// Self-description aspects. Required for all DDL classes.
 
 	// InputSchema is the JSON Schema string for this DDL's operation payload.
 	InputSchema string
@@ -140,7 +135,7 @@ type LensSpec struct {
 	// first projection.
 	Bucket string
 
-	// Engine selects the cypher engine — `full` for Story-3.1+ rules.
+	// Engine selects the cypher engine — `full` for the standard rule set.
 	Engine string
 }
 
@@ -153,8 +148,7 @@ type PermissionSpec struct {
 	Scope string
 
 	// GrantsTo lists the role canonical names that receive this
-	// permission via a `grantedBy` link at install time (Story 4.7
-	// rename — was `grantsPermission`).
+	// permission via a `grantedBy` link at install time.
 	GrantsTo []string
 
 	// Note is an optional human-readable note stored in the permission

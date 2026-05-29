@@ -24,9 +24,6 @@ import (
 // The returned map (canonicalName → NanoID) is merged into the
 // Installer's RoleIDs map so identity-domain's atomic batch can resolve
 // `grantsTo: [consumer]` / `[frontOfHouse, ...]` to real link targets.
-//
-// Phase 1: substrate-direct. Phase 2 will route role creation through
-// CreateRole ops via Story 5.3 compensating-ops machinery.
 func PreInstall(ctx context.Context, conn *substrate.Conn, adminActor string) (map[string]string, error) {
 	roles := []string{"consumer", "frontOfHouse", "backOfHouse"}
 	out := map[string]string{}
@@ -87,7 +84,7 @@ func PreInstall(ctx context.Context, conn *substrate.Conn, adminActor string) (m
 		})
 
 		// Index entry — canonical-name -> roleId. Used for idempotent re-runs
-		// and for cross-package canonical lookups (Phase 2).
+		// and for cross-package canonical lookups.
 		idxEnv, err := makeEnvelope(indexKey, "roleindex",
 			map[string]any{"canonicalName": name, "roleId": roleID}, adminActor, createdByOp, now)
 		if err != nil {

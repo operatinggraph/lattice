@@ -1,10 +1,7 @@
-// Story 3.6 Starlark unit smoke tests (ported in 4.7 cleanup).
+// Starlark unit smoke tests for the rbac-domain DDL script.
 //
-// The pre-4.7 form ran 5 separate DDL scripts (role / permission /
-// holdsRole / grantsPermission / reportsTo) via the StarlarkRunner.
-// The post-4.7 form has ONE `rbac` script with 10 op branches; each
-// per-DDL test maps to a per-op-branch test against that single
-// script.
+// One `rbac` script handles 10 op branches; each test exercises one
+// op branch against that single script.
 //
 // Coverage (one per operationType, parses + Contract #3 shape):
 //   - TestStarlark_Rbac_CreateRole

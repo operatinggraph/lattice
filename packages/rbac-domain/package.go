@@ -1,6 +1,5 @@
 // Package rbacdomain is the rbac-domain Capability Package. It provides
-// the role / permission / grant management operations that used to live
-// in the bootstrap kernel before Story 4.7.
+// role, permission, and grant management operations.
 //
 // One DDL (`rbac`) handles all 10 operations:
 //
@@ -9,7 +8,7 @@
 //	AssignRole, RevokeRole
 //	GrantPermission, RevokePermission
 //
-// Link conventions (Story 4.7):
+// Link conventions:
 //   - holdsRole link key: lnk.<actorType>.<actorId>.holdsRole.role.<roleId>
 //     (actor source, role target — actor added later in graph growth)
 //   - grantedBy link key: lnk.permission.<permId>.grantedBy.role.<roleId>

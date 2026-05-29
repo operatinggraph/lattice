@@ -41,7 +41,7 @@ func TestPackage_TenPermittedCommands(t *testing.T) {
 func TestPackage_ScriptUsesGrantedByName(t *testing.T) {
 	src := Package.DDLs[0].Script
 	if !strings.Contains(src, "grantedBy") {
-		t.Error("script must construct grantedBy link keys (Story 4.7 rename)")
+		t.Error("script must construct grantedBy link keys")
 	}
 	if strings.Contains(src, "grantsPermission") {
 		t.Error("script must NOT reference the deprecated grantsPermission name")

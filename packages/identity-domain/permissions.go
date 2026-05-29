@@ -4,16 +4,15 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // Permissions returns the 3 identity-domain permission vertices.
 //
-// Grant matrix (per Story 4.7 brief §2):
+// Grant matrix:
 //
 //	CreateUnclaimedIdentity → frontOfHouse, backOfHouse, operator
 //	UpdateIdentityState     → operator
 //	ClaimIdentity (self)    → consumer
 //
-// Scope `self` for ClaimIdentity: Phase 1 platformPermissions[] match
-// is exact-operationType only; scope enforcement happens in the
-// Starlark `ClaimIdentity` branch (one-credential-one-identity via
-// credentialindex).
+// Scope `self` for ClaimIdentity: platformPermissions[] match is
+// exact-operationType only; scope enforcement happens in the Starlark
+// `ClaimIdentity` branch (one-credential-one-identity via credentialindex).
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{

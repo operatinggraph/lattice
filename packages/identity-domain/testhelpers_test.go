@@ -1,4 +1,4 @@
-// Story 4.7 cleanup — shared helpers for identity-domain package tests.
+// Shared helpers for identity-domain package tests.
 //
 // These tests live in an external test package (`identitydomain_test`)
 // so they exercise only the public Lattice surface that any Capability
@@ -7,12 +7,6 @@
 //   - testutil.InstallPhase1Packages installs rbac-domain +
 //     identity-domain + identity-hygiene against that kernel.
 //   - Tests submit ops, run the standard pipeline, and assert outcomes.
-//
-// The package was previously tested via
-// internal/processor/identity_*_test.go — which seeded the identity
-// DDL via the legacy bootstrap.IdentityDDL() helper. Story 4.7
-// retired that helper; tests now read the same DDL via the installed
-// package and assert through the production pipeline.
 package identitydomain_test
 
 import (

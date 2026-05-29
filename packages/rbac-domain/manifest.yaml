@@ -10,6 +10,7 @@ declares:
   ddls:
     - canonicalName: rbac
       class: meta.ddl.vertexType
+  lenses: []
   permissions:
     - operationType: CreateRole
       scope: any

@@ -117,6 +117,32 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 			return fmt.Errorf("pkgmgr: Permission[%d] operationType mismatch: manifest=%q definition=%q",
 				i, pm.OperationType, d.Permissions[i].OperationType)
 		}
+		// Cross-check GrantsTo lists so a manifest that drifts from the Go
+		// Definition is caught before any Core KV write (the install uses
+		// the Definition's GrantsTo, not the manifest's).
+		if err := crossCheckGrantsTo(i, pm.GrantsTo, d.Permissions[i].GrantsTo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// crossCheckGrantsTo compares the manifest and Definition GrantsTo lists for
+// one permission entry. Ordering is irrelevant; set-equality is checked.
+func crossCheckGrantsTo(idx int, manifestGrants, defGrants []string) error {
+	if len(manifestGrants) != len(defGrants) {
+		return fmt.Errorf("pkgmgr: Permission[%d] grantsTo count mismatch: manifest=%d definition=%d",
+			idx, len(manifestGrants), len(defGrants))
+	}
+	// Build a set from the definition's grants.
+	defSet := make(map[string]struct{}, len(defGrants))
+	for _, g := range defGrants {
+		defSet[g] = struct{}{}
+	}
+	for _, g := range manifestGrants {
+		if _, ok := defSet[g]; !ok {
+			return fmt.Errorf("pkgmgr: Permission[%d] grantsTo: manifest has %q but Definition does not", idx, g)
+		}
 	}
 	return nil
 }

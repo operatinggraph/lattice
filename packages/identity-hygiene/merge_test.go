@@ -1,13 +1,11 @@
-// Story 4.6 Surface-B (Phase-1 hygiene carry) — MergeIdentity end-to-end
-// tests for the identity-hygiene Capability Package.
+// MergeIdentity end-to-end tests for the identity-hygiene Capability Package.
 //
 // All 8 tests exercise the MergeIdentity operation through the real Processor
 // pipeline (CapabilityAuthorizer → DDLCache → Hydrator → Executor → Committer)
-// using the testutil harness introduced in Story 4.7.
+// using the testutil harness.
 //
 // Lens-projection tests (TestHygiene_LensProjection_ExactEmail,
-// _LevenshteinName, _SkipsMerged, _NFR_P3) are explicitly deferred —
-// see the closing summary and the brief §DEFERRED section.
+// _LevenshteinName, _SkipsMerged, _NFR_P3) are explicitly deferred.
 //
 // Coverage:
 //  1. TestMerge_HappyPath               — 3 edges migrated, state=merged, 1 event

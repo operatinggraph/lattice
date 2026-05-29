@@ -7,10 +7,9 @@
 //	lattice-pkg uninstall <package-canonical-name>
 //	lattice-pkg list
 //
-// Phase 1: substrate-direct. The operator credential is the admin
-// actor NanoID read from lattice.bootstrap.json. Phase 2 / Story 5.3
-// will route installs through the Processor as CreateMetaVertex
-// operations.
+// The operator credential is the admin actor NanoID read from
+// lattice.bootstrap.json. Install writes directly to core-kv via
+// an atomic batch.
 package main
 
 import (
@@ -63,7 +62,11 @@ func main() {
 			os.Exit(2)
 		}
 		if err := runInstall(args[0], natsURL, bootstrapPath, logger); err != nil {
-			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
+			if errors.Is(err, pkgmgr.ErrBootstrapRequired) {
+				fmt.Fprintln(os.Stderr, "install failed: core-kv bucket not found — run `lattice-pkg bootstrap` (or `make up`) before installing packages.")
+			} else {
+				fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
+			}
 			os.Exit(1)
 		}
 	case "uninstall":
@@ -213,8 +216,8 @@ func loadBootstrap(path string) (*bootstrapJSON, string, error) {
 }
 
 // roleIDsFromBootstrap returns the canonical-name → NanoID map for
-// kernel-seeded roles. After Story 4.7 the kernel only seeds `operator`;
-// the other roles (consumer, frontOfHouse, backOfHouse) are seeded by
+// kernel-seeded roles. The kernel seeds the `operator` role; the other
+// roles (consumer, frontOfHouse, backOfHouse) are seeded by
 // identity-domain's PreInstall hook and merged into Installer.RoleIDs
 // at install time.
 func roleIDsFromBootstrap(bs *bootstrapJSON) map[string]string {

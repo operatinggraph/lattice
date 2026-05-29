@@ -1,6 +1,5 @@
-// Story 4.1 (ported in 4.7 cleanup) — Identity Domain DDL & State
-// Machine integration tests for the identity-domain Capability
-// Package.
+// Identity Domain DDL & State Machine integration tests for the
+// identity-domain Capability Package.
 //
 // Validates the identity DDL's Starlark script, hydration of state +
 // mergedInto aspects, the state-machine validator, and the

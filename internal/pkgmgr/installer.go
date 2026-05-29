@@ -10,9 +10,9 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// CoreBucket is the bucket all Capability Package writes target. Phase
-// 1 supports only single-bucket atomic batches; cross-bucket batches
-// aren't available from NATS atomic-batch (Story 1.1).
+// CoreBucket is the bucket all Capability Package writes target. The installer
+// uses single-bucket atomic batches; cross-bucket batches are not supported
+// by the NATS atomic-batch protocol.
 const CoreBucket = "core-kv"
 
 // PackageVertexPrefix is the Contract #1 vertex prefix the installer
@@ -78,14 +78,21 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 
 	res := &InstallResult{PackageName: def.Name, PackageVersion: def.Version}
 
-	// Step 1 — dependency warnings (Phase 1: warn-and-proceed).
+	// Pre-flight: confirm core-kv bucket exists before any KV operation.
+	// If bootstrap has not run, the bucket is absent and we return a clear
+	// actionable error instead of a raw NATS stream-not-found message.
+	if err := i.checkCoreBucketExists(ctx); err != nil {
+		return nil, err
+	}
+
+	// Step 1 — dependency warnings (warn-and-proceed; install order is the
+	// operator's responsibility).
 	for _, dep := range def.Depends {
 		if dep == "" {
 			continue
 		}
-		// No discovery loop in Phase 1; we just record the declared deps.
 		res.DependencyWarnings = append(res.DependencyWarnings,
-			fmt.Sprintf("declared dependency %q not verified (Phase 1 warn-and-proceed)", dep))
+			fmt.Sprintf("declared dependency %q not verified at install time", dep))
 	}
 
 	// Step 2 — idempotency check via the package vertex aspect.
@@ -125,6 +132,19 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 
 	// Resolve any unresolved canonical names in GrantsTo via i.RoleIDs.
 	def = i.resolveGrants(def)
+
+	// Validate all GrantsTo entries resolved to valid NanoIDs. Any
+	// remaining canonical name (non-NanoID) means the bootstrap JSON is
+	// missing the role's primordialID or the PreInstall hook did not seed
+	// it. A dangling grant link would be written silently and cause
+	// PermissionDenied at runtime with no helpful diagnostic.
+	for idx, p := range def.Permissions {
+		for _, g := range p.GrantsTo {
+			if !substrate.IsValidNanoID(g) {
+				return nil, fmt.Errorf("pkgmgr: Permission[%d] %q: GrantsTo entry %q is not a valid NanoID — role may not be installed or bootstrap JSON is missing the role ID", idx, p.OperationType, g)
+			}
+		}
+	}
 
 	// Step 3 — build the atomic batch.
 	pkgNanoID, err := substrate.NewNanoID()
@@ -219,15 +239,32 @@ type InstallResult struct {
 }
 
 // ErrVersionMismatch is returned by Install when a different version of
-// the same package is already installed. Phase 2 will replace this
-// with an upgrade path.
+// the same package is already installed. Use `lattice-pkg uninstall <name>`
+// followed by `lattice-pkg install` to upgrade.
 var ErrVersionMismatch = errors.New("pkgmgr: installed package version differs from requested")
+
+// ErrBootstrapRequired is returned when the core-kv bucket is absent,
+// indicating bootstrap has not been run.
+var ErrBootstrapRequired = errors.New("pkgmgr: core-kv bucket not found — run bootstrap (or make up) before installing packages")
 
 // installedPackage is the partial deserialization of `vtx.package.<id>.manifest`.
 type installedPackage struct {
 	Name    string
 	Version string
 	Key     string // package vertex key
+}
+
+// checkCoreBucketExists probes the core-kv bucket and returns
+// ErrBootstrapRequired if it is absent (bootstrap has not been run).
+// The probe is a lightweight KVListKeys call that fails fast if the
+// underlying NATS stream does not exist.
+func (i *Installer) checkCoreBucketExists(ctx context.Context) error {
+	_, err := i.Conn.KVListKeys(ctx, CoreBucket)
+	if err != nil {
+		// Any error opening the bucket means it doesn't exist yet.
+		return fmt.Errorf("%w", ErrBootstrapRequired)
+	}
+	return nil
 }
 
 // findInstalledPackage scans `vtx.package.>` and returns the first

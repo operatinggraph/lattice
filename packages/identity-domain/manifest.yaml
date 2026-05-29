@@ -1,12 +1,10 @@
 name: identity-domain
 version: 0.1.0
 description: |
-  Identity vertex creation, claim, and state-machine management. Replaces
-  the bootstrap-seeded identity DDL (Story 4.1 / 4.6) after kernel
-  minimization (Story 4.7). The install seed.go PreInstall hook seeds
-  the 3 user-facing roles (consumer, frontOfHouse, backOfHouse) via
-  substrate-direct writes; the atomic batch then seeds the identity DDL
-  + permission grants.
+  Identity vertex creation, claim, and state-machine management. Provides
+  CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity. Depends on
+  rbac-domain. The PreInstall hook seeds the consumer, frontOfHouse, and
+  backOfHouse roles before the main install batch runs.
 depends:
   - rbac-domain
 declares:

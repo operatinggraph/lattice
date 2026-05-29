@@ -5,7 +5,7 @@ description: |
   per-secondary incident-edge enumeration) + operator-approved merge
   (MergeIdentity op).
 depends:
-  - identity-domain   # in-bootstrap identity DDL; Phase 1 warns-and-proceeds
+  - identity-domain
 declares:
   ddls:
     - canonicalName: identityHygiene

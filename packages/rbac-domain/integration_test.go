@@ -1,11 +1,8 @@
-// Story 3.6 (ported in 4.7 cleanup) — RBAC integration tests for the
-// rbac-domain Capability Package.
+// RBAC integration tests for the rbac-domain Capability Package.
 //
-// The pre-4.7 form had 5 separate DDLs (role / permission / holdsRole /
-// grantsPermission / reportsTo). The post-4.7 form has ONE `rbac` DDL
-// with 10 op branches and the holdsRole + grantedBy link key shapes.
-// The tests are structure-agnostic — they submit ops and assert
-// outcomes through the production commit pipeline + Capability KV.
+// One `rbac` DDL handles 10 op branches with holdsRole + grantedBy
+// link key shapes. Tests submit ops and assert outcomes through the
+// production commit pipeline + Capability KV.
 //
 // Coverage:
 //  1. TestRoleMgmt_CreateRole          — vtx.role.<X> + canonicalName + description

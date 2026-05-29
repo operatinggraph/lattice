@@ -30,8 +30,8 @@ func Lenses() []pkgmgr.LensSpec {
 // >= 0.85, and for each pair enumerates the secondary's (higher-keyed
 // member) inbound + outbound link vertex keys via `collect(DISTINCT)`.
 //
-// The threshold is hard-coded for Phase 1 (operator-configurable is
-// Phase 2 via a Lens `parameters` aspect + executor parameterization).
+// The threshold is hard-coded at 0.85; operator-configurable thresholds
+// are a future improvement via a Lens `parameters` aspect.
 const duplicateCandidatesSpec = `MATCH (a:identity), (b:identity)
 WHERE a.key < b.key
   AND a.state IN ['unclaimed', 'claimed']

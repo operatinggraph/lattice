@@ -4,12 +4,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations. One DDL —
 // `identity` — handles CreateUnclaimedIdentity, UpdateIdentityState,
-// ClaimIdentity.
-//
-// Verbatim copy of the post-Story-4.6 trimmed identity DDL that
-// formerly lived in internal/bootstrap/identity_ddl.go. State machine:
-// unclaimed → claimed; merged is set only by identity-hygiene's
-// MergeIdentity.
+// ClaimIdentity. State machine: unclaimed → claimed; merged is set only
+// by identity-hygiene's MergeIdentity.
 //
 // Architectural rules: known-key reads only. The duplicate-detection
 // index lookups (vtx.identityindex.*) use crypto.sha256NanoID-derived
@@ -24,7 +20,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"UpdateIdentityState",
 				"ClaimIdentity",
 			},
-			Description: "Identity domain DDL (Story 4.7 — moved from bootstrap kernel). " +
+			Description: "Identity domain DDL. " +
 				"Vertex shape: vtx.identity.<NanoID>, class=identity. " +
 				"Aspects: name (sensitive, required, maxLen 200), email (sensitive, lowercase-normalized), " +
 				"phone (sensitive, E.164-normalized), state (enum: unclaimed|claimed|merged), " +
@@ -70,9 +66,9 @@ func DDLs() []pkgmgr.DDLSpec {
 	}
 }
 
-// identityDDLScript is the verbatim post-Story-4.6 trimmed identity DDL
-// script. State machine: unclaimed -> claimed. The merged state is set
-// only by the identity-hygiene package's MergeIdentity script.
+// identityDDLScript is the identity DDL Starlark script. State machine:
+// unclaimed -> claimed. The merged state is set only by the
+// identity-hygiene package's MergeIdentity script.
 const identityDDLScript = `
 def make_update(key, data):
     return {"op": "update", "key": key, "document": {"isDeleted": False, "data": data}}

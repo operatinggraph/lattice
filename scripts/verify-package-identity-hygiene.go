@@ -9,7 +9,8 @@
 //  1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
 //  8 DDL aspects: .canonicalName=identityHygiene,
 //                 .permittedCommands=[MergeIdentity], .description, .script,
-//                 .inputSchema, .outputSchema, .fieldDescription, .examples (Story 5.1)
+//                 .inputSchema, .outputSchema, .fieldDescription, .examples
+//    Each aspect also validated for correct vertexKey + localName envelope fields.
 //  1 Lens meta-vertex (vtx.meta.<NanoID>) with class=meta.lens
 //  5 Lens aspects: .canonicalName=duplicateCandidates, .spec (contains
 //    secondaryInboundEdges + secondaryOutboundEdges + levenshteinRatio),
@@ -29,7 +30,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -39,19 +39,20 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/scripts/pkgverify"
 )
 
 const (
-	hygienePackageName     = "identity-hygiene"
-	hygieneDDLCanonical    = "identityHygiene"
-	hygieneLensCanonical   = "duplicateCandidates"
-	hygieneCoreKVBucket    = "core-kv"
-	hygieneMergeOp         = "MergeIdentity"
+	hygienePackageName   = "identity-hygiene"
+	hygieneDDLCanonical  = "identityHygiene"
+	hygieneLensCanonical = "duplicateCandidates"
+	hygieneCoreKVBucket  = "core-kv"
+	hygieneMergeOp       = "MergeIdentity"
 )
 
 func main() {
-	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
-	bootstrapJSONPath := envOrDefault("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
+	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
+	bootstrapJSONPath := pkgverify.EnvOrDefault("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -80,7 +81,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	allKeys, err := hygieneListAllKeys(ctx, coreKV)
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: cannot list Core KV keys: %v\n", err)
 		os.Exit(1)
@@ -103,7 +104,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	// 1. Find the identityHygiene DDL meta-vertex.
 	// -------------------------------------------------------------------------
-	hygieneDDLKey, err := hygieneFindMetaByCanonical(ctx, coreKV, allKeys, hygieneDDLCanonical)
+	hygieneDDLKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, hygieneDDLCanonical)
 	if err != nil || hygieneDDLKey == "" {
 		fail("identityHygiene DDL meta-vertex", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", hygieneDDLCanonical, err))
 	} else {
@@ -112,7 +113,7 @@ func main() {
 
 	if hygieneDDLKey != "" {
 		// 2. DDL vertex class == meta.ddl.vertexType.
-		if env, err := hygieneGetEnvelope(ctx, coreKV, hygieneDDLKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, hygieneDDLKey); err != nil {
 			fail(hygieneDDLKey+" class", fmt.Sprintf("cannot read: %v", err))
 		} else {
 			cls, _ := env["class"].(string)
@@ -131,12 +132,12 @@ func main() {
 
 		// 3. Aspect: .permittedCommands = [MergeIdentity].
 		pcKey := hygieneDDLKey + ".permittedCommands"
-		if env, err := hygieneGetEnvelope(ctx, coreKV, pcKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pcKey); err != nil {
 			fail(pcKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
-			cmds := hygieneToStringSlice(data["commands"])
-			cmdSet := hygieneToSet(cmds)
+			cmds := pkgverify.ToStringSlice(data["commands"])
+			cmdSet := pkgverify.ToSet(cmds)
 			if !cmdSet[hygieneMergeOp] {
 				fail(pcKey, fmt.Sprintf("missing command %q", hygieneMergeOp))
 			} else if len(cmds) != 1 {
@@ -144,11 +145,16 @@ func main() {
 			} else {
 				ok(fmt.Sprintf("%s contains [%s]", pcKey, hygieneMergeOp))
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, pcKey, hygieneDDLKey, "permittedCommands"); err != nil {
+				fail(pcKey+" envelope", err.Error())
+			} else {
+				ok(pcKey + " envelope shape OK")
+			}
 		}
 
 		// 4. Aspect: .description non-empty.
 		descKey := hygieneDDLKey + ".description"
-		if env, err := hygieneGetEnvelope(ctx, coreKV, descKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, descKey); err != nil {
 			fail(descKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -158,11 +164,16 @@ func main() {
 			} else {
 				ok(descKey + " non-empty")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, descKey, hygieneDDLKey, "description"); err != nil {
+				fail(descKey+" envelope", err.Error())
+			} else {
+				ok(descKey + " envelope shape OK")
+			}
 		}
 
 		// 5. Aspect: .script non-empty.
 		scriptKey := hygieneDDLKey + ".script"
-		if env, err := hygieneGetEnvelope(ctx, coreKV, scriptKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, scriptKey); err != nil {
 			fail(scriptKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -172,15 +183,25 @@ func main() {
 			} else {
 				ok(scriptKey + " non-empty")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, scriptKey, hygieneDDLKey, "script"); err != nil {
+				fail(scriptKey+" envelope", err.Error())
+			} else {
+				ok(scriptKey + " envelope shape OK")
+			}
 		}
 
-		// 5a. Story 5.1: self-description aspects.
+		// 5a. Self-description aspects.
 		for _, asp := range []string{"inputSchema", "outputSchema", "fieldDescription", "examples"} {
 			k := hygieneDDLKey + "." + asp
-			if _, err := hygieneGetEnvelope(ctx, coreKV, k); err != nil {
+			if env, err := pkgverify.GetEnvelope(ctx, coreKV, k); err != nil {
 				fail(k, fmt.Sprintf("missing: %v", err))
 			} else {
 				ok(k + " present")
+				if err := pkgverify.CheckAspectEnvelope(env, k, hygieneDDLKey, asp); err != nil {
+					fail(k+" envelope", err.Error())
+				} else {
+					ok(k + " envelope shape OK")
+				}
 			}
 		}
 	}
@@ -188,7 +209,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	// 6. Find the duplicateCandidates Lens meta-vertex.
 	// -------------------------------------------------------------------------
-	lensKey, err := hygieneFindMetaByCanonical(ctx, coreKV, allKeys, hygieneLensCanonical)
+	lensKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, hygieneLensCanonical)
 	if err != nil || lensKey == "" {
 		fail("duplicateCandidates Lens meta-vertex", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", hygieneLensCanonical, err))
 	} else {
@@ -197,7 +218,7 @@ func main() {
 
 	if lensKey != "" {
 		// 7. Lens vertex class == meta.lens.
-		if env, err := hygieneGetEnvelope(ctx, coreKV, lensKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, lensKey); err != nil {
 			fail(lensKey+" class", fmt.Sprintf("cannot read: %v", err))
 		} else {
 			cls, _ := env["class"].(string)
@@ -214,10 +235,9 @@ func main() {
 			}
 		}
 
-		// 8. Aspect: .spec exists and contains levenshteinRatio, secondaryInboundEdges,
-		//    secondaryOutboundEdges (the three query signals the brief requires).
+		// 8. Aspect: .spec exists and contains required terms.
 		specKey := lensKey + ".spec"
-		if env, err := hygieneGetEnvelope(ctx, coreKV, specKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, specKey); err != nil {
 			fail(specKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -233,11 +253,16 @@ func main() {
 			} else {
 				ok(specKey + " contains secondaryInboundEdges, secondaryOutboundEdges, levenshteinRatio")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, specKey, lensKey, "spec"); err != nil {
+				fail(specKey+" envelope", err.Error())
+			} else {
+				ok(specKey + " envelope shape OK")
+			}
 		}
 
 		// 9. Aspect: .canonicalName = duplicateCandidates.
 		cnKey := lensKey + ".canonicalName"
-		if env, err := hygieneGetEnvelope(ctx, coreKV, cnKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, cnKey); err != nil {
 			fail(cnKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -246,6 +271,11 @@ func main() {
 				fail(cnKey, fmt.Sprintf("value=%q want %q", val, hygieneLensCanonical))
 			} else {
 				ok(cnKey + " value=duplicateCandidates")
+			}
+			if err := pkgverify.CheckAspectEnvelope(env, cnKey, lensKey, "canonicalName"); err != nil {
+				fail(cnKey+" envelope", err.Error())
+			} else {
+				ok(cnKey + " envelope shape OK")
 			}
 		}
 	}
@@ -263,7 +293,7 @@ func main() {
 		if len(parts) != 3 {
 			continue
 		}
-		env, err := hygieneGetEnvelope(ctx, coreKV, key)
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
 		if err != nil {
 			continue
 		}
@@ -286,7 +316,7 @@ func main() {
 		ok(fmt.Sprintf("%s operationType=MergeIdentity", mergePermKey))
 
 		// Verify scope=any.
-		if env, err := hygieneGetEnvelope(ctx, coreKV, mergePermKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, mergePermKey); err != nil {
 			fail(mergePermKey+" scope", fmt.Sprintf("cannot read: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -307,7 +337,7 @@ func main() {
 			if _, exists := allKeys[linkKey]; !exists {
 				fail(linkKey, "grantedBy link not found")
 			} else {
-				if lenv, err := hygieneGetEnvelope(ctx, coreKV, linkKey); err != nil {
+				if lenv, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
 					fail(linkKey, fmt.Sprintf("cannot read: %v", err))
 				} else {
 					isDeleted, _ := lenv["isDeleted"].(bool)
@@ -324,7 +354,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	// 11. Package manifest.
 	// -------------------------------------------------------------------------
-	pkgKey, pkgManifestKey, err := hygieneFindPackageManifest(ctx, coreKV, allKeys, hygienePackageName)
+	pkgKey, pkgManifestKey, err := pkgverify.FindPackageManifest(ctx, coreKV, allKeys, hygienePackageName)
 	if err != nil || pkgKey == "" {
 		fail("identity-hygiene package manifest", fmt.Sprintf("vtx.package.*.manifest[name=%q] not found: %v", hygienePackageName, err))
 	} else {
@@ -332,7 +362,7 @@ func main() {
 		ok(fmt.Sprintf("package manifest exists: %s", pkgManifestKey))
 	}
 	if pkgManifestKey != "" {
-		if env, err := hygieneGetEnvelope(ctx, coreKV, pkgManifestKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pkgManifestKey); err != nil {
 			fail(pkgManifestKey+" name", fmt.Sprintf("cannot read: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -341,6 +371,11 @@ func main() {
 				fail(pkgManifestKey+" name", fmt.Sprintf("got %q want %q", name, hygienePackageName))
 			} else {
 				ok(pkgManifestKey + " name=identity-hygiene")
+			}
+			if err := pkgverify.CheckAspectEnvelope(env, pkgManifestKey, pkgKey, "manifest"); err != nil {
+				fail(pkgManifestKey+" envelope", err.Error())
+			} else {
+				ok(pkgManifestKey + " envelope shape OK")
 			}
 		}
 	}
@@ -359,102 +394,4 @@ func main() {
 	}
 	fmt.Printf("\nSuggestion: run `make down && make up` then install all three packages before re-running.\n")
 	os.Exit(1)
-}
-
-func hygieneListAllKeys(ctx context.Context, kv jetstream.KeyValue) (map[string]struct{}, error) {
-	lister, err := kv.ListKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer lister.Stop()
-	result := map[string]struct{}{}
-	for k := range lister.Keys() {
-		result[k] = struct{}{}
-	}
-	return result, nil
-}
-
-func hygieneGetEnvelope(ctx context.Context, kv jetstream.KeyValue, key string) (map[string]any, error) {
-	entry, err := kv.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	var env map[string]any
-	if err := json.Unmarshal(entry.Value(), &env); err != nil {
-		return nil, fmt.Errorf("invalid JSON for %s: %w", key, err)
-	}
-	return env, nil
-}
-
-func hygieneFindMetaByCanonical(ctx context.Context, kv jetstream.KeyValue, allKeys map[string]struct{}, wantCanonical string) (string, error) {
-	for key := range allKeys {
-		if !strings.HasPrefix(key, "vtx.meta.") {
-			continue
-		}
-		if !strings.HasSuffix(key, ".canonicalName") {
-			continue
-		}
-		env, err := hygieneGetEnvelope(ctx, kv, key)
-		if err != nil {
-			continue
-		}
-		data, _ := env["data"].(map[string]any)
-		val, _ := data["value"].(string)
-		if val == wantCanonical {
-			return strings.TrimSuffix(key, ".canonicalName"), nil
-		}
-	}
-	return "", nil
-}
-
-func hygieneFindPackageManifest(ctx context.Context, kv jetstream.KeyValue, allKeys map[string]struct{}, pkgName string) (string, string, error) {
-	for key := range allKeys {
-		if !strings.HasPrefix(key, "vtx.package.") {
-			continue
-		}
-		if !strings.HasSuffix(key, ".manifest") {
-			continue
-		}
-		env, err := hygieneGetEnvelope(ctx, kv, key)
-		if err != nil {
-			continue
-		}
-		isDeleted, _ := env["isDeleted"].(bool)
-		if isDeleted {
-			continue
-		}
-		data, _ := env["data"].(map[string]any)
-		name, _ := data["name"].(string)
-		if name == pkgName {
-			vtxKey := strings.TrimSuffix(key, ".manifest")
-			return vtxKey, key, nil
-		}
-	}
-	return "", "", nil
-}
-
-func hygieneToStringSlice(v any) []string {
-	raw, _ := v.([]any)
-	out := make([]string, 0, len(raw))
-	for _, item := range raw {
-		if s, ok := item.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func hygieneToSet(ss []string) map[string]bool {
-	m := map[string]bool{}
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

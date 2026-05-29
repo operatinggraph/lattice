@@ -26,8 +26,8 @@ Role / permission / grant management operations.
 
     lattice-pkg install packages/rbac-domain
 
-Phase 1: substrate-direct via the pkgmgr installer. The operator role
-must already exist in the kernel (it is the sole primordial role).
+The operator role must already exist in the kernel (it is the sole
+primordial role).
 
 ## Architectural notes
 
@@ -36,4 +36,4 @@ must already exist in the kernel (it is the sole primordial role).
 - For Assign / Grant ops the link key is deterministic from inputs; the
   script reads it by known key to make the op idempotent.
 - Canonical-name uniqueness is NOT enforced in the write path. Operators
-  who need uniqueness gate it upstream (Phase 2 concern).
+  who need uniqueness gate it upstream.

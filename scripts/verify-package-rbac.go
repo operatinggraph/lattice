@@ -7,7 +7,8 @@
 //
 //  1 DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
 //  8 DDL aspects: .canonicalName=rbac, .permittedCommands (10 ops), .description, .script,
-//                 .inputSchema, .outputSchema, .fieldDescription, .examples (Story 5.1)
+//                 .inputSchema, .outputSchema, .fieldDescription, .examples
+//    Each aspect also validated for correct vertexKey + localName envelope fields.
 // 10 permission vertices (vtx.permission.<NanoID>) — one per op
 // 10 grantedBy link keys (each permission → operator role)
 //  1 package vertex (vtx.package.<NanoID>)
@@ -23,7 +24,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -34,6 +34,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/scripts/pkgverify"
 )
 
 const (
@@ -50,8 +51,8 @@ var rbacExpectedOps = []string{
 }
 
 func main() {
-	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
-	bootstrapJSONPath := envOrDefault("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
+	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
+	bootstrapJSONPath := pkgverify.EnvOrDefault("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -81,7 +82,7 @@ func main() {
 	}
 
 	// Snapshot all keys in core-kv into a map for O(1) lookup.
-	allKeys, err := listAllKeys(ctx, coreKV)
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: cannot list Core KV keys: %v\n", err)
 		os.Exit(1)
@@ -105,7 +106,7 @@ func main() {
 	// 1. Find the rbac DDL meta-vertex by scanning vtx.meta.* .canonicalName
 	//    aspects and matching value=rbac.
 	// -------------------------------------------------------------------------
-	rbacDDLKey, err := findMetaVertexByCanonicalName(ctx, coreKV, allKeys, rbacDDLCanonical)
+	rbacDDLKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, rbacDDLCanonical)
 	if err != nil || rbacDDLKey == "" {
 		fail("rbac DDL meta-vertex", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", rbacDDLCanonical, err))
 	} else {
@@ -114,7 +115,7 @@ func main() {
 
 	if rbacDDLKey != "" {
 		// 2. DDL vertex class == meta.ddl.vertexType.
-		if env, err := getEnvelope(ctx, coreKV, rbacDDLKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, rbacDDLKey); err != nil {
 			fail(rbacDDLKey+" class", fmt.Sprintf("cannot read: %v", err))
 		} else {
 			cls, _ := env["class"].(string)
@@ -131,9 +132,9 @@ func main() {
 			}
 		}
 
-		// 3. Aspect: .canonicalName = rbac.
+		// 3. Aspect: .canonicalName = rbac. Also validate envelope shape.
 		cnKey := rbacDDLKey + ".canonicalName"
-		if env, err := getEnvelope(ctx, coreKV, cnKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, cnKey); err != nil {
 			fail(cnKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -143,16 +144,21 @@ func main() {
 			} else {
 				ok(cnKey + " value=rbac")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, cnKey, rbacDDLKey, "canonicalName"); err != nil {
+				fail(cnKey+" envelope", err.Error())
+			} else {
+				ok(cnKey + " envelope shape OK")
+			}
 		}
 
 		// 4. Aspect: .permittedCommands contains all 10 ops.
 		pcKey := rbacDDLKey + ".permittedCommands"
-		if env, err := getEnvelope(ctx, coreKV, pcKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pcKey); err != nil {
 			fail(pcKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
-			cmds := toStringSlice(data["commands"])
-			cmdSet := toSet(cmds)
+			cmds := pkgverify.ToStringSlice(data["commands"])
+			cmdSet := pkgverify.ToSet(cmds)
 			allPresent := true
 			for _, op := range rbacExpectedOps {
 				if !cmdSet[op] {
@@ -167,11 +173,16 @@ func main() {
 			if allPresent && len(cmds) == len(rbacExpectedOps) {
 				ok(fmt.Sprintf("%s contains all %d commands", pcKey, len(rbacExpectedOps)))
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, pcKey, rbacDDLKey, "permittedCommands"); err != nil {
+				fail(pcKey+" envelope", err.Error())
+			} else {
+				ok(pcKey + " envelope shape OK")
+			}
 		}
 
 		// 5. Aspect: .description non-empty.
 		descKey := rbacDDLKey + ".description"
-		if env, err := getEnvelope(ctx, coreKV, descKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, descKey); err != nil {
 			fail(descKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -181,11 +192,16 @@ func main() {
 			} else {
 				ok(descKey + " non-empty")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, descKey, rbacDDLKey, "description"); err != nil {
+				fail(descKey+" envelope", err.Error())
+			} else {
+				ok(descKey + " envelope shape OK")
+			}
 		}
 
 		// 6. Aspect: .script non-empty.
 		scriptKey := rbacDDLKey + ".script"
-		if env, err := getEnvelope(ctx, coreKV, scriptKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, scriptKey); err != nil {
 			fail(scriptKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -195,11 +211,16 @@ func main() {
 			} else {
 				ok(scriptKey + " non-empty")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, scriptKey, rbacDDLKey, "script"); err != nil {
+				fail(scriptKey+" envelope", err.Error())
+			} else {
+				ok(scriptKey + " envelope shape OK")
+			}
 		}
 
-		// 6a. Story 5.1: self-description aspects.
+		// 6a. Self-description aspects.
 		isKey := rbacDDLKey + ".inputSchema"
-		if env, err := getEnvelope(ctx, coreKV, isKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, isKey); err != nil {
 			fail(isKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -208,9 +229,14 @@ func main() {
 			} else {
 				ok(isKey + " present")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, isKey, rbacDDLKey, "inputSchema"); err != nil {
+				fail(isKey+" envelope", err.Error())
+			} else {
+				ok(isKey + " envelope shape OK")
+			}
 		}
 		osKey := rbacDDLKey + ".outputSchema"
-		if env, err := getEnvelope(ctx, coreKV, osKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, osKey); err != nil {
 			fail(osKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -219,18 +245,33 @@ func main() {
 			} else {
 				ok(osKey + " present")
 			}
+			if err := pkgverify.CheckAspectEnvelope(env, osKey, rbacDDLKey, "outputSchema"); err != nil {
+				fail(osKey+" envelope", err.Error())
+			} else {
+				ok(osKey + " envelope shape OK")
+			}
 		}
 		fdKey := rbacDDLKey + ".fieldDescription"
-		if _, err := getEnvelope(ctx, coreKV, fdKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, fdKey); err != nil {
 			fail(fdKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			ok(fdKey + " present")
+			if err := pkgverify.CheckAspectEnvelope(env, fdKey, rbacDDLKey, "fieldDescription"); err != nil {
+				fail(fdKey+" envelope", err.Error())
+			} else {
+				ok(fdKey + " envelope shape OK")
+			}
 		}
 		exKey := rbacDDLKey + ".examples"
-		if _, err := getEnvelope(ctx, coreKV, exKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, exKey); err != nil {
 			fail(exKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			ok(exKey + " present")
+			if err := pkgverify.CheckAspectEnvelope(env, exKey, rbacDDLKey, "examples"); err != nil {
+				fail(exKey+" envelope", err.Error())
+			} else {
+				ok(exKey + " envelope shape OK")
+			}
 		}
 	}
 
@@ -238,7 +279,7 @@ func main() {
 	// 7. Find the package vertex by scanning vtx.package.*.manifest where
 	//    data.name=rbac-domain.
 	// -------------------------------------------------------------------------
-	pkgKey, pkgManifestKey, err := findPackageManifest(ctx, coreKV, allKeys, rbacPackageName)
+	pkgKey, pkgManifestKey, err := pkgverify.FindPackageManifest(ctx, coreKV, allKeys, rbacPackageName)
 	if err != nil || pkgKey == "" {
 		fail("rbac-domain package manifest", fmt.Sprintf("vtx.package.*.manifest[name=%q] not found: %v", rbacPackageName, err))
 	} else {
@@ -248,7 +289,7 @@ func main() {
 
 	// Verify manifest carries the correct name.
 	if pkgManifestKey != "" {
-		if env, err := getEnvelope(ctx, coreKV, pkgManifestKey); err != nil {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pkgManifestKey); err != nil {
 			fail(pkgManifestKey+" name", fmt.Sprintf("cannot read: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
@@ -257,6 +298,12 @@ func main() {
 				fail(pkgManifestKey+" name", fmt.Sprintf("got %q want %q", name, rbacPackageName))
 			} else {
 				ok(pkgManifestKey + " name=rbac-domain")
+			}
+			// Manifest is an aspect of the package vertex; check envelope shape.
+			if err := pkgverify.CheckAspectEnvelope(env, pkgManifestKey, pkgKey, "manifest"); err != nil {
+				fail(pkgManifestKey+" envelope", err.Error())
+			} else {
+				ok(pkgManifestKey + " envelope shape OK")
 			}
 		}
 	}
@@ -283,7 +330,7 @@ func main() {
 		if len(parts) != 3 {
 			continue
 		}
-		env, err := getEnvelope(ctx, coreKV, key)
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
 		if err != nil {
 			continue
 		}
@@ -320,7 +367,7 @@ func main() {
 		ok(fmt.Sprintf("%s operationType=%s", permKey, op))
 
 		// Verify scope=any.
-		env, err := getEnvelope(ctx, coreKV, permKey)
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, permKey)
 		if err == nil {
 			data, _ := env["data"].(map[string]any)
 			scope, _ := data["scope"].(string)
@@ -337,7 +384,7 @@ func main() {
 			if _, exists := allKeys[linkKey]; !exists {
 				fail(linkKey, "grantedBy link not found")
 			} else {
-				if env, err := getEnvelope(ctx, coreKV, linkKey); err != nil {
+				if env, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
 					fail(linkKey, fmt.Sprintf("cannot read: %v", err))
 				} else {
 					isDeleted, _ := env["isDeleted"].(bool)
@@ -365,113 +412,4 @@ func main() {
 	}
 	fmt.Printf("\nSuggestion: run `make down && make up && make verify-package-rbac` to reinstall from clean state.\n")
 	os.Exit(1)
-}
-
-// listAllKeys returns a set (map[string]struct{}) of all keys in the KV bucket.
-func listAllKeys(ctx context.Context, kv jetstream.KeyValue) (map[string]struct{}, error) {
-	lister, err := kv.ListKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer lister.Stop()
-	result := map[string]struct{}{}
-	for k := range lister.Keys() {
-		result[k] = struct{}{}
-	}
-	return result, nil
-}
-
-// getEnvelope fetches a single key and unmarshals it as a map.
-func getEnvelope(ctx context.Context, kv jetstream.KeyValue, key string) (map[string]any, error) {
-	entry, err := kv.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	var env map[string]any
-	if err := json.Unmarshal(entry.Value(), &env); err != nil {
-		return nil, fmt.Errorf("invalid JSON for %s: %w", key, err)
-	}
-	return env, nil
-}
-
-// findMetaVertexByCanonicalName scans vtx.meta.*.canonicalName aspects
-// and returns the vertex key (vtx.meta.<NanoID>) whose canonicalName data.value
-// matches wantCanonical.
-func findMetaVertexByCanonicalName(ctx context.Context, kv jetstream.KeyValue, allKeys map[string]struct{}, wantCanonical string) (string, error) {
-	for key := range allKeys {
-		// Match vtx.meta.<id>.canonicalName
-		if !strings.HasPrefix(key, "vtx.meta.") {
-			continue
-		}
-		if !strings.HasSuffix(key, ".canonicalName") {
-			continue
-		}
-		env, err := getEnvelope(ctx, kv, key)
-		if err != nil {
-			continue
-		}
-		data, _ := env["data"].(map[string]any)
-		val, _ := data["value"].(string)
-		if val == wantCanonical {
-			// Strip the .canonicalName suffix.
-			return strings.TrimSuffix(key, ".canonicalName"), nil
-		}
-	}
-	return "", nil
-}
-
-// findPackageManifest scans vtx.package.*.manifest and returns (pkgVertexKey, manifestKey)
-// for the first entry whose data.name matches pkgName.
-func findPackageManifest(ctx context.Context, kv jetstream.KeyValue, allKeys map[string]struct{}, pkgName string) (string, string, error) {
-	for key := range allKeys {
-		if !strings.HasPrefix(key, "vtx.package.") {
-			continue
-		}
-		if !strings.HasSuffix(key, ".manifest") {
-			continue
-		}
-		env, err := getEnvelope(ctx, kv, key)
-		if err != nil {
-			continue
-		}
-		isDeleted, _ := env["isDeleted"].(bool)
-		if isDeleted {
-			continue
-		}
-		data, _ := env["data"].(map[string]any)
-		name, _ := data["name"].(string)
-		if name == pkgName {
-			vtxKey := strings.TrimSuffix(key, ".manifest")
-			return vtxKey, key, nil
-		}
-	}
-	return "", "", nil
-}
-
-// toStringSlice converts an any (expected []any of strings) to []string.
-func toStringSlice(v any) []string {
-	raw, _ := v.([]any)
-	out := make([]string, 0, len(raw))
-	for _, item := range raw {
-		if s, ok := item.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// toSet converts a []string to a map[string]bool for O(1) lookup.
-func toSet(ss []string) map[string]bool {
-	m := map[string]bool{}
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

@@ -1,5 +1,5 @@
-// Story 4.2 (ported in 4.7 cleanup) — CreateUnclaimedIdentity (FR1)
-// integration tests for the identity-domain Capability Package.
+// CreateUnclaimedIdentity (FR1) integration tests for the identity-domain
+// Capability Package.
 //
 // Pipeline: real Capability authorizer, real DDL cache (resolves the
 // identity DDL installed by testutil.InstallPhase1Packages), real
@@ -10,7 +10,7 @@
 //  2. TestCreateUnclaimed_MissingName_Rejected     — payload missing name
 //  3. TestCreateUnclaimed_MissingBothContacts      — name only, no email/phone
 //  4. TestCreateUnclaimed_NormalizesEmailCase      — email uppercased -> lowercase
-//  5. TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed — Story 4.6 walk-back
+//  5. TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed — duplicate email walk-back
 //  6. TestCreateUnclaimed_NonStaffActor_Denied     — consumer role denied at step 3
 //  7. TestCreateUnclaimed_Idempotent               — same requestId twice
 //  8. TestCreateUnclaimed_ClaimKeyHashOnly         — claimKey aspect = hash only (NFR-S6)
@@ -168,8 +168,9 @@ func TestCreateUnclaimed_NormalizesEmailCase(t *testing.T) {
 	}
 }
 
-// Story 4.6 walk-back: duplicate emails do NOT change state. State stays
-// unclaimed; only the IdentityCreated event's `duplicate` flag is set.
+// TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed: duplicate emails do
+// NOT change state. State stays unclaimed; only the IdentityCreated event's
+// `duplicate` flag is set.
 func TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed(t *testing.T) {
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-dupemail")
@@ -211,9 +212,10 @@ func TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed(t *testing.T) {
 
 	stateAspect := readAspectData(t, ctx, conn, identityKey+".state")
 	if got, _ := stateAspect["value"].(string); got != "unclaimed" {
-		t.Fatalf("state = %q, want unclaimed (Story 4.6 walk-back)", got)
+		t.Fatalf("state = %q, want unclaimed (duplicate does not change state)", got)
 	}
-	// IdentityFlaggedForReview must NOT be emitted (Story 4.6 walk-back).
+	// IdentityFlaggedForReview must NOT be emitted — duplicate detection
+	// sets possibleDuplicateFlag on the response only, not the state.
 	assertTrackerNotEvent(t, ctx, conn, reqID, "IdentityFlaggedForReview")
 	assertTrackerEvent(t, ctx, conn, reqID, "IdentityCreated")
 }

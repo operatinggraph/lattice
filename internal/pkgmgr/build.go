@@ -43,16 +43,16 @@ func (i *Installer) buildInstallBatch(
 	// Fail-fast: validate all DDLSpec self-description fields before writing any entries.
 	for idx, d := range def.DDLs {
 		if d.InputSchema == "" {
-			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: InputSchema required (Story 5.1)", idx, d.CanonicalName)
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: InputSchema required", idx, d.CanonicalName)
 		}
 		if d.OutputSchema == "" {
-			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: OutputSchema required (Story 5.1)", idx, d.CanonicalName)
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: OutputSchema required", idx, d.CanonicalName)
 		}
 		if len(d.FieldDescription) == 0 {
-			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: FieldDescription required (Story 5.1)", idx, d.CanonicalName)
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: FieldDescription required", idx, d.CanonicalName)
 		}
 		if len(d.Examples) == 0 {
-			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: Examples required (Story 5.1)", idx, d.CanonicalName)
+			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] %q: Examples required", idx, d.CanonicalName)
 		}
 	}
 
@@ -96,7 +96,7 @@ func (i *Installer) buildInstallBatch(
 			return nil, nil, err
 		}
 		addCreate(ddlKey+".script", sc)
-		// Story 5.1: inputSchema
+		// Self-description aspects: inputSchema, outputSchema, fieldDescription, examples.
 		fdMap := make(map[string]any, len(d.FieldDescription))
 		for k, v := range d.FieldDescription {
 			fdMap[k] = v
@@ -202,9 +202,9 @@ func (i *Installer) buildInstallBatch(
 			if len(role) > len("vtx.role.") && role[:len("vtx.role.")] == "vtx.role." {
 				roleID = role[len("vtx.role."):]
 			}
-			// Story 4.7: link canonical name is `grantedBy` (permission
-			// granted by role). Direction permission → role per Contract
-			// #1 §1.1: permissions are conceptually later in graph growth.
+			// Link canonical name is `grantedBy` (permission granted by role).
+			// Direction permission → role per Contract #1 §1.1: permissions
+			// are conceptually later in graph growth.
 			linkKey := "lnk.permission." + permID + ".grantedBy.role." + roleID
 			linkEnv, err := i.makeLinkEnvelope(linkKey, "vtx.permission."+permID, "vtx.role."+roleID,
 				"grantedBy", "grantedBy", nil, createdByOp, now)
@@ -273,6 +273,9 @@ func (i *Installer) buildTombstoneBatch(ctx context.Context, keys []string) ([]s
 		// failure cannot leave a mixed state. Per-key OCC would force a
 		// retry loop on benign concurrent reprojection and adds no
 		// safety the atomic-batch failure mode does not already provide.
+		// Note: concurrent Processor writes to these keys between the read
+		// phase and batch submission will be silently overwritten. Per-key
+		// sequence numbers in the tombstone batch are a future improvement.
 		ops = append(ops, substrate.BatchOp{
 			Bucket: CoreBucket,
 			Key:    k,

@@ -1,5 +1,5 @@
-// Story 4.3 (ported in 4.7 cleanup) — Two-Phase Identity Claim (FR2,
-// FR5) integration tests for the identity-domain Capability Package.
+// Two-Phase Identity Claim (FR2, FR5) integration tests for the
+// identity-domain Capability Package.
 //
 // Tests chain a CreateUnclaimedIdentity op (arrange) with a
 // ClaimIdentity op (act) so both ops are exercised together. All

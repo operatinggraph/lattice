@@ -1,9 +1,8 @@
-// Story 4.6 Surface-B (Phase-1 hygiene carry) — shared test helpers for
-// identity-hygiene package end-to-end tests.
+// Shared test helpers for identity-hygiene package end-to-end tests.
 //
 // These live in an external test package (`identityhygiene_test`) so they
 // exercise only the public Lattice surface that any Capability Package would
-// see in production. The pattern mirrors packages/identity-domain/testhelpers_test.go.
+// see in production.
 package identityhygiene_test
 
 import (

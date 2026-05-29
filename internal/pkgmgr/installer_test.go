@@ -70,6 +70,12 @@ func newInstallerHarness(t *testing.T) (context.Context, *substrate.Conn, *Insta
 	// Stable Now so test assertions are deterministic.
 	fixed := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
 	inst.Now = func() time.Time { return fixed }
+	// Seed a valid mock NanoID for the "operator" role so the grant
+	// validation guard in Install passes without a real bootstrap.
+	// Must be exactly 20 chars from the Contract #1 NanoID alphabet.
+	inst.RoleIDs = map[string]string{
+		"operator": "Hj4kPmRtw9nbCxz5vQ2y",
+	}
 	return ctx, conn, inst
 }
 

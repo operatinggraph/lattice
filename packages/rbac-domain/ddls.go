@@ -20,9 +20,9 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     to verify pre-existence (idempotent) or absence (so we don't
 //     create twice). No "list all grants for role" enumeration.
 //   - Canonical-name uniqueness for new role/permission vertices is NOT
-//     enforced here — that's an installer-level concern (Phase 2). The
-//     script assigns a fresh NanoID and writes; if the operator wants
-//     to forbid duplicate canonical names, that gate is upstream.
+//     enforced here — that's an upstream concern. The script assigns a
+//     fresh NanoID and writes; duplicate-name gates are the caller's
+//     responsibility.
 //
 // Caller's ContextHint.Reads MUST include:
 //   - CreateRole / CreatePermission: nothing (script generates the new NanoID)
@@ -34,7 +34,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //   - GrantPermission / RevokePermission: permKey, roleKey, and the
 //     deterministic grantedBy link key
 //
-// Link key shapes (Story 4.7):
+// Link key shapes:
 //
 //	lnk.<actorType>.<actorId>.holdsRole.role.<roleId>
 //	lnk.permission.<permId>.grantedBy.role.<roleId>

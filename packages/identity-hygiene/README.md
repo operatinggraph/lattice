@@ -47,15 +47,13 @@ After `lattice-pkg install packages/identity-hygiene`:
   read the `duplicate-candidates` bucket directly (or via a separate
   read-CLI in a future story).
 - It does not configure the levenshtein threshold — 0.85 is hard-coded.
-  Phase 2 (or a future package version) may parameterize this via a
-  Lens `parameters` aspect.
+  A future package version may parameterize this via a Lens `parameters`
+  aspect.
 - It does not migrate existing data. Pre-package identities flow through
   the lens on first CDC tick after install.
 
-## Phase 1 carries
+## Install notes
 
-- Install is substrate-direct (Story 5.3 / Phase 2 will route through
-  `CreateMetaVertex` ops).
+- Install writes directly to `core-kv` as an atomic batch.
 - Uninstall is soft-delete only (tombstones remain queryable for audit).
-- No real NATS auth — the installer uses the admin actor NanoID from
-  `lattice.bootstrap.json`.
+- The installer uses the admin actor NanoID from `lattice.bootstrap.json`.
