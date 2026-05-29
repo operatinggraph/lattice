@@ -21,12 +21,14 @@ Plan: `_bmad-output/planning-artifacts/sprint-change-proposal-2026-05-28.md`. Pr
 | Story | Title | Status | Commit |
 |---|---|---|---|
 | 1.5.1 | Substrate write-path contracts (ctx + per-key revisions) | ✅ SHIPPED (CI green) | `09edf5c` |
-| 1.5.3 | UpdateMetaVertex expansion | 🔧 in dev | — |
-| 1.5.2 | DDL tombstone coherence (M6) | queued (after 1.5.3) | — |
+| 1.5.3 | UpdateMetaVertex expansion | ✅ SHIPPED (CI green) | `d58311c` |
+| 1.5.2 | DDL tombstone coherence (M6) | 🔧 in dev | — |
 | 1.5.4 | Capability auth freshness coherence (B4) | queued (Wave A) | — |
 | 1.5.5 | Route cap-pkg installs through Processor (M5) | queued (Wave B; needs 1.5.1) | — |
 | 1.5.7 | Contract conformance suite + freeze | queued (Wave C; needs 1.5.1+1.5.3) | — |
 | 1.5.6 | Re-enable Hello Lattice M4–M6 + flip Gate 5 | queued (Wave D) | — |
+
+**1.5.3 note:** CR clean (0 P0/P1, 2 P2 + 1 nit), all adjudicated and fixed inline by Winston: permittedCommands per-element string check (parity with Create); fail-the-forward-op when a changed field's prior value is unavailable (a null prior would bake an un-submittable rollback) instead of capturing nil; doc wording. Fixed a latent description-blanking bug as part of "mutate only fields present".
 
 **1.5.1 note:** CR found one Major (M-1) — bootstrap seeding lost its timeout bound because the locked design's premise (`readyCtx` governs seeding) was wrong (`main.go` seeds with `context.Background()` before `readyCtx` exists). Winston fix: bound `SeedPrimordial` with a `BOOTSTRAP_READY_TIMEOUT_SEC`-derived context in `cmd/bootstrap/main.go`. All other CR observations confirmed the impl solid. Empirical revision==stream-sequence assertion passed on live NATS.
 
