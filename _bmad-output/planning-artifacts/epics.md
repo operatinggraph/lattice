@@ -289,6 +289,12 @@ A developer can go from `git clone` to a working vertical slice — one entity t
 **FRs covered:** FR43, FR44, FR45, FR46, FR48, FR52, FR55
 **Phase 1 gates delivered:** "Hello Lattice" < 60 min from `git clone`, verified by external tester (gate 5)
 
+### Phase 1.5: Hardening Block
+Post-Phase-1 remediation, not new capability. Triggered by (a) the `bmad-code-review` adversarial pass having run only on Epics 5–6 originally, and (b) Gate 5 (Hello Lattice) shipping partial with M4–M6 deferred behind three architectural gaps. A full six-component CR sweep (Refractor, Bootstrap/Kernel, Core KV, Processor, AI-agent, Capability packages) was run; inline-fixable findings are already merged (CI-green). Seven stories carry the larger items. Closes the substrate-direct install pattern (installs route through the Processor), hardens the write-path and kernel meta-DDL contracts, makes capability auth freshness deterministic, re-enables Gate 5 to a full pass, and freezes contract shapes behind a conformance suite. **Prerequisite for Phase 2.** See `sprint-change-proposal-2026-05-28.md` and the six `phase-1.5-cr-*.md` reports.
+**Stories:** 1.5.1 Substrate write-path contracts · 1.5.2 DDL tombstone coherence (M6) · 1.5.3 UpdateMetaVertex expansion · 1.5.4 Capability auth freshness coherence · 1.5.5 Route package installs through Processor (M5) · 1.5.6 Re-enable Hello Lattice M4–M6 + Gate 5 full pass · 1.5.7 Contract conformance suite + freeze
+**Gates delivered:** Gate 5 full pass (M1–M6); contract conformance suite green
+**Phase 2 readiness:** all 7 stories CR'd + done, Gate 5 `passed:true`, conformance suite green, substrate-direct install grep-clean
+
 ---
 
 **Phase 2+ Deferred FRs:** FR17, FR18, FR26–33, FR35–42, FR47, FR49, FR50, FR51, FR54, FR58
