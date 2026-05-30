@@ -79,6 +79,12 @@ const (
 	// Steps 6/8 typed failure codes.
 	ErrCodeDDLViolation     ErrorCode = "DDLViolation"
 	ErrCodeRevisionConflict ErrorCode = "RevisionConflict"
+	// ErrCodeProtectedKey is the step-8 authoritative backstop: any update or
+	// tombstone whose root document carries data.protected == true is rejected
+	// at commit time, path-independent (InstallPackage, UninstallPackage,
+	// meta-root, or any future DDL). It is the kernel/auth bricking guard —
+	// the script-level checks are best-effort defense-in-depth only.
+	ErrCodeProtectedKey ErrorCode = "ProtectedKey"
 	// Step-3 Capability KV auth codes.
 	// ErrCodeAuthInfrastructureFailure surfaces a NATS / Capability KV outage
 	// to the reply path. The CapabilityAuthorizer returns an error (not a

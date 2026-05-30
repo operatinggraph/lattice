@@ -1,12 +1,9 @@
 package pkgmgr
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
+	"crypto/sha256"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -15,29 +12,48 @@ import (
 // meta-vertices (`vtx.meta.<NanoID>`).
 const metaVertexPrefix = "vtx.meta."
 
-// buildInstallBatch constructs the full atomic-batch op list for one
-// install. Returns the ops + the flat list of every Core KV key it
-// will write (mirrored into the package's manifest aspect so uninstall
-// can enumerate).
+// installMutation is one entry in the InstallPackage op payload's
+// `mutations` list — a LOGICAL document (no provenance). The Processor
+// stamps createdAt/createdBy/createdByOp at step 8 from the install actor.
+type installMutation struct {
+	Op       string         `json:"op"`
+	Key      string         `json:"key"`
+	Document map[string]any `json:"document"`
+}
+
+// buildInstallBatch constructs the full mutation manifest for one install
+// as LOGICAL documents (Story 1.5.5). Returns the mutations + the flat
+// list of every Core KV key it will write (mirrored into the package's
+// manifest aspect so uninstall can enumerate). The mutations are shipped
+// in the InstallPackage op payload and committed atomically by the
+// Processor, which stamps provenance.
 func (i *Installer) buildInstallBatch(
 	def Definition,
 	pkgKey string,
-	ddlIDs, lensIDs, permIDs []string,
-	now time.Time,
-) ([]substrate.BatchOp, []string, error) {
-	var ops []substrate.BatchOp
+	ddlIDs, lensIDs, permIDs, roleIDs []string,
+) ([]installMutation, []string, error) {
+	var ops []installMutation
 	var declared []string
 
-	createdByOp := "pkg-install:" + def.Name
-
-	addCreate := func(key string, env []byte) {
-		ops = append(ops, substrate.BatchOp{
-			Bucket:     CoreBucket,
-			Key:        key,
-			Value:      env,
-			CreateOnly: true,
-		})
+	addCreate := func(key string, doc map[string]any) {
+		ops = append(ops, installMutation{Op: "create", Key: key, Document: doc})
 		declared = append(declared, key)
+	}
+
+	// Role vertices + aspects + canonical-name index (Story 1.5.5: folded
+	// into the install batch — formerly identity-domain's substrate-direct
+	// PreInstall). Deterministic NanoIDs make re-install idempotent; the
+	// roleindex vertex lets cross-package canonical lookups resolve.
+	for idx, r := range def.Roles {
+		roleKey := "vtx.role." + roleIDs[idx]
+		addCreate(roleKey, docVertex("role", nil))
+		addCreate(roleKey+".canonicalName", docAspect(roleKey, "canonicalName", "canonicalName",
+			map[string]any{"value": r.CanonicalName}))
+		addCreate(roleKey+".description", docAspect(roleKey, "description", "description",
+			map[string]any{"text": r.Description}))
+		indexKey := "vtx.roleindex." + sha256NanoID("rolecanonical:"+r.CanonicalName)
+		addCreate(indexKey, docVertex("roleindex",
+			map[string]any{"canonicalName": r.CanonicalName, "roleId": roleIDs[idx]}))
 	}
 
 	// Fail-fast: validate all DDLSpec self-description fields before writing any entries.
@@ -63,39 +79,15 @@ func (i *Installer) buildInstallBatch(
 		if class == "" {
 			class = "meta.ddl.vertexType"
 		}
-		vtxEnv, err := i.makeDocEnvelope(ddlKey, class, nil, createdByOp, now)
-		if err != nil {
-			return nil, nil, fmt.Errorf("pkgmgr: DDL[%d] vertex: %w", idx, err)
-		}
-		addCreate(ddlKey, vtxEnv)
-		// canonicalName
-		cn, err := i.makeAspectEnvelope(ddlKey+".canonicalName", ddlKey, "canonicalName", "canonicalName",
-			map[string]any{"value": d.CanonicalName}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".canonicalName", cn)
-		// permittedCommands
-		pc, err := i.makeAspectEnvelope(ddlKey+".permittedCommands", ddlKey, "permittedCommands", "permittedCommands",
-			map[string]any{"commands": d.PermittedCommands}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".permittedCommands", pc)
-		// description
-		desc, err := i.makeAspectEnvelope(ddlKey+".description", ddlKey, "description", "description",
-			map[string]any{"text": d.Description}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".description", desc)
-		// script
-		sc, err := i.makeAspectEnvelope(ddlKey+".script", ddlKey, "script", "script",
-			map[string]any{"source": d.Script}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".script", sc)
+		addCreate(ddlKey, docVertex(class, nil))
+		addCreate(ddlKey+".canonicalName", docAspect(ddlKey, "canonicalName", "canonicalName",
+			map[string]any{"value": d.CanonicalName}))
+		addCreate(ddlKey+".permittedCommands", docAspect(ddlKey, "permittedCommands", "permittedCommands",
+			map[string]any{"commands": d.PermittedCommands}))
+		addCreate(ddlKey+".description", docAspect(ddlKey, "description", "description",
+			map[string]any{"text": d.Description}))
+		addCreate(ddlKey+".script", docAspect(ddlKey, "script", "script",
+			map[string]any{"source": d.Script}))
 		// Self-description aspects: inputSchema, outputSchema, fieldDescription, examples.
 		fdMap := make(map[string]any, len(d.FieldDescription))
 		for k, v := range d.FieldDescription {
@@ -109,33 +101,14 @@ func (i *Installer) buildInstallBatch(
 				"expectedOutcome": ex.ExpectedOutcome,
 			}
 		}
-		is, err := i.makeAspectEnvelope(ddlKey+".inputSchema", ddlKey, "inputSchema", "inputSchema",
-			map[string]any{"schema": d.InputSchema}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".inputSchema", is)
-		// outputSchema
-		os, err := i.makeAspectEnvelope(ddlKey+".outputSchema", ddlKey, "outputSchema", "outputSchema",
-			map[string]any{"schema": d.OutputSchema}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".outputSchema", os)
-		// fieldDescription
-		fd, err := i.makeAspectEnvelope(ddlKey+".fieldDescription", ddlKey, "fieldDescription", "fieldDescription",
-			map[string]any{"fieldDescriptions": fdMap}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".fieldDescription", fd)
-		// examples
-		ex, err := i.makeAspectEnvelope(ddlKey+".examples", ddlKey, "examples", "examples",
-			map[string]any{"examples": exList}, createdByOp, now)
-		if err != nil {
-			return nil, nil, err
-		}
-		addCreate(ddlKey+".examples", ex)
+		addCreate(ddlKey+".inputSchema", docAspect(ddlKey, "inputSchema", "inputSchema",
+			map[string]any{"schema": d.InputSchema}))
+		addCreate(ddlKey+".outputSchema", docAspect(ddlKey, "outputSchema", "outputSchema",
+			map[string]any{"schema": d.OutputSchema}))
+		addCreate(ddlKey+".fieldDescription", docAspect(ddlKey, "fieldDescription", "fieldDescription",
+			map[string]any{"fieldDescriptions": fdMap}))
+		addCreate(ddlKey+".examples", docAspect(ddlKey, "examples", "examples",
+			map[string]any{"examples": exList}))
 	}
 
 	// Lens meta-vertices + canonical aspects.
@@ -145,11 +118,7 @@ func (i *Installer) buildInstallBatch(
 		if class == "" {
 			class = "meta.lens"
 		}
-		vtxEnv, err := i.makeDocEnvelope(lensKey, class, nil, createdByOp, now)
-		if err != nil {
-			return nil, nil, fmt.Errorf("pkgmgr: Lens[%d] vertex: %w", idx, err)
-		}
-		addCreate(lensKey, vtxEnv)
+		addCreate(lensKey, docVertex(class, nil))
 		aspects := map[string]map[string]any{
 			"canonicalName": {"value": l.CanonicalName},
 			"spec":          {"source": l.Spec},
@@ -157,20 +126,15 @@ func (i *Installer) buildInstallBatch(
 			"bucket":        {"value": l.Bucket},
 			"engine":        {"value": l.Engine},
 		}
-		// Stable iteration order so the install op list is deterministic
-		// across invocations — important for atomic-batch reproducibility.
+		// Stable iteration order so the install mutation list is deterministic
+		// across invocations.
 		names := make([]string, 0, len(aspects))
 		for n := range aspects {
 			names = append(names, n)
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			env, err := i.makeAspectEnvelope(lensKey+"."+name, lensKey, name, name,
-				aspects[name], createdByOp, now)
-			if err != nil {
-				return nil, nil, err
-			}
-			addCreate(lensKey+"."+name, env)
+			addCreate(lensKey+"."+name, docAspect(lensKey, name, name, aspects[name]))
 		}
 	}
 
@@ -185,44 +149,25 @@ func (i *Installer) buildInstallBatch(
 		if p.Note != "" {
 			data["note"] = p.Note
 		}
-		permEnv, err := i.makeDocEnvelope(permKey, "permission", data, createdByOp, now)
-		if err != nil {
-			return nil, nil, fmt.Errorf("pkgmgr: Permission[%d] vertex: %w", idx, err)
-		}
-		addCreate(permKey, permEnv)
+		addCreate(permKey, docVertex("permission", data))
 		// Grant links — one per role canonical name in GrantsTo.
 		for _, role := range p.GrantsTo {
-			// In Phase 1 the role canonical names are translated to role IDs
-			// by the caller (see cmd/lattice-pkg/main.go). Here we accept
-			// either a canonical name OR a vtx.role.<NanoID>; if it doesn't
-			// look like a NanoID we wrap it for traceability and the caller
-			// can resolve later. Real production wiring resolves at the
-			// caller layer.
 			roleID := role
 			if len(role) > len("vtx.role.") && role[:len("vtx.role.")] == "vtx.role." {
 				roleID = role[len("vtx.role."):]
 			}
 			// Link canonical name is `grantedBy` (permission granted by role).
-			// Direction permission → role per Contract #1 §1.1: permissions
-			// are conceptually later in graph growth.
 			linkKey := "lnk.permission." + permID + ".grantedBy.role." + roleID
-			linkEnv, err := i.makeLinkEnvelope(linkKey, "vtx.permission."+permID, "vtx.role."+roleID,
-				"grantedBy", "grantedBy", nil, createdByOp, now)
-			if err != nil {
-				return nil, nil, err
-			}
-			addCreate(linkKey, linkEnv)
+			addCreate(linkKey, docLink("vtx.permission."+permID, "vtx.role."+roleID,
+				"grantedBy", "grantedBy", nil))
 		}
+		_ = idx
 	}
 
 	// Package vertex + manifest aspect (carries the declared-keys list
 	// for uninstall enumeration).
-	pkgEnv, err := i.makeDocEnvelope(pkgKey, "package",
-		map[string]any{"name": def.Name, "version": def.Version}, createdByOp, now)
-	if err != nil {
-		return nil, nil, err
-	}
-	addCreate(pkgKey, pkgEnv)
+	addCreate(pkgKey, docVertex("package",
+		map[string]any{"name": def.Name, "version": def.Version}))
 
 	manifestData := map[string]any{
 		"name":         def.Name,
@@ -232,103 +177,66 @@ func (i *Installer) buildInstallBatch(
 		"declaredKeys": append([]string{}, declared...), // snapshot before we add the manifest aspect itself
 	}
 	manifestKey := pkgKey + ".manifest"
-	manifestEnv, err := i.makeAspectEnvelope(manifestKey, pkgKey, "manifest", "manifest",
-		manifestData, createdByOp, now)
-	if err != nil {
-		return nil, nil, err
-	}
-	addCreate(manifestKey, manifestEnv)
+	addCreate(manifestKey, docAspect(pkgKey, "manifest", "manifest", manifestData))
 
 	return ops, declared, nil
 }
 
-// buildTombstoneBatch reads the live envelope of each key and emits a
-// CreateOnly=false Put with isDeleted=true. We need the current
-// envelope's class + provenance fields so the tombstone is a valid
-// Contract #1 envelope. Missing keys are silently skipped.
-func (i *Installer) buildTombstoneBatch(ctx context.Context, keys []string) ([]substrate.BatchOp, error) {
-	var ops []substrate.BatchOp
-	for _, k := range keys {
-		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf("pkgmgr: tombstone read %s: %w", k, err)
-		}
-		var env map[string]any
-		if err := json.Unmarshal(entry.Value, &env); err != nil {
-			return nil, fmt.Errorf("pkgmgr: tombstone parse %s: %w", k, err)
-		}
-		env["isDeleted"] = true
-		env["lastModifiedAt"] = i.Now().Format(time.RFC3339Nano)
-		env["lastModifiedBy"] = i.AdminActor
-		env["lastModifiedByOp"] = "pkg-uninstall"
-		data, err := json.Marshal(env)
-		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: tombstone marshal %s: %w", k, err)
-		}
-		// Tombstone batch uses unconditional puts (no OCC). Uninstall is
-		// admin-driven and the entire batch is still atomic — partial
-		// failure cannot leave a mixed state. Per-key OCC would force a
-		// retry loop on benign concurrent reprojection and adds no
-		// safety the atomic-batch failure mode does not already provide.
-		// Note: concurrent Processor writes to these keys between the read
-		// phase and batch submission will be silently overwritten. Per-key
-		// sequence numbers in the tombstone batch are a future improvement.
-		ops = append(ops, substrate.BatchOp{
-			Bucket: CoreBucket,
-			Key:    k,
-			Value:  data,
-		})
-		_ = entry.Revision // intentionally unused — see comment above
+// --- logical-document helpers (Story 1.5.5) ---
+//
+// These build LOGICAL documents (no provenance) for the InstallPackage op
+// payload. The Processor stamps createdAt/createdBy/createdByOp at step 8
+// from the install actor, so installed entities carry real provenance
+// authored by the install actor.
+
+// sha256NanoID derives a deterministic 20-char Contract #1 NanoID from an
+// arbitrary string. Used as the stable canonical-name index suffix
+// (vtx.roleindex.<sha256NanoID("rolecanonical:"+name)>) so re-install
+// produces the same index key. Read only by Go installer code, never by
+// scripts, so exact parity with the Starlark crypto.sha256NanoID builtin
+// is not required.
+func sha256NanoID(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	out := make([]byte, substrate.NanoIDLength)
+	for i := 0; i < substrate.NanoIDLength; i++ {
+		hi := sum[(i*2)%len(sum)]
+		lo := sum[((i*2)+1)%len(sum)]
+		idx := (int(hi)<<8 | int(lo)) % len(substrate.Alphabet)
+		out[i] = substrate.Alphabet[idx]
 	}
-	return ops, nil
+	return string(out)
 }
 
-// --- envelope helpers ---
-
-// makeDocEnvelope mirrors bootstrap.MakeVertexEnvelope but with caller-
-// supplied actor + opTracker, so installs carry the admin actor's NanoID
-// rather than the bootstrap identity's.
-func (i *Installer) makeDocEnvelope(key, class string, data map[string]any, createdByOp string, now time.Time) ([]byte, error) {
-	env := substrate.NewDocumentEnvelopeAt(class, i.AdminActor, createdByOp, now)
-	env.Key = key
-	if data != nil {
-		env.Data = data
+func docVertex(class string, data map[string]any) map[string]any {
+	if data == nil {
+		data = map[string]any{}
 	}
-	return json.Marshal(env)
+	return map[string]any{"class": class, "isDeleted": false, "data": data}
 }
 
-// makeAspectEnvelope mirrors bootstrap.MakeAspectEnvelope with caller-
-// supplied actor + opTracker.
-func (i *Installer) makeAspectEnvelope(key, vertexKey, localName, class string, data map[string]any, createdByOp string, now time.Time) ([]byte, error) {
-	base := substrate.NewDocumentEnvelopeAt(class, i.AdminActor, createdByOp, now)
-	base.Key = key
-	if data != nil {
-		base.Data = data
+func docAspect(vertexKey, localName, class string, data map[string]any) map[string]any {
+	if data == nil {
+		data = map[string]any{}
 	}
-	asp := substrate.AspectEnvelope{
-		DocumentEnvelope: base,
-		VertexKey:        vertexKey,
-		LocalName:        localName,
+	return map[string]any{
+		"class":     class,
+		"isDeleted": false,
+		"data":      data,
+		"vertexKey": vertexKey,
+		"localName": localName,
 	}
-	return json.Marshal(asp)
 }
 
-// makeLinkEnvelope mirrors bootstrap.MakeLinkEnvelope with caller-supplied
-// actor + opTracker.
-func (i *Installer) makeLinkEnvelope(key, youngerVertex, olderVertex, localName, class string, data map[string]any, createdByOp string, now time.Time) ([]byte, error) {
-	base := substrate.NewDocumentEnvelopeAt(class, i.AdminActor, createdByOp, now)
-	base.Key = key
-	if data != nil {
-		base.Data = data
+func docLink(youngerVertex, olderVertex, localName, class string, data map[string]any) map[string]any {
+	if data == nil {
+		data = map[string]any{}
 	}
-	link := substrate.LinkEnvelope{
-		DocumentEnvelope: base,
-		YoungerVertex:    youngerVertex,
-		OlderVertex:      olderVertex,
-		LocalName:        localName,
+	return map[string]any{
+		"class":         class,
+		"isDeleted":     false,
+		"data":          data,
+		"youngerVertex": youngerVertex,
+		"olderVertex":   olderVertex,
+		"localName":     localName,
 	}
-	return json.Marshal(link)
 }

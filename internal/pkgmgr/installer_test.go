@@ -3,6 +3,8 @@ package pkgmgr
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -54,6 +58,13 @@ func newInstallerHarness(t *testing.T) (context.Context, *substrate.Conn, *Insta
 	}); err != nil {
 		t.Fatalf("create %s bucket: %v", CoreBucket, err)
 	}
+	// Health KV — the pipeline's heartbeater writes here.
+	if _, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:         "health-kv",
+		LimitMarkerTTL: time.Second,
+	}); err != nil {
+		t.Fatalf("create health-kv bucket: %v", err)
+	}
 	streamName := "KV_" + CoreBucket
 	stream, err := js.Stream(ctx, streamName)
 	if err != nil {
@@ -64,19 +75,84 @@ func newInstallerHarness(t *testing.T) (context.Context, *substrate.Conn, *Insta
 	if _, err := js.UpdateStream(ctx, cfg); err != nil {
 		t.Fatalf("enable AllowAtomicPublish: %v", err)
 	}
+	// ops + events streams — installs route through the Processor as
+	// InstallPackage ops (Story 1.5.5).
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "core-operations",
+		Subjects: []string{"ops.>"},
+	}); err != nil {
+		t.Fatalf("create core-operations stream: %v", err)
+	}
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "core-events",
+		Subjects: []string{"events.>"},
+	}); err != nil {
+		t.Fatalf("create core-events stream: %v", err)
+	}
 
-	adminActor := "vtx.identity.AdmnAdmnAdmnAdmnAdmn"
-	inst := NewInstaller(conn, adminActor)
-	// Stable Now so test assertions are deterministic.
-	fixed := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
-	inst.Now = func() time.Time { return fixed }
-	// Seed a valid mock NanoID for the "operator" role so the grant
-	// validation guard in Install passes without a real bootstrap.
-	// Must be exactly 20 chars from the Contract #1 NanoID alphabet.
+	// Seed primordials so the InstallPackage / UninstallPackage DDLs +
+	// admin identity + operator role exist and installs can route through
+	// the Processor.
+	tmpPath := t.TempDir() + "/lattice-test-bootstrap.json"
+	if _, err := bootstrap.LoadOrGenerate(tmpPath); err != nil {
+		t.Fatalf("bootstrap.LoadOrGenerate: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	seeder, err := bootstrap.NewSeeder(conn.NATS(), logger)
+	if err != nil {
+		t.Fatalf("bootstrap.NewSeeder: %v", err)
+	}
+	if err := seeder.SeedPrimordial(ctx); err != nil {
+		t.Fatalf("bootstrap.SeedPrimordial: %v", err)
+	}
+
+	// Run a real meta-lane stub-auth pipeline so submitted InstallPackage /
+	// UninstallPackage ops are consumed end-to-end (real DDL script, step-6
+	// validation, step-8 atomic commit; only auth is stubbed).
+	stop := runMetaPipeline(t, ctx, conn, logger)
+	t.Cleanup(stop)
+
+	inst := NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{
-		"operator": "Hj4kPmRtw9nbCxz5vQ2y",
+		"operator": bootstrap.RoleOperatorID,
 	}
 	return ctx, conn, inst
+}
+
+// runMetaPipeline stands up a stub-auth CommitPath bound to ops.meta and
+// starts consuming. Returns a stop func the caller must defer/Cleanup. On
+// stop it deletes the durable and purges committed install ops so they do
+// not interfere with other consumers. Mirrors testutil.RunMetaInstallPipeline
+// (reproduced here to avoid the testutil→pkgmgr import cycle).
+func runMetaPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, logger *slog.Logger) func() {
+	t.Helper()
+	cp, _, err := processor.MakeStubPipeline(conn, CoreBucket, "health-kv", processor.AuthModeStub, logger, "pkgmgr-test-meta")
+	if err != nil {
+		t.Fatalf("MakeStubPipeline: %v", err)
+	}
+	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
+		StreamName:     "core-operations",
+		Durable:        "pkgmgr-test-meta",
+		FilterSubjects: []string{"ops.meta"},
+		AckWait:        5 * time.Second,
+	}, logger)
+	if err != nil {
+		t.Fatalf("EnsureConsumer: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	cc, err := cons.Consume(func(m jetstream.Msg) { cp.HandleMessage(runCtx, m) })
+	if err != nil {
+		cancel()
+		t.Fatalf("Consume: %v", err)
+	}
+	return func() {
+		cc.Stop()
+		cancel()
+		_ = conn.JetStream().DeleteConsumer(context.Background(), "core-operations", "pkgmgr-test-meta")
+		if s, err := conn.JetStream().Stream(context.Background(), "core-operations"); err == nil {
+			_ = s.Purge(context.Background(), jetstream.WithPurgeSubject("ops.meta"))
+		}
+	}
 }
 
 func sampleDef(version string) Definition {

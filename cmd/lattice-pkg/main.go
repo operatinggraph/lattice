@@ -117,8 +117,9 @@ func runInstall(pkgPath, natsURL, bootstrapPath string, logger *slog.Logger) err
 	}
 	// Read admin actor + kernel role NanoIDs from lattice.bootstrap.json.
 	// The Installer resolves Permission.GrantsTo canonical names through
-	// the RoleIDs map; any names a package's PreInstall hook mints are
-	// merged in at install time (see pkgmgr.Installer.resolveGrants).
+	// the RoleIDs map; roles a package declares itself (Definition.Roles)
+	// are minted with deterministic NanoIDs and merged in at install time
+	// (see pkgmgr.Installer.resolveGrants).
 	bs, adminActor, err := loadBootstrap(bootstrapPath)
 	if err != nil {
 		return err
@@ -217,9 +218,9 @@ func loadBootstrap(path string) (*bootstrapJSON, string, error) {
 
 // roleIDsFromBootstrap returns the canonical-name → NanoID map for
 // kernel-seeded roles. The kernel seeds the `operator` role; the other
-// roles (consumer, frontOfHouse, backOfHouse) are seeded by
-// identity-domain's PreInstall hook and merged into Installer.RoleIDs
-// at install time.
+// roles (consumer, frontOfHouse, backOfHouse) are declared by
+// identity-domain (Definition.Roles), minted with deterministic NanoIDs,
+// and merged into Installer.RoleIDs at install time.
 func roleIDsFromBootstrap(bs *bootstrapJSON) map[string]string {
 	out := map[string]string{}
 	if id := bs.PrimordialIDs["roleOperator"]; id != "" {

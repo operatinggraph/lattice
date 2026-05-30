@@ -89,6 +89,23 @@ var (
 	PermTombstoneMetaVertexID  string
 	PermTombstoneMetaVertexKey string
 
+	// InstallPackage / UninstallPackage primordial DDL meta-vertices.
+	// These route capability-package install/uninstall through the
+	// Processor (Story 1.5.5). Each is a meta.ddl.vertexType keyed by
+	// NanoID with canonicalName "InstallPackage" / "UninstallPackage".
+	InstallPackageDDLID    string
+	InstallPackageDDLKey   string
+	UninstallPackageDDLID  string
+	UninstallPackageDDLKey string
+
+	// Two meta-permission NanoIDs authorizing the operator to submit the
+	// InstallPackage / UninstallPackage ops. Granted to the operator role,
+	// which the primordial admin holds.
+	PermInstallPackageID      string
+	PermInstallPackageKey     string
+	PermUninstallPackageID    string
+	PermUninstallPackageKey   string
+
 	// Five aspect-type meta-vertex NanoIDs — the primordial DDLs for the
 	// self-description aspect classes (description, inputSchema,
 	// outputSchema, fieldDescription, examples).
@@ -124,6 +141,12 @@ type PrimordialIDsRaw struct {
 	PermUpdateMetaVertex    string `json:"permUpdateMetaVertex"`
 	PermTombstoneMetaVertex string `json:"permTombstoneMetaVertex"`
 
+	// InstallPackage / UninstallPackage DDL + permission NanoIDs (Story 1.5.5).
+	InstallPackageDDL    string `json:"installPackageDDL"`
+	UninstallPackageDDL  string `json:"uninstallPackageDDL"`
+	PermInstallPackage   string `json:"permInstallPackage"`
+	PermUninstallPackage string `json:"permUninstallPackage"`
+
 	// Aspect-type meta-vertex NanoIDs.
 	AspectTypeDescription       string `json:"aspectTypeDescription"`
 	AspectTypeInputSchema        string `json:"aspectTypeInputSchema"`
@@ -141,6 +164,9 @@ type PrimordialIDsRaw struct {
 //     Persist. status="in-progress" means IDs are stable but seeding may
 //     not have completed; status="committed" means seeding and persist both
 //     succeeded.
+//   - "5": InstallPackage/UninstallPackage primordial DDL + permission
+//     NanoIDs added (Story 1.5.5 — package installs route through the
+//     Processor).
 type BootstrapFile struct {
 	Version       string           `json:"version"`
 	GeneratedAt   string           `json:"generatedAt"`
@@ -238,6 +264,10 @@ func currentRaw() PrimordialIDsRaw {
 		PermCreateMetaVertex:       PermCreateMetaVertexID,
 		PermUpdateMetaVertex:       PermUpdateMetaVertexID,
 		PermTombstoneMetaVertex:    PermTombstoneMetaVertexID,
+		InstallPackageDDL:          InstallPackageDDLID,
+		UninstallPackageDDL:        UninstallPackageDDLID,
+		PermInstallPackage:         PermInstallPackageID,
+		PermUninstallPackage:       PermUninstallPackageID,
 		AspectTypeDescription:      AspectTypeDescriptionID,
 		AspectTypeInputSchema:      AspectTypeInputSchemaID,
 		AspectTypeOutputSchema:     AspectTypeOutputSchemaID,
@@ -264,16 +294,18 @@ func Load(path string) error {
 }
 
 // checkVersion returns a clear error when the bootstrap file's version is
-// not one of the supported versions ("3" or "4"). This surfaces a
-// meaningful message instead of a confusing NanoID validation failure
-// when an operator upgrades Lattice without running `make down` first.
+// not one of the supported versions. This surfaces a meaningful message
+// instead of a confusing NanoID validation failure when an operator
+// upgrades Lattice without running `make down` first. Version 5 adds the
+// InstallPackage/UninstallPackage primordial NanoIDs; older files lack
+// them and must be regenerated.
 func checkVersion(f BootstrapFile) error {
 	switch f.Version {
-	case "3", "4":
+	case "5":
 		return nil
 	default:
 		return fmt.Errorf(
-			"bootstrap file version mismatch: got %q, want \"3\" or \"4\" — run `make down && make up`",
+			"bootstrap file version mismatch: got %q, want \"5\" — run `make down && make up`",
 			f.Version,
 		)
 	}
@@ -291,6 +323,10 @@ func generate() (PrimordialIDsRaw, error) {
 		&raw.PermCreateMetaVertex,
 		&raw.PermUpdateMetaVertex,
 		&raw.PermTombstoneMetaVertex,
+		&raw.InstallPackageDDL,
+		&raw.UninstallPackageDDL,
+		&raw.PermInstallPackage,
+		&raw.PermUninstallPackage,
 		&raw.AspectTypeDescription,
 		&raw.AspectTypeInputSchema,
 		&raw.AspectTypeOutputSchema,
@@ -322,6 +358,10 @@ func populate(raw PrimordialIDsRaw) error {
 		{"permCreateMetaVertex", raw.PermCreateMetaVertex},
 		{"permUpdateMetaVertex", raw.PermUpdateMetaVertex},
 		{"permTombstoneMetaVertex", raw.PermTombstoneMetaVertex},
+		{"installPackageDDL", raw.InstallPackageDDL},
+		{"uninstallPackageDDL", raw.UninstallPackageDDL},
+		{"permInstallPackage", raw.PermInstallPackage},
+		{"permUninstallPackage", raw.PermUninstallPackage},
 		{"aspectTypeDescription", raw.AspectTypeDescription},
 		{"aspectTypeInputSchema", raw.AspectTypeInputSchema},
 		{"aspectTypeOutputSchema", raw.AspectTypeOutputSchema},
@@ -347,6 +387,15 @@ func populate(raw PrimordialIDsRaw) error {
 	PermUpdateMetaVertexKey = "vtx.permission." + PermUpdateMetaVertexID
 	PermTombstoneMetaVertexID = raw.PermTombstoneMetaVertex
 	PermTombstoneMetaVertexKey = "vtx.permission." + PermTombstoneMetaVertexID
+
+	InstallPackageDDLID = raw.InstallPackageDDL
+	InstallPackageDDLKey = "vtx.meta." + InstallPackageDDLID
+	UninstallPackageDDLID = raw.UninstallPackageDDL
+	UninstallPackageDDLKey = "vtx.meta." + UninstallPackageDDLID
+	PermInstallPackageID = raw.PermInstallPackage
+	PermInstallPackageKey = "vtx.permission." + PermInstallPackageID
+	PermUninstallPackageID = raw.PermUninstallPackage
+	PermUninstallPackageKey = "vtx.permission." + PermUninstallPackageID
 
 	AspectTypeDescriptionID = raw.AspectTypeDescription
 	AspectTypeDescriptionKey = "vtx.meta." + AspectTypeDescriptionID
@@ -375,7 +424,7 @@ func populate(raw PrimordialIDsRaw) error {
 
 func persistWithStatus(path string, raw PrimordialIDsRaw, status string) error {
 	f := BootstrapFile{
-		Version:       "4",
+		Version:       "5",
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		Status:        status,
 		PrimordialIDs: raw,
@@ -401,19 +450,26 @@ func PrimordialVertexKeys() []string {
 		BootstrapIdentityKey,
 		// meta-meta DDL
 		MetaRootKey,
+		// InstallPackage / UninstallPackage primordial DDLs (Story 1.5.5)
+		InstallPackageDDLKey,
+		UninstallPackageDDLKey,
 		// 2 Lens definitions
 		CapabilityLensKey,
 		CapabilityRoleIndexLensKey,
 		// operator role
 		RoleOperatorKey,
-		// 3 kernel meta-permissions
+		// 3 kernel meta-permissions + 2 package-install permissions
 		PermCreateMetaVertexKey,
 		PermUpdateMetaVertexKey,
 		PermTombstoneMetaVertexKey,
-		// 3 grantedBy links (meta-perm → operator) + admin holdsRole link
+		PermInstallPackageKey,
+		PermUninstallPackageKey,
+		// 5 grantedBy links (meta-perm + install perms → operator) + admin holdsRole link
 		"lnk.permission." + PermCreateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
 		"lnk.permission." + PermUpdateMetaVertexID + ".grantedBy.role." + RoleOperatorID,
 		"lnk.permission." + PermTombstoneMetaVertexID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermInstallPackageID + ".grantedBy.role." + RoleOperatorID,
+		"lnk.permission." + PermUninstallPackageID + ".grantedBy.role." + RoleOperatorID,
 		BootstrapHoldsRoleLinkKey,
 		// 5 aspect-type meta-vertices (self-description DDLs)
 		AspectTypeDescriptionKey,
@@ -427,6 +483,7 @@ func PrimordialVertexKeys() []string {
 // PrimordialVertexKeyCount is the count of TOP-LEVEL kernel keys (the
 // ones in PrimordialVertexKeys()). Used as a count-only readiness gate
 // where loading lattice.bootstrap.json would race startup. Current count
-// is 18 entries: 1 op + 1 admin + 1 meta-DDL + 2 lenses +
-// 1 role + 3 meta-perms + 4 links + 5 aspect-type meta-vertices.
-const PrimordialVertexKeyCount = 18
+// is 25 entries: 1 op + 1 admin + 1 meta-DDL + 2 install/uninstall DDLs +
+// 2 lenses + 1 role + 5 perms (3 meta + 2 install) + 6 links + 5
+// aspect-type meta-vertices.
+const PrimordialVertexKeyCount = 25

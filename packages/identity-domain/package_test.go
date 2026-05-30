@@ -23,9 +23,18 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-func TestPackage_HasPreInstallHook(t *testing.T) {
-	if Package.PreInstall == nil {
-		t.Fatal("identity-domain Package must declare a PreInstall hook to seed user-facing roles")
+func TestPackage_DeclaresUserFacingRoles(t *testing.T) {
+	want := map[string]bool{"consumer": true, "frontOfHouse": true, "backOfHouse": true}
+	if got := len(Package.Roles); got != len(want) {
+		t.Fatalf("expected %d declared roles, got %d", len(want), got)
+	}
+	for _, r := range Package.Roles {
+		if !want[r.CanonicalName] {
+			t.Errorf("unexpected role %q", r.CanonicalName)
+		}
+		if r.Description == "" {
+			t.Errorf("role %q missing description", r.CanonicalName)
+		}
 	}
 }
 

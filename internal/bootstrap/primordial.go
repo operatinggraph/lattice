@@ -295,17 +295,20 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	}
 
 	// 2. Primordial admin identity (class=identity; no .state aspect —
-	// state is identity-domain-package territory).
+	// state is identity-domain-package territory). Protected (§3.4) so a
+	// package uninstall can never tombstone the kernel admin.
 	bsIdVal, bsIdErr := MakeVertexEnvelope(BootstrapIdentityKey, "identity",
-		map[string]any{"note": "Primordial admin identity. Authors all primordial provenance fields. No state aspect."})
+		map[string]any{"protected": true,
+			"note": "Primordial admin identity. Authors all primordial provenance fields. No state aspect."})
 	if err := add(BootstrapIdentityKey, bsIdVal, bsIdErr); err != nil {
 		return nil, err
 	}
 
 	// 3. Meta-meta root DDL meta-vertex — the kernel's sole DDL.
 	rootVal, rootErr := MakeVertexEnvelope(MetaRootKey, "meta.ddl.vertexType",
-		map[string]any{"note": "Meta-meta-DDL. Governs all vtx.meta.* mutations via " +
-			"CreateMetaVertex / UpdateMetaVertex / TombstoneMetaVertex."})
+		map[string]any{"protected": true,
+			"note": "Meta-meta-DDL. Governs all vtx.meta.* mutations via " +
+				"CreateMetaVertex / UpdateMetaVertex / TombstoneMetaVertex."})
 	if err := add(MetaRootKey, rootVal, rootErr); err != nil {
 		return nil, err
 	}
@@ -400,9 +403,30 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		return nil, err
 	}
 
+	// 4b. InstallPackage / UninstallPackage primordial DDLs (Story 1.5.5).
+	// Two privileged kernel DDLs that route package install/uninstall
+	// through the Processor. Each is protected (§3.4) so it cannot be
+	// tombstoned/updated or overwritten by an install.
+	if err := seedPackageInstallDDL(add, InstallPackageDDLKey, "InstallPackage",
+		[]string{"InstallPackage"},
+		"Installs a Capability Package by applying its pre-built mutation manifest as one atomic commit. "+
+			"Privileged: enforces key-shape, protected-key, system-aspect, and create-only guardrails.",
+		InstallPackageDDLScript, installPackageInputSchema, installPackageOutputSchema,
+		installPackageFieldDescription, installPackageExamples); err != nil {
+		return nil, err
+	}
+	if err := seedPackageInstallDDL(add, UninstallPackageDDLKey, "UninstallPackage",
+		[]string{"UninstallPackage"},
+		"Uninstalls a Capability Package by tombstoning its declared keys as one atomic commit. "+
+			"Carries optional per-key expectedRevision (OCC) and rejects protected kernel keys.",
+		UninstallPackageDDLScript, uninstallPackageInputSchema, uninstallPackageOutputSchema,
+		uninstallPackageFieldDescription, uninstallPackageExamples); err != nil {
+		return nil, err
+	}
+
 	// 5. Capability Lens definition.
 	capLens := CapabilityLensDefinition()
-	capLensVal, capLensErr := MakeVertexEnvelope(CapabilityLensKey, "meta.lens", map[string]any{})
+	capLensVal, capLensErr := MakeVertexEnvelope(CapabilityLensKey, "meta.lens", map[string]any{"protected": true})
 	if err := add(CapabilityLensKey, capLensVal, capLensErr); err != nil {
 		return nil, err
 	}
@@ -412,7 +436,7 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 
 	// 6. Capability role-index Lens definition.
 	roleIdxLens := CapabilityRoleIndexLensDefinition()
-	roleIdxLensVal, roleIdxLensErr := MakeVertexEnvelope(CapabilityRoleIndexLensKey, "meta.lens", map[string]any{})
+	roleIdxLensVal, roleIdxLensErr := MakeVertexEnvelope(CapabilityRoleIndexLensKey, "meta.lens", map[string]any{"protected": true})
 	if err := add(CapabilityRoleIndexLensKey, roleIdxLensVal, roleIdxLensErr); err != nil {
 		return nil, err
 	}
@@ -430,9 +454,9 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 
 	// 7. Operator role — the only primordial role. Identity-domain
 	// installs the user-facing roles (consumer/frontOfHouse/backOfHouse)
-	// via its PreInstall hook.
+	// in its own install batch (Definition.Roles).
 	{
-		roleVal, roleErr := MakeVertexEnvelope(RoleOperatorKey, "role", map[string]any{})
+		roleVal, roleErr := MakeVertexEnvelope(RoleOperatorKey, "role", map[string]any{"protected": true})
 		if err := add(RoleOperatorKey, roleVal, roleErr); err != nil {
 			return nil, err
 		}
@@ -462,8 +486,18 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		{PermUpdateMetaVertexKey, PermUpdateMetaVertexID, "UpdateMetaVertex"},
 		{PermTombstoneMetaVertexKey, PermTombstoneMetaVertexID, "TombstoneMetaVertex"},
 	}
+	// Package-install permissions authorizing the operator to submit the
+	// InstallPackage / UninstallPackage ops (Story 1.5.5). Projected into
+	// the admin's Capability doc via the holdsRole → grantedBy chain.
+	installPerms := []struct {
+		key, id, op string
+	}{
+		{PermInstallPackageKey, PermInstallPackageID, "InstallPackage"},
+		{PermUninstallPackageKey, PermUninstallPackageID, "UninstallPackage"},
+	}
 	for _, mp := range metaPerms {
 		data := map[string]any{
+			"protected":     true,
 			"operationType": mp.op,
 			"scope":         "any",
 			"note":          "Kernel meta-permission. Authorizes operator to mutate vtx.meta.* vertices.",
@@ -473,9 +507,32 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 			return nil, err
 		}
 	}
+	for _, mp := range installPerms {
+		data := map[string]any{
+			"protected":     true,
+			"operationType": mp.op,
+			"scope":         "any",
+			"note":          "Kernel package-install permission. Authorizes operator to submit " + mp.op + ".",
+		}
+		permVal, permErr := MakeVertexEnvelope(mp.key, "permission", data)
+		if err := add(mp.key, permVal, permErr); err != nil {
+			return nil, err
+		}
+	}
 
-	// 9. Three grantedBy links: meta-permission → operator role.
+	// 9. grantedBy links: each meta- + install-permission → operator role.
 	for _, mp := range metaPerms {
+		linkKey := "lnk.permission." + mp.id + ".grantedBy.role." + RoleOperatorID
+		linkVal, linkErr := MakeLinkEnvelope(
+			linkKey,
+			"vtx.permission."+mp.id,
+			"vtx.role."+RoleOperatorID,
+			"grantedBy", "grantedBy", map[string]any{})
+		if err := add(linkKey, linkVal, linkErr); err != nil {
+			return nil, err
+		}
+	}
+	for _, mp := range installPerms {
 		linkKey := "lnk.permission." + mp.id + ".grantedBy.role." + RoleOperatorID
 		linkVal, linkErr := MakeLinkEnvelope(
 			linkKey,
@@ -501,6 +558,54 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// seedPackageInstallDDL seeds one privileged package-install DDL
+// meta-vertex (InstallPackage / UninstallPackage) with all nine
+// self-description aspects (4 structural + 4 self-description +
+// .compensation). The root vertex is marked protected (§3.4) so it can
+// never be tombstoned/updated or overwritten by an install.
+func seedPackageInstallDDL(
+	add func(string, []byte, error) error,
+	ddlKey, canonicalName string,
+	permittedCommands []string,
+	description, script, inputSchema, outputSchema string,
+	fieldDescriptions map[string]any,
+	examples []any,
+) error {
+	vtxVal, vtxErr := MakeVertexEnvelope(ddlKey, "meta.ddl.vertexType",
+		map[string]any{"protected": true,
+			"note": canonicalName + " primordial DDL. Routes Capability-Package " +
+				"install/uninstall through the Processor (Story 1.5.5)."})
+	if err := add(ddlKey, vtxVal, vtxErr); err != nil {
+		return err
+	}
+	aspects := []struct {
+		name, class string
+		data        map[string]any
+	}{
+		{"canonicalName", "canonicalName", map[string]any{"value": canonicalName}},
+		{"permittedCommands", "permittedCommands", map[string]any{"commands": permittedCommands}},
+		{"description", "description", map[string]any{"text": description}},
+		{"script", "script", map[string]any{"source": script}},
+		{"inputSchema", "inputSchema", map[string]any{"schema": inputSchema}},
+		{"outputSchema", "outputSchema", map[string]any{"schema": outputSchema}},
+		{"fieldDescription", "fieldDescription", map[string]any{"fieldDescriptions": fieldDescriptions}},
+		{"examples", "examples", map[string]any{"examples": examples}},
+		{CompensationAspectClass, CompensationAspectClass, map[string]any{
+			"inverseOperationType": "UninstallPackage",
+			"payloadTemplate":      map[string]any{"name": "{{detail.name}}"},
+			"revisionTemplate":     map[string]any{},
+		}},
+	}
+	for _, a := range aspects {
+		key := ddlKey + "." + a.name
+		val, err := MakeAspectEnvelope(key, ddlKey, a.name, a.class, a.data)
+		if err := add(key, val, err); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // seedAspectTypeMeta seeds the five aspect-type meta-vertices — the

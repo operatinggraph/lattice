@@ -3,8 +3,9 @@ version: 0.1.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity. Depends on
-  rbac-domain. The PreInstall hook seeds the consumer, frontOfHouse, and
-  backOfHouse roles before the main install batch runs.
+  rbac-domain. The consumer, frontOfHouse, and backOfHouse roles are
+  declared in the package definition and created in the single install
+  batch routed through the Processor (Story 1.5.5).
 depends:
   - rbac-domain
 declares:

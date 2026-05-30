@@ -35,6 +35,7 @@ const (
 	HarnessHealthBucket = "health-kv"
 	HarnessCapBucket    = "capability-kv"
 	HarnessOpsStream    = "core-operations"
+	HarnessEventsStream = "core-events"
 )
 
 // ProvisionHarness configures the post-bootstrap KV bucket + stream
@@ -77,6 +78,19 @@ func ProvisionHarness(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	})
 	if err != nil {
 		t.Fatalf("create core-operations stream: %v", err)
+	}
+
+	// core-events stream — step 9 publishes business events (e.g.
+	// PackageInstalled from an InstallPackage commit) to events.<class>.
+	// Without it step 9 fails and naks for redelivery, replaying the
+	// committed op (a benign "duplicate" on the install path but a source
+	// of cross-test interference on the shared ops.meta lane).
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     HarnessEventsStream,
+		Subjects: []string{"events.>"},
+	})
+	if err != nil {
+		t.Fatalf("create core-events stream: %v", err)
 	}
 }
 

@@ -244,6 +244,27 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	tracker := NewTracker(env, now)
 	commitAck, err := cp.deps.Committer.Commit(ctx, env, result, tracker)
 	if err != nil {
+		// Authoritative protected-key guard (Story 1.5.5 P1): an update or
+		// tombstone targeting a data.protected root is rejected before the
+		// atomic batch. Terminate (no redelivery) — a redelivery cannot
+		// succeed since the world is unchanged.
+		var protErr *ProtectedKeyError
+		if errors.As(err, &protErr) {
+			cp.deps.Metrics.OpsRejected.Add(1)
+			cp.deps.Logger.Info("step 8: protected-key rejection",
+				"requestId", env.RequestID,
+				"key", protErr.Key,
+				"root", protErr.Root,
+				"op", protErr.Op)
+			cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeProtectedKey,
+				protErr.Error(), map[string]any{
+					"key":  protErr.Key,
+					"root": protErr.Root,
+					"op":   protErr.Op,
+				}))
+			_ = msg.TermWithReason("ProtectedKey: " + protErr.Root)
+			return OutcomeRejected
+		}
 		// If the commit failed because the tracker already exists, a
 		// previous redelivery committed and we're racing with our own
 		// idempotency: ack and emit a duplicate reply.

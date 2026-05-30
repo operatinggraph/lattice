@@ -112,6 +112,23 @@ def vertex_alive(state, key):
         return False
     return True
 
+def is_protected(state, key):
+    # A primordial/kernel meta-vertex carries data.protected == True in its
+    # root document. Such entities (the meta-root DDL itself, the
+    # Install/Uninstall DDLs, the Capability lenses, ...) must never be
+    # tombstoned or updated — doing so could disable auth or the kernel
+    # (1.5.2 kernel-protection residual). The caller must declare meta_key
+    # in ContextHint.Reads, which vertex_alive already requires, so the
+    # root doc is in state.
+    if key not in state or state[key] == None:
+        return False
+    doc = state[key]
+    if not hasattr(doc, "data") or type(doc.data) != type({}):
+        return False
+    if "protected" not in doc.data:
+        return False
+    return doc.data["protected"] == True
+
 ALLOWED_DDL_CLASSES = ["meta.ddl.vertexType", "meta.ddl.linkType",
                        "meta.ddl.aspectType", "meta.ddl.eventType"]
 
@@ -218,6 +235,8 @@ def execute(state, op):
         meta_key = required_string(p, "metaKey")
         if not vertex_alive(state, meta_key):
             fail("UnknownMetaVertex: " + meta_key)
+        if is_protected(state, meta_key):
+            fail("ProtectedMetaVertex: " + meta_key)
 
         # The meta-vertex class selects the updatable field set. DDL classes
         # expose all self-description aspects; meta.lens exposes description
@@ -366,6 +385,8 @@ def execute(state, op):
         meta_key = required_string(p, "metaKey")
         if not vertex_alive(state, meta_key):
             fail("UnknownMetaVertex: " + meta_key)
+        if is_protected(state, meta_key):
+            fail("ProtectedMetaVertex: " + meta_key)
         # force=True skips the revision assertion (last-writer-wins merge policy).
         force = hasattr(p, "force") and p.force == True
 

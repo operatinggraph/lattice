@@ -9,8 +9,9 @@ Identity vertex creation, claim, and state-machine management.
   - `UpdateIdentityState`     (grants → operator)
   - `ClaimIdentity` (scope=self, grants → consumer)
 - 3 permission vertices + 5 `grantedBy` link grants
-- PreInstall hook seeds the 3 user-facing roles
-  (consumer, frontOfHouse, backOfHouse).
+- 3 user-facing roles (consumer, frontOfHouse, backOfHouse) — role vertex
+  + canonicalName/description aspects + a `vtx.roleindex.*` entry each —
+  declared in the package definition and created in the install batch.
 
 ## State machine
 
@@ -24,12 +25,13 @@ set only by the identity-hygiene package's MergeIdentity script.
 Depends on `rbac-domain` (dependency warning logged; install order is the
 operator's responsibility).
 
-The install is two-stage:
-
-1. **PreInstall**: creates `consumer`, `frontOfHouse`, `backOfHouse` role
-   vertices and a `vtx.roleindex.*` entry per role for idempotent re-runs.
-2. **Atomic batch**: DDL meta-vertex + 4 aspects, package manifest, 3
-   permission vertices, 5 grantedBy link grants.
+The install is ONE atomic commit routed through the Processor as an
+`InstallPackage` op (Story 1.5.5): the 3 role vertices + their aspects +
+`vtx.roleindex.*` entries, the DDL meta-vertex + aspects, the package
+manifest, 3 permission vertices, and 5 grantedBy link grants. Everything
+(roles included) lands in the manifest's `declaredKeys`, so uninstall
+reclaims it all (closes F-001). Deterministic NanoIDs make re-install
+idempotent. See `docs/contracts/08-package-install.md`.
 
 ## Architectural notes
 

@@ -2,11 +2,15 @@ package pkgmgr
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
+	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -36,10 +40,10 @@ type Installer struct {
 	// RoleIDs maps role canonical names to NanoIDs for grant-link
 	// resolution. Callers (cmd/lattice-pkg) populate this from
 	// lattice.bootstrap.json so packages whose `GrantsTo` references
-	// canonical names (e.g. "operator") get the right link target.
-	// Additional roles minted by a package's PreInstall hook are
-	// merged in at install time. The map may be unset (nil) for tests
-	// that hard-code NanoIDs in GrantsTo.
+	// primordial roles (e.g. "operator") get the right link target.
+	// Roles a package declares itself (Definition.Roles) are minted with
+	// deterministic NanoIDs and merged in at install time. The map may be
+	// unset (nil) for tests that hard-code NanoIDs in GrantsTo.
 	RoleIDs map[string]string
 }
 
@@ -110,24 +114,20 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		return nil, fmt.Errorf("%w: installed=%s requested=%s", ErrVersionMismatch, existing.Version, def.Version)
 	}
 
-	// Step 2.5 — optional PreInstall hook (per-package Go-side seeding
-	// that must complete before the atomic batch — e.g. identity-domain
-	// seeds its 3 user-facing roles so subsequent grant links can
-	// reference them). Hooks must be idempotent.
-	if def.PreInstall != nil {
-		extraRoles, err := def.PreInstall(ctx, i.Conn, i.AdminActor)
-		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: PreInstall %s: %w", def.Name, err)
-		}
-		if len(extraRoles) > 0 {
-			if i.RoleIDs == nil {
-				i.RoleIDs = map[string]string{}
-			}
-			for k, v := range extraRoles {
-				i.RoleIDs[k] = v
-			}
-		}
-		res.PreInstallRan = true
+	// Step 2.5 — mint deterministic NanoIDs for any roles this package
+	// declares, and register them in RoleIDs so this package's own
+	// GrantsTo entries (and the grant links built below) resolve to the
+	// role's in-batch NanoID. The role vertices/aspects/index are created
+	// in the SAME install batch (Story 1.5.5 — no substrate-direct
+	// PreInstall) and captured in declaredKeys (closes F-001).
+	roleNanoIDs := make([]string, len(def.Roles))
+	if len(def.Roles) > 0 && i.RoleIDs == nil {
+		i.RoleIDs = map[string]string{}
+	}
+	for idx, r := range def.Roles {
+		id := deterministicNanoID(def.Name, def.Version, "role:"+r.CanonicalName)
+		roleNanoIDs[idx] = id
+		i.RoleIDs[r.CanonicalName] = id
 	}
 
 	// Resolve any unresolved canonical names in GrantsTo via i.RoleIDs.
@@ -135,9 +135,10 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 
 	// Validate all GrantsTo entries resolved to valid NanoIDs. Any
 	// remaining canonical name (non-NanoID) means the bootstrap JSON is
-	// missing the role's primordialID or the PreInstall hook did not seed
-	// it. A dangling grant link would be written silently and cause
-	// PermissionDenied at runtime with no helpful diagnostic.
+	// missing the role's primordialID or the package did not declare the
+	// role in Definition.Roles. A dangling grant link would be written
+	// silently and cause PermissionDenied at runtime with no helpful
+	// diagnostic.
 	for idx, p := range def.Permissions {
 		for _, g := range p.GrantsTo {
 			if !substrate.IsValidNanoID(g) {
@@ -146,53 +147,129 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		}
 	}
 
-	// Step 3 — build the atomic batch.
-	pkgNanoID, err := substrate.NewNanoID()
-	if err != nil {
-		return nil, fmt.Errorf("pkgmgr: nanoid: %w", err)
-	}
-	pkgKey := PackageVertexPrefix + pkgNanoID
+	// Step 3 — build the mutation manifest with DETERMINISTIC NanoIDs
+	// (derived from package name+version+entity tag) so a re-install
+	// produces identical keys and the create-only batch is idempotent.
+	pkgKey := PackageVertexPrefix + deterministicNanoID(def.Name, def.Version, "package")
 	res.PackageKey = pkgKey
 
 	ddlNanoIDs := make([]string, len(def.DDLs))
 	lensNanoIDs := make([]string, len(def.Lenses))
 	permNanoIDs := make([]string, len(def.Permissions))
-	for idx := range def.DDLs {
-		id, err := substrate.NewNanoID()
-		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: nanoid for DDL[%d]: %w", idx, err)
-		}
-		ddlNanoIDs[idx] = id
+	for idx, d := range def.DDLs {
+		ddlNanoIDs[idx] = deterministicNanoID(def.Name, def.Version, "ddl:"+d.CanonicalName)
 	}
-	for idx := range def.Lenses {
-		id, err := substrate.NewNanoID()
-		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: nanoid for Lens[%d]: %w", idx, err)
-		}
-		lensNanoIDs[idx] = id
+	for idx, l := range def.Lenses {
+		lensNanoIDs[idx] = deterministicNanoID(def.Name, def.Version, "lens:"+l.CanonicalName)
 	}
-	for idx := range def.Permissions {
-		id, err := substrate.NewNanoID()
-		if err != nil {
-			return nil, fmt.Errorf("pkgmgr: nanoid for Permission[%d]: %w", idx, err)
-		}
-		permNanoIDs[idx] = id
+	for idx, p := range def.Permissions {
+		permNanoIDs[idx] = deterministicNanoID(def.Name, def.Version,
+			fmt.Sprintf("perm:%d:%s", idx, p.OperationType))
 	}
 
-	now := i.Now()
-	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, now)
+	ops, declared, err := i.buildInstallBatch(def, pkgKey, ddlNanoIDs, lensNanoIDs, permNanoIDs, roleNanoIDs)
 	if err != nil {
 		return nil, err
 	}
 
-	// Step 4 — single atomic batch.
+	// Step 4 — submit the InstallPackage op to the Processor. The op
+	// carries the pre-built manifest; the kernel script enforces
+	// guardrails and emits the mutations; the Processor commits them in
+	// one atomic batch and invalidates the vtx.meta.* DDL cache in-commit.
+	payload := map[string]any{
+		"name":      def.Name,
+		"version":   def.Version,
+		"mutations": ops,
+	}
+	// Deterministic requestId from name+version so a re-submit dedup-
+	// short-circuits at step 2 (idempotent install).
+	requestID := deterministicNanoID(def.Name, def.Version, "install-op")
+	reply, err := i.submitOp(ctx, "InstallPackage", "InstallPackage", requestID, payload)
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: submit InstallPackage: %w", err)
+	}
+	switch reply.Status {
+	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
+		res.DeclaredKeys = declared
+		return res, nil
+	default:
+		return nil, fmt.Errorf("pkgmgr: InstallPackage rejected: %s", replyError(reply))
+	}
+}
+
+// deterministicNanoID derives a stable Contract #1 NanoID from the
+// package name+version+entity tag. Same inputs → same ID on every run,
+// so re-install is idempotent and produces identical keys.
+func deterministicNanoID(name, version, tag string) string {
+	sum := sha256.Sum256([]byte("lattice-pkg:" + name + ":" + version + ":" + tag))
+	out := make([]byte, substrate.NanoIDLength)
+	for i := 0; i < substrate.NanoIDLength; i++ {
+		hi := sum[(i*2)%len(sum)]
+		lo := sum[((i*2)+1)%len(sum)]
+		idx := (int(hi)<<8 | int(lo)) % len(substrate.Alphabet)
+		out[i] = substrate.Alphabet[idx]
+	}
+	return string(out)
+}
+
+// replyError renders a rejected reply's error for diagnostics.
+func replyError(reply *processor.OperationReply) string {
+	if reply.Error != nil {
+		return fmt.Sprintf("%s: %s", reply.Error.Code, reply.Error.Message)
+	}
+	return string(reply.Status)
+}
+
+// submitOp publishes an op to ops.meta and waits for the Processor reply
+// on a NATS inbox. Mirrors cmd/lattice/output.SubmitOp; reproduced here
+// so internal/pkgmgr does not depend on a cmd/ package.
+func (i *Installer) submitOp(ctx context.Context, operationType, class, requestID string, payload map[string]any) (*processor.OperationReply, error) {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	env := &processor.OperationEnvelope{
+		RequestID:     requestID,
+		Lane:          processor.LaneMeta,
+		OperationType: operationType,
+		Actor:         i.AdminActor,
+		SubmittedAt:   i.Now().Format(time.RFC3339Nano),
+		Class:         class,
+		Payload:       payloadJSON,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("marshal envelope: %w", err)
+	}
+
+	inbox := nats.NewInbox()
+	sub, err := i.Conn.NATS().SubscribeSync(inbox)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe inbox: %w", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	subject := "ops." + string(env.Lane)
+	msg := &nats.Msg{
+		Subject: subject,
+		Data:    data,
+		Header:  nats.Header{"Lattice-Reply-Inbox": []string{inbox}},
+	}
+
 	bctx, cancel := context.WithTimeout(ctx, DefaultBatchTimeout)
 	defer cancel()
-	if _, err := i.Conn.AtomicBatch(bctx, ops); err != nil {
-		return nil, fmt.Errorf("pkgmgr: install atomic batch: %w", err)
+	if _, err := i.Conn.JetStream().PublishMsg(bctx, msg); err != nil {
+		return nil, fmt.Errorf("publish to %s: %w", subject, err)
 	}
-	res.DeclaredKeys = declared
-	return res, nil
+	replyMsg, err := sub.NextMsgWithContext(bctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait for reply: %w", err)
+	}
+	var reply processor.OperationReply
+	if err := json.Unmarshal(replyMsg.Data, &reply); err != nil {
+		return nil, fmt.Errorf("parse reply: %w", err)
+	}
+	return &reply, nil
 }
 
 // resolveGrants returns a copy of def with each PermissionSpec.GrantsTo
@@ -237,7 +314,6 @@ type InstallResult struct {
 	Skipped            bool
 	Reason             string
 	DependencyWarnings []string
-	PreInstallRan      bool
 }
 
 // ErrVersionMismatch is returned by Install when a different version of
@@ -390,33 +466,62 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 		return nil, fmt.Errorf("pkgmgr: parse %s: %w", manifestKey, err)
 	}
 	declaredRaw, _ := env.Data["declaredKeys"].([]any)
-	keys := make([]string, 0, len(declaredRaw)+1)
+	keys := make([]string, 0, len(declaredRaw)+2)
 	for _, dk := range declaredRaw {
 		if s, ok := dk.(string); ok && s != "" {
 			keys = append(keys, s)
 		}
 	}
 	// Manifest aspect (not in declaredKeys — captured before its own key
-	// was added during install) + package vertex itself, soft-deleted
-	// last in order.
+	// was added during install) + package vertex itself, tombstoned last.
 	keys = append(keys, manifestKey, ip.Key)
 
-	ops, err := i.buildTombstoneBatch(ctx, keys)
-	if err != nil {
-		return nil, err
+	// Build the UninstallPackage payload. Keys that no longer resolve
+	// (already hard-deleted) are skipped — there is nothing to tombstone.
+	//
+	// Uninstall tombstones UNCONDITIONALLY (no per-key expectedRevision).
+	// The UninstallPackage script supports per-key OCC, but the canonical
+	// expectedRevision is the per-SUBJECT sequence the Committer returns in
+	// OperationReply.Revisions (the install reply) — NOT the stream-level
+	// revision KVGet exposes. Threading the install-time committed
+	// revisions through to a later uninstall is heavier than this story
+	// warrants, so OCC is deferred (CAR: per-key-revision uninstall OCC).
+	// Window: a concurrent Processor write to a declared key between this
+	// read and the commit is silently overwritten. The whole batch is
+	// still atomic, so no partial/mixed state can result; the only loss is
+	// the lost-update guarantee on a key being uninstalled — acceptable for
+	// an admin-driven uninstall.
+	declaredEntries := make([]map[string]any, 0, len(keys))
+	tombstoned := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, err := i.Conn.KVGet(ctx, CoreBucket, k); err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("pkgmgr: uninstall read %s: %w", k, err)
+		}
+		declaredEntries = append(declaredEntries, map[string]any{"key": k})
+		tombstoned = append(tombstoned, k)
 	}
-	if len(ops) == 0 {
+	if len(declaredEntries) == 0 {
 		return &UninstallResult{PackageName: packageName, Note: "nothing to uninstall"}, nil
 	}
-	bctx, cancel := context.WithTimeout(ctx, DefaultBatchTimeout)
-	defer cancel()
-	if _, err := i.Conn.AtomicBatch(bctx, ops); err != nil {
-		return nil, fmt.Errorf("pkgmgr: uninstall atomic batch: %w", err)
+
+	payload := map[string]any{
+		"name":         packageName,
+		"declaredKeys": declaredEntries,
 	}
-	return &UninstallResult{
-		PackageName: packageName,
-		Tombstoned:  keys,
-	}, nil
+	requestID := deterministicNanoID(packageName, ip.Version, "uninstall-op")
+	reply, err := i.submitOp(ctx, "UninstallPackage", "UninstallPackage", requestID, payload)
+	if err != nil {
+		return nil, fmt.Errorf("pkgmgr: submit UninstallPackage: %w", err)
+	}
+	switch reply.Status {
+	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
+		return &UninstallResult{PackageName: packageName, Tombstoned: tombstoned}, nil
+	default:
+		return nil, fmt.Errorf("pkgmgr: UninstallPackage rejected: %s", replyError(reply))
+	}
 }
 
 // UninstallResult summarises an uninstall.

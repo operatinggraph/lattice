@@ -30,6 +30,24 @@ func (e *ConflictError) Error() string {
 
 func (e *ConflictError) Unwrap() error { return e.Cause }
 
+// ProtectedKeyError is the typed step-8 failure surfaced when an update or
+// tombstone mutation targets a root document carrying data.protected == true.
+// This is the authoritative, path-independent kernel-protection backstop: it
+// closes the bricking hole for EVERY op at once (InstallPackage,
+// UninstallPackage, meta-root mutations, and any future DDL) regardless of
+// whether the originating script declared the root in ContextHint.Reads.
+// The commit path maps this onto a `rejected` reply with code `ProtectedKey`.
+// create mutations are exempt — create-only already conflicts on overwrite.
+type ProtectedKeyError struct {
+	Key  string // the offending mutation key
+	Root string // the derived protected root (vtx.<type>.<id>)
+	Op   string // the mutation op (update|tombstone)
+}
+
+func (e *ProtectedKeyError) Error() string {
+	return fmt.Sprintf("ProtectedKey: %s on %s targets protected kernel root %s", e.Op, e.Key, e.Root)
+}
+
 // CommitterImpl is the step-8 implementation. Behavior:
 //  1. Build a single substrate.AtomicBatch op list:
 //     - one BatchOp per mutation (revision condition derived from
@@ -106,6 +124,16 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	trackerVal, err := tracker.Marshal()
 	if err != nil {
 		return CommitAck{}, fmt.Errorf("step 8: marshal tracker: %w", err)
+	}
+
+	// Authoritative protected-key guard (Story 1.5.5 P1). For every update
+	// or tombstone, derive the 3-segment root and reject the WHOLE operation
+	// if the root document carries data.protected == true. This is the
+	// path-independent kernel/auth bricking backstop — the script-level
+	// install/uninstall checks are best-effort defense-in-depth only.
+	// create mutations are exempt (create-only already conflicts on overwrite).
+	if err := c.rejectProtectedMutations(ctx, result.Mutations); err != nil {
+		return CommitAck{}, err
 	}
 
 	ops := make([]substrate.BatchOp, 0, len(result.Mutations)+1)
@@ -271,6 +299,76 @@ func buildMutationValue(env *OperationEnvelope, m MutationOp, at time.Time, trac
 	}
 
 	return json.Marshal(doc)
+}
+
+// rejectProtectedMutations is the authoritative commit-time kernel-protection
+// guard. For every update/tombstone mutation it derives the 3-segment root
+// (vtx.<type>.<id>), KVGets the root document, and rejects the whole operation
+// with *ProtectedKeyError if data.protected == true. Root→protected lookups
+// are cached within the single commit so multiple aspects of one root cost a
+// single KVGet. A root that does not exist (ErrKeyNotFound) is not protected.
+// create mutations are skipped — create-only conflicts on overwrite already.
+func (c *CommitterImpl) rejectProtectedMutations(ctx context.Context, mutations []MutationOp) error {
+	cache := map[string]bool{} // root → protected
+	for _, m := range mutations {
+		if m.Op != "update" && m.Op != "tombstone" {
+			continue
+		}
+		root := protectedRootKey(m.Key)
+		if root == "" {
+			continue
+		}
+		protected, seen := cache[root]
+		if !seen {
+			p, err := c.rootIsProtected(ctx, root)
+			if err != nil {
+				return fmt.Errorf("step 8: protected-key check for %s: %w", root, err)
+			}
+			protected = p
+			cache[root] = p
+		}
+		if protected {
+			return &ProtectedKeyError{Key: m.Key, Root: root, Op: m.Op}
+		}
+	}
+	return nil
+}
+
+// rootIsProtected reads the root document and reports whether data.protected
+// is true. A not-found root is reported as not protected (allow).
+func (c *CommitterImpl) rootIsProtected(ctx context.Context, root string) (bool, error) {
+	entry, err := c.Conn.KVGet(ctx, c.CoreBucket, root)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	var doc struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		// A root we cannot parse cannot be confirmed protected; treat as
+		// non-protected so a corrupt unrelated doc does not wedge commits.
+		return false, nil
+	}
+	if doc.Data == nil {
+		return false, nil
+	}
+	prot, ok := doc.Data["protected"].(bool)
+	return ok && prot, nil
+}
+
+// protectedRootKey derives the 3-segment root of a mutation key
+// (vtx.<type>.<id> from vtx.<type>.<id>.<aspect...>). Returns "" for keys that
+// have no 3-segment vtx root (e.g. links, which are not vertex-rooted and are
+// not kernel-protected entities). Aspect and root keys alike map to the root.
+func protectedRootKey(key string) string {
+	parts := strings.Split(key, ".")
+	if len(parts) < 3 || parts[0] != "vtx" {
+		return ""
+	}
+	return strings.Join(parts[:3], ".")
 }
 
 // guessConflictingKey extracts the best-effort key that caused an

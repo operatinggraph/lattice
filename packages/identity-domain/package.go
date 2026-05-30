@@ -2,16 +2,18 @@
 // provides CreateUnclaimedIdentity, UpdateIdentityState, and ClaimIdentity
 // operations.
 //
-// Install via `lattice-pkg install packages/identity-domain`. The
-// install runs in two stages:
+// Install via `lattice-pkg install packages/identity-domain`. The install
+// is ONE atomic commit routed through the Processor (Story 1.5.5):
 //
-//  1. PreInstall (seed.go): atomic batch creating the 3 user-facing
-//     roles (consumer, frontOfHouse, backOfHouse) so the subsequent
-//     grant links can reference them. Idempotent via a
-//     `vtx.roleindex.<sha256NanoID(rolecanonical:<name>)>` probe.
-//  2. Main atomic batch: identity DDL + 3 permission vertices + 5
-//     grantedBy links from those permissions to the 4 relevant roles
-//     (frontOfHouse, backOfHouse, operator, consumer).
+//   - the 3 user-facing roles (consumer, frontOfHouse, backOfHouse) — role
+//     vertex + canonicalName/description aspects + a canonical-name index
+//     vertex, with deterministic NanoIDs;
+//   - the identity DDL + 3 permission vertices + grantedBy links from those
+//     permissions to the relevant roles (frontOfHouse, backOfHouse,
+//     operator, consumer).
+//
+// Everything (roles included) lands in the single install batch and in the
+// manifest's declaredKeys, so uninstall reclaims it all (closes F-001).
 //
 // Depends on rbac-domain being installed first (so the `rbac` DDL can
 // govern operator-driven role mutations after install). The installer
@@ -28,5 +30,9 @@ var Package = pkgmgr.Definition{
 	Depends:     []string{"rbac-domain"},
 	DDLs:        DDLs(),
 	Permissions: Permissions(),
-	PreInstall:  PreInstall,
+	Roles: []pkgmgr.RoleSpec{
+		{CanonicalName: "consumer", Description: "A resident, tenant, or other end-consumer of platform services."},
+		{CanonicalName: "frontOfHouse", Description: "Front-of-house staff with visibility into resident-facing operations."},
+		{CanonicalName: "backOfHouse", Description: "Back-of-house staff responsible for internal operational tasks."},
+	},
 }

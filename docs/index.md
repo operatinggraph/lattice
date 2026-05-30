@@ -18,6 +18,7 @@ The seven Phase 1 data contracts are frozen. They define the exact wire shapes, 
 | [contracts/05-health-kv.md](./contracts/05-health-kv.md) | Health KV convention — bucket/key pattern, document shape, status enum, heartbeat cadence |
 | [contracts/06-capability-kv.md](./contracts/06-capability-kv.md) | Capability KV shape (SECURITY-CRITICAL) — per-actor projection, platformPermissions, serviceAccess, ephemeralGrants, scope enum |
 | [contracts/07-primordial-bootstrap.md](./contracts/07-primordial-bootstrap.md) | `make up` seeding inventory, bootstrap config, idempotence, readiness gate |
+| [contracts/08-package-install.md](./contracts/08-package-install.md) | Capability-package install/uninstall as Processor-routed kernel ops (`InstallPackage`/`UninstallPackage`) — thin-script/fat-manifest, guardrails, M5/B2 cache coherence, kernel protection |
 
 ---
 

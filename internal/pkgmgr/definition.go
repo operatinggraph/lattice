@@ -12,12 +12,6 @@
 //   - Install writes directly to core-kv (substrate-direct).
 package pkgmgr
 
-import (
-	"context"
-
-	"github.com/asolgan/lattice/internal/substrate"
-)
-
 // Definition is the static, install-time bundle for one package. Package
 // authors construct one of these in their package's top-level Go file and
 // export it as `var Package = pkgmgr.Definition{...}`.
@@ -48,26 +42,28 @@ type Definition struct {
 	// declares.
 	Permissions []PermissionSpec
 
-	// PreInstall is an optional hook that runs BEFORE the atomic batch.
-	// Packages whose install needs Go-side seeding (e.g. identity-domain
-	// seeding its 3 user-facing roles so the subsequent atomic batch's
-	// grants can reference them) provide this hook. ctx is the install
-	// ctx; conn is the live substrate connection; adminActor is the admin
-	// vtx.identity.<NanoID> key read from lattice.bootstrap.json.
-	// The hook MUST be idempotent — install retry after a partial failure
-	// re-invokes it.
-	PreInstall PreInstallFn
+	// Roles lists the user-facing roles this package declares. They are
+	// created in the SAME install batch as everything else (Story 1.5.5 —
+	// no substrate-direct PreInstall), with deterministic NanoIDs, and are
+	// captured in the manifest's declaredKeys so uninstall reclaims them
+	// (closes F-001 orphans). A package's own Permissions may reference a
+	// declared role by canonical name in GrantsTo; the installer resolves
+	// it to the role's deterministic NanoID.
+	Roles []RoleSpec
 }
 
-// PreInstallFn is the optional install pre-step a package can supply.
-// Implementations live in the package (e.g. packages/identity-domain/seed.go).
-//
-// Returns a map of role canonical names → NanoIDs that the seed step
-// created. The installer merges this map into its GrantsTo resolution
-// when building the atomic batch, so grant links can reference roles
-// the seed just created. May be nil/empty for packages that don't seed
-// new roles.
-type PreInstallFn func(ctx context.Context, conn *substrate.Conn, adminActor string) (extraRoleIDs map[string]string, err error)
+// RoleSpec is one user-facing role a package declares. The installer
+// creates a role vertex (`vtx.role.<id>`), its canonicalName +
+// description aspects, and a canonical-name index vertex
+// (`vtx.roleindex.<sha256(canonical)>` → roleId) — all in the install
+// batch with deterministic NanoIDs.
+type RoleSpec struct {
+	// CanonicalName is the role's canonical name (e.g. "consumer").
+	CanonicalName string
+
+	// Description is the role's plain-language description aspect.
+	Description string
+}
 
 // DDLSpec is one DDL meta-vertex declaration.
 type DDLSpec struct {

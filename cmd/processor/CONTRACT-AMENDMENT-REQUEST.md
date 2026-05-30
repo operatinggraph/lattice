@@ -366,3 +366,51 @@ responsibility) is the intended Phase-1.5 contract.
    protected-key mechanism (where the protected set lives + who enforces it). It
    belongs with 1.5.5 (route installs through Processor / kernel-protection surface).
    Recorded as a residual in phase-1-progress.md.
+
+---
+
+# Contract Amendment Request — UninstallPackage per-key OCC (F-011 follow-up)
+
+raisedBy: Story 1.5.5 implementation agent (claude-opus-4-8)
+raisedAt: 2026-05-30
+status: OPEN — proposal for a follow-up story
+severity: Low (does not block 1.5.5 acceptance; documented window below)
+
+## Context
+
+Story 1.5.5 routes uninstall through the Processor as an `UninstallPackage`
+op. The seeded `UninstallPackageDDLScript` supports a per-key
+`expectedRevision` (OCC) so a tombstone can fail if a declared key was
+modified between the client's read and the commit — the intended F-011 fix.
+
+## Problem
+
+The atomic-batch OCC condition (`Nats-Expected-Last-Subject-Sequence`)
+requires the per-SUBJECT sequence of each key. The only place that
+per-subject sequence is exposed to a client today is the
+`OperationReply.Revisions` map returned by the COMMITTING op (e.g. the
+install). `substrate.KVGet(...).Revision` returns the STREAM-level
+sequence, which does not match the per-subject header and produces a
+spurious `wrong last sequence` rejection if used as `expectedRevision`.
+
+Threading the install-time committed `Revisions` through to a later,
+independent uninstall (persisting them, e.g. in the package manifest, and
+reading them back at uninstall) is heavier than Story 1.5.5 warrants.
+
+## Decision taken for 1.5.5
+
+`Installer.Uninstall` submits `UninstallPackage` WITHOUT per-key
+`expectedRevision` — tombstones are unconditional. The whole batch is still
+atomic (no partial/mixed state). The only relaxed guarantee is lost-update
+protection on a key that is being uninstalled.
+
+**Documented window:** a concurrent Processor write to a declared key
+between the installer's read phase and the commit is silently overwritten
+by the tombstone. Acceptable for an admin-driven uninstall.
+
+## Proposed follow-up
+
+Persist the per-subject committed revisions (from the install reply's
+`Revisions` map) into the package `.manifest` aspect at install time, then
+read them back at uninstall and pass them as per-key `expectedRevision`.
+The script path already accepts them; only the client plumbing is missing.

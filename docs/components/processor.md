@@ -332,6 +332,75 @@ just avoids redundant Core KV reads).
 
 ---
 
+## Package install / uninstall (Story 1.5.5 — M5/B2, F-001)
+
+Capability-package install **and** uninstall route through the Processor as two
+primordial kernel operations — `InstallPackage` / `UninstallPackage` — instead of
+writing to the substrate directly. They are seeded as protected primordial DDL
+meta-vertices (`internal/bootstrap/install_ddl.go`,
+`internal/bootstrap/primordial.go`). The full install/uninstall contract is in
+[`docs/contracts/08-package-install.md`](../contracts/08-package-install.md); this
+section covers the Processor-side behavior.
+
+**Thin script over a fat manifest.** The client (`internal/pkgmgr`) pre-computes
+the complete mutation set — every DDL/lens/permission/grant/role/index key — and
+ships it as **logical documents** (`{class, data, isDeleted}`, no provenance) in
+the op payload. The kernel script iterates that set, enforces guardrails, and
+emits it as the op's mutations. The Processor stamps `createdAt`/`createdBy`/
+`createdByOp` at step 8 from the install actor, so installed entities carry real
+provenance authored by the install actor (an improvement over the old
+bootstrap-identity substrate-direct stamp).
+
+**Install guardrails** (`InstallPackage` is privileged — it must not be an
+arbitrary-write backdoor):
+
+- key-shape — every key matches an allowed Contract #1 pattern (`vtx.<type>.<id>`
+  `[.aspect]`, `lnk.<…>`); anything else is rejected;
+- protected-key — a key whose hydrated root carries `data.protected == true` is
+  rejected (installs may not overwrite kernel entities);
+- system-aspect — no aspect `localName` may start with `_` (mirrors the step-6
+  `sensitiveAspectScope` convention);
+- create-only — every install mutation op must be `create`.
+
+**M5/B2 cache coherence (no restart).** All mutations land in ONE step-8 atomic
+batch. The existing step-8 `vtx.meta.*` invalidation fires in-commit for the DDL
+meta-vertices in that batch, so a class the package just declared is usable
+immediately on the same running Processor — no restart, no manual refresh. (Test:
+`packages/rbac-domain/install_flow_test.go::TestInstallFlow_M5B2_DomainOpWithoutRestart`
+installs `rbac-domain` against a DDL cache that did not contain the `rbac` class at
+refresh time, then commits a `CreateRole` op on that just-declared class.)
+
+**Uninstall** reads the package's `.manifest` aspect (`declaredKeys`) and submits
+`UninstallPackage`, which tombstones each declared key (cascade-style) and rejects
+any protected key (defense in depth). The script accepts an optional per-key
+`expectedRevision` for OCC; the client currently submits tombstones
+**unconditionally** — see the [package-install contract](../contracts/08-package-install.md)
+and `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md` for the documented window and the
+per-key-revision follow-up.
+
+## Kernel protection (§3.4 — 1.5.2 residual)
+
+Primordial kernel entities are **protected** from update and tombstone. Bootstrap
+seeds `protected: true` in the **root vertex document `data`** (not a separate
+aspect) of: the meta-root DDL, the `InstallPackage` / `UninstallPackage` DDLs,
+both Capability lenses, the operator role, the primordial admin identity, and the
+primordial meta-permissions.
+
+The meta-root DDL's `UpdateMetaVertex` and `TombstoneMetaVertex` branches read the
+hydrated root and, when `data.protected == true`, `fail("ProtectedMetaVertex:
+<key>")` — so an operation cannot disable auth (the Capability lens) or the kernel
+(the meta-root DDL) by tombstoning or rewriting it. `UninstallPackage` applies the
+same rejection to any declared key whose root is protected. (Test:
+`packages/rbac-domain/install_flow_test.go::TestInstallFlow_ProtectedMetaVertexRejected`
+asserts both `TombstoneMetaVertex` and `UpdateMetaVertex` against the protected
+meta-root DDL are rejected and the target is left unmutated.)
+
+The caller must declare the target `metaKey` in `ContextHint.Reads` (already
+required by the `vertex_alive` liveness check), so the root document — and its
+`protected` flag — is in the script's hydrated `state`.
+
+---
+
 ## Failure modes
 
 | Failure | Where | Resolution |

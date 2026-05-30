@@ -136,4 +136,115 @@ This story defines the package-install contract Loom will build on — keep the 
 
 **Open risk flagged for checkpoint report:** deterministic NanoID derivation must stay collision-free across a package's entities AND idempotent across re-install; will derive via `crypto.sha256NanoID`-equivalent over `name+version+entityTag`.
 
-_(checkpoint findings appended below once rbac-domain is green)_
+### ✅ CHECKPOINT — rbac-domain installs end-to-end through the Processor (2026-05-30)
+
+**What is GREEN:**
+- `go build ./...`, `make vet`, `golangci-lint run ./internal/bootstrap/... ./internal/pkgmgr/...` → all clean (0 issues).
+- `make down && make up` → bootstrap committed **93** primordial entries (was ~69; +24 for the two new DDLs × 10 keys + 2 perms + 2 grant links).
+- `make verify-kernel` → **ALL ASSERTIONS PASSED** (new InstallPackage/UninstallPackage DDL top-level keys present; existing kernel intact).
+- `make verify-package-rbac` → **ALL ASSERTIONS PASSED (53 OK)** — rbac-domain installed via the Processor, all DDLs/permissions/grants present and correct.
+- Processor log confirms the full pipeline ran for the install (not substrate-direct):
+  `step1 parsed (lane=meta, operationType=InstallPackage)` → `step4 hydrated (class=InstallPackage)` → `step5 executed (mutations=31)` → `step8 committed (31 mutations, ONE atomic batch, seq=125)` → `step9 PackageInstalled event`. No rejections.
+- **Provenance improvement verified:** the installed `vtx.package.<id>` has `createdBy=vtx.identity.<admin>` and `createdByOp=vtx.op.<InstallPackage-tracker>` — the Processor stamps real provenance authored by the install actor (§3.2), an improvement over the old bootstrap-identity substrate-direct stamp.
+- **M5/B2 cache coherence:** step 8's existing `vtx.meta.*` invalidation fires in-commit for the InstallPackage batch (the 31 mutations include the DDL meta-vertices) — no Committer change needed; the new classes are usable without a Processor restart. (The explicit "submit a domain op on the just-declared class without restart" assertion is part of the deferred test set but the mechanism is in place and exercised by verify-package-rbac's reliance on the committed DDLs.)
+
+**What was BUILT (toward the checkpoint):**
+1. `internal/bootstrap/nanoid.go` — bootstrap file **v5**; added `InstallPackageDDL{ID,Key}`, `UninstallPackageDDL{ID,Key}`, `PermInstallPackage{ID,Key}`, `PermUninstallPackage{ID,Key}`; updated generate/populate/currentRaw/PrimordialVertexKeys; `PrimordialVertexKeyCount` 18 → **25**. checkVersion now requires "5" (`make down && make up` mandated anyway — Deviation 14).
+2. `internal/bootstrap/install_ddl.go` (NEW) — `InstallPackageDDLScript` + `UninstallPackageDDLScript` (thin scripts over fat manifest) with shared `installGuardrailHelpers` prelude: key-shape, protected-root reject (via state), system/underscore-aspect reject, create-only (install) / OCC-per-key (uninstall). Plus the self-description constants (input/output schema, fieldDescription, examples).
+3. `internal/bootstrap/primordial.go` — seeds the two DDL meta-vertices (9 aspects each incl `.compensation`) via new `seedPackageInstallDDL` helper; the two install permissions + grantedBy→operator links; `protected: true` on the root `data` of the admin identity, meta-root DDL, both Capability lenses, operator role, all meta-permissions, both install permissions, and the two new DDLs (§3.4).
+4. `internal/pkgmgr/build.go` — `buildInstallBatch` now emits **logical documents** (`docVertex/docAspect/docLink`, no provenance) returned as `[]installMutation{op,key,document}`; the Processor stamps provenance at step 8.
+5. `internal/pkgmgr/installer.go` — `Install` now derives **deterministic NanoIDs** (`deterministicNanoID(name,version,tag)` via SHA-256→alphabet) for all entities + a deterministic op `requestId`, builds the `InstallPackage` payload `{name,version,mutations}`, and submits via the new `submitOp` (ops.meta, NATS inbox round-trip — reproduced locally so `internal/pkgmgr` does not import a `cmd/` package). Handles accepted/duplicate/rejected.
+6. `cmd/lattice-pkg/main.go` — unchanged surface; `runInstall` calls `inst.Install`, which now routes through the Processor.
+
+**What REMAINS (Winston may split):**
+- **Uninstall** (`UninstallPackage` op): the script is WRITTEN + seeded but `installer.go`'s `Uninstall` still uses `buildTombstoneBatch` + `AtomicBatch` (substrate-direct). Needs: read `.manifest`, optionally read per-key revisions for OCC (expectedRevision plumbing), submit `UninstallPackage` op. `cmd/lattice-pkg` `runUninstall` already just calls `inst.Uninstall`.
+- **identity-domain PreInstall fold** — move `packages/identity-domain/seed.go`'s 3-role seeding into `buildInstallBatch` (deterministic role NanoIDs + roleindex + aspects → manifest `declaredKeys`); delete `PreInstallFn` mechanism (`definition.go`, `installer.go` step 2.5, `seed.go`). `resolveGrants`/`RoleIDs` stay.
+- **identity-domain + identity-hygiene end-to-end** via the new path + their verify gates.
+- **`InstallPhase1Packages` / `SetupPackageTestEnv` testutil refactor** — ~11 test files install packages BEFORE any pipeline exists; they now hit "wait for reply: context deadline exceeded". The helper must stand up a meta-lane stub-auth `CommitPath` + consumer and drive the InstallPackage ops. This is the single largest remaining work item and blocks `go test ./...`, `test-bypass`, `test-capability-adversarial`, and the bootstrap `self_description_e2e_test`.
+- **NEW required tests:** install→submit-domain-op-without-restart (M5/B2); install→uninstall→reinstall orphan-free (F-001); TombstoneMetaVertex/UpdateMetaVertex against a protected primordial key is rejected (§3.4 — note: the meta-root DDL's Tombstone/Update branches do NOT yet read `data.protected`; that guard still needs to be added to `MetaRootDDLScript`).
+- **Kernel-protection guard in `MetaRootDDLScript`** (§3.4) — the Update/Tombstone branches must `fail("ProtectedMetaVertex: ...")` when the target root's `data.protected == true`. NOT yet done (the `protected` flags are seeded; the meta-root enforcement is pending).
+- **grep-clean** — `grep -rn "AtomicBatch" packages/ internal/pkgmgr/ cmd/lattice-pkg/`: still present in `installer.go` (Uninstall) and `packages/identity-domain/seed.go` (PreInstall) until the two items above land.
+- **Docs** — `docs/components/processor.md` (InstallPackage/UninstallPackage + protection) + `docs/contracts/` install-contract page.
+
+**Assessment of remaining effort:** the install half (the largest design risk — routing a privileged op through the full auth/hydrate/execute/commit pipeline with in-commit DDL coherence) is DONE and proven against production. The remainder is mechanical-but-broad: uninstall (small), PreInstall fold (small), meta-root protected guard (small Starlark edit), the new tests (moderate), and the **testutil pipeline refactor (moderate-large, gates the whole unit suite)**. Recommend either continuing in-session starting with the testutil refactor (unblocks the suite) then uninstall + PreInstall + protected guard, OR splitting the testutil refactor + tests into a follow-up if budget is tight. No stuck loops; no CARs needed.
+
+_(Winston: design §3 held up cleanly — the stub-auth `make up` path made the install milestone reachable without first solving cap-doc projection; capability-mode projection is wired primordially via the operator grant and will surface for `test-capability-adversarial` once that test installs through a pipeline.)_
+
+### ✅ CLOSING SUMMARY — all §6 deliverables complete (2026-05-30, continuation session)
+
+Winston approved continuing in-session (no split). All remaining §6 deliverables landed in the order recommended. No stuck loops.
+
+**Deliverables vs §6 (all ✅):**
+- ✅ `InstallPackage` + `UninstallPackage` primordial kernel DDLs seeded (self-description complete; verify-kernel green) + operator/admin permission to submit them. *(landed in the checkpoint; unchanged.)*
+- ✅ Install routed through the Processor — one atomic commit; DDL cache coherent in-commit. **M5/B2 test passes** (shared-cache pipeline: `rbac` class absent before install, resolvable + a `CreateRole` op commits after, on the same running Processor).
+- ✅ Thin script + guardrails (key-shape, protected-key, system-aspect, create-only); fat manifest from `build.go` (logical docs, Processor-stamped provenance, deterministic keys + requestId).
+- ✅ **PreInstall fold:** identity-domain's 3 roles (vertex + canonicalName/description aspects + roleindex) now created in the install batch with deterministic NanoIDs and captured in `declaredKeys`. `PreInstallFn` mechanism **deleted** (`definition.go`, `installer.go`, `packages/identity-domain/seed.go` removed). New `Definition.Roles []RoleSpec`. Folded role NanoIDs are deterministic (`deterministicNanoID(name,version,"role:"+canonical)`) → idempotent re-install. **F-001 orphan-free test passes.**
+- ✅ **Uninstall** routed through the Processor (`UninstallPackage` op; installer reads `.manifest` declaredKeys + package vertex, submits tombstones). **OCC DEFERRED with documented window + CAR** — see Deviation/CAR below.
+- ✅ **Kernel protection (§3.4):** `MetaRootDDLScript` `UpdateMetaVertex` + `TombstoneMetaVertex` now `fail("ProtectedMetaVertex: <key>")` when `state[meta_key].data.protected == True` (new `is_protected` helper). `UninstallPackage` rejects protected declared keys (was already in the seeded script via `_is_protected_root`). **Protected-rejection test passes** (asserts reply status=rejected, error mentions ProtectedMetaVertex, target unmutated, for BOTH Tombstone + Update).
+- ✅ **grep-clean:** `grep -rn "AtomicBatch" packages/ internal/pkgmgr/ cmd/lattice-pkg/` → only `packages/identity-domain/state_machine_test.go` (an unrelated test fixture tombstoning a lease, NOT an install write). Bootstrap seed path (`internal/bootstrap`) legitimately retained.
+- ✅ All 3 packages install+verify via the new path; verify-package-* + all §5 gates green.
+- ✅ **Docs:** `docs/components/processor.md` gains "Package install / uninstall" + "Kernel protection" sections; new `docs/contracts/08-package-install.md` (Contract #8, C3); indexes updated (`docs/index.md`, `docs/contracts/_index.md`).
+
+**testutil pipeline refactor (done FIRST, unblocked the suite):**
+- `internal/testutil/install_phase1_packages.go` — `InstallPhase1Packages` now stands up a REAL meta-lane stub-auth `CommitPath` (`RunMetaInstallPipeline`) that consumes the submitted `InstallPackage`/`UninstallPackage` ops. The InstallPackage DDL script, step-6 validation, and step-8 atomic commit all run for real; only the auth step is stubbed (`AuthModeStub` via `MakeStubPipeline`). No guardrail or validation is skipped — installs are not faked.
+- `internal/testutil/pipeline.go` — `ProvisionHarness` now also creates the `core-events` stream (step 9 publishes `PackageInstalled`/`PackageUninstalled`; absent stream caused nak-redelivery → cross-test interference on the shared `ops.meta` lane).
+- On stop, the install consumer is deleted AND the committed install ops are purged from the `ops.meta` subject, so a meta-lane consumer a test creates afterward (DeliverAll) does not replay them as spurious "duplicate" outcomes. (Two real failures — `TestFR19_NFR_S10` + `TestGate4` got "duplicate" — were root-caused to lingering install ops + missing events stream and fixed here, NOT papered over.)
+- `internal/pkgmgr/installer_test.go` — `newInstallerHarness` now seeds primordials + provisions ops/events streams + runs the meta pipeline, so the install/uninstall/list/idempotency unit tests exercise the Processor-routed path. Coverage not weakened (same assertions; install/uninstall now go through the full pipeline).
+
+**Files touched:**
+- Source: `internal/pkgmgr/{definition.go,build.go,installer.go}`, `internal/bootstrap/meta_ddl.go`, `internal/bootstrap/primordial.go` (comment), `cmd/lattice-pkg/main.go` (comments), `packages/identity-domain/package.go`, **deleted** `packages/identity-domain/seed.go`.
+- Tests/harness: `internal/testutil/{install_phase1_packages.go,pipeline.go}`, `internal/pkgmgr/installer_test.go`, `packages/identity-domain/package_test.go`, **new** `packages/rbac-domain/install_flow_test.go` (the 3 §5 required tests).
+- Docs: `docs/components/processor.md`, **new** `docs/contracts/08-package-install.md`, `docs/contracts/_index.md`, `docs/index.md`, `packages/identity-domain/{manifest.yaml,README.md}`.
+- CAR: `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md` (appended UninstallPackage per-key OCC entry).
+
+**§5 gate tails (all green):**
+- `go build ./...` → clean. `make vet` → exit 0. `golangci-lint run ./...` → **0 issues.**
+- `make down && make up` → primordial atomic batch committed **93** entries; readiness gate satisfied.
+- `make verify-kernel` → **ALL ASSERTIONS PASSED.**
+- `make verify-package-rbac` → **ALL ASSERTIONS PASSED (53 OK).**
+- `make verify-package-identity` → **ALL ASSERTIONS PASSED (37 OK).** (folded roles live: 3 `vtx.roleindex.*` present; grant links resolve to folded role NanoIDs.)
+- `make verify-package-identity-hygiene` → **ALL ASSERTIONS PASSED (31 OK).**
+- `go test ./internal/pkgmgr/... ./internal/bootstrap/... ./internal/processor/... -p 1 -count=1` → all **ok**.
+- `go test ./... -p 1 -count=1` → **all 36 packages ok** (incl. the 3 new install-flow tests in rbac-domain).
+- `make test-bypass` → **PHASE 1 GATE 3: PASSED (4/4).**
+- `make test-capability-adversarial` → `TestCapAdv*` **ok**; `TestGate3_Report` **PASS (4/4 vectors; 3 DEFENDED, 1 ACCEPTED-WINDOW).**
+- (Deviation 14 honored: `make down && make up` between full-suite / bypass / adversarial runs.)
+
+**New §5 tests (all PASS) — `packages/rbac-domain/install_flow_test.go`:**
+- `TestInstallFlow_M5B2_DomainOpWithoutRestart` — install rbac via InstallPackage, then commit a CreateRole on the just-declared `rbac` class on the SAME shared DDL cache (absent at refresh → resolvable after install). Proves M5/B2 in-commit coherence, no restart.
+- `TestInstallFlow_F001_ReinstallNoOrphans` — install rbac+identity-domain, assert the folded roles are in `declaredKeys` (≥3 role + ≥3 roleindex), uninstall → every declared key tombstoned (no live orphan), re-install on a fresh keyspace succeeds.
+- `TestInstallFlow_ProtectedMetaVertexRejected` — Tombstone AND Update against the protected meta-root DDL are both rejected with `ProtectedMetaVertex` and leave the target unmutated.
+
+**CARs / Deviations:**
+- **CAR (OPEN, Low):** `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md` — UninstallPackage per-key OCC. The `UninstallPackageDDLScript` supports per-key `expectedRevision`, but the canonical per-subject sequence is only exposed in the committing op's `OperationReply.Revisions` (the install reply), NOT via `KVGet.Revision` (stream-level → spurious `wrong last sequence`). Threading install-time committed revisions through to a later uninstall is heavier than this story warranted, so uninstall tombstones **unconditionally**. Documented window: a concurrent Processor write to a declared key between the installer read and the commit is silently overwritten by the tombstone; the batch is still atomic (no partial/mixed state). Proposed follow-up: persist the install reply's `Revisions` into the `.manifest` aspect and read them back at uninstall. Per §3.3, this was an explicitly permitted fallback ("your call, but state it").
+- No other deviations. No stuck loops; no reverts.
+
+**Net result:** Story 1.5.5 closes M5/B2 (in-commit DDL coherence — no restart), F-001 (orphan-free install/uninstall/reinstall; PreInstall roles folded into the manifest), F-002 (deterministic requestId → idempotent install dedup), the C3 install contract (Contract #8), and the 1.5.2 kernel-protection residual (ProtectedMetaVertex guard). F-011 per-key OCC is deferred via documented window + CAR. Substrate-direct install writes eliminated (grep-clean). Left in the working tree for Winston — not committed.
+
+---
+
+### CR fix round (P1 protected-key authoritative guard)
+
+Addresses the CR P1 (dead script-level protected check; `UninstallPackage` could tombstone a protected kernel key → brick kernel/auth), CR DOC-1, and CR P2 B-1. Andrew's directive: option A — a Processor-level, commit-time, read-and-check guard (path-independent).
+
+**Changes:**
+- **Authoritative guard (location + error code):** `internal/processor/step8_commit.go` — `CommitterImpl.rejectProtectedMutations` (called at the top of `Commit`, before the atomic batch). For every `update`/`tombstone` it derives the 3-segment root (`protectedRootKey`), `KVGet`s the root, and rejects the WHOLE op with `*ProtectedKeyError` when `data.protected == true`. Root→protected lookups are cached per-commit (one `KVGet` per root). Not-found root → not protected (allow). `create` exempt. New error code `ErrCodeProtectedKey = "ProtectedKey"` in `internal/processor/envelope.go`; surfaced as a rejected reply (term, no redelivery) in `internal/processor/commit_path.go`.
+- **De-conflicted dead script checks:** removed the non-functional `_is_protected_root` helper + both call sites from `internal/bootstrap/install_ddl.go`; replaced with honest comments stating the Processor commit-time guard is authoritative. The functional `meta_ddl.go` `is_protected` guard kept as defense-in-depth (clearer per-op `ProtectedMetaVertex` error), noted as non-authoritative.
+- **Docs (CR DOC-1):** `docs/contracts/08-package-install.md` §8.2/§8.3/§8.4 corrected — the script-level install/uninstall protected check is no longer claimed as active protection; §8.4 now names the Processor commit-time guard as authoritative + path-independent.
+- **CR P2 B-1:** removed the dead `now time.Time` param from `buildInstallBatch` (`internal/pkgmgr/build.go`) + its call site in `installer.go`; dropped the now-unused `time` import.
+
+**New test (CR KP-2, fails closed):** `packages/rbac-domain/install_flow_test.go` → `TestInstallFlow_UninstallProtectedKeyRejected` — submits a crafted `UninstallPackage` op whose `declaredKeys` includes `bootstrap.MetaRootKey` (a protected kernel key) and asserts the reply is **rejected with `ErrCodeProtectedKey`** and the protected key is **NOT tombstoned** (same revision, still live). This exercises the real authoritative path (the script performs no protected check — empty hydrated state). Verified PASS.
+
+**§5 gate tails (CR-fix round, all green):**
+- `go build ./...` → clean. `make vet` → exit 0. `golangci-lint run ./internal/... ./packages/...` → **0 issues.**
+- `make down && make up` → primordial atomic batch committed **93** entries; readiness gate satisfied.
+- `make verify-kernel` → **ALL ASSERTIONS PASSED.**
+- `make verify-package-rbac` → **ALL ASSERTIONS PASSED (53 OK).**
+- `make verify-package-identity` → **ALL ASSERTIONS PASSED (37 OK).**
+- `make verify-package-identity-hygiene` → **ALL ASSERTIONS PASSED (31 OK).**
+- `go test ./... -p 1 -count=1` → **all packages ok** (incl. the new `TestInstallFlow_UninstallProtectedKeyRejected`). Note: under default parallel `-p`, a few integration tests that share the live `make up` stack flake on NATS resource contention (`TestPublishBatch_HappyPath`, `TestCapAdv_V4_*`, one processor NFR test) — each passes in isolation and under `-p 1`; not a regression.
+- `make test-bypass` → **PHASE 1 GATE 3: PASSED (4/4).**
+- `make test-capability-adversarial` → `TestGate3_Report` **PASS (4/4; 3 DEFENDED, 1 ACCEPTED-WINDOW).**
+- New + related protected tests: `TestInstallFlow_UninstallProtectedKeyRejected` **PASS**, `TestInstallFlow_ProtectedMetaVertexRejected` **PASS**, `TestInstallFlow_M5B2_DomainOpWithoutRestart` **PASS**, `TestInstallFlow_F001_ReinstallNoOrphans` **PASS**.
+
+**CAR status:** the OPEN UninstallPackage per-key OCC CAR is **unaffected** by this change (the protected-key guard is orthogonal to OCC — it reads the root doc, does not assert revisions). No new CARs. No stuck loops. Left in the working tree for Winston — not committed.
