@@ -22,11 +22,11 @@ Three key shapes are valid in Core KV. No other shapes are permitted.
 
   Substrate is **direction-agnostic**: `substrate.LinkKey(type1, id1, linkName, type2, id2)` constructs the key in caller-provided order; the substrate does NOT validate or re-sort. The DDL's Starlark script (or other authorized caller) is responsible for emitting endpoints in the DDL-declared direction. The link DDL's `.description` aspect SHOULD document its directional semantics for downstream consumers (FR19 self-description aspect).
 
-  **Pre-Story-1.4 framing superseded.** Earlier drafts described this as "`<id1>` is the younger vertex (later `createdAt`), `<id2>` is the older." That formulation conflated runtime ordering with design intent and broke down for cases where the conceptual ordering doesn't match `createdAt` (e.g., a manager seeded later than a report through bulk import). The convention is a **DDL authoring rule**, not a runtime invariant — once authored, direction is encoded in the link DDL and instances inherit it.
+  **Pre-Story-1.4 framing superseded.** Earlier drafts described this as "`<id1>` is the younger vertex (later `createdAt`), `<id2>` is the older," and the link envelope carried `youngerVertex`/`olderVertex` fields. That formulation conflated runtime ordering with design intent and broke down for cases where the conceptual ordering doesn't match `createdAt` (e.g., a manager seeded later than a report through bulk import). The convention is a **DDL authoring rule**, not a runtime invariant — once authored, direction is encoded in the link DDL and instances inherit it. The envelope fields are now named **`sourceVertex`** (segments 1–3, the source side) and **`targetVertex`** (segments 4–6, the target side) to reflect the DDL-declared direction rather than any timestamp ordering. There is no `direction` field: direction is fully encoded by segment order in the key, so a stored copy would be redundant and risk drift.
 
 **Parser disambiguation rule:**
 - Count segments by dot-splitting the key. 3 segments → vertex. 4 segments → aspect. 6 segments → link. Any other segment count is malformed and rejected at write time.
-- Vertex `<id>` is the third segment; aspect's vertex key is segments 1–3; link endpoints are segments 1–3 (younger) and 4–6 (older, after the linkName).
+- Vertex `<id>` is the third segment; aspect's vertex key is segments 1–3; link endpoints are segments 1–3 (source side) and 4–6 (target side, after the linkName).
 
 **Case sensitivity:**
 - NATS subjects are case-sensitive. Keys are case-sensitive at storage level.
@@ -118,8 +118,8 @@ Links add three fields:
 ```json
 {
   "key": "lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.heldBy.identity.Hj4kPmRtw9nbCxz5vQ2y",
-  "youngerVertex": "vtx.lease.Lk2Pn6mQrtwzKbcXvP3T",
-  "olderVertex": "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y",
+  "sourceVertex": "vtx.lease.Lk2Pn6mQrtwzKbcXvP3T",
+  "targetVertex": "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y",
   "localName": "heldBy",
   "class": "heldBy",
   "isDeleted": false,
@@ -130,8 +130,8 @@ Links add three fields:
 
 | Field | Purpose |
 |-------|---------|
-| `youngerVertex` | Pointer to younger endpoint (key segments 1–3). |
-| `olderVertex` | Pointer to older endpoint (key segments 4–6). |
+| `sourceVertex` | Pointer to the source-side endpoint (key segments 1–3) — the DDL-declared source, typically the later-arriving vertex. |
+| `targetVertex` | Pointer to the target-side endpoint (key segments 4–6) — the DDL-declared target, typically the pre-existing vertex. |
 | `localName` | The link's local name (key segment 4 of the link key — the middle segment between the two vertex keys). |
 
 ### 1.4 Reserved Underscore-Prefixed Local Names
@@ -311,12 +311,12 @@ vtx.lease.Lk2Pn6mQrtwzKbcXvP3T
   envelope: { class: "lease", isDeleted: false, ... }
   data: {}
 
-# Lease was created after the identity → lease is younger
+# DDL declares heldBy as lease → identity, so lease is the source side
 lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.heldBy.identity.St6mP3qBn4rT8wYxK7Vc
   envelope:
     key: "lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.heldBy.identity.St6mP3qBn4rT8wYxK7Vc"
-    youngerVertex: "vtx.lease.Lk2Pn6mQrtwzKbcXvP3T"
-    olderVertex: "vtx.identity.St6mP3qBn4rT8wYxK7Vc"
+    sourceVertex: "vtx.lease.Lk2Pn6mQrtwzKbcXvP3T"
+    targetVertex: "vtx.identity.St6mP3qBn4rT8wYxK7Vc"
     localName: "heldBy"
     class: "heldBy"
     isDeleted: false

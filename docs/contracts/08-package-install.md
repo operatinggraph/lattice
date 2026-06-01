@@ -24,7 +24,7 @@ privileged kernel script small and auditable while the (untrusted-but-validated)
 mutation computation stays client-side.
 
 - **Logical documents** carry `class`, `data`, `isDeleted` (and for aspects
-  `vertexKey`, `localName`; for links `youngerVertex`, `olderVertex`,
+  `vertexKey`, `localName`; for links `sourceVertex`, `targetVertex`,
   `localName`) — but **no provenance**. The Processor stamps `createdAt`,
   `createdBy`, `createdByOp` at step 8 from the install actor, so installed
   entities carry real provenance authored by the actor that ran the install.

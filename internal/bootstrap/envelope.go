@@ -48,9 +48,9 @@ func MakeAspectEnvelope(key, vertexKey, localName, class string, data any) ([]by
 	return json.Marshal(env)
 }
 
-// MakeLinkEnvelope constructs a link envelope. youngerVertex is key segments
-// 1-3, olderVertex is segments 4-6 (after localName).
-func MakeLinkEnvelope(key, youngerVertex, olderVertex, localName, class string, data any) ([]byte, error) {
+// MakeLinkEnvelope constructs a link envelope. sourceVertex is key segments
+// 1-3, targetVertex is segments 4-6 (after localName).
+func MakeLinkEnvelope(key, sourceVertex, targetVertex, localName, class string, data any) ([]byte, error) {
 	base := substrate.NewDocumentEnvelopeAt(class, BootstrapIdentityKey, BootstrapOpKey, BootstrapTime)
 	base.Key = key
 	if data != nil {
@@ -62,8 +62,8 @@ func MakeLinkEnvelope(key, youngerVertex, olderVertex, localName, class string, 
 	}
 	env := substrate.LinkEnvelope{
 		DocumentEnvelope: base,
-		YoungerVertex:    youngerVertex,
-		OlderVertex:      olderVertex,
+		SourceVertex:     sourceVertex,
+		TargetVertex:     targetVertex,
 		LocalName:        localName,
 	}
 	return json.Marshal(env)

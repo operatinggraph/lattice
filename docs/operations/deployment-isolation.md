@@ -71,7 +71,7 @@ Lattice key naming embeds no cell identity, no deployment identity, and no topol
 |--------|-------------|---------|
 | Vertex | `vtx.<type>.<id>` | `vtx.tenant.aB3kR7x9pQ2mN5yZ` |
 | Aspect | `asp.<vtxId>.<name>` | `asp.aB3kR7x9pQ2mN5yZ.leaseTerm` |
-| Link | `lnk.<youngerId>.<name>.<olderId>` | `lnk.cD4nS8y0qR3pO6zA.memberOf.aB3kR7x9pQ2mN5yZ` |
+| Link | `lnk.<sourceId>.<name>.<targetId>` | `lnk.cD4nS8y0qR3pO6zA.memberOf.aB3kR7x9pQ2mN5yZ` |
 | DDL meta-vertex | `vtx.meta.<NanoID>` with `.canonicalName` aspect | — |
 | Op tracker | `vtx.op.<NanoID>` | — |
 

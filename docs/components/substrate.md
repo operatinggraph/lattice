@@ -64,7 +64,7 @@ trust boundary (untrusted input is never passed directly to a key builder).
 |----------|-------------|-------|
 | `VertexKey(type, id)` | `vtx.<type>.<id>` | `type` must match `[a-z][a-z0-9]*`; `id` must be a valid NanoID |
 | `AspectKey(vtxKey, localName)` | `vtx.<type>.<id>.<localName>` | `vtxKey` must be a valid 3-segment vertex key; `localName` must match `[a-z_][a-zA-Z0-9]*` |
-| `LinkKey(type1, id1, linkName, type2, id2)` | `lnk.<type1>.<id1>.<linkName>.<type2>.<id2>` | Callers determine ordering (younger-first per Contract #1 §1.1); substrate does NOT enforce it. Use `CanonicalLinkOrder` if you have only (a, b) without canonical ordering. |
+| `LinkKey(type1, id1, linkName, type2, id2)` | `lnk.<type1>.<id1>.<linkName>.<type2>.<id2>` | Callers pass endpoints in the DDL-declared direction (source side first, target side second per Contract #1 §1.1); substrate does NOT validate or re-sort. There is no auto-ordering by type, NanoID, or `createdAt`. |
 
 ### Key parsing and classification
 

@@ -32,13 +32,16 @@ type AspectEnvelope struct {
 	LocalName string `json:"localName"`
 }
 
-// LinkEnvelope extends DocumentEnvelope with the youngerVertex/olderVertex
-// pointers and the link's localName (Contract #1 §1.3).
+// LinkEnvelope extends DocumentEnvelope with the sourceVertex/targetVertex
+// pointers and the link's localName (Contract #1 §1.3). sourceVertex is key
+// segments 1-3 (the DDL-declared source side); targetVertex is segments 4-6
+// (the target side). The pointers mirror the key's segment order — they are
+// not a runtime createdAt ordering.
 type LinkEnvelope struct {
 	DocumentEnvelope
-	YoungerVertex string `json:"youngerVertex"`
-	OlderVertex   string `json:"olderVertex"`
-	LocalName     string `json:"localName"`
+	SourceVertex string `json:"sourceVertex"`
+	TargetVertex string `json:"targetVertex"`
+	LocalName    string `json:"localName"`
 }
 
 // FormatTimestamp returns t formatted as the Contract #1 ISO 8601 string

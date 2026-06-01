@@ -132,10 +132,10 @@ def make_update_aspect(key, vkey, local_name, cls, data):
             "document": {"class": cls, "vertexKey": vkey, "localName": local_name,
                          "isDeleted": False, "data": data}}
 
-def make_link(key, younger, older, cls, local_name, data):
+def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False,
-                         "youngerVertex": younger, "olderVertex": older,
+                         "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": data}}
 
 def make_tombstone(key):

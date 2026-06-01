@@ -227,16 +227,16 @@ func docAspect(vertexKey, localName, class string, data map[string]any) map[stri
 	}
 }
 
-func docLink(youngerVertex, olderVertex, localName, class string, data map[string]any) map[string]any {
+func docLink(sourceVertex, targetVertex, localName, class string, data map[string]any) map[string]any {
 	if data == nil {
 		data = map[string]any{}
 	}
 	return map[string]any{
-		"class":         class,
-		"isDeleted":     false,
-		"data":          data,
-		"youngerVertex": youngerVertex,
-		"olderVertex":   olderVertex,
-		"localName":     localName,
+		"class":        class,
+		"isDeleted":    false,
+		"data":         data,
+		"sourceVertex": sourceVertex,
+		"targetVertex": targetVertex,
+		"localName":    localName,
 	}
 }

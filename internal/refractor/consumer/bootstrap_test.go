@@ -167,8 +167,8 @@ func TestBootstrapper_LinkEnvelopeBridge(t *testing.T) {
 		"key":           linkKey,
 		"class":         "holdsRole",
 		"isDeleted":     false,
-		"youngerVertex": identityKey,
-		"olderVertex":   roleKey,
+		"sourceVertex": identityKey,
+		"targetVertex":   roleKey,
 		"localName":     "holdsRole",
 	}
 	body, err := json.Marshal(envelope)

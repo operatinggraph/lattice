@@ -35,7 +35,7 @@ Each mutation declares an intended state transition on a single Core KV key.
 |-------|--------------|---------|
 | `op` | all | One of `create`, `update`, `tombstone`. See §3.3. |
 | `key` | all | Full Core KV key conforming to Contract #1 patterns. |
-| `document` | `create`, `update` | Document body. Includes `class`, `isDeleted`, and `data` (plus aspect/link-specific fields like `vertexKey`/`localName`/`youngerVertex`/`olderVertex`). **Provenance fields are NOT set by the script** — `createdAt`, `createdBy`, `createdByOp`, `lastModifiedAt`, `lastModifiedBy`, `lastModifiedByOp` are injected by the Processor at commit step 6 using the current operation's actor and timestamp. |
+| `document` | `create`, `update` | Document body. Includes `class`, `isDeleted`, and `data` (plus aspect/link-specific fields like `vertexKey`/`localName`/`sourceVertex`/`targetVertex`). **Provenance fields are NOT set by the script** — `createdAt`, `createdBy`, `createdByOp`, `lastModifiedAt`, `lastModifiedBy`, `lastModifiedByOp` are injected by the Processor at commit step 6 using the current operation's actor and timestamp. |
 | `expectedRevision` | optional, `update` only | Revision condition for optimistic concurrency. If omitted, Processor uses the revision read during step 4 (Hydrate). Explicit override is reserved for compensating operations that need to force a specific revision check. |
 
 ### 3.3 Mutation Op Types — and why there is no `upsert`

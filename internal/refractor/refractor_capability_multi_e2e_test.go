@@ -246,8 +246,8 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 			"key":           linkKey,
 			"class":         name,
 			"isDeleted":     false,
-			"youngerVertex": substrate.VertexKey(srcType, srcID),
-			"olderVertex":   substrate.VertexKey(dstType, dstID),
+			"sourceVertex": substrate.VertexKey(srcType, srcID),
+			"targetVertex":   substrate.VertexKey(dstType, dstID),
 			"localName":     name,
 		}
 		body, jerr := json.Marshal(envelope)
@@ -467,8 +467,8 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 			"key":           holdsBKey,
 			"class":         "holdsRole",
 			"isDeleted":     true,
-			"youngerVertex": identityBKey,
-			"olderVertex":   userRoleKey,
+			"sourceVertex": identityBKey,
+			"targetVertex":   userRoleKey,
 			"localName":     "holdsRole",
 		}
 		body, jerr := json.Marshal(tombstone)

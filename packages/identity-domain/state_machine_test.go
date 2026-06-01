@@ -234,8 +234,8 @@ func TestIdentity_FR7_LeaseTombstoneDoesNotCascade(t *testing.T) {
 	linkDoc, _ := json.Marshal(map[string]any{
 		"class":         "hasLease",
 		"isDeleted":     false,
-		"youngerVertex": identityKey,
-		"olderVertex":   leaseKey,
+		"sourceVertex": identityKey,
+		"targetVertex":   leaseKey,
 		"localName":     "hasLease",
 		"data":          map[string]any{},
 	})

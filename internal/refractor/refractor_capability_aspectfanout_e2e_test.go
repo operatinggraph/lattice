@@ -202,8 +202,8 @@ func TestRefractor_CapabilityLens_AspectFanOut_E2E(t *testing.T) {
 			"key":           linkKey,
 			"class":         name,
 			"isDeleted":     false,
-			"youngerVertex": substrate.VertexKey(srcType, srcID),
-			"olderVertex":   substrate.VertexKey(dstType, dstID),
+			"sourceVertex": substrate.VertexKey(srcType, srcID),
+			"targetVertex":   substrate.VertexKey(dstType, dstID),
 			"localName":     name,
 		}
 		body, jerr := json.Marshal(envelope)

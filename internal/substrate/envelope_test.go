@@ -120,8 +120,8 @@ func TestAspectAndLinkEnvelopes_Marshal(t *testing.T) {
 
 	lnk := LinkEnvelope{
 		DocumentEnvelope: NewDocumentEnvelope("heldBy", actor, op),
-		YoungerVertex:    VertexKey("lease", testNanoID3),
-		OlderVertex:      VertexKey("identity", testNanoID1),
+		SourceVertex:     VertexKey("lease", testNanoID3),
+		TargetVertex:     VertexKey("identity", testNanoID1),
 		LocalName:        "heldBy",
 	}
 	lnk.Key = LinkKey("lease", testNanoID3, "heldBy", "identity", testNanoID1)
@@ -129,7 +129,7 @@ func TestAspectAndLinkEnvelopes_Marshal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lnk marshal: %v", err)
 	}
-	if !strings.Contains(string(bl), `"youngerVertex":`) || !strings.Contains(string(bl), `"olderVertex":`) {
+	if !strings.Contains(string(bl), `"sourceVertex":`) || !strings.Contains(string(bl), `"targetVertex":`) {
 		t.Fatalf("link envelope missing extension fields: %s", bl)
 	}
 }

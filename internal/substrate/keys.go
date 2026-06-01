@@ -50,10 +50,12 @@ func AspectKey(vtxKey, localName string) string {
 // LinkKey constructs a Contract #1 link key:
 // lnk.<type1>.<id1>.<linkName>.<type2>.<id2>.
 //
-// Per Contract #1 §1.1, id1 is the YOUNGER vertex and id2 the OLDER.
-// LinkKey does NOT compute youngerness — callers must pass arguments in
-// canonical order. Use CanonicalLinkOrder if you only have (a, b) with
-// timestamps.
+// Per Contract #1 §1.1, id1 is the SOURCE side and id2 the TARGET side, in
+// the link DDL's declared direction (source typically added later, target
+// typically pre-exists). The convention is semantic, not algorithmic: there
+// is NO auto-sort by type, NanoID, or createdAt. LinkKey constructs the key
+// in caller-provided order; the authorized caller (the DDL's Starlark script)
+// is responsible for emitting endpoints in the declared direction.
 func LinkKey(type1, id1, linkName, type2, id2 string) string {
 	mustValidateType(type1)
 	mustValidateNanoID(id1)
@@ -118,28 +120,6 @@ func ParseLinkKey(key string) (type1, id1, linkName, type2, id2 string, ok bool)
 		return "", "", "", "", "", false
 	}
 	return parts[1], parts[2], parts[3], parts[4], parts[5], true
-}
-
-// CanonicalLinkOrder returns the younger and older vertex keys in the order
-// required by LinkKey. Per Contract #1 §1.1, the younger vertex (larger
-// createdAt timestamp) occupies the id1 position. If the timestamps are
-// equal, keys are ordered lexicographically to break ties deterministically.
-//
-// aCreatedAt and bCreatedAt must be RFC3339Nano strings as produced by
-// FormatTimestamp. Malformed timestamps fall back to lexicographic ordering
-// of the raw strings.
-func CanonicalLinkOrder(aKey, aCreatedAt, bKey, bCreatedAt string) (younger, older string) {
-	if aCreatedAt > bCreatedAt {
-		return aKey, bKey
-	}
-	if bCreatedAt > aCreatedAt {
-		return bKey, aKey
-	}
-	// Equal timestamps: break tie lexicographically.
-	if aKey >= bKey {
-		return aKey, bKey
-	}
-	return bKey, aKey
 }
 
 // splitVertexKey is the internal vertex-key parser.
