@@ -989,7 +989,7 @@ func (ex *executor) evalExpr(b binding, e Expr) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return propertyOf(target, x.Key), nil
+		return ex.resolveProperty(target, x.Key)
 	case *BinaryOp:
 		l, err := ex.evalExpr(b, x.Left)
 		if err != nil {
@@ -1255,6 +1255,40 @@ func cloneBinding(b binding) binding {
 
 // propertyOf resolves target.key for various target shapes (nodeRef, map,
 // or nil). Returns nil for null targets and missing keys.
+// resolveProperty reads property `key` off target, implementing the Lattice
+// property model: vertices carry the envelope (key/class/provenance) plus link
+// topology; business data lives in aspects (and, by exception, in a vertex's
+// own `data` envelope — e.g. permissions).
+//
+// For a vertex nodeRef, a name present in the root body returns that value
+// directly (envelope fields, and root `data`). A name ABSENT from the root body
+// is treated as an ASPECT reference: the aspect key <nodeKey>.<key> is
+// point-read and its body returned, so a lens rule navigates an aspect-stored
+// field explicitly as node.<aspect>.data.<field> (e.g. role.canonicalName.data.value).
+// Aspect bodies returned this way are plain maps, so any further navigation uses
+// ordinary map access — only the first hop off a vertex resolves an aspect.
+func (ex *executor) resolveProperty(target any, key string) (any, error) {
+	nr, ok := target.(*nodeRef)
+	if !ok || nr == nil {
+		return propertyOf(target, key), nil
+	}
+	if v, present := nr.props[key]; present {
+		return v, nil
+	}
+	if key == "key" {
+		return nr.key, nil
+	}
+	// Absent from the root body → aspect reference: point-read <nodeKey>.<key>.
+	aref, err := ex.fetchNode(nr.key + "." + key)
+	if err != nil {
+		return nil, err
+	}
+	if aref == nil {
+		return nil, nil
+	}
+	return aref.props, nil
+}
+
 func propertyOf(target any, key string) any {
 	switch t := target.(type) {
 	case nil:

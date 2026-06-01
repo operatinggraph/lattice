@@ -40,38 +40,40 @@ OPTIONAL MATCH (identity)-[:containedIn*0..]->(loc)
 WHERE NOT (identity)-[:containedIn*0..]->(loc)-[:unavailableAt]->(svc)
 
 // --- ephemeralGrants ---
-// Walk: task → assignedTo → identity (direct or via reportsTo chain, max 2 hops)
-OPTIONAL MATCH (task:task)-[:assignedTo]->(identity)
-  WHERE task.expiresAt > $now
+// Walk: task → assignedTo → identity (direct or via reportsTo chain, max 2 hops).
+// Anchored on the already-bound identity (not the unbound task label) so the
+// engine traverses adjacency from the actor instead of scanning the entire Core
+// KV bucket for task seeds on every reprojection.
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.expiresAt > $now
 
-OPTIONAL MATCH (task2:task)-[:assignedTo]->(report:identity)
-  <-[:reportsTo]-(identity)
-  WHERE task2.expiresAt > $now
+OPTIONAL MATCH (identity)-[:reportsTo]->(report:identity)<-[:assignedTo]-(task2:task)
+  WHERE task2.data.expiresAt > $now
 
 RETURN
   identity.key AS actorKey,
   collect(DISTINCT {
-    operationType: perm.operationType,
-    scope: perm.scope
+    operationType: perm.data.operationType,
+    scope: perm.data.scope
   }) AS platformPermissions,
   collect(DISTINCT {
     service: svc.key,
     serviceClass: svc.class,
     resolvedVia: [loc.key],
-    allowedOperations: [(svc)-[:permitsOperation]->(op) | {operationType: op.operationType}]
+    allowedOperations: [(svc)-[:permitsOperation]->(op) | {operationType: op.data.operationType}]
   }) AS serviceAccess,
   collect(DISTINCT {
     source: "task",
     taskKey: task.key,
-    operationType: task.grantedOperationType,
-    target: task.targetKey,
-    expiresAt: task.expiresAt
+    operationType: task.data.grantedOperationType,
+    target: task.data.targetKey,
+    expiresAt: task.data.expiresAt
   }) + collect(DISTINCT {
     source: "task",
     taskKey: task2.key,
-    operationType: task2.grantedOperationType,
-    target: task2.targetKey,
-    expiresAt: task2.expiresAt
+    operationType: task2.data.grantedOperationType,
+    target: task2.data.targetKey,
+    expiresAt: task2.data.expiresAt
   }) AS ephemeralGrants,
   collect(DISTINCT role.key) AS roles
 `,
@@ -116,8 +118,8 @@ func CapabilityRoleIndexLensDefinition() LensDefinition {
 		CypherRule: `
 MATCH (role:role)<-[:grantedBy]-(perm:permission)
 RETURN
-  perm.operationType AS operationType,
-  collect(DISTINCT role.canonicalName) AS roles,
+  perm.data.operationType AS operationType,
+  collect(DISTINCT role.canonicalName.data.value) AS roles,
   $projectedAt AS projectedAt
 `,
 		OutputSchema: `{

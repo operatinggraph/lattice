@@ -180,15 +180,16 @@ func TestRefractor_CapabilityLens_AspectFanOut_E2E(t *testing.T) {
 	permKey := substrate.VertexKey("permission", permID)
 
 	const provenanceAt = "2026-05-15T10:00:00Z"
+	// Domain fields live under the `data` envelope, mirroring how the Processor
+	// commits a vertex (provenance fields top-level, script document under data).
+	// Lens cypher rules read them as node.data.<field>.
 	writeVertex := func(key, class string, extra map[string]any) {
 		body := map[string]any{
 			"key":            key,
 			"class":          class,
 			"createdAt":      provenanceAt,
 			"lastModifiedAt": provenanceAt,
-		}
-		for k, v := range extra {
-			body[k] = v
+			"data":           extra,
 		}
 		data, jerr := json.Marshal(body)
 		require.NoError(t, jerr)

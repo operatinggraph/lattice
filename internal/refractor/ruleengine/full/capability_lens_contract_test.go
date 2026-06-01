@@ -84,10 +84,10 @@ func contractPutVertex(t *testing.T, kv jetstream.KeyValue, typ, name string, ex
 	t.Helper()
 	id := contractStableID(typ + ":" + name)
 	key := "vtx." + typ + "." + id
-	body := map[string]any{"key": key, "class": typ}
-	for k, v := range extra {
-		body[k] = v
-	}
+	// Domain fields live under the `data` envelope (key/class/provenance stay
+	// top-level), mirroring the Processor's vertex shape; the seeded capability
+	// cypher reads them as node.data.<field>.
+	body := map[string]any{"key": key, "class": typ, "data": extra}
 	data, err := json.Marshal(body)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -96,6 +96,32 @@ the `engine` field in the `LensSpec`. Selection logic lives in
 - **Production status**: in production since Story 3.1b-ii; the bootstrap-seeded Capability Lens uses `engine: "full"` and serves as the canary for full-engine production wiring
 - **Dependency pin**: `cmd/refractor/main.go:191` constructs `full.New()` and registers it; `startPipeline` routes based on `r.ResolvedEngine == ruleengine.EngineFull`
 
+### Property model (how lens cypher reads a node)
+
+A vertex's Core KV body carries the **envelope** (`key`, `class`, provenance,
+`isDeleted`) and, by exception, a small `data` object for types that keep
+business data on the vertex root (e.g. permissions: `perm.data.operationType`).
+**Business data otherwise lives in aspects** — separate Core KV keys
+`vtx.<type>.<id>.<localName>` whose body nests the value under `data`
+(`canonicalName` → `data.value`, `description` → `data.text`). Vertices exist
+mostly to walk links; aspects hold the data.
+
+Lens cypher reads these **explicitly**, and the full engine's property resolver
+(`executor.go` `resolveProperty`) disambiguates by presence in the root body:
+
+| Cypher | Resolves to |
+|---|---|
+| `node.key`, `node.class` | vertex envelope (root body) |
+| `node.data.<field>` | the vertex root `data` object (permissions only, by exception) |
+| `node.<aspect>.data.<field>` | point-reads the aspect key `vtx.<type>.<id>.<aspect>` and navigates its body — e.g. `role.canonicalName.data.value` |
+
+A name **present** in the root body returns that value; a name **absent** from
+the root body is treated as an aspect reference and point-read (not a scan).
+Only the first hop off a vertex resolves an aspect; the returned aspect body is
+a plain map, so `.data.<field>` is ordinary map navigation. Authoring rule:
+write the path the data actually lives at — `perm.data.operationType` (root),
+`role.canonicalName.data.value` (aspect).
+
 ### Engine selection algorithm
 
 1. `LensSpec.engine` field is inspected at spec load time (in `translateSpec`)

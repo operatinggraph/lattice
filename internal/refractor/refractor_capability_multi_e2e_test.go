@@ -225,15 +225,15 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	// (Contract #1 §1.3); the capability lens derives projectedAt from the
 	// anchor vertex's lastModifiedAt, so the fixture includes it.
 	const provenanceAt = "2026-05-15T10:00:00Z"
+	// Domain fields live under the `data` envelope, mirroring the Processor's
+	// vertex shape; lens cypher rules read them as node.data.<field>.
 	writeVertex := func(key, class string, extra map[string]any) {
 		body := map[string]any{
 			"key":            key,
 			"class":          class,
 			"createdAt":      provenanceAt,
 			"lastModifiedAt": provenanceAt,
-		}
-		for k, v := range extra {
-			body[k] = v
+			"data":           extra,
 		}
 		data, jerr := json.Marshal(body)
 		require.NoError(t, jerr)
@@ -256,10 +256,31 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		require.NoError(t, perr)
 		return linkKey
 	}
+	// writeAspect writes an aspect key vtx.<type>.<id>.<localName> with its value
+	// under data.value, mirroring how the Processor stores business data on an
+	// aspect. Lens cypher reads it as node.<localName>.data.value.
+	writeAspect := func(vtxKey, localName, value string) {
+		aspectKey := vtxKey + "." + localName
+		body, jerr := json.Marshal(map[string]any{
+			"key":            aspectKey,
+			"class":          localName,
+			"localName":      localName,
+			"vertexKey":      vtxKey,
+			"createdAt":      provenanceAt,
+			"lastModifiedAt": provenanceAt,
+			"data":           map[string]any{"value": value},
+		})
+		require.NoError(t, jerr)
+		_, perr := coreKV.Put(ctx, aspectKey, body)
+		require.NoError(t, perr)
+	}
 
 	// --- topology vertices ---
-	writeVertex(adminRoleKey, "role", map[string]any{"canonicalName": "admin"})
-	writeVertex(userRoleKey, "role", map[string]any{"canonicalName": "user"})
+	// Roles carry no business data in the vertex root; canonicalName is an aspect.
+	writeVertex(adminRoleKey, "role", nil)
+	writeVertex(userRoleKey, "role", nil)
+	writeAspect(adminRoleKey, "canonicalName", "admin")
+	writeAspect(userRoleKey, "canonicalName", "user")
 	writeVertex(adminPermKey, "permission", map[string]any{
 		"operationType": "write", "scope": "any",
 	})

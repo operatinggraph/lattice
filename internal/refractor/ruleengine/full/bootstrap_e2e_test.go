@@ -42,10 +42,10 @@ func TestBootstrap_CapabilityLensE2E(t *testing.T) {
 	// Roles + permissions
 	putVertex(t, reg, coreKV, "admin", "role", map[string]any{"canonicalName": "admin"})
 	putVertex(t, reg, coreKV, "permread", "permission", map[string]any{
-		"operationType": "read", "scope": "any",
+		"data": map[string]any{"operationType": "read", "scope": "any"},
 	})
 	putVertex(t, reg, coreKV, "permwrite", "permission", map[string]any{
-		"operationType": "write", "scope": "owned",
+		"data": map[string]any{"operationType": "write", "scope": "owned"},
 	})
 	putEdge(t, reg, adjKV, "holdsRole", "alice", "admin")
 	// Story 4.7 rename: grantsPermission(role→permission) became
@@ -61,30 +61,36 @@ func TestBootstrap_CapabilityLensE2E(t *testing.T) {
 	putEdge(t, reg, adjKV, "availableAt", "hq", "svcok")
 	putEdge(t, reg, adjKV, "availableAt", "hq", "svcblocked")
 	putEdge(t, reg, adjKV, "unavailableAt", "hq", "svcblocked")
-	putVertex(t, reg, coreKV, "opread", "operation", map[string]any{"operationType": "read"})
+	putVertex(t, reg, coreKV, "opread", "operation", map[string]any{"data": map[string]any{"operationType": "read"}})
 	putEdge(t, reg, adjKV, "permitsOperation", "svcok", "opread")
 
 	// Tasks (ephemeral grants)
 	future := time.Now().Add(24 * time.Hour).Unix()
 	past := time.Now().Add(-24 * time.Hour).Unix()
 	putVertex(t, reg, coreKV, "task1", "task", map[string]any{
-		"expiresAt":            float64(future),
-		"grantedOperationType": "delete",
-		"targetKey":            "doc1",
+		"data": map[string]any{
+			"expiresAt":            float64(future),
+			"grantedOperationType": "delete",
+			"targetKey":            "doc1",
+		},
 	})
 	putVertex(t, reg, coreKV, "taskexpired", "task", map[string]any{
-		"expiresAt":            float64(past),
-		"grantedOperationType": "admin",
-		"targetKey":            "doc2",
+		"data": map[string]any{
+			"expiresAt":            float64(past),
+			"grantedOperationType": "admin",
+			"targetKey":            "doc2",
+		},
 	})
 	putEdge(t, reg, adjKV, "assignedTo", "task1", "alice")
 	putEdge(t, reg, adjKV, "assignedTo", "taskexpired", "alice")
 
 	// Reports-to chain
 	putVertex(t, reg, coreKV, "task2", "task", map[string]any{
-		"expiresAt":            float64(future),
-		"grantedOperationType": "approve",
-		"targetKey":            "doc3",
+		"data": map[string]any{
+			"expiresAt":            float64(future),
+			"grantedOperationType": "approve",
+			"targetKey":            "doc3",
+		},
 	})
 	putEdge(t, reg, adjKV, "assignedTo", "task2", "bob")
 	// alice reports to bob: identity -[:reportsTo]-> report; bob is the manager.

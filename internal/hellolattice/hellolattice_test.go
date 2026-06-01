@@ -103,8 +103,8 @@ var milestonePassed [7]bool
 // milestonesDeferred marks milestones that are intentionally skipped (a known,
 // tracked gap). A deferred milestone keeps Gate 5 partial (passed:false) but does
 // not fail the suite — only a non-deferred milestone that fails to pass is an
-// error. M5 is deferred pending the non-atomic step-9 event-publish fix.
-var milestonesDeferred = map[int]bool{5: true}
+// error. No milestones are currently deferred — Gate 5 runs all six.
+var milestonesDeferred = map[int]bool{}
 
 // TestMain establishes the shared connection and loads bootstrap IDs.
 func TestMain(m *testing.M) {
@@ -472,7 +472,6 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 // TestHelloLattice_Milestone5_AITraversal creates an AI agent identity,
 // grants it CreateBook, and runs the cold-start traversal.
 func TestHelloLattice_Milestone5_AITraversal(t *testing.T) {
-	t.Skip("Milestone 5 deferred: M5 fails FUNCTIONAL convergence (not latency). The seeded capability cypher reads domain permission fields as flat node properties (perm.operationType / perm.scope), but the Processor stores a vertex's domain fields nested under a `data` envelope (perm.data.operationType). The full-engine property resolver (propertyOf, internal/refractor/ruleengine/full/executor.go) reads top-level props only, so perm.operationType resolves to null: an agent assigned to the operator role projects a capability doc with platformPermissions=[{operationType:null,scope:null}] regardless of how many grantedBy edges exist (verified: 19 grantedBy edges present with OtherType=permission, adjacency correct, fresh reprojection still null). This is a lens-cypher vs vertex-storage property-model mismatch. NOTE: the earlier 'atomic-publish-storm (NATS 10174)' diagnosis was INCORRECT — atomic batch publish to core-events works on NATS 2.14 (AllowAtomicPublish=true, verified by direct PublishBatch). The capability link/aspect fan-out E2E tests pass because their fixtures write domain fields flat (top-level), masking the `data`-envelope mismatch. Re-enable after the property-model fix.")
 	if bookDDLKey == "" {
 		t.Skip("bookDDLKey not set — run Milestone2 first")
 	}
