@@ -1291,8 +1291,34 @@ All 38 Phase 1 FRs covered. All 5 Phase 1 gates assigned. 20 Phase 2+ FRs explic
 *(Relocated from the Epic List 2026-06-03 — shipped history consolidated into the Phase 1 shard. A one-line pointer + the Phase-2 prerequisite note remain in [index.md](./index.md).)*
 
 Post-Phase-1 remediation, not new capability. Triggered by (a) the `bmad-code-review` adversarial pass having run only on Epics 5–6 originally, and (b) Gate 5 (Hello Lattice) shipping partial with M4–M6 deferred behind three architectural gaps. A full six-component CR sweep (Refractor, Bootstrap/Kernel, Core KV, Processor, AI-agent, Capability packages) was run; inline-fixable findings are already merged (CI-green). Seven stories carry the larger items. Closes the substrate-direct install pattern (installs route through the Processor), hardens the write-path and kernel meta-DDL contracts, makes capability auth freshness deterministic, re-enables Gate 5 to a full pass, and freezes contract shapes behind a conformance suite. **Prerequisite for Phase 2.** See `sprint-change-proposal-2026-05-28.md` and the six `phase-1.5-cr-*.md` reports.
-**Stories:** 1.5.1 Substrate write-path contracts · 1.5.2 DDL tombstone coherence (M6) · 1.5.3 UpdateMetaVertex expansion · 1.5.4 Capability auth freshness coherence · 1.5.5 Route package installs through Processor (M5) · 1.5.6 Re-enable Hello Lattice M4–M6 + Gate 5 full pass *(SUPERSEDED — the M5 functional blockers were not an atomic-publish storm; closed instead by 1.5.8 + 1.5.9)* · 1.5.7 Contract conformance suite + freeze · 1.5.8 Capability-lens aspect CDC fan-out · 1.5.9 Lens property model + explicit aspect navigation *(closed M5 / Gate 5 full pass)* · **1.5.10 Transactional event outbox** *(pre-Phase-2 hardening — REQUIRED before Loom/Weaver; see below)* · **1.5.11 Publisher relocation to outbox + 9-step commit-path renumber**
+**Stories:** 1.5.1 Substrate write-path contracts · 1.5.2 DDL tombstone coherence (M6) · 1.5.3 UpdateMetaVertex expansion · 1.5.4 Capability auth freshness coherence · 1.5.5 Route package installs through Processor (M5) · 1.5.6 Re-enable Hello Lattice M4–M6 + Gate 5 full pass *(SUPERSEDED — the M5 functional blockers were not an atomic-publish storm; closed instead by 1.5.8 + 1.5.9)* · 1.5.7 Contract conformance suite + freeze · 1.5.8 Capability-lens aspect CDC fan-out · 1.5.9 Lens property model + explicit aspect navigation *(closed M5 / Gate 5 full pass)* · **1.5.10 Transactional event outbox** *(pre-Phase-2 hardening — REQUIRED before Loom/Weaver; see below)* · **1.5.11 Publisher relocation to outbox + 9-step commit-path renumber** · **1.5.12 Per-lens delete-projection mode (default hard)** *(pre-Phase-2 remediation, surfaced 2026-06-03 during the doc-debt pass; see below)*
 **Gates delivered:** Gate 5 full pass (M1–M6, closed by 1.5.8 + 1.5.9); contract conformance suite green
 **Phase 2 readiness:** stories 1.5.1–1.5.5, 1.5.7–1.5.9 CR'd + done · Gate 5 `passed:true` · conformance suite green · substrate-direct install grep-clean · **Story 1.5.10 (transactional event outbox) shipped** — event fidelity is a hard prerequisite for Phase 2 orchestration
 
 **Story 1.5.10 — Transactional event outbox (pre-Phase-2 hardening, gates Phase 2):** `core-events` are not CDC — they are intentional, declared-schema events Loom/Weaver depend on. The Phase 1 redelivery path re-derives the EventList by reconstructing events from Core KV keys (`RebuildEventListFromClasses`, best-effort), which is not equal to what the Starlark script actually returned. Replace with a transactional outbox: persist the script-returned `EventList` as part of the step-8 atomic batch (on the `op` tracker vertex); a durable consumer publishes from that persisted record to `core-events`, acking only on confirmed publish. Redelivery then republishes the *real* events. Architecture detail: `lattice-architecture.md` → Commit Path → "Transactional outbox". Removes the best-effort reconstruction entirely.
+
+### Story 1.5.12: Per-lens delete-projection mode (default hard)
+
+As a lens author / operator,
+I want each lens to declare whether a Core KV deletion projects as a **hard delete** (row/key removed) or a **soft delete** (tombstone retained) in its target,
+So that derived views reflect deletions as removals by default — lineage already lives in Core KV — while audit/forensic targets can opt into soft-delete.
+
+**Context / why:** surfaced 2026-06-03 during the doc-debt pass. The current Refractor adapters *always* soft-delete the projection target — Postgres `UPDATE … SET is_deleted=true, deleted_at=NOW()` and NATS-KV `Put({isDeleted:true})` (a Materializer "tombstone-aware projection" carry for crypto-shred forensics, which is Vault/Phase-3 and not built). Because Core KV already retains the tombstone + lineage, duplicating soft-delete into the derived view forces every consumer to filter `is_deleted` and lets NATS-KV targets accumulate tombstone docs indefinitely. Hard-delete-in-target is the more correct default; soft-delete becomes an opt-in for genuine audit targets.
+
+**Acceptance Criteria:**
+
+**Given** a lens spec with no delete-mode set
+**When** a Core KV tombstone is projected
+**Then** the default is **hard delete**: `DELETE FROM <table> WHERE <keys>` (Postgres adapter) / `kv.Delete(key)` (NATS-KV adapter) — the row/key is removed from the target
+**And** hard-delete is idempotent (deleting an absent row/key is a no-op, not an error)
+
+**Given** a lens spec with `targetConfig.deleteMode: soft`
+**When** a Core KV tombstone is projected
+**Then** the adapter performs the current soft-delete (`UPDATE … SET is_deleted=true, deleted_at=NOW()` / `Put({isDeleted:true})`), preserving today's behavior for opt-in targets
+
+**And** the pipeline delete path (`internal/refractor/pipeline` → `adapter.Delete`) passes the lens's delete-mode through to the adapter; both `PostgresAdapter` and `NatsKVAdapter` implement both modes
+**And** the `is_deleted` / `deleted_at` columns are required only for `deleteMode: soft` Postgres targets; hard-delete targets need only the key + projected columns
+**And** docs are updated: `docs/components/refractor.md` + `docs/components/refractor-failure-tiers.md` (delete semantics are now mode-dependent, default hard) and the README Milestone-4 `CREATE TABLE` (a default hard-delete target needs no soft-delete columns)
+**And** tests cover: both adapters × both modes; pipeline delete routing; an end-to-end create→tombstone→gone-from-target (hard) test and a tombstone-retained (soft) test
+
+*FRs: NFR-P3 read-path projection fidelity · Depends on: none (refactor of the existing adapter delete path) · Model: Opus (cross-adapter + pipeline + LensSpec contract)*
