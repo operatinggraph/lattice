@@ -2,8 +2,7 @@
 
 Start here to navigate Lattice reference documentation. This tree contains durable reference material for implementers and AI agents. For BMad workflow artifacts (stories, epics, architecture decisions, retros), see `_bmad-output/`.
 
-New to Lattice? Read the [project README](../README.md), then walk the
-[Hello Lattice tutorial](./hello-lattice.md).
+New to Lattice? Read the [project README](../README.md), then check the [architecture overview](./architecture-overview.md) for a full-platform diagram, and walk the [Hello Lattice tutorial](./hello-lattice.md).
 
 ---
 

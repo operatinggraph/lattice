@@ -120,6 +120,7 @@ This is the one place that distinguishes what's built from what's designed.
 
 ## Documentation
 
+- **[`docs/architecture-overview.md`](docs/architecture-overview.md)** — full platform architecture diagram (as designed, all phases)
 - **[`docs/`](docs/README.md)** — the documentation map (contracts, components, observability, operations)
 - **[`docs/contracts/`](docs/contracts/README.md)** — the data contracts (source of truth for wire shapes)
 - **[`docs/components/`](docs/components/README.md)** — living per-component reference pages
