@@ -161,7 +161,7 @@ func NewEphemeralWrapper(lensDefKey string, projectionRevision func(actorKey str
 			return nil, nil, pipeline.ErrSkipProjection
 		}
 
-		envKey := ephemeralKey(actorKey)
+		envKey := EphemeralKey(actorKey)
 		grants := realEphemeralGrants(row["ephemeralGrants"])
 		if len(grants) == 0 {
 			// No live grants for this actor → delete the ephemeral key.
@@ -204,10 +204,13 @@ func realEphemeralGrants(v any) []any {
 	return out
 }
 
-// ephemeralKey converts an actor vertex key (vtx.identity.<NanoID>) into the
+// EphemeralKey converts an actor vertex key (vtx.identity.<NanoID>) into the
 // disjoint Capability KV ephemeral key (cap.ephemeral.identity.<NanoID>)
-// per Contract #6 §6.6 amendment.
-func ephemeralKey(actorKey string) string {
+// per Contract #6 §6.6 amendment. It is the single source of truth for the
+// ephemeral key shape: the envelope projects to it, the pipeline deletes it on
+// actor disappearance, and the consumer (processor.ephemeralKeyFromActor)
+// reads it.
+func EphemeralKey(actorKey string) string {
 	if rest, ok := strings.CutPrefix(actorKey, substrate.VertexPrefix+"."); ok {
 		return "cap.ephemeral." + rest
 	}

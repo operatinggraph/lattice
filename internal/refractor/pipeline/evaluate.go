@@ -86,7 +86,7 @@ func (p *Pipeline) evaluateForEntry(ctx context.Context, entry simple.NodeEntry)
 		// soft-deleted. Only the actor-aware pipeline (ActorEnumerator installed)
 		// takes this path — other lenses let the cypher re-execute normally.
 		if entry.IsDeleted && p.actorEnumerator != nil {
-			delKey := capabilityKeyForActor(entry.CoreKVKey)
+			delKey := p.actorDeleteKeyFor(entry.CoreKVKey)
 			return []simple.EvalResult{{
 				Delete: true,
 				Keys:   map[string]any{"key": delKey},
@@ -348,7 +348,7 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]s
 			// KV reflects the disappearance. This case can occur if the
 			// actor was tombstoned but its adjacency hasn't been
 			// pruned yet.
-			delKey := capabilityKeyForActor(actorKey)
+			delKey := p.actorDeleteKeyFor(actorKey)
 			all = append(all, simple.EvalResult{
 				Delete: true,
 				Keys:   map[string]any{"key": delKey},
@@ -393,6 +393,16 @@ func (p *Pipeline) fetchVertexProps(ctx context.Context, vtxKey string) (map[str
 		return nil, nil
 	}
 	return props, nil
+}
+
+// actorDeleteKeyFor derives the Capability KV key to delete when actorKey
+// disappears, using the lens-specific derivation when one is installed and
+// falling back to the primary cap.<actor> shape otherwise.
+func (p *Pipeline) actorDeleteKeyFor(actorKey string) string {
+	if p.actorDeleteKey != nil {
+		return p.actorDeleteKey(actorKey)
+	}
+	return capabilityKeyForActor(actorKey)
 }
 
 // capabilityKeyForActor derives the Capability KV target key

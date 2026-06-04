@@ -287,6 +287,9 @@ func main() {
 			lensDefKey := "vtx.meta." + r.ID
 			p.SetEnvelopeFn(capabilityenv.NewEphemeralWrapper(lensDefKey, projectionRevision))
 			p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
+			// Actor disappearance must delete this lens's disjoint
+			// cap.ephemeral.<actor> key, not the primary cap.<actor> doc.
+			p.SetActorDeleteKey(capabilityenv.EphemeralKey)
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 			logger.Info("capabilityEphemeral envelope + fan-out + latency installed",
 				"lensId", r.ID, "lensDefKey", lensDefKey)

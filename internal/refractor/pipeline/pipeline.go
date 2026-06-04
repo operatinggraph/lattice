@@ -65,6 +65,13 @@ type Pipeline struct {
 	// the cypher per actor. Nil uses the single-execute path.
 	actorEnumerator *ActorEnumerator
 
+	// actorDeleteKey derives the Capability KV target key to delete when an
+	// actor disappears (tombstone shortcut and reprojectActors missing-actor
+	// path). It maps an actor vertex key to the key this lens's envelope
+	// projects to, so each lens removes the key it actually owns. Nil falls
+	// back to capabilityKeyForActor (cap.<actor>), the primary lens's shape.
+	actorDeleteKey func(actorKey string) string
+
 	// latencyBuf captures the (CDC → projection-write) latency per event
 	// so the heartbeat can compute mean/p95/p99 per Lens. Nil disables.
 	latencyBuf *LatencyRingBuffer
@@ -181,6 +188,15 @@ func (p *Pipeline) SetEnvelopeFn(fn EnvelopeFn) {
 // Pass nil to disable. Must be called before Run.
 func (p *Pipeline) SetActorEnumerator(en *ActorEnumerator) {
 	p.actorEnumerator = en
+}
+
+// SetActorDeleteKey installs the actor-deletion delete-key derivation used by
+// both actor-disappearance paths (the tombstone shortcut and the
+// reprojectActors missing-actor path). It lets a lens delete the key its own
+// envelope projects to. Pass nil to keep the default cap.<actor> derivation.
+// Must be called before Run.
+func (p *Pipeline) SetActorDeleteKey(fn func(actorKey string) string) {
+	p.actorDeleteKey = fn
 }
 
 // SetLatencyBuffer installs the per-Lens latency ring buffer.
