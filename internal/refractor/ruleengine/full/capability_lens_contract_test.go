@@ -39,6 +39,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/substrate"
+	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
 // --- local test helpers (mirror the package-internal test scaffolding;
@@ -149,13 +150,11 @@ func TestCapabilityLens_ContractConformance(t *testing.T) {
 	contractPutEdge(t, adjKV, "containedIn", "identity", "alice", "location", "hq")
 	contractPutEdge(t, adjKV, "availableAt", "location", "hq", "service", "svc")
 
-	future := time.Now().Add(24 * time.Hour).Unix()
-	contractPutVertex(t, coreKV, "task", "task1", map[string]any{
-		"expiresAt":            float64(future),
-		"grantedOperationType": "delete",
-		"targetKey":            "doc1",
-	})
-	contractPutEdge(t, adjKV, "assignedTo", "task", "task1", "identity", "alice")
+	// The bootstrap `capability` cypher does not produce ephemeralGrants —
+	// those are owned by the orchestration-base `capabilityEphemeral` lens
+	// (key cap.ephemeral.<actor>). The link-sourced ephemeral conformance
+	// lives in TestCapabilityEphemeralLens_ContractConformance below. No
+	// task fixture is seeded here.
 
 	// --- run the LITERAL bootstrap cypher ---
 	body := bootstrap.CapabilityLensDefinition().CypherRule
@@ -283,33 +282,128 @@ func TestCapabilityLens_ContractConformance(t *testing.T) {
 	require.True(t, svcEntryOK,
 		"serviceAccess must include a real (non-null) entry per Contract #6 §6.2")
 
-	// `ephemeralGrants`: array of {source, taskKey, operationType, target, expiresAt}.
+	// `ephemeralGrants`: the bootstrap envelope still carries the field for
+	// shape stability (the wrapper hardcodes it), but post-7.1 the bootstrap
+	// cypher RETURNs no ephemeral rows, so it must be EMPTY here. The
+	// link-sourced grant projection is asserted against the orchestration-base
+	// lens in TestCapabilityEphemeralLens_ContractConformance.
 	eg, ok := envRow["ephemeralGrants"].([]any)
 	require.True(t, ok, "envelope.ephemeralGrants must be an array")
-	require.NotEmpty(t, eg, "ephemeralGrants must include the seeded task grant")
-	taskFound := false
 	for _, e := range eg {
 		m, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		if m["taskKey"] == nil {
-			continue
-		}
-		taskFound = true
-		require.Contains(t, m, "source")
-		require.Contains(t, m, "taskKey")
-		require.Contains(t, m, "operationType")
-		require.Contains(t, m, "target")
-		require.Contains(t, m, "expiresAt")
-		require.Equal(t, "task", m["source"],
-			"ephemeralGrants entry source must be 'task'")
+		require.Nil(t, m["taskKey"],
+			"bootstrap cypher must produce NO real ephemeral grant post-7.1 (moved to capabilityEphemeral lens)")
 	}
-	require.True(t, taskFound,
-		"ephemeralGrants must include a real (non-null) task entry")
 
 	// `roles`: array of role vertex keys.
 	roles, ok := envRow["roles"].([]any)
 	require.True(t, ok, "envelope.roles must be an array")
 	require.NotEmpty(t, roles, "roles must include the seeded admin role")
+}
+
+// TestCapabilityEphemeralLens_ContractConformance asserts the Contract #6
+// §6.6 (Phase-2 amendment) cap.ephemeral.<actor> envelope shape against the
+// LITERAL orchestration-base `capabilityEphemeral` lens spec. The grant is
+// LINK-SOURCED: the lens walks assignedTo/forOperation/scopedTo (Contract
+// #10 §10.1) — NOT the old task.data.grantedOperationType/targetKey fields.
+func TestCapabilityEphemeralLens_ContractConformance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+
+	_, adjKV, coreKV := contractStartKVs(t)
+
+	// --- deterministic graph fixture: a manager with one link-shaped task ---
+	managerKey := contractPutVertex(t, coreKV, "identity", "manager", map[string]any{"name": "manager"})
+	// The operation meta-vertex the task grants (operationType under data).
+	opKey := contractPutVertex(t, coreKV, "meta", "approveOp", map[string]any{
+		"operationType": "ApproveLeaseApplication",
+	})
+	// The scopedTo target (the specific lease application).
+	targetKey := contractPutVertex(t, coreKV, "leaseApp", "applicant", map[string]any{"state": "pending"})
+	// The task vertex — root data is scalars only {status, expiresAt}; NO
+	// grantedOperationType / targetKey fields (Contract #10 §10.1).
+	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	contractPutVertex(t, coreKV, "task", "task1", map[string]any{
+		"status":    "open",
+		"expiresAt": future,
+	})
+
+	// Links (task = source, the other vertex = target).
+	contractPutEdge(t, adjKV, "assignedTo", "task", "task1", "identity", "manager")
+	contractPutEdge(t, adjKV, "forOperation", "task", "task1", "meta", "approveOp")
+	contractPutEdge(t, adjKV, "scopedTo", "task", "task1", "leaseApp", "applicant")
+
+	// --- run the LITERAL orchestration-base capabilityEphemeral cypher ---
+	lensSpecs := orchestrationbase.Lenses()
+	require.Len(t, lensSpecs, 1, "orchestration-base must declare exactly one lens")
+	require.Equal(t, "capabilityEphemeral", lensSpecs[0].CanonicalName)
+	body := lensSpecs[0].Spec
+
+	eng := full.New()
+	cr, err := eng.Parse(body)
+	require.NoError(t, err, "literal capabilityEphemeral cypher must parse")
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	projectedAt := time.Now().UTC().Format(time.RFC3339)
+	params := map[string]any{
+		"actorKey":    managerKey,
+		"now":         now,
+		"projectedAt": projectedAt,
+	}
+	out, err := eng.ExecuteWith(context.Background(), cr,
+		ruleengine.EventContext{Parameters: params}, adjKV, coreKV)
+	require.NoError(t, err, "literal capabilityEphemeral cypher must execute")
+	require.Len(t, out, 1, "ephemeral query should produce exactly one row")
+	row := out[0].Values
+	keys := out[0].Key
+
+	// --- wrap through the production ephemeral envelope ---
+	wrapper := capabilityenv.NewEphemeralWrapper("vtx.meta.test-eph-lens",
+		func(k string) uint64 { return 7 })
+	envRow, envKeys, envErr := wrapper(row, keys, params)
+	require.NoError(t, envErr, "ephemeral envelope wrapping must succeed")
+	require.NotNil(t, envRow)
+	require.NotNil(t, envKeys)
+
+	// `key`: must be "cap.ephemeral.identity.<NanoID>".
+	keyVal, ok := envRow["key"].(string)
+	require.True(t, ok, "envelope.key must be a string")
+	require.Truef(t, len(keyVal) > len("cap.ephemeral.identity."),
+		"envelope.key must include actor NanoID; got %q", keyVal)
+	require.Equalf(t, "cap.ephemeral.identity.", keyVal[:len("cap.ephemeral.identity.")],
+		"envelope.key must start with 'cap.ephemeral.identity.'; got %q", keyVal)
+	require.Equal(t, keyVal, envKeys["key"], "Keys map must mirror envelope.key")
+
+	// `actor` / `version`.
+	require.Equal(t, managerKey, envRow["actor"], "envelope.actor must equal $actorKey")
+	require.Equal(t, "1.0", envRow["version"], "envelope.version must be '1.0'")
+
+	// `ephemeralGrants`: link-sourced {source, taskKey, operationType, target, expiresAt}.
+	eg, ok := envRow["ephemeralGrants"].([]any)
+	require.True(t, ok, "envelope.ephemeralGrants must be an array")
+	require.NotEmpty(t, eg, "ephemeralGrants must include the seeded link-sourced grant")
+	grantFound := false
+	for _, e := range eg {
+		m, ok := e.(map[string]any)
+		if !ok || m["taskKey"] == nil {
+			continue
+		}
+		grantFound = true
+		require.Equal(t, "task", m["source"], "grant source must be 'task'")
+		// operationType is LINK-sourced from forOperation→op.data.operationType.
+		require.Equalf(t, "ApproveLeaseApplication", m["operationType"],
+			"operationType must be link-sourced from the forOperation op; got %v", m["operationType"])
+		// target is LINK-sourced from scopedTo→target.key.
+		require.Equalf(t, targetKey, m["target"],
+			"target must be link-sourced from scopedTo; got %v", m["target"])
+		require.Equalf(t, future, m["expiresAt"],
+			"expiresAt must be the task root scalar; got %v", m["expiresAt"])
+		_ = opKey
+	}
+	require.True(t, grantFound,
+		"ephemeralGrants must include a real (non-null) link-sourced grant")
 }

@@ -124,17 +124,101 @@ func NewCapabilityAuthorizer(reader CapabilityReader, bucket string, clock Clock
 }
 
 // Authorize implements Authorizer. Hot path:
-//  1. derive cap-key from env.Actor
-//  2. KV GET (ErrKeyNotFound → AuthDenied/NoCapabilityEntry; any other
-//     error → return error so commit path naks for retry)
-//  3. parse Contract #6 §6.2 doc
+//  1. derive the path from authContext BEFORE the read (Contract #10 §10.7):
+//     the task-dispatch branch reads the DISJOINT `cap.ephemeral.<actor>`
+//     key (it needs only grants — a single GET, no fallback); the
+//     role/service/platform path reads `cap.<actor>` as before.
+//  2. KV GET (ErrKeyNotFound → denial; any other error → return error so
+//     commit path naks for retry)
+//  3. parse the doc
 //  4. dispatch per Contract #2 §2.8 / Contract #6 §6.4-6.8
+//
+// FR56 grants live in the package-owned `cap.ephemeral.<actor>` entry
+// produced by the orchestration-base `capabilityEphemeral` lens; the
+// `cap.<actor>` doc carries roles/permissions/service access only. A
+// task-path no-match denies with AuthContextMismatch, which the denial
+// builder emits without `actorRoles`, so there is NO `cap.<actor>` second
+// read on the task path.
 func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnvelope) (Decision, error) {
 	start := a.clock.Now()
 	defer func() {
 		a.latency.record(a.clock.Now().Sub(start))
 	}()
 
+	ac := env.AuthContext
+	serviceSet := ac != nil && ac.Service != ""
+	taskSet := ac != nil && ac.Task != ""
+
+	// Both task+service set → invalid auth declaration. Contract #2 §2.8's
+	// dispatch table doesn't admit this combination. Decided BEFORE any read.
+	if serviceSet && taskSet {
+		return Decision{
+			Authorized: false,
+			Code:       ErrCodeAuthContextMismatch,
+			Reason:     "authContext: service and task are mutually exclusive",
+		}, nil
+	}
+
+	if taskSet {
+		return a.authorizeTaskPath(ctx, env)
+	}
+	return a.authorizeCapabilityPath(ctx, env, serviceSet)
+}
+
+// authorizeTaskPath reads the disjoint `cap.ephemeral.<actor>` key and runs
+// matchEphemeralGrant. Single GET, no `cap.<actor>` fallback (Contract #10
+// §10.7). Both an absent key AND an empty-grants doc are denial
+// (AuthContextMismatch) — absence = denial, Contract #6 §6.8 / A3.
+func (a *CapabilityAuthorizer) authorizeTaskPath(ctx context.Context, env *OperationEnvelope) (Decision, error) {
+	ephKey, derr := ephemeralKeyFromActor(env.Actor)
+	if derr != nil {
+		return Decision{
+			Authorized: false,
+			Code:       ErrCodeAuthDenied,
+			Reason:     "InvalidActorKey: " + derr.Error(),
+		}, nil
+	}
+
+	entry, err := a.reader.KVGet(ctx, a.bucket, ephKey)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			// No ephemeral entry for the actor = no grant. A3: absent key is
+			// denial; the task path denies with AuthContextMismatch (carries
+			// no actorRoles), so there is no second read.
+			a.logger.Info("step 3: no ephemeral Capability KV entry for actor (task path)",
+				"requestId", env.RequestID, "actor", env.Actor, "ephKey", ephKey)
+			return Decision{
+				Authorized: false,
+				Code:       ErrCodeAuthContextMismatch,
+				Reason:     "no ephemeral grant entry for actor",
+			}, nil
+		}
+		return Decision{}, fmt.Errorf("capability kv read %q: %w", ephKey, err)
+	}
+
+	doc, err := ParseCapabilityDoc(entry.Value)
+	if err != nil {
+		return Decision{}, fmt.Errorf("capability kv parse %q: %w", ephKey, err)
+	}
+
+	resolved := &ResolvedPermission{
+		CapKey:      ephKey,
+		ProjectedAt: doc.ProjectedAt,
+	}
+	dec := a.matchEphemeralGrant(env, doc, resolved)
+	if dec.Authorized {
+		dec.Resolved = resolved
+	}
+	// On a task-path denial the code is AuthContextMismatch; the denial
+	// builder returns early for that code without actorRoles, so we do NOT
+	// thread doc (the ephemeral doc carries no roles anyway).
+	return dec, nil
+}
+
+// authorizeCapabilityPath reads `cap.<actor>` and dispatches the
+// service / platform paths (unchanged from Phase 1, minus the task branch
+// which now lives in authorizeTaskPath).
+func (a *CapabilityAuthorizer) authorizeCapabilityPath(ctx context.Context, env *OperationEnvelope, serviceSet bool) (Decision, error) {
 	capKey, derr := capabilityKeyFromActor(env.Actor)
 	if derr != nil {
 		// Malformed actor key would have been rejected at step 1, but
@@ -181,7 +265,12 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 		ProjectedAt: doc.ProjectedAt,
 	}
 
-	dec := a.dispatch(env, doc, resolved)
+	var dec Decision
+	if serviceSet {
+		dec = a.matchServiceAccess(env, doc, resolved)
+	} else {
+		dec = a.matchPlatformPermission(env, doc, resolved)
+	}
 	if dec.Authorized {
 		dec.Resolved = resolved
 	} else {
@@ -190,33 +279,6 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 		dec.Doc = doc
 	}
 	return dec, nil
-}
-
-// dispatch implements Contract #2 §2.8 path selection + Contract #6
-// §6.4-6.8 matching.
-func (a *CapabilityAuthorizer) dispatch(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {
-	ac := env.AuthContext
-	serviceSet := ac != nil && ac.Service != ""
-	taskSet := ac != nil && ac.Task != ""
-
-	// Both task+service set → invalid auth declaration. Contract #2 §2.8's
-	// dispatch table doesn't admit this combination.
-	if serviceSet && taskSet {
-		return Decision{
-			Authorized: false,
-			Code:       ErrCodeAuthContextMismatch,
-			Reason:     "authContext: service and task are mutually exclusive",
-		}
-	}
-
-	switch {
-	case taskSet:
-		return a.matchEphemeralGrant(env, doc, resolved)
-	case serviceSet:
-		return a.matchServiceAccess(env, doc, resolved)
-	default:
-		return a.matchPlatformPermission(env, doc, resolved)
-	}
 }
 
 func (a *CapabilityAuthorizer) matchEphemeralGrant(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {
@@ -371,4 +433,20 @@ func capabilityKeyFromActor(actor string) (string, error) {
 		return "", fmt.Errorf("actor %q lacks %q prefix", actor, substrate.VertexPrefix+".")
 	}
 	return "cap." + rest, nil
+}
+
+// ephemeralKeyFromActor converts `vtx.identity.<NanoID>` →
+// `cap.ephemeral.identity.<NanoID>` per Contract #6 §6.6 amendment + the
+// producer logic in
+// `internal/refractor/capabilityenv/envelope.go:ephemeralKey`. This is the
+// disjoint key the task-dispatch branch reads (Contract #10 §10.7).
+func ephemeralKeyFromActor(actor string) (string, error) {
+	if actor == "" {
+		return "", errors.New("empty actor")
+	}
+	rest, ok := strings.CutPrefix(actor, substrate.VertexPrefix+".")
+	if !ok {
+		return "", fmt.Errorf("actor %q lacks %q prefix", actor, substrate.VertexPrefix+".")
+	}
+	return "cap.ephemeral." + rest, nil
 }

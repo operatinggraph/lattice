@@ -276,6 +276,20 @@ func main() {
 			// heartbeater emits stats per Lens regardless of envelope shape.
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 			logger.Info("capabilityRoleIndex envelope installed", "lensId", r.ID)
+		case "capabilityEphemeral":
+			// The orchestration-base ephemeral-grant lens (Contract #6 §6.6
+			// amendment / Contract #10 §10.7). It projects FR56 grants to the
+			// DISJOINT key `cap.ephemeral.<actor>` in the shared
+			// capability-kv bucket. Like the primary capability lens it needs
+			// cross-vertex fan-out: a CDC event on a task / link must
+			// re-project the affected actor(s) rather than only direct
+			// identity events.
+			lensDefKey := "vtx.meta." + r.ID
+			p.SetEnvelopeFn(capabilityenv.NewEphemeralWrapper(lensDefKey, projectionRevision))
+			p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
+			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
+			logger.Info("capabilityEphemeral envelope + fan-out + latency installed",
+				"lensId", r.ID, "lensDefKey", lensDefKey)
 		}
 
 		if err := manager.Add(ctx, r.ID); err != nil {

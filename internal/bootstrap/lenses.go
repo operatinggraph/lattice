@@ -20,8 +20,16 @@ func CapabilityLensDefinition() LensDefinition {
 		CanonicalName: "capability",
 		TargetBucket:  "capability",
 		// Cypher rule per Contract #6 §6.10 and brief decision #8.
-		// Produces three sections: platformPermissions, serviceAccess, ephemeralGrants.
+		// Produces platformPermissions, serviceAccess, and roles.
 		// Story 3.1 connects the openCypher engine; Story 3.2 activates live projection.
+		//
+		// This bootstrap god-cypher does NOT include ephemeralGrants. FR56
+		// ephemeral grants are produced by the orchestration-base
+		// `capabilityEphemeral` lens to the disjoint key
+		// `cap.ephemeral.<actor>` (Contract #6 §6.6 amendment, Contract #10
+		// §10.7). The `cap.<actor>` doc this cypher produces carries
+		// roles/permissions/service access only — no `ephemeralGrants`
+		// section.
 		CypherRule: `
 MATCH (identity:identity {key: $actorKey})
 
@@ -39,17 +47,6 @@ OPTIONAL MATCH (identity)-[:containedIn*0..]->(loc)
   -[:availableAt]->(svc)
 WHERE NOT (identity)-[:containedIn*0..]->(loc)-[:unavailableAt]->(svc)
 
-// --- ephemeralGrants ---
-// Walk: task → assignedTo → identity (direct or via reportsTo chain, max 2 hops).
-// Anchored on the already-bound identity (not the unbound task label) so the
-// engine traverses adjacency from the actor instead of scanning the entire Core
-// KV bucket for task seeds on every reprojection.
-OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
-  WHERE task.data.expiresAt > $now
-
-OPTIONAL MATCH (identity)-[:reportsTo]->(report:identity)<-[:assignedTo]-(task2:task)
-  WHERE task2.data.expiresAt > $now
-
 RETURN
   identity.key AS actorKey,
   collect(DISTINCT {
@@ -62,19 +59,6 @@ RETURN
     resolvedVia: [loc.key],
     allowedOperations: [(svc)-[:permitsOperation]->(op) | {operationType: op.data.operationType}]
   }) AS serviceAccess,
-  collect(DISTINCT {
-    source: "task",
-    taskKey: task.key,
-    operationType: task.data.grantedOperationType,
-    target: task.data.targetKey,
-    expiresAt: task.data.expiresAt
-  }) + collect(DISTINCT {
-    source: "task",
-    taskKey: task2.key,
-    operationType: task2.data.grantedOperationType,
-    target: task2.data.targetKey,
-    expiresAt: task2.data.expiresAt
-  }) AS ephemeralGrants,
   collect(DISTINCT role.key) AS roles
 `,
 		// outputSchema: JSON Schema for the Capability KV document per Contract #6 §6.2.
@@ -82,7 +66,7 @@ RETURN
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "required": ["key","actor","version","projectedAt","projectedFromRevisions","lanes",
-               "platformPermissions","serviceAccess","ephemeralGrants","roles"],
+               "platformPermissions","serviceAccess","roles"],
   "properties": {
     "key":                   {"type": "string"},
     "actor":                 {"type": "string"},
@@ -99,7 +83,6 @@ RETURN
       }
     }},
     "serviceAccess":  {"type": "array"},
-    "ephemeralGrants":{"type": "array"},
     "roles":          {"type": "array", "items": {"type": "string"}}
   }
 }`,

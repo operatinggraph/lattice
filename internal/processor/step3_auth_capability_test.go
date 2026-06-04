@@ -29,6 +29,7 @@ const (
 	capTestActorID    = "Hj4kPmRtw9nbCxz5vQ2y"
 	capTestActorKey   = "vtx.identity." + capTestActorID
 	capTestActorCap   = "cap.identity." + capTestActorID
+	capTestActorEph   = "cap.ephemeral.identity." + capTestActorID // disjoint ephemeral key
 	capTestServiceKey = "vtx.service.executive-cleaning-NanoID"
 	capTestTaskKey    = "vtx.task.Rm7q3pntwzkfbcxv5p9j"
 	capTestTargetKey  = "vtx.lease.Op4Nb2mPq6rTwzKxVyP7"
@@ -43,9 +44,11 @@ func (c *fakeClock) Now() time.Time { return c.now }
 type fakeReader struct {
 	entries map[string][]byte
 	err     error
+	gets    []string // records every key fetched (for single-GET assertions)
 }
 
 func (r *fakeReader) KVGet(_ context.Context, _, key string) (*substrate.KVEntry, error) {
+	r.gets = append(r.gets, key)
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -79,15 +82,42 @@ func newCapAuthForTest(t *testing.T, doc *CapabilityDoc, clockAt time.Time) (*Ca
 	emitter := &recordingEmitter{}
 	reader := &fakeReader{entries: map[string][]byte{}}
 	if doc != nil {
-		raw, err := json.Marshal(doc)
+		// Ephemeral grants live in the disjoint cap.ephemeral.<actor> entry
+		// produced by the orchestration-base capabilityEphemeral lens — NOT
+		// in the primary cap.<actor> doc. Split the fixture: seed the grants
+		// under the ephemeral key, and strip them from the primary doc.
+		grants := doc.EphemeralGrants
+		primary := *doc
+		primary.EphemeralGrants = nil
+		raw, err := json.Marshal(&primary)
 		if err != nil {
 			t.Fatalf("marshal cap doc: %v", err)
 		}
 		reader.entries[capTestActorCap] = raw
+		if len(grants) > 0 {
+			ephRaw, err := json.Marshal(freshEphemeralDoc(grants))
+			if err != nil {
+				t.Fatalf("marshal ephemeral doc: %v", err)
+			}
+			reader.entries[capTestActorEph] = ephRaw
+		}
 	}
 	clock := &fakeClock{now: clockAt}
 	a := NewCapabilityAuthorizer(reader, "capability-kv", clock, DefaultCapabilityAuthorizerConfig(), capTestLogger())
 	return a, emitter, reader
+}
+
+// freshEphemeralDoc builds the cap.ephemeral.<actor> entry shape
+// (Contract #6 §6.6 amendment): key/actor/version/projectedAt +
+// ephemeralGrants only (no roles/serviceAccess/platformPermissions).
+func freshEphemeralDoc(grants []EphemeralGrant) *CapabilityDoc {
+	return &CapabilityDoc{
+		Key:             capTestActorEph,
+		Actor:           capTestActorKey,
+		Version:         "1.0",
+		ProjectedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+		EphemeralGrants: grants,
+	}
 }
 
 func freshDoc(projectedAt time.Time) *CapabilityDoc {
@@ -284,6 +314,69 @@ func TestCapabilityAuthorizer_TaskPath_TargetMismatch(t *testing.T) {
 	dec, _ := a.Authorize(context.Background(), env)
 	if dec.Code != ErrCodeAuthContextMismatch {
 		t.Fatalf("expected AuthContextMismatch for target-mismatch; got %+v", dec)
+	}
+}
+
+// TestCapabilityAuthorizer_TaskPath_SingleGetNoFallback asserts the task
+// branch reads ONLY cap.ephemeral.<actor> — a single GET, with no
+// cap.<actor> second read (Contract #10 §10.7 / A1).
+func TestCapabilityAuthorizer_TaskPath_SingleGetNoFallback(t *testing.T) {
+	now := time.Now().UTC()
+	a, _, reader := newCapAuthForTest(t, freshDoc(now), now)
+	env := envFor("ApproveLeaseApplication", capTestActorKey, &AuthContext{Task: capTestTaskKey, Target: capTestTargetKey})
+	dec, err := a.Authorize(context.Background(), env)
+	if err != nil || !dec.Authorized {
+		t.Fatalf("expected allow; got err=%v dec=%+v", err, dec)
+	}
+	if len(reader.gets) != 1 {
+		t.Fatalf("task path must be a SINGLE GET; got %d reads: %v", len(reader.gets), reader.gets)
+	}
+	if reader.gets[0] != capTestActorEph {
+		t.Fatalf("task path must read the ephemeral key %q; got %q", capTestActorEph, reader.gets[0])
+	}
+	for _, k := range reader.gets {
+		if k == capTestActorCap {
+			t.Fatalf("task path must NOT read the primary cap.<actor> key %q (no fallback)", capTestActorCap)
+		}
+	}
+}
+
+// TestCapabilityAuthorizer_TaskPath_AbsentEphemeralKey asserts an absent
+// cap.ephemeral.<actor> entry denies with AuthContextMismatch (A3: absence
+// = denial), NOT NoCapabilityEntry, and does a single GET.
+func TestCapabilityAuthorizer_TaskPath_AbsentEphemeralKey(t *testing.T) {
+	now := time.Now().UTC()
+	// nil doc → no ephemeral entry seeded.
+	a, _, reader := newCapAuthForTest(t, nil, now)
+	env := envFor("ApproveLeaseApplication", capTestActorKey, &AuthContext{Task: capTestTaskKey, Target: capTestTargetKey})
+	dec, err := a.Authorize(context.Background(), env)
+	if err != nil {
+		t.Fatalf("absent ephemeral key must NOT return error; got %v", err)
+	}
+	if dec.Authorized || dec.Code != ErrCodeAuthContextMismatch {
+		t.Fatalf("expected AuthContextMismatch for absent ephemeral key; got %+v", dec)
+	}
+	if len(reader.gets) != 1 || reader.gets[0] != capTestActorEph {
+		t.Fatalf("absent task path must be a single GET of the ephemeral key; got %v", reader.gets)
+	}
+}
+
+// TestCapabilityAuthorizer_TaskPath_EmptyGrantsDoc asserts an
+// ephemeral entry that exists but has no grants denies with
+// AuthContextMismatch (A3 — empty-grants doc is denial, defensively).
+func TestCapabilityAuthorizer_TaskPath_EmptyGrantsDoc(t *testing.T) {
+	now := time.Now().UTC()
+	a, _, reader := newCapAuthForTest(t, nil, now)
+	emptyEph := freshEphemeralDoc([]EphemeralGrant{})
+	raw, _ := json.Marshal(emptyEph)
+	reader.entries[capTestActorEph] = raw
+	env := envFor("ApproveLeaseApplication", capTestActorKey, &AuthContext{Task: capTestTaskKey, Target: capTestTargetKey})
+	dec, err := a.Authorize(context.Background(), env)
+	if err != nil {
+		t.Fatalf("empty-grants doc must NOT return error; got %v", err)
+	}
+	if dec.Authorized || dec.Code != ErrCodeAuthContextMismatch {
+		t.Fatalf("expected AuthContextMismatch for empty-grants ephemeral doc; got %+v", dec)
 	}
 }
 

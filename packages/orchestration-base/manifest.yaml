@@ -1,0 +1,22 @@
+name: orchestration-base
+version: 0.1.0
+description: |
+  Generic task substrate (task DDL + CreateTask op, assignee required and
+  validated) plus the package-owned capabilityEphemeral lens that re-sources
+  FR56 ephemeral task grants out of the bootstrap god-cypher into the
+  disjoint key cap.ephemeral.<actor> (Contract #6 §6.6 / Contract #10 §10.7).
+depends:
+  - identity-domain
+declares:
+  ddls:
+    - canonicalName: task
+      class: meta.ddl.vertexType
+  lenses:
+    - canonicalName: capabilityEphemeral
+      adapter: nats-kv
+      bucket: capability-kv
+      engine: full
+  permissions:
+    - operationType: CreateTask
+      scope: any
+      grantsTo: [operator]

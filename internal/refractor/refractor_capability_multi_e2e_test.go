@@ -43,6 +43,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/substrate"
+	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
 // stableMultiID returns a deterministic NanoID for a multi-e2e fixture role.
@@ -193,10 +194,40 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	idxDone := make(chan struct{})
 	go func() { defer close(idxDone); idxP.Run(pipelineCtx, idxCons) }()
 
+	// --- tertiary capabilityEphemeral pipeline ---
+	// The orchestration-base `capabilityEphemeral` lens is a PACKAGE lens, not
+	// bootstrap-seeded, so we compile its literal spec and wire a pipeline
+	// directly (mirroring how the primary cap pipeline is wired). It projects
+	// FR56 grants to the disjoint key cap.ephemeral.<actor> in the same shared
+	// capability-kv bucket.
+	ephSpecs := orchestrationbase.Lenses()
+	require.Len(t, ephSpecs, 1)
+	ephCR, err := fullEngine.Parse(ephSpecs[0].Spec)
+	require.NoError(t, err, "capabilityEphemeral spec must parse")
+	ephTargetKV, err := js.KeyValue(ctx, bootstrap.CapabilityKVBucket)
+	require.NoError(t, err)
+	// DEFAULT HARD delete: no deleteMode override.
+	ephAdpt, err := adapter.New(ephTargetKV, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	const ephLensID = "EphLensId00000000001" // synthetic 20-char id for the consumer
+	ephP, err := pipeline.New(ephLensID, "nats_kv",
+		nil, bootstrap.CoreKVBucket, adjKV, coreKV, ephAdpt, nil)
+	require.NoError(t, err)
+	ephP.UseFullEngine(fullEngine, ephCR)
+	ephP.SetEnvelopeFn(capabilityenv.NewEphemeralWrapper("vtx.meta."+ephLensID, projectionRevision))
+	ephP.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
+
+	require.NoError(t, manager.Add(ctx, ephLensID))
+	ephCons := manager.Consumer(ephLensID)
+	require.NotNil(t, ephCons)
+	ephDone := make(chan struct{})
+	go func() { defer close(ephDone); ephP.Run(pipelineCtx, ephCons) }()
+
 	t.Cleanup(func() {
 		pipelineCancel()
 		<-capDone
 		<-idxDone
+		<-ephDone
 	})
 
 	// --- fixture: three identities, role/permission, location/service, task ---
@@ -210,6 +241,10 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	locationID := stableMultiID("office-3.2b")
 	serviceID := stableMultiID("docs-3.2b")
 	taskID := stableMultiID("task-bigreport")
+	// The task grant is LINK-sourced — the op meta-vertex (forOperation) +
+	// the scopedTo target are real graph vertices.
+	taskOpID := stableMultiID("op-approve-3.2b")
+	taskTargetID := stableMultiID("leaseapp-3.2b")
 
 	identityAKey := substrate.VertexKey("identity", identityAID)
 	identityBKey := substrate.VertexKey("identity", identityBID)
@@ -221,6 +256,8 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	locationKey := substrate.VertexKey("location", locationID)
 	serviceKey := substrate.VertexKey("service", serviceID)
 	taskKey := substrate.VertexKey("task", taskID)
+	taskOpKey := substrate.VertexKey("meta", taskOpID)
+	taskTargetKey := substrate.VertexKey("leaseapp", taskTargetID)
 
 	// Real Core KV vertices carry the universal envelope provenance fields
 	// (Contract #1 §1.3); the capability lens derives projectedAt from the
@@ -290,15 +327,19 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	})
 	writeVertex(locationKey, "location", nil)
 	writeVertex(serviceKey, "service", map[string]any{"class": "service"})
-	// Task vertex carries the grant data the cypher RETURNs in ephemeralGrants.
-	// Use a far-future expiresAt so the `task.expiresAt > $now` predicate
-	// holds for the duration of the test.
+	// Task root data is scalars only {status, expiresAt} — NO
+	// grantedOperationType/targetKey fields. The granted operationType +
+	// target are LINK-sourced (forOperation→op, scopedTo→target). Use a
+	// far-future expiresAt so the `task.expiresAt > $now` predicate holds.
 	taskExpiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 	writeVertex(taskKey, "task", map[string]any{
-		"expiresAt":            taskExpiresAt,
-		"grantedOperationType": "read",
-		"targetKey":            serviceKey,
+		"status":    "open",
+		"expiresAt": taskExpiresAt,
 	})
+	// forOperation op meta-vertex (carries the granted operationType).
+	writeVertex(taskOpKey, "meta", map[string]any{"operationType": "read"})
+	// scopedTo target.
+	writeVertex(taskTargetKey, "leaseapp", map[string]any{"state": "pending"})
 
 	// --- topology links (these now flow through the 3.2b link-bridge bootstrapper) ---
 	// Story 4.7 rename: grantsPermission(role→permission) became
@@ -310,6 +351,9 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	writeLink("identity", identityBID, "containedIn", "location", locationID)
 	writeLink("location", locationID, "availableAt", "service", serviceID)
 	writeLink("task", taskID, "assignedTo", "identity", identityCID)
+	// Link-sourced grant: forOperation→op, scopedTo→target.
+	writeLink("task", taskID, "forOperation", "meta", taskOpID)
+	writeLink("task", taskID, "scopedTo", "leaseapp", taskTargetID)
 	_ = holdsAKey
 
 	// Wait for adjacency to fully absorb all link envelopes via the
@@ -413,16 +457,34 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		hasPlatformPerm("write", "any"), "identity A admin platform permission")
 	envB := waitForKeyConverged("cap.identity."+identityBID,
 		hasServiceAccess(serviceKey), "identity B service access via location")
-	envC := waitForKeyConverged("cap.identity."+identityCID,
-		hasEphemeralForTask(taskKey), "identity C task-derived ephemeralGrant")
+	// Identity C's ephemeral grant projects to the DISJOINT cap.ephemeral.<C>
+	// key (orchestration-base capabilityEphemeral lens), NOT the primary
+	// cap.identity.<C> doc.
+	envCEph := waitForKeyConverged("cap.ephemeral.identity."+identityCID,
+		hasEphemeralForTask(taskKey), "identity C link-sourced ephemeralGrant (cap.ephemeral key)")
+	// The link-sourced grant must carry the op-derived operationType + the
+	// scopedTo target (faithful re-source: link-sourced, not field-sourced).
+	require.Eventually(t, func() bool {
+		eg, _ := envCEph["ephemeralGrants"].([]any)
+		for _, e := range eg {
+			m, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if m["taskKey"] == taskKey && m["operationType"] == "read" && m["target"] == taskTargetKey {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 10*time.Millisecond,
+		"identity C ephemeral grant must be link-sourced {operationType:read, target:scopedTo}")
 
-	// envA/envB/envC are now guaranteed to carry the targeted feature.
-	// Defensive shape checks: each must carry the Contract #6 §6.2
-	// three-section envelope.
-	for label, env := range map[string]map[string]any{"A": envA, "B": envB, "C": envC} {
+	// Primary cap docs (A/B/C) must carry the Contract #6 §6.2 sections; the
+	// ephemeralGrants section on the PRIMARY doc is now empty post-7.1 (the
+	// grants moved to cap.ephemeral.<actor>).
+	for label, env := range map[string]map[string]any{"A": envA, "B": envB} {
 		require.Containsf(t, env, "platformPermissions", "identity %s missing platformPermissions", label)
 		require.Containsf(t, env, "serviceAccess", "identity %s missing serviceAccess", label)
-		require.Containsf(t, env, "ephemeralGrants", "identity %s missing ephemeralGrants", label)
 		require.Containsf(t, env, "roles", "identity %s missing roles", label)
 		require.Equalf(t, "1.0", env["version"], "identity %s wrong envelope version", label)
 	}
@@ -525,11 +587,11 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		_, perr := coreKV.Put(ctx, identityCKey, body)
 		require.NoError(t, perr)
 
-		// Story 1.5.12: the capability plane uses the default hard delete, so the
-		// natskv adapter physically removes cap.identity.<C> on projection of the
-		// identity tombstone. The capability authorizer treats absence and the
-		// (legacy) tombstone identically as denial, so absence is the correct,
-		// contract-aligned outcome (Contract #6 §6.8 "absence equals denial").
+		// The capability plane uses the default hard delete, so the natskv
+		// adapter physically removes cap.identity.<C> on projection of the
+		// identity tombstone. The capability authorizer treats absence as
+		// denial, so absence is the correct, contract-aligned outcome
+		// (Contract #6 §6.8 "absence equals denial").
 		require.Eventually(t, func() bool {
 			_, gErr := capabilityKV.Get(ctx, "cap.identity."+identityCID)
 			return errors.Is(gErr, jetstream.ErrKeyNotFound)

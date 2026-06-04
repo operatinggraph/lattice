@@ -116,6 +116,68 @@ func emptyArrayIfNil(v any) any {
 	return v
 }
 
+// NewEphemeralWrapper returns the EnvelopeFn for the orchestration-base
+// `capabilityEphemeral` lens (Contract #6 §6.6 Phase-2 amendment / Contract
+// #10 §10.7).
+//
+// It wraps the lens's RETURN row into the disjoint-key ephemeral-grant
+// document and targets `cap.ephemeral.<actor-suffix>` — a DIFFERENT key
+// space from the primary `cap.<actor>` doc (capabilityKey), in the SAME
+// shared capability-kv bucket (the disjoint-prefix contribution pattern,
+// Contract #6 §6.1).
+//
+// Input row (produced by the lens cypher RETURN):
+//
+//	{actorKey: "vtx.identity.<id>", ephemeralGrants: [{source,taskKey,operationType,target,expiresAt}, ...]}
+//
+// Output (Contract #6 §6.6 amendment shape):
+//
+//	{key: "cap.ephemeral.identity.<id>", actor: "vtx.identity.<id>",
+//	 version: "1.0", projectedAt: "...", ephemeralGrants: [...]}
+//
+// Rows whose anchor isn't a bound identity are dropped (ErrSkipProjection),
+// identical to the primary wrapper. DEFAULT HARD delete applies via the
+// adapter: when an actor has no live grants the lens reprojects no row →
+// the key is hard-deleted → step-3 reads absent → AuthContextMismatch
+// (absence = denial, Contract #6 §6.8).
+func NewEphemeralWrapper(lensDefKey string, projectionRevision func(actorKey string) uint64) pipeline.EnvelopeFn {
+	return func(row map[string]any, keys map[string]any, params map[string]any) (map[string]any, map[string]any, error) {
+		rowActor, _ := row["actorKey"].(string)
+		if rowActor == "" {
+			return nil, nil, pipeline.ErrSkipProjection
+		}
+		actorKey := rowActor
+		vtxType, _, ok := substrate.ParseVertexKey(actorKey)
+		if !ok {
+			return nil, nil, fmt.Errorf("capabilityenv: actorKey %q is not a Contract #1 vertex key", actorKey)
+		}
+		if vtxType != IdentityType {
+			return nil, nil, pipeline.ErrSkipProjection
+		}
+
+		envKey := ephemeralKey(actorKey)
+		envelope := map[string]any{
+			"key":                    envKey,
+			"actor":                  actorKey,
+			"version":                Version,
+			"projectedAt":            params["projectedAt"],
+			"projectedFromRevisions": projectedFromRevisions(actorKey, lensDefKey, projectionRevision),
+			"ephemeralGrants":        emptyArrayIfNil(row["ephemeralGrants"]),
+		}
+		return envelope, map[string]any{"key": envKey}, nil
+	}
+}
+
+// ephemeralKey converts an actor vertex key (vtx.identity.<NanoID>) into the
+// disjoint Capability KV ephemeral key (cap.ephemeral.identity.<NanoID>)
+// per Contract #6 §6.6 amendment.
+func ephemeralKey(actorKey string) string {
+	if rest, ok := strings.CutPrefix(actorKey, substrate.VertexPrefix+"."); ok {
+		return "cap.ephemeral." + rest
+	}
+	return "cap.ephemeral." + actorKey
+}
+
 // NewRoleIndexWrapper returns the EnvelopeFn for the secondary
 // capabilityRoleIndex lens (Contract #6 §6.1 / Story 3.2b §2).
 //

@@ -41,25 +41,31 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// buildAliceCapDoc builds aliceManager's CapabilityDoc with one ephemeral grant:
-// (aliceTask, ApproveLeaseApplication, aliceLease). No grants for bobLease or bobTask.
-func buildAliceCapDoc() *processor.CapabilityDoc {
+// Ephemeral grants live in the disjoint cap.ephemeral.<actor> entry produced
+// by the orchestration-base capabilityEphemeral lens (Contract #6 §6.6
+// amendment). The task-dispatch branch of step-3 reads that key. These V4
+// fixtures therefore seed the grants under cap.ephemeral.<actor>; the
+// matching logic / cross-target target-match assertions are unchanged.
+
+// aliceEphCapKey / bobEphCapKey are the disjoint ephemeral entry keys.
+func aliceEphCapKey() string { return "cap.ephemeral.identity." + capadvNanoID4 }
+func bobEphCapKey() string   { return "cap.ephemeral.identity." + capadvNanoID5 }
+
+// buildAliceEphDoc builds aliceManager's cap.ephemeral.<actor> entry with one
+// ephemeral grant: (aliceTask, ApproveLeaseApplication, aliceLease). No
+// grants for bobLease or bobTask.
+func buildAliceEphDoc() *processor.CapabilityDoc {
 	aliceID := capadvNanoID4
 	aliceTaskKey := "vtx.task." + capadvNanoID6
 	aliceLeaseKey := "vtx.leaseApp." + capadvNanoID8
-	capKey := "cap.identity." + aliceID
 	actorKey := "vtx.identity." + aliceID
 
 	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
 	return &processor.CapabilityDoc{
-		Key:                    capKey,
-		Actor:                  actorKey,
-		Version:                "1.0",
-		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
-		ProjectedFromRevisions: map[string]uint64{actorKey: 1},
-		Lanes:                  []string{"default"},
-		PlatformPermissions:    []processor.PlatformPermission{},
-		ServiceAccess:          []processor.ServiceAccessEntry{},
+		Key:         aliceEphCapKey(),
+		Actor:       actorKey,
+		Version:     "1.0",
+		ProjectedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		// Alice has exactly ONE ephemeral grant: her own task → her own lease.
 		// No transitive grant to bobLease or any entry from bobTask.
 		EphemeralGrants: []processor.EphemeralGrant{
@@ -71,29 +77,24 @@ func buildAliceCapDoc() *processor.CapabilityDoc {
 				ExpiresAt:     future,
 			},
 		},
-		Roles: []string{"vtx.role.manager"},
 	}
 }
 
-// buildBobCapDoc builds bobManager's CapabilityDoc with one ephemeral grant:
-// (bobTask, ApproveLeaseApplication, bobLease). Not used by alice.
-func buildBobCapDoc() *processor.CapabilityDoc {
+// buildBobEphDoc builds bobManager's cap.ephemeral.<actor> entry with one
+// ephemeral grant: (bobTask, ApproveLeaseApplication, bobLease). Not used by
+// alice.
+func buildBobEphDoc() *processor.CapabilityDoc {
 	bobID := capadvNanoID5
 	bobTaskKey := "vtx.task." + capadvNanoID7
 	bobLeaseKey := "vtx.leaseApp." + capadvNanoID9
-	capKey := "cap.identity." + bobID
 	actorKey := "vtx.identity." + bobID
 
 	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
 	return &processor.CapabilityDoc{
-		Key:                    capKey,
-		Actor:                  actorKey,
-		Version:                "1.0",
-		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
-		ProjectedFromRevisions: map[string]uint64{actorKey: 1},
-		Lanes:                  []string{"default"},
-		PlatformPermissions:    []processor.PlatformPermission{},
-		ServiceAccess:          []processor.ServiceAccessEntry{},
+		Key:         bobEphCapKey(),
+		Actor:       actorKey,
+		Version:     "1.0",
+		ProjectedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		EphemeralGrants: []processor.EphemeralGrant{
 			{
 				Source:        "task",
@@ -103,27 +104,27 @@ func buildBobCapDoc() *processor.CapabilityDoc {
 				ExpiresAt:     future,
 			},
 		},
-		Roles: []string{"vtx.role.manager"},
 	}
 }
 
-// setupV4Harness provisions Capability KV with alice and bob's cap docs.
+// setupV4Harness provisions Capability KV with alice and bob's ephemeral
+// cap.ephemeral.<actor> entries.
 func setupV4Harness(t *testing.T) (context.Context, *substrate.Conn, *processor.CapabilityAuthorizer) { //nolint:unparam
 	t.Helper()
 	ctx, conn := setupCapAdvHarness(t)
 
-	// Seed alice's cap doc.
-	aliceDoc := buildAliceCapDoc()
+	// Seed alice's ephemeral entry.
+	aliceDoc := buildAliceEphDoc()
 	aliceRaw, _ := json.Marshal(aliceDoc)
 	if _, err := conn.KVPut(ctx, capadvCapBucket, aliceDoc.Key, aliceRaw); err != nil {
-		t.Fatalf("v4: seed alice cap doc: %v", err)
+		t.Fatalf("v4: seed alice ephemeral cap doc: %v", err)
 	}
 
-	// Seed bob's cap doc.
-	bobDoc := buildBobCapDoc()
+	// Seed bob's ephemeral entry.
+	bobDoc := buildBobEphDoc()
 	bobRaw, _ := json.Marshal(bobDoc)
 	if _, err := conn.KVPut(ctx, capadvCapBucket, bobDoc.Key, bobRaw); err != nil {
-		t.Fatalf("v4: seed bob cap doc: %v", err)
+		t.Fatalf("v4: seed bob ephemeral cap doc: %v", err)
 	}
 
 	cfg := processor.DefaultCapabilityAuthorizerConfig()
@@ -248,15 +249,16 @@ func TestCapAdv_V4_CrossManager_DeniedBobTask(t *testing.T) {
 func TestCapAdv_V4_FR56_AliceCapEntry_NoTransitiveGrant(t *testing.T) {
 	ctx, conn, _ := setupV4Harness(t)
 
-	aliceCapKey := "cap.identity." + capadvNanoID4
-	entry, err := conn.KVGet(ctx, capadvCapBucket, aliceCapKey)
+	// Alice's ephemeral grants live in the disjoint cap.ephemeral.<actor> entry.
+	aliceEphKey := aliceEphCapKey()
+	entry, err := conn.KVGet(ctx, capadvCapBucket, aliceEphKey)
 	if err != nil {
-		t.Fatalf("v4 FR56: KVGet alice cap entry: %v", err)
+		t.Fatalf("v4 FR56: KVGet alice ephemeral cap entry: %v", err)
 	}
 
 	var doc processor.CapabilityDoc
 	if err := json.Unmarshal(entry.Value, &doc); err != nil {
-		t.Fatalf("v4 FR56: unmarshal alice cap doc: %v", err)
+		t.Fatalf("v4 FR56: unmarshal alice ephemeral cap doc: %v", err)
 	}
 
 	bobTaskKey := "vtx.task." + capadvNanoID7
