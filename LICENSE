@@ -1,0 +1,43 @@
+Copyright (c) 2026 Andrew Solgan (asolgan). All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL — SOURCE-AVAILABLE, NOT OPEN SOURCE
+
+This repository and all of its contents (the "Software") — including, without
+limitation, source code, documentation, designs, specifications, and other
+materials — are the exclusive property of Andrew Solgan ("the Author") and are
+protected by copyright and other intellectual property laws.
+
+The Software is made publicly visible solely for the purposes of demonstration,
+evaluation, and personal reference. Making the source visible does NOT place it
+in the public domain and does NOT grant any license to use it.
+
+NO LICENSE IS GRANTED. Except for the limited permission below, no rights of any
+kind are granted, expressly or by implication, estoppel, or otherwise.
+
+Limited permission. You MAY view and read the Software through the hosting
+platform (e.g., GitHub) and create the incidental, temporary copies a web
+browser or git client makes in the course of viewing it.
+
+You MAY NOT, without the Author's prior written permission:
+
+  1. use the Software, in whole or in part, for any purpose, commercial or
+     non-commercial;
+  2. copy, reproduce, download, fork, mirror, or store the Software, except as
+     incidental to viewing it as permitted above;
+  3. modify, adapt, translate, or create derivative works of the Software;
+  4. distribute, publish, sublicense, sell, rent, lease, or otherwise transfer
+     the Software or any derivative of it;
+  5. use the Software, or any part of it, to train, fine-tune, or evaluate any
+     machine-learning model or dataset;
+  6. remove, alter, or obscure this notice or any copyright or attribution
+     notice contained in the Software.
+
+All rights not expressly granted are reserved by the Author. To request
+permission for any use beyond the limited permission above, contact the Author.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE
+LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
