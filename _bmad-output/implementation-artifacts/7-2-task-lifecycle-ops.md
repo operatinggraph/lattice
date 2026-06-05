@@ -1,6 +1,6 @@
 # Story 7.2 — Task lifecycle ops (ReAssign / Complete / Cancel) + auto-complete + my-tasks Lens
 
-Status: review
+Status: done — shipped `d25a839` (CI green, 2026-06-05). 3-layer adversarial review clean after one fix-forward (the `origin` frozen-contract violation). One follow-up spun off (revision-guarded refractor projection writes — pre-existing, inherited from 7.1).
 
 **Tier:** Opus (new ops on the task substrate + a **commit-path auto-completion injection on the security-plane** + a new projection lens + OCC/state-machine validation). This extends the Story 7.1 substrate; it touches the step-3 task-auth code path, so it is security-plane-adjacent and warrants full review.
 **Epic spec:** `_bmad-output/planning-artifacts/epics/phase-2-epics.md` → "### Story 7.2: Task lifecycle ops (ReAssign / Complete / Cancel) + my-tasks Lens" (line ~31). Read it for the user-story framing.
