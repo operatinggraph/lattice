@@ -1,6 +1,6 @@
 # Story 7.4 — Platform-wide message-scheduling stream (ADR-51)
 
-Status: review
+Status: done — shipped `9507e61` (CI green, 2026-06-05). Thorough lead review (config-only); one lead test-rigor fix + a contract-amendment request (§10.4 republish-target scope) routed to planning.
 
 **Tier:** Sonnet (config, well-bounded). This provisions one new JetStream stream with a single boolean flag and a smoke test. The only non-trivial risk is the NATS version gate — confirmed resolved (see §0.7 and Open Question 1).
 **Epic spec:** `_bmad-output/planning-artifacts/epics/phase-2-epics.md` → "### Story 7.4" (line ~65). Read it for the user-story framing and exact AC.
