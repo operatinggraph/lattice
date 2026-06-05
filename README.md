@@ -10,31 +10,73 @@
 
 ## What is Lattice?
 
-Most software is a "dumb warehouse" of data, and we bolt AI onto it after the fact — agents
-that guess at API shapes, hallucinate schemas, and fight inconsistent state. Lattice inverts
-that: it's an operating system for application state where **the data model is the integration
-surface**, designed from the ground up for both human logic and machine intelligence.
+Lattice is an experiment in what application infrastructure should look like when the system is
+expected to change continuously, explain itself clearly, and safely include AI agents as
+first-class actors.
 
-Lattice stores everything as a graph and treats every change as a deterministic, auditable
-operation:
+Modern applications often hide their real shape behind service code, private conventions,
+framework-specific models, and API glue. Humans can learn those conventions over time. AI agents
+usually cannot: they guess at schemas, call APIs without enough context, and work around state
+they cannot inspect or reason about directly.
 
-- **State is a graph.** Entities are **vertices**, their data lives in **aspects**, and every
-  relationship — including authorization — is a **link**. Keys are opaque addresses; meaning
-  lives in the documents. This is the **VAL** (Vertex · Aspect · Link) model.
-- **Writes are deterministic operations.** A change is an *intent* submitted to an immutable
-  ledger. A single authorized writer — the **Processor** — runs a sandboxed **Starlark** script
-  that validates the intent against the schema and returns the mutations + business events to
-  commit atomically. No code path writes state except through this pipeline.
-- **Reads are derived views.** The **Refractor** continuously projects the graph into queryable
-  **lenses** (openCypher → Postgres, NATS KV) via change-data-capture. The read side is always
-  derived from the source of truth, never written directly — and authorization itself is just a
-  lens (ReBAC projected into an O(1) capability check).
-- **The platform is self-describing.** Every operation and type is a DDL meta-vertex carrying
-  its own schema, description, and examples. An AI agent starts at an identity, follows links to
-  discover what it can do, reads the schema, and submits a valid operation — **cold-start, with
-  no SDK and no integration code.** The graph *is* the prompt context.
-- **The kernel is minimal.** Identity, RBAC, and all business capability ship as installable
-  **Capability Packages** (DDLs + lenses + permissions), not baked into the core.
+Lattice takes the opposite bet: the application state itself should be the integration surface.
+The system should be able to describe what exists, what may be done, who may do it, and what a
+valid change looks like without requiring a hand-written SDK for every new actor.
+
+## Why it exists
+
+The original product pressure behind Lattice came from **experience businesses**: places like
+residential communities, coworking buildings, campuses, clubs, hospitality groups, and mixed-use
+properties where one person's relationship spans leases, payments, access, events, services,
+staff interactions, preferences, history, and support.
+
+Those businesses are always inventing new workflows. A new membership bundle, lease rule, access
+policy, concierge service, compliance requirement, or staff process should not require weeks of
+engineering coordination. But in normal software, every new capability crosses too many seams:
+database schema, service code, authorization, API shape, event stream, reporting view, workflow
+logic, and UI assumptions.
+
+That is the broken promise Lattice is aimed at: "just spin up a new idea" only works if the
+architecture makes the right path easier than the bypass. Lattice tries to make platform
+discipline structural. A valid change must go through the same deterministic write path, the same
+schema validation, the same authorization model, and the same projection machinery whether it was
+initiated by a human, a service, or an AI agent.
+
+The deeper research question is:
+
+> What if application state were structured so humans, services, and AI agents could all reason
+> over the same model safely?
+
+The answer Lattice is testing is a living system, not a faster deployment script: capabilities
+should be authorable, reviewable, reversible, observable, and evolvable inside the running
+platform. Meetings are replaced by intent + review, not intent alone. Human judgment stays in the
+loop; coordination overhead is what gets compressed.
+
+## What makes it different
+
+Lattice is built around a few opinionated choices:
+
+- **The graph is the source of truth.** State, relationships, authorization, schemas, and
+  operations share one addressable model instead of being scattered across tables, service code,
+  policy engines, and integration docs.
+- **Every write goes through one deterministic path.** Application behavior is submitted as an
+  operation, validated by schema-aware Starlark, authorized, and committed atomically. There is no
+  side door for state mutation.
+- **Reads are projections, not competing truth.** Queryable views are continuously derived from
+  the graph, so Postgres tables, NATS KV views, and authorization caches can be rebuilt from the
+  ledgered source.
+- **AI discovery is part of the architecture.** The graph is prompt context: operations and types
+  carry schemas, descriptions, and examples, so agents can follow links from their identity to
+  available commands instead of depending on hardcoded API knowledge.
+- **AI authorship has guardrails.** A Lattice-aware agent may propose DDL, Starlark rules, lenses,
+  and workflows, but those changes still pass through human review, deterministic validation,
+  rollback-friendly contracts, and the same write path as business data.
+- **The kernel stays small.** Identity, RBAC, orchestration, and domain behavior arrive as
+  capability packages rather than being permanently baked into the core.
+
+In implementation terms, that core is the **VAL** model: entities are **vertices**, their data
+lives in **aspects**, and relationships are **links**. The **Processor** is the sole writer to
+Core KV; the **Refractor** derives queryable **lenses** from Core KV change-data-capture.
 
 On top of this core, two engines drive *action*: the **Loom** runs deterministic, imperative
 procedures ("do A, then B, then C"); the **Weaver** drives declarative convergence ("this target
