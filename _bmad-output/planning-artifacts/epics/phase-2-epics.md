@@ -81,6 +81,18 @@ So that any component (Weaver's temporal lane first) can use NATS native message
 
 ### Story 7.5: No-orphan task invariant (FR29 by construction)
 
+> **Status: WON'T DO — closed 2026-06-05.** Already satisfied by construction; no new mechanism is
+> warranted. The only `orchestration-base` ops that create or re-point an `assignedTo` link are
+> `CreateTask` (7.1) and `ReAssignTask` (7.2), and **both already validate the target identity is
+> alive and reject with a structured `UnknownAssignee` error** (CreateTask also validates
+> `forOperation` + `scopedTo`). `CompleteTask`/`CancelTask` only flip status and cannot orphan. So
+> no-orphan-at-creation is **total today**. Loom/Weaver introduce no new vector — they submit the
+> same *known* ops through the same validated write path (no privileged task-creation backdoor), so a
+> general structural guard would be redundant. The two cases this story nominally reserved for are
+> out of scope by its own AC: **post-hoc cross-package orphaning** (identity tombstone vs. open
+> tasks) is deferred to the data-contracts session, and the **FR28 role-queue unroutable** case is
+> Phase 3 (the FR29 Health-KV monitor). No story file was created.
+
 As an operator,
 I want it to be impossible for a task to reference a non-existent assignee,
 So that no task is ever silently orphaned — enforced as an invariant, not monitored after the fact.
@@ -319,7 +331,7 @@ So that Loom + Weaver + Two-Phase Nudge + temporal are proven to converge.
 
 | Epic | Stories | Notes |
 |---|---|---|
-| Epic 7: Orchestration Foundations | 6 | task model + service actors + platform-wide schedule stream + FR29 (creation-time) + substrate durable-consumer |
+| Epic 7: Orchestration Foundations | 5 (7.5 won't-do) | task model + service actors + platform-wide schedule stream + substrate durable-consumer (FR29 creation-time already satisfied by 7.1/7.2 — 7.5 closed) |
 | Epic 8: Loom — Deterministic Flow Engine | 3 | skeleton → user-tasks → guards |
 | Epic 9: Weaver — Convergence Engine | 4 | target-as-Lens+lane1 → anti-storm → temporal → control-API (FR30) |
 | Epic 10: External Convergence — Two-Phase Nudge | 2 | framework + idempotency proof |
