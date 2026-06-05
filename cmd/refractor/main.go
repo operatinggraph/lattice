@@ -293,6 +293,23 @@ func main() {
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 			logger.Info("capabilityEphemeral envelope + fan-out + latency installed",
 				"lensId", r.ID, "lensDefKey", lensDefKey)
+		case "myTasks":
+			// The orchestration-base my-tasks lens (Contract #10 §10.1). It
+			// projects, per identity, that identity's OPEN tasks into the
+			// package-owned my-tasks bucket keyed my-tasks.identity.<id>. Like
+			// the ephemeral lens it is link-sourced + needs cross-vertex
+			// fan-out: a CDC event on a task root (open→closed) or an
+			// assignedTo link (reassign) must reproject the affected actor(s),
+			// and zero open tasks must hard-delete the key (vanish-on-close).
+			lensDefKey := "vtx.meta." + r.ID
+			p.SetEnvelopeFn(capabilityenv.NewMyTasksWrapper(lensDefKey, projectionRevision))
+			p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
+			// Actor disappearance must delete this lens's my-tasks.identity.<id>
+			// key, not the primary cap.<actor> doc.
+			p.SetActorDeleteKey(capabilityenv.MyTasksKey)
+			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
+			logger.Info("myTasks envelope + fan-out + latency installed",
+				"lensId", r.ID, "lensDefKey", lensDefKey)
 		}
 
 		if err := manager.Add(ctx, r.ID); err != nil {

@@ -200,9 +200,14 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	// directly (mirroring how the primary cap pipeline is wired). It projects
 	// FR56 grants to the disjoint key cap.ephemeral.<actor> in the same shared
 	// capability-kv bucket.
-	ephSpecs := orchestrationbase.Lenses()
-	require.Len(t, ephSpecs, 1)
-	ephCR, err := fullEngine.Parse(ephSpecs[0].Spec)
+	var ephSpec string
+	for _, l := range orchestrationbase.Lenses() {
+		if l.CanonicalName == "capabilityEphemeral" {
+			ephSpec = l.Spec
+		}
+	}
+	require.NotEmpty(t, ephSpec, "orchestration-base must declare a capabilityEphemeral lens")
+	ephCR, err := fullEngine.Parse(ephSpec)
 	require.NoError(t, err, "capabilityEphemeral spec must parse")
 	ephTargetKV, err := js.KeyValue(ctx, bootstrap.CapabilityKVBucket)
 	require.NoError(t, err)

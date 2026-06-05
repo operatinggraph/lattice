@@ -13,6 +13,20 @@ import (
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
+// ephemeralLensSpec returns the orchestration-base capabilityEphemeral lens
+// cypher, selected by CanonicalName so the package may declare additional
+// lenses without these conformance tests silently exercising the wrong one.
+func ephemeralLensSpec(t *testing.T) string {
+	t.Helper()
+	for _, l := range orchestrationbase.Lenses() {
+		if l.CanonicalName == "capabilityEphemeral" {
+			return l.Spec
+		}
+	}
+	t.Fatal("orchestration-base must declare a capabilityEphemeral lens")
+	return ""
+}
+
 // TestBootstrap_CapabilityLensE2E is the Story 3.1b-ii acceptance test.
 //
 // Representative graph seeded:
@@ -209,10 +223,8 @@ func TestCapabilityEphemeralLens_E2E(t *testing.T) {
 	putEdge(t, reg, adjKV, "scopedTo", "task2", "doc3")
 	putEdge(t, reg, adjKV, "reportsTo", "alice", "bob")
 
-	specs := orchestrationbase.Lenses()
-	require.Len(t, specs, 1)
 	eng := New()
-	cr, err := eng.Parse(specs[0].Spec)
+	cr, err := eng.Parse(ephemeralLensSpec(t))
 	require.NoError(t, err, "capabilityEphemeral cypher must parse")
 
 	type grant struct{ op, target string }
@@ -312,7 +324,7 @@ func TestCapabilityEphemeralLens_NoLiveGrants_NoRealRow(t *testing.T) {
 	putEdge(t, reg, adjKV, "scopedTo", "daveexpired", "doc1")
 
 	eng := New()
-	cr, err := eng.Parse(orchestrationbase.Lenses()[0].Spec)
+	cr, err := eng.Parse(ephemeralLensSpec(t))
 	require.NoError(t, err)
 
 	for _, actor := range []string{"carol", "dave"} {

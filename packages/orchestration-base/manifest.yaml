@@ -16,7 +16,20 @@ declares:
       adapter: nats-kv
       bucket: capability-kv
       engine: full
+    - canonicalName: myTasks
+      adapter: nats-kv
+      bucket: my-tasks
+      engine: full
   permissions:
     - operationType: CreateTask
+      scope: any
+      grantsTo: [operator]
+    - operationType: ReAssignTask
+      scope: any
+      grantsTo: [operator]
+    - operationType: CompleteTask
+      scope: any
+      grantsTo: [operator]
+    - operationType: CancelTask
       scope: any
       grantsTo: [operator]

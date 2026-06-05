@@ -41,7 +41,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		{
 			CanonicalName:     "task",
 			Class:             "meta.ddl.vertexType",
-			PermittedCommands: []string{"CreateTask"},
+			PermittedCommands: []string{"CreateTask", "ReAssignTask", "CompleteTask", "CancelTask"},
 			Description: "Orchestration task DDL. Vertex shape: vtx.task.<NanoID>, class=task, " +
 				"root data = scalars only {status (open|complete|cancelled), expiresAt}; NO aspects " +
 				"(the UI renders from the bound op's self-describing DDL via the forOperation link). " +
@@ -49,7 +49,11 @@ func DDLs() []pkgmgr.DDLSpec {
 				"(task→op-meta: the operation this task grants), scopedTo (task→target: the grant's " +
 				"target). All links: task is the later-arriving source, the other vertex is the " +
 				"pre-existing target (Contract #1 §1.1). CreateTask requires + validates the assignee " +
-				"identity (no-orphan invariant, FR29/P4).",
+				"identity (no-orphan invariant, FR29/P4). Lifecycle ops: ReAssignTask validates the " +
+				"new assignee + re-points the assignedTo link atomically (old tombstoned, new created); " +
+				"CompleteTask (open→complete) and CancelTask (open→cancelled) transition the root " +
+				"data.status. All lifecycle ops require the task to be open, assert the task root " +
+				"revision (OCC, Contract #2 §2.6), and reject any other source state (§10.6).",
 			Script: taskDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"assignee":{"type":"string","description":"vtx.identity.<NanoID> — the identity that will perform the task (required; validated)."},` +
@@ -181,5 +185,118 @@ def execute(state, op):
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": task_key}}
 
+    if ot == "ReAssignTask":
+        task_key = required_string(p, "taskKey")
+        new_assignee = required_string(p, "newAssignee")
+        _, task_id = parts_of(task_key, "taskKey", "task")
+        _, new_assignee_id = parts_of(new_assignee, "newAssignee", "identity")
+
+        # The task root must exist, be alive, and be open. A reassign of a
+        # complete/cancelled task is rejected (the link only flips while the
+        # task is live).
+        if not vertex_alive(state, task_key):
+            fail("UnknownTask: " + task_key)
+        task_status = root_status(state, task_key)
+        if task_status != "open":
+            fail("TaskNotOpen: cannot re-assign a " + task_status + " task: " + task_key)
+
+        # No-orphan invariant (FR29 / P4): the NEW assignee identity MUST be
+        # alive, or no link flip is committed.
+        if not vertex_alive(state, new_assignee):
+            fail("UnknownAssignee: " + new_assignee)
+
+        # The caller names the OLD assignedTo link in ContextHint.Reads so the
+        # script can re-point it. Locate the single assignedTo link for this
+        # task among the hydrated reads.
+        old_link = find_assigned_link(state, task_id)
+        if old_link == None:
+            fail("UnknownAssignedLink: no assignedTo link for " + task_key + " in reads")
+        # The old assignee is the link key's final id segment
+        # (lnk.task.<taskId>.assignedTo.identity.<oldId>); the script reads it
+        # from the key shape, not from a link-endpoint field (the hydrated
+        # link struct exposes no targetVertex).
+        old_link_parts = split_key(old_link)
+        old_target = "vtx.identity." + old_link_parts[len(old_link_parts) - 1]
+        if old_target == new_assignee:
+            fail("NoOpReassign: task already assigned to " + new_assignee)
+
+        new_link = "lnk.task." + task_id + ".assignedTo.identity." + new_assignee_id
+
+        # OCC on the task root: assert its read revision so a concurrent
+        # transition cannot clobber. The root vertex is NOT re-created; the
+        # link flip is the effect. The root takes an OCC-guarded touch so the
+        # reassign serialises against complete/cancel on the same root.
+        mutations = [
+            {"op": "update", "key": task_key,
+             "expectedRevision": state[task_key].revision,
+             "document": {"class": "task", "isDeleted": False,
+                          "data": {"status": "open",
+                                   "expiresAt": root_expires_at(state, task_key)}}},
+            {"op": "tombstone", "key": old_link},
+            make_link(new_link, task_key, new_assignee, "assignedTo", "assignedTo", {}),
+        ]
+        events = [{"class": "TaskReAssigned",
+                   "data": {"taskKey": task_key, "oldAssignee": old_target,
+                            "newAssignee": new_assignee}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": task_key}}
+
+    if ot == "CompleteTask":
+        return transition_task(state, p, "complete", "TaskCompleted")
+
+    if ot == "CancelTask":
+        return transition_task(state, p, "cancelled", "TaskCancelled")
+
     fail("task DDL: unknown operationType: " + ot)
+
+def root_status(state, key):
+    doc = state[key]
+    if not hasattr(doc, "data") or doc.data == None:
+        return ""
+    if "status" not in doc.data:
+        return ""
+    return doc.data["status"]
+
+def root_expires_at(state, key):
+    doc = state[key]
+    if not hasattr(doc, "data") or doc.data == None:
+        return ""
+    if "expiresAt" not in doc.data:
+        return ""
+    return doc.data["expiresAt"]
+
+def find_assigned_link(state, task_id):
+    want_prefix = "lnk.task." + task_id + ".assignedTo.identity."
+    for k in state:
+        if k.startswith(want_prefix):
+            doc = state[k]
+            if hasattr(doc, "isDeleted") and doc.isDeleted:
+                continue
+            return k
+    return None
+
+def transition_task(state, p, target_status, event_class):
+    # CompleteTask (open -> complete) and CancelTask (open -> cancelled) share
+    # this validated-transition body. Only an OPEN task transitions; any other
+    # source state is rejected with a structured ScriptError (the named AC
+    # invariant: cannot complete a cancelled task, and its symmetric guard).
+    task_key = required_string(p, "taskKey")
+    parts_of(task_key, "taskKey", "task")
+    if not vertex_alive(state, task_key):
+        fail("UnknownTask: " + task_key)
+    status = root_status(state, task_key)
+    if status == target_status:
+        fail("TaskAlreadyInState: task " + task_key + " is already " + target_status)
+    if status != "open":
+        fail("InvalidTransition: cannot move task " + task_key + " from " + status + " to " + target_status)
+    mutations = [
+        {"op": "update", "key": task_key,
+         "expectedRevision": state[task_key].revision,
+         "document": {"class": "task", "isDeleted": False,
+                      "data": {"status": target_status,
+                               "expiresAt": root_expires_at(state, task_key)}}},
+    ]
+    events = [{"class": event_class, "data": {"taskKey": task_key}}]
+    return {"mutations": mutations, "events": events,
+            "response": {"primaryKey": task_key}}
 `

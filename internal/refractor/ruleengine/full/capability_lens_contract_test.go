@@ -339,9 +339,16 @@ func TestCapabilityEphemeralLens_ContractConformance(t *testing.T) {
 
 	// --- run the LITERAL orchestration-base capabilityEphemeral cypher ---
 	lensSpecs := orchestrationbase.Lenses()
-	require.Len(t, lensSpecs, 1, "orchestration-base must declare exactly one lens")
-	require.Equal(t, "capabilityEphemeral", lensSpecs[0].CanonicalName)
-	body := lensSpecs[0].Spec
+	var body string
+	var found bool
+	for _, ls := range lensSpecs {
+		if ls.CanonicalName == "capabilityEphemeral" {
+			body = ls.Spec
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "orchestration-base must declare a capabilityEphemeral lens")
 
 	eng := full.New()
 	cr, err := eng.Parse(body)

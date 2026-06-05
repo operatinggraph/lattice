@@ -43,6 +43,9 @@ func staffCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateTask", Scope: "any"},
+			{OperationType: "ReAssignTask", Scope: "any"},
+			{OperationType: "CompleteTask", Scope: "any"},
+			{OperationType: "CancelTask", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

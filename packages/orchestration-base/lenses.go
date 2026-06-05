@@ -30,8 +30,62 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          capabilityEphemeralSpec,
 		},
+		{
+			CanonicalName: "myTasks",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        MyTasksBucket,
+			Engine:        "full",
+			Spec:          myTasksSpec,
+		},
 	}
 }
+
+// MyTasksBucket is the package-owned output bucket for the my-tasks lens.
+// Provisioned at package-install time (NOT primordial), mirroring
+// duplicate-candidates. Each entry is keyed my-tasks.identity.<NanoID> and
+// carries that identity's OPEN tasks (§10.1). DEFAULT HARD delete (Story
+// 1.5.12 — no deleteMode override): when an identity's last open task closes
+// or moves away, the envelope signals a delete and the key is hard-deleted →
+// the identity drops out of my-tasks.
+const MyTasksBucket = "my-tasks"
+
+// myTasksSpec is the link-sourced per-identity OPEN-task cypher. Anchored on
+// the bound identity (not the unbound task label) so reprojection traverses
+// adjacency from the actor, mirroring capabilityEphemeral.
+//
+// Per identity it walks (identity)<-[:assignedTo]-(task) where the task is
+// OPEN, and for each open task LINK-sources the projected fields (Contract
+// #10 §10.1 — task relationships are links, not fields):
+//
+//	forOperation ← (task)-[:forOperation]->(op),  op.key
+//	scopedTo     ← (task)-[:scopedTo]->(t),        t.key
+//	expiresAt    ← task.data.expiresAt (scalar on the task root)
+//	status       ← task.data.status (always 'open' here; the WHERE filters it)
+//
+// The non-optional identity anchor means a live identity always yields exactly
+// one row whose `openTasks` collect may contain a degenerate {taskKey:null}
+// artifact when the identity has no open task; the envelope wrapper drops those
+// and, finding zero real open tasks, signals a delete so absence is genuine
+// (the 7.1 FIX-1 absence mechanism — ErrSkipProjection would leave the key).
+const myTasksSpec = `
+MATCH (identity:identity {key: $actorKey})
+
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+  WHERE task.data.status = 'open'
+OPTIONAL MATCH (task)-[:forOperation]->(op)
+OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
+
+RETURN
+  identity.key AS actorKey,
+  collect(DISTINCT {
+    taskKey: task.key,
+    assignee: identity.key,
+    forOperation: op.key,
+    scopedTo: tgt.key,
+    expiresAt: task.data.expiresAt
+  }) AS openTasks
+`
 
 // capabilityEphemeralSpec is the link-sourced ephemeral-grant cypher.
 //

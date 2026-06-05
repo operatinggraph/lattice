@@ -438,6 +438,7 @@ func vertexMapToStarlarkWithHydrated(m map[string]VertexDoc) *stateMapValue {
 			"class":     starlarklib.String(v.Class),
 			"isDeleted": starlarklib.Bool(v.IsDeleted),
 			"data":      goMapToStarlarkDict(v.Data),
+			"revision":  starlarklib.MakeUint64(v.Revision),
 		}
 		if v.VertexKey != "" {
 			fields["vertexKey"] = starlarklib.String(v.VertexKey)

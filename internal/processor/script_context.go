@@ -39,6 +39,13 @@ type VertexDoc struct {
 	// Aspect-only fields. Empty for vertex documents.
 	VertexKey string `json:"vertexKey,omitempty"`
 	LocalName string `json:"localName,omitempty"`
+	// Revision is the Core KV revision the document was read at during step 4
+	// (Hydrate). It is the script's OCC handle: a script asserting a guarded
+	// transition echoes it back as a mutation's expectedRevision so a
+	// concurrent write to the same root surfaces as a RevisionConflict
+	// (Contract #2 §2.6). Not part of the persisted document body — it is the
+	// substrate entry's revision, threaded in by the Hydrator.
+	Revision uint64 `json:"-"`
 }
 
 // MetaVertex is the DDL meta-vertex projection hydrated from the DDL cache.

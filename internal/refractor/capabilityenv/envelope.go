@@ -217,6 +217,104 @@ func EphemeralKey(actorKey string) string {
 	return "cap.ephemeral." + actorKey
 }
 
+// NewMyTasksWrapper returns the EnvelopeFn for the orchestration-base
+// `myTasks` lens (Contract #10 §10.1). It projects, per identity, that
+// identity's OPEN tasks into the package-owned my-tasks bucket keyed
+// my-tasks.identity.<id>.
+//
+// Input row (produced by the lens cypher RETURN):
+//
+//	{actorKey: "vtx.identity.<id>", openTasks: [{taskKey,assignee,forOperation,scopedTo,expiresAt}, ...]}
+//
+// Output:
+//
+//	{key: "my-tasks.identity.<id>", assignee: "vtx.identity.<id>",
+//	 projectedAt: "...", openTasks: [...]}
+//
+// Like the ephemeral wrapper, the lens cypher anchors on a non-optional
+// identity, so a live identity always yields one row whose `openTasks` collect
+// may carry a degenerate {taskKey:null} artifact when the identity has no open
+// task. The wrapper keeps only entries with a non-empty taskKey; when zero
+// remain it returns ErrDeleteProjection keyed at the identity's my-tasks key —
+// the pipeline emits a Delete and the default-hard adapter removes the key, so
+// a closed/cancelled/reassigned-away task drops out of my-tasks (the 7.1 FIX-1
+// genuine-absence mechanism). A reassign reprojects BOTH endpoints via the
+// actor fan-out: the old assignee's doc loses the task, the new assignee's
+// gains it.
+func NewMyTasksWrapper(lensDefKey string, projectionRevision func(actorKey string) uint64) pipeline.EnvelopeFn {
+	return func(row map[string]any, keys map[string]any, params map[string]any) (map[string]any, map[string]any, error) {
+		// When the anchored identity has zero open tasks the cypher collapses the
+		// OPTIONAL task chain and `identity.key` projects as null; the per-actor
+		// `params["actorKey"]` the pipeline bound is the authoritative anchor, so
+		// fall back to it to key the deletion. Without this an identity whose last
+		// open task just closed would skip (key lingers) instead of deleting.
+		actorKey, _ := row["actorKey"].(string)
+		if actorKey == "" {
+			actorKey, _ = params["actorKey"].(string)
+		}
+		if actorKey == "" {
+			return nil, nil, pipeline.ErrSkipProjection
+		}
+		vtxType, _, ok := substrate.ParseVertexKey(actorKey)
+		if !ok {
+			return nil, nil, fmt.Errorf("capabilityenv: actorKey %q is not a Contract #1 vertex key", actorKey)
+		}
+		if vtxType != IdentityType {
+			return nil, nil, pipeline.ErrSkipProjection
+		}
+
+		envKey := MyTasksKey(actorKey)
+		tasks := realOpenTasks(row["openTasks"])
+		if len(tasks) == 0 {
+			return nil, map[string]any{"key": envKey}, pipeline.ErrDeleteProjection
+		}
+		envelope := map[string]any{
+			"key":                    envKey,
+			"assignee":               actorKey,
+			"version":                Version,
+			"projectedAt":            params["projectedAt"],
+			"projectedFromRevisions": projectedFromRevisions(actorKey, lensDefKey, projectionRevision),
+			"openTasks":              tasks,
+		}
+		return envelope, map[string]any{"key": envKey}, nil
+	}
+}
+
+// realOpenTasks returns the subset of a cypher `openTasks` collect whose
+// entries carry a non-empty string `taskKey`. The non-optional identity anchor
+// plus OPTIONAL task matches mean a task-less identity still produces a
+// degenerate {taskKey:null} artifact; those are dropped so absence is real.
+func realOpenTasks(v any) []any {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]any, 0, len(list))
+	for _, e := range list {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		tk, ok := m["taskKey"].(string)
+		if !ok || tk == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// MyTasksKey converts an identity vertex key (vtx.identity.<NanoID>) into the
+// my-tasks bucket key (my-tasks.identity.<NanoID>). Single source of truth for
+// the shape: the envelope projects to it and the pipeline deletes it on actor
+// disappearance.
+func MyTasksKey(actorKey string) string {
+	if rest, ok := strings.CutPrefix(actorKey, substrate.VertexPrefix+"."); ok {
+		return "my-tasks." + rest
+	}
+	return "my-tasks." + actorKey
+}
+
 // NewRoleIndexWrapper returns the EnvelopeFn for the secondary
 // capabilityRoleIndex lens (Contract #6 §6.1 / Story 3.2b §2).
 //

@@ -197,7 +197,6 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	// Emit FR23 auth trace for allowed decisions when flag is ON. The emitter
 	// guards internally on traceAllowDecisions; nil emitter is a no-op.
 	cp.deps.TraceEmitter.Emit(env, decision)
-	_ = resolvedPermission // threaded through for denial response + auth trace
 
 	// --- Steps 4-10: stubbed pipeline. ---
 	var state HydratedState
@@ -256,7 +255,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 
 	now := cp.deps.Clock()
 	tracker := NewTracker(env, now)
-	commitAck, err := cp.deps.Committer.Commit(ctx, env, result, tracker)
+	commitAck, err := cp.commitWithTaskAutoComplete(ctx, env, result, tracker, resolvedPermission)
 	if err != nil {
 		// Authoritative protected-key guard (Story 1.5.5 P1): an update or
 		// tombstone targeting a data.protected root is rejected before the
@@ -348,6 +347,104 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	}
 	cp.deps.Logger.Info("step 9: ack", "requestId", env.RequestID)
 	return OutcomeAccepted
+}
+
+// commitWithTaskAutoComplete commits the operation, injecting the §10.6
+// task auto-completion into the SAME atomic batch when step-3 resolved on the
+// task path (Contract #10 §10.7) and the named task is currently open.
+//
+// Seam (a) (Adjudication #1): the conditional status→complete mutation + the
+// TaskCompleted event are appended to a copy of the ScriptResult before
+// Committer.Commit, so the existing batch builder, BuildEventList, and the
+// transactional outbox carry them unchanged — one atomic batch holds both the
+// op's own effect and the task closure, or neither.
+//
+// CAS-on-open + best-effort (Adjudication #2): the completion mutation carries
+// the task root's read revision. If the commit loses an OCC race on that
+// injected update (a concurrent admin CompleteTask/CancelTask moved the root),
+// re-read the task: if it is no longer open, drop the injection and commit the
+// user's op ALONE. A task-side race the user did not cause MUST NOT fail the
+// user's op — this never surfaces as RevisionConflict for the auto-complete.
+// A conflict on one of the user's OWN mutations is returned unchanged.
+func (cp *CommitPath) commitWithTaskAutoComplete(
+	ctx context.Context,
+	env *OperationEnvelope,
+	result ScriptResult,
+	tracker Tracker,
+	rp *ResolvedPermission,
+) (CommitAck, error) {
+	taskKey := taskKeyFromTaskPathDecision(rp)
+	if taskKey == "" {
+		// Not a task-path op (role/service/platform auth, or stub) — nothing
+		// to auto-complete. Commit the op as-is.
+		return cp.deps.Committer.Commit(ctx, env, result, tracker)
+	}
+
+	ac, err := readTaskAutoCompletion(ctx, cp.deps.Conn, cp.deps.CoreBucket, taskKey)
+	if err != nil {
+		// A read failure on the task root must not fail the user's op on a
+		// best-effort closure. Log and commit the op alone; a redelivery (or a
+		// later op on the same grant) re-attempts the closure, and the
+		// CAS-on-open keeps that idempotent.
+		cp.deps.Logger.Warn("auto-complete: task root read failed; committing op without closure",
+			"requestId", env.RequestID, "taskKey", taskKey, "error", err)
+		return cp.deps.Committer.Commit(ctx, env, result, tracker)
+	}
+	if !ac.open {
+		// Task absent / cancelled / already complete → inject nothing (no
+		// double-complete, no cancelled-resurrection; the stale-grant window is
+		// a harmless no-op).
+		return cp.deps.Committer.Commit(ctx, env, result, tracker)
+	}
+
+	// The completion of a task whose granted op just ran is a platform behaviour
+	// (Contract #10 §10.6), injected on the commit path — not script-authored.
+	// The seam is auditable here in the log, NOT via a marker on the persisted
+	// root data or event payload (those stay byte-for-byte identical to the
+	// explicit CompleteTask shape so Loom consumes one shape).
+	cp.deps.Logger.Info("auto-complete: injecting task closure into the atomic batch",
+		"requestId", env.RequestID, "taskKey", taskKey, "autoComplete", true)
+	augmented := injectTaskAutoCompletion(result, ac)
+	commitAck, err := cp.deps.Committer.Commit(ctx, env, augmented, tracker)
+	if err == nil {
+		return commitAck, nil
+	}
+	if !errors.Is(err, substrate.ErrAtomicBatchRejected) {
+		// Non-conflict commit failure (e.g. protected-key, infra) — propagate
+		// unchanged; the injection did not introduce it.
+		return commitAck, err
+	}
+
+	// An atomic-batch conflict occurred. Re-read the task to attribute it. The
+	// only guarded mutation the injection adds is the task update at
+	// ac.revision; if the root has since moved (or closed), the injected CAS is
+	// a cause of the conflict — re-resolve the closure so the user's op is
+	// never bounced on a task-side race (Adjudication #2).
+	recheck, rerr := readTaskAutoCompletion(ctx, cp.deps.Conn, cp.deps.CoreBucket, taskKey)
+	if rerr != nil {
+		return commitAck, err
+	}
+	if recheck.open && recheck.revision == ac.revision {
+		// The task root is untouched at the revision we asserted — the conflict
+		// is on one of the USER's own mutations, not the auto-complete. Surface
+		// it unchanged (the existing RevisionConflict branch handles it).
+		return commitAck, err
+	}
+	if recheck.open {
+		// Still open but at a newer revision — retry the injection once with the
+		// fresh CAS handle.
+		retry := injectTaskAutoCompletion(result, recheck)
+		retryAck, retryErr := cp.deps.Committer.Commit(ctx, env, retry, tracker)
+		if retryErr == nil {
+			return retryAck, nil
+		}
+		// Lost the race again (or a user-mutation conflict surfaced under the
+		// retry) — fall through and commit the op alone so the user's op is
+		// never bounced on a task-side race.
+	}
+	cp.deps.Logger.Info("auto-complete: task closed or moved under a concurrent transition; committing op without closure",
+		"requestId", env.RequestID, "taskKey", taskKey)
+	return cp.deps.Committer.Commit(ctx, env, result, tracker)
 }
 
 // primaryKeyInCommit reports whether a script-named primaryKey lies within the

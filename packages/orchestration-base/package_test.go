@@ -23,39 +23,63 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-func TestPackage_OneDDLOneLensOnePermission(t *testing.T) {
+func TestPackage_OneDDLTwoLensesFourPermissions(t *testing.T) {
 	if got := len(Package.DDLs); got != 1 {
 		t.Fatalf("expected 1 DDL, got %d", got)
 	}
 	if got := Package.DDLs[0].CanonicalName; got != "task" {
 		t.Fatalf("DDL canonicalName = %q, want task", got)
 	}
-	if got := len(Package.Lenses); got != 1 {
-		t.Fatalf("expected 1 lens, got %d", got)
+	if got := len(Package.Lenses); got != 2 {
+		t.Fatalf("expected 2 lenses, got %d", got)
 	}
-	if got := Package.Lenses[0].CanonicalName; got != "capabilityEphemeral" {
-		t.Fatalf("lens canonicalName = %q, want capabilityEphemeral", got)
+	lensNames := map[string]bool{}
+	for _, l := range Package.Lenses {
+		lensNames[l.CanonicalName] = true
 	}
-	if got := len(Package.Permissions); got != 1 {
-		t.Fatalf("expected 1 permission, got %d", got)
+	for _, want := range []string{"capabilityEphemeral", "myTasks"} {
+		if !lensNames[want] {
+			t.Fatalf("missing lens %q (have %v)", want, lensNames)
+		}
+	}
+	if got := len(Package.Permissions); got != 4 {
+		t.Fatalf("expected 4 permissions, got %d", got)
 	}
 }
 
-func TestPackage_TaskDDLOnlyCreateTask(t *testing.T) {
+func TestPackage_TaskDDLLifecycleCommands(t *testing.T) {
 	cmds := Package.DDLs[0].PermittedCommands
-	if len(cmds) != 1 || cmds[0] != "CreateTask" {
-		t.Fatalf("permittedCommands = %v, want [CreateTask]", cmds)
+	want := map[string]bool{"CreateTask": false, "ReAssignTask": false, "CompleteTask": false, "CancelTask": false}
+	for _, c := range cmds {
+		if _, ok := want[c]; !ok {
+			t.Fatalf("unexpected permittedCommand %q", c)
+		}
+		want[c] = true
+	}
+	for c, seen := range want {
+		if !seen {
+			t.Fatalf("permittedCommands missing %q (have %v)", c, cmds)
+		}
 	}
 }
 
-// TestPackage_CreateTaskGrantedToOperator pins the grantee role (A6).
-func TestPackage_CreateTaskGrantedToOperator(t *testing.T) {
-	p := Package.Permissions[0]
-	if p.OperationType != "CreateTask" {
-		t.Fatalf("permission op = %q, want CreateTask", p.OperationType)
+// TestPackage_LifecycleOpsGrantedToOperator pins the grantee role for every
+// lifecycle op (A3/A6).
+func TestPackage_LifecycleOpsGrantedToOperator(t *testing.T) {
+	want := map[string]bool{"CreateTask": false, "ReAssignTask": false, "CompleteTask": false, "CancelTask": false}
+	for _, p := range Package.Permissions {
+		if _, ok := want[p.OperationType]; !ok {
+			t.Fatalf("unexpected permission op %q", p.OperationType)
+		}
+		want[p.OperationType] = true
+		if len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
+			t.Fatalf("%s grantsTo = %v, want [operator]", p.OperationType, p.GrantsTo)
+		}
 	}
-	if len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
-		t.Fatalf("CreateTask grantsTo = %v, want [operator]", p.GrantsTo)
+	for op, seen := range want {
+		if !seen {
+			t.Fatalf("missing permission for op %q", op)
+		}
 	}
 }
 

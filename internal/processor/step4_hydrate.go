@@ -160,6 +160,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			if err != nil {
 				return HydratedState{}, fmt.Errorf("step4: parse %s: %w", key, err)
 			}
+			doc.Revision = entry.Revision
 			hydrated[key] = doc
 		}
 	}
