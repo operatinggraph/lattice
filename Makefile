@@ -22,16 +22,22 @@ up:
 	@echo "==> Starting NATS + Postgres..."
 	docker compose up -d --wait
 	@echo "==> Containers healthy."
+	@echo "==> Killing any background refractor processes (avoid warm-up duplicates)..."
+	-pkill -f "bin/refractor" 2>/dev/null || true
+	@echo "==> Killing any background processor processes (avoid warm-up duplicates)..."
+	-pkill -f "bin/processor" 2>/dev/null || true
 	@echo "==> Building bootstrap binary..."
 	go build -o bin/bootstrap ./cmd/bootstrap
 	@echo "==> Building refractor binary (Story 2.1)..."
 	go build -o bin/refractor ./cmd/refractor
 	@echo "==> Building lattice CLI..."
 	go build -o bin/lattice ./cmd/lattice
-	@echo "==> Running bootstrap..."
-	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap
+	@echo "==> Running bootstrap (seed pass — readiness gate deferred until Refractor is up)..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap -skip-ready-wait
 	@echo "==> Starting refractor in background..."
 	NATS_URL=$(NATS_URL) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" ./bin/refractor >refractor.log 2>&1 </dev/null &
+	@echo "==> Running bootstrap (readiness gate — blocks until admin + Loom + Weaver cap.* projections land)..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap
 	@echo "==> Building processor binary..."
 	go build -o bin/processor ./cmd/processor
 	@echo "==> Starting processor in background..."
@@ -52,7 +58,7 @@ down:
 	@echo "==> Down complete."
 
 ## verify-kernel — Assert post-Story-4.7 kernel keys exist with correct envelopes.
-## Replaces the old verify-bootstrap target. Expected count ≈ 33 OK lines.
+## Expected count ≈ 89 OK lines (28 top-level keys + aspects + streams/buckets).
 verify-kernel:
 	@echo "==> Running kernel verification..."
 	NATS_URL=$(NATS_URL) go run ./scripts/verify-kernel.go

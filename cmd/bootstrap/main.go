@@ -13,10 +13,21 @@
 // status="in-progress", the same NanoIDs are reused and SeedPrimordial
 // is re-run. SeedPrimordial's own idempotency guard skips keys that
 // already exist in Core KV, so partial-seeding crashes are safe to retry.
+//
+// Readiness phasing: the §7.5 readiness gate blocks until the admin, Loom,
+// and Weaver `cap.*` projections exist — but those are produced by Refractor,
+// which `make up` starts AFTER seeding. To avoid a deadlock the binary runs in
+// two phases: the seed pass is invoked with the explicit -skip-ready-wait flag
+// (provision + seed + mark, no wait), Refractor is started, then a second
+// idempotent pass (no flag, seeding skipped) runs the readiness gate. The skip
+// is an explicit CLI flag, never an ambient env var, so an exported variable in
+// an operator/CI shell cannot leak into the wait pass and silently defeat the
+// gate.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,6 +43,10 @@ const defaultBootstrapJSONPath = "./lattice.bootstrap.json"
 const defaultReadyTimeoutSec = 30
 
 func main() {
+	skipReadyWait := flag.Bool("skip-ready-wait", false,
+		"seed pass only: provision + seed + mark readiness, then exit without waiting on the cap.* readiness gate")
+	flag.Parse()
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
@@ -118,6 +133,17 @@ func main() {
 	if err := bootstrap.MarkBootstrapComplete(ctx, nc, logger); err != nil {
 		logger.Error("write readiness marker failed", "error", err)
 		os.Exit(1)
+	}
+
+	// The readiness gate (Contract #7 §7.5) blocks on the admin + Loom +
+	// Weaver `cap.*` projections, which Refractor produces. On the seed pass
+	// Refractor is not running yet, so `make up` passes -skip-ready-wait to
+	// defer the gate to a second pass that runs after Refractor is up. This is
+	// an explicit per-invocation flag: only the seed pass carries it, so the
+	// gate can never be skipped by an ambient/exported env var.
+	if *skipReadyWait {
+		logger.Warn("readiness gate SKIPPED — seed pass only (-skip-ready-wait); cap.* projections NOT verified")
+		return
 	}
 
 	logger.Info("waiting for readiness gate", "timeout", fmt.Sprintf("%ds", timeoutSec))

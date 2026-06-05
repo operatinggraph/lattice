@@ -165,6 +165,8 @@ func (s *Seeder) provisionStreams(ctx context.Context) error {
 //   - 1 bootstrap op tracker
 //   - 1 primordial admin identity (vtx.identity.<NanoID>); no .state aspect
 //     (state is identity-domain-package territory)
+//   - 2 internal service-actor identities (Loom + Weaver, arch §92;
+//     class identity.system.loom / identity.system.weaver); no .state aspect
 //   - 1 meta-meta DDL (vtx.meta.<NanoID-root>, canonicalName="root") +
 //     9 aspects (canonicalName, permittedCommands, description, script,
 //     inputSchema, outputSchema, fieldDescription, examples, compensation)
@@ -178,8 +180,9 @@ func (s *Seeder) provisionStreams(ctx context.Context) error {
 //     TombstoneMetaVertex), all scope=any
 //   - 3 grantedBy links (each meta-permission → operator)
 //   - 1 admin→operator holdsRole link
+//   - 2 service-actor→operator holdsRole links (Loom + Weaver)
 //
-// Total ≈ 69 Core KV entries. See `scripts/verify-kernel.go`.
+// Total ≈ 73 Core KV entries. See `scripts/verify-kernel.go`.
 //
 // Roles consumer/frontOfHouse/backOfHouse and the identity DDL + its
 // permissions and grants move to packages (rbac-domain, identity-domain,
@@ -301,6 +304,36 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		map[string]any{"protected": true,
 			"note": "Primordial admin identity. Authors all primordial provenance fields. No state aspect."})
 	if err := add(BootstrapIdentityKey, bsIdVal, bsIdErr); err != nil {
+		return nil, err
+	}
+
+	// 2a. Internal service-actor identities — Loom and Weaver (arch §92).
+	// Root-equivalent actors that submit ops directly to the ledger within
+	// the trust boundary. Root capability is established solely by their
+	// holdsRole link to the operator role (entry 10a below), projected by
+	// the Capability Lens identically to the admin — the `identity.system.*`
+	// class is a descriptive marker and never gates capability (Contract #7
+	// §7.7). Protected (§3.4) so a package uninstall can never tombstone a
+	// kernel service actor.
+	//
+	// "Pre-provisioned signing keys" (arch §92) are NOT graph material:
+	// the Processor authorizes on `env.Actor` → `cap.<actor>` with no
+	// signature check, and there is no Gateway in Phase 2. The signing key
+	// is the engine process's NATS transport credential for `ops.system.>`,
+	// deferred to Stream 3 / deployment (arch lines 285/325). When envelope-
+	// signature verification is ever added, these actors receive key
+	// material at that time. The graph contribution here is the identity
+	// vertex + root-role topology that makes the actor authorizable.
+	loomIDVal, loomIDErr := MakeVertexEnvelope(LoomIdentityKey, "identity.system.loom",
+		map[string]any{"protected": true,
+			"note": "Internal Loom service-actor identity. Root-equivalent via holdsRole to the operator role."})
+	if err := add(LoomIdentityKey, loomIDVal, loomIDErr); err != nil {
+		return nil, err
+	}
+	weaverIDVal, weaverIDErr := MakeVertexEnvelope(WeaverIdentityKey, "identity.system.weaver",
+		map[string]any{"protected": true,
+			"note": "Internal Weaver service-actor identity. Root-equivalent via holdsRole to the operator role."})
+	if err := add(WeaverIdentityKey, weaverIDVal, weaverIDErr); err != nil {
 		return nil, err
 	}
 
@@ -554,6 +587,31 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		"vtx.role."+RoleOperatorID,
 		"holdsRole", "holdsRole", map[string]any{})
 	if err := add(BootstrapHoldsRoleLinkKey, bsHoldsVal, bsHoldsErr); err != nil {
+		return nil, err
+	}
+
+	// 10a. Service-actor → operator holdsRole links. Identity is the source
+	// (later-arriving vertex per Contract #1 §1.1); the operator role is the
+	// target. Reads "loom holdsRole operator" / "weaver holdsRole operator".
+	// This single edge is the sole source of each actor's root-equivalent
+	// capability: the Capability Lens walks holdsRole → operator → grantedBy
+	// → permission and projects the operator's scope:"any" permissions into
+	// `cap.identity.<id>.platformPermissions[]` — no new role, permission,
+	// grantedBy link, cypher branch, or step-3 code (Contract #7 §7.7).
+	loomHoldsVal, loomHoldsErr := MakeLinkEnvelope(
+		LoomHoldsRoleLinkKey,
+		"vtx.identity."+LoomIdentityID,
+		"vtx.role."+RoleOperatorID,
+		"holdsRole", "holdsRole", map[string]any{})
+	if err := add(LoomHoldsRoleLinkKey, loomHoldsVal, loomHoldsErr); err != nil {
+		return nil, err
+	}
+	weaverHoldsVal, weaverHoldsErr := MakeLinkEnvelope(
+		WeaverHoldsRoleLinkKey,
+		"vtx.identity."+WeaverIdentityID,
+		"vtx.role."+RoleOperatorID,
+		"holdsRole", "holdsRole", map[string]any{})
+	if err := add(WeaverHoldsRoleLinkKey, weaverHoldsVal, weaverHoldsErr); err != nil {
 		return nil, err
 	}
 
@@ -877,39 +935,119 @@ func MarkBootstrapComplete(ctx context.Context, nc *nats.Conn, logger *slog.Logg
 	return nil
 }
 
-// WaitForBootstrapComplete polls Health KV until health.bootstrap.complete is present
-// or ctx is cancelled.
+// WaitForBootstrapComplete blocks until the platform is ready for ops or ctx
+// is cancelled. Readiness (Contract #7 §7.5) requires both:
+//
+//   - the Health KV `health.bootstrap.complete` marker, and
+//   - the Capability KV projections of every actor that must be able to
+//     submit ops at startup: the primordial admin and the two internal
+//     service actors (Loom + Weaver). Their `cap.identity.<id>` docs are
+//     produced asynchronously by the Capability Lens once Refractor runs;
+//     gating on them guarantees the engines are authorizable the moment
+//     `make up` returns ready (the AC #4 intent).
+//
+// The Capability projections are produced by Refractor, so this MUST be
+// called only after Refractor has been started — otherwise the cap.* poll
+// can never satisfy. The single ctx deadline bounds the whole wait: a
+// missing projection times out cleanly with a named-key error and never
+// hangs past the caller's bound.
 func WaitForBootstrapComplete(ctx context.Context, nc *nats.Conn, logger *slog.Logger) error {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return fmt.Errorf("jetstream.New: %w", err)
 	}
-	kv, err := js.KeyValue(ctx, HealthKVBucket)
+	healthKV, err := js.KeyValue(ctx, HealthKVBucket)
 	if err != nil {
 		return fmt.Errorf("open Health KV: %w", err)
 	}
+	capabilityKV, err := js.KeyValue(ctx, CapabilityKVBucket)
+	if err != nil {
+		return fmt.Errorf("open Capability KV: %w", err)
+	}
 
-	// Check immediately before starting the poll loop — the key is typically
-	// already present since MarkBootstrapComplete runs just before this call.
-	if _, err := kv.Get(ctx, HealthBootstrapCompleteKey); err == nil {
-		logger.Info("readiness gate satisfied", "key", HealthBootstrapCompleteKey)
+	// The actor capability projections required before declaring ready.
+	// Keyed by the human-readable actor name for clear timeout diagnostics.
+	capProjections := []struct{ actor, key string }{
+		{"admin", capabilityKeyForIdentity(BootstrapIdentityID)},
+		{"loom", capabilityKeyForIdentity(LoomIdentityID)},
+		{"weaver", capabilityKeyForIdentity(WeaverIdentityID)},
+	}
+
+	// checkAll reports whether every required key is present. A genuine
+	// key-absence (jetstream.ErrKeyNotFound) is a not-ready signal that keeps
+	// the caller polling; any other Get error is a transport/bucket failure
+	// that is returned immediately so the caller fails fast on the true cause
+	// rather than burning the whole timeout as a false "missing projection."
+	// A context cancellation/deadline is neither — it is the caller's own
+	// timeout, handled by the <-ctx.Done() branch as a clean "timed out" so
+	// the named missing key is reported, not a raw transport error.
+	classify := func(bucket, key string, err error) (missing string, fatal error) {
+		switch {
+		case errors.Is(err, jetstream.ErrKeyNotFound):
+			return key, nil
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return key, nil
+		case errors.Is(err, nats.ErrTimeout), errors.Is(err, nats.ErrNoResponders):
+			// Transient conditions while NATS settles during startup — the gate
+			// exists to wait through these, so keep polling rather than aborting
+			// on a momentary blip. A persistent failure surfaces as a timeout.
+			return key, nil
+		default:
+			return "", fmt.Errorf("read %s %s: %w", bucket, key, err)
+		}
+	}
+
+	checkAll := func() (missing string, ok bool, fatal error) {
+		if _, err := healthKV.Get(ctx, HealthBootstrapCompleteKey); err != nil {
+			m, fatal := classify("Health KV", HealthBootstrapCompleteKey, err)
+			return m, false, fatal
+		}
+		for _, p := range capProjections {
+			if _, err := capabilityKV.Get(ctx, p.key); err != nil {
+				m, fatal := classify("Capability KV", p.actor+" ("+p.key+")", err)
+				return m, false, fatal
+			}
+		}
+		return "", true, nil
+	}
+
+	// Check immediately before starting the poll loop — the Health marker is
+	// typically already present since MarkBootstrapComplete runs just before
+	// this call, though the cap.* projections usually lag behind Refractor.
+	if _, ok, fatal := checkAll(); fatal != nil {
+		return fatal
+	} else if ok {
+		logger.Info("readiness gate satisfied", "marker", HealthBootstrapCompleteKey,
+			"capProjections", len(capProjections))
 		return nil
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	var lastMissing string
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("readiness gate timed out: %w", ctx.Err())
+			return fmt.Errorf("readiness gate timed out waiting for %s: %w", lastMissing, ctx.Err())
 		case <-ticker.C:
-			_, err := kv.Get(ctx, HealthBootstrapCompleteKey)
-			if err == nil {
-				logger.Info("readiness gate satisfied", "key", HealthBootstrapCompleteKey)
+			missing, ok, fatal := checkAll()
+			if fatal != nil {
+				return fatal
+			}
+			if ok {
+				logger.Info("readiness gate satisfied", "marker", HealthBootstrapCompleteKey,
+					"capProjections", len(capProjections))
 				return nil
 			}
-			logger.Debug("waiting for readiness gate", "key", HealthBootstrapCompleteKey)
+			lastMissing = missing
+			logger.Debug("waiting for readiness gate", "missing", missing)
 		}
 	}
+}
+
+// capabilityKeyForIdentity maps an identity NanoID to its Capability KV
+// projection key (`cap.identity.<id>`) per Contract #6 §6.1.
+func capabilityKeyForIdentity(id string) string {
+	return "cap.identity." + id
 }

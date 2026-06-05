@@ -4,10 +4,11 @@
 //
 // Connects to a running Lattice NATS instance and checks that all
 // kernel Core KV keys exist with correct envelopes per Contract #1 §1.3.
-// The kernel set (~69 entries):
+// The kernel set (~73 entries):
 //
 //	 1 bootstrap op tracker
 //	 1 admin identity vertex
+//	 2 internal service-actor identity vertices (Loom + Weaver, arch §92)
 //	 1 meta-meta-DDL vertex + 9 aspects
 //	   (canonicalName/permittedCommands/description/script +
 //	    inputSchema/outputSchema/fieldDescription/examples + compensation)
@@ -19,8 +20,9 @@
 //	 3 meta-permission vertices
 //	 3 grantedBy links (meta-perm → operator)
 //	 1 admin → operator holdsRole link
+//	 2 service-actor → operator holdsRole links (Loom + Weaver)
 //
-// Total ≈ 69 OK lines.
+// Total ≈ 73 OK lines.
 //
 // Package gates (verify-package-rbac etc.) cover package-installed
 // DDLs / lenses / permissions / grants separately.
@@ -85,6 +87,13 @@ func main() {
 
 	// 1. Top-level kernel keys + envelope sanity.
 	primordialKeys := bootstrap.PrimordialVertexKeys()
+	// The enumerated set and the declared count must agree, so the kernel
+	// composition cannot silently re-drift in only one of the two places.
+	if len(primordialKeys) != bootstrap.PrimordialVertexKeyCount {
+		failures = append(failures, fmt.Sprintf(
+			"KERNEL KEY COUNT DRIFT: PrimordialVertexKeys() enumerates %d but PrimordialVertexKeyCount is %d",
+			len(primordialKeys), bootstrap.PrimordialVertexKeyCount))
+	}
 	fmt.Printf("Checking %d kernel Core KV keys...\n", len(primordialKeys))
 	for _, key := range primordialKeys {
 		entry, err := coreKV.Get(ctx, key)
