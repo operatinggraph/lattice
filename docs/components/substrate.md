@@ -170,6 +170,62 @@ MaxDeliver=10):
 - `MaxDeliver int` — redelivery bound on Nak; defaults to 10 when zero.
 - `Logger *slog.Logger` — diagnostics sink; defaults to `slog.Default()`.
 
+### Durable consumer (ack-disciplined)
+
+`(*Conn).RunDurableConsumer(ctx, cfg DurableConsumerConfig, handler HandlerFunc) error`
+
+A minimal ack-disciplined durable consumer: it binds a durable JetStream
+consumer to a stream + filter subject, drives a ctx-cancellable message loop
+(reopening the iterator on transient error), hands each message to `handler`,
+and applies the `Decision` the handler returns. It blocks until `ctx` is
+cancelled. Re-running with the same `cfg.Durable` resumes from the last-acked
+sequence; the consumer is **not** deleted on shutdown (its persisted position is
+the point of "durable").
+
+The defining property — the one `SubscribeKVChanges` lacks — is
+**caller-controlled ack keyed on downstream success**. The handler returns one
+of three decisions, applied after it returns (never before — the handler runs to
+completion, *then* the ack is applied):
+
+- `Ack` — message processed; advance the durable ack floor.
+- `Nak` — transient failure; JetStream redelivers (at-least-once preserved).
+- `Term` — poison message; never redelivered (event-loss-accepting — log loudly first).
+
+`Message` fields handed to the handler: `Subject`, `Body`, `Sequence`
+(backing-stream sequence, for diagnostics). **Read-from-body discipline:** the
+handler reads routing/identity from `Body`, not `Subject`. `Subject` is provided
+**only** for mechanical key recovery (e.g. the outbox strips `"$KV.<bucket>."` to
+recover the Core KV key for its tombstone delete) and diagnostics — never design
+a consumer that parses the subject for identity.
+
+`DurableConsumerConfig` fields:
+- `Stream string` — the JetStream stream (e.g. `"KV_core-kv"`).
+- `FilterSubject string` — delivery filter (e.g. `"$KV.core-kv.vtx.op.*.events"`).
+- `Durable string` — durable name; same name resumes from last ack.
+- `MaxDeliver int` — redelivery bound on Nak; **`<= 0` omits the bound (JetStream default = unlimited)**. (Contrast `SubscribeKVChanges`, which defaults `MaxDeliver=10`.)
+- `Logger *slog.Logger` — diagnostics sink; defaults to `slog.Default()`.
+
+`DeliverPolicy` is fixed at `DeliverAllPolicy` and `AckPolicy` at
+`AckExplicitPolicy` — both are baked in, not config knobs. Empty-body messages
+are delivered to the handler (the primitive is policy-free about body content);
+the handler decides what they mean (the outbox acks-and-skips KV
+tombstone/PURGE markers).
+
+This primitive does **not** include pause/resume, lag polling, `Reset()` /
+redelivery-policy switching, `DeliverLastPerSubjectPolicy`, per-rule consumer
+management, channel-based delivery, or consumer deletion on shutdown. Those are
+component-specific (Refractor owns them) and stay out of substrate per the
+"architecturally common only" principle below — this primitive is the minimal
+common need shared by the outbox (today) and the forward Loom/Weaver flow
+engines.
+
+**`RunDurableConsumer` vs. `SubscribeKVChanges`:** the latter is a channel-based
+**auto-ack** consumer — it acks each event *after the caller reads it off the
+channel*, which cannot express "ack only if my downstream publish succeeded."
+`RunDurableConsumer` is the sibling primitive for callers that need
+caller-controlled ack/nak/term keyed on downstream confirmation. They are
+distinct primitives, not two modes of one.
+
 ### Sentinel errors
 
 | Error | Returned by |

@@ -11,22 +11,15 @@ package outbox
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
-	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-const (
-	// ConsumerName is the durable consumer name on the Core KV stream.
-	ConsumerName = "processor-outbox"
-	reconnect    = 5 * time.Second
-)
+// ConsumerName is the durable consumer name on the Core KV stream.
+const ConsumerName = "processor-outbox"
 
 // Consumer drives the durable outbox consumer on the Core KV stream. It
 // filters for outbox aspects (`$KV.<bucket>.vtx.op.*.events`), publishes the
@@ -36,7 +29,7 @@ type Consumer struct {
 	streamName   string
 	filterSubj   string
 	bucket       string
-	subjectPrefx string // "$KV.<bucket>." — strip from msg.Subject() to recover the Core KV key
+	subjectPrefx string // "$KV.<bucket>." — strip from msg.Subject to recover the Core KV key
 	publisher    *EventPublisherImpl
 	logger       *slog.Logger
 }
@@ -66,103 +59,41 @@ func New(conn *substrate.Conn, coreKVBucket string, logger *slog.Logger) *Consum
 // Run creates the durable consumer (idempotent) and processes outbox aspects
 // until ctx is cancelled. Run blocks until ctx is done.
 func (c *Consumer) Run(ctx context.Context) error {
-	cons, err := c.conn.JetStream().CreateOrUpdateConsumer(ctx, c.streamName, jetstream.ConsumerConfig{
-		Durable:       ConsumerName,
+	return c.conn.RunDurableConsumer(ctx, substrate.DurableConsumerConfig{
+		Stream:        c.streamName,
 		FilterSubject: c.filterSubj,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-	})
-	if err != nil {
-		return fmt.Errorf("outbox: create consumer: %w", err)
-	}
-	c.loop(ctx, cons)
-	return nil
+		Durable:       ConsumerName,
+		Logger:        c.logger,
+	}, c.handle)
 }
 
-// loop reopens the message iterator on transient errors until ctx is done.
-func (c *Consumer) loop(ctx context.Context, cons jetstream.Consumer) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		mc, err := cons.Messages()
-		if err != nil {
-			c.logger.Error("outbox: open messages iterator", "error", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reconnect):
-			}
-			continue
-		}
-		c.drain(ctx, mc)
-	}
-}
-
-// drain reads messages from mc until ctx is cancelled or mc returns an error.
-// A watcher stops the iterator when ctx is cancelled so the blocking Next()
-// unblocks promptly for a clean shutdown.
-func (c *Consumer) drain(ctx context.Context, mc jetstream.MessagesContext) {
-	stopped := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			mc.Stop()
-		case <-stopped:
-		}
-	}()
-	defer func() {
-		close(stopped)
-		mc.Stop()
-	}()
-	for {
-		msg, err := mc.Next()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			c.logger.Error("outbox: receive error, will reconnect", "error", err)
-			return
-		}
-		c.processMsg(ctx, msg)
-	}
-}
-
-// processMsg handles a single outbox-aspect delivery: empty/tombstone/PURGE
+// handle processes a single outbox-aspect delivery: empty/tombstone/PURGE
 // bodies are acked and skipped; otherwise the persisted EventList is published
 // to `core-events`, the aspect is tombstoned, and the message is acked. Nak on
-// publish failure so JetStream redelivers (events stay at-least-once).
-func (c *Consumer) processMsg(ctx context.Context, msg jetstream.Msg) {
+// publish failure so JetStream redelivers (events stay at-least-once). Term on
+// an unparseable aspect (poison; event-loss risk).
+func (c *Consumer) handle(ctx context.Context, msg substrate.Message) substrate.Decision {
 	// KV tombstone / PURGE / TTL-expiry markers have empty bodies — ack + skip.
 	// This also covers our own post-publish tombstone on a full seq-0 replay.
-	if len(msg.Data()) == 0 {
-		if ackErr := msg.Ack(); ackErr != nil {
-			c.logger.Error("outbox: ack empty/tombstone", "error", ackErr)
-		}
-		return
+	if len(msg.Body) == 0 {
+		return substrate.Ack
 	}
 
 	// Recover the Core KV key from the JetStream subject ($KV.<bucket>.<key>).
-	key := strings.TrimPrefix(msg.Subject(), c.subjectPrefx)
+	key := strings.TrimPrefix(msg.Subject, c.subjectPrefx)
 
-	aspect, err := processor.ParseOutboxAspect(msg.Data())
+	aspect, err := processor.ParseOutboxAspect(msg.Body)
 	if err != nil {
 		// An unparseable outbox record is structurally invalid and an
 		// event-loss risk; term it (poison message) and log loudly.
 		c.logger.Error("outbox: unparseable aspect — terminating (event-loss risk)",
 			"key", key, "error", err)
-		if termErr := msg.Term(); termErr != nil {
-			c.logger.Error("outbox: term failed", "error", termErr)
-		}
-		return
+		return substrate.Term
 	}
 
 	// A tombstoned aspect (isDeleted) carries no events to publish — ack + skip.
 	if aspect.IsDeleted || len(aspect.Data.Events) == 0 {
-		if ackErr := msg.Ack(); ackErr != nil {
-			c.logger.Error("outbox: ack deleted/empty aspect", "error", ackErr)
-		}
-		return
+		return substrate.Ack
 	}
 
 	// Publish the faithful EventList. The publisher batches all events for the
@@ -171,10 +102,7 @@ func (c *Consumer) processMsg(ctx context.Context, msg jetstream.Msg) {
 	if err := c.publisher.Publish(ctx, env, aspect.Data.Events); err != nil {
 		c.logger.Warn("outbox: publish failed; nak for redelivery",
 			"key", key, "requestId", aspect.Data.RequestID, "error", err)
-		if nakErr := msg.Nak(); nakErr != nil {
-			c.logger.Error("outbox: nak failed", "error", nakErr)
-		}
-		return
+		return substrate.Nak
 	}
 
 	// Tombstone the aspect (cleanup + replay-safety) before acking. A failure
@@ -185,7 +113,5 @@ func (c *Consumer) processMsg(ctx context.Context, msg jetstream.Msg) {
 			"key", key, "requestId", aspect.Data.RequestID, "error", delErr)
 	}
 
-	if ackErr := msg.Ack(); ackErr != nil {
-		c.logger.Error("outbox: ack after publish failed", "error", ackErr)
-	}
+	return substrate.Ack
 }
