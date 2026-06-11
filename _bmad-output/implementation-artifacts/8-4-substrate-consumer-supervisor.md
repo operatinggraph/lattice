@@ -1,6 +1,6 @@
 # Story 8.4: Substrate ConsumerSupervisor — extract Refractor's supervised pump, migrate Refractor (F4 hardening)
 
-Status: review
+Status: done
 
 > Replaces the withdrawn draft `8-4-substrate-consumer-lifecycle-manager.md` after an architecture
 > review. The "thin-adapter over the bind" plan is REJECTED — do not resurrect it. The reusable
