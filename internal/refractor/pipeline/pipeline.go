@@ -32,13 +32,6 @@ var ProbeInterval = 10 * time.Second
 // The interval is captured into the Pipeline at construction time via New.
 var RebuildPollInterval = 500 * time.Millisecond
 
-// ConsumerResetter resets a rule's durable consumer to DeliverLastPerSubjectPolicy.
-// *consumer.Manager satisfies this via its Reset method.
-// Defined here to keep pipeline free of an import cycle with internal/consumer.
-type ConsumerResetter interface {
-	Reset(ctx context.Context, ruleID string) (jetstream.Consumer, error)
-}
-
 // Pipeline processes Core KV messages for a single rule: evaluate → project → write.
 // Each rule runs its own Pipeline in an independent goroutine (NFR13).
 type Pipeline struct {
@@ -99,28 +92,20 @@ type Pipeline struct {
 	// Set via SetAuditWriter before calling Run.
 	auditWriter *health.AuditWriter
 
-	// Resume support for structural and manual pauses.
-	// resumeMu protects resumeCh; initResumeCh creates a fresh channel per pause cycle.
-	resumeMu sync.Mutex
-	resumeCh chan struct{} // non-nil only while a structural/manual pause select is in progress
+	// Rebuild support. rebuildPollInterval is captured from RebuildPollInterval
+	// at construction time; watchRebuildCompletion polls the supervisor for
+	// pending count.
+	rebuildPollInterval time.Duration
 
-	// Manual pause support (FR30, FR31).
-	// manualPauseTrigger is sent to by Pause() to interrupt the running drain loop.
-	// manualPauseRequested is read by the Run loop at the top of each iteration.
-	manualPauseMu       sync.Mutex
-	manualPauseRequested bool
-	manualPauseTrigger  chan struct{} // buffered 1; initialized in New()
-
-	// forceResumeCh allows Resume() to override an infra probe loop immediately (AC4).
-	// Buffered 1; initialized in New().
-	forceResumeCh chan struct{}
-
-	// Rebuild support (optional). consumerResetter is set via SetConsumerResetter before Run.
-	// pendingCons is set by Rebuild and consumed (swapped in) by Run on the next loop iteration.
-	consumerResetter   ConsumerResetter // nil → rebuild unavailable
-	rebuildMu          sync.Mutex
-	pendingCons        jetstream.Consumer // non-nil while a rebuild-triggered swap is pending
-	rebuildPollInterval time.Duration     // captured from RebuildPollInterval at construction time
+	// Supervised runtime. The supervisor hosts the pump skeleton (restore →
+	// pump → classify → pause/probe/resume); the pipeline supplies the handler
+	// + Classify + Probe + HealthSink policy. Configured via RunOn before Run.
+	supervisor  *substrate.ConsumerSupervisor
+	consumerCfg substrate.ConsumerSpec // stream/filter/durable/deliver-policy/queue-group
+	// started is closed once Run has registered the consumer with the
+	// supervisor, so a control-plane Pause/Resume issued immediately after Run
+	// (which runs in a goroutine) acts on a live consumer.
+	started chan struct{}
 }
 
 // EnvelopeFn rewrites a projection-row map into the on-wire shape the
@@ -159,9 +144,8 @@ func New(
 		coreKV:              coreKV,
 		reporter:            reporter,
 		rebuildPollInterval: iv,
-		manualPauseTrigger:  make(chan struct{}, 1),
-		forceResumeCh:       make(chan struct{}, 1),
 		engineKind:          ruleengine.EngineSimple,
+		started:             make(chan struct{}),
 	}
 	p.adpt = adpt
 	return p, nil
@@ -265,11 +249,26 @@ func (p *Pipeline) SetAuditWriter(aw *health.AuditWriter) {
 	p.auditWriter = aw
 }
 
-// SetConsumerResetter attaches a ConsumerResetter that the Rebuild method uses
-// to delete and recreate the rule's durable consumer with DeliverLastPerSubjectPolicy.
-// Must be called before Run. *consumer.Manager satisfies this interface.
-func (p *Pipeline) SetConsumerResetter(cr ConsumerResetter) {
-	p.consumerResetter = cr
+// RunOn configures the supervised runtime for this pipeline: a substrate
+// connection (from which the pipeline builds its own ConsumerSupervisor — one
+// supervisor per pipeline, one consumer per supervisor) and the consumer spec
+// config (stream, filter, durable name, delivery policy, queue group,
+// redelivery floor). The handler + Classify + Probe + HealthSink hooks are
+// filled in by Run. Must be called before Run.
+func (p *Pipeline) RunOn(conn *substrate.Conn, cfg substrate.ConsumerSpec) {
+	if p.supervisor != nil {
+		slog.Error("pipeline: RunOn called more than once, ignoring", "ruleId", p.ruleID)
+		return
+	}
+	p.supervisor = substrate.NewConsumerSupervisor(conn)
+	p.consumerCfg = cfg
+}
+
+// Supervisor returns the pipeline's ConsumerSupervisor (nil before RunOn).
+// Exposed so the rebuild lag-watch and control plane can drive Reset / Pause /
+// Resume / pending-count through the same supervised consumer.
+func (p *Pipeline) Supervisor() *substrate.ConsumerSupervisor {
+	return p.supervisor
 }
 
 // HotReloadInto atomically replaces the adapter. Any message already in processMsg
@@ -286,17 +285,16 @@ func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 	return nil
 }
 
-// Run continuously processes messages from cons until ctx is cancelled.
-// On startup it reads health KV to restore any previous paused state (NFR4).
-// On infrastructure failure: pauses, probes for recovery, resumes (FR16, FR17).
-// On structural failure: pauses until ctx is cancelled OR Resume() is called (FR19a).
+// Run starts the supervised consumer for this rule on the configured supervisor
+// (via RunOn) and blocks until ctx is cancelled. The supervisor owns the pump
+// skeleton — restore persisted paused state on startup (NFR4), pump, classify,
+// pause/probe/resume (FR16, FR17, FR19a). The pipeline supplies the processing
+// policy (handler), error classification, recovery probe, and HealthSink.
 // Callers must use a sync.WaitGroup to track completion for graceful shutdown.
-func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
-	// Restore persisted paused state on process restart (NFR4).
-	if p.reporter != nil {
-		if done := p.restoreHealthState(ctx); done {
-			return
-		}
+func (p *Pipeline) Run(ctx context.Context) {
+	if p.supervisor == nil {
+		slog.Error("pipeline: Run called before RunOn — no supervisor configured", "ruleId", p.ruleID)
+		return
 	}
 
 	// Start per-rule consumer lag metric publisher (Story 4.2).
@@ -310,130 +308,46 @@ func (p *Pipeline) Run(ctx context.Context, cons jetstream.Consumer) {
 	// produces output with up-to-date adjacency without writing back to Core KV.
 	go p.runAdjWatch(ctx)
 
-	currentCons := cons
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		// Check for a pending manual pause (set by Pause()).
-		// Drain exits because Pause() sends to manualPauseTrigger causing mc.Stop(),
-		// which makes mc.Next() error; Run falls into the default case and loops here.
-		p.manualPauseMu.Lock()
-		if p.manualPauseRequested {
-			p.manualPauseRequested = false
-			// Drain any stale trigger token. If drain() exited for an unrelated reason
-			// (CatInfra / CatStructural) before the watcher goroutine could consume the
-			// token, the token remains in the channel. Without this drain the next
-			// drain() call would stop immediately on the stale signal.
-			select {
-			case <-p.manualPauseTrigger:
-			default:
-			}
-			p.manualPauseMu.Unlock()
-			resumeCh := p.initResumeCh()
-			select {
-			case <-ctx.Done():
-				p.clearResumeCh()
-				return
-			case <-resumeCh:
-				p.clearResumeCh()
-				slog.Info("pipeline: manual pause cleared by resume",
-					"ruleId", p.ruleID)
-			}
-			// Resumed — fall through to pendingCons check and normal loop.
-			continue
-		}
-		p.manualPauseMu.Unlock()
-
-		// Pick up a rebuild-triggered consumer replacement (set by Rebuild).
-		// This check runs before each Messages() call so the new consumer is
-		// used as soon as the previous drain exits (e.g. due to consumer deletion).
-		p.rebuildMu.Lock()
-		if p.pendingCons != nil {
-			currentCons = p.pendingCons
-			p.pendingCons = nil
-		}
-		p.rebuildMu.Unlock()
-
-		mc, err := currentCons.Messages(jetstream.PullHeartbeat(5 * time.Second))
-		if err != nil {
-			slog.Error("pipeline: open messages iterator", "ruleId", p.ruleID, "err", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reconnectDelay):
-			}
-			continue
-		}
-
-		cat, drainErr := p.drain(ctx, mc)
-
-		switch cat {
-		case failure.CatInfra:
-			slog.Warn("pipeline: infrastructure failure, pausing",
-				"ruleId", p.ruleID, "err", drainErr)
-			p.setHealthPaused(ctx, health.PauseReasonInfra, drainErr)
-			cat, probeErr := p.runInfraProbeLoop(ctx)
-			if cat == failure.CatStructural {
-				slog.Error("pipeline: structural error during probe, pausing until resume or shutdown",
-					"ruleId", p.ruleID, "err", probeErr)
-				p.setHealthPaused(ctx, health.PauseReasonStructural, probeErr)
-				resumeCh := p.initResumeCh()
-				select {
-				case <-ctx.Done():
-					p.clearResumeCh()
-					return
-				case <-resumeCh:
-					p.clearResumeCh()
-					slog.Info("pipeline: structural pause (probe) cleared by resume",
-						"ruleId", p.ruleID)
-				}
-				// Resumed — fall through to setHealthActive and continue the Run loop.
-			}
-			if probeErr != nil {
-				return // ctx cancelled
-			}
-			p.setHealthActive(ctx)
-
-		case failure.CatStructural:
-			slog.Error("pipeline: structural failure, pausing until resume or shutdown",
-				"ruleId", p.ruleID, "err", drainErr)
-			p.setHealthPaused(ctx, health.PauseReasonStructural, drainErr)
-			resumeCh := p.initResumeCh()
-			select {
-			case <-ctx.Done():
-				p.clearResumeCh()
-				return
-			case <-resumeCh:
-				p.clearResumeCh()
-				slog.Info("pipeline: structural pause cleared by resume",
-					"ruleId", p.ruleID)
-			}
-
-		default:
-			// Transient or clean ctx-cancellation reconnect — continue normal loop.
-			if ctx.Err() != nil {
-				return
-			}
-		}
+	spec := p.consumerCfg
+	spec.Handler = p.handle
+	spec.Classify = classifyForSupervisor
+	spec.Probe = func(pctx context.Context) error { return p.currentAdapter().Probe(pctx) }
+	spec.Health = newHealthSink(p.reporter)
+	// ProbeInterval is exported so tests can shrink it for fast recovery detection.
+	if spec.ProbeInterval <= 0 {
+		spec.ProbeInterval = ProbeInterval
 	}
+
+	if err := p.supervisor.Add(ctx, spec); err != nil {
+		slog.Error("pipeline: supervisor add", "ruleId", p.ruleID, "err", err)
+		return
+	}
+	// Signal that the supervised consumer is registered so Pause/Resume issued
+	// immediately after Run starts (in a goroutine) act on a live consumer.
+	close(p.started)
+
+	<-ctx.Done()
+	// Stop the pump without deleting the durable — its persisted position is the
+	// point of durability (substrate doctrine, Winston Q3). Refractor's
+	// delete-on-rule-removal path goes through the supervisor's Remove from the
+	// orchestrator (control Deleter), not here.
+	p.supervisor.Stop()
 }
 
 // Rebuild performs an in-place rebuild of the rule's target store. It:
 //  1. Sets health KV status to "rebuilding" (AC4).
 //  2. If truncate is true and the adapter implements adapter.Truncater, truncates
 //     the target store before the rescan (FR29, AC2).
-//  3. Resets the durable consumer to DeliverLastPerSubjectPolicy via consumerResetter,
-//     so all current Core KV entries are rescanned from the beginning (FR28, AC1).
-//  4. Updates the LagPoller to use the new consumer so it does not query the deleted one.
-//  5. Stores the new consumer in pendingCons so Run picks it up on its next iteration.
-//  6. Launches a background goroutine (watchRebuildCompletion) that transitions
+//  3. Resets the durable consumer via the supervisor (delete-and-recreate
+//     preserving DeliverLastPerSubjectPolicy), so all current Core KV entries are
+//     rescanned from the beginning (FR28, AC1). The supervised pump swaps onto
+//     the recreated durable automatically.
+//  4. Launches a background goroutine (watchRebuildCompletion) that transitions
 //     health KV to "active" when consumer lag reaches zero (AC5).
 //
-// Returns nil immediately — the rebuild runs asynchronously in the Run loop.
-// The caller (control service) MUST call Rebuild in its own goroutine and return
-// an async ack to the operator before Rebuild returns.
+// Returns nil immediately — the rebuild runs asynchronously. The caller (control
+// service) MUST call Rebuild in its own goroutine and return an async ack to the
+// operator before Rebuild returns.
 func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	// 1. Set health status to "rebuilding".
 	if p.reporter != nil {
@@ -455,39 +369,26 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 		}
 	}
 
-	// 3. Reset consumer.
-	if p.consumerResetter == nil {
-		return fmt.Errorf("pipeline: rebuild: no consumer resetter configured")
+	// 3. Reset the durable via the supervisor (delete-recreate-swap).
+	if p.supervisor == nil {
+		return fmt.Errorf("pipeline: rebuild: no supervisor configured")
 	}
-	newCons, err := p.consumerResetter.Reset(ctx, p.ruleID)
-	if err != nil {
+	if err := p.supervisor.Reset(ctx, p.consumerCfg.Name); err != nil {
 		return fmt.Errorf("pipeline: rebuild: reset consumer: %w", err)
 	}
 
-	// 4. Update LagPoller so it polls the new consumer (avoids errors on deleted consumer).
-	if p.lagPoller != nil {
-		p.lagPoller.SetConsumer(newCons)
-	}
-
-	// 5. Store new consumer; Run loop picks it up on the next iteration after drain exits.
-	// Drain exits naturally because Reset calls DeleteConsumer on the old consumer,
-	// which causes mc.Next() to return an error in the running drain loop.
-	p.rebuildMu.Lock()
-	p.pendingCons = newCons
-	p.rebuildMu.Unlock()
-
-	// 6. Launch background goroutine to transition to "active" when lag reaches zero.
+	// 4. Launch background goroutine to transition to "active" when lag reaches zero.
 	if p.reporter != nil {
-		go p.watchRebuildCompletion(ctx, newCons)
+		go p.watchRebuildCompletion(ctx)
 	}
 
 	return nil
 }
 
-// watchRebuildCompletion polls the given consumer's lag at rebuildPollInterval.
-// When NumPending reaches zero, it calls setHealthActive to transition the
-// health KV from "rebuilding" back to "active" (AC5).
-func (p *Pipeline) watchRebuildCompletion(ctx context.Context, cons jetstream.Consumer) {
+// watchRebuildCompletion polls the supervised consumer's pending count at
+// rebuildPollInterval. When it reaches zero, it transitions health KV from
+// "rebuilding" back to "active" (AC5).
+func (p *Pipeline) watchRebuildCompletion(ctx context.Context) {
 	ticker := time.NewTicker(p.rebuildPollInterval)
 	defer ticker.Stop()
 	for {
@@ -495,7 +396,7 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, cons jetstream.Co
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			info, err := cons.Info(ctx)
+			pending, err := p.supervisor.PendingForConsumer(ctx, p.consumerCfg.Name)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -503,153 +404,34 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context, cons jetstream.Co
 				// Consumer may still be initializing or context cancelled; retry.
 				continue
 			}
-			if info.NumPending == 0 {
-				p.setHealthActive(ctx)
+			if pending == 0 {
+				if p.reporter != nil {
+					if serr := p.reporter.SetActive(ctx); serr != nil {
+						slog.Error("pipeline: rebuild: set active", "ruleId", p.ruleID, "err", serr)
+					}
+				}
 				return
 			}
 		}
 	}
 }
 
-// restoreHealthState reads health KV on startup and enters the appropriate pause state.
-// Returns true if the caller (Run) should return immediately (ctx cancelled during restore).
-// "rebuilding" status on startup means the rebuild was interrupted; it is treated as
-// active — the operator must re-trigger the rebuild if desired.
-func (p *Pipeline) restoreHealthState(ctx context.Context) bool {
-	entry, err := p.reporter.GetStatus(ctx)
-	if err != nil {
-		slog.Warn("pipeline: could not read health KV on startup, assuming active",
-			"ruleId", p.ruleID, "err", err)
-		return false
-	}
-	if entry.Status != "paused" {
-		// "active", "rebuilding" (interrupted), or unknown status — treat as active.
-		return false
-	}
-
-	// PauseReason is *string (null when active); guard nil before dereferencing.
-	// If status is "paused" but PauseReason is nil, the entry is malformed — log and treat as active.
-	if entry.PauseReason == nil {
-		slog.Warn("pipeline: paused health entry has nil pauseReason, treating as active",
-			"ruleId", p.ruleID)
-		return false
-	}
-	switch *entry.PauseReason {
-	case health.PauseReasonInfra:
-		slog.Info("pipeline: restoring infra pause from health KV, entering probe loop",
-			"ruleId", p.ruleID)
-		cat, probeErr := p.runInfraProbeLoop(ctx)
-		if cat == failure.CatStructural {
-			slog.Error("pipeline: structural error during probe on restart, pausing until resume or shutdown",
-				"ruleId", p.ruleID, "err", probeErr)
-			p.setHealthPaused(ctx, health.PauseReasonStructural, probeErr)
-			resumeCh := p.initResumeCh()
-			select {
-			case <-ctx.Done():
-				p.clearResumeCh()
-				return true
-			case <-resumeCh:
-				p.clearResumeCh()
-				slog.Info("pipeline: structural pause (probe on restart) cleared by resume",
-					"ruleId", p.ruleID)
-				// Resumed — fall through to setHealthActive and return false so Run continues.
-			}
-		}
-		if probeErr != nil {
-			return true // ctx cancelled
-		}
-		p.setHealthActive(ctx)
-
-	case health.PauseReasonStructural:
-		slog.Info("pipeline: restoring structural pause from health KV, blocking until resume or shutdown",
-			"ruleId", p.ruleID)
-		resumeCh := p.initResumeCh()
-		select {
-		case <-ctx.Done():
-			p.clearResumeCh()
-			return true
-		case <-resumeCh:
-			p.clearResumeCh()
-			slog.Info("pipeline: structural pause cleared by resume on startup restore",
-				"ruleId", p.ruleID)
-			// Resumed — health KV already set active by Resume(); return false so Run continues.
-			return false
-		}
-
-	case health.PauseReasonManual:
-		slog.Info("pipeline: restoring manual pause from health KV, blocking until resume or shutdown",
-			"ruleId", p.ruleID)
-		resumeCh := p.initResumeCh()
-		select {
-		case <-ctx.Done():
-			p.clearResumeCh()
-			return true
-		case <-resumeCh:
-			p.clearResumeCh()
-			slog.Info("pipeline: manual pause cleared by resume on startup restore",
-				"ruleId", p.ruleID)
-			// Resumed — health KV already set active by Resume(); return false so Run continues.
-			return false
-		}
-
-	default:
-		slog.Warn("pipeline: unrecognised pause reason in health KV, assuming active",
-			"ruleId", p.ruleID, "pauseReason", entry.PauseReason)
-	}
-	return false
-}
-
-// drain reads and processes messages from mc until ctx is cancelled, mc errors, or
-// an infrastructure/structural failure signals a pause.
-// Returns (Infrastructure|Structural, err) to signal a pause, or (Transient, err/nil) otherwise.
-func (p *Pipeline) drain(ctx context.Context, mc jetstream.MessagesContext) (failure.Category, error) {
-	stopCtx, stopDone := context.WithCancel(ctx)
-	defer stopDone() // always fires mc.Stop() via the goroutines below on any exit
-	go func() {
-		<-stopCtx.Done()
-		mc.Stop()
-	}()
-	// Watch for a manual pause trigger: stop the iterator so drain exits and
-	// Run picks up the manualPauseRequested flag on the next loop iteration.
-	go func() {
-		select {
-		case <-p.manualPauseTrigger:
-			mc.Stop()
-		case <-stopCtx.Done():
-		}
-	}()
-
-	for {
-		msg, err := mc.Next()
-		if err != nil {
-			if ctx.Err() != nil {
-				return failure.CatTransient, nil
-			}
-			slog.Error("pipeline: receive error, will reconnect", "ruleId", p.ruleID, "err", err)
-			return failure.CatTransient, err
-		}
-
-		cat, procErr := p.processMsg(ctx, msg)
-		if cat == failure.CatInfra || cat == failure.CatStructural {
-			return cat, procErr
-		}
-	}
-}
-
-// processMsg handles one Core KV message: decode → evaluate → write → ack/nak.
-// Returns the failure category and error:
-//   - (Transient, nil)       → success or skip (message was acked)
-//   - (Transient, err)       → message was Nak'd; drain continues
-//   - (Infrastructure, err)  → do NOT ack/nak; drain must stop and signal Run to pause
-//   - (Structural, err)      → do NOT ack/nak; drain must stop and signal Run to pause
-func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.Category, error) {
+// handle is the supervised message handler (substrate.SupervisedHandler). It
+// runs Refractor's full per-message policy — decode → classify key shape →
+// evaluate → write, with terminal-DLQ and retry-queue disposition — and returns
+// the substrate Decision the supervisor applies. A non-nil returned error is an
+// Infra/Structural failure: the message is left UN-acked so JetStream redelivers
+// it when the supervised pump resumes (the supervisor classifies the error and
+// pauses). Transient and Terminal outcomes are disposed here and reported via the
+// Decision (Nak for transient redelivery, Ack after DLQ/retry-enqueue).
+func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
 	// Extract Core KV key from subject: "$KV.<bucket>.<key>" → "<key>".
 	// Done before the empty-body short-circuit so a link TOMBSTONE (which has
 	// an empty body) can still be classified and fanned out on the actor-aware
 	// pipeline (revocation must shrink capability docs).
 	prefix := "$KV." + p.coreKVBucket + "."
-	key := strings.TrimPrefix(msg.Subject(), prefix)
-	tombstone := len(msg.Data()) == 0
+	key := strings.TrimPrefix(msg.Subject, prefix)
+	tombstone := len(msg.Body) == 0
 
 	// Classify the key by Lattice Contract #1 §1.5 shape.
 	switch substrate.ClassifyKey(key) {
@@ -660,76 +442,55 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 		// fan-out reprojection seeded from the parent vertex. Other lenses
 		// keep the legacy ack-and-skip behaviour.
 		if p.actorEnumerator != nil {
-			return p.processAspectFanOut(ctx, msg, key)
+			return p.evalAspectFanOut(ctx, msg, key)
 		}
 		slog.Info("pipeline: aspect mutation observed but no handler registered",
 			"ruleId", p.ruleID, "key", key,
 			"parentVertexKey", key[:strings.LastIndex(key, ".")])
-		if err := msg.Ack(); err != nil {
-			slog.Error("pipeline: ack aspect key", "ruleId", p.ruleID, "key", key, "err", err)
-		}
-		return failure.CatTransient, nil
+		return substrate.Ack, nil
 	case substrate.KindLink:
 		// On the actor-aware (capability) pipeline a pure link mutation
 		// (holdsRole/grantedBy/...) changes actors' topology with no vertex
 		// event, so it must drive a fan-out reprojection from both endpoints.
 		// Other lenses keep the legacy ack-and-skip behaviour.
 		if p.actorEnumerator != nil {
-			return p.processLinkFanOut(ctx, msg, key, tombstone)
+			return p.evalLinkFanOut(ctx, msg, key, tombstone)
 		}
 		slog.Info("pipeline: link mutation observed but no handler registered",
 			"ruleId", p.ruleID, "key", key)
-		if err := msg.Ack(); err != nil {
-			slog.Error("pipeline: ack link key", "ruleId", p.ruleID, "key", key, "err", err)
-		}
-		return failure.CatTransient, nil
+		return substrate.Ack, nil
 	case substrate.KindUnknown:
 		slog.Warn("pipeline: unknown key shape — defect signal",
 			"ruleId", p.ruleID, "key", key)
-		if err := msg.Ack(); err != nil {
-			slog.Error("pipeline: ack unknown key", "ruleId", p.ruleID, "key", key, "err", err)
-		}
-		return failure.CatTransient, nil
+		return substrate.Ack, nil
 	}
 
 	// KindVertex. A vertex tombstone (empty body) is handled below by the
 	// normal evaluate path (the actor-aware pipeline emits a cap Delete);
 	// for other lenses an empty body carries no props, so ack and skip.
 	if tombstone {
-		if err := msg.Ack(); err != nil {
-			slog.Error("pipeline: ack tombstone", "ruleId", p.ruleID, "err", err)
-		}
-		return failure.CatTransient, nil
+		return substrate.Ack, nil
 	}
 
 	// KindVertex: parse type and id.
 	label, _, ok := substrate.ParseVertexKey(key)
 	if !ok {
 		// Should not occur after ClassifyKey == KindVertex, but guard defensively.
-		if err := msg.Ack(); err != nil {
-			slog.Error("pipeline: ack vertex parse failure", "ruleId", p.ruleID, "key", key, "err", err)
-		}
-		return failure.CatTransient, nil
+		return substrate.Ack, nil
 	}
 
 	// Unmarshal payload.
 	var props map[string]any
-	if err := json.Unmarshal(msg.Data(), &props); err != nil {
+	if err := json.Unmarshal(msg.Body, &props); err != nil {
 		slog.Error("pipeline: unmarshal payload",
 			"ruleId", p.ruleID, "entityId", key,
 			"stage", "pipeline", "adapter", p.adapterName, "err", err)
-		if nakErr := msg.Nak(); nakErr != nil {
-			slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
-		}
-		return failure.CatTransient, err
+		return substrate.Nak, nil
 	}
 
 	// Edge events carry a non-empty "nodeId" field — adjacency builder handles these.
 	if nodeID, _ := props["nodeId"].(string); nodeID != "" {
-		if err := msg.Ack(); err != nil {
-			slog.Error("pipeline: ack edge event", "ruleId", p.ruleID, "err", err)
-		}
-		return failure.CatTransient, nil
+		return substrate.Ack, nil
 	}
 
 	isDeleted, _ := props["isDeleted"].(bool)
@@ -750,33 +511,17 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 		slog.Error("pipeline: evaluate",
 			"ruleId", p.ruleID, "entityId", key,
 			"stage", "traversal", "adapter", p.adapterName, "err", err)
-		cat := failure.Classify(err)
-		if cat == failure.CatInfra || cat == failure.CatStructural {
-			// Do NOT ack or nak — leave message pending for redelivery when pipeline resumes.
-			return cat, err
-		}
-		if cat == failure.CatTerminal {
-			p.publishTerminalDLQ(ctx, msg, key, "traversal", err)
-			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Error("pipeline: ack after terminal evaluate", "ruleId", p.ruleID, "err", ackErr)
-			}
-			return failure.CatTransient, nil
-		}
-		// Default (Transient): Nak for redelivery.
-		if nakErr := msg.Nak(); nakErr != nil {
-			slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
-		}
-		return failure.CatTransient, err
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
 	}
 
 	// Write each result through the shared write path (failure classification,
-	// terminal DLQ, retry enqueue, ack/nak discipline). The adapter is captured
+	// terminal DLQ, retry enqueue, ack discipline). The adapter is captured
 	// once inside writeResults so all results in this message use a consistent
 	// instance even if HotReloadInto swaps it between messages.
 	return p.writeResults(ctx, msg, key, results)
 }
 
-// processLinkFanOut handles a KindLink CDC event on the actor-aware pipeline.
+// evalLinkFanOut handles a KindLink CDC event on the actor-aware pipeline.
 // It determines whether the link is a create or a tombstone, drives the
 // endpoint-seeded fan-out reprojection (evaluateLinkFanOut), and writes the
 // resulting capability projections through the normal write path.
@@ -784,17 +529,14 @@ func (p *Pipeline) processMsg(ctx context.Context, msg jetstream.Msg) (failure.C
 // A link tombstone arrives with an empty body (NATS DEL/PURGE). A link create
 // or update arrives with a body whose `isDeleted` field distinguishes a
 // soft-delete (revocation) from an active link.
-func (p *Pipeline) processLinkFanOut(ctx context.Context, msg jetstream.Msg, key string, tombstone bool) (failure.Category, error) {
+func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, key string, tombstone bool) (substrate.Decision, error) {
 	isDeleted := tombstone
 	if !tombstone {
 		var props map[string]any
-		if err := json.Unmarshal(msg.Data(), &props); err != nil {
+		if err := json.Unmarshal(msg.Body, &props); err != nil {
 			slog.Error("pipeline: link fan-out: unmarshal payload",
 				"ruleId", p.ruleID, "entityId", key, "err", err)
-			if nakErr := msg.Nak(); nakErr != nil {
-				slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
-			}
-			return failure.CatTransient, err
+			return substrate.Nak, nil
 		}
 		isDeleted, _ = props["isDeleted"].(bool)
 	}
@@ -803,28 +545,13 @@ func (p *Pipeline) processLinkFanOut(ctx context.Context, msg jetstream.Msg, key
 	if err != nil {
 		slog.Error("pipeline: link fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
-		cat := failure.Classify(err)
-		if cat == failure.CatInfra || cat == failure.CatStructural {
-			// Do NOT ack/nak — leave pending for redelivery when the pipeline resumes.
-			return cat, err
-		}
-		if cat == failure.CatTerminal {
-			p.publishTerminalDLQ(ctx, msg, key, "traversal", err)
-			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Error("pipeline: ack after terminal link fan-out", "ruleId", p.ruleID, "err", ackErr)
-			}
-			return failure.CatTransient, nil
-		}
-		if nakErr := msg.Nak(); nakErr != nil {
-			slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
-		}
-		return failure.CatTransient, err
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
 	}
 
 	return p.writeResults(ctx, msg, key, results)
 }
 
-// processAspectFanOut handles a KindAspect CDC event on the actor-aware
+// evalAspectFanOut handles a KindAspect CDC event on the actor-aware
 // pipeline. An aspect-only mutation (e.g. identity .state, role .description)
 // carries no vertex-root event, so the parent vertex's projection is re-derived
 // by seeding the fan-out from the parent vertex (evaluateAspectFanOut) and
@@ -834,38 +561,41 @@ func (p *Pipeline) processLinkFanOut(ctx context.Context, msg jetstream.Msg, key
 // adjacency update is required; the aspect body is irrelevant to the fan-out
 // (the reprojection cypher re-reads current Core KV state), so a tombstone
 // (empty body) and a value change take the same path.
-func (p *Pipeline) processAspectFanOut(ctx context.Context, msg jetstream.Msg, key string) (failure.Category, error) {
+func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
 	results, err := p.evaluateAspectFanOut(ctx, key)
 	if err != nil {
 		slog.Error("pipeline: aspect fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
-		cat := failure.Classify(err)
-		if cat == failure.CatInfra || cat == failure.CatStructural {
-			// Do NOT ack/nak — leave pending for redelivery when the pipeline resumes.
-			return cat, err
-		}
-		if cat == failure.CatTerminal {
-			p.publishTerminalDLQ(ctx, msg, key, "traversal", err)
-			if ackErr := msg.Ack(); ackErr != nil {
-				slog.Error("pipeline: ack after terminal aspect fan-out", "ruleId", p.ruleID, "err", ackErr)
-			}
-			return failure.CatTransient, nil
-		}
-		if nakErr := msg.Nak(); nakErr != nil {
-			slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
-		}
-		return failure.CatTransient, err
+		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
 	}
 
 	return p.writeResults(ctx, msg, key, results)
 }
 
+// dispositionEvalErr maps an evaluate-stage error to a Decision (+ error for the
+// pause path), mirroring the inline ack/nak discipline the pre-supervisor
+// pipeline applied: Infra/Structural leave the message pending (return the error
+// so the supervisor pauses); Terminal publishes a DLQ entry and acks; Transient
+// naks for redelivery.
+func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message, key, stage string, err error) (substrate.Decision, error) {
+	cat := failure.Classify(err)
+	if cat == failure.CatInfra || cat == failure.CatStructural {
+		// Do NOT dispose — leave pending for redelivery when the pipeline resumes.
+		return substrate.Nak, err
+	}
+	if cat == failure.CatTerminal {
+		p.publishTerminalDLQ(ctx, msg.Body, key, stage, err)
+		return substrate.Ack, nil
+	}
+	return substrate.Nak, nil
+}
+
 // writeResults writes a slice of evaluation results through the active adapter,
 // applying the same failure-classification, terminal-DLQ, retry-enqueue, and
-// ack/nak discipline as the inline vertex write loop. Returns the failure
-// category and error; on a successful or fully-disposed message the message is
-// acked and (Transient, nil) is returned.
-func (p *Pipeline) writeResults(ctx context.Context, msg jetstream.Msg, key string, results []simple.EvalResult) (failure.Category, error) {
+// ack discipline as the inline vertex write loop. Returns the Decision the
+// supervisor applies (plus a non-nil error on an infra/structural write failure,
+// which leaves the message pending and pauses the pump).
+func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key string, results []simple.EvalResult) (substrate.Decision, error) {
 	adpt := p.currentAdapter()
 	var enqueuedCount, terminalCount int
 	for _, result := range results {
@@ -887,41 +617,34 @@ func (p *Pipeline) writeResults(ctx context.Context, msg jetstream.Msg, key stri
 				"stage", "write", "adapter", p.adapterName, "err", writeErr)
 
 			if cat == failure.CatInfra || cat == failure.CatStructural {
-				return cat, writeErr
+				return substrate.Nak, writeErr
 			}
 			if cat == failure.CatTerminal {
-				p.publishTerminalDLQ(ctx, msg, key, "write", writeErr)
+				p.publishTerminalDLQ(ctx, msg.Body, key, "write", writeErr)
 				terminalCount++
 				continue
 			}
 			if cat == failure.CatTransient && p.retryQueue != nil && p.retryMaxAttempts > 0 {
-				p.enqueueRetry(key, msg.Data(), result)
+				p.enqueueRetry(key, msg.Body, result)
 				enqueuedCount++
 				continue
 			}
-			if nakErr := msg.Nak(); nakErr != nil {
-				slog.Error("pipeline: nak failed", "ruleId", p.ruleID, "err", nakErr)
-			}
-			return cat, writeErr
+			return substrate.Nak, nil
 		}
 
 		p.writeAudit(ctx, key, result)
 	}
 
 	if enqueuedCount > 0 || terminalCount > 0 {
-		if ackErr := msg.Ack(); ackErr != nil {
-			slog.Error("pipeline: ack after terminal/retry enqueue", "ruleId", p.ruleID, "err", ackErr)
-		}
-		return failure.CatTransient, nil
+		// Transient enqueue / terminal DLQ: the message is fully disposed —
+		// ack to prevent redelivery (the retry queue owns the eventual write).
+		return substrate.Ack, nil
 	}
 
 	slog.Info("pipeline: processed",
 		"ruleId", p.ruleID, "entityId", key,
 		"stage", "pipeline", "adapter", p.adapterName)
-	if err := msg.Ack(); err != nil {
-		slog.Error("pipeline: ack failed", "ruleId", p.ruleID, "err", err)
-	}
-	return failure.CatTransient, nil
+	return substrate.Ack, nil
 }
 
 // enqueueRetry constructs and enqueues a RetryEntry for a transient write
@@ -964,70 +687,58 @@ func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result simple.Eva
 	p.retryQueue.Enqueue(e)
 }
 
-// initResumeCh creates a fresh buffered channel for the current structural pause cycle.
-// Acquires resumeMu internally — callers must NOT hold resumeMu when calling this.
-// Returns the channel to select on; Resume() sends on p.resumeCh.
-func (p *Pipeline) initResumeCh() chan struct{} {
-	p.resumeMu.Lock()
-	defer p.resumeMu.Unlock()
-	p.resumeCh = make(chan struct{}, 1)
-	return p.resumeCh
-}
-
-// clearResumeCh sets p.resumeCh to nil, indicating the pipeline is no longer paused.
-// Must be called after the structural pause select (whether resumed or ctx cancelled).
-func (p *Pipeline) clearResumeCh() {
-	p.resumeMu.Lock()
-	p.resumeCh = nil
-	p.resumeMu.Unlock()
-}
-
-// Pause signals the pipeline to halt its fetch loop and enter a manual pause state.
-// Sets health KV to paused with reason "manual" and sends to manualPauseTrigger so
-// the running drain loop exits at its next mc.Next() call.
-// The Run loop picks up manualPauseRequested on its next iteration and waits on
-// resumeCh until Resume() is called (FR30).
-// Safe to call from any goroutine; calling while already paused is idempotent.
+// Pause manually pauses this rule's supervised consumer (FR30 control surface).
+// The supervisor sets health KV to paused/manual and halts the pump; processing
+// blocks until Resume. Safe to call from any goroutine; idempotent.
 func (p *Pipeline) Pause(ctx context.Context) {
-	p.setHealthPaused(ctx, health.PauseReasonManual, nil)
-	p.manualPauseMu.Lock()
-	p.manualPauseRequested = true
-	p.manualPauseMu.Unlock()
-	// Non-blocking send: if the channel already has a pending value the trigger is already set.
+	if p.supervisor == nil {
+		return
+	}
+	if !p.awaitStarted(ctx) {
+		slog.Warn("pipeline: Pause: consumer never started, dropping", "ruleId", p.ruleID)
+		return
+	}
+	p.supervisor.Pause(ctx, p.consumerCfg.Name)
+}
+
+// awaitStarted blocks (briefly) until Run has registered the supervised consumer
+// so a control-plane Pause/Resume issued right after Run starts is not lost.
+// Returns false if p.started was never closed within the wait window (Run
+// exited early, e.g. supervisor nil or Add failed) — callers should treat this
+// as "no live consumer to act on" rather than issuing a no-op against the
+// supervisor.
+func (p *Pipeline) awaitStarted(ctx context.Context) bool {
 	select {
-	case p.manualPauseTrigger <- struct{}{}:
-	default:
+	case <-p.started:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-time.After(2 * time.Second):
+		return false
 	}
 }
 
-// Resume unblocks an active structural or manual pause, allowing the pipeline to
-// re-enter its normal fetch loop. Also sets health KV to active.
-// When the pipeline is in an infra probe loop, Resume() forces the probe loop to
-// exit immediately so processing resumes without waiting for the next probe (AC4).
-// Safe to call from any goroutine; no-op if the pipeline is not currently paused.
+// Resume clears a manual or structural pause and force-exits an in-flight infra
+// probe loop (FR31, AC4), so processing resumes without waiting for the next
+// probe; the supervisor sets health KV active. Safe to call from any goroutine;
+// no-op if the consumer is not paused.
 func (p *Pipeline) Resume(ctx context.Context) {
-	p.setHealthActive(context.WithoutCancel(ctx))
-	// Unblock structural/manual pause select in Run loop.
-	p.resumeMu.Lock()
-	if p.resumeCh != nil {
-		select {
-		case p.resumeCh <- struct{}{}:
-		default: // already queued — no-op
-		}
+	if p.supervisor == nil {
+		return
 	}
-	p.resumeMu.Unlock()
-	// Unblock infra probe loop if it is running (AC4).
-	select {
-	case p.forceResumeCh <- struct{}{}:
-	default:
+	if !p.awaitStarted(ctx) {
+		slog.Warn("pipeline: Resume: consumer never started, dropping", "ruleId", p.ruleID)
+		return
 	}
+	p.supervisor.Resume(ctx, p.consumerCfg.Name)
 }
 
 // publishTerminalDLQ publishes a DLQ message for an entity whose data is permanently
 // unrecoverable (failure.CatTerminal). Uses p.retryJS — the same JetStream handle set via
 // SetRetryQueue. If p.retryJS == nil (no JetStream configured), logs and returns without
-// panicking, mirroring RetryQueue.escalateToDLQ.
-func (p *Pipeline) publishTerminalDLQ(ctx context.Context, msg jetstream.Msg, entityID, stage string, origErr error) {
+// panicking, mirroring RetryQueue.escalateToDLQ. rawBody is the message body
+// stored as the DLQ rawPayload.
+func (p *Pipeline) publishTerminalDLQ(ctx context.Context, rawBody []byte, entityID, stage string, origErr error) {
 	if p.retryJS == nil {
 		slog.Error("pipeline: terminal failure, no JetStream for DLQ — entity dropped",
 			"ruleId", p.ruleID, "entityId", entityID,
@@ -1051,7 +762,7 @@ func (p *Pipeline) publishTerminalDLQ(ctx context.Context, msg jetstream.Msg, en
 		RetryCount:   0,
 		RuleSequence: ruleSeq,
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		RawPayload:   string(msg.Data()),
+		RawPayload:   string(rawBody),
 	}
 	// Use WithoutCancel so a DLQ publish triggered during shutdown still completes.
 	pubCtx := context.WithoutCancel(ctx)
@@ -1065,73 +776,6 @@ func (p *Pipeline) publishTerminalDLQ(ctx context.Context, msg jetstream.Msg, en
 			slog.Error("pipeline: update health errorCount after terminal DLQ",
 				"ruleId", p.ruleID, "err", recErr)
 		}
-	}
-}
-
-// runInfraProbeLoop polls the adapter at ProbeInterval until the target store responds,
-// ctx is cancelled, or a structural error is discovered during probing.
-// Returns (Transient, nil) when recovered, (Infrastructure, ctx.Err()) when ctx cancelled,
-// or (Structural, err) if the probe reveals a structural problem (e.g. bucket deleted).
-func (p *Pipeline) runInfraProbeLoop(ctx context.Context) (failure.Category, error) {
-	// Drain any stale forceResumeCh signal left over from a Resume() call that
-	// happened outside of an active infra-probe context. Without this drain, the
-	// first iteration of the select would fire on the stale token and return
-	// CatTransient without performing any probe.
-	select {
-	case <-p.forceResumeCh:
-	default:
-	}
-	slog.Info("pipeline: entering probe loop", "ruleId", p.ruleID)
-	for {
-		select {
-		case <-ctx.Done():
-			return failure.CatInfra, ctx.Err()
-		case <-p.forceResumeCh:
-			// Resume() was called while we were in the probe loop (AC4).
-			// Treat as recovered so Run re-enters the normal fetch loop.
-			slog.Info("pipeline: infra probe loop overridden by resume op",
-				"ruleId", p.ruleID)
-			return failure.CatTransient, nil
-		case <-time.After(ProbeInterval):
-			err := p.currentAdapter().Probe(ctx)
-			if err == nil {
-				slog.Info("pipeline: target store recovered, resuming", "ruleId", p.ruleID)
-				return failure.CatTransient, nil
-			}
-			// Classify the probe error: a structural error (e.g. bucket deleted while paused)
-			// must escalate to a permanent structural pause rather than retrying indefinitely.
-			if failure.Classify(err) == failure.CatStructural {
-				slog.Error("pipeline: structural error discovered during probe, escalating",
-					"ruleId", p.ruleID, "stage", "probe", "err", err)
-				return failure.CatStructural, err
-			}
-			slog.Warn("pipeline: target store not yet available, probing again",
-				"ruleId", p.ruleID, "stage", "probe")
-		}
-	}
-}
-
-// setHealthPaused writes a paused health entry; errors are logged but not returned.
-func (p *Pipeline) setHealthPaused(ctx context.Context, reason string, cause error) {
-	if p.reporter == nil {
-		return
-	}
-	errStr := ""
-	if cause != nil {
-		errStr = cause.Error()
-	}
-	if err := p.reporter.SetPaused(ctx, reason, errStr); err != nil {
-		slog.Error("pipeline: write health paused", "ruleId", p.ruleID, "err", err)
-	}
-}
-
-// setHealthActive writes an active health entry; errors are logged but not returned.
-func (p *Pipeline) setHealthActive(ctx context.Context) {
-	if p.reporter == nil {
-		return
-	}
-	if err := p.reporter.SetActive(ctx); err != nil {
-		slog.Error("pipeline: write health active", "ruleId", p.ruleID, "err", err)
 	}
 }
 

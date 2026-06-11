@@ -99,8 +99,6 @@ func TestRefractor_ServiceActorRootEquivalence_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	manager := consumer.NewManager(js, bootstrap.CoreKVBucket)
-
 	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, logger)
 	loaded := make(chan *lens.Rule, 4)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
@@ -140,15 +138,13 @@ func TestRefractor_ServiceActorRootEquivalence_E2E(t *testing.T) {
 	}
 	p.SetEnvelopeFn(capabilityenv.NewWrapper("vtx.meta."+capabilityRule.ID, projectionRevision))
 
-	require.NoError(t, manager.Add(ctx, capabilityRule.ID))
-	cons := manager.Consumer(capabilityRule.ID)
-	require.NotNil(t, cons)
+	p.RunOn(conn, e2eSpec(capabilityRule.ID, bootstrap.CoreKVBucket))
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		p.Run(pipelineCtx, cons)
+		p.Run(pipelineCtx)
 	}()
 	t.Cleanup(func() {
 		pipelineCancel()

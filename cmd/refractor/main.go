@@ -29,6 +29,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
+	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -239,7 +240,6 @@ func main() {
 			logger.Error("create pipeline", "lensId", r.ID, "err", err)
 			return
 		}
-		p.SetConsumerResetter(manager)
 
 		// Wire full engine when selected.
 		if r.ResolvedEngine == ruleengine.EngineFull {
@@ -312,6 +312,8 @@ func main() {
 				"lensId", r.ID, "lensDefKey", lensDefKey)
 		}
 
+		// Create the durable up-front so the lag poller has a handle; the
+		// pipeline's supervisor reuses it idempotently (CreateOrUpdateConsumer).
 		if err := manager.Add(ctx, r.ID); err != nil {
 			logger.Error("manager add consumer", "lensId", r.ID, "err", err)
 			return
@@ -320,6 +322,18 @@ func main() {
 
 		lp := health.NewLagPoller(nc, cons, reporter, r.ID)
 		p.SetLagPoller(lp)
+
+		// Configure the supervised runtime: durable name refractor-<ruleID>,
+		// queue group = same name (NFR12), DeliverLastPerSubject (ADR-15), Core
+		// KV stream + filter. ruleID must not be "adjacency" (collides with the
+		// bootstrapper's refractor-adjacency consumer).
+		p.RunOn(conn, substrate.ConsumerSpec{
+			Name:          "refractor-" + r.ID,
+			Stream:        subjects.CoreKVStream(coreKVBucket),
+			FilterSubject: subjects.CoreKVFilter(coreKVBucket),
+			DeliverPolicy: substrate.DeliverLastPerSubject,
+			DeliverGroup:  "refractor-" + r.ID,
+		})
 
 		lensCtx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -338,7 +352,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			defer close(done)
-			p.Run(lensCtx, cons)
+			p.Run(lensCtx)
 		}()
 
 		controlSvc.Register(r.ID, p, reporter)

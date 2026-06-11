@@ -110,8 +110,6 @@ func TestRefractor_CapabilityLens_AspectFanOut_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	manager := consumer.NewManager(js, bootstrap.CoreKVBucket)
-
 	// --- CoreKVSource activation: collect the capability lens ---
 	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, logger)
 	loaded := make(chan *lens.Rule, 8)
@@ -158,13 +156,11 @@ func TestRefractor_CapabilityLens_AspectFanOut_E2E(t *testing.T) {
 	capP.SetEnvelopeFn(capabilityenv.NewWrapper("vtx.meta."+capabilityRule.ID, projectionRevision))
 	capP.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
 
-	require.NoError(t, manager.Add(ctx, capabilityRule.ID))
-	capCons := manager.Consumer(capabilityRule.ID)
-	require.NotNil(t, capCons)
+	capP.RunOn(conn, e2eSpec(capabilityRule.ID, bootstrap.CoreKVBucket))
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	capDone := make(chan struct{})
-	go func() { defer close(capDone); capP.Run(pipelineCtx, capCons) }()
+	go func() { defer close(capDone); capP.Run(pipelineCtx) }()
 	t.Cleanup(func() {
 		pipelineCancel()
 		<-capDone

@@ -123,8 +123,6 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	manager := consumer.NewManager(js, bootstrap.CoreKVBucket)
-
 	// --- CoreKVSource activation (drives the primary capability lens) ---
 	// We capture the activated *lens.Rule so we can construct the
 	// pipeline using the same engine routing cmd/refractor's
@@ -173,15 +171,13 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 	lensDefKey := "vtx.meta." + capabilityRule.ID
 	p.SetEnvelopeFn(capabilityenv.NewWrapper(lensDefKey, projectionRevision))
 
-	require.NoError(t, manager.Add(ctx, capabilityRule.ID))
-	cons := manager.Consumer(capabilityRule.ID)
-	require.NotNil(t, cons)
+	p.RunOn(conn, e2eSpec(capabilityRule.ID, bootstrap.CoreKVBucket))
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		p.Run(pipelineCtx, cons)
+		p.Run(pipelineCtx)
 	}()
 	t.Cleanup(func() {
 		pipelineCancel()

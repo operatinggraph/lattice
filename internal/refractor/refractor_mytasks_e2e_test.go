@@ -80,8 +80,6 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	manager := consumer.NewManager(js, bootstrap.CoreKVBucket)
-
 	// Compile the package's myTasks cypher and wire a pipeline exactly as
 	// cmd/refractor's startPipeline `case "myTasks"` does.
 	fullEngine := full.New()
@@ -113,13 +111,11 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
 	p.SetActorDeleteKey(capabilityenv.MyTasksKey)
 
-	require.NoError(t, manager.Add(ctx, lensID))
-	cons := manager.Consumer(lensID)
-	require.NotNil(t, cons)
+	p.RunOn(conn, e2eSpec(lensID, bootstrap.CoreKVBucket))
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
-	go func() { defer close(doneCh); p.Run(pipelineCtx, cons) }()
+	go func() { defer close(doneCh); p.Run(pipelineCtx) }()
 	t.Cleanup(func() { pipelineCancel(); <-doneCh })
 
 	// --- fixture: identity + open task + the three links ---

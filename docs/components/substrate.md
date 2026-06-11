@@ -1,6 +1,6 @@
 # Substrate
 
-**Component reference** | Audience: implementers + architects | Last verified: 2026-06-03
+**Component reference** | Audience: implementers + architects | Last verified: 2026-06-11
 
 ---
 
@@ -37,6 +37,10 @@ Key files:
 | `kv.go` | `KVGet`, `KVPut`, `KVCreate`, `KVUpdate`, `KVListKeys`, `KVPutWithTTL`, `KVDelete` |
 | `batch.go` | `AtomicBatch`, `PublishBatch`, `BatchOp`, `PublishOp`, `BatchAck`, `PublishBatchAck`; raw-protocol implementation |
 | `errors.go` | `ErrKeyNotFound`, `ErrRevisionConflict`, `ErrAtomicBatchRejected` |
+| `consumer.go` | `Decision` (`Ack`/`Nak`/`Term`/`NakWithDelay`), `DefaultRedeliveryDelay`, `Message`, `HandlerFunc`, `DurableConsumerConfig`, `RunDurableConsumer`, `applyDecision` |
+| `consumer_supervisor.go` | `ConsumerSupervisor`, `NewConsumerSupervisor`, `Add`/`Remove`/`Reset`/`Stop`/`UpdateSpec`/`Pause`/`Resume`/`PendingForConsumer` |
+| `consumer_supervisor_spec.go` | `ConsumerSpec`, `DeliverPolicy`, `FailureClass`, `PauseReason`, `HealthStatus`, `HealthSink`, `SupervisedHandler`, `ClassifyFunc`, `ProbeFunc`, `DefaultProbeInterval` |
+| `consumer_supervisor_pump.go` | The supervised pump loop: drain, classify, pause/probe/resume, health restore |
 
 ---
 
@@ -225,6 +229,155 @@ channel*, which cannot express "ack only if my downstream publish succeeded."
 `RunDurableConsumer` is the sibling primitive for callers that need
 caller-controlled ack/nak/term keyed on downstream confirmation. They are
 distinct primitives, not two modes of one.
+
+### ConsumerSupervisor (supervised pump)
+
+`RunDurableConsumer` stays dumb on purpose: one-shot bind, pump, ack, done. A
+caller that needs supervision — pause/resume, an infra-recovery probe loop,
+health-state persisted across restarts, or a durable whose config can change
+underneath it (`Reset`) — does not graft that onto layer 1. Instead it hands a
+`ConsumerSpec` to a `ConsumerSupervisor`, which owns the pump loop itself.
+
+| Layer | Type | Content |
+|-------|------|---------|
+| 1 | `RunDurableConsumer` | one-shot bind + pump + ack; untouched, no supervision |
+| 2 | `ConsumerSupervisor` | mechanism: spec registry + reconcile, composable pause state machine, `NakWithDelay` backoff floor, HealthSink persist/restore |
+| 3 (caller) | `ConsumerSpec` hooks | policy: `Classify`, `Probe`, the message handler |
+
+`NewConsumerSupervisor(conn *Conn) *ConsumerSupervisor` constructs a supervisor
+over a connection's package-internal JetStream handle. No `jetstream` (or
+`nats.go`) type appears anywhere on the supervisor's exported surface — Loom
+and Weaver, like Refractor, import only `substrate/*`.
+
+#### Spec registry + reconcile
+
+Each `ConsumerSpec` is a full, caller-supplied description of one supervised
+consumer — stream, `FilterSubject`, durable name (`Name`, also the registry
+key), `DeliverPolicy` (`DeliverAll` or `DeliverLastPerSubject` — a
+substrate-owned enum, never `jetstream.DeliverPolicy`), `DeliverGroup` (queue
+group, NFR12 fan-out across instances), `RedeliveryDelay`, `ProbeInterval`,
+`AckWait`, plus the `Handler`/`Classify`/`Probe`/`Health`/`Logger` hooks. The
+supervisor hard-codes nothing about stream shape — it is agnostic between
+event-stream durables (`events.<domain>.>`) and KV-CDC durables
+(`$KV.<bucket>.>`).
+
+| Method | Behaviour |
+|--------|-----------|
+| `Add(ctx, spec) error` | Registers spec, idempotently creates the durable (`CreateOrUpdateConsumer`), and starts the supervised pump goroutine. A `Name` already managed is a no-op — use `Reset` to recreate a durable whose config changed. |
+| `Remove(ctx, name) error` | Stops the pump **and deletes** the server-side durable. No-op if `name` is not managed. The operator-retiring-a-consumer intent. |
+| `Reset(ctx, name) error` | Deletes and recreates the durable for `name`, preserving the spec's delivery policy (and `DeliverGroup`, redelivery floor, etc.) — unconditional delete, `ErrConsumerNotFound`-tolerant (TOCTOU-safe), then recreate. Signals the pump to re-open its iterator against the new durable. Pair with `UpdateSpec` to change `FilterSubject` (or other config) before resetting. |
+| `UpdateSpec(name, mutate) error` | Replaces the desired spec for an already-managed consumer without recreating the durable — typically followed by `Reset` to apply the change. |
+| `Stop()` | Stops every pump but **never deletes** any durable — a durable's persisted position is the point of its durability. After `Stop`, further `Add` calls are rejected. Callers that want delete-on-shutdown call `Remove` per consumer from their own adapter layer (this is Refractor's shutdown policy, not the supervisor's). |
+| `PendingForConsumer(ctx, name) (uint64, error)` | Returns the pending (un-delivered) message count for the named durable — a substrate-typed accessor so callers (e.g. Refractor's rebuild lag-watch) need no `jetstream.Consumer` handle. |
+
+The supervisor never sets `MaxDeliver` on any consumer it creates: retry
+*cadence* is bounded (via `NakWithDelay`, below) but retry *count* never is.
+
+#### Composable pause state machine
+
+Each managed consumer tracks a **set** of active pause reasons, not a single
+value — the pump runs only when the set is empty:
+
+| Reason | Cleared by |
+|--------|-----------|
+| `PauseInfra` | A passing `Probe`, automatically (the probe loop) |
+| `PauseStructural` | An operator `Resume` only |
+| `PauseManual` | An operator `Resume` only |
+
+A manual (operator) pause is never cleared by a passing probe — composability
+means `PauseManual` and `PauseInfra` can both be set, and a probe success
+clears only `PauseInfra`. `Pause(ctx, name)` adds `PauseManual` and is
+idempotent. `Resume(ctx, name)` clears `PauseManual` + `PauseStructural` and
+force-exits an in-flight probe loop, so processing resumes without waiting for
+the next probe tick.
+
+`Resume` only clears reasons that were active at the moment it was called: a
+pause reason added *after* a `Resume` — e.g. a structural escalation the probe
+loop discovers, or a fresh infra failure on the next pump iteration — is not
+retroactively cleared by that earlier `Resume`. The new failure re-enters its
+own pause state and needs its own `Resume`.
+
+When a `ClassInfra`-classified error pauses the pump, the supervisor enters a
+probe loop: it polls the spec's `Probe(ctx)` hook at `ProbeInterval` (default
+`DefaultProbeInterval = 10s`) until it returns nil (clears `PauseInfra`) or an
+error that `Classify` maps to `ClassStructural` (escalates to
+`PauseStructural`, which then blocks awaiting `Resume`). Structural and manual
+pauses block awaiting `Resume` or ctx-done, exactly like the probe loop's exit
+conditions.
+
+#### Policy hooks
+
+Policy stays with the caller via three `ConsumerSpec` hooks:
+
+- **`Classify(err) FailureClass`** — maps a handler/probe error to
+  `ClassTransient` (default for nil/unrecognised `Classify`; redeliver),
+  `ClassTerminal` (handler disposes; supervisor doesn't `Term` it — policy
+  stays with the caller), `ClassInfra` (pause + probe loop), or
+  `ClassStructural` (pause awaiting `Resume`). This mirrors a caller's own
+  4-tier taxonomy (e.g. Refractor's `failure.Category`) without the supervisor
+  importing any caller package.
+- **`Probe(ctx) error`** — checks whether a paused-on-infra dependency has
+  recovered. A nil `Probe` makes an infra pause behave like a structural one
+  (no automatic recovery).
+- **`SupervisedHandler(ctx, msg Message) (Decision, error)`** — the message
+  handler. A nil error means the handler disposed of the message itself
+  (success, skip, terminal-to-DLQ, or a deferred retry-queue enqueue); the
+  returned `Decision` (`Ack`/`Nak`/`NakWithDelay`/`Term`) is applied to the
+  JetStream message. A non-nil error routes through `Classify`:
+  `ClassInfra`/`ClassStructural` pause the pump and leave the message
+  un-acked/un-naked so JetStream redelivers it on resume (mirroring the
+  "do NOT ack/nak on infra/structural" contract); `ClassTransient`/
+  `ClassTerminal` fall back to the returned `Decision`. The handler MUST be
+  idempotent — at-least-once delivery means the same message can arrive again
+  after a `Nak`, a pause/resume, or a crash-before-ack.
+
+`Message` carries `Subject`, `Body`, `Sequence`, and `NumDelivered` (the
+JetStream delivery count, 1 on first delivery) — enough for a supervised
+handler to reason about redelivery without a `jetstream.Msg`.
+
+#### HealthSink — persist + restore
+
+`HealthSink` is a small, caller-keyed interface — `SetActive(ctx)`,
+`SetPaused(ctx, reason, lastErr)`, `Load(ctx) (HealthStatus, PauseReason,
+error)`. The supervisor never invents or namespaces health keys: the caller
+supplies both the key and the bucket via its `HealthSink` implementation
+(Refractor's existing bare-`<ruleId>` Health KV key stays byte-identical; Loom
+/ Weaver later use `health.loom.<instance>` / `health.weaver.<target>`). A nil
+`Health` skips all health I/O — the supervisor still runs.
+
+Every state transition is persisted through the sink; sink errors are logged,
+never fatal. When multiple pause reasons are active, the persisted reason
+follows precedence **manual > structural > infra** (today's pump never
+persists two reasons at once — this only governs the composable machine's
+restore tie-break; an unpersisted lower-precedence reason simply re-presents
+on the next pump failure and re-enters its own pause path — self-healing).
+
+At startup, `Add` restores from the sink with these exact semantics:
+
+- Status ≠ `"paused"` (including unrecognised statuses and an interrupted
+  `"rebuilding"`) → active, pump immediately.
+- `"paused"` + `PauseInfra` → re-enter the probe loop.
+- `"paused"` + `PauseStructural` / `PauseManual` → block awaiting `Resume`.
+- A malformed entry (nil reason) or a `Load` error → log a warning and treat
+  as active.
+
+#### NakWithDelay (backoff)
+
+`Decision` gained a fourth value, appended to the end of the iota
+(`Ack=0`/`Nak=1`/`Term=2`/`NakWithDelay=3` — binary-additive; every existing
+`Ack`/`Nak`/`Term` caller compiles and behaves identically):
+
+- **`NakWithDelay`** — a transient failure that must not hot-loop:
+  `applyDecision` maps it to `msg.NakWithDelay(delay)`, where `delay` is the
+  consumer's `RedeliveryDelay` (a fixed, per-spec, **non-exponential**
+  redelivery floor — never carried on the `Decision` itself). A zero
+  `RedeliveryDelay` falls back to the package default,
+  `DefaultRedeliveryDelay = 5s`, rather than degrading silently to plain `Nak`
+  (a handler returning `NakWithDelay` has explicitly said "do not hot-loop";
+  silent immediate redelivery would reintroduce exactly that spin).
+
+The redelivery floor bounds retry *cadence*; retry *count* is never bounded —
+the supervisor never sets `MaxDeliver` on any consumer it creates.
 
 ### Sentinel errors
 

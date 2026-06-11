@@ -23,6 +23,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 const coreKVBucket = "CORE"
@@ -60,9 +61,25 @@ const (
 type pipelineEnv struct {
 	nc      *nats.Conn // underlying NATS connection; needed for core-NATS subscriptions (e.g. metrics)
 	js      jetstream.JetStream
+	conn    *substrate.Conn // substrate handle the pipeline's supervisor runs on
 	coreKV  jetstream.KeyValue
 	adjKV   jetstream.KeyValue
 	manager *consumer.Manager
+}
+
+// specFor builds the supervised-consumer spec for a rule in tests, mirroring the
+// production wiring (durable refractor-<ruleID>, queue group = same name,
+// DeliverLastPerSubject, Core KV stream + filter) with a short AckWait so an
+// un-acked infra message redelivers promptly after resume.
+func specFor(ruleID string) substrate.ConsumerSpec {
+	return substrate.ConsumerSpec{
+		Name:          "refractor-" + ruleID,
+		Stream:        subjects.CoreKVStream(coreKVBucket),
+		FilterSubject: subjects.CoreKVFilter(coreKVBucket),
+		DeliverPolicy: substrate.DeliverLastPerSubject,
+		DeliverGroup:  "refractor-" + ruleID,
+		AckWait:       2 * time.Second,
+	}
 }
 
 // startPipelineEnv starts an in-memory NATS server and creates the Core KV, Adj KV buckets.
@@ -101,8 +118,11 @@ func startPipelineEnv(t *testing.T) *pipelineEnv {
 	adjKV, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "ADJ"})
 	require.NoError(t, err)
 
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+
 	mgr := consumer.NewManager(js, coreKVBucket)
-	return &pipelineEnv{nc: nc, js: js, coreKV: coreKV, adjKV: adjKV, manager: mgr}
+	return &pipelineEnv{nc: nc, js: js, conn: conn, coreKV: coreKV, adjKV: adjKV, manager: mgr}
 }
 
 // putNode writes a node entry to Core KV.
@@ -162,21 +182,19 @@ func newHealthReporter(t *testing.T, env *pipelineEnv, ruleID string) *health.Re
 	return health.New(kv, ruleID)
 }
 
-// startPipeline adds a rule consumer and starts the pipeline in a goroutine.
-// Returns cancel func and a WaitGroup entry. Caller must call cancel then wg.Wait.
+// startPipeline configures the supervised runtime and starts the pipeline in a
+// goroutine. Returns cancel func and a WaitGroup entry. Caller must call cancel
+// then wg.Wait.
 func startPipeline(t *testing.T, env *pipelineEnv, p *pipeline.Pipeline, ruleID string) (cancel context.CancelFunc, wg *sync.WaitGroup) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	err := env.manager.Add(ctx, ruleID)
-	require.NoError(t, err)
-	cons := env.manager.Consumer(ruleID)
-	require.NotNil(t, cons)
+	p.RunOn(env.conn, specFor(ruleID))
 
 	wg = &sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.Run(ctx, cons)
+		p.Run(ctx)
 	}()
 
 	t.Cleanup(func() {
@@ -373,12 +391,11 @@ func TestPipeline_GracefulShutdown(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	require.NoError(t, env.manager.Add(ctx, "rule-sd"))
-	cons := env.manager.Consumer("rule-sd")
+	p.RunOn(env.conn, specFor("rule-sd"))
 
 	done := make(chan struct{})
 	go func() {
-		p.Run(ctx, cons)
+		p.Run(ctx)
 		close(done)
 	}()
 
@@ -459,24 +476,17 @@ func TestPipeline_InfrastructurePause(t *testing.T) {
 	p, err := pipeline.New("rule-infra", "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ia, reporter)
 	require.NoError(t, err)
 
-	// Create consumer with short AckWait so the unacked infra message is redelivered quickly.
+	// The supervised consumer uses a short AckWait (specFor) so the unacked infra
+	// message is redelivered quickly after recovery.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel() })
-	cons, err := env.js.CreateOrUpdateConsumer(ctx, "KV_"+coreKVBucket, jetstream.ConsumerConfig{
-		Durable:       "refractor-lens-infra",
-		DeliverGroup:  "refractor-lens-infra",
-		FilterSubject: "$KV." + coreKVBucket + ".>",
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       2 * time.Second, // short AckWait for fast redelivery in test
-	})
-	require.NoError(t, err)
+	p.RunOn(env.conn, specFor("rule-infra"))
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.Run(ctx, cons)
+		p.Run(ctx)
 	}()
 	t.Cleanup(func() { cancel(); wg.Wait() })
 
@@ -1244,25 +1254,16 @@ func TestPipeline_Resume_OverridesInfraPause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cons, err := env.js.CreateOrUpdateConsumer(ctx, "KV_"+coreKVBucket, jetstream.ConsumerConfig{
-		Durable:       "refractor-lens-resume-infra",
-		DeliverGroup:  "refractor-lens-resume-infra",
-		FilterSubject: "$KV." + coreKVBucket + ".>",
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       2 * time.Second,
-	})
-	require.NoError(t, err)
-
 	p, err := pipeline.New("rule-resume-infra", "nats_kv", plan, coreKVBucket,
 		env.adjKV, env.coreKV, ia, reporter)
 	require.NoError(t, err)
+	p.RunOn(env.conn, specFor("rule-resume-infra"))
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.Run(ctx, cons)
+		p.Run(ctx)
 	}()
 	t.Cleanup(func() { cancel(); wg.Wait() })
 

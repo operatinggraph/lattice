@@ -174,35 +174,53 @@ So that one pattern serves both "collect" and "verify-info," and the cursor is c
 
 **Acceptance Criteria:**
 
-**Given** a step with a guard predicate over current state
+**Given** a step carrying an optional `guard` — a pure predicate expressed as **pattern data** (the `Step.guard` field already exists in `internal/loom/pattern.go`, rejected today by `validate()`), evaluated by the engine over current Core-KV state
 **When** Loom evaluates the step and the guard is false (data already present)
 **Then** the step is skipped (no task created), cursor advances; guard true → step runs
-**And** guards are **pure, deterministic** predicates (no side effects, no external reads) — verified by the engine contract
-**And** with `loom-state` **lost entirely** (disaster recovery — normal restart resumes from the durable `loom-state` cursor + `token.` index per §10.6), the engine can **re-derive the cursor by replaying guards** over Core KV tasks (first step whose guard is true and whose task is incomplete) — a recovery test asserts identical resumption
+**And** guards are **pure and deterministic by construction**: the guard vocabulary is a restricted predicate over instance/task aspects (no side effects, no external reads), so purity is a property of the predicate language — not a runtime check; the engine rejects any guard outside the vocabulary
+**And** with `loom-state` **lost entirely** (disaster recovery — normal restart resumes from the durable `loom-state` cursor + `token.` index per §10.6), the engine can **re-derive the cursor by replaying guards** over Core KV tasks (first step whose guard is true and whose task is incomplete) — sound by construction because the cursor is a function of guarded state; a recovery test asserts identical resumption
 **And** no branches/loops/fan-out are expressible (linear only)
 
-*FRs: FR26 · Depends on: 8.2 · Model: Opus · Grounding: D3 guard purity; Contract #10 §10.5*
+*FRs: FR26 · Depends on: 8.2 · Sequenced after 8.4, 8.5 · Model: Opus · Grounding: `internal/loom/pattern.go` (Step.guard), D3 guard purity, Contract #10 §10.5*
 
-### Story 8.4: Loom durable-consumer lifecycle manager + Health KV (hardening — F4/F6 + observability)
+### Story 8.4: Substrate ConsumerSupervisor — extract Refractor's supervised pump, migrate Refractor (F4 hardening)
 
-As a platform operator,
-I want Loom's durable consumers managed by a shared lifecycle machinery (the same pause/resume/recreate/teardown Refractor uses) and Loom to publish its liveness to Health KV,
-So that a sustained outage degrades gracefully, a removed pattern leaks no consumer, an in-place filter change recreates cleanly, and Loom's operational state is observable.
+As a platform developer,
+I want Refractor's supervised consumer runtime — the pause/probe/health state machine plus the bind lifecycle — extracted into a substrate `ConsumerSupervisor` that Refractor itself then runs on,
+So that Loom (8.5) and Weaver (Epic 9: per-target lane-1 + per-domain lane-2 consumers; 9.4's disable/revoke control surface = the supervisor's `Pause`/`Remove`) reuse one supervised pump instead of each hand-rolling lifecycle, backoff, and health.
 
 **Acceptance Criteria:**
 
-**Given** Refractor's `consumer.Manager` already implements `Add`/`Remove`/`Reset` (delete+recreate)/`Stop` + the pipeline's `Pause`/`Resume`, while Loom hand-rolls its per-domain consumers on the bare `RunDurableConsumer` primitive
-**When** the shared lifecycle is extracted into **substrate** (so no `nats.io`/`jetstream` handle leaks into `internal/loom` — AC#8 of 8.1 holds; the extraction wraps jetstream, it is not imported from Refractor)
-**Then** Loom's per-domain completion consumers (and the trigger/relay/deadline-watcher durables) are driven through the shared manager, which provides:
-**And** **backoff on repeated failure** (a `NakWithDelay`/backoff capability — the `HandlerFunc` Decision enum currently carries no delay) so a handler that keeps returning Nak does not hot-loop; the **relay's retry stays unbounded** (at-least-once — only the *cadence* is bounded, never a `MaxDeliver` drop) — *subsumes the former Story 8.4 (F4)*
-**And** **teardown** (`Remove`): when the last pattern referencing a domain is removed, `reconcileConsumers` diffs desired-vs-running and cancels the orphaned `loom-<domain>` consumer + goroutine, honoring the ack-floor persistence convention — *subsumes the former Story 8.5 (F6)*
-**And** **in-place recreate** (`Reset`): a durable whose filter/config changed (e.g. an 8.1→8.2 `events.<domain>.>` filter that JetStream rejects updating in place) is delete-and-recreated rather than silently failing — *covers Story 8.2 review ECH Path #3*
+**Given** Refractor interleaves a supervision state machine inside `pipeline.Run` (failure classification → infra **probe loop** / structural pause / manual pause; rebuild consumer hot-swap; `restoreHealthState` reading pause-state back from Health KV at startup) with projection processing, while `consumer.Manager` owns only the bind (`Add`/`Remove`/`Reset`/`Stop`)
+**When** the **mechanism** is extracted into `substrate.ConsumerSupervisor`:
+- a registry of desired consumer specs + desired-vs-running **reconcile** (`Add`/`Remove`/`Reset` = delete-and-recreate/`Stop`), each spec carrying its full config — deliver policy, queue group, filter — supplied by the caller, never hard-coded
+- a per-consumer **state machine**: Running → PausedInfra (probe loop) / PausedStructural / PausedManual (await `Resume`) — pause reasons stay **distinct and composable** (resume-from-infra never clears an operator pause)
+- **backoff**: a `NakWithDelay` decision appended to substrate's `Decision` enum (binary-additive; `Ack`/`Nak`/`Term` values unchanged) with a fixed configurable redelivery floor — retry *cadence* bounded, retry *count* never (the supervisor never sets `MaxDeliver`)
+- a **HealthSink**: state transitions persisted to Health KV (Contract #5) under a **caller-supplied key prefix** (`health.refractor.<ruleId>` / `health.loom.<instance>` / `health.weaver.<target>`) and restored on startup (generalized `restoreHealthState`)
+**Then** policy stays with the caller via hooks — `Classify(err) → Transient|Terminal|Infra|Structural`, `Probe(ctx) error`, and the message handler — the supervisor owns mechanism only, stays agnostic between event-stream and KV-CDC durables, and **no `jetstream` handle escapes its exported surface** (Loom/Weaver import only `substrate/*`)
+**And** **Refractor is migrated onto the supervisor**: `pipeline.Run`'s supervision skeleton is hosted by the supervisor; Refractor keeps its processing policy (`drain`/`processMsg`, retry queue, DLQ, audit, lag poller, `failure.Classify`, `adapter.Probe`); the pipeline + consumer-manager test suites are the **regression net** — every behavioral assertion preserved (mechanical rewires to new signatures permitted; behavior changes are not), queue-group fan-out (NFR12) + `DeliverLastPerSubjectPolicy` (ADR-15) intact
+**And** tests assert: a handler returning `NakWithDelay` does not hot-loop at zero delay; retry count remains unbounded; a manual pause survives restart via Health KV; an infra pause enters the probe loop and recovers on a passing probe; `Reset` recreates a durable whose filter changed
 
-**And** Loom writes `health.loom.<instance>` heartbeats to Health KV (Contract #5 already names `loom` as a Phase-2 publisher) with `status`/`heartbeatAt`/`metrics` (running instance count, per-domain consumer states, relay + deadline-watcher liveness) + `issues`, mirroring Refractor's `health.Reporter`
-**And** consumer **pause-state is persisted in Health KV** and restored on restart (mirroring Refractor's `restoreHealthState`), so a paused consumer resumes its prior state across a Loom restart
-**And** tests assert: a failing handler does not spin at zero delay; a removed-pattern domain consumer is torn down; a filter change recreates; Loom emits a well-formed `health.loom.<instance>` heartbeat
+*Replaces the earlier thin-adapter plan after an architecture review: the reusable asset is Refractor's supervised pump (when/whether to pull + health-persisted pause state), not the bind. Validated against Weaver's Epic 9 requirements. Loom adoption moved to 8.5. Depends on: 8.1, 8.2, 7.6 · Model: Opus · Grounding: internal/refractor/pipeline/pipeline.go (`Run`, `restoreHealthState`, `runInfraProbeLoop`, `Pause`/`Resume`, `Rebuild`/`pendingCons`), internal/refractor/consumer/manager.go, internal/refractor/failure/classify.go, internal/refractor/health/reporter.go, internal/substrate/consumer.go, docs/contracts/05-health-kv.md, docs/components/weaver.md (3 lanes + FR30)*
 
-*Consolidates former 8.4 (F4 backoff) + 8.5 (F6 teardown), plus ECH Path #3 (filter-recreate) and the Loom Health-KV gap (Contract #5). Surfaced by: Story 8.1 + 8.2 adversarial reviews. Depends on: 8.1, 8.2 · Model: Opus · Grounding: internal/refractor/consumer/manager.go, internal/refractor/health/*, internal/refractor/pipeline/pipeline.go (Pause/Resume + restoreHealthState), internal/substrate/consumer.go, docs/contracts/05-health-kv.md, lattice-architecture #D2*
+### Story 8.5: Loom adopts ConsumerSupervisor — teardown, backoff, filter-reset, Health KV (F6 hardening + observability)
+
+As a platform operator,
+I want Loom's durables (trigger, per-domain completion, relay, deadline-watcher) driven through the substrate `ConsumerSupervisor`,
+So that a removed pattern leaks no consumer, a sustained failure backs off instead of hot-looping, a filter change recreates cleanly, and Loom's liveness is observable in Health KV.
+
+**Acceptance Criteria:**
+
+**Given** Loom hand-rolls its consumers on the bare `RunDurableConsumer` and `reconcileConsumers` (`internal/loom/engine.go`) is additive-only (the `domainConsumers` map never shrinks)
+**When** Loom drives all its durables through the supervisor (8.4)
+**Then** `reconcileConsumers` becomes a desired-vs-running diff over `Pattern.Domains()` aggregated across the pattern snapshot; when the **last** pattern referencing a domain is removed, the `loom-<domain>` consumer is torn down **and its JetStream durable deleted** — *adjudicated: F6's guarantee is "no leaked consumer," and an un-pumped server-side durable IS the leak; correctness on a future re-add rests on `loom-state` + Contract #4 idempotency + `token.` pointer presence, not a preserved ack floor, so a `DeliverAll` replay on re-add is safe and its cost accepted* — *subsumes the former F6 story*
+**And** a domain whose desired filter/config differs from the running durable is `Reset` (delete-and-recreate), never silently unchanged — *covers Story 8.2 review ECH Path #3*
+**And** the relay's publish-failure path returns `NakWithDelay` (bounded cadence, unbounded count — at-least-once preserved; no `MaxDeliver`) — *subsumes the former F4 story on the Loom side*
+**And** Loom publishes `health.loom.<instance>` to Health KV via the supervisor's HealthSink (Contract #5 names `loom` as a Phase-2 publisher: `status`/`heartbeatAt`/`metrics` — running instance count, per-domain consumer states, relay + deadline-watcher liveness — + `issues`), and consumer pause-state persists and restores across a Loom restart
+**And** `loom` still imports only `substrate/*` (8.1 AC#8 holds)
+**And** tests assert: a removed-pattern domain consumer is torn down and its durable deleted; a filter change recreates; no zero-delay spin; a well-formed Contract-#5 heartbeat; pause-state survives a Loom restart
+
+*Health-KV publishing arrives with supervisor adoption (no separate observability story). Depends on: 8.4 · Model: Opus · Grounding: internal/loom/engine.go (`reconcileConsumers`, `runTriggerConsumer`, `runDeadlineWatcher`, relay), internal/loom/pattern.go (`Domains()`), docs/contracts/05-health-kv.md, Contract #10 §10.6/§10.9*
 
 ## Epic 9: Weaver — Convergence Engine
 

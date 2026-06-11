@@ -112,8 +112,6 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	manager := consumer.NewManager(js, bootstrap.CoreKVBucket)
-
 	// --- CoreKVSource activation: collect both seeded lenses ---
 	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, logger)
 	loaded := make(chan *lens.Rule, 8)
@@ -167,13 +165,11 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	capLatency := pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize)
 	capP.SetLatencyBuffer(capLatency)
 
-	require.NoError(t, manager.Add(ctx, capabilityRule.ID))
-	capCons := manager.Consumer(capabilityRule.ID)
-	require.NotNil(t, capCons)
+	capP.RunOn(conn, e2eSpec(capabilityRule.ID, bootstrap.CoreKVBucket))
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	capDone := make(chan struct{})
-	go func() { defer close(capDone); capP.Run(pipelineCtx, capCons) }()
+	go func() { defer close(capDone); capP.Run(pipelineCtx) }()
 
 	// --- secondary capabilityRoleIndex pipeline ---
 	idxTargetKV, err := js.KeyValue(ctx, roleIndexRule.Into.Bucket)
@@ -187,12 +183,10 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	idxP.UseFullEngine(fullEngine, roleIndexRule.CompiledRule)
 	idxP.SetEnvelopeFn(capabilityenv.NewRoleIndexWrapper())
 
-	require.NoError(t, manager.Add(ctx, roleIndexRule.ID))
-	idxCons := manager.Consumer(roleIndexRule.ID)
-	require.NotNil(t, idxCons)
+	idxP.RunOn(conn, e2eSpec(roleIndexRule.ID, bootstrap.CoreKVBucket))
 
 	idxDone := make(chan struct{})
-	go func() { defer close(idxDone); idxP.Run(pipelineCtx, idxCons) }()
+	go func() { defer close(idxDone); idxP.Run(pipelineCtx) }()
 
 	// --- tertiary capabilityEphemeral pipeline ---
 	// The orchestration-base `capabilityEphemeral` lens is a PACKAGE lens, not
@@ -222,11 +216,9 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	ephP.SetEnvelopeFn(capabilityenv.NewEphemeralWrapper("vtx.meta."+ephLensID, projectionRevision))
 	ephP.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
 
-	require.NoError(t, manager.Add(ctx, ephLensID))
-	ephCons := manager.Consumer(ephLensID)
-	require.NotNil(t, ephCons)
+	ephP.RunOn(conn, e2eSpec(ephLensID, bootstrap.CoreKVBucket))
 	ephDone := make(chan struct{})
-	go func() { defer close(ephDone); ephP.Run(pipelineCtx, ephCons) }()
+	go func() { defer close(ephDone); ephP.Run(pipelineCtx) }()
 
 	t.Cleanup(func() {
 		pipelineCancel()

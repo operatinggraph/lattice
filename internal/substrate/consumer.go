@@ -28,7 +28,22 @@ const (
 	// Term drops a poison message; JetStream never redelivers it
 	// (event-loss-accepting — log loudly before returning it).
 	Term
+	// NakWithDelay signals a transient failure that must NOT hot-loop:
+	// JetStream redelivers, but no sooner than a fixed redelivery floor. The
+	// floor is configuration, not data — it is carried on the consumer's
+	// config (DurableConsumerConfig.RedeliveryDelay or a ConsumerSpec), never
+	// on the Decision. Use this instead of Nak when immediate redelivery would
+	// spin the handler against a still-failing dependency.
+	NakWithDelay
 )
+
+// DefaultRedeliveryDelay is the floor applied to a NakWithDelay decision when
+// the consumer config leaves RedeliveryDelay at its zero value. A handler that
+// returns NakWithDelay has expressed "do not hot-loop"; degrading to immediate
+// redelivery would silently reintroduce the spin, so a missing floor falls back
+// to this package default rather than plain Nak. Same order of magnitude as
+// durableReconnect.
+const DefaultRedeliveryDelay = 5 * time.Second
 
 // Message is the minimal view of a delivered JetStream message handed to a
 // HandlerFunc. Routing/identity is read from Body (read-from-body discipline),
@@ -38,6 +53,11 @@ type Message struct {
 	Subject  string
 	Body     []byte
 	Sequence uint64 // backing-stream sequence (diagnostics / position reasoning)
+	// NumDelivered is the JetStream delivery count for this message (1 on first
+	// delivery, incrementing on each redelivery). Zero when metadata is
+	// unavailable. Provided so a supervised handler can reason about redelivery
+	// without reaching for a jetstream.Msg.
+	NumDelivered uint64
 }
 
 // HandlerFunc processes one message and returns the ack Decision. It MUST be
@@ -58,6 +78,10 @@ type DurableConsumerConfig struct {
 	// MaxDeliver bounds redelivery on Nak. A value <= 0 omits the bound,
 	// leaving JetStream's default (unlimited redelivery).
 	MaxDeliver int
+	// RedeliveryDelay is the floor applied when a handler returns NakWithDelay.
+	// A zero value falls back to DefaultRedeliveryDelay. It has no effect on
+	// plain Nak (immediate redelivery) decisions.
+	RedeliveryDelay time.Duration
 	// Logger is the diagnostics sink. Defaults to slog.Default() when nil.
 	Logger *slog.Logger
 }
@@ -108,7 +132,7 @@ func (c *Conn) RunDurableConsumer(ctx context.Context, cfg DurableConsumerConfig
 			cfg.Durable, cfg.Stream, err)
 	}
 
-	c.runDurableLoop(ctx, cons, cfg.Durable, logger, handler)
+	c.runDurableLoop(ctx, cons, cfg.Durable, cfg.RedeliveryDelay, logger, handler)
 	return nil
 }
 
@@ -118,6 +142,7 @@ func (c *Conn) runDurableLoop(
 	ctx context.Context,
 	cons jetstream.Consumer,
 	durable string,
+	redeliveryDelay time.Duration,
 	logger *slog.Logger,
 	handler HandlerFunc,
 ) {
@@ -136,7 +161,7 @@ func (c *Conn) runDurableLoop(
 			}
 			continue
 		}
-		c.drainDurable(ctx, mc, durable, logger, handler)
+		c.drainDurable(ctx, mc, durable, redeliveryDelay, logger, handler)
 	}
 }
 
@@ -147,6 +172,7 @@ func (c *Conn) drainDurable(
 	ctx context.Context,
 	mc jetstream.MessagesContext,
 	durable string,
+	redeliveryDelay time.Duration,
 	logger *slog.Logger,
 	handler HandlerFunc,
 ) {
@@ -173,7 +199,7 @@ func (c *Conn) drainDurable(
 				"durable", durable, "error", err)
 			return
 		}
-		applyDecision(handler(ctx, newMessage(msg)), msg, durable, logger)
+		applyDecision(handler(ctx, newMessage(msg)), msg, durable, redeliveryDelay, logger)
 	}
 }
 
@@ -186,18 +212,28 @@ func newMessage(msg jetstream.Msg) Message {
 	}
 	if meta, err := msg.Metadata(); err == nil {
 		m.Sequence = meta.Sequence.Stream
+		m.NumDelivered = meta.NumDelivered
 	}
 	return m
 }
 
 // applyDecision applies the handler's Decision to the underlying JetStream
 // message. A failed Ack is logged, not retried (a redelivery re-runs the
-// handler, which must be idempotent).
-func applyDecision(d Decision, msg jetstream.Msg, durable string, logger *slog.Logger) {
+// handler, which must be idempotent). redeliveryDelay is the floor applied to a
+// NakWithDelay decision; a zero value falls back to DefaultRedeliveryDelay.
+func applyDecision(d Decision, msg jetstream.Msg, durable string, redeliveryDelay time.Duration, logger *slog.Logger) {
 	switch d {
 	case Nak:
 		if err := msg.Nak(); err != nil {
 			logger.Error("substrate: durable consumer: nak failed", "durable", durable, "error", err)
+		}
+	case NakWithDelay:
+		delay := redeliveryDelay
+		if delay <= 0 {
+			delay = DefaultRedeliveryDelay
+		}
+		if err := msg.NakWithDelay(delay); err != nil {
+			logger.Error("substrate: durable consumer: nak-with-delay failed", "durable", durable, "error", err)
 		}
 	case Term:
 		if err := msg.Term(); err != nil {

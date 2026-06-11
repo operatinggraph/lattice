@@ -144,8 +144,6 @@ func TestRefractor_E2E_P99(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	manager := consumer.NewManager(js, coreBucket)
-
 	// --- pipeline + lens setup ---
 	// Build the projection plan: MATCH (c:contract) RETURN c.id, c.name
 	q, err := simple.Parse("MATCH (c:contract) RETURN c.id AS contract_id, c.name AS name")
@@ -159,16 +157,14 @@ func TestRefractor_E2E_P99(t *testing.T) {
 	p, err := pipeline.New(lensID, "nats_kv", plan, coreBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(t, err)
 
-	require.NoError(t, manager.Add(ctx, lensID))
-	cons := manager.Consumer(lensID)
-	require.NotNil(t, cons)
+	p.RunOn(conn, e2eSpec(lensID, coreBucket))
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.Run(pipelineCtx, cons)
+		p.Run(pipelineCtx)
 	}()
 	t.Cleanup(func() {
 		pipelineCancel()
