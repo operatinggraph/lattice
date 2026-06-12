@@ -148,24 +148,43 @@ notation was loose). `weaver-state` / `weaver-claims` already exist as primordia
 
 | Bucket | Owner | Key | Status |
 |--------|-------|-----|--------|
-| `loom-state` | Loom | `instance.<instanceId>` / `token.<pendingToken>` / `outbox.<token>` / `deadline.<instanceId>` | primordial (new), `AllowAtomicPublish: true` |
+| `loom-state` | Loom | `instance.<instanceId>` / `instance.<instanceId>.pattern` / `token.<pendingToken>` / `outbox.<token>` / `deadline.<instanceId>` | primordial (new), `AllowAtomicPublish: true` |
 | `weaver-state` | Weaver | `<targetId>.<entityId>.<gapColumn>` | primordial (exists) |
 | `weaver-claims` | Weaver | `<claimId>` | primordial (exists), 90d retention |
 | `weaver-work` | Weaver | — | **in-process only; no durable bucket in Phase 2** (see below) |
 
 ### `loom-state` — per-instance Loom cursor + co-located reverse index
 
-`loom-state` holds **four disjoint-prefixed key shapes** in the one bucket (the same one-bucket /
-disjoint-prefix pattern capability-kv §6.1 uses for `cap.ephemeral.*`):
+`loom-state` holds **five key shapes** in the one bucket: four mutually disjoint prefixes (the same
+one-bucket / disjoint-prefix pattern capability-kv §6.1 uses for `cap.ephemeral.*`), plus the
+`instance.<instanceId>.pattern` definition pin — deliberately a **sub-key of its instance**
+(instanceIds are NanoIDs, so the `.pattern` suffix is unambiguous and cannot collide with an
+`instance.<instanceId>` key):
 
 ```
-key:  instance.<instanceId>     value: { instanceId, patternRef, subjectKey, cursor, pendingToken, status, retryCount }
-key:  token.<pendingToken>      value: { instanceId }                                          # thin reverse pointer (committed-path)
-key:  outbox.<token>            value: { requestId, operation, payload, target, lane, actor }  # command-outbox record (the op to submit)
-key:  deadline.<instanceId>     value: { setAt }   with a per-key TTL = the step deadline       # timeout backstop (one per instance; linear interpreter)
+key:  instance.<instanceId>           value: { instanceId, patternRef, subjectKey, cursor, pendingToken, status, retryCount }
+key:  instance.<instanceId>.pattern   value: <the full pattern definition, as loaded at trigger time>
+key:  token.<pendingToken>            value: { instanceId }                                          # thin reverse pointer (committed-path)
+key:  outbox.<token>                  value: { requestId, operation, payload, target, lane, actor }  # command-outbox record (the op to submit)
+key:  deadline.<instanceId>           value: { setAt }   with a per-key TTL = the step deadline       # timeout backstop (one per instance; linear interpreter)
 ```
 - `cursor` = current step index; `pendingToken` = the `taskId | requestId` of the step being awaited
   (§10.6); `status ∈ {running, complete, failed}`.
+- **Definitions bind at instance start.** `instance.<instanceId>.pattern` is written **in the same
+  `AtomicBatch`** that creates `instance.<instanceId>` (both `CreateOnly`) and is the pinned copy
+  every step resolution (advance, completion, deadline recovery) reads — **never** the live pattern
+  source. A pattern update mid-flight therefore affects **new instances only**: an in-flight
+  instance's `cursor` always indexes into the definition it was created against, so reordering,
+  inserting, or changing steps in the live definition cannot mis-index a running instance. The pin
+  is deleted in the **same terminal batch** that flips `status` to `complete`/`failed` — the
+  instance record itself persists, but listing `instance.*.pattern` keys yields exactly the **live**
+  instance set, which is the second leg of the §10.9 per-domain consumer reconcile (current
+  definitions ∪ pinned definitions of live instances), letting an in-flight instance survive its
+  pattern being removed/updated-away. A missing pin for a `status=running` instance is an invariant
+  break (the pin is written atomically with the instance), surfaced as an operator-visible failed
+  terminal — never a silent fallback to the live source. Disaster recovery (total `loom-state`
+  loss → fresh `StartLoomPattern`) re-binds to the **current** definition; this is re-convergence
+  under today's truth, not a regression of the pin (see `docs/components/loom.md`).
 - The `pendingToken → instance` correlation is a **durable co-located reverse index** (the `token.`
   pointer), resolved by a **direct GET** on completion — **not** an in-memory index. This is
   **multi-instance-safe**: any engine replica resolves any token via the bucket.
@@ -798,3 +817,4 @@ emits events and writes no business vertex — nothing in the pipeline special-c
 | 2026-06-06 | **Loom command-outbox ratified (Andrew) — §10.3 + §10.6** (CAR Request 5, Story 8.1 review finding F2). **§10.3:** `loom-state` gains two disjoint prefixes — `outbox.<token>` (the op-to-submit record) and `deadline.<instanceId>` (per-key TTL = the step deadline). The per-step transition writes/re-arms both in the **same `substrate.AtomicBatch`** as the cursor/token update, so op submission is no longer a dual write (the **command-outbox** pattern, symmetric to the Processor's *event* outbox). An async **relay** (durable consumer on the `loom-state` backing stream `outbox.>`) fire-and-forget publishes the op to `core-operations` and deletes the record on publish-ack (re-publish idempotent via Loom's chosen `requestId` + the Contract #4 tracker) — **no request-reply, no raw NATS handle in `internal/loom`**. `deadline.<instanceId>` is per-instance (linear interpreter ⇒ one pending step), re-armed on advance, deleted on terminal, or auto-expires (`KeyValuePurge`/MaxAge marker, distinct from DEL). **§10.6:** the failed/rejected terminal is **off-stream via the deadline + a read-before-act probe** (`GET vtx.op.<token>`: present→advance+alert; absent+outbox-present→re-arm; absent+no-outbox→fail) — the **synchronous `ops.<lane>` submit-reply terminal is REMOVED**. Crash-safety invariant 1 restated as outbox-inclusive (write-ahead holds by construction). Retires findings F1/F2/F5 + the C2 blocking-callback. Mechanism verified against the repo (`BatchOp.TTL`; `internal/spike/nats-batch/test_ttl_marker_delivery.go`); reconciler-sweep is the sanctioned fallback. |
 | 2026-06-02 | **(a1) cap-lens extraction (Andrew).** Reading `step3_auth_capability.go` + `lenses.go` revealed the Capability Lens is a **god-cypher in core/bootstrap** that hard-codes the grant vocabulary of *multiple packages* (rbac-domain `role`/`permission`/`holdsRole`/`grantedBy`; service/location; Phase-2 `task`/`assignedTo`) into one per-actor doc — `task` is the newest tenant of a pre-existing inverted dependency. Fix (Story 7.1 scope): ephemeral grants leave the bootstrap god-cypher for an **`orchestration-base`-owned `capabilityEphemeral` lens** → disjoint key **`cap.ephemeral.<actor>`** (reuses the `capabilityRoleIndex` disjoint-prefix pattern, Contract #6 §6.1; no Refractor lens-merge needed). Bootstrap cypher **drops all `task` refs** (dependency direction flips package→core). Step-3 task branch reads the new key; `cap.<actor>` still read for `roles` on task-path denials. Grant *field shape* unchanged. Broader god-lens decomposition (role/permission/service projections + a generic step-3 **auth-hooks** consumer side) recorded as a future-ADR open item in `lattice-architecture.md`. |
 | 2026-06-07 | **Event-domain model ratified (Andrew) — §10.5/§10.6** (CAR Requests 6–9, folded into Story 8.2; superseded by the broader Contract #3 event-domain model). Every event class is now `<domain>.<eventName>` (Contract #3 §3.4, enforced at commit step 7), so the §10.5 "domain = first segment" routing model is **true**, not illustrative. **§10.5:** the onboarding example becomes `completionDomains: ["orchestration"]` — a userTask completes on the **`orchestration`** domain (the `orchestration.taskCompleted` event), regardless of subject type. **§10.6:** the userTask correlation row reads `taskKey` (`vtx.task.<id>`) → completion `orchestration.taskCompleted` → **`payload.taskKey`** → `token.<taskKey>` GET (all event business fields ride the envelope `payload`, Contract #3 §3.4; Loom's two correlation keys are top-level `requestId` (systemOp) and `payload.taskKey` (userTask)); the userTask completion subsection retitled "by `taskKey`"; crash-safety invariant 1 notes the engine supplies the deterministic `taskId` via `CreateTask`'s optional `taskId` so the `taskKey` is known write-ahead (no Contract #2 change; §10.7 auth unchanged). Added the **userTask creation-deadline + task-vertex probe** (R9): a userTask arms a bounded `CreateTaskTimeout` that disarms once the task vertex exists (then the human wait is unbounded), failing a rejected/lost `CreateTask` rather than wedging — with the honest nuance that after disarm a mis-declared `completionDomains` is caught by a load-time warn, not a runtime backstop. |
+| 2026-06-12 | **Pattern-definition pinning ratified (Andrew) — §10.3** (CAR Request 10, post-8.3 fix-forward, finding F2). `loom-state` gains a **fifth key shape**, `instance.<instanceId>.pattern` — the full pattern definition as loaded at trigger time, written in the **same `AtomicBatch`** that creates `instance.<instanceId>` (both `CreateOnly`) and deleted in the **same terminal batch** that flips `status` to `complete`/`failed`. It is deliberately a **sub-key of its instance**, not a fifth disjoint prefix (instanceIds are NanoIDs, so `.pattern` is unambiguous); the other four prefixes remain disjoint. **Definitions bind at instance start**: all step resolution (advance, completion, deadline recovery) reads this pin, never the live pattern source, so a pattern update mid-flight (reordered/inserted/changed steps) cannot mis-index a running instance's `cursor` — pattern updates affect **new instances only**. Listing `instance.*.pattern` yields exactly the live-instance set, which is the second leg of the §10.9 per-domain consumer reconcile (current definitions ∪ pinned definitions of live instances): an in-flight instance survives its pattern being removed/updated-away, and the domain consumer drains once its last live instance completes — superseding the prior documented in-flight-orphan-on-pattern-removal caveat. A missing pin for a `status=running` instance is an invariant break, surfaced as an operator-visible failed terminal (never a silent wedge or a Nak loop). Disaster recovery (total `loom-state` loss → fresh `StartLoomPattern`) re-binds to the current definition, unchanged from the Story 8.3 narrow recovery semantics. Event-embedded pins were analyzed and rejected (`core-events` `MaxAge=7d` vs unbounded userTask waits). |

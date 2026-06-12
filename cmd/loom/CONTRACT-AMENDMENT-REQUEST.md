@@ -492,6 +492,17 @@ bounded creation-deadline that **disarms once the task vertex exists** (after wh
 unbounded), so a rejected/lost `CreateTask` fails the instance instead of wedging it (§10.6: "never a
 silent wedge"). No envelope/contract shape change.
 
+# Contract #10 Amendment Request (post-8.3 fix-forward — pattern-definition pinning)
+
+Raised by the Story 8.3 review's finding F2 fix-forward (definitions binding at instance start).
+Per CLAUDE.md "Frozen contracts," not an in-flight edit — raised here for Andrew's ratification +
+a revision-history entry.
+
+**STATUS: RATIFIED 2026-06-12.** Request 10 is ratified; §10.3 has been amended to enumerate the
+fifth `instance.<instanceId>.pattern` key shape and the binding/disaster-recovery semantics (see
+Contract #10 §10.3 revision 2026-06-12). The working tree (`internal/loom`) already builds to the
+ratified shape.
+
 ## Request 10: §10.3 — fifth `loom-state` key shape: the per-instance pattern definition pin
 
 **Location:** §10.3 "`loom-state` — per-instance Loom cursor + co-located reverse index" (the

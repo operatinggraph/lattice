@@ -26,9 +26,8 @@ not a Loom branch.
 Loom is an **internal service actor** at root-equivalent capability. It **submits operations
 through the Processor** — it never writes Core KV directly. Its only direct writes are to its
 own operational bucket `loom-state` (dash-named; keys may be dotted — `instance.<instanceId>` /
-`token.<pendingToken>` / `outbox.<token>` / `deadline.<instanceId>`, Contract #10 §10.3, plus the
-`instance.<instanceId>.pattern` definition pin, a fifth key shape pending contract amendment — see
-`cmd/loom/CONTRACT-AMENDMENT-REQUEST.md` Request 10).
+`instance.<instanceId>.pattern` / `token.<pendingToken>` / `outbox.<token>` /
+`deadline.<instanceId>`, Contract #10 §10.3).
 
 ---
 
