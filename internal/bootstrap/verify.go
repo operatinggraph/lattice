@@ -163,10 +163,24 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) []string {
 	// 7. KV buckets.
 	for _, bucket := range []string{
 		CoreKVBucket, HealthKVBucket, CapabilityKVBucket,
-		WeaverStateBucket, WeaverClaimsBucket, WeaverTargetsBucket, RefractorAdjacencyKV,
+		WeaverStateBucket, WeaverClaimsBucket, LoomStateBucket, WeaverTargetsBucket, RefractorAdjacencyKV,
 	} {
 		if _, err := js.KeyValue(ctx, bucket); err != nil {
 			failures = append(failures, fmt.Sprintf("MISSING KV bucket: %s (%v)", bucket, err))
+		}
+	}
+
+	// AllowAtomicPublish must be set on the buckets whose writers use atomic
+	// batches: Core KV (Processor commit) and loom-state (Loom step transition,
+	// Contract #10 §10.3). Without it, Conn.AtomicBatch on the bucket is rejected.
+	for _, bucket := range []string{CoreKVBucket, LoomStateBucket} {
+		stream, err := js.Stream(ctx, "KV_"+bucket)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("CANNOT read stream KV_%s for AllowAtomicPublish check: %v", bucket, err))
+			continue
+		}
+		if !stream.CachedInfo().Config.AllowAtomicPublish {
+			failures = append(failures, fmt.Sprintf("AllowAtomicPublish NOT set on KV_%s (Conn.AtomicBatch would be rejected)", bucket))
 		}
 	}
 
