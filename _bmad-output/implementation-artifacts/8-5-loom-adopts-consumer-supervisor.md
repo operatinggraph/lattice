@@ -1,6 +1,6 @@
 # Story 8.5: Loom adopts ConsumerSupervisor — teardown, backoff, filter-reset, Health KV (F6 hardening + observability)
 
-Status: review
+Status: done
 
 ## Story
 
