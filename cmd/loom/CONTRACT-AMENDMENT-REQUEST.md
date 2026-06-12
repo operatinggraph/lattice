@@ -491,3 +491,41 @@ task-vertex GET, like the existing tracker GET) — it never writes Core KV, and
 bounded creation-deadline that **disarms once the task vertex exists** (after which the human wait is
 unbounded), so a rejected/lost `CreateTask` fails the instance instead of wedging it (§10.6: "never a
 silent wedge"). No envelope/contract shape change.
+
+## Request 10: §10.3 — fifth `loom-state` key shape: the per-instance pattern definition pin
+
+**Location:** §10.3 "`loom-state` — per-instance Loom cursor + co-located reverse index" (the
+four-key-shape enumeration and the "four disjoint-prefixed key shapes" framing).
+
+**Current text:** "`loom-state` holds **four disjoint-prefixed key shapes** in the one bucket",
+enumerating `instance.<instanceId>` / `token.<pendingToken>` / `outbox.<token>` /
+`deadline.<instanceId>`.
+
+**Problem:** the engine resolved a running instance's pattern definition **live** from the pattern
+source on every transition, and `instance.<instanceId>` carries only a `patternRef` — no copy. A
+pattern update mid-flight (steps reordered/inserted, a guard changed) therefore silently mis-indexed
+the durable `cursor` against the NEW step list: the cursor is a step *index*, and the contract gives
+it no stable definition to index into. (Surfaced by the Story 8.3 review, finding F2.)
+
+**Resolution implemented (post-8.3 fix-forward, Winston-adjudicated):** definitions **bind at
+instance start**. The trigger consumer writes a full copy of the pattern — as loaded at trigger
+time — to `instance.<instanceId>.pattern` in the **same `AtomicBatch`** that creates
+`instance.<instanceId>` (both CreateOnly); every subsequent step resolution (advance, completion,
+deadline recovery) reads the pinned copy, never the live source. The pin is deleted in the same
+terminal batch that flips `status` to `complete`/`failed`, so listing `instance.*.pattern` yields
+exactly the live-instance set — which feeds the per-domain consumer reconcile as the second leg of
+a union (current-snapshot domains ∪ pinned domains of live instances), letting an in-flight
+instance survive its pattern being removed/updated-away and letting the domain consumer drain when
+its last live instance completes. Pattern updates affect NEW instances only; disaster recovery
+(total `loom-state` loss → fresh `StartLoomPattern`, the shipped 8.3 narrow semantics) re-binds to
+the CURRENT definition. Event-embedded pins were analyzed and rejected (`core-events` `MaxAge=7d`
+vs unbounded userTask waits — a pin riding events would evaporate mid-instance).
+
+**Requested text:** §10.3 enumerates **five** key shapes, adding
+`key: instance.<instanceId>.pattern   value: <the full pattern definition as loaded at trigger time>`,
+written atomically with the instance create and deleted in the terminal batch. The
+"disjoint-prefixed" framing is qualified: the pin deliberately shares the `instance.` prefix as a
+sub-key of its instance (instanceIds are NanoIDs, so the `.pattern` suffix is unambiguous); the
+other four prefixes remain disjoint. A note records that definitions bind at instance start and
+that the per-domain consumer set (D2/§10.9) is derived from the union of current definitions and
+live-instance pins.

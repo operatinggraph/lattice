@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/asolgan/lattice/internal/substrate"
@@ -27,7 +29,20 @@ const (
 	deadlinePrefix = "deadline."
 )
 
+// patternPinSuffix is the sub-key suffix of an instance's pinned pattern copy:
+// instance.<instanceId>.pattern holds the full pattern definition as loaded at
+// trigger time. All step resolution for a running instance reads this pin —
+// never the live pattern source — so a pattern update mid-flight cannot
+// mis-index the durable cursor against reordered/changed steps. The pin lives
+// exactly as long as the instance is live: written in the same AtomicBatch
+// that creates instance.<instanceId>, deleted in the terminal batch.
+const patternPinSuffix = ".pattern"
+
 func instanceKey(instanceID string) string { return instancePrefix + instanceID }
+
+func patternPinKey(instanceID string) string {
+	return instancePrefix + instanceID + patternPinSuffix
+}
 func tokenKey(token string) string         { return tokenPrefix + token }
 func outboxKey(token string) string        { return outboxPrefix + token }
 func deadlineKey(instanceID string) string { return deadlinePrefix + instanceID }
@@ -125,19 +140,103 @@ func (s *stateStore) resolveToken(ctx context.Context, token string) (instanceID
 	return ptr.InstanceID, true, nil
 }
 
-// createInstance writes the initial instance.<id> cursor as a create (the
-// trigger consumer's idempotency hinges on this: a duplicate trigger for the
-// same instanceId finds the key present and skips). No token is written yet —
+// createInstance writes the initial instance.<id> cursor and its pattern pin
+// (instance.<id>.pattern — the full definition as loaded at trigger time) in
+// one AtomicBatch, both CreateOnly. The trigger consumer's idempotency hinges
+// on the create semantics: a duplicate trigger for the same instanceId finds
+// the key present and skips, and the CreateOnly rejection is the race guard
+// for two triggers passing the existence check concurrently. Because the pin
+// rides the same batch, a live running instance ALWAYS has a pin — a missing
+// pin is an invariant break, never a fallback case. No token is written yet —
 // step 0's submission write-aheads its token via transition.
-func (s *stateStore) createInstance(ctx context.Context, inst *Instance) error {
+func (s *stateStore) createInstance(ctx context.Context, inst *Instance, pattern *Pattern) error {
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
 	}
-	if _, err := s.conn.KVCreate(ctx, s.bucket, instanceKey(inst.InstanceID), body); err != nil {
+	pinBody, err := json.Marshal(pattern)
+	if err != nil {
+		return fmt.Errorf("loom: marshal pattern pin %q: %w", inst.InstanceID, err)
+	}
+	ops := []substrate.BatchOp{
+		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body, CreateOnly: true},
+		{Bucket: s.bucket, Key: patternPinKey(inst.InstanceID), Value: pinBody, CreateOnly: true},
+	}
+	if _, err := s.conn.AtomicBatch(ctx, ops); err != nil {
 		return fmt.Errorf("loom: create instance %q: %w", inst.InstanceID, err)
 	}
 	return nil
+}
+
+// errPatternPinMissing reports that instance.<id>.pattern is absent. The pin is
+// written atomically with the instance and deleted only in the terminal batch,
+// so for a live running instance absence is an invariant break — never a
+// fallback-to-live-source case. Callers match on this sentinel to turn the
+// break into an operator-visible failed terminal (§10.6: never a silent wedge)
+// instead of an infinite redelivery loop; any other pin-read error stays a
+// retryable error.
+var errPatternPinMissing = errors.New("pattern pin missing for live instance (pin is written atomically with the instance)")
+
+// getPinnedPattern reads the instance's pinned pattern definition
+// (instance.<id>.pattern). A missing pin returns errPatternPinMissing (wrapped);
+// the live pattern source is never substituted.
+func (s *stateStore) getPinnedPattern(ctx context.Context, instanceID string) (*Pattern, error) {
+	entry, err := s.conn.KVGet(ctx, s.bucket, patternPinKey(instanceID))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return nil, fmt.Errorf("loom: instance %q: %w", instanceID, errPatternPinMissing)
+		}
+		return nil, fmt.Errorf("loom: read pattern pin %q: %w", instanceID, err)
+	}
+	var p Pattern
+	if err := json.Unmarshal(entry.Value, &p); err != nil {
+		return nil, fmt.Errorf("loom: unmarshal pattern pin %q: %w", instanceID, err)
+	}
+	return &p, nil
+}
+
+// pinnedDomains enumerates the completion domains of every LIVE instance's
+// pinned pattern. Pins are deleted in the terminal batch, so listing
+// instance.*.pattern keys yields exactly the live set — this is the second leg
+// of the reconcile union (an in-flight instance keeps its completion domain's
+// consumer alive even after its pattern is removed/updated-away; the consumer
+// drains once the last live instance pinning that domain completes).
+//
+// Error posture is asymmetric by design. An unparseable pin is logged and
+// SKIPPED: its instance is already unrecoverable (advance cannot unmarshal the
+// same value), so excluding its domains does not worsen its fate — and one
+// poisoned pin must not freeze consumer teardown forever. A transient KV read
+// error stays a hard error: the union would be incomplete, so the caller skips
+// the Remove phase for that pass only.
+func (s *stateStore) pinnedDomains(ctx context.Context, logger *slog.Logger) (map[string]struct{}, error) {
+	keys, err := s.conn.KVListKeys(ctx, s.bucket)
+	if err != nil {
+		return nil, fmt.Errorf("loom: list pinned patterns: %w", err)
+	}
+	domains := make(map[string]struct{})
+	for _, k := range keys {
+		if !strings.HasPrefix(k, instancePrefix) || !strings.HasSuffix(k, patternPinSuffix) {
+			continue
+		}
+		entry, err := s.conn.KVGet(ctx, s.bucket, k)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				// Deleted between list and read (its instance reached terminal).
+				continue
+			}
+			return nil, fmt.Errorf("loom: read pattern pin %q: %w", k, err)
+		}
+		var p Pattern
+		if err := json.Unmarshal(entry.Value, &p); err != nil {
+			logger.Error("loom: pattern pin unparseable; excluding its domains from the reconcile union",
+				"key", k, "err", err)
+			continue
+		}
+		for _, d := range p.Domains() {
+			domains[d] = struct{}{}
+		}
+	}
+	return domains, nil
 }
 
 // transition applies one transition as a single AtomicBatch on loom-state
@@ -153,6 +252,8 @@ func (s *stateStore) createInstance(ctx context.Context, inst *Instance) error {
 //   - outbox != nil writes the op-to-submit record (the relay publishes it).
 //   - deadlineTTL > 0 arms (PUT, fresh TTL) deadline.<instanceId> (re-arm on
 //     each step); deadlineTTL <= 0 deletes it (terminal).
+//   - inst.Status != running (terminal) also deletes the instance's pattern pin
+//     (instance.<id>.pattern) in the same batch.
 //
 // The write-ahead invariant (§10.6 invariant 1) holds by construction: the op
 // record is persisted in this batch and the relay's publish is the only side
@@ -164,6 +265,18 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 	}
 	ops := []substrate.BatchOp{
 		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body},
+	}
+	if inst.Status != StatusRunning {
+		// Terminal (complete/failed): delete the pattern pin in the SAME batch
+		// that flips the status. The terminal instance record itself stays; the
+		// pin's removal is what lets the reconcile union drain — a domain kept
+		// alive only by this instance's pinned pattern is torn down on the next
+		// reconcile.
+		ops = append(ops, substrate.BatchOp{
+			Bucket: s.bucket,
+			Key:    patternPinKey(inst.InstanceID),
+			Delete: true,
+		})
 	}
 	if newToken != "" {
 		ptrBody, err := json.Marshal(tokenPointer{InstanceID: inst.InstanceID})

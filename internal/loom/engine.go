@@ -253,6 +253,13 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 	if err := e.source.start(ctx); err != nil {
 		return fmt.Errorf("loom: start pattern source: %w", err)
 	}
+	// Seed one reconcile at startup. The pinned-instance leg of the desired set
+	// is independent of the source callbacks: a restart with live pinned
+	// instances but ZERO loaded patterns fires no load/update callback, and
+	// without this seed no loom-<domain> pump would ever attach — permanently
+	// wedging an in-flight wait (e.g. a userTask whose human acts after the
+	// restart). When patterns did load, this is a cheap no-op diff.
+	e.reconcileConsumers()
 
 	e.logger.Info("loom engine started",
 		"coreKV", e.cfg.CoreKVBucket, "loomState", e.cfg.LoomStateBucket, "lane", e.cfg.Lane)
@@ -368,15 +375,35 @@ func (e *Engine) handleTrigger(ctx context.Context, msg substrate.Message) subst
 			"instanceId", t.InstanceID, "patternRef", t.PatternRef, "subjectKey", t.SubjectKey)
 		return substrate.Ack
 	}
+	// instanceId is the StartLoomPattern requestId — a NanoID (§10.9), which is
+	// dot-free by construction. A dotted id (e.g. "X.pattern") would collide with
+	// the instance.<id>.pattern pin namespace and corrupt the health counter and
+	// the pinned-domain enumeration. Redelivery cannot fix a malformed id, so
+	// drop it (Ack), loudly.
+	if !substrate.IsValidNanoID(t.InstanceID) {
+		e.logger.Warn("loom: patternStarted instanceId is not a NanoID; dropping",
+			"instanceId", t.InstanceID, "patternRef", t.PatternRef)
+		return substrate.Ack
+	}
 
 	// Idempotency on instanceId: a redelivered trigger finds the cursor present
-	// and skips (Contract #10 §10.9).
+	// and skips (Contract #10 §10.9) — unless the prior delivery crashed between
+	// createInstance and the step-0 submission, in which case it resumes.
 	existing, err := e.state.getInstance(ctx, t.InstanceID)
 	if err != nil {
 		e.logger.Error("loom: trigger instance read failed; nak", "instanceId", t.InstanceID, "err", err)
 		return substrate.Nak
 	}
 	if existing != nil {
+		if existing.Status == StatusRunning && existing.PendingToken == "" {
+			// The instance exists but no step was ever submitted: a prior handler
+			// crashed/Nak'd after the createInstance batch committed but before the
+			// step-0 transition. Plain-Acking here would wedge the instance forever
+			// (its pin would sit in the reconcile union with no step in flight), so
+			// resume step 0 from the PINNED pattern instead.
+			return e.resumeStepZero(ctx, existing)
+		}
+		// Terminal, or running with a step in flight — a true duplicate.
 		return substrate.Ack
 	}
 
@@ -397,13 +424,58 @@ func (e *Engine) handleTrigger(ctx context.Context, msg substrate.Message) subst
 		Cursor:     0,
 		Status:     StatusRunning,
 	}
-	if err := e.state.createInstance(ctx, inst); err != nil {
+	// The definition binds at instance start: createInstance pins a full copy of
+	// the pattern (instance.<id>.pattern) atomically with the cursor. Every
+	// subsequent step resolution reads the pin, so a pattern update mid-flight
+	// affects NEW instances only.
+	if err := e.state.createInstance(ctx, inst, pattern); err != nil {
 		e.logger.Error("loom: create instance failed; nak", "instanceId", t.InstanceID, "err", err)
 		return substrate.Nak
 	}
+	// The pin is committed; make sure its completion domains have running
+	// consumers before the step is submitted. This closes the trigger-vs-
+	// reconcile race where a concurrent reconcile listed the pins BEFORE this
+	// trigger's pin landed and removed a consumer this instance needs.
+	e.ensureDomainConsumers(pattern)
+	return e.runStepZero(ctx, inst, pattern)
+}
+
+// resumeStepZero finishes a trigger whose prior delivery committed the
+// createInstance batch (instance + pin) but never submitted step 0
+// (status=running, pendingToken empty). It re-runs the step-0 sequence against
+// the PINNED pattern — the pin necessarily exists, written atomically with the
+// instance. Race-safe under concurrent redeliveries: both racers derive the
+// same deterministic step-0 token, and the transition batch's CreateOnly token
+// guard rejects the loser, whose next redelivery then sees a non-empty
+// pendingToken and plain-Acks.
+func (e *Engine) resumeStepZero(ctx context.Context, inst *Instance) substrate.Decision {
+	pattern, err := e.state.getPinnedPattern(ctx, inst.InstanceID)
+	if err != nil {
+		if errors.Is(err, errPatternPinMissing) {
+			// Same posture as advance: an operator-visible failed terminal, never a
+			// Nak loop on an unrecoverable invariant break.
+			if ferr := e.fail(ctx, inst, "", "pattern pin missing"); ferr != nil {
+				e.logger.Error("loom: fail on missing pin failed; nak", "instanceId", inst.InstanceID, "err", ferr)
+				return substrate.Nak
+			}
+			return substrate.Ack
+		}
+		e.logger.Error("loom: resume pin read failed; nak", "instanceId", inst.InstanceID, "err", err)
+		return substrate.Nak
+	}
+	e.logger.Info("loom: resuming step 0 for instance with no submitted step",
+		"instanceId", inst.InstanceID, "patternId", pattern.PatternID)
+	e.ensureDomainConsumers(pattern)
+	return e.runStepZero(ctx, inst, pattern)
+}
+
+// runStepZero evaluates guards forward from the instance's cursor and either
+// completes immediately (every remaining guard false) or submits the first
+// runnable step, mapping each outcome to the trigger consumer's Decision.
+func (e *Engine) runStepZero(ctx context.Context, inst *Instance, pattern *Pattern) substrate.Decision {
 	runCursor, completed, err := e.advanceToRunnableStep(ctx, inst, pattern)
 	if err != nil {
-		e.logger.Error("loom: step-0 guard evaluation failed; nak", "instanceId", t.InstanceID, "err", err)
+		e.logger.Error("loom: step-0 guard evaluation failed; nak", "instanceId", inst.InstanceID, "err", err)
 		return substrate.Nak
 	}
 	if completed {
@@ -414,31 +486,43 @@ func (e *Engine) handleTrigger(ctx context.Context, msg substrate.Message) subst
 		// normal completion would persist.
 		inst.Cursor = runCursor
 		if err := e.complete(ctx, inst, pattern, ""); err != nil {
-			e.logger.Error("loom: complete-on-trigger failed; nak", "instanceId", t.InstanceID, "err", err)
+			e.logger.Error("loom: complete-on-trigger failed; nak", "instanceId", inst.InstanceID, "err", err)
 			return substrate.Nak
 		}
 		e.logger.Info("loom instance completed on trigger (all guards skipped)",
-			"instanceId", t.InstanceID, "patternId", patternID)
+			"instanceId", inst.InstanceID, "patternId", pattern.PatternID)
 		return substrate.Ack
 	}
 	inst.Cursor = runCursor
 	if err := e.submitStep(ctx, inst, pattern, ""); err != nil {
-		e.logger.Error("loom: submit step 0 failed; nak", "instanceId", t.InstanceID, "err", err)
+		e.logger.Error("loom: submit step 0 failed; nak", "instanceId", inst.InstanceID, "err", err)
 		return substrate.Nak
 	}
-	e.logger.Info("loom instance started", "instanceId", t.InstanceID, "patternId", patternID)
+	e.logger.Info("loom instance started", "instanceId", inst.InstanceID, "patternId", pattern.PatternID)
 	return substrate.Ack
 }
 
 // --- Per-domain completion consumers (D2) ----------------------------------
 
-// reconcileConsumers diffs the desired per-domain completion-consumer set (the
-// binding registry aggregated across the current pattern snapshot) against the
-// last-applied set, driving the supervisor's Add / Remove / Reset:
+// reconcileConsumers diffs the desired per-domain completion-consumer set
+// against the last-applied set, driving the supervisor's Add / Remove / Reset.
+// The desired set is the UNION of two legs:
 //
-//   - a domain newly referenced by any pattern → Add loom-<domain>;
-//   - a domain referenced by no current pattern (its last pattern was
-//     removed/updated-away) → Remove (the supervisor stops the pump AND deletes
+//   - the binding registry aggregated across the current pattern snapshot
+//     (which domains today's definitions reference); and
+//   - the domains of the pinned patterns of LIVE instances (instance.*.pattern
+//     in loom-state — pins are deleted in the terminal batch, so the listing is
+//     exactly the live set).
+//
+// The union is what makes an in-flight instance survive its pattern being
+// removed/updated-away: the instance completes under its pinned definition, and
+// its completion domain's consumer stays up until the last live instance
+// pinning that domain reaches terminal (complete/fail trigger a reconcile, so
+// the drained consumer is then torn down). Diff outcomes:
+//
+//   - a domain newly in the union → Add loom-<domain>;
+//   - a domain in neither leg (no current pattern references it AND no live
+//     instance pins it) → Remove (the supervisor stops the pump AND deletes
 //     the JetStream durable — an un-pumped server-side durable IS the leak F6
 //     forbids);
 //   - a domain in both whose desired spec differs from the running one → Reset
@@ -448,21 +532,37 @@ func (e *Engine) handleTrigger(ctx context.Context, msg substrate.Message) subst
 // Reset branch is mechanically reachable only if a future spec field changes;
 // the diff is written generically so such a change is caught.
 //
-// Caveat (out of scope, documented): removing a pattern while an in-flight
-// instance of it exists orphans that instance's completion. The cause is the
-// pattern definition disappearing from the engine's loaded set — advance's
-// pattern lookup by PatternRef fails once the definition is gone, regardless of
-// whether loom-<domain> is torn down. This applies even when the domain
-// consumer survives because another pattern still references the same domain
-// (no Remove fires): the consumer keeps delivering, but the removed instance's
-// completion still cannot resolve. Delete-vs-preserve of the consumer changes
-// nothing about this orphan.
+// If the pinned-domain enumeration fails, the diff proceeds with the snapshot
+// leg only for Adds but SKIPS the Remove phase: tearing down a consumer a live
+// instance still needs would orphan its completion, while deferring a teardown
+// to the next reconcile is harmless.
+//
+// The WHOLE pass — desired-set computation AND diff application — runs under
+// e.mu, so concurrent passes serialize: a pass can never apply a desired set
+// computed before another pass's teardown (which would resurrect a just-removed
+// domain from stale data). pinnedDomains does KV I/O under the mutex; that is
+// an accepted tradeoff at current scale (the live-instance set is small and
+// reconciles fire on callbacks/terminals, not per-message).
 func (e *Engine) reconcileConsumers() {
-	desired := bindingRegistry(e.source.snapshot())
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.ctx == nil {
+	if e.ctx == nil || e.ctx.Err() != nil {
 		return
+	}
+	desired := bindingRegistry(e.source.snapshot())
+	pinned, pinErr := e.state.pinnedDomains(e.ctx, e.logger)
+	if pinErr != nil {
+		if e.ctx.Err() != nil || errors.Is(pinErr, context.Canceled) || errors.Is(pinErr, context.DeadlineExceeded) {
+			// Shutdown, not a fault: the engine is going away, so there is nothing
+			// to reconcile and nothing alarming to report.
+			e.logger.Info("loom: reconcile aborted by shutdown", "err", pinErr)
+			return
+		}
+		e.logger.Error("loom: pinned-domain enumeration failed; deferring consumer teardown", "err", pinErr)
+	} else {
+		for d := range pinned {
+			desired[d] = struct{}{}
+		}
 	}
 	for d := range desired {
 		spec := e.domainSpec(d)
@@ -492,6 +592,12 @@ func (e *Engine) reconcileConsumers() {
 		e.domains[d] = fp
 		e.logger.Info("loom domain consumer reset", "domain", d, "durable", spec.Name)
 	}
+	if pinErr != nil {
+		// Without the pinned leg the union is incomplete — a Remove here could
+		// tear down a consumer a live instance still needs. Defer teardown to the
+		// next reconcile.
+		return
+	}
 	for d := range e.domains {
 		if _, want := desired[d]; want {
 			continue
@@ -507,6 +613,27 @@ func (e *Engine) reconcileConsumers() {
 			e.logger.Error("loom domain consumer health-state cleanup failed", "domain", d, "durable", name, "err", err)
 		}
 		e.logger.Info("loom domain consumer removed", "domain", d, "durable", name)
+	}
+}
+
+// ensureDomainConsumers guarantees the pattern's completion domains have
+// running consumers, running a full reconcile only on a miss. The fast path is
+// a map check under e.mu (no KV list per trigger when the domains are already
+// up). Because reconcile passes are serialized whole under e.mu, a reconcile
+// entered after the caller's pin write is committed necessarily sees that pin —
+// so the slow path cannot itself be raced into staleness.
+func (e *Engine) ensureDomainConsumers(pattern *Pattern) {
+	e.mu.Lock()
+	missing := false
+	for _, d := range pattern.Domains() {
+		if _, ok := e.domains[d]; !ok {
+			missing = true
+			break
+		}
+	}
+	e.mu.Unlock()
+	if missing {
+		e.reconcileConsumers()
 	}
 }
 
@@ -600,9 +727,20 @@ func (e *Engine) advance(ctx context.Context, instanceID, token string) error {
 		return e.state.deleteToken(ctx, token)
 	}
 
-	pattern, ok := e.source.get(patternIDFromRef(inst.PatternRef))
-	if !ok {
-		return fmt.Errorf("pattern %q not loaded", inst.PatternRef)
+	// Step resolution reads the instance's PINNED definition (bound at trigger
+	// time), never the live pattern source: a pattern update mid-flight must not
+	// re-index the durable cursor against reordered/changed steps. The pin is
+	// written atomically with the instance, so a missing pin for a running
+	// instance is an invariant break — and an unrecoverable one (no retry can
+	// restore it), so it becomes an operator-visible failed terminal (§10.6:
+	// never a silent wedge) rather than an error → Nak → infinite redelivery.
+	// Transient pin-read errors stay errors → Nak → retry.
+	pattern, err := e.state.getPinnedPattern(ctx, inst.InstanceID)
+	if err != nil {
+		if errors.Is(err, errPatternPinMissing) {
+			return e.fail(ctx, inst, token, "pattern pin missing")
+		}
+		return err
 	}
 
 	inst.Cursor++
@@ -721,6 +859,13 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 // the deadline and the wait for the human becomes unbounded (§10.6) — a
 // human may take days, and false-failing that wait would be a correctness bug.
 func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string) error {
+	// opMetaKey resolves LIVE (not pinned): it maps the step's operationType to
+	// the op's CURRENT meta-vertex key, which becomes the task's forOperation
+	// grant endpoint. The user executes the op as it exists when the task is
+	// created, so the grant must reference the live op definition — a pinned
+	// (possibly deleted/replaced) meta-vertex key would mint a task whose grant
+	// points at a dead vertex. The pin governs WHICH steps run in WHAT order;
+	// op-name → meta-vertex identity is deliberately today's truth.
 	forOperation, ok := e.source.opMetaKey(step.Operation)
 	if !ok {
 		return fmt.Errorf("loom: userTask step %d: no op meta-vertex for operation %q (forOperation unresolved)",
@@ -775,6 +920,11 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 		return err
 	}
 	e.logger.Info("loom pattern complete", "instanceId", inst.InstanceID, "patternId", pattern.PatternID)
+	// The terminal batch deleted this instance's pattern pin; re-derive the
+	// desired domain set so a consumer kept alive only by this instance drains.
+	// Run async — reconcile takes e.mu and supervisor calls, and this path runs
+	// inside a consumer handler.
+	go e.reconcileConsumers()
 	return nil
 }
 
@@ -800,6 +950,8 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 	}
 	e.logger.Warn("loom instance failed",
 		"instanceId", inst.InstanceID, "cursor", inst.Cursor, "reason", reason)
+	// Same drain trigger as complete: the terminal batch deleted the pattern pin.
+	go e.reconcileConsumers()
 	return nil
 }
 

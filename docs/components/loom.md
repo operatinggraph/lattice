@@ -26,7 +26,9 @@ not a Loom branch.
 Loom is an **internal service actor** at root-equivalent capability. It **submits operations
 through the Processor** — it never writes Core KV directly. Its only direct writes are to its
 own operational bucket `loom-state` (dash-named; keys may be dotted — `instance.<instanceId>` /
-`token.<pendingToken>` / `outbox.<token>` / `deadline.<instanceId>`, Contract #10 §10.3).
+`token.<pendingToken>` / `outbox.<token>` / `deadline.<instanceId>`, Contract #10 §10.3, plus the
+`instance.<instanceId>.pattern` definition pin, a fifth key shape pending contract amendment — see
+`cmd/loom/CONTRACT-AMENDMENT-REQUEST.md` Request 10).
 
 ---
 
@@ -59,6 +61,35 @@ all-userTask onboarding pattern declares `completionDomains: ["orchestration"]` 
 - Guard semantics give the **"collect vs verify" reuse**: the same `[name, phone, address]`
   pattern serves first-time collection (guards false → all become tasks) and re-verification
   (guards skip fields already present).
+
+### Definition binding (pinning)
+
+**Definitions bind at instance start.** When the trigger consumer creates an instance, it writes a
+full copy of the pattern — as loaded at trigger time — to `instance.<instanceId>.pattern` in the
+**same `AtomicBatch`** that creates `instance.<instanceId>`, and every subsequent step resolution
+(advance, completion, deadline recovery) reads that **pinned** copy, never the live pattern source.
+A pattern update mid-flight therefore affects **NEW instances only**: an in-flight instance
+completes under the definition it started with, and its durable cursor can never be mis-indexed
+against reordered/inserted/changed steps. The pin is deleted in the same terminal batch that flips
+the instance to `complete`/`failed`, so listing `instance.*.pattern` keys yields exactly the live
+set (this drives the reconcile union, below). A missing pin for a live running instance is an
+invariant break (the pin is written atomically with the instance) — surfaced as an error, never a
+silent fallback to the live source. The live source remains authoritative only for **new triggers**
+(which pin from it), consumer reconcile, and load-time validation; a userTask's `forOperation`
+(operationType → op meta-vertex key) also resolves live, because the task grant must reference the
+op definition as it exists when the task is created.
+
+**Disaster recovery re-binds to the CURRENT definition.** Total `loom-state` loss destroys the pin
+along with the cursor; a fresh `StartLoomPattern` (the shipped narrow recovery semantics) starts a
+new instance that pins **today's** definition. Recovery is re-convergence under today's truth; the
+guard-replay properties below make that safe. Do **not** attempt event-embedded pins to preserve a
+dead generation's definition: `core-events` has `MaxAge=7d` while a userTask wait is unbounded, so
+such a pin would evaporate mid-instance (analyzed and rejected).
+
+**Authoring guidance:** a **semantic** redefinition of a flow deserves a **new pattern DDL/id** —
+in-flight instances of the old id then drain under their pinned (old) definition while new starts
+target the new id explicitly. Mechanical edits (wording, an inserted cheap step, a tightened guard)
+may safely update a pattern in place; only new instances see them.
 
 ### Guard grammar (shipped)
 
@@ -106,6 +137,8 @@ a second time.
 This is the Contract #10 **documented-bound** doctrine (Contract #10 ~line 242): the duplicate is
 **bounded and operator-visible** (one extra commit per guardless step in the recovery window, never
 an unbounded loop), not a silent risk. A robust check-before-act variant is Phase-3 hardening.
+Note the wipe also destroys the instance's pinned definition — the recovery instance **re-binds to
+the current pattern definition** (see Definition binding above).
 
 **Authoring guidance:** give a guard to any step whose re-run is costly. A guarded step is
 **recovery-idempotent by construction** — guard replay re-skips it once its precondition is already
@@ -181,7 +214,7 @@ code**. Pattern definitions, guards, step→operation bindings, and the `task` t
 |--------|--------|-------|
 | Step operations | Processor via `core-operations` | Submitted via the **command outbox**: written as `outbox.<token>` in the transition batch, fire-and-forget published by the relay (no dual write, no request-reply) |
 | `loom.patternStarted` / `Completed` / `Failed` | **lifecycle** ops (`StartLoomPattern`/`CompletePattern`/`FailPattern`) → outbox → `core-events` | Lifecycle on the first-class `loom` domain; no Core-KV business vertex (events ride the standard `vtx.op.<requestId>.events` outbox aspect); drives nesting + Weaver re-projection |
-| Instance cursor + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
+| Instance cursor + pinned pattern + token index + outbox + deadline | `loom-state` (own bucket) | `instance.<id>` cursor + `instance.<id>.pattern` pinned definition (written with the create, deleted at terminal) + `token.<token>` reverse pointer + `outbox.<token>` op record + `deadline.<instanceId>` (TTL); one atomic batch per transition |
 | Tasks | **Core KV** (via Processor) | Business state — queryable, UI-rendered, audited, read by Weaver target Lens |
 
 ---
@@ -191,7 +224,7 @@ code**. Pattern definitions, guards, step→operation bindings, and the `task` t
 | State | Where | Why |
 |-------|-------|-----|
 | **Tasks** (+ assignment links, completion) | **Core KV** | Business-meaningful, cross-component, audited |
-| **Instance cursor + token index** (pattern ref, step pointer, run status, reverse pointer) | **`loom-state`** | Single-component orchestration bookkeeping (P1 boundary); the instance has **no Core-KV vertex** — its sole durable home is the cursor |
+| **Instance cursor + pinned pattern + token index** (pattern ref, pinned definition, step pointer, run status, reverse pointer) | **`loom-state`** | Single-component orchestration bookkeeping (P1 boundary); the instance has **no Core-KV vertex** — its sole durable home is the cursor; the pinned definition (`instance.<id>.pattern`) is what the cursor indexes into |
 
 The instance is **operational-only**: there is no Core-KV instance vertex — `loom-state` is its sole
 durable home (P1). Each step transition is a **single `substrate.AtomicBatch`** that, all-or-nothing,
@@ -242,17 +275,21 @@ floor, and `HealthSink` persist/restore. Loom continues to import only `substrat
 
 ### Desired-vs-running reconcile (per-domain set)
 
-`reconcileConsumers` runs on every pattern load/update/remove callback and resolves to a real diff of
-the desired domain set (`bindingRegistry` aggregated across the pattern snapshot) against the
-last-applied set:
+`reconcileConsumers` runs on every pattern load/update/remove callback **and after every instance
+terminal (complete/fail)**, and resolves to a real diff of the desired domain set against the
+last-applied set. The desired set is the **UNION** of (a) `bindingRegistry` aggregated across the
+current pattern snapshot and (b) the domains of the **pinned patterns of live instances**
+(enumerated from the `instance.*.pattern` keys in `loom-state` — pins are deleted at terminal, so
+the listing is exactly the live set):
 
 - **Add** — a domain newly referenced by any pattern spins up `loom-<domain>` live (unchanged additive
   behavior).
-- **Remove (F6)** — when the **last** pattern referencing a domain is removed/updated-away, the
-  supervisor stops the pump **and deletes the JetStream durable**. "No leaked consumer" is the
+- **Remove (F6)** — when a domain is referenced by **no current pattern AND no live instance's pin**,
+  the supervisor stops the pump **and deletes the JetStream durable**. "No leaked consumer" is the
   guarantee: an un-pumped server-side durable IS the leak. Correctness on a future re-add rests on
   `loom-state` + Contract #4 idempotency + `token.` pointer presence (a `DeliverAll` replay on re-add is
-  safe; its cost is accepted) — not a preserved ack floor.
+  safe; its cost is accepted) — not a preserved ack floor. If the pinned-domain enumeration fails,
+  the Remove phase is skipped for that pass (a deferred teardown is harmless; a premature one is not).
 - **Reset** — a domain whose desired spec config diverges from the running durable is recreated
   (delete-and-recreate), never silently left unchanged. The per-domain filter (`events.<domain>.>`) is
   name-derived and stable, so this branch is reachable in practice only if a future spec field changes;
@@ -262,15 +299,13 @@ The three fixed durables (trigger, relay, deadline) are `Add`ed once at `Start` 
 force-removed on shutdown — `Stop()` preserves their ack-floor position (substrate doctrine: a durable's
 persisted position is the point of its durability). Only a live per-domain teardown diff calls `Remove`.
 
-**Known limitation (not fixed here):** removing a pattern while an in-flight instance of it exists orphans
-that instance's completion. The cause is the **pattern definition** disappearing from the engine's loaded
-set — `handleCompletion`'s `advance` looks up the instance's `PatternRef` to find its next step, and that
-lookup fails once the definition is gone, regardless of whether `loom-<domain>` is torn down. This applies
-even when the domain consumer **survives** because another pattern still references the same domain
-(`bindingRegistry` keeps it live, so no Remove fires) — the consumer keeps delivering events on that
-domain, but the removed instance's completion still cannot resolve because its pattern definition is gone.
-Delete-vs-preserve of the consumer changes nothing about this orphan; it is documented rather than
-mitigated.
+**In-flight instances survive pattern removal/update.** With pinning + the union, an in-flight
+instance completes under its **pinned** definition even after its pattern is removed or updated
+away: `advance` reads `instance.<id>.pattern`, never the (gone/changed) live definition, and the
+union keeps the instance's completion-domain consumer alive until the instance reaches terminal.
+The terminal batch deletes the pin, and the terminal-triggered reconcile then tears the drained
+`loom-<domain>` consumer down once no current pattern and no remaining live instance references the
+domain.
 
 ### Health surface (Contract #5)
 

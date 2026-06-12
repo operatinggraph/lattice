@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,6 +111,12 @@ func (r *runningInstanceCounter) count(ctx context.Context) (int, error) {
 	running := 0
 	for _, k := range keys {
 		if len(k) < len(instancePrefix) || k[:len(instancePrefix)] != instancePrefix {
+			continue
+		}
+		// instance.<id>.pattern pins share the instance. prefix but are not
+		// instance records; the instanceId is a NanoID (no dots), so any dotted
+		// remainder is a sub-key, not an instance.
+		if strings.ContainsRune(k[len(instancePrefix):], '.') {
 			continue
 		}
 		entry, err := r.conn.KVGet(ctx, r.bucket, k)
