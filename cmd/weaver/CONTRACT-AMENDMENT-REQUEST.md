@@ -7,7 +7,7 @@ the contract owner (Andrew) + a Contract #10 revision-history entry. The impleme
 (`internal/weaver/state.go`, `internal/weaver/reconciler.go`) already builds to the requested
 text.
 
-**STATUS: PENDING ratification (Andrew).**
+**STATUS: RATIFIED 2026-06-12 (Andrew).** Applied to Contract #10 (§10.2/§10.3/§10.4) + revision-history entry; the working tree already built to this text.
 
 ## Request 1: §10.3 `weaver-state` — the mark's per-key TTL is 2× the lease, not a literal mirror of `leaseExpiresAt`
 
@@ -46,7 +46,7 @@ by the contract owner (Andrew) + a Contract #10 revision-history entry, not edit
 implementation (`internal/weaver/temporal.go`, `internal/weaver/actuator.go`) already builds to the
 requested reading.
 
-**STATUS: PENDING ratification (Andrew).**
+**STATUS: RATIFIED 2026-06-12 (Andrew).** Applied to Contract #10 (§10.2/§10.3/§10.4) + revision-history entry; the working tree already built to this text.
 
 ## Request 2: §10.4 schedule-subject template widened by a publisher-chosen `<targetId>` token
 

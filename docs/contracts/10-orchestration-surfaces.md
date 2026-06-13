@@ -121,6 +121,11 @@ means Weaver watches all rows under its prefix and **acts only on `violating == 
   value is `true`.
 - **param columns** (free-form, e.g. `applicant`) — whatever the §10.8 playbook templates reference
   (`row.<field>`); the Lens **must project every column the playbook templates name**.
+- **`freshUntil`** (optional, engine-recognized convention) — an RFC3339 instant the target cypher
+  computes as `resolve + window`. The engine converts it into an `@at` schedule (the time→op temporal
+  lane, §10.4) and **never computes the window itself** — the freshness rule lives in the cypher, the
+  engine only turns the projected deadline into a timer. A free-form param column by storage, named by
+  convention so the engine/Lens seam is explicit.
 - `projectedAt` — deterministic as-of provenance, **same semantics as Contract #6 §6.3** (the
   candidate's `lastModifiedAt`, not a wall-clock read). The NATS KV entry's own revision arrives free
   on each watch update, so it is **not** projected into the value.
@@ -243,8 +248,17 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
 - **Lease enforcement is BOTH passive and active:** the mark is written with a **NATS per-key TTL**
   (the bucket is provisioned TTL-capable) **and** an **active reconciler** sweeps for reclaim. The
   per-key TTL is the backstop — a missing/dead reconciler can therefore **never wedge a gap forever**
-  (the key self-expires); the reconciler is for prompt reclaim. `leaseExpiresAt` mirrors the TTL for
-  visibility. The lease is set **≫ expected remediation latency** so expiry means "presumed dead."
+  (the key self-expires); the reconciler is for prompt reclaim. The lease is set **≫ expected
+  remediation latency** so expiry means "presumed dead."
+- **The per-key TTL is `2 × lease`, not a literal mirror of `leaseExpiresAt`** (`markTTLBackstopFactor`,
+  a constant). `leaseExpiresAt` mirrors the **lease** (`claimedAt + lease`); the TTL is the lease's
+  **dead-reconciler backstop**, strictly longer. The sweep can only *reclaim* a lease while the mark
+  still exists, and the mark is the sweep's only evidence (it enumerates marks, not rows) — so the key
+  must outlive `leaseExpiresAt` to give the interval-cadence sweep a full lease-width window to observe
+  and re-attempt. With TTL == lease the key self-deletes the instant it becomes reclaimable and the
+  reclaim clause is mechanically unreachable; `2 × lease` is the smallest factor that satisfies both
+  the *never-wedge* (TTL) and *re-attempt* (sweep) clauses together. `SweepInterval` is clamped
+  ≤ lease so at least one sweep pass lands inside the lease-to-TTL window.
 - **Mark-clearing is level-reconciled, not edge-triggered** (§10.8): on each watch update **and** each
   reconciler sweep, Weaver compares the **current** row's `missing_<col>` against existing marks for
   that `<targetId>.<entityId>` and deletes any mark whose column is now `false` — it does **not** rely
@@ -320,19 +334,28 @@ first consumer; op-vertex pruner / retention are future consumers).
 ```
 stream:            core-schedules             # platform-bootstrapped, AllowMsgSchedules: true
                                               #   (core-* family, like core-operations / core-events)
-schedule subject:  schedule.<domain>.<kind>.<entityId>    # publish here; one schedule per subject
+schedule subject:  schedule.<domain>.<kind>.<token...>    # publish here; one schedule per subject
                                               #   (bare-word subject root, like ops.> / events.>)
+                                              #   <token...> = publisher-chosen dot-free token(s)
+                                              #   e.g. Weaver uses  schedule.weaver.timer.<targetId>.<entityId>
 header:            @at <RFC3339>   (absolute; or @every for recurring — Phase 2 uses @at one-shot)
                    Nats-Schedule-Target: <target subject>   # republish target (must be within schedule.>)
-target subject:    schedule.<component>.fired.<entityId>    # publisher-chosen, but MUST be within schedule.>
-                                              #   e.g. Weaver uses  schedule.weaver.timer.fired.<entityId>
+target subject:    schedule.<component>.fired.<token...>    # publisher-chosen, but MUST be within schedule.>
+                                              #   e.g. Weaver uses  schedule.weaver.timer.fired.<targetId>.<entityId>
                                               #   (the scheduler republishes back into core-schedules here)
 ```
 
 - **Naming:** stream `core-schedules` (dash-form, no project name — matches `core-operations` /
-  `core-events`); subject root `schedule.>` (matches `ops.>` / `events.>`). `<entityId>` is the
-  **NanoID, not the dotted vertex key** (same discipline as §10.2/§10.3 — dots are subject-token
-  separators); the full entity key, if needed, rides the **message payload**, not the subject.
+  `core-events`); subject root `schedule.>` (matches `ops.>` / `events.>`).
+- **The segments after `schedule.<domain>.<kind>.` are publisher-chosen, dot-free tokens** within the
+  `schedule.>` space — a publisher MAY key its schedules with more than one entity token. Weaver keys
+  per **target AND entity** (`schedule.weaver.timer.<targetId>.<entityId>`, fired
+  `schedule.weaver.timer.fired.<targetId>.<entityId>`), so two targets projecting a `freshUntil` for
+  the same entity hold **independent timer slots** instead of colliding on the shared
+  `MaxMsgsPerSubject: 1` rollup (without the `<targetId>` token the later projection would silently
+  overwrite the earlier deadline). Each token is a **NanoID, not the dotted vertex key** (same
+  discipline as §10.2/§10.3 — dots are subject-token separators); the full entity key, if needed,
+  rides the **message payload**, not the subject.
 - **`core-schedules` is NEW** — it **joins the primordial stream create list** (scheduling bootstrap
   story), alongside `core-operations`/`core-events`; `AllowMsgSchedules: true` is set at provisioning.
   (It does not exist yet — same "new, joins the create list" status as `loom-state` in §10.3.)
@@ -342,13 +365,14 @@ target subject:    schedule.<component>.fired.<entityId>    # publisher-chosen, 
   the target subject (an out-of-stream target is rejected at publish time). Each component consumes
   its fired messages via a **JetStream consumer filtered on its target-subject prefix** (e.g.
   `schedule.weaver.timer.fired.>`).
-- Per-entity schedule subject → re-scheduling **replaces** the prior timer (one schedule per subject).
+- Per-subject schedule → re-scheduling **replaces** the prior timer (one schedule per subject; for
+  Weaver, per `<targetId>.<entityId>`).
 - Durable across restart. The fired message hits the publisher's target subject; that component
   converts it to a normal **op** via the Processor — it is **never** published to `core-events`
   directly (the transactional outbox, Contract #3 / Story 1.5.10, remains the sole event producer).
 - **Fired-timer → op is dedup'd.** JetStream delivery is at-least-once (a consumer crash before ack
   redelivers), so the converted op carries a **deterministic `requestId`** derived from the schedule
-  subject (`schedule.<domain>.<kind>.<entityId>` + fire instant) → Contract #4's `vtx.op.<requestId>`
+  subject (`schedule.<domain>.<kind>.<token...>` + fire instant) → Contract #4's `vtx.op.<requestId>`
   tracker collapses redeliveries. A redelivered timer does **not** double-act.
 
 ---
@@ -817,4 +841,5 @@ emits events and writes no business vertex — nothing in the pipeline special-c
 | 2026-06-06 | **Loom command-outbox ratified (Andrew) — §10.3 + §10.6** (CAR Request 5, Story 8.1 review finding F2). **§10.3:** `loom-state` gains two disjoint prefixes — `outbox.<token>` (the op-to-submit record) and `deadline.<instanceId>` (per-key TTL = the step deadline). The per-step transition writes/re-arms both in the **same `substrate.AtomicBatch`** as the cursor/token update, so op submission is no longer a dual write (the **command-outbox** pattern, symmetric to the Processor's *event* outbox). An async **relay** (durable consumer on the `loom-state` backing stream `outbox.>`) fire-and-forget publishes the op to `core-operations` and deletes the record on publish-ack (re-publish idempotent via Loom's chosen `requestId` + the Contract #4 tracker) — **no request-reply, no raw NATS handle in `internal/loom`**. `deadline.<instanceId>` is per-instance (linear interpreter ⇒ one pending step), re-armed on advance, deleted on terminal, or auto-expires (`KeyValuePurge`/MaxAge marker, distinct from DEL). **§10.6:** the failed/rejected terminal is **off-stream via the deadline + a read-before-act probe** (`GET vtx.op.<token>`: present→advance+alert; absent+outbox-present→re-arm; absent+no-outbox→fail) — the **synchronous `ops.<lane>` submit-reply terminal is REMOVED**. Crash-safety invariant 1 restated as outbox-inclusive (write-ahead holds by construction). Retires findings F1/F2/F5 + the C2 blocking-callback. Mechanism verified against the repo (`BatchOp.TTL`; `internal/spike/nats-batch/test_ttl_marker_delivery.go`); reconciler-sweep is the sanctioned fallback. |
 | 2026-06-02 | **(a1) cap-lens extraction (Andrew).** Reading `step3_auth_capability.go` + `lenses.go` revealed the Capability Lens is a **god-cypher in core/bootstrap** that hard-codes the grant vocabulary of *multiple packages* (rbac-domain `role`/`permission`/`holdsRole`/`grantedBy`; service/location; Phase-2 `task`/`assignedTo`) into one per-actor doc — `task` is the newest tenant of a pre-existing inverted dependency. Fix (Story 7.1 scope): ephemeral grants leave the bootstrap god-cypher for an **`orchestration-base`-owned `capabilityEphemeral` lens** → disjoint key **`cap.ephemeral.<actor>`** (reuses the `capabilityRoleIndex` disjoint-prefix pattern, Contract #6 §6.1; no Refractor lens-merge needed). Bootstrap cypher **drops all `task` refs** (dependency direction flips package→core). Step-3 task branch reads the new key; `cap.<actor>` still read for `roles` on task-path denials. Grant *field shape* unchanged. Broader god-lens decomposition (role/permission/service projections + a generic step-3 **auth-hooks** consumer side) recorded as a future-ADR open item in `lattice-architecture.md`. |
 | 2026-06-07 | **Event-domain model ratified (Andrew) — §10.5/§10.6** (CAR Requests 6–9, folded into Story 8.2; superseded by the broader Contract #3 event-domain model). Every event class is now `<domain>.<eventName>` (Contract #3 §3.4, enforced at commit step 7), so the §10.5 "domain = first segment" routing model is **true**, not illustrative. **§10.5:** the onboarding example becomes `completionDomains: ["orchestration"]` — a userTask completes on the **`orchestration`** domain (the `orchestration.taskCompleted` event), regardless of subject type. **§10.6:** the userTask correlation row reads `taskKey` (`vtx.task.<id>`) → completion `orchestration.taskCompleted` → **`payload.taskKey`** → `token.<taskKey>` GET (all event business fields ride the envelope `payload`, Contract #3 §3.4; Loom's two correlation keys are top-level `requestId` (systemOp) and `payload.taskKey` (userTask)); the userTask completion subsection retitled "by `taskKey`"; crash-safety invariant 1 notes the engine supplies the deterministic `taskId` via `CreateTask`'s optional `taskId` so the `taskKey` is known write-ahead (no Contract #2 change; §10.7 auth unchanged). Added the **userTask creation-deadline + task-vertex probe** (R9): a userTask arms a bounded `CreateTaskTimeout` that disarms once the task vertex exists (then the human wait is unbounded), failing a rejected/lost `CreateTask` rather than wedging — with the honest nuance that after disarm a mis-declared `completionDomains` is caught by a load-time warn, not a runtime backstop. |
+| 2026-06-12 | **Weaver amendments ratified (Andrew) — §10.2/§10.3/§10.4** (`cmd/weaver/CONTRACT-AMENDMENT-REQUEST.md`, Stories 9.2/9.3). **§10.3 (R1):** the `weaver-state` mark's per-key TTL is **`2 × lease`** (`markTTLBackstopFactor`), not a literal mirror of `leaseExpiresAt` — `leaseExpiresAt` mirrors the *lease* (`claimedAt + lease`) and the TTL is the strictly-longer dead-reconciler backstop. The interval-cadence sweep reclaims a lease only while the mark still exists (the mark is its only evidence — it enumerates marks, not rows), so the key must outlive `leaseExpiresAt` for the *sweep-reclaims-expired-leases* clause to be reachable; `2 ×` is the smallest factor satisfying both the never-wedge (TTL) and re-attempt (sweep) clauses, with `SweepInterval` clamped ≤ lease. **§10.4 (R2):** the schedule-subject template's segments after `schedule.<domain>.<kind>.` are **publisher-chosen dot-free tokens** within `schedule.>` — Weaver keys per **target AND entity** (`schedule.weaver.timer.<targetId>.<entityId>`, fired `…fired.<targetId>.<entityId>`) so two targets projecting a `freshUntil` for the same entity hold independent timer slots instead of colliding on the `MaxMsgsPerSubject: 1` rollup (pins the same "publisher-chosen" reading the fired-target line already had). **§10.2 (R3):** **`freshUntil`** named as an optional engine-recognized convention column (RFC3339, a free-form param column by storage) — the target cypher computes `resolve + window` and projects the deadline; the engine converts it to an `@at` schedule (§10.4) and never computes the window. |
 | 2026-06-12 | **Pattern-definition pinning ratified (Andrew) — §10.3** (CAR Request 10, post-8.3 fix-forward, finding F2). `loom-state` gains a **fifth key shape**, `instance.<instanceId>.pattern` — the full pattern definition as loaded at trigger time, written in the **same `AtomicBatch`** that creates `instance.<instanceId>` (both `CreateOnly`) and deleted in the **same terminal batch** that flips `status` to `complete`/`failed`. It is deliberately a **sub-key of its instance**, not a fifth disjoint prefix (instanceIds are NanoIDs, so `.pattern` is unambiguous); the other four prefixes remain disjoint. **Definitions bind at instance start**: all step resolution (advance, completion, deadline recovery) reads this pin, never the live pattern source, so a pattern update mid-flight (reordered/inserted/changed steps) cannot mis-index a running instance's `cursor` — pattern updates affect **new instances only**. Listing `instance.*.pattern` yields exactly the live-instance set, which is the second leg of the §10.9 per-domain consumer reconcile (current definitions ∪ pinned definitions of live instances): an in-flight instance survives its pattern being removed/updated-away, and the domain consumer drains once its last live instance completes — superseding the prior documented in-flight-orphan-on-pattern-removal caveat. A missing pin for a `status=running` instance is an invariant break, surfaced as an operator-visible failed terminal (never a silent wedge or a Nak loop). Disaster recovery (total `loom-state` loss → fresh `StartLoomPattern`) re-binds to the current definition, unchanged from the Story 8.3 narrow recovery semantics. Event-embedded pins were analyzed and rejected (`core-events` `MaxAge=7d` vs unbounded userTask waits). |
