@@ -1,6 +1,6 @@
 # Story 12.3: Projection plan compiler + `projectionKind: actorAggregate` marker (D-PIPELINE core)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
