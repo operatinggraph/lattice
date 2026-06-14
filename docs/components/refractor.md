@@ -221,6 +221,36 @@ service actors) are supported without code change.
 
 ---
 
+## Rebuild & truncate semantics
+
+`Pipeline.Rebuild(ctx, truncate)` resets a lens's durable consumer so the lens
+re-projects from the start of its source stream. The optional truncate step
+clears the target store first.
+
+| Adapter / mode | `truncate` requested | Behavior |
+|----------------|----------------------|----------|
+| NATS-KV, unguarded | `false` | No truncate; the stream replay overwrites each key last-writer-wins. |
+| NATS-KV, unguarded | `true` | `Truncate` purges every key in the bucket, then the stream replays into the empty bucket. (`Truncate` does what the flag promised — it is not a silent skip.) |
+| NATS-KV, **guarded** | `false` or `true` | **Truncate is forced.** A guarded bucket's monotonic `projectionSeq` watermarks would reject the historical lower-seq replays against the live high-seq watermarks, leaving rejected-write holes. The pipeline detects guardedness via `Guarded()` (it never learns lens canonical names), purges the bucket — clearing the watermarks with the data — and logs at info that truncate was forced. The stream then replays from empty, the highest-seq write wins, and the steady state is identical to a from-scratch projection (Contract #6 §6.2). |
+| Postgres (no `Truncater`) | `true` | Truncate is skipped with a warn (the adapter does not implement `Truncater`). |
+
+`NatsKVAdapter.Truncate` purges each key (`Purge` per key) rather than deleting:
+a purge drops prior revisions and leaves a delete marker, so a subsequent `Get`
+returns `ErrKeyNotFound` and a guarded rebuild's first replay takes the
+absent→`Create` path with no stale watermark in the way. The force keeps the
+projection-write guard **on** across the rebuild — it is never bypassed, so the
+monotonic ordering still holds: a stale retry-queue write carries its original
+(lower) `projectionSeq` and is superseded by the higher-seq replay of the current
+state. The post-rebuild **steady state therefore equals a from-scratch
+projection** regardless of how a concurrent retry interleaves with the
+truncate/replay — the guarantee is on the converged state, not on instantaneous
+consistency mid-rebuild (while a guarded bucket is being rebuilt its keys are
+transiently absent, which step-3 denies fail-closed). The retry queue is **not**
+separately quiesced during the rebuild because it does not need to be: the guard
+makes a racing stale write lose on its own.
+
+---
+
 ## Capability-Lens health (operational backstop)
 
 The Processor has no per-operation projection-freshness gate. The accepted

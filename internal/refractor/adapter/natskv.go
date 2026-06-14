@@ -14,8 +14,9 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// Compile-time check that NatsKVAdapter satisfies Adapter.
+// Compile-time check that NatsKVAdapter satisfies Adapter and Truncater.
 var _ Adapter = (*NatsKVAdapter)(nil)
+var _ Truncater = (*NatsKVAdapter)(nil)
 
 // guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
 // runs when a concurrent writer (the retry-queue goroutine) collides on the
@@ -273,6 +274,29 @@ func storedProjectionSeq(data []byte) (uint64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// Truncate clears the bucket by purging every key, so a rebuild's stream replay
+// starts from an empty high-water state and the highest-seq write wins
+// (Contract #6 §6.2). Purge removes each key's prior revisions and leaves a
+// delete marker as the latest revision, so a subsequent Get returns
+// ErrKeyNotFound: a guarded rebuild then takes the absent→Create path on the
+// first replay and never reads a stale projectionSeq watermark, eliminating the
+// rejected-write holes a lower-seq replay against a live watermark would leave.
+func (a *NatsKVAdapter) Truncate(ctx context.Context) error {
+	keys, err := a.kv.ListKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("natskv truncate: list keys: %w", err)
+	}
+	for key := range keys.Keys() {
+		if err := a.kv.Purge(ctx, key); err != nil {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				continue
+			}
+			return fmt.Errorf("natskv truncate: purge %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // Probe checks whether the NATS KV bucket is reachable by calling kv.Status.

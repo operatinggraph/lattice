@@ -14,11 +14,11 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/asolgan/lattice/internal/refractor/failure"
+	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
-	"github.com/asolgan/lattice/internal/refractor/failure"
-	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -69,11 +69,11 @@ type Pipeline struct {
 	// latencyBuf captures the (CDC → projection-write) latency per event
 	// so the heartbeat can compute mean/p95/p99 per Lens. Nil disables.
 	latencyBuf *LatencyRingBuffer
-	adapterMu    sync.RWMutex    // protects adpt for concurrent hot-reload
-	adpt         adapter.Adapter // access via currentAdapter(); swap via HotReloadInto
-	planMu       sync.RWMutex   // protects plan for concurrent hot-reload
+	adapterMu  sync.RWMutex    // protects adpt for concurrent hot-reload
+	adpt       adapter.Adapter // access via currentAdapter(); swap via HotReloadInto
+	planMu     sync.RWMutex    // protects plan for concurrent hot-reload
 
-	reporter     *health.Reporter // nil → skip health KV operations (optional)
+	reporter *health.Reporter // nil → skip health KV operations (optional)
 
 	// Retry queue (optional). When non-nil and retryMaxAttempts > 0, transient write
 	// failures are enqueued for exponential-backoff retry instead of Nak'd.
@@ -367,7 +367,17 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 		}
 	}
 
-	// 2. Optional target-store truncation.
+	// 2. Optional target-store truncation. A guarded bucket forces truncate: its
+	// monotonic watermarks would reject a lower-seq historical replay, leaving
+	// rejected-write holes. Truncating clears the watermarks with the data so the
+	// stream replays from empty and the highest-seq write wins, yielding a steady
+	// state identical to a from-scratch projection (Contract #6 §6.2). The force
+	// keys off Guarded() so the pipeline never learns lens canonical names.
+	if g, ok := p.currentAdapter().(interface{ Guarded() bool }); ok && g.Guarded() && !truncate {
+		slog.Info("pipeline: rebuild: guarded bucket forces truncate (avoids rejected-write holes)",
+			"ruleId", p.ruleID)
+		truncate = true
+	}
 	if truncate {
 		adpt := p.currentAdapter()
 		if t, ok := adpt.(adapter.Truncater); ok {
@@ -1012,4 +1022,3 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjEntry jetstream.KeyVa
 			"stage", "pipeline", "adapter", p.adapterName)
 	}
 }
-

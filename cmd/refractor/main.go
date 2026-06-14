@@ -23,12 +23,12 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/capabilityenv"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
 	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -264,6 +264,14 @@ func main() {
 			p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, capabilityenv.IdentityType))
 			// Per-Lens latency ring buffer for heartbeat NFR-P3 emission.
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
+			// Security plane: the primary per-actor capability doc (cap.identity.<id>)
+			// is the surface step-3 authorization reads, so it is guarded by the
+			// monotonic projection-write guard — a retried or reordered stale write
+			// can never resurrect a revoked grant on it (Contract #6 §6.2).
+			if err := enableProjectionGuard(adpt, r.ID); err != nil {
+				logger.Error("capability guard", "lensId", r.ID, "err", err)
+				return
+			}
 			logger.Info("capability envelope + fan-out + latency installed",
 				"lensId", r.ID, "lensDefKey", lensDefKey)
 		case "capabilityRoleIndex":
@@ -271,6 +279,13 @@ func main() {
 			// `cap.role-by-operation.<op>` shape and skips rows whose
 			// operationType is null/empty. capabilityRoleIndex does not use the
 			// per-actor envelope.
+			//
+			// This lens is intentionally NOT guarded: it is keyed by operationType
+			// (cap.role-by-operation.<op>), an operation-aggregate rather than an
+			// actor-aggregate, with no per-actor revoke→resurrect race (a role's
+			// operation coverage is recomputed from the role graph, not subject to
+			// the open-era/close-era capture window). Per Contract #6 §6.2/§6.3 it
+			// is NOT a guarded key.
 			p.SetEnvelopeFn(capabilityenv.NewRoleIndexWrapper())
 			// Latency buffer also installed for the secondary Lens — the
 			// heartbeater emits stats per Lens regardless of envelope shape.

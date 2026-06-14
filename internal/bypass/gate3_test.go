@@ -51,7 +51,7 @@ func TestGate3_Report(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 
 	// The adversarial vectors and their enforcement layers. Vectors #1, #3, #4,
-	// #5 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per Story
+	// #5, #6 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per Story
 	// 1.5.4. If any sub-test fails, the Go test framework exits non-zero BEFORE
 	// this roll-up fires — so reaching here with passing sub-tests is sufficient
 	// proof.
@@ -92,6 +92,12 @@ func TestGate3_Report(t *testing.T) {
 			Vector:      "Stale projection resurrection (retry + adj-watch)",
 			Result:      "DEFENDED",
 			Enforcement: "Refractor monotonic projection-write guard: projectionSeq CAS rejects lower-seq replay; Delete → soft tombstone carries watermark; adj-watch (seq 0) cannot advance it (§6.2/§6.8; Story 12.1a)",
+		},
+		{
+			Num:         6,
+			Vector:      "Guarded-projection rebuild integrity",
+			Result:      "DEFENDED",
+			Enforcement: "Refractor force-truncate on a guarded rebuild: Truncate purges watermarks with the data → highest-seq replay wins (no rejected-write holes); the guard stays always-on across the rebuild so a concurrent/post-rebuild stale retry cannot resurrect the primary cap.identity doc (§6.2; Story 12.1b)",
 		},
 	}
 

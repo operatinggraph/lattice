@@ -63,6 +63,33 @@ func newAdapterMode(t *testing.T, kv jetstream.KeyValue, keyOrder []string, mode
 	return a
 }
 
+// dumpBucket reads every live key in the bucket and returns a stable JSON map of
+// key→decoded-value, excluding tombstones (purged/absent keys read as
+// ErrKeyNotFound; tombstones are skipped so two buckets that differ only in
+// physical tombstone presence still compare equal on their live contents).
+func dumpBucket(t *testing.T, ctx context.Context, kv jetstream.KeyValue) string {
+	t.Helper()
+	lister, err := kv.ListKeys(ctx)
+	require.NoError(t, err)
+	out := map[string]any{}
+	for k := range lister.Keys() {
+		entry, err := kv.Get(ctx, k)
+		if err != nil {
+			require.ErrorIs(t, err, jetstream.ErrKeyNotFound)
+			continue
+		}
+		var v map[string]any
+		require.NoError(t, json.Unmarshal(entry.Value(), &v))
+		if del, _ := v["isDeleted"].(bool); del {
+			continue
+		}
+		out[k] = v
+	}
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	return string(b)
+}
+
 func TestNatsKVAdapter_New_EmptyKeyOrder(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
@@ -316,6 +343,126 @@ func TestNatsKVAdapter_Unguarded_IgnoresProjectionSeq(t *testing.T) {
 	require.Equal(t, "low", got["v"], "unguarded adapter must keep last-writer-wins")
 	_, hasSeq := got["projectionSeq"]
 	require.False(t, hasSeq, "unguarded adapter must not inject projectionSeq")
+}
+
+// TestNatsKVAdapter_Truncate_GetReturnsKeyNotFound proves the property the
+// force-truncate correctness depends on: after Truncate purges a key, a
+// subsequent Get returns ErrKeyNotFound (so a guarded rebuild takes the
+// absent→Create path and never reads a stale watermark).
+func TestNatsKVAdapter_Truncate_GetReturnsKeyNotFound(t *testing.T) {
+	kv := startKV(t)
+	a := guardedAdapter(t, kv, []string{"key"})
+	ctx := context.Background()
+
+	require.NoError(t, a.Upsert(ctx, map[string]any{"key": "cap.identity.A"}, map[string]any{"v": 1}, 5))
+	require.NoError(t, a.Upsert(ctx, map[string]any{"key": "cap.identity.B"}, map[string]any{"v": 2}, 6))
+	// A tombstone too — Truncate must clear it like any other key.
+	require.NoError(t, a.Delete(ctx, map[string]any{"key": "cap.identity.C"}, 7))
+
+	require.NoError(t, a.Truncate(ctx))
+
+	for _, k := range []string{"cap.identity.A", "cap.identity.B", "cap.identity.C"} {
+		_, err := kv.Get(ctx, k)
+		require.ErrorIs(t, err, jetstream.ErrKeyNotFound, "key %s must read absent after Truncate", k)
+	}
+}
+
+func TestNatsKVAdapter_Truncate_EmptyBucket(t *testing.T) {
+	kv := startKV(t)
+	a := guardedAdapter(t, kv, []string{"key"})
+	require.NoError(t, a.Truncate(context.Background()), "Truncate on an empty bucket is a no-op")
+}
+
+// TestNatsKVAdapter_Truncate_RebuildEquivalence is the AC#3 rebuild-equivalence
+// proof at the adapter level: a guarded bucket carrying live HIGH-seq watermarks
+// (an upsert at a high seq + a tombstone) is force-truncated and then the
+// historical LOWER-seq events replay. The result must be key-equal to projecting
+// those same lower-seq events into a fresh empty bucket — every key present, none
+// missing, no stale tombstone left behind. Without the Truncate the guard would
+// reject the lower-seq replays against the live watermarks (rejected-write holes);
+// with it the first replay write wins.
+func TestNatsKVAdapter_Truncate_RebuildEquivalence(t *testing.T) {
+	ctx := context.Background()
+
+	// The "historical" stream, in seq order, that a rebuild replays.
+	type ev struct {
+		key string
+		row map[string]any
+		del bool
+		seq uint64
+	}
+	historical := []ev{
+		{key: "cap.identity.A", row: map[string]any{"grants": "a1"}, seq: 1},
+		{key: "cap.identity.B", row: map[string]any{"grants": "b1"}, seq: 2},
+		{key: "cap.identity.A", row: map[string]any{"grants": "a2"}, seq: 3},
+		{key: "cap.identity.C", row: map[string]any{"grants": "c1"}, seq: 4},
+	}
+	replay := func(a *adapter.NatsKVAdapter) {
+		for _, e := range historical {
+			if e.del {
+				require.NoError(t, a.Delete(ctx, map[string]any{"key": e.key}, e.seq))
+			} else {
+				require.NoError(t, a.Upsert(ctx, map[string]any{"key": e.key}, e.row, e.seq))
+			}
+		}
+	}
+
+	// Fresh bucket: project the historical events into an empty guarded bucket.
+	freshKV := startKV(t)
+	fresh := guardedAdapter(t, freshKV, []string{"key"})
+	replay(fresh)
+
+	// Live bucket: seed HIGH-seq watermark state, then force-truncate + replay.
+	liveKV := startKV(t)
+	live := guardedAdapter(t, liveKV, []string{"key"})
+	require.NoError(t, live.Upsert(ctx, map[string]any{"key": "cap.identity.A"}, map[string]any{"grants": "live-A"}, 100))
+	require.NoError(t, live.Delete(ctx, map[string]any{"key": "cap.identity.B"}, 101)) // live tombstone at high seq
+	require.NoError(t, live.Upsert(ctx, map[string]any{"key": "cap.identity.Z"}, map[string]any{"grants": "gone"}, 102))
+	require.NoError(t, live.Truncate(ctx))
+	replay(live)
+
+	require.JSONEq(t,
+		dumpBucket(t, ctx, freshKV),
+		dumpBucket(t, ctx, liveKV),
+		"post-rebuild bucket must be key-equal to a from-scratch projection (no holes, no stale tombstone)",
+	)
+}
+
+// TestNatsKVAdapter_Truncate_RebuildEquivalence_FailsWithoutTruncate pins the AC#3
+// requirement that the test FAILS without the force-truncate: replaying the
+// lower-seq historical events against the live high-seq watermarks leaves holes.
+func TestNatsKVAdapter_Truncate_RebuildEquivalence_FailsWithoutTruncate(t *testing.T) {
+	ctx := context.Background()
+	liveKV := startKV(t)
+	live := guardedAdapter(t, liveKV, []string{"key"})
+
+	// Live high-seq state.
+	require.NoError(t, live.Upsert(ctx, map[string]any{"key": "cap.identity.A"}, map[string]any{"grants": "live-A"}, 100))
+	// Replay a historical LOWER-seq event WITHOUT truncating first.
+	require.NoError(t, live.Upsert(ctx, map[string]any{"key": "cap.identity.A"}, map[string]any{"grants": "a2"}, 3))
+
+	entry, err := liveKV.Get(ctx, "cap.identity.A")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(entry.Value(), &got))
+	require.Equal(t, "live-A", got["grants"],
+		"without force-truncate the lower-seq replay is rejected by the guard (the hole this story removes)")
+}
+
+// TestNatsKVAdapter_RoleIndexLens_Unguarded documents the capabilityRoleIndex
+// exclusion (Contract #6 §6.2/§6.3): the role-index lens is keyed by
+// operationType (cap.role-by-operation.<op>), an operation-aggregate with no
+// per-actor revoke→resurrect race, so its adapter is left unguarded. The wiring
+// (cmd/refractor/main.go case "capabilityRoleIndex") deliberately omits the
+// enableProjectionGuard call, leaving the adapter in its default state. This
+// asserts the default — a guard-family-membership guardrail so a future careless
+// edit that flips it is caught.
+func TestNatsKVAdapter_RoleIndexLens_Unguarded(t *testing.T) {
+	kv := startKV(t)
+	// The role-index adapter is built like any other default lens adapter:
+	// New + no SetGuarded(true) call.
+	a := newAdapter(t, kv, []string{"operationType"})
+	require.False(t, a.Guarded(), "capabilityRoleIndex must remain unguarded (operation-aggregate, not actor-aggregate)")
 }
 
 func TestNatsKVAdapter_Probe_Success(t *testing.T) {
