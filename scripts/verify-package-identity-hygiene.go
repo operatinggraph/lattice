@@ -235,13 +235,16 @@ func main() {
 			}
 		}
 
-		// 8. Aspect: .spec exists and contains required terms.
+		// 8. Aspect: .spec carries the LensSpec body and its cypherRule
+		// contains the required terms. The spec aspect holds the full LensSpec
+		// (the shape CoreKVSource activates the lens from); the cypher text
+		// lives under cypherRule.
 		specKey := lensKey + ".spec"
 		if env, err := pkgverify.GetEnvelope(ctx, coreKV, specKey); err != nil {
 			fail(specKey, fmt.Sprintf("missing: %v", err))
 		} else {
 			data, _ := env["data"].(map[string]any)
-			src, _ := data["source"].(string)
+			src, _ := data["cypherRule"].(string)
 			missingTerms := []string{}
 			for _, term := range []string{"secondaryInboundEdges", "secondaryOutboundEdges", "levenshteinRatio"} {
 				if !strings.Contains(src, term) {
