@@ -5,20 +5,39 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // Compile-time check that NatsKVAdapter satisfies Adapter.
 var _ Adapter = (*NatsKVAdapter)(nil)
+
+// guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
+// runs when a concurrent writer (the retry-queue goroutine) collides on the
+// same key. On exhaustion the write returns a plain error, which the pipeline's
+// failure.Classify routes as CatTransient (re-enqueue, not a pump pause).
+const guardCASMaxAttempts = 8
+
+// projectionSeqField is the top-level body field carrying the monotonic
+// ordering token on a guarded write (Contract #6 §6.2).
+const projectionSeqField = "projectionSeq"
 
 // NatsKVAdapter writes materialized rows to a NATS KV bucket.
 type NatsKVAdapter struct {
 	kv         jetstream.KeyValue
 	keyOrder   []string   // ordered key field names; used for deterministic composite key construction
 	deleteMode DeleteMode // hard (default): kv.Delete; soft: tombstone Put
+	// guarded selects the monotonic projection-write guard (Contract #6 §6.2).
+	// When true, Upsert/Delete write conditionally (CAS) so a lower-seq replay
+	// is rejected, a Delete becomes a soft tombstone carrying the watermark, and
+	// projectionSeq is stamped into the persisted body. Set per-lens via
+	// SetGuarded; the two at-risk lenses (capabilityEphemeral, myTasks) enable it.
+	guarded bool
 }
 
 // New creates a NatsKVAdapter that writes to kv.
@@ -27,12 +46,27 @@ type NatsKVAdapter struct {
 // (e.g. ["account_id","agreement_id"] → "acct-001.abc123").
 // deleteMode selects hard (kv.Delete) vs soft (tombstone Put) delete projection;
 // it is fixed for the life of the adapter.
+//
+// The adapter is built unguarded; SetGuarded enables the projection-write guard
+// for the lenses that require it (the canonical-name switch in cmd/refractor
+// owns that decision, keeping this constructor free of lens-name knowledge).
 func New(kv jetstream.KeyValue, keyOrder []string, deleteMode DeleteMode) (*NatsKVAdapter, error) {
 	if len(keyOrder) == 0 {
 		return nil, errors.New("natskv: keyOrder must not be empty")
 	}
 	return &NatsKVAdapter{kv: kv, keyOrder: keyOrder, deleteMode: deleteMode}, nil
 }
+
+// SetGuarded enables or disables the monotonic projection-write guard for this
+// adapter. It must be called at construction time, before the pipeline starts
+// writing — the flag is not safe to flip concurrently with writes.
+func (a *NatsKVAdapter) SetGuarded(guarded bool) { a.guarded = guarded }
+
+// Guarded reports whether the projection-write guard is enabled. The pipeline
+// consults it to decide whether the non-stream-sequenced adjacency-watch path
+// may write this adapter's keys (a guarded watermark may only be advanced or
+// cleared by a stream-sequenced write).
+func (a *NatsKVAdapter) Guarded() bool { return a.guarded }
 
 // buildKey concatenates key field values in keyOrder order, joined with ".".
 // Lattice key shape convention (Contract #1) uses "." as the segment
@@ -50,12 +84,20 @@ func (a *NatsKVAdapter) buildKey(keys map[string]any) (string, error) {
 	return strings.Join(parts, "."), nil
 }
 
-// Upsert serializes row to JSON and writes it to the KV bucket under the constructed key,
-// creating or overwriting unconditionally (idempotent).
-func (a *NatsKVAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any) error {
+// Upsert serializes row to JSON and writes it to the KV bucket under the
+// constructed key. An unguarded adapter writes unconditionally (idempotent
+// last-writer-wins, ignoring projectionSeq). A guarded adapter writes
+// conditionally: it drops the write as an idempotent no-op when a write with an
+// equal-or-higher projectionSeq already landed, and otherwise stamps
+// projectionSeq into the persisted body and commits via a CAS loop so a lower-seq
+// replay can never overwrite a newer projection (Contract #6 §6.2).
+func (a *NatsKVAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) error {
 	key, err := a.buildKey(keys)
 	if err != nil {
 		return fmt.Errorf("natskv upsert: %w", err)
+	}
+	if a.guarded {
+		return a.guardedWrite(ctx, key, row, projectionSeq, false)
 	}
 	data, err := json.Marshal(row)
 	if err != nil {
@@ -83,10 +125,17 @@ func (a *NatsKVAdapter) Upsert(ctx context.Context, keys map[string]any, row map
 // NoCapabilityEntry and an isDeleted doc to a denied entry. The freshness-ceiling
 // comparison that originally motivated soft-delete on the capability plane was
 // removed in Story 1.5.4, so absence and tombstone are now equivalent for auth.
-func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any) error {
+func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error {
 	key, err := a.buildKey(keys)
 	if err != nil {
 		return fmt.Errorf("natskv delete: %w", err)
+	}
+	if a.guarded {
+		// A guarded delete is always a soft tombstone carrying the watermark,
+		// regardless of the lens's deleteMode: the high-water mark must survive
+		// physical absence so a lower-seq replay still loses. Absence and an
+		// isDeleted tombstone are equivalent for authorization (Contract #6 §6.8).
+		return a.guardedWrite(ctx, key, nil, projectionSeq, true)
 	}
 	if a.deleteMode == DeleteModeSoft {
 		tombstone := map[string]any{
@@ -110,6 +159,120 @@ func (a *NatsKVAdapter) Delete(ctx context.Context, keys map[string]any) error {
 		return fmt.Errorf("natskv delete: delete %s: %w", key, err)
 	}
 	return nil
+}
+
+// guardedWrite performs a monotonic, conditional write under the projection
+// guard (Contract #6 §6.2). delete selects a soft tombstone body
+// {isDeleted:true, projectionSeq} over a live upsert body (row + injected
+// projectionSeq). It reads the current entry, drops the write as an idempotent
+// no-op when the stored projectionSeq is greater than or equal to the incoming
+// one, and otherwise commits with the entry's revision as the CAS precondition.
+// A revision conflict (a concurrent writer landed first) triggers a re-read and
+// re-compare, bounded by guardCASMaxAttempts; on exhaustion it returns a plain
+// error (routed transient) after a warn naming the key.
+//
+// A guarded write always carries a real JetStream stream sequence (≥ 1); the
+// only way to reach here with incomingSeq == 0 is a non-stream caller (the
+// adjacency-watch path, which already skips guarded keys) or a failed metadata
+// read. Such a write carries no ordering and is dropped as a fail-closed no-op
+// so it can neither create a clobberable seq-0 key nor no-op a real update.
+func (a *NatsKVAdapter) guardedWrite(ctx context.Context, key string, row map[string]any, incomingSeq uint64, delete bool) error {
+	if incomingSeq == 0 {
+		slog.Warn("natskv guarded write: dropping sequence-less write (no ordering token)",
+			"key", key, "delete", delete)
+		return nil
+	}
+	body := a.guardedBody(row, incomingSeq, delete)
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("natskv guarded write: marshal %s: %w", key, err)
+	}
+
+	for attempt := 0; attempt < guardCASMaxAttempts; attempt++ {
+		entry, getErr := a.kv.Get(ctx, key)
+		if getErr != nil {
+			if !errors.Is(getErr, jetstream.ErrKeyNotFound) {
+				return fmt.Errorf("natskv guarded write: get %s: %w", key, getErr)
+			}
+			// Key absent: create it. A concurrent create wins the revision and
+			// we re-read on the next iteration.
+			if _, createErr := a.kv.Create(ctx, key, data); createErr != nil {
+				if substrate.IsRevisionConflict(createErr) {
+					continue
+				}
+				return fmt.Errorf("natskv guarded write: create %s: %w", key, createErr)
+			}
+			return nil
+		}
+
+		if storedSeq, ok := storedProjectionSeq(entry.Value()); ok && storedSeq >= incomingSeq {
+			// A write with an equal-or-higher watermark already landed; this is
+			// an idempotent no-op (a stale lower-seq replay loses).
+			return nil
+		}
+
+		if _, updErr := a.kv.Update(ctx, key, data, entry.Revision()); updErr != nil {
+			if substrate.IsRevisionConflict(updErr) {
+				continue
+			}
+			return fmt.Errorf("natskv guarded write: update %s: %w", key, updErr)
+		}
+		return nil
+	}
+
+	slog.Warn("natskv guarded write: CAS loop exhausted under contention",
+		"key", key, "attempts", guardCASMaxAttempts, "projectionSeq", incomingSeq)
+	return fmt.Errorf("natskv guarded write: %s: revision conflict not resolved after %d attempts", key, guardCASMaxAttempts)
+}
+
+// guardedBody builds the persisted document for a guarded write: a soft
+// tombstone for a delete, or the projection row with projectionSeq injected as a
+// top-level field for an upsert.
+func (a *NatsKVAdapter) guardedBody(row map[string]any, incomingSeq uint64, delete bool) map[string]any {
+	if delete {
+		return map[string]any{
+			"isDeleted":        true,
+			"projectedAt":      time.Now().UTC().Format(time.RFC3339),
+			projectionSeqField: incomingSeq,
+		}
+	}
+	body := make(map[string]any, len(row)+1)
+	for k, v := range row {
+		body[k] = v
+	}
+	body[projectionSeqField] = incomingSeq
+	return body
+}
+
+// storedProjectionSeq extracts the projectionSeq watermark from a persisted
+// guarded body. Returns (0, false) when the body is empty, unparseable, or
+// carries no projectionSeq (legacy doc written before the guard) — the caller
+// then treats it as the lowest possible watermark and proceeds to write.
+func storedProjectionSeq(data []byte) (uint64, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return 0, false
+	}
+	raw, ok := doc[projectionSeqField]
+	if !ok {
+		return 0, false
+	}
+	// JSON numbers decode into float64 through map[string]any.
+	switch v := raw.(type) {
+	case float64:
+		return uint64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		return uint64(n), true
+	default:
+		return 0, false
+	}
 }
 
 // Probe checks whether the NATS KV bucket is reachable by calling kv.Status.

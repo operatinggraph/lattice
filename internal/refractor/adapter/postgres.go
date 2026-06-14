@@ -201,7 +201,11 @@ func coerceForPgx(v any) any {
 // keys and row together form the complete row; keys drives the ON CONFLICT clause.
 // []any and map[string]any values are coerced to json.RawMessage for JSONB columns.
 // The per-rule queryTimeout is applied via withTimeout. Returns nil on success.
-func (a *PostgresAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any) error {
+//
+// projectionSeq is accepted to satisfy the Adapter interface but ignored: the
+// monotonic projection-write guard is not enforced on Postgres targets
+// (Contract #6 §6.2). Postgres writes remain unconditional last-writer-wins.
+func (a *PostgresAdapter) Upsert(ctx context.Context, keys map[string]any, row map[string]any, _ uint64) error {
 	ctx, cancel := a.withTimeout(ctx)
 	defer cancel()
 
@@ -254,7 +258,11 @@ func (a *PostgresAdapter) buildDeleteSQL(keys map[string]any) (string, []any, er
 // Zero rows affected is not an error — deletion of a non-existent row is idempotent (NFR2).
 // []any and map[string]any key values are coerced to json.RawMessage for JSONB columns.
 // The per-rule queryTimeout is applied via withTimeout. Returns nil on success.
-func (a *PostgresAdapter) Delete(ctx context.Context, keys map[string]any) error {
+//
+// projectionSeq is accepted to satisfy the Adapter interface but ignored: the
+// monotonic projection-write guard is not enforced on Postgres targets
+// (Contract #6 §6.2).
+func (a *PostgresAdapter) Delete(ctx context.Context, keys map[string]any, _ uint64) error {
 	ctx, cancel := a.withTimeout(ctx)
 	defer cancel()
 

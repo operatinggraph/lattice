@@ -629,12 +629,19 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 	adpt := p.currentAdapter()
 	var retryResults []simple.EvalResult
 	var terminalErrs []error
+	for i := range results {
+		// Stamp the triggering CDC message's stream sequence as the monotonic
+		// ordering token before any write. The retry-queue capture copies the
+		// stamped result, so a replay carries this same (original, lower) seq,
+		// which is exactly what must lose to a later real reprojection.
+		results[i].ProjectionSeq = msg.Sequence
+	}
 	for _, result := range results {
 		var writeErr error
 		if result.Delete {
-			writeErr = adpt.Delete(ctx, result.Keys)
+			writeErr = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
 		} else {
-			writeErr = adpt.Upsert(ctx, result.Keys, result.Row)
+			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
 		}
 
 		if writeErr != nil {
@@ -705,9 +712,9 @@ func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result simple.Eva
 		WriteFn: func(rctx context.Context) error {
 			a := p.currentAdapter()
 			if capturedResult.Delete {
-				return a.Delete(rctx, capturedResult.Keys)
+				return a.Delete(rctx, capturedResult.Keys, capturedResult.ProjectionSeq)
 			}
-			return a.Upsert(rctx, capturedResult.Keys, capturedResult.Row)
+			return a.Upsert(rctx, capturedResult.Keys, capturedResult.Row, capturedResult.ProjectionSeq)
 		},
 		Attempt:     0,
 		MaxAttempts: p.retryMaxAttempts,
@@ -958,12 +965,29 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjEntry jetstream.KeyVa
 	}
 
 	adpt := p.currentAdapter()
+	// A guarded watermark may be advanced or cleared ONLY by a stream-sequenced
+	// write (Contract #6 §6.2). The adjacency-watch path is not message-driven —
+	// it carries no JetStream stream sequence — and it is redundant for the
+	// guarded lenses: every link/aspect CDC event that an adjacency update
+	// reflects also flows through the stream consumer's evalLinkFanOut /
+	// evalAspectFanOut, which reproject the same affected actors with the
+	// triggering message's stream sequence. Writing here with a sentinel seq of 0
+	// would either be unconditionally dropped or could resurrect a tombstoned /
+	// absent guarded key. So skip guarded-key writes on this path entirely and
+	// log, leaving the watermark to the stream-sequenced reprojection.
+	if g, ok := adpt.(interface{ Guarded() bool }); ok && g.Guarded() {
+		if len(results) > 0 {
+			slog.Info("pipeline: adj watch: skipping guarded-key write (stream consumer owns the watermark)",
+				"ruleId", p.ruleID, "key", nodeKey, "results", len(results))
+		}
+		return
+	}
 	for _, result := range results {
 		var writeErr error
 		if result.Delete {
-			writeErr = adpt.Delete(ctx, result.Keys)
+			writeErr = adpt.Delete(ctx, result.Keys, 0)
 		} else {
-			writeErr = adpt.Upsert(ctx, result.Keys, result.Row)
+			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, 0)
 		}
 		if writeErr != nil {
 			if ctx.Err() != nil {

@@ -210,11 +210,11 @@ type errAdapter struct {
 	calls atomic.Int64
 }
 
-func (e *errAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any) error {
+func (e *errAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any, _ uint64) error {
 	e.calls.Add(1)
 	return errors.New("injected upsert error")
 }
-func (e *errAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (e *errAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (e *errAdapter) Probe(_ context.Context) error                    { return nil }
 func (e *errAdapter) Close() error                                     { return nil }
 
@@ -226,11 +226,11 @@ type infraAdapter struct {
 	recoverAt   int64 // probe call number at which recovery occurs
 }
 
-func (a *infraAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any) error {
+func (a *infraAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any, _ uint64) error {
 	a.upsertCalls.Add(1)
 	return nats.ErrConnectionClosed // classified as Infrastructure
 }
-func (a *infraAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (a *infraAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (a *infraAdapter) Probe(_ context.Context) error {
 	n := a.probeCalls.Add(1)
 	if n >= a.recoverAt {
@@ -243,10 +243,10 @@ func (a *infraAdapter) Close() error { return nil }
 // structuralAdapter always returns a structural error from Upsert.
 type structuralAdapter struct{}
 
-func (a *structuralAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any) error {
+func (a *structuralAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any, _ uint64) error {
 	return jetstream.ErrBucketNotFound // classified as Structural
 }
-func (a *structuralAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (a *structuralAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (a *structuralAdapter) Probe(_ context.Context) error                    { return nil }
 func (a *structuralAdapter) Close() error                                     { return nil }
 
@@ -602,13 +602,13 @@ type structuralOnceAdapter struct {
 	calls atomic.Int64
 }
 
-func (a *structuralOnceAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any) error {
+func (a *structuralOnceAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any, _ uint64) error {
 	if a.calls.Add(1) == 1 {
 		return jetstream.ErrBucketNotFound // classified as Structural
 	}
 	return nil
 }
-func (a *structuralOnceAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (a *structuralOnceAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (a *structuralOnceAdapter) Probe(_ context.Context) error                    { return nil }
 func (a *structuralOnceAdapter) Close() error                                     { return nil }
 
@@ -714,7 +714,7 @@ type recorderAdapter struct {
 	upsertKeys []map[string]any
 }
 
-func (r *recorderAdapter) Upsert(_ context.Context, keys map[string]any, _ map[string]any) error {
+func (r *recorderAdapter) Upsert(_ context.Context, keys map[string]any, _ map[string]any, _ uint64) error {
 	r.mu.Lock()
 	cp := make(map[string]any, len(keys))
 	for k, v := range keys {
@@ -724,7 +724,7 @@ func (r *recorderAdapter) Upsert(_ context.Context, keys map[string]any, _ map[s
 	r.mu.Unlock()
 	return nil
 }
-func (r *recorderAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (r *recorderAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (r *recorderAdapter) Probe(_ context.Context) error                    { return nil }
 func (r *recorderAdapter) Close() error                                     { return nil }
 
@@ -890,13 +890,13 @@ type terminalOnceAdapter struct {
 	calls atomic.Int64
 }
 
-func (a *terminalOnceAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any) error {
+func (a *terminalOnceAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any, _ uint64) error {
 	if a.calls.Add(1) == 1 {
 		return failure.Terminal(errors.New("bad data: value 'xyz' is not a valid integer"))
 	}
 	return nil
 }
-func (a *terminalOnceAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (a *terminalOnceAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (a *terminalOnceAdapter) Probe(_ context.Context) error                    { return nil }
 func (a *terminalOnceAdapter) Close() error                                     { return nil }
 
@@ -1300,11 +1300,11 @@ type gateAdapter struct {
 	probeOK     atomic.Bool
 }
 
-func (a *gateAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any) error {
+func (a *gateAdapter) Upsert(_ context.Context, _ map[string]any, _ map[string]any, _ uint64) error {
 	a.upsertCalls.Add(1)
 	return nats.ErrConnectionClosed // classified as Infrastructure
 }
-func (a *gateAdapter) Delete(_ context.Context, _ map[string]any) error { return nil }
+func (a *gateAdapter) Delete(_ context.Context, _ map[string]any, _ uint64) error { return nil }
 func (a *gateAdapter) Probe(_ context.Context) error {
 	a.probeCalls.Add(1)
 	if a.probeOK.Load() {

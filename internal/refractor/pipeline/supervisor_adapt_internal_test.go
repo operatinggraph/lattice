@@ -88,10 +88,12 @@ func (a *keyedAdapter) write(keys map[string]any) error {
 	return a.errs[k]
 }
 
-func (a *keyedAdapter) Upsert(_ context.Context, keys map[string]any, _ map[string]any) error {
+func (a *keyedAdapter) Upsert(_ context.Context, keys map[string]any, _ map[string]any, _ uint64) error {
 	return a.write(keys)
 }
-func (a *keyedAdapter) Delete(_ context.Context, keys map[string]any) error { return a.write(keys) }
+func (a *keyedAdapter) Delete(_ context.Context, keys map[string]any, _ uint64) error {
+	return a.write(keys)
+}
 func (a *keyedAdapter) Probe(context.Context) error                         { return nil }
 func (a *keyedAdapter) Close() error                                        { return nil }
 

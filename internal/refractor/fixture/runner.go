@@ -82,9 +82,9 @@ func RunFixture(t *testing.T, fix *Fixture, adjKV, coreKV, targetKV jetstream.Ke
 
 		for _, result := range results {
 			if result.Delete {
-				err = adpt.Delete(ctx, result.Keys)
+				err = adpt.Delete(ctx, result.Keys, result.ProjectionSeq)
 			} else {
-				err = adpt.Upsert(ctx, result.Keys, result.Row)
+				err = adpt.Upsert(ctx, result.Keys, result.Row, result.ProjectionSeq)
 			}
 			require.NoError(t, err, "fixture: write result key=%s delete=%v", input.Key, result.Delete)
 		}

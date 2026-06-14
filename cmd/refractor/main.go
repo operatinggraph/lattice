@@ -291,6 +291,13 @@ func main() {
 			// cap.ephemeral.<actor> key, not the primary cap.<actor> doc.
 			p.SetActorDeleteKey(capabilityenv.EphemeralKey)
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
+			// Security plane: this per-actor ephemeral-grant projection is guarded
+			// by the monotonic projection-write guard so a retried or reordered
+			// stale write can never resurrect a revoked grant (Contract #6 §6.2).
+			if err := enableProjectionGuard(adpt, r.ID); err != nil {
+				logger.Error("capabilityEphemeral guard", "lensId", r.ID, "err", err)
+				return
+			}
 			logger.Info("capabilityEphemeral envelope + fan-out + latency installed",
 				"lensId", r.ID, "lensDefKey", lensDefKey)
 		case "myTasks":
@@ -308,6 +315,14 @@ func main() {
 			// key, not the primary cap.<actor> doc.
 			p.SetActorDeleteKey(capabilityenv.MyTasksKey)
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
+			// Correctness plane: the per-actor my-tasks projection is guarded so a
+			// closed task can never be resurrected by a stale replay; a close
+			// becomes a soft tombstone carrying the watermark (Contract #6 §6.2,
+			// Contract #10 §10.1).
+			if err := enableProjectionGuard(adpt, r.ID); err != nil {
+				logger.Error("myTasks guard", "lensId", r.ID, "err", err)
+				return
+			}
 			logger.Info("myTasks envelope + fan-out + latency installed",
 				"lensId", r.ID, "lensDefKey", lensDefKey)
 		}
@@ -496,4 +511,21 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// enableProjectionGuard turns on the monotonic projection-write guard for a
+// NATS-KV-backed lens. buildAdapter stays free of lens-name knowledge; the
+// canonical-name switch (the only place that knows which lenses are guarded, and
+// the place a later epic deletes) flips the flag here. The guarded lenses are
+// security/correctness-plane, so an adapter that cannot enforce the guard
+// (e.g. a Postgres target) is a fail-closed error, not a silent downgrade: a
+// guarded lens running unguarded re-opens the resurrection window the guard
+// exists to close.
+func enableProjectionGuard(adpt adapter.Adapter, lensID string) error {
+	nkv, ok := adpt.(*adapter.NatsKVAdapter)
+	if !ok {
+		return fmt.Errorf("projection-write guard required for lens %s but target adapter cannot enforce it (not NATS-KV)", lensID)
+	}
+	nkv.SetGuarded(true)
+	return nil
 }

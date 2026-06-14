@@ -2,10 +2,12 @@
 //
 // TestGate3_Report is the roll-up entry point for the Capability Lens
 // adversarial test suite (Story 3.7). It mirrors the structure of TestGate2_Report
-// (bypass_test.go) for the four attack vectors enumerated in NFR-S3 / Story 3.7 AC.
+// (bypass_test.go) for the adversarial attack vectors enumerated in NFR-S3 /
+// Story 3.7 AC, extended by later stories (e.g. the projection-resurrection
+// vector, Story 12.1a).
 //
 // This test:
-//  1. Documents all four attack vectors with their enforcement layers.
+//  1. Documents every attack vector with its enforcement layer.
 //  2. Produces gate3-report.txt in _bmad-output/implementation-artifacts/.
 //  3. Writes the Health KV marker health.gates.phase1.gate3 on full pass.
 //  4. Fails (exits non-zero) unless every vector clears (DEFENDED, or
@@ -34,7 +36,7 @@ import (
 )
 
 // TestGate3_Report is the roll-up test. It:
-//  1. Verifies all four adversarial vectors have individual passing tests.
+//  1. Verifies every adversarial vector has individual passing tests.
 //  2. Produces the human-readable report to stdout and gate3-report.txt.
 //  3. Writes the Health KV marker on full pass.
 //  4. Fails (exits non-zero) unless every vector clears (DEFENDED, or
@@ -48,11 +50,11 @@ func TestGate3_Report(t *testing.T) {
 	now := time.Now().UTC()
 	timestamp := now.Format(time.RFC3339)
 
-	// The four adversarial vectors and their enforcement layers. Vectors #1,
-	// #3, #4 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per
-	// Story 1.5.4. If any sub-test fails, the Go test framework exits non-zero
-	// BEFORE this roll-up fires — so reaching here with passing sub-tests is
-	// sufficient proof.
+	// The adversarial vectors and their enforcement layers. Vectors #1, #3, #4,
+	// #5 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per Story
+	// 1.5.4. If any sub-test fails, the Go test framework exits non-zero BEFORE
+	// this roll-up fires — so reaching here with passing sub-tests is sufficient
+	// proof.
 	type reportRow struct {
 		Num         int
 		Vector      string
@@ -85,13 +87,24 @@ func TestGate3_Report(t *testing.T) {
 			Result:      "DEFENDED",
 			Enforcement: "CapabilityAuthorizer ephemeralGrant target-match (§6.6): task+target must match exactly; cross-target → AuthContextMismatch (Story 3.2b + 3.3)",
 		},
+		{
+			Num:         5,
+			Vector:      "Stale projection resurrection (retry + adj-watch)",
+			Result:      "DEFENDED",
+			Enforcement: "Refractor monotonic projection-write guard: projectionSeq CAS rejects lower-seq replay; Delete → soft tombstone carries watermark; adj-watch (seq 0) cannot advance it (§6.2/§6.8; Story 12.1a)",
+		},
 	}
+
+	// total is the number of vectors in the report and the gate denominator.
+	// Deriving it from rows keeps the pass/fail count honest when a vector is
+	// added — a new row updates the gate automatically.
+	total := len(rows)
 
 	// Count vectors that clear the gate. Vector #2 (projection lag) is an
 	// ACCEPTED-WINDOW posture (Story 1.5.4): the per-op freshness gate was
 	// removed, so a stale projection is a bounded accepted risk backstopped
 	// operationally + by the future Gateway revocation path — not a denial.
-	// The other three vectors remain DEFENDED.
+	// Every other vector is DEFENDED.
 	defended := 0
 	accepted := 0
 	for _, r := range rows {
@@ -130,11 +143,11 @@ func TestGate3_Report(t *testing.T) {
 	fmt.Fprintln(&buf, "    Phase 1 defense is Refractor reprojection; Phase 2 will add substrate-level enforcement.")
 	fmt.Fprintln(&buf)
 
-	if cleared == 4 {
-		fmt.Fprintf(&buf, "PHASE 1 GATE 3: PASSED (%d/4 cleared — %d DEFENDED, %d ACCEPTED-WINDOW)\n", cleared, defended, accepted)
+	if cleared == total {
+		fmt.Fprintf(&buf, "PHASE 1 GATE 3: PASSED (%d/%d cleared — %d DEFENDED, %d ACCEPTED-WINDOW)\n", cleared, total, defended, accepted)
 		fmt.Fprintln(&buf, "EPIC 3 STATUS: CLOSED — 7 stories complete; Phase 1 Gate 3 cleared.")
 	} else {
-		fmt.Fprintf(&buf, "PHASE 1 GATE 3: NOT PASSED (%d/4 cleared)\n", cleared)
+		fmt.Fprintf(&buf, "PHASE 1 GATE 3: NOT PASSED (%d/%d cleared)\n", cleared, total)
 	}
 
 	report := buf.String()
@@ -152,14 +165,14 @@ func TestGate3_Report(t *testing.T) {
 
 	// Gate 3 verdict check — fail unless every vector clears (DEFENDED or, for
 	// the projection-lag window, ACCEPTED-WINDOW).
-	if cleared < 4 {
-		t.Fatalf("PHASE 1 GATE 3: NOT PASSED — only %d/4 vectors cleared", cleared)
+	if cleared < total {
+		t.Fatalf("PHASE 1 GATE 3: NOT PASSED — only %d/%d vectors cleared", cleared, total)
 	}
 
 	// On full pass: write Health KV marker.
 	writeGate3HealthMarker(t, timestamp, commit)
 
-	t.Logf("PHASE 1 GATE 3: PASSED — %d/4 vectors cleared (%d DEFENDED, %d ACCEPTED-WINDOW)", cleared, defended, accepted)
+	t.Logf("PHASE 1 GATE 3: PASSED — %d/%d vectors cleared (%d DEFENDED, %d ACCEPTED-WINDOW)", cleared, total, defended, accepted)
 	t.Logf("EPIC 3: CLOSED")
 }
 

@@ -289,11 +289,11 @@ func TestPostgresAdapter_Upsert_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// First upsert — inserts the row.
-	err = a.Upsert(ctx, map[string]any{"id": "abc"}, map[string]any{"name": "Acme"})
+	err = a.Upsert(ctx, map[string]any{"id": "abc"}, map[string]any{"name": "Acme"}, 0)
 	require.NoError(t, err)
 
 	// Second upsert with same key — updates, not duplicates.
-	err = a.Upsert(ctx, map[string]any{"id": "abc"}, map[string]any{"name": "Acme Corp"})
+	err = a.Upsert(ctx, map[string]any{"id": "abc"}, map[string]any{"name": "Acme Corp"}, 0)
 	require.NoError(t, err)
 
 	// Exactly one row must exist with the latest value.
@@ -324,6 +324,7 @@ func TestPostgresAdapter_Upsert_CompositeKey_Integration(t *testing.T) {
 	err = a.Upsert(ctx,
 		map[string]any{"team_id": "t1", "agreement_id": "a1"},
 		map[string]any{"party_name": "Acme"},
+		0,
 	)
 	require.NoError(t, err)
 
@@ -331,6 +332,7 @@ func TestPostgresAdapter_Upsert_CompositeKey_Integration(t *testing.T) {
 	err = a.Upsert(ctx,
 		map[string]any{"team_id": "t1", "agreement_id": "a1"},
 		map[string]any{"party_name": "Acme Corp"},
+		0,
 	)
 	require.NoError(t, err)
 
@@ -352,7 +354,7 @@ func TestPostgresAdapter_Upsert_MissingTable_Integration(t *testing.T) {
 	a, err := NewPostgresAdapter(pool, "table_does_not_exist_xyz", []string{"id"}, 5*time.Second, DeleteModeHard)
 	require.NoError(t, err)
 
-	err = a.Upsert(context.Background(), map[string]any{"id": "x"}, map[string]any{"val": "y"})
+	err = a.Upsert(context.Background(), map[string]any{"id": "x"}, map[string]any{"val": "y"}, 0)
 	assert.Error(t, err, "upsert into non-existent table must return an error")
 }
 
@@ -445,7 +447,7 @@ func TestPostgresAdapter_Delete_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete the row.
-	err = a.Delete(ctx, map[string]any{"id": "abc"})
+	err = a.Delete(ctx, map[string]any{"id": "abc"}, 0)
 	require.NoError(t, err)
 
 	// Verify it is gone.
@@ -471,7 +473,7 @@ func TestPostgresAdapter_Delete_Idempotent_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete a row that was never inserted — must return nil (idempotent, NFR2).
-	err = a.Delete(ctx, map[string]any{"id": "nonexistent"})
+	err = a.Delete(ctx, map[string]any{"id": "nonexistent"}, 0)
 	assert.NoError(t, err, "deleting a non-existent row must be a no-error no-op")
 }
 
@@ -493,7 +495,7 @@ func TestPostgresAdapter_Delete_CompositeKey_Integration(t *testing.T) {
 	a, err := NewPostgresAdapter(pool, "delete_composite_test", []string{"team_id", "agreement_id"}, 5*time.Second, DeleteModeHard)
 	require.NoError(t, err)
 
-	err = a.Delete(ctx, map[string]any{"team_id": "t1", "agreement_id": "a1"})
+	err = a.Delete(ctx, map[string]any{"team_id": "t1", "agreement_id": "a1"}, 0)
 	require.NoError(t, err)
 
 	var count int
@@ -521,7 +523,7 @@ func TestPostgresAdapter_Delete_Soft_Integration(t *testing.T) {
 	a, err := NewPostgresAdapter(pool, "delete_soft_test", []string{"id"}, 5*time.Second, DeleteModeSoft)
 	require.NoError(t, err)
 
-	err = a.Delete(ctx, map[string]any{"id": "abc"})
+	err = a.Delete(ctx, map[string]any{"id": "abc"}, 0)
 	require.NoError(t, err)
 
 	// Row must still exist with is_deleted=true (tombstone retained).
@@ -603,6 +605,7 @@ func TestPostgresAdapter_Upsert_JSONBColumn_Integration(t *testing.T) {
 	err = a.Upsert(ctx,
 		map[string]any{"id": "row1"},
 		map[string]any{"tags": tagsInput, "meta": metaInput},
+		0,
 	)
 	require.NoError(t, err, "upsert with JSONB columns must succeed")
 

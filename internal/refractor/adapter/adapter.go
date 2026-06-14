@@ -6,9 +6,12 @@ import "context"
 //
 // keys holds the composite key fields and values (from EvalResult.Keys).
 // row holds all projected non-key column values (from EvalResult.Row).
+// projectionSeq is the JetStream stream sequence of the triggering CDC message
+// (EvalResult.ProjectionSeq); a guarded adapter uses it as a monotonic ordering
+// token to reject a lower-seq replay. Unguarded adapters ignore it.
 type Adapter interface {
-	Upsert(ctx context.Context, keys map[string]any, row map[string]any) error
-	Delete(ctx context.Context, keys map[string]any) error
+	Upsert(ctx context.Context, keys map[string]any, row map[string]any, projectionSeq uint64) error
+	Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error
 	// Probe performs a lightweight liveness check against the target store.
 	// Returns nil if the store is reachable and the target bucket/table exists;
 	// returns an error (classified by failure.Classify) otherwise.

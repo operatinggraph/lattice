@@ -46,6 +46,11 @@ type EvalResult struct {
 	Delete bool           // true = issue a hard delete to the adapter
 	Keys   map[string]any // key column values (always populated)
 	Row    map[string]any // all projected column values; nil when Delete is true
+	// ProjectionSeq is the JetStream stream sequence of the CDC message that
+	// triggered this evaluation. It is the monotonic ordering token a guarded
+	// adapter uses to reject a lower-seq replay. Zero means unguarded/unknown
+	// (no triggering stream message, e.g. the adjacency-watch path).
+	ProjectionSeq uint64
 }
 
 // evalBinding holds the variable-to-node mapping for one traversal path in progress.

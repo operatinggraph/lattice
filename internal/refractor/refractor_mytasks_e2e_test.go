@@ -1,9 +1,14 @@
-// my-tasks lens e2e: a per-identity OPEN-task projection that genuinely
-// vanishes when the task leaves `open` (the 7.1 FIX-1 absence mechanism via the
-// envelope wrapper's ErrDeleteProjection). The lens reuses the proven
-// ephemeral-lens architecture (link-sourced cypher + actor fan-out + wrapper-
-// driven delete), so this test exercises the package's myTasks cypher + the
-// NewMyTasksWrapper end-to-end through the real pipeline.
+// my-tasks lens e2e: a per-identity OPEN-task projection. When a task leaves
+// `open`, the envelope wrapper's ErrDeleteProjection drives a guarded delete,
+// which the monotonic projection-write guard records as a soft tombstone
+// {isDeleted:true, projectionSeq} (Contract #6 §6.2, Contract #10 §10.1).
+// Absence and an isDeleted tombstone are equivalent for the reader: neither
+// surfaces the closed task. The guard makes the close authoritative — a stale
+// open-era re-projection carries a lower stream sequence and is rejected, so it
+// cannot resurrect the closed task. The lens reuses the proven ephemeral-lens
+// architecture (link-sourced cypher + actor fan-out + wrapper-driven delete), so
+// this test exercises the package's myTasks cypher + the NewMyTasksWrapper
+// end-to-end through the real pipeline.
 package refractor_test
 
 import (
@@ -95,6 +100,10 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 
 	adpt, err := adapter.New(myTasksKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
+	// my-tasks is a guarded per-actor projection: a close becomes a soft
+	// tombstone carrying the watermark, and a stale lower-seq replay is rejected
+	// (Contract #6 §6.2, Contract #10 §10.1).
+	adpt.SetGuarded(true)
 
 	const lensID = "MyTasksLensId0000001"
 	p, err := pipeline.New(lensID, "nats_kv", nil, bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
@@ -202,49 +211,34 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	require.Equal(t, opKey, row["forOperation"])
 	require.Equal(t, targetKey, row["scopedTo"])
 
-	// Workaround for a KNOWN, separately-tracked refractor projection-ordering
-	// race: the natskv adapter writes projections unconditionally (no revision
-	// guard / last-writer-wins), so a still-in-flight open re-projection of the
-	// assignee can land AFTER the close and resurrect the key. The settle-wait
-	// drains the open-era CDC fan-out backlog before flipping the task. This
-	// masks the race for the test; it is NOT proof the race is closed.
-	requireQuiescentRevision(t, ctx, myTasksKV, expectedKey)
+	// Capture the open-era watermark so the close-era tombstone can be asserted
+	// to carry a strictly-greater projectionSeq.
+	openEntry, gErr := myTasksKV.Get(ctx, expectedKey)
+	require.NoError(t, gErr)
+	var openEnv map[string]any
+	require.NoError(t, json.Unmarshal(openEntry.Value(), &openEnv))
+	openSeq, _ := openEnv["projectionSeq"].(float64)
 
-	// --- vanish-on-close: flip the task to complete; the key must hard-delete ---
+	// --- vanish-on-close: flip the task to complete; the guarded key must
+	// become a soft tombstone (not absent). The monotonic projection-write guard
+	// makes the close authoritative: a still-in-flight open re-projection carries
+	// a lower stream sequence and is rejected, so the key cannot be resurrected.
 	writeVertex(taskKey, "task", map[string]any{
 		"status": "complete", "expiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 	})
 
 	require.Eventually(t, func() bool {
-		_, gErr := myTasksKV.Get(ctx, expectedKey)
-		return gErr != nil // key absent → vanished on close
+		entry, err := myTasksKV.Get(ctx, expectedKey)
+		if err != nil {
+			return false // the guarded delete tombstones; the key must remain present
+		}
+		var env map[string]any
+		if err := json.Unmarshal(entry.Value(), &env); err != nil {
+			return false
+		}
+		isDeleted, _ := env["isDeleted"].(bool)
+		seq, _ := env["projectionSeq"].(float64)
+		return isDeleted && seq >= openSeq
 	}, 25*time.Second, 100*time.Millisecond,
-		"closed task must vanish from my-tasks (FIX-1 genuine absence)")
-}
-
-// requireQuiescentRevision blocks until the key's KV revision stops advancing
-// for a short settle window — i.e. no further re-projections are in flight.
-// This drains the create-era CDC fan-out backlog so a stale open re-projection
-// can't resurrect the key after a subsequent close.
-func requireQuiescentRevision(t *testing.T, ctx context.Context, kv jetstream.KeyValue, key string) {
-	t.Helper()
-	const settle = 1500 * time.Millisecond
-	deadline := time.Now().Add(25 * time.Second)
-	var lastRev uint64
-	stableSince := time.Time{}
-	for time.Now().Before(deadline) {
-		entry, err := kv.Get(ctx, key)
-		var rev uint64
-		if err == nil && entry != nil {
-			rev = entry.Revision()
-		}
-		if rev != lastRev {
-			lastRev = rev
-			stableSince = time.Now()
-		} else if !stableSince.IsZero() && time.Since(stableSince) >= settle {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("my-tasks key %s never reached a quiescent revision", key)
+		"closed task must become an isDeleted tombstone carrying a watermark ≥ the open-era seq")
 }
