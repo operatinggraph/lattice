@@ -1,6 +1,6 @@
 # Story 12.1a: Monotonic projection-write guard — security/correctness plane (D-INTEGRITY)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
