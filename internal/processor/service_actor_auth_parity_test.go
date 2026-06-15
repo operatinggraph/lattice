@@ -52,8 +52,12 @@ func authorizerFor(t *testing.T, docs ...*CapabilityDoc) *CapabilityAuthorizer {
 		}
 		reader.entries[d.Key] = raw
 	}
-	return NewCapabilityAuthorizer(reader, "capability-kv", &fakeClock{now: time.Now()},
+	a, err := NewCapabilityAuthorizer(reader, "capability-kv", &fakeClock{now: time.Now()},
 		DefaultCapabilityAuthorizerConfig(), capTestLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
+	return a
 }
 
 // TestServiceActor_AuthParity_PlatformPath proves both Loom and Weaver pass

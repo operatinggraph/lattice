@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,7 +104,10 @@ func newCapAuthForTest(t *testing.T, doc *CapabilityDoc, clockAt time.Time) (*Ca
 		}
 	}
 	clock := &fakeClock{now: clockAt}
-	a := NewCapabilityAuthorizer(reader, "capability-kv", clock, DefaultCapabilityAuthorizerConfig(), capTestLogger())
+	a, err := NewCapabilityAuthorizer(reader, "capability-kv", clock, DefaultCapabilityAuthorizerConfig(), capTestLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
 	return a, emitter, reader
 }
 
@@ -493,6 +497,97 @@ func TestSelectAuthorizerArgs_CapabilityWithoutReaderErrors(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error when capability mode lacks reader")
+	}
+}
+
+// TestAuthRegistry_DuplicatePathRejected proves AC4: two entries selecting the
+// same path are a configuration error surfaced at authorizer construction
+// (fail-closed), never resolved by issuing N reads or merging docs.
+func TestAuthRegistry_DuplicatePathRejected(t *testing.T) {
+	reader := &fakeReader{entries: map[string][]byte{}}
+	dupe := authEntry{
+		name:            "platform", // collides with the core platform seed entry
+		selects:         func(ac *AuthContext) bool { return true },
+		kind:            matchPlatformPermissionKind,
+		keyDerivation:   capabilityKeyFromActor,
+		absentKeyCode:   ErrCodeAuthDenied,
+		absentKeyReason: "NoCapabilityEntry",
+	}
+	a, err := NewCapabilityAuthorizer(reader, "capability-kv", &fakeClock{now: time.Now()},
+		DefaultCapabilityAuthorizerConfig(), capTestLogger(), dupe)
+	if err == nil {
+		t.Fatalf("duplicate path must be rejected at construction; got authorizer %v", a)
+	}
+	if a != nil {
+		t.Fatalf("rejected construction must return a nil authorizer; got %v", a)
+	}
+}
+
+// TestAuthRegistry_ExtensionPoint_RoutesNewPath proves AC5: a data-declared
+// entry binding a NEW path predicate → an existing core matcher kind (platform)
+// → a NEW disjoint key derivation routes correctly and matches with NO edit to
+// the matcher-kind implementation. This is the shape Story 12.6 uses.
+func TestAuthRegistry_ExtensionPoint_RoutesNewPath(t *testing.T) {
+	now := time.Now().UTC()
+
+	// A throwaway disjoint key + the doc seeded there. The new path is selected
+	// when authContext.target carries a sentinel marker; it reuses the platform
+	// matcher kind unchanged.
+	const extKey = "cap.ext.identity." + capTestActorID
+	const extMarker = "vtx.ext-route.marker"
+
+	extDoc := &CapabilityDoc{
+		Key:         extKey,
+		Actor:       capTestActorKey,
+		Version:     "1.0",
+		ProjectedAt: now.Format(time.RFC3339Nano),
+		PlatformPermissions: []PlatformPermission{
+			{OperationType: "ExtRoutedOp", Scope: "any"},
+		},
+	}
+	extRaw, err := json.Marshal(extDoc)
+	if err != nil {
+		t.Fatalf("marshal ext doc: %v", err)
+	}
+
+	reader := &fakeReader{entries: map[string][]byte{extKey: extRaw}}
+	extEntry := authEntry{
+		name:    "ext-route",
+		selects: func(ac *AuthContext) bool { return ac != nil && ac.Target == extMarker },
+		kind:    matchPlatformPermissionKind,
+		keyDerivation: func(actor string) (string, error) {
+			rest, ok := strings.CutPrefix(actor, "vtx.")
+			if !ok {
+				return "", errors.New("bad actor")
+			}
+			return "cap.ext." + rest, nil
+		},
+		absentKeyCode:   ErrCodeAuthDenied,
+		absentKeyReason: "NoCapabilityEntry",
+	}
+	a, err := NewCapabilityAuthorizer(reader, "capability-kv", &fakeClock{now: now},
+		DefaultCapabilityAuthorizerConfig(), capTestLogger(), extEntry)
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer with extra entry: %v", err)
+	}
+
+	env := envFor("ExtRoutedOp", capTestActorKey, &AuthContext{Target: extMarker})
+	dec, err := a.Authorize(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !dec.Authorized {
+		t.Fatalf("expected the new path to authorize; got %+v", dec)
+	}
+	if dec.Resolved == nil || dec.Resolved.Path != "platform" {
+		t.Fatalf("expected platform matcher kind to set Path=platform; got %+v", dec.Resolved)
+	}
+	if dec.Resolved.CapKey != extKey {
+		t.Fatalf("expected the new disjoint key %q to back the decision; got %q", extKey, dec.Resolved.CapKey)
+	}
+	// Exactly one GET, of the new disjoint key — one-key-per-path holds.
+	if len(reader.gets) != 1 || reader.gets[0] != extKey {
+		t.Fatalf("extension path must be a single GET of the new key; got %v", reader.gets)
 	}
 }
 

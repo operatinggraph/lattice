@@ -128,7 +128,10 @@ func setupV4Harness(t *testing.T) (context.Context, *substrate.Conn, *processor.
 	}
 
 	cfg := processor.DefaultCapabilityAuthorizerConfig()
-	authz := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, nil, cfg, bypassLogger())
+	authz, err := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, nil, cfg, bypassLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
 	return ctx, conn, authz
 }
 

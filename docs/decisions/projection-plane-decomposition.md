@@ -168,7 +168,17 @@ and D-CONSUMER land together per grant-type** so read and write sides never drif
 
 - **12.5** — generic step-3 auth-hook dispatcher; existing three matchers re-expressed as hooks,
   behavior identical. Security-critical (Gate 2/3). Contract #2 §2.8 / Contract #6 amendment =
-  `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md`.
+  `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md`. **Landed:** registry is a precedence-ordered slice
+  `[task, service, …extras, platform]` (platform predicate is the always-true catch-all, last);
+  `selectEntry` returns the first match → exactly one key → one GET; duplicate-name and
+  missing-predicate/kind/key entries are rejected at construction (`buildAuthRegistry`); the
+  `extraEntries` seam is core-injected only (no package-data path yet — that is 12.6). **Carried
+  obligation for 12.6:** when entries become **package-derived** (install-time data), duplicate
+  detection must move from name-only to **predicate-overlap / coverage** — a uniquely-named extra whose
+  `selects` overlaps a core path (or is always-true) must be rejected at install, not silently shadowed
+  by precedence. Today extras are trusted core wiring, so name-dedup suffices; the day a package
+  supplies an entry, the overlap guard becomes load-bearing (a broad extra ordered before `platform`
+  could otherwise capture the platform path onto a package-controlled key).
 - **12.6** — `rbac-domain` owns role/permission projection (disjoint key) + registers its hook;
   bootstrap cypher drops the rbac MATCHes.
 - **12.7** — retire the god-cypher's service/location remnants. **Two-path** (Andrew, 2026-06-07):

@@ -76,15 +76,16 @@ type noopAlertEmitter struct{}
 
 func (noopAlertEmitter) EmitAlert(_ context.Context, _ string, _ map[string]any) {}
 
-// CapabilityAuthorizer implements Authorizer by reading
-// `cap.<actor-suffix>` from Capability KV and dispatching per Contract #6
-// §6.4-6.8.
+// CapabilityAuthorizer implements Authorizer by selecting an auth path from
+// authContext, reading that path's single disjoint Capability-KV key, and
+// running the path's matcher kind (Contract #2 §2.8 / Contract #6 §6.4-6.8).
 type CapabilityAuthorizer struct {
-	reader CapabilityReader
-	bucket string
-	clock  Clock
-	cfg    CapabilityAuthorizerConfig
-	logger *slog.Logger
+	reader   CapabilityReader
+	bucket   string
+	clock    Clock
+	cfg      CapabilityAuthorizerConfig
+	logger   *slog.Logger
+	registry []authEntry
 
 	// Health KV samples — read by HealthHeartbeater at tick.
 	latency *latencyRing
@@ -93,8 +94,10 @@ type CapabilityAuthorizer struct {
 // NewCapabilityAuthorizer constructs the production authorizer. `reader`
 // is typically a `*substrate.Conn`. `bucket` is the Capability KV bucket
 // name (`bootstrap.CapabilityKVBucket` = `capability-kv`). Nil clock falls
-// back to SystemClock; nil logger uses slog.Default().
-func NewCapabilityAuthorizer(reader CapabilityReader, bucket string, clock Clock, cfg CapabilityAuthorizerConfig, logger *slog.Logger) *CapabilityAuthorizer {
+// back to SystemClock; nil logger uses slog.Default(). `extraEntries` adds
+// package-declared dispatch entries to the three core seed entries; a
+// duplicate path is rejected (one-key-per-path invariant) with an error.
+func NewCapabilityAuthorizer(reader CapabilityReader, bucket string, clock Clock, cfg CapabilityAuthorizerConfig, logger *slog.Logger, extraEntries ...authEntry) (*CapabilityAuthorizer, error) {
 	if reader == nil {
 		panic("processor: CapabilityAuthorizer requires a CapabilityReader")
 	}
@@ -113,32 +116,40 @@ func NewCapabilityAuthorizer(reader CapabilityReader, bucket string, clock Clock
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &CapabilityAuthorizer{
-		reader:  reader,
-		bucket:  bucket,
-		clock:   clock,
-		cfg:     cfg,
-		logger:  logger,
-		latency: newLatencyRing(cfg.LatencyBufferSize),
+	registry, err := buildAuthRegistry(extraEntries)
+	if err != nil {
+		return nil, err
 	}
+	return &CapabilityAuthorizer{
+		reader:   reader,
+		bucket:   bucket,
+		clock:    clock,
+		cfg:      cfg,
+		logger:   logger,
+		registry: registry,
+		latency:  newLatencyRing(cfg.LatencyBufferSize),
+	}, nil
 }
 
 // Authorize implements Authorizer. Hot path:
-//  1. derive the path from authContext BEFORE the read (Contract #10 §10.7):
-//     the task-dispatch branch reads the DISJOINT `cap.ephemeral.<actor>`
-//     key (it needs only grants — a single GET, no fallback); the
-//     role/service/platform path reads `cap.<actor>` as before.
-//  2. KV GET (ErrKeyNotFound → denial; any other error → return error so
-//     commit path naks for retry)
-//  3. parse the doc
-//  4. dispatch per Contract #2 §2.8 / Contract #6 §6.4-6.8
+//  1. select the dispatch entry from authContext BEFORE any read — each entry
+//     owns exactly one disjoint Capability-KV key, so path selection is a
+//     pure function of authContext (Contract #2 §2.8 / Contract #6 §6.4-6.8).
+//  2. derive that entry's single key and issue exactly one KV GET
+//     (ErrKeyNotFound → denial with the entry's absent-key code; any other
+//     error → return error so the commit path naks for retry).
+//  3. parse the doc.
+//  4. run the entry's matcher kind.
 //
-// FR56 grants live in the package-owned `cap.ephemeral.<actor>` entry
-// produced by the orchestration-base `capabilityEphemeral` lens; the
-// `cap.<actor>` doc carries roles/permissions/service access only. A
-// task-path no-match denies with AuthContextMismatch, which the denial
-// builder emits without `actorRoles`, so there is NO `cap.<actor>` second
-// read on the task path.
+// The registry is walked in precedence order (task → service → platform);
+// exactly one entry's predicate matches a given authContext, so exactly one
+// key is read. The dispatcher never loops issuing reads and never merges docs.
+//
+// FR56 grants live in the package-owned `cap.ephemeral.<actor>` entry produced
+// by the orchestration-base `capabilityEphemeral` lens; the `cap.<actor>` doc
+// carries roles/permissions/service access only. A task-path no-match denies
+// with AuthContextMismatch, which the denial builder emits without
+// `actorRoles`, so there is NO `cap.<actor>` second read on the task path.
 func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnvelope) (Decision, error) {
 	start := a.clock.Now()
 	defer func() {
@@ -146,12 +157,11 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 	}()
 
 	ac := env.AuthContext
-	serviceSet := ac != nil && ac.Service != ""
-	taskSet := ac != nil && ac.Task != ""
 
 	// Both task+service set → invalid auth declaration. Contract #2 §2.8's
-	// dispatch table doesn't admit this combination. Decided BEFORE any read.
-	if serviceSet && taskSet {
+	// dispatch table doesn't admit this combination. Decided BEFORE any read
+	// and before path selection (otherwise the task entry would shadow it).
+	if ac != nil && ac.Service != "" && ac.Task != "" {
 		return Decision{
 			Authorized: false,
 			Code:       ErrCodeAuthContextMismatch,
@@ -159,19 +169,22 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 		}, nil
 	}
 
-	if taskSet {
-		return a.authorizeTaskPath(ctx, env)
+	entry := a.selectEntry(ac)
+	if entry == nil {
+		// The platform seed entry's predicate is always-true, so no match is
+		// only reachable if the registry was built without it — fail closed.
+		return Decision{
+			Authorized: false,
+			Code:       ErrCodeAuthDenied,
+			Reason:     "no auth path selected for authContext",
+		}, nil
 	}
-	return a.authorizeCapabilityPath(ctx, env, serviceSet)
-}
 
-// authorizeTaskPath reads the disjoint `cap.ephemeral.<actor>` key and runs
-// matchEphemeralGrant. Single GET, no `cap.<actor>` fallback (Contract #10
-// §10.7). Both an absent key AND an empty-grants doc are denial
-// (AuthContextMismatch) — absence = denial, Contract #6 §6.8 / A3.
-func (a *CapabilityAuthorizer) authorizeTaskPath(ctx context.Context, env *OperationEnvelope) (Decision, error) {
-	ephKey, derr := ephemeralKeyFromActor(env.Actor)
+	key, derr := entry.keyDerivation(env.Actor)
 	if derr != nil {
+		// Malformed actor key would have been rejected at step 1, but keep the
+		// defensive branch so a programming bug here surfaces as a typed denial
+		// rather than a panic.
 		return Decision{
 			Authorized: false,
 			Code:       ErrCodeAuthDenied,
@@ -179,110 +192,76 @@ func (a *CapabilityAuthorizer) authorizeTaskPath(ctx context.Context, env *Opera
 		}, nil
 	}
 
-	entry, err := a.reader.KVGet(ctx, a.bucket, ephKey)
+	kvEntry, err := a.reader.KVGet(ctx, a.bucket, key)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			// No ephemeral entry for the actor = no grant. A3: absent key is
-			// denial; the task path denies with AuthContextMismatch (carries
-			// no actorRoles), so there is no second read.
-			a.logger.Info("step 3: no ephemeral Capability KV entry for actor (task path)",
-				"requestId", env.RequestID, "actor", env.Actor, "ephKey", ephKey)
+			// Contract #6 §6.8 — an absent key denies with the path's own denial
+			// code. A soft-tombstoned key is not absent (the GET returns its body),
+			// but it carries an empty grant body, so the matcher below finds no
+			// grant and denies all the same — there is no isDeleted inspection here.
+			a.logger.Info("step 3: no Capability KV entry for actor on auth path",
+				"requestId", env.RequestID, "actor", env.Actor, "path", entry.name, "key", key)
 			return Decision{
 				Authorized: false,
-				Code:       ErrCodeAuthContextMismatch,
-				Reason:     "no ephemeral grant entry for actor",
+				Code:       entry.absentKeyCode,
+				Reason:     entry.absentKeyReason,
 			}, nil
 		}
-		return Decision{}, fmt.Errorf("capability kv read %q: %w", ephKey, err)
+		// Genuine infrastructure failure — return error so commit path naks for
+		// redelivery (existing authorizer-error branch in commit_path.go).
+		return Decision{}, fmt.Errorf("capability kv read %q: %w", key, err)
 	}
 
-	doc, err := ParseCapabilityDoc(entry.Value)
-	if err != nil {
-		return Decision{}, fmt.Errorf("capability kv parse %q: %w", ephKey, err)
-	}
-
-	resolved := &ResolvedPermission{
-		CapKey:      ephKey,
-		ProjectedAt: doc.ProjectedAt,
-	}
-	dec := a.matchEphemeralGrant(env, doc, resolved)
-	if dec.Authorized {
-		dec.Resolved = resolved
-	}
-	// On a task-path denial the code is AuthContextMismatch; the denial
-	// builder returns early for that code without actorRoles, so we do NOT
-	// thread doc (the ephemeral doc carries no roles anyway).
-	return dec, nil
-}
-
-// authorizeCapabilityPath reads `cap.<actor>` and dispatches the
-// service / platform paths (unchanged from Phase 1, minus the task branch
-// which now lives in authorizeTaskPath).
-func (a *CapabilityAuthorizer) authorizeCapabilityPath(ctx context.Context, env *OperationEnvelope, serviceSet bool) (Decision, error) {
-	capKey, derr := capabilityKeyFromActor(env.Actor)
-	if derr != nil {
-		// Malformed actor key would have been rejected at step 1, but
-		// keep the defensive branch so a programming bug here surfaces
-		// as a typed denial rather than a panic.
-		return Decision{
-			Authorized: false,
-			Code:       ErrCodeAuthDenied,
-			Reason:     "InvalidActorKey: " + derr.Error(),
-		}, nil
-	}
-
-	entry, err := a.reader.KVGet(ctx, a.bucket, capKey)
-	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			// Contract #6 §6.8 — absence equals denial.
-			a.logger.Info("step 3: no Capability KV entry for actor",
-				"requestId", env.RequestID, "actor", env.Actor, "capKey", capKey)
-			return Decision{
-				Authorized: false,
-				Code:       ErrCodeAuthDenied,
-				Reason:     "NoCapabilityEntry",
-			}, nil
-		}
-		// Genuine infrastructure failure — return error so commit path
-		// naks for redelivery (existing authorizer-error branch in
-		// commit_path.go).
-		return Decision{}, fmt.Errorf("capability kv read %q: %w", capKey, err)
-	}
-
-	doc, err := ParseCapabilityDoc(entry.Value)
+	doc, err := ParseCapabilityDoc(kvEntry.Value)
 	if err != nil {
 		// Parse failure indicates a producer / contract drift — should be
 		// caught by conformance tests long before runtime. Surface as internal
 		// error rather than denial so operators see the real problem.
-		return Decision{}, fmt.Errorf("capability kv parse %q: %w", capKey, err)
+		return Decision{}, fmt.Errorf("capability kv parse %q: %w", key, err)
 	}
 
-	// Resolved permission threaded through context (Decision #8).
-	// doc.ProjectedAt is recorded as provenance for the auth-trace; it is
-	// no longer compared against any freshness ceiling.
+	// doc.ProjectedAt is recorded as provenance for the auth-trace; it is no
+	// longer compared against any freshness ceiling.
 	resolved := &ResolvedPermission{
-		CapKey:      capKey,
+		CapKey:      key,
 		ProjectedAt: doc.ProjectedAt,
 	}
 
-	var dec Decision
-	if serviceSet {
-		dec = a.matchServiceAccess(env, doc, resolved)
-	} else {
-		dec = a.matchPlatformPermission(env, doc, resolved)
-	}
+	dec := entry.kind(a, env, doc, resolved)
 	if dec.Authorized {
 		dec.Resolved = resolved
-	} else {
+	} else if entry.threadsDocOnDenial {
 		// Thread the doc through the denial for FR22 response construction
 		// (actorRoles sourced from doc.Roles without an additional KV read).
+		// The task path leaves this off: its denial carries no roles.
 		dec.Doc = doc
 	}
 	return dec, nil
 }
 
+// selectEntry returns the first registry entry whose predicate matches the
+// authContext, walking in precedence order. Path selection is a pure function
+// of authContext — no KV read happens here.
+func (a *CapabilityAuthorizer) selectEntry(ac *AuthContext) *authEntry {
+	for i := range a.registry {
+		if a.registry[i].selects(ac) {
+			return &a.registry[i]
+		}
+	}
+	return nil
+}
+
 func (a *CapabilityAuthorizer) matchEphemeralGrant(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {
 	ac := env.AuthContext
+	if ac == nil {
+		// This kind reads ac.Task/ac.Target. A nil authContext yields the same
+		// denial a non-matching grant produces, never a panic.
+		return Decision{
+			Authorized: false,
+			Code:       ErrCodeAuthContextMismatch,
+			Reason:     "no matching ephemeralGrant",
+		}
+	}
 	now := a.clock.Now()
 	for i := range doc.EphemeralGrants {
 		g := &doc.EphemeralGrants[i]
@@ -320,6 +299,15 @@ func (a *CapabilityAuthorizer) matchEphemeralGrant(env *OperationEnvelope, doc *
 
 func (a *CapabilityAuthorizer) matchServiceAccess(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {
 	ac := env.AuthContext
+	if ac == nil {
+		// This kind reads ac.Service. A nil authContext yields the same denial a
+		// service not in serviceAccess[] produces, never a panic.
+		return Decision{
+			Authorized: false,
+			Code:       ErrCodeAuthContextMismatch,
+			Reason:     "service not in serviceAccess",
+		}
+	}
 	for i := range doc.ServiceAccess {
 		entry := &doc.ServiceAccess[i]
 		if entry.Service != ac.Service {

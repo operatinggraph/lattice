@@ -105,7 +105,10 @@ func TestCapAdv_V3_AIActor_LensDef_Rejected(t *testing.T) {
 
 	// AI actor has NO Capability KV entry → AuthDenied/NoCapabilityEntry.
 	cfg := processor.DefaultCapabilityAuthorizerConfig()
-	authz := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, nil, cfg, bypassLogger())
+	authz, err := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, nil, cfg, bypassLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
 
 	// Submit UpdateAspect targeting the Capability Lens definition.
 	env := &processor.OperationEnvelope{
@@ -169,7 +172,10 @@ func TestCapAdv_V3_AIActor_LensDef_Unchanged(t *testing.T) {
 	// AI actor attempts the mutation (no cap entry → will be denied by Authorizer).
 	aiActorKey := "vtx.identity." + capadvNanoID3
 	cfg := processor.DefaultCapabilityAuthorizerConfig()
-	authz := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, nil, cfg, bypassLogger())
+	authz, err := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, nil, cfg, bypassLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
 
 	env := &processor.OperationEnvelope{
 		RequestID:     "CdV3LensUnRq234567a",

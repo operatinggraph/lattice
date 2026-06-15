@@ -105,7 +105,10 @@ func TestCapAdv_V2_ProjectionLag_NormalLag_Allowed(t *testing.T) {
 
 	clock := fixedClock{t: now}
 	cfg := processor.DefaultCapabilityAuthorizerConfig()
-	authz := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, clock, cfg, bypassLogger())
+	authz, err := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, clock, cfg, bypassLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
 
 	env := &processor.OperationEnvelope{
 		RequestID:     capadvReqV2Op1,
@@ -150,7 +153,10 @@ func TestCapAdv_V2_ProjectionLag_ExcessiveLag_NoLongerDenies(t *testing.T) {
 
 	clock := fixedClock{t: now}
 	cfg := processor.DefaultCapabilityAuthorizerConfig()
-	authz := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, clock, cfg, bypassLogger())
+	authz, err := processor.NewCapabilityAuthorizer(conn, capadvCapBucket, clock, cfg, bypassLogger())
+	if err != nil {
+		t.Fatalf("NewCapabilityAuthorizer: %v", err)
+	}
 
 	env := &processor.OperationEnvelope{
 		RequestID:     capadvReqV2Op2,

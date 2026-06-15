@@ -130,6 +130,11 @@ type SelectAuthorizerOpts struct {
 	Clock            Clock
 	Emitter          AuthAlertEmitter
 	Config           CapabilityAuthorizerConfig
+	// ExtraEntries are package-declared dispatch entries appended to the three
+	// core seed entries. A duplicate path is rejected at construction
+	// (one-key-per-path invariant). Empty in Phase-2 base wiring; the seam a
+	// package uses to relocate its grant projection to a disjoint key.
+	ExtraEntries []authEntry
 }
 
 // SelectAuthorizerArgs is the production wiring entry point.
@@ -157,7 +162,7 @@ func SelectAuthorizerArgs(opts SelectAuthorizerOpts) (Authorizer, error) {
 		if cfg.NFRP3 == 0 && cfg.LatencyBufferSize == 0 {
 			cfg = DefaultCapabilityAuthorizerConfig()
 		}
-		return NewCapabilityAuthorizer(opts.Reader, opts.CapabilityBucket, opts.Clock, cfg, opts.Logger), nil
+		return NewCapabilityAuthorizer(opts.Reader, opts.CapabilityBucket, opts.Clock, cfg, opts.Logger, opts.ExtraEntries...)
 	default:
 		return nil, errUnknownAuthMode(opts.Mode)
 	}
