@@ -11,7 +11,9 @@
 //   - Zero Processor changes: the story is entirely additive.
 //
 // Cold-start traversal algorithm (FR19):
-//  1. Agent reads cap.identity.<actorId> from Capability KV.
+//  1. Agent reads its capability doc from Capability KV — the key is resolved
+//     by actor class (cap.identity.<actorId> for a kernel-seeded system actor,
+//     cap.roles.identity.<actorId> for an ordinary actor).
 //  2. Agent picks an operationType from platformPermissions[].
 //  3. Agent calls DiscoverDDL to find the matching vtx.meta.<NanoID> by
 //     enumerating vtx.meta.* keys and reading .canonicalName aspects.
@@ -120,12 +122,22 @@ func NewTraverser(conn *substrate.Conn, coreBucket, capBucket string) *Traverser
 }
 
 // ReadCapability fetches the actor's full resolved capability set from
-// Capability KV. The key format is cap.identity.<actorId> per Contract #6
-// §6.2. This is the agent's first read — no prior deployment knowledge
+// Capability KV. The key is resolved by actor class, mirroring the
+// Processor's step-3 platform read (Contract #6 §6.1).
+//
+// A kernel-seeded system identity (data.protected = true) reads its core
+// anchor cap.identity.<actorId>. An ordinary actor reads
+// cap.roles.identity.<actorId> — where rbac-domain's capabilityRoles lens
+// projects role-derived grants — and, only when that key is absent, falls
+// back to the core cap.identity.<actorId> doc. The fallback keeps the helper
+// correct in deployments where rbac-domain is not installed (no cap.roles.*
+// projection) without the Traverser needing to know which packages are
+// installed. This is the agent's first read — no prior deployment knowledge
 // required beyond the actor ID.
 //
 // Returns ErrKeyNotFound (wrapped) when no capability entry exists for the
-// actor. Callers should treat this as "agent has no capabilities yet".
+// actor at any resolved key. Callers should treat this as "agent has no
+// capabilities yet".
 //
 // Staleness note: the returned doc reflects a Refractor projection that
 // may have been written some time ago. doc.ProjectedAt is deterministic
@@ -136,7 +148,23 @@ func NewTraverser(conn *substrate.Conn, coreBucket, capBucket string) *Traverser
 // Capability-Lens health and, in future, Gateway token revocation. Callers
 // must NOT rely on the Processor denying stale projections.
 func (t *Traverser) ReadCapability(ctx context.Context, actorID string) (*processor.CapabilityDoc, error) {
-	key := "cap.identity." + actorID
+	coreKey := "cap.identity." + actorID
+	if t.actorIsSystem(ctx, actorID) {
+		return t.readCapabilityAt(ctx, actorID, coreKey)
+	}
+	doc, err := t.readCapabilityAt(ctx, actorID, "cap.roles.identity."+actorID)
+	if err == nil {
+		return doc, nil
+	}
+	if errors.Is(err, substrate.ErrKeyNotFound) {
+		return t.readCapabilityAt(ctx, actorID, coreKey)
+	}
+	return nil, err
+}
+
+// readCapabilityAt reads and parses the capability doc at a specific
+// Capability-KV key.
+func (t *Traverser) readCapabilityAt(ctx context.Context, actorID, key string) (*processor.CapabilityDoc, error) {
 	entry, err := t.conn.KVGet(ctx, t.capBucket, key)
 	if err != nil {
 		return nil, fmt.Errorf("aiagent: read capability for %s: %w", actorID, err)
@@ -146,6 +174,30 @@ func (t *Traverser) ReadCapability(ctx context.Context, actorID string) (*proces
 		return nil, fmt.Errorf("aiagent: parse capability doc for %s: %w", actorID, err)
 	}
 	return doc, nil
+}
+
+// actorIsSystem reports whether the actor is a kernel-seeded system identity
+// — an `identity` vertex carrying data.protected = true. It uses the same
+// predicate as bootstrap.SystemActorKeys and the Capability-Lens primordial
+// anchor, so the read-side key routing matches where grants project.
+//
+// On any read or decode failure the actor is treated as ordinary (the common
+// case), routing the capability read to cap.roles.* with a cap.identity.*
+// fallback.
+func (t *Traverser) actorIsSystem(ctx context.Context, actorID string) bool {
+	entry, err := t.conn.KVGet(ctx, t.coreBucket, "vtx.identity."+actorID)
+	if err != nil {
+		return false
+	}
+	var env struct {
+		IsDeleted bool           `json:"isDeleted"`
+		Data      map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &env); err != nil || env.IsDeleted {
+		return false
+	}
+	protected, _ := env.Data["protected"].(bool)
+	return protected
 }
 
 // DiscoverDDL resolves an operationType string to the DDL meta-vertex key

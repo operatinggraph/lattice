@@ -131,7 +131,7 @@ func TestReadCapability_HappyPath(t *testing.T) {
 	ctx, conn, tr := setupUnitEnv(t)
 
 	actorID := "ReadCapTestActrID00001"
-	capKey := "cap.identity." + actorID
+	capKey := "cap.roles.identity." + actorID
 	putKV(t, ctx, conn, unitCapBucket, capKey, map[string]any{
 		"key":                    capKey,
 		"actor":                  "vtx.identity." + actorID,
