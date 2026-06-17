@@ -80,6 +80,13 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		return nil, fmt.Errorf("pkgmgr: AdminActor is required")
 	}
 
+	// Fail closed before any KV operation: a lens whose declared Bucket is a
+	// reserved short alias would auto-create a phantom bucket no reader
+	// consults (silent mis-targeting of the auth plane).
+	if err := def.validateLensBuckets(); err != nil {
+		return nil, err
+	}
+
 	res := &InstallResult{PackageName: def.Name, PackageVersion: def.Version}
 
 	// Pre-flight: confirm core-kv bucket exists before any KV operation.

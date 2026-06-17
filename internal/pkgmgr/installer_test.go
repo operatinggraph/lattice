@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,6 +263,29 @@ func TestInstaller_RefusesDifferentVersion(t *testing.T) {
 	}
 	if !errors.Is(err, ErrVersionMismatch) {
 		t.Fatalf("expected ErrVersionMismatch, got %v", err)
+	}
+}
+
+// TestInstaller_RejectsReservedBucketAlias asserts Install fails closed end-
+// to-end when a lens declares the short auth-plane alias "capability", and
+// that the canonical "capability-kv" form installs successfully.
+func TestInstaller_RejectsReservedBucketAlias(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	bad := sampleDef("0.1.0")
+	bad.Lenses[0].Bucket = "capability"
+	_, err := inst.Install(ctx, bad)
+	if err == nil {
+		t.Fatal("expected Install to reject lens Bucket \"capability\", got nil error")
+	}
+	if !strings.Contains(err.Error(), "capability-kv") {
+		t.Fatalf("rejection should direct author to canonical bucket; got %v", err)
+	}
+
+	good := sampleDef("0.1.0")
+	good.Lenses[0].Bucket = "capability-kv"
+	if _, err := inst.Install(ctx, good); err != nil {
+		t.Fatalf("canonical Bucket \"capability-kv\" should install, got: %v", err)
 	}
 }
 
