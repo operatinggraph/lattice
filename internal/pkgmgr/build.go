@@ -216,21 +216,38 @@ func sha256NanoID(s string) string {
 // lensSpecBody builds the LensSpec body stored as the `spec` aspect's data.
 // Refractor's CoreKVSource unwraps the aspect's `data` to this object and
 // activates the lens from it (cypherRule + targetConfig + engine +
-// projectionKind + the §6.13 Output descriptor). A package lens targets a
-// nats-kv bucket; its envelope keys each row under "key".
+// projectionKind + the §6.13 Output descriptor).
 func lensSpecBody(lensID string, l LensSpec) map[string]any {
 	keyField := l.IntoKey
 	if len(keyField) == 0 {
 		keyField = []string{"key"}
 	}
-	targetConfig := map[string]any{
-		"bucket": l.Bucket,
-		"key":    keyField,
+
+	var targetType string
+	var targetConfig map[string]any
+	switch l.Adapter {
+	case "postgres":
+		targetType = "postgres"
+		targetConfig = map[string]any{
+			"dsn":   l.DSN,
+			"table": l.Table,
+			"key":   keyField,
+		}
+		if l.QueryTimeout != "" {
+			targetConfig["queryTimeout"] = l.QueryTimeout
+		}
+	default: // "nats-kv" or empty
+		targetType = "nats_kv"
+		targetConfig = map[string]any{
+			"bucket": l.Bucket,
+			"key":    keyField,
+		}
 	}
+
 	spec := map[string]any{
 		"id":            lensID,
 		"canonicalName": l.CanonicalName,
-		"targetType":    "nats_kv",
+		"targetType":    targetType,
 		"targetConfig":  targetConfig,
 		"cypherRule":    l.Spec,
 		"engine":        l.Engine,

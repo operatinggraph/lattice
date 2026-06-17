@@ -123,13 +123,24 @@ type LensSpec struct {
 	// Spec is the cypher source for the lens body.
 	Spec string
 
-	// Adapter is the projection-output adapter — `nats-kv` for Phase 1.
+	// Adapter is the projection-output adapter — `"nats-kv"` or `"postgres"`.
 	Adapter string
 
-	// Bucket is the target output bucket for the lens projection. The
-	// Refractor's nats-kv adapter auto-creates-or-opens the bucket on
-	// first projection.
+	// Bucket is the target NATS KV bucket name (nats-kv adapter only). The
+	// Refractor's nats-kv adapter auto-creates-or-opens the bucket on first
+	// projection. Must not be a reserved short alias (see validateLensBuckets).
 	Bucket string
+
+	// DSN is the Postgres connection string (postgres adapter only).
+	DSN string
+
+	// Table is the Postgres table name (postgres adapter only). The table must
+	// already exist — the installer and Refractor never issue table DDL.
+	Table string
+
+	// QueryTimeout is the per-query deadline for the postgres adapter, e.g.
+	// "5s". Empty defaults to 30s in Refractor. Ignored by nats-kv.
+	QueryTimeout string
 
 	// Engine selects the cypher engine — `full` for the standard rule set.
 	Engine string
@@ -144,10 +155,10 @@ type LensSpec struct {
 	Output *OutputDescriptorSpec
 
 	// IntoKey is the lens's primary output-key column list — the RETURN
-	// column(s) the nats-kv adapter keys each projected record under. Empty
-	// defaults to ["key"] (the per-row envelope key produced by an actor-
-	// aggregate lens). An operation-aggregate index keys by its aggregation
-	// column instead (e.g. ["operationType"] for the role-by-operation index).
+	// column(s) the adapter keys each projected record under. Empty defaults to
+	// ["key"] (the per-row envelope key produced by an actor-aggregate lens).
+	// An operation-aggregate index keys by its aggregation column instead (e.g.
+	// ["operationType"] for the role-by-operation index).
 	IntoKey []string
 }
 

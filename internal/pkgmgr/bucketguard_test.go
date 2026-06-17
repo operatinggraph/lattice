@@ -60,3 +60,90 @@ func TestValidateLensBuckets_AcceptsCanonicalBucket(t *testing.T) {
 		t.Fatalf("expected canonical buckets to pass validation, got: %v", err)
 	}
 }
+
+func TestValidateLensAdapters_NatsKV_RequiresBucket(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses:  []LensSpec{{CanonicalName: "L", Adapter: "nats-kv"}},
+	}
+	if err := def.validateLensAdapters(); err == nil {
+		t.Fatal("expected error for nats-kv lens missing Bucket, got nil")
+	}
+}
+
+func TestValidateLensAdapters_EmptyAdapter_RequiresBucket(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses:  []LensSpec{{CanonicalName: "L", Adapter: ""}},
+	}
+	if err := def.validateLensAdapters(); err == nil {
+		t.Fatal("expected error for default-adapter lens missing Bucket, got nil")
+	}
+}
+
+func TestValidateLensAdapters_Postgres_RequiresDSNAndTable(t *testing.T) {
+	cases := []struct {
+		name string
+		lens LensSpec
+	}{
+		{"missing both", LensSpec{CanonicalName: "L", Adapter: "postgres"}},
+		{"missing DSN", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t"}},
+		{"missing Table", LensSpec{CanonicalName: "L", Adapter: "postgres", DSN: "postgres://x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def := Definition{Name: "pkg", Version: "0.1.0", Lenses: []LensSpec{tc.lens}}
+			if err := def.validateLensAdapters(); err == nil {
+				t.Fatalf("expected validation error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidateLensAdapters_Postgres_Valid(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses: []LensSpec{{
+			CanonicalName: "L",
+			Adapter:       "postgres",
+			DSN:           "postgres://localhost/mydb",
+			Table:         "projection_table",
+		}},
+	}
+	if err := def.validateLensAdapters(); err != nil {
+		t.Fatalf("expected valid postgres lens to pass, got: %v", err)
+	}
+}
+
+func TestValidateLensAdapters_UnknownAdapter_Rejected(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses:  []LensSpec{{CanonicalName: "L", Adapter: "redis"}},
+	}
+	err := def.validateLensAdapters()
+	if err == nil {
+		t.Fatal("expected error for unknown adapter, got nil")
+	}
+	if !strings.Contains(err.Error(), "redis") {
+		t.Errorf("error should name the bad adapter value; got %q", err)
+	}
+}
+
+func TestValidateLensAdapters_NatsKV_Valid(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses: []LensSpec{{
+			CanonicalName: "L",
+			Adapter:       "nats-kv",
+			Bucket:        "my-bucket",
+		}},
+	}
+	if err := def.validateLensAdapters(); err != nil {
+		t.Fatalf("expected valid nats-kv lens to pass, got: %v", err)
+	}
+}

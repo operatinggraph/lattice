@@ -86,6 +86,9 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 	if err := def.validateLensBuckets(); err != nil {
 		return nil, err
 	}
+	if err := def.validateLensAdapters(); err != nil {
+		return nil, err
+	}
 
 	res := &InstallResult{PackageName: def.Name, PackageVersion: def.Version}
 

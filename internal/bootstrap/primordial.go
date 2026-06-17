@@ -843,6 +843,9 @@ func seedAspectTypeMeta(entries *[]kvEntry, add func(string, []byte, error) erro
 // Refractor's CoreKVSource reads to activate the lens. The four individual
 // aspects are documentation surface for operators and for the
 // verify-bootstrap regression gate.
+//
+// Bootstrap-primordial lenses are always nats-kv; postgres is not supported
+// here. Package lenses (pkgmgr.LensSpec) support both adapters.
 func addLensAspects(entries *[]kvEntry, lensKey string, def LensDefinition) error {
 	aspects := []struct {
 		localName string
