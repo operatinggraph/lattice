@@ -24,18 +24,16 @@ func provisionHealthKV(t *testing.T, ctx context.Context, conn *substrate.Conn) 
 	require.NoError(t, err)
 }
 
-// consumerExists reports whether a durable consumer exists on a stream.
+// consumerExists reports whether a durable consumer exists on a stream. It is a
+// polling probe: any non-nil error (ErrConsumerNotFound, or a transient
+// JetStream-API hiccup like "no responders" under load) means "not observable
+// yet" and returns false so the caller keeps polling. It must never fail the
+// test on a transient lookup error — that would turn a momentary blip into a
+// hard flake.
 func consumerExists(t *testing.T, ctx context.Context, conn *substrate.Conn, stream, durable string) bool {
 	t.Helper()
 	_, err := conn.JetStream().Consumer(ctx, stream, durable)
-	if err == nil {
-		return true
-	}
-	if errors.Is(err, jetstream.ErrConsumerNotFound) {
-		return false
-	}
-	require.NoError(t, err)
-	return false
+	return err == nil
 }
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool) bool {
@@ -48,6 +46,54 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return cond()
+}
+
+// startEngine starts an engine in a goroutine and returns it with a channel that
+// receives Start's return value when it unwinds — on ctx cancellation (nil) or
+// an early boot error. Tests use the channel two ways: to fail fast with the
+// real cause if Start dies during bring-up (instead of waiting out a poll
+// deadline against a consumer that will never appear), and to join the
+// goroutine deterministically on shutdown (instead of sleeping a fixed guess).
+func startEngine(t *testing.T, ctx context.Context, conn *substrate.Conn, opts ...func(*loom.Config)) (*loom.Engine, <-chan error) {
+	t.Helper()
+	e := newEngine(conn, opts...)
+	errCh := make(chan error, 1)
+	go func() { errCh <- e.Start(ctx) }()
+	return e, errCh
+}
+
+// waitForReady polls cond until true or the deadline, failing fast if the
+// engine's Start goroutine returns early — surfacing the boot error rather than
+// silently waiting out the deadline.
+func waitForReady(t *testing.T, d time.Duration, startErr <-chan error, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		select {
+		case err := <-startErr:
+			t.Fatalf("%s: engine Start returned during bring-up: %v", msg, err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if !cond() {
+		t.Fatal(msg)
+	}
+}
+
+// joinEngine waits for an engine's Start goroutine to return after its context
+// is cancelled. Because supervisor.Stop synchronously joins every pump before
+// Start returns, this is a complete teardown barrier — the deterministic
+// replacement for sleeping and hoping shutdown finished.
+func joinEngine(t *testing.T, startErr <-chan error) {
+	t.Helper()
+	select {
+	case <-startErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("engine did not shut down within 10s of context cancellation")
+	}
 }
 
 // TestSupervisor_RemovedPatternTearsDownDurable proves AC #2/#5 (F6): when the
@@ -222,23 +268,27 @@ func TestSupervisor_PauseStateSurvivesRestart(t *testing.T) {
 
 	const instance = "loom-restart-instance"
 
-	ctx1, cancel1 := context.WithCancel(ctx)
-	e1 := newEngine(conn, func(c *loom.Config) {
+	cfg := func(c *loom.Config) {
 		c.HealthKVBucket = healthKVBucket
 		c.Instance = instance
 		c.HeartbeatEvery = time.Second
-	})
-	go func() { _ = e1.Start(ctx1) }()
+	}
 
-	// Wait for the trigger consumer to come up, then manually pause it.
-	require.True(t, waitFor(t, 10*time.Second, func() bool {
-		return consumerExists(t, ctx, conn, eventsStream, "loom-trigger")
-	}), "loom-trigger should be created")
-	e1.PauseForTest(ctx, "loom-trigger")
+	ctx1, cancel1 := context.WithCancel(ctx)
+	e1, e1Err := startEngine(t, ctx1, conn, cfg)
 
-	// The sink should persist PausedManual.
+	// Pause the trigger and confirm it persisted PausedManual to the sink.
+	//
+	// Pause no-ops until the consumer is registered in the supervisor, and that
+	// registration LAGS the consumer's JetStream visibility — Add creates the
+	// durable (making it visible to a consumer-exists probe) before recording it
+	// in its managed set. Gating the pause on mere JetStream visibility therefore
+	// races: a pause issued in that window is silently dropped and never reaches
+	// the sink. Pause is idempotent, so we re-issue it each poll until the sink
+	// reflects it, closing the race deterministically.
 	sinkKey := "health.loom." + instance + ".consumer.loom-trigger"
-	require.True(t, waitFor(t, 10*time.Second, func() bool {
+	waitForReady(t, 10*time.Second, e1Err, func() bool {
+		e1.PauseForTest(ctx, "loom-trigger")
 		entry, err := conn.KVGet(ctx, healthKVBucket, sinkKey)
 		if err != nil {
 			return false
@@ -251,24 +301,22 @@ func TestSupervisor_PauseStateSurvivesRestart(t *testing.T) {
 			return false
 		}
 		return doc.Status == "paused" && doc.PauseReason == string(substrate.PauseManual)
-	}), "manual pause should persist to the per-consumer sink")
+	}, "manual pause should persist to the per-consumer sink")
 
+	// Shut e1 down and wait for its pumps to fully drain (supervisor.Stop joins
+	// every pump before Start returns) before restarting — deterministic, so e2
+	// never races a half-stopped e1 on the shared loom-trigger durable.
 	cancel1()
-	time.Sleep(500 * time.Millisecond)
+	joinEngine(t, e1Err)
 
 	// Restart against the same conn+buckets. The new engine's supervisor restores
 	// the trigger into PausedManual at Add time, without an explicit Resume.
 	ctx2, cancel2 := context.WithCancel(ctx)
 	defer cancel2()
-	e2 := newEngine(conn, func(c *loom.Config) {
-		c.HealthKVBucket = healthKVBucket
-		c.Instance = instance
-		c.HeartbeatEvery = time.Second
-	})
-	go func() { _ = e2.Start(ctx2) }()
+	_, e2Err := startEngine(t, ctx2, conn, cfg)
 
 	// The restored consumer reports pausedManual in the fresh heartbeat.
-	require.True(t, waitFor(t, 12*time.Second, func() bool {
+	waitForReady(t, 12*time.Second, e2Err, func() bool {
 		entry, err := conn.KVGet(ctx, healthKVBucket, "health.loom."+instance)
 		if err != nil {
 			return false
@@ -282,7 +330,7 @@ func TestSupervisor_PauseStateSurvivesRestart(t *testing.T) {
 			return false
 		}
 		return doc.Metrics.Consumers["loom-trigger"] == "pausedManual"
-	}), "trigger consumer should restore into pausedManual across restart")
+	}, "trigger consumer should restore into pausedManual across restart")
 }
 
 // heartbeatConsumers reads health.loom.<instance> and returns metrics.consumers

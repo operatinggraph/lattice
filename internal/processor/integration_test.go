@@ -177,61 +177,67 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
 
-// driveOne runs the consumer loop until f signals done or ctx expires.
-func driveOne(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.Consumer, want MessageOutcome) MessageOutcome {
+// driveFetchWait bounds a single synchronous pull. It is a safety ceiling, not
+// a timing assumption: the message under test is already durable in the stream
+// (publishEnvelope waits for the PubAck) before we fetch, and post-fault
+// redelivery is server-driven, so a healthy fetch returns the instant a message
+// is available. Hitting this ceiling means a real defect, not a slow runner.
+const driveFetchWait = 20 * time.Second
+
+// fetchOne pulls a single message from the durable consumer and runs it through
+// the commit path, returning (outcome, true). It returns ("", false) when no
+// message becomes available within driveFetchWait.
+//
+// It uses synchronous pull (Fetch) rather than push (Consume) deliberately:
+// Consume holds a long-lived background subscription whose Stop is asynchronous,
+// so the NFR-R1 pattern of driving one delivery and then another on the SAME
+// durable consumer raced that teardown and occasionally stalled the second
+// pull. Fetch carries no background machinery — each call is self-contained, so
+// repeated sequential calls on one consumer cannot race.
+func fetchOne(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.Consumer) (MessageOutcome, bool) {
 	t.Helper()
-	got := make(chan MessageOutcome, 1)
-	cc, err := cons.Consume(func(m jetstream.Msg) {
-		outcome := cp.HandleMessage(ctx, m)
-		select {
-		case got <- outcome:
-		default:
-		}
-	})
+	batch, err := cons.Fetch(1, jetstream.FetchMaxWait(driveFetchWait))
 	if err != nil {
-		t.Fatalf("Consume: %v", err)
+		t.Fatalf("Fetch: %v", err)
 	}
-	defer cc.Stop()
-	select {
-	case outcome := <-got:
-		if want != "" && outcome != want {
-			t.Fatalf("outcome mismatch: got %q want %q", outcome, want)
-		}
-		// Drain a brief moment to let ack flush.
-		time.Sleep(100 * time.Millisecond)
-		return outcome
-	case <-time.After(30 * time.Second):
-		t.Fatalf("timed out waiting for outcome (want %q)", want)
-		return ""
+	var (
+		outcome MessageOutcome
+		got     bool
+	)
+	for m := range batch.Messages() {
+		outcome = cp.HandleMessage(ctx, m)
+		got = true
 	}
+	if err := batch.Error(); err != nil {
+		t.Fatalf("Fetch batch error: %v", err)
+	}
+	return outcome, got
 }
 
-// driveOneAny runs the consumer until any outcome is emitted, then
-// returns it. Used by NFR-R1 tests where the post-fault redelivery
-// could land as Accepted (first attempt's step 8 didn't run) OR
-// Duplicate (step 8 did run before the fault).
+// driveOne pulls exactly one message and asserts its outcome.
+func driveOne(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.Consumer, want MessageOutcome) MessageOutcome {
+	t.Helper()
+	outcome, ok := fetchOne(t, ctx, cp, cons)
+	if !ok {
+		t.Fatalf("no message delivered within %s (want outcome %q)", driveFetchWait, want)
+	}
+	if want != "" && outcome != want {
+		t.Fatalf("outcome mismatch: got %q want %q", outcome, want)
+	}
+	return outcome
+}
+
+// driveOneAny pulls one message and returns its outcome without asserting it.
+// Used by NFR-R1 tests where the post-fault redelivery could land as Accepted
+// (first attempt's step 8 didn't run) OR Duplicate (step 8 did run before the
+// fault).
 func driveOneAny(t *testing.T, ctx context.Context, cp *CommitPath, cons jetstream.Consumer) MessageOutcome {
 	t.Helper()
-	got := make(chan MessageOutcome, 1)
-	cc, err := cons.Consume(func(m jetstream.Msg) {
-		outcome := cp.HandleMessage(ctx, m)
-		select {
-		case got <- outcome:
-		default:
-		}
-	})
-	if err != nil {
-		t.Fatalf("Consume: %v", err)
+	outcome, ok := fetchOne(t, ctx, cp, cons)
+	if !ok {
+		t.Fatalf("no message delivered within %s", driveFetchWait)
 	}
-	defer cc.Stop()
-	select {
-	case outcome := <-got:
-		time.Sleep(100 * time.Millisecond)
-		return outcome
-	case <-time.After(30 * time.Second):
-		t.Fatalf("timed out waiting for any outcome")
-		return ""
-	}
+	return outcome
 }
 
 func setupTestPipeline(t *testing.T) (context.Context, *substrate.Conn, *CommitPath, jetstream.Consumer, *Metrics) {
@@ -322,7 +328,13 @@ func TestIntegration_MalformedNackTerminated(t *testing.T) {
 	}
 
 	// Confirm the message did NOT redeliver: pull info from the
-	// consumer and verify ack pending is zero after term.
+	// consumer and verify ack pending is zero after term. Flush first so the
+	// term (published asynchronously by HandleMessage) is guaranteed processed
+	// by the server before we read its consumer state — a deterministic
+	// PING/PONG barrier, not a timing guess.
+	if err := conn.NATS().Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	info, err := cons.Info(ctx)
 	if err != nil {
 		t.Fatalf("consumer info: %v", err)

@@ -64,8 +64,12 @@ func TestAckerImpl_E2E(t *testing.T) {
 		t.Fatalf("Ack: %v", err)
 	}
 
-	// Give the server a beat to register the ack.
-	time.Sleep(150 * time.Millisecond)
+	// Flush so the ack (published asynchronously by Msg.Ack) is guaranteed
+	// processed by the server before we read consumer state — a deterministic
+	// PING/PONG barrier rather than a timing guess.
+	if err := conn.NATS().Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	info, err := cons.Info(ctx)
 	if err != nil {
 		t.Fatalf("consumer info: %v", err)
