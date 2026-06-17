@@ -46,25 +46,31 @@ cap.role-by-operation.BookExecutiveCleaning
 
 **Phase 2 extends this to a *package-owned* producer.** The `cap.ephemeral.*` key space is produced by a **third Lens (`capabilityEphemeral`) shipped by the `orchestration-base` package** — not seeded at bootstrap. This is the first instance of the **contract-contribution model**: core owns the Capability KV bucket + the step-3 reader; *packages project the grant types they own* into disjoint key spaces. It is what lets the bootstrap `capability` cypher **stop referencing the package-owned `task` type** (the dependency direction becomes package→core). `capabilityEphemeral` is its first proof-of-pattern.
 
-**Phase 2 decomposition — the god-cypher splits to package-owned disjoint keys (Epic 12).** The
-broader decomposition is now adjudicated (`docs/decisions/projection-plane-decomposition.md`,
-D-PROJECTION + D-CONSUMER). The mechanism — a declarative `projectionKind: actorAggregate` plan
-compiler (§6.13, Story 12.3/12.4) on the write side and a **generic one-key-per-path auth-hook
-dispatcher** on the read side (Contract #2 §2.8, Story 12.5) — lets each grant type move to its own
+**Phase 2 decomposition — the god-cypher split to package-owned disjoint keys (Epic 12 — COMPLETE
+2026-06-17).** The decomposition is adjudicated (`docs/decisions/projection-plane-decomposition.md`,
+D-PROJECTION + D-CONSUMER) and **landed**. The mechanism — a declarative `projectionKind: actorAggregate`
+plan compiler (§6.13, Story 12.3/12.4) on the write side and a **generic one-key-per-path auth-hook
+dispatcher** on the read side (Contract #2 §2.8, Story 12.5) — lets each grant type live at its own
 disjoint key with **no core edit**:
 
-- **`cap.roles.<actor>`** — `rbac-domain` projects the role/permission grants (Story 12.6); the
-  bootstrap `capability` cypher **drops its `holdsRole`/`grantedBy`/`role`/`permission` MATCHes**.
-- **`cap.svc.<actor>`** — a service package projects service-access grants (Story 12.7); the bootstrap
-  cypher **drops its `containedIn`/`availableAt`/`unavailableAt`/`permitsOperation` MATCHes**. Two-path:
-  if `service-location` exists it projects this key, else the MATCHes are simply deleted and the key
-  space stays registered-but-empty (absence = denial, §6.8) until a real service package lands.
+- **`cap.roles.<actor>`** — `rbac-domain` projects the role/permission grants (Story 12.6, **done**);
+  the bootstrap `capability` cypher **dropped its `holdsRole`/`grantedBy`/`role`/`permission` MATCHes**.
+  An ordinary actor's role-derived platform grants now read from this key; a kernel-seeded primordial
+  identity reads the core anchor (below). `capabilityRoleIndex` (FR22 denial source) is `rbac-domain`-
+  owned too, degrading to empty when `rbac-domain` is absent.
+- **`cap.svc.<actor>`** — service-access grants. **Path B taken (Story 12.7, folded into 12.6):** no
+  `service-location` package exists, so the bootstrap cypher's `containedIn`/`availableAt`/
+  `unavailableAt`/`permitsOperation` MATCHes were **simply deleted** with no replacement projection;
+  the service matcher kind + key space stay registered-but-empty (absence = denial, §6.8) until a real
+  service package projects into them — a pure package addition, no core edit.
 
-After the decomposition the bootstrap `capability` cypher shrinks to the **primordial-identity anchor**
-(root-equivalent platform grants core must project even when no RBAC package is installed) — or retires
-entirely — leaving core owning only the bucket, the key conventions, and the step-3 dispatcher. Step-3
-preserves its single-GET hot path because it path-dispatches **before** the read: each path reads
-exactly one disjoint key by actor class (§2.8 amendment).
+After the decomposition the bootstrap `capability` cypher is the **narrow primordial-identity anchor**
+(`WHERE identity.data.protected = true` → a literal set of the root-equivalent platform grants core
+must project even when no RBAC package is installed) — core references no rbac or service/location grant
+vocabulary, owning only the bucket, the key conventions, and the step-3 dispatcher. Step-3 preserves its
+single-GET hot path because it path-dispatches **before** the read: each path reads exactly one disjoint
+key by actor class (§2.8 amendment) — primordial identity → the core `cap.<actor>` anchor, ordinary
+actor → `cap.roles.<actor>`.
 
 ### 6.2 Document Shape
 

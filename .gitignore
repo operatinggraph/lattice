@@ -31,7 +31,7 @@ coverage.html
 /verify-package-identity
 /verify-package-identity-hygiene
 /bootstrap
-refractor.log
+*.log
 
 # Editor / IDE
 .idea/

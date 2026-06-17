@@ -1200,7 +1200,7 @@ with root-equivalent capability; `class` on root.
   scheduler / op-vertex pruner (#47/#49); promotion of the nudge actuator to a shared package
   if a future Loom *saga* needs external steps.
 
-### Open item (future ADR) — Capability Lens god-cypher → contract-contribution model
+### Resolved (Epic 12, 2026-06-17) — Capability Lens god-cypher → contract-contribution model
 
 **Surfaced 2026-06-02 (Phase 2 contracts session), while extracting the task grant projection.**
 
@@ -1224,12 +1224,25 @@ each grant type too.
    grant-matchers that packages register, so it no longer names `task`/`service`/etc. (Andrew's
    framing.) The dispatch table is data, contributed at install time, not a hardcoded `switch`.
 
-**Status:** **(a1) done as first proof-of-pattern** (Story 7.1) — `orchestration-base`
-`capabilityEphemeral` lens → `cap.ephemeral.<actor>`; bootstrap cypher drops `task`. The rbac/service
-projection moves and the generic auth-hook consumer side are **NOT scheduled** — future ADR. **Not a
-Weaver prerequisite.** This is also the concrete shape of the broader **package-interoperation model**
+**Status: RESOLVED — Epic 12 complete (2026-06-17).** Both sides landed; see the decision record
+`docs/decisions/projection-plane-decomposition.md` and Contract #6 §6.1 ("decomposition complete").
+- **(a1)** the first proof-of-pattern (Story 7.1) — `orchestration-base` `capabilityEphemeral` lens →
+  `cap.ephemeral.<actor>`; bootstrap cypher drops `task`.
+- **Projection side** — the per-name god-cypher switch was made declarative (`projectionKind:
+  actorAggregate` plan compiler, Stories 12.3/12.4) and the built-in lenses migrated onto it; then
+  `rbac-domain` took ownership of role/permission grants → `cap.roles.<actor>` (Story 12.6) and the
+  service/location MATCHes were deleted (Story 12.7 Path B, folded into 12.6). The bootstrap cypher is
+  now the **narrow primordial-identity anchor** — core references no package grant vocabulary.
+- **Consumer side** — step-3 became a **generic one-key-per-path auth-hook dispatcher** over a fixed
+  set of core matcher *kinds* wired by data (Story 12.5; Contract #2 §2.8), preserving the single-GET
+  hot path. Write-ordering integrity is held by the monotonic `projectionSeq` guard (Stories 12.1a/b).
+
+This is also the concrete realization of the broader **package-interoperation model**
 (packages collaborate via: shared graph reads w/ declared `requires:` deps; the `events.<domain>.>`
-plane per D2; and *contract contribution* into core-owned buckets — this item).
+plane per D2; and *contract contribution* into core-owned buckets — this item). **Carried obligations**
+(non-blocking, recorded in the decision record): a declarative overlap-discriminator for when packages
+supply registry entries; an actor-aggregate "anchor no longer matches WHERE → tombstone" eviction if
+in-place (no-reset) upgrade is ever supported; and a field-level create guard on `data.protected`.
 
 ---
 
@@ -1237,8 +1250,8 @@ plane per D2; and *contract contribution* into core-owned buckets — this item)
 
 Consolidated backlog of design questions deliberately deferred past the Phase 2 orchestration core.
 Each is **out of scope until scheduled** — recorded here so the gap is explicit, not lost. (The
-**Capability Lens god-cypher → contract-contribution** open item lives in the Phase 2 Orchestration
-Core section above, by the context it was surfaced in; it belongs to this same backlog.)
+**Capability Lens god-cypher → contract-contribution** item that lived in the Phase 2 Orchestration
+Core section above is now **RESOLVED** — Epic 12, 2026-06-17 — and no longer part of this backlog.)
 
 ### OI-1 — Async external-call result-return (real Two-Phase Nudge adapters)
 
