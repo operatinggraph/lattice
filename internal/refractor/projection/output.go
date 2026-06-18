@@ -47,6 +47,14 @@ type OutputDescriptor struct {
 	RealnessFilter   string
 	Freshness        string
 
+	// KeyColumn opts the descriptor into the §10.2 Option (b) row-key shape. When
+	// non-empty, BuildKey substitutes the anchor's bare-NanoID <entityId> (derived
+	// from actorKey) into the {actorSuffix} slot instead of the default
+	// <type>.<id> suffix, so a convergence row key stays <targetId>.<entityId>
+	// (bare NanoID) and Weaver's splitRowKey accepts it unchanged. Empty leaves
+	// the default suffix path byte-for-byte intact.
+	KeyColumn string
+
 	// ActorField is the top-level field carrying the actor vertex key
 	// ("actor" by default; "assignee" for the my-tasks document).
 	ActorField string
@@ -95,6 +103,15 @@ func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, e
 		return OutputDescriptor{}, fmt.Errorf("output descriptor: freshness must be %q or empty, got %q", FreshnessAuto, spec.Freshness)
 	}
 
+	// keyColumn is an opt-in marker (§10.2 Option b): when present it directs
+	// BuildKey to emit the anchor's bare-NanoID <entityId> into the {actorSuffix}
+	// slot. Its value is the anchor's id derived from actorKey, not a RETURN
+	// alias, so it is NOT required to name a bodyColumns member — a present but
+	// blank value is the only malformed case and is rejected fail-closed.
+	if spec.KeyColumn != "" && strings.TrimSpace(spec.KeyColumn) == "" {
+		return OutputDescriptor{}, fmt.Errorf("output descriptor: keyColumn, when set, must not be blank")
+	}
+
 	actorField := spec.ActorField
 	if strings.TrimSpace(actorField) == "" {
 		actorField = DefaultActorField
@@ -107,6 +124,7 @@ func ParseOutputDescriptor(spec *lens.OutputDescriptorSpec) (OutputDescriptor, e
 		EmptyBehavior:      eb,
 		RealnessFilter:     spec.RealnessFilter,
 		Freshness:          spec.Freshness,
+		KeyColumn:          spec.KeyColumn,
 		ActorField:         actorField,
 		Lanes:              append([]string(nil), spec.Lanes...),
 		StaticEmptyColumns: append([]string(nil), spec.StaticEmptyColumns...),
@@ -153,11 +171,32 @@ func validateKeyPattern(pattern string) error {
 }
 
 // BuildKey renders the constrained outputKeyPattern for one actor key by
-// substituting {actorSuffix} with the actor key minus its "vtx." prefix.
+// substituting {actorSuffix}. The default suffix is the actor key minus its
+// "vtx." prefix (<type>.<id>). When KeyColumn is set (§10.2 Option b), the suffix
+// is instead the anchor's bare-NanoID <entityId> derived from actorKey, so a
+// convergence row key stays <targetId>.<entityId> (bare NanoID) and Weaver's
+// splitRowKey accepts it unchanged.
+//
+// The value is anchor-derived, not row-sourced, so BuildKey computes the same key
+// on both call sites: the project path (driver EnvelopeFn, has the row) and the
+// actor-disappearance delete path (SetActorDeleteKey → pipeline, has only
+// actorKey, no row). A row-sourced key would diverge on the delete path and leave
+// a stale row un-retracted.
 func (d OutputDescriptor) BuildKey(actorKey string) string {
 	suffix := actorKey
 	if rest, ok := strings.CutPrefix(actorKey, substrate.VertexPrefix+"."); ok {
 		suffix = rest
+	}
+	if d.KeyColumn != "" {
+		if _, id, ok := substrate.ParseVertexKey(actorKey); ok {
+			// ParseVertexKey enforces IsValidNanoID on the id segment, so the
+			// emitted <entityId> is structurally a bare NanoID (no dots) —
+			// splitRowKey's single-dot split + NanoID check accept it.
+			suffix = id
+		}
+		// A non-vertex actorKey falls through to the vtx-stripped suffix. The
+		// EnvelopeFn rejects a non-vertex actorKey before BuildKey on the project
+		// path, so this guards only the delete path's already-validated key.
 	}
 	return strings.ReplaceAll(d.OutputKeyPattern, ActorSuffixPlaceholder, suffix)
 }

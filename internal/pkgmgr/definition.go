@@ -301,6 +301,7 @@ type OutputDescriptorSpec struct {
 	EmptyBehavior      string   `json:"emptyBehavior"`
 	RealnessFilter     string   `json:"realnessFilter,omitempty"`
 	Freshness          string   `json:"freshness,omitempty"`
+	KeyColumn          string   `json:"keyColumn,omitempty"`
 	ActorField         string   `json:"actorField,omitempty"`
 	Lanes              []string `json:"lanes,omitempty"`
 	StaticEmptyColumns []string `json:"staticEmptyColumns,omitempty"`

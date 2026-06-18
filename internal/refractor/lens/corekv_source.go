@@ -108,6 +108,13 @@ type OutputDescriptorSpec struct {
 	RealnessFilter   string   `json:"realnessFilter"`   // field whose non-empty value marks a real collect entry
 	Freshness        string   `json:"freshness"`        // "auto"
 
+	// KeyColumn, when set, opts an actor-aggregate lens into the §10.2 Option (b)
+	// row-key shape: BuildKey emits the anchor's bare-NanoID <entityId> into the
+	// {actorSuffix} slot instead of the default <type>.<id> suffix, so a
+	// convergence row key stays <targetId>.<entityId> (bare NanoID) and Weaver's
+	// splitRowKey accepts it unchanged. Empty leaves the default suffix path.
+	KeyColumn string `json:"keyColumn,omitempty"`
+
 	// ActorField names the top-level envelope field that carries the actor
 	// vertex key. Defaults to "actor" (the cap.* documents); the my-tasks
 	// document uses "assignee".

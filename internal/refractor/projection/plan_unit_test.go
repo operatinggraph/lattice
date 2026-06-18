@@ -8,6 +8,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // --- Output descriptor parsing / validation (AC4) ---
@@ -85,6 +86,105 @@ func TestParseOutputDescriptor_NilSpec(t *testing.T) {
 	_, err := ParseOutputDescriptor(nil)
 	if err == nil {
 		t.Fatalf("expected error for nil descriptor")
+	}
+}
+
+// --- keyColumn: actorKey-derived bare-NanoID key (§10.2 Option b) ---
+
+// A keyColumn descriptor emits the anchor's BARE NanoID into the {actorSuffix}
+// slot, so the projected weaver-targets row key is <targetId>.<bareNanoID> (one
+// dot after the targetId) — the shape splitRowKey accepts.
+func TestBuildKey_KeyColumn_EmitsBareNanoID(t *testing.T) {
+	d := OutputDescriptor{
+		OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
+		KeyColumn:        "entityId",
+	}
+	// The anchor TYPE segment is lowercase per Contract #1 (isValidTypeSegment:
+	// [a-z][a-z0-9]*); the targetId prefix in the pattern is a free key token.
+	got := d.BuildKey("vtx.leaseapp.Lk2Pn6mQrtwzKbcXvP3T")
+	const want = "leaseApplicationComplete.Lk2Pn6mQrtwzKbcXvP3T"
+	if got != want {
+		t.Fatalf("keyColumn BuildKey: got %q, want %q (bare NanoID after one dot)", got, want)
+	}
+	if strings.Count(got, ".") != 1 {
+		t.Fatalf("keyColumn key must have exactly one dot after the targetId: %q", got)
+	}
+}
+
+// The default (no keyColumn) BuildKey path is byte-for-byte the pre-14.2
+// behavior: {actorSuffix} = <type>.<id> (vtx-stripped). This is the AC #2
+// regression pin at the unit layer.
+func TestBuildKey_DefaultSuffix_Unchanged(t *testing.T) {
+	d := OutputDescriptor{
+		OutputKeyPattern: "cap.ephemeral.{actorSuffix}",
+	}
+	got := d.BuildKey("vtx.identity.Hj4kPmRtw9nbCxz5vQ2y")
+	const want = "cap.ephemeral.identity.Hj4kPmRtw9nbCxz5vQ2y"
+	if got != want {
+		t.Fatalf("default BuildKey changed: got %q, want %q", got, want)
+	}
+	// A descriptor parsed without keyColumn defaults the field empty.
+	parsed, err := ParseOutputDescriptor(validDescriptor())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if parsed.KeyColumn != "" {
+		t.Fatalf("KeyColumn must default empty, got %q", parsed.KeyColumn)
+	}
+}
+
+// TestKeyColumn_SplitRowKeyRoundTrips closes the §4 loop: the keyColumn-projected
+// key satisfies the exact predicate Weaver's splitRowKey applies
+// (internal/weaver/evaluator.go:514 — IsValidNanoID on the tail after the first
+// dot), while the DEFAULT {actorSuffix}=<type>.<id> key FAILS it — demonstrating
+// why Option (b) is needed (the M2 defect) and that 14.2 fixes it. splitRowKey is
+// unexported in internal/weaver, so this asserts the predicate directly; the
+// weaver-package test TestSplitRowKey_AcceptsKeyColumnProjectedKey calls the real
+// function.
+func TestKeyColumn_SplitRowKeyRoundTrips(t *testing.T) {
+	const actorKey = "vtx.leaseapp.Lk2Pn6mQrtwzKbcXvP3T"
+
+	keyCol := OutputDescriptor{OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}", KeyColumn: "entityId"}
+	projected := keyCol.BuildKey(actorKey)
+	tail := projected[strings.IndexByte(projected, '.')+1:]
+	if !substrate.IsValidNanoID(tail) {
+		t.Fatalf("keyColumn key tail %q must be a bare NanoID (splitRowKey predicate)", tail)
+	}
+
+	def := OutputDescriptor{OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}"}
+	defaultKey := def.BuildKey(actorKey)
+	defaultTail := defaultKey[strings.IndexByte(defaultKey, '.')+1:]
+	if substrate.IsValidNanoID(defaultTail) {
+		t.Fatalf("default <type>.<id> key tail %q must FAIL the NanoID predicate (the M2 defect)", defaultTail)
+	}
+}
+
+func TestParseOutputDescriptor_KeyColumn_AcceptAndReject(t *testing.T) {
+	// Accept: a non-empty keyColumn parses and is carried onto the descriptor.
+	accept := validDescriptor()
+	accept.KeyColumn = "entityId"
+	d, err := ParseOutputDescriptor(accept)
+	if err != nil {
+		t.Fatalf("keyColumn must be accepted: %v", err)
+	}
+	if d.KeyColumn != "entityId" {
+		t.Fatalf("KeyColumn not carried: got %q", d.KeyColumn)
+	}
+
+	// Reject: a whitespace-only keyColumn is fail-closed.
+	reject := validDescriptor()
+	reject.KeyColumn = "   "
+	if _, err := ParseOutputDescriptor(reject); err == nil || !strings.Contains(err.Error(), "keyColumn") {
+		t.Fatalf("expected whitespace-only keyColumn rejection, got %v", err)
+	}
+
+	// The {actorSuffix}-required rule still fires when keyColumn is set: the
+	// placeholder is the substitution point keyColumn fills, not a relaxation.
+	noSuffix := validDescriptor()
+	noSuffix.KeyColumn = "entityId"
+	noSuffix.OutputKeyPattern = "leaseApplicationComplete.static"
+	if _, err := ParseOutputDescriptor(noSuffix); err == nil || !strings.Contains(err.Error(), "actorSuffix") {
+		t.Fatalf("expected missing-actorSuffix rejection even with keyColumn set, got %v", err)
 	}
 }
 
