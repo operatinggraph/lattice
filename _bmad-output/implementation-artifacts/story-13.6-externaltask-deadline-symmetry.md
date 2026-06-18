@@ -1,6 +1,6 @@
 # Story 13.6 — externalTask deadline + completion symmetry (corrects 13.2 §10.6)
 
-**Status:** review
+**Status:** done
 **Epic:** 13 — External I/O Bridge (orchestration core)
 **Tier:** Opus — guarded engine (`internal/loom`), correctness/wedge plane. Review: full 3-layer adversarial + `make verify-kernel`.
 **Sequencing:** lands **before Epic 14 (14.4)** — it changes the externalTask completion convention the real `replyOp` DDL (14.4) must build to. It is NOT gated behind 13.5.
