@@ -1,6 +1,6 @@
 # Story 14.3 — Identity sensitive PII aspects (`ssn` / `dob`, `sensitive: true`, identity-anchored)
 
-**Status:** review
+**Status:** done
 **Epic:** 14 — Loftspace Lease-Application Reference Vertical
 **Tier:** Opus — a **package-content + a thin pkgmgr-plumbing** change on the **security/privacy plane** (NFR Privacy / NFR-S3). It ships **no engine change** and (by design intent) **no step-6 validator change**. The risk is **not** size; it is that this is the **PII / crypto-shred boundary**, and the change must make `ssn`/`dob` *actually* `sensitive: true` **on the real install path** (not just in prose) so the **existing** MutationBatch validator anchors them to `identity` for free. Review: **full 3-layer adversarial** (Blind Hunter / Edge Case Hunter / Acceptance Auditor) per `bmad-code-review` — a sensitive-data-boundary change is exactly what three independent lenses catch (the Acceptance Auditor against the 2 ACs + arch Item 6 + PRD §358; the Edge Case Hunter on the install-path round-trip + the format-validation rejections + the "sensitive aspect on a non-identity vertex" negative; Blind Hunter on the diff). Plus the gates in §8.
 **Epic spec:** `_bmad-output/planning-artifacts/epics/phase-2-epics.md` → "Story 14.3: Identity sensitive PII aspects" (lines ~703–716) + the Epic 14 framing (~662–671) + the build order (14.1, 14.2, 14.3 → 14.4 → 14.5). Read it for the user-story framing and the **two** ACs (verbatim in §1).

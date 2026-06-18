@@ -700,7 +700,7 @@ So that a convergence lens can fan out across links **and** satisfy the frozen �
 
 *FRs: integration (enabler) · Depends on: 13.1 (§10.2 amended) · Model: Opus · Grounding: Contract #10 §10.2; the Epic-12 Output-descriptor machinery. Review: full 3-layer (guarded engine `internal/refractor`) + verify. **Gates 14.4.***
 
-### Story 14.3: Identity sensitive PII aspects
+### Story 14.3: Identity sensitive PII aspects — ✅ DONE 2026-06-18
 
 As a vertical author,
 I want applicant PII as sensitive identity aspects,
