@@ -239,6 +239,78 @@ func TestEmit_LoomPattern_RoundTripsThroughEngineParse(t *testing.T) {
 	}
 }
 
+// TestEmit_LoomPattern_ExternalTaskRoundTripsThroughEngineParse proves an
+// externalTask step's four fields (adapter/params/replyOp/instanceOp) are
+// emitted by the body builder and round-trip into a loom.Step the engine
+// accepts — the validation-parity + body-builder agreement the second site
+// requires. The emitted body is unmarshaled into loom.Pattern (the exact CDC
+// path) and the resulting step must carry every externalTask field.
+func TestEmit_LoomPattern_ExternalTaskRoundTripsThroughEngineParse(t *testing.T) {
+	def := pkgmgr.Definition{
+		Name:    "lease-signing",
+		Version: "0.1.0",
+		LoomPatterns: []pkgmgr.LoomPatternSpec{{
+			PatternID:   "leaseSigning",
+			SubjectType: "lease",
+			Steps: []pkgmgr.StepSpec{
+				{
+					Kind:       "externalTask",
+					Adapter:    "docusign",
+					InstanceOp: "CreateSigningInstance",
+					ReplyOp:    "ResolveSigning",
+					Params:     map[string]any{"template": "lease", "ttlDays": 7},
+				},
+				{Kind: "systemOp", Operation: "RecordLease"},
+			},
+		}},
+	}
+	ops, _, err := pkgmgr.BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+
+	patternID := pkgmgr.DeterministicNanoIDForTest(def.Name, def.Version, "loomPattern:leaseSigning")
+	specDoc := findDoc(ops, "vtx.meta."+patternID+".spec")
+	if specDoc == nil {
+		t.Fatalf("no loom-pattern spec aspect emitted for externalTask pattern")
+	}
+	body := specDoc["data"].(map[string]any)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal pattern body: %v", err)
+	}
+	var pattern loom.Pattern
+	if err := json.Unmarshal(raw, &pattern); err != nil {
+		t.Fatalf("emitted externalTask pattern body does not deserialize into loom.Pattern: %v", err)
+	}
+	if len(pattern.Steps) != 2 {
+		t.Fatalf("steps len = %d, want 2", len(pattern.Steps))
+	}
+	s := pattern.Steps[0]
+	if s.Kind != "externalTask" {
+		t.Fatalf("step[0] kind = %q, want externalTask", s.Kind)
+	}
+	if s.Adapter != "docusign" {
+		t.Errorf("step[0] adapter = %q, want docusign", s.Adapter)
+	}
+	if s.InstanceOp != "CreateSigningInstance" {
+		t.Errorf("step[0] instanceOp = %q, want CreateSigningInstance", s.InstanceOp)
+	}
+	if s.ReplyOp != "ResolveSigning" {
+		t.Errorf("step[0] replyOp = %q, want ResolveSigning", s.ReplyOp)
+	}
+	if len(s.Params) == 0 {
+		t.Error("step[0] params should round-trip into loom.Step.Params json.RawMessage")
+	}
+	// externalTask must NOT carry an operation; the systemOp step must.
+	if s.Operation != "" {
+		t.Errorf("step[0] (externalTask) operation should be empty, got %q", s.Operation)
+	}
+	if pattern.Steps[1].Operation != "RecordLease" {
+		t.Errorf("step[1] (systemOp) operation = %q, want RecordLease", pattern.Steps[1].Operation)
+	}
+}
+
 // TestEmit_OpMeta_ShapeMatchesEngineIndex asserts the op-meta vertex carries
 // operationType on its data and emits NO spec aspect (the installOpMeta shape
 // both engines' indexOpMeta read).

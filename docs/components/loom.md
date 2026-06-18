@@ -394,8 +394,9 @@ If two processes ever do run with the same `Instance` against the same `health-k
 - External-call steps in Loom — **now the ratified design, no longer deferred to Weaver**: the
   **`externalTask`** step kind (Core model above) dispatches an idempotent external call via the
   **bridge** and awaits its result. This **supersedes** the former Two-Phase-Nudge / Weaver-owned
-  external-call placement (Contract #10 §10.3/§10.8 retired 2026-06-18). The engine work lands in the
-  External I/O Bridge epic (Story 13.2); until then `externalTask` is ratified-but-unbuilt.
+  external-call placement (Contract #10 §10.3/§10.8 retired 2026-06-18). The engine side is implemented
+  in `internal/loom`; the **bridge** component that consumes `events.external.>` and posts the `replyOp`
+  is the remaining piece.
 - Starlark guard evaluation — the reserved `{reads, starlark}` escape hatch (validated-and-rejected
   today). The shared verified-pure sandbox lands only when the first Starlark guard is authored
   (§10.5); the shipped declarative grammar (above) covers the field-presence/equality predicates the

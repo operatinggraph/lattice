@@ -8,19 +8,43 @@ import (
 
 // Step kinds (Contract #10 §10.5). A systemOp step submits its bound op
 // directly; a userTask step submits CreateTask and waits for the user to
-// perform the bound op (auto-completing the task).
+// perform the bound op (auto-completing the task); an externalTask step
+// submits its instanceOp (which mints a claim vertex and emits the
+// external.<adapter> event off its own outbox) and parks for the bridge's
+// replyOp.
 const (
-	StepKindSystemOp = "systemOp"
-	StepKindUserTask = "userTask"
+	StepKindSystemOp     = "systemOp"
+	StepKindUserTask     = "userTask"
+	StepKindExternalTask = "externalTask"
 )
 
-// Step is one entry in a pattern's linear step list (Contract #10 §10.5
-// shape `{kind, operation, guard?}`). For both kinds `operation` names the
-// bound op; guards are not yet interpreted.
+// Step is one entry in a pattern's linear step list (Contract #10 §10.5).
+// systemOp/userTask carry the `{kind, operation, guard?}` shape — `operation`
+// names the bound op. externalTask carries the `{kind, adapter, params,
+// replyOp, instanceOp, guard?}` shape and leaves `operation` unused: its op
+// vocabulary is instanceOp (the op the engine submits, which mints the claim
+// vertex) and replyOp (the result-op the bridge posts back). Guards apply to
+// any kind.
 type Step struct {
 	Kind      string          `json:"kind"`
-	Operation string          `json:"operation"`
+	Operation string          `json:"operation,omitempty"`
 	Guard     json.RawMessage `json:"guard,omitempty"`
+
+	// Adapter is the external adapter name an externalTask dispatches to. It is
+	// carried into the instanceOp payload and rides the external.<adapter> event
+	// the instanceOp's outbox emits; the bridge selects its adapter from it.
+	Adapter string `json:"adapter,omitempty"`
+	// Params are the externalTask's adapter parameters — free-form templates
+	// opaque to the engine, passed through verbatim into the instanceOp payload.
+	Params json.RawMessage `json:"params,omitempty"`
+	// ReplyOp is the result-op type the bridge posts back for an externalTask
+	// (carrying payload.externalRef); its DDL records the external outcome as
+	// aspect(s) on the claim vertex (D5). Carried into the instanceOp payload.
+	ReplyOp string `json:"replyOp,omitempty"`
+	// InstanceOp is the op an externalTask step submits: its DDL mints the claim
+	// vertex (with the caller-supplied instance handle) and emits the
+	// external.<adapter> event via its own transactional outbox.
+	InstanceOp string `json:"instanceOp,omitempty"`
 }
 
 // Pattern is the in-engine view of a meta.loomPattern definition. A pattern
@@ -112,12 +136,20 @@ func (p *Pattern) userTaskCompletionUnobservable() bool {
 	return true
 }
 
-// validate rejects a pattern the engine cannot run. systemOp and userTask
-// steps are interpreted; any other kind is rejected so a half-understood
-// pattern never partially executes. A guarded step's guard must parse as a
-// §10.5 declarative shape (atoms/composition); a malformed guard or the
-// reserved Starlark escape hatch rejects the whole pattern, the same doctrine as
-// an unknown kind — a half-understood pattern never partially executes.
+// validate rejects a pattern the engine cannot run. systemOp, userTask, and
+// externalTask steps are interpreted; any other kind is rejected so a
+// half-understood pattern never partially executes. Each kind's §10.5 shape is
+// enforced exactly — required fields present AND foreign fields absent — so a
+// step that confuses the two shapes (e.g. a systemOp carrying adapter/params,
+// or an externalTask carrying operation) is rejected rather than silently
+// running with the foreign field ignored. systemOp/userTask require a non-empty
+// operation and forbid adapter/instanceOp/replyOp/params; externalTask requires
+// non-empty adapter/instanceOp/replyOp (params optional) and forbids operation.
+// A guarded step's guard
+// must parse as a §10.5 declarative shape (atoms/composition); a malformed
+// guard or the reserved Starlark escape hatch rejects the whole pattern, the
+// same doctrine as an unknown kind — a half-understood pattern never partially
+// executes. Guards apply to any kind.
 func (p *Pattern) validate() error {
 	if strings.TrimSpace(p.SubjectType) == "" {
 		return fmt.Errorf("pattern %q: subjectType required", p.PatternID)
@@ -126,12 +158,39 @@ func (p *Pattern) validate() error {
 		return fmt.Errorf("pattern %q: at least one step required", p.PatternID)
 	}
 	for i, s := range p.Steps {
-		if s.Kind != StepKindSystemOp && s.Kind != StepKindUserTask {
-			return fmt.Errorf("pattern %q step %d: kind %q unsupported (systemOp | userTask)",
+		switch s.Kind {
+		case StepKindSystemOp, StepKindUserTask:
+			if strings.TrimSpace(s.Operation) == "" {
+				return fmt.Errorf("pattern %q step %d: operation required", p.PatternID, i)
+			}
+			if strings.TrimSpace(s.Adapter) != "" {
+				return fmt.Errorf("pattern %q step %d: adapter is an externalTask-only field, not permitted on a %s step", p.PatternID, i, s.Kind)
+			}
+			if strings.TrimSpace(s.InstanceOp) != "" {
+				return fmt.Errorf("pattern %q step %d: instanceOp is an externalTask-only field, not permitted on a %s step", p.PatternID, i, s.Kind)
+			}
+			if strings.TrimSpace(s.ReplyOp) != "" {
+				return fmt.Errorf("pattern %q step %d: replyOp is an externalTask-only field, not permitted on a %s step", p.PatternID, i, s.Kind)
+			}
+			if len(s.Params) != 0 {
+				return fmt.Errorf("pattern %q step %d: params is an externalTask-only field, not permitted on a %s step", p.PatternID, i, s.Kind)
+			}
+		case StepKindExternalTask:
+			if strings.TrimSpace(s.Adapter) == "" {
+				return fmt.Errorf("pattern %q step %d: adapter required for externalTask", p.PatternID, i)
+			}
+			if strings.TrimSpace(s.InstanceOp) == "" {
+				return fmt.Errorf("pattern %q step %d: instanceOp required for externalTask", p.PatternID, i)
+			}
+			if strings.TrimSpace(s.ReplyOp) == "" {
+				return fmt.Errorf("pattern %q step %d: replyOp required for externalTask", p.PatternID, i)
+			}
+			if strings.TrimSpace(s.Operation) != "" {
+				return fmt.Errorf("pattern %q step %d: operation is a systemOp/userTask-only field, not permitted on an externalTask step", p.PatternID, i)
+			}
+		default:
+			return fmt.Errorf("pattern %q step %d: kind %q unsupported (systemOp | userTask | externalTask)",
 				p.PatternID, i, s.Kind)
-		}
-		if strings.TrimSpace(s.Operation) == "" {
-			return fmt.Errorf("pattern %q step %d: operation required", p.PatternID, i)
 		}
 		if len(s.Guard) != 0 {
 			if _, err := parseGuard(s.Guard); err != nil {

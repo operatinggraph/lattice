@@ -32,9 +32,28 @@ func deriveTaskID(instanceID string, cursor int) string {
 	return deriveID("task:", instanceID, cursor)
 }
 
+// deriveInstanceID returns a deterministic 20-char NanoID for the externalTask
+// step at cursor within instance: the bare instance handle Loom mints
+// write-ahead, parks on as token.<handle>, AND passes to instanceOp as the
+// caller-supplied id (the DDL prepends its package-chosen type to form the
+// vtx.<type>.<handle> claim-vertex key — the engine never names the type). A
+// crash-retry re-mints the same handle, so the re-submitted instanceOp collapses
+// on the Contract #4 vtx.op.<opRequestId> tracker (no duplicate claim vertex);
+// the bridge echoes the handle back as payload.externalRef, the same value Loom
+// parked on. It is namespaced disjoint from deriveRequestID ("") and
+// deriveTaskID ("task:") so the same (instanceId, cursor) yields three distinct
+// ids — the instanceOp's own submission requestId (deriveRequestID) and the
+// instance handle never collide. The handle is a bare NanoID (the canonical
+// Lattice alphabet has no dot), so it can never carry the "vtx.task." prefix
+// isUserTaskToken keys on — the externalTask token is namespace-disjoint from
+// the userTask token AND the systemOp requestId.
+func deriveInstanceID(instanceID string, cursor int) string {
+	return deriveID("instance:", instanceID, cursor)
+}
+
 // deriveID is the shared deterministic NanoID derivation. The namespace prefix
-// keeps disjoint derivations (op requestId vs task id) from colliding for the
-// same (instanceId, cursor).
+// keeps disjoint derivations (op requestId vs task id vs instance handle) from
+// colliding for the same (instanceId, cursor).
 func deriveID(namespace, instanceID string, cursor int) string {
 	var seed [8]byte
 	binary.BigEndian.PutUint64(seed[:], uint64(cursor))

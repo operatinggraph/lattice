@@ -131,20 +131,42 @@ type LoomPatternSpec struct {
 	Steps []StepSpec
 }
 
-// StepSpec is one entry in a pattern's linear step list (Contract #10 §10.5
-// shape `{kind, operation, guard?}`).
+// StepSpec is one entry in a pattern's linear step list (Contract #10 §10.5).
+// systemOp/userTask carry `{kind, operation, guard?}`; externalTask carries
+// `{kind, adapter, params, replyOp, instanceOp, guard?}` and leaves Operation
+// unused.
 type StepSpec struct {
-	// Kind is `systemOp` (submit the bound op directly) or `userTask`
-	// (CreateTask and wait for the user to perform the bound op).
+	// Kind is `systemOp` (submit the bound op directly), `userTask` (CreateTask
+	// and wait for the user to perform the bound op), or `externalTask` (submit
+	// the instanceOp and wait for the bridge's replyOp).
 	Kind string
 
-	// Operation names the bound op for this step.
+	// Operation names the bound op for a systemOp/userTask step (unused by
+	// externalTask).
 	Operation string
 
 	// Guard is the §10.5 declarative predicate the step is gated on. Carried
 	// as a Go map so authors write a map literal; marshaled into the step's
 	// `guard` field and omitted when nil.
 	Guard map[string]any
+
+	// Adapter is the external adapter name an externalTask dispatches to
+	// (required for externalTask, unused otherwise).
+	Adapter string
+
+	// Params are an externalTask's adapter parameters — author-friendly map,
+	// emitted into the step's `params` field and omitted when nil. Opaque to the
+	// engine (passed through to the instanceOp payload).
+	Params map[string]any
+
+	// ReplyOp is the result-op type the bridge posts back for an externalTask
+	// (required for externalTask, unused otherwise).
+	ReplyOp string
+
+	// InstanceOp is the op an externalTask step submits — its DDL mints the claim
+	// vertex and emits the external.<adapter> event (required for externalTask,
+	// unused otherwise).
+	InstanceOp string
 }
 
 // OpMetaSpec is one op-meta vertex a package declares so an op is discoverable

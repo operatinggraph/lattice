@@ -57,3 +57,39 @@ func TestDeriveTaskID_DeterministicValidAndDisjoint(t *testing.T) {
 		t.Fatal("taskId collided with the step's requestId (handles must be disjoint)")
 	}
 }
+
+// TestDeriveInstanceID_DeterministicValidAndDisjoint proves the externalTask
+// instance handle is a valid stable bare NanoID, that the three derivations for
+// the same (instanceId, cursor) are mutually distinct (so the parked handle and
+// the instanceOp's own submission requestId never collide), and that the handle
+// is dot-free so it is NOT a userTask token (it routes to the systemOp-style
+// deadline probe, never the userTask creation-probe).
+func TestDeriveInstanceID_DeterministicValidAndDisjoint(t *testing.T) {
+	id, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := deriveInstanceID(id, 0)
+	if a != deriveInstanceID(id, 0) {
+		t.Fatal("deriveInstanceID not deterministic")
+	}
+	if !substrate.IsValidNanoID(a) {
+		t.Fatalf("deriveInstanceID produced invalid NanoID: %q", a)
+	}
+	if deriveInstanceID(id, 0) == deriveInstanceID(id, 1) {
+		t.Fatal("cursor 0 and 1 produced the same instance handle")
+	}
+	// The three derivations for the same (instanceId, cursor) must be mutually
+	// distinct: requestId (submission idempotency handle), taskId, and the
+	// instance handle each live in their own namespace.
+	req := deriveRequestID(id, 0)
+	task := deriveTaskID(id, 0)
+	if a == req || a == task || req == task {
+		t.Fatalf("the three derivations collided: requestId=%q taskId=%q instance=%q", req, task, a)
+	}
+	// The handle is a bare NanoID (dot-free), so isUserTaskToken is false — the
+	// externalTask token is disjoint from the vtx.task.* userTask namespace.
+	if isUserTaskToken(a) {
+		t.Fatalf("instance handle %q must not be a userTask token (it must route to the systemOp-style probe)", a)
+	}
+}

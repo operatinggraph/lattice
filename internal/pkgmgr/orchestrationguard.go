@@ -28,8 +28,9 @@ const reservedGapParam = "expectedRevision"
 // validates patterns without importing internal/loom (the installer must not
 // depend on an engine).
 const (
-	stepKindSystemOp = "systemOp"
-	stepKindUserTask = "userTask"
+	stepKindSystemOp     = "systemOp"
+	stepKindUserTask     = "userTask"
+	stepKindExternalTask = "externalTask"
 )
 
 // Gap action names (Contract #10 §10.8 action table). Re-stated here so the
@@ -141,9 +142,14 @@ func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) er
 // validateLoomPatterns runs the §10.5 install-time validations on every
 // declared LoomPatternSpec, fail-closed and pure. It validates pattern and step
 // STRUCTURE (patternId/subjectType non-empty; ≥1 step; each step kind ∈
-// {systemOp,userTask} with a non-empty operation) plus a package-local
-// patternId-uniqueness check (two patterns minting the same create-only
-// loomPattern key would collide on an opaque conflict). Step Guard bodies are
+// {systemOp,userTask,externalTask}, with each kind's §10.5 shape enforced
+// exactly — required fields present AND foreign fields absent: systemOp/userTask
+// require a non-empty operation and forbid adapter/instanceOp/replyOp/params,
+// externalTask requires adapter/instanceOp/replyOp and forbids operation) plus
+// a package-local patternId-uniqueness check (two patterns
+// minting the same create-only loomPattern key would collide on an opaque
+// conflict). It mirrors the engine's validate() exactly so an install never
+// admits a pattern the engine would reject at CDC load. Step Guard bodies are
 // author-supplied maps validated by the engine at CDC load; the installer does
 // not interpret guard grammar.
 func (def Definition) validateLoomPatterns() error {
@@ -164,12 +170,39 @@ func (def Definition) validateLoomPatterns() error {
 			return fmt.Errorf("pkgmgr: LoomPattern[%d] %q: at least one step is required", idx, p.PatternID)
 		}
 		for sIdx, s := range p.Steps {
-			if s.Kind != stepKindSystemOp && s.Kind != stepKindUserTask {
-				return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: kind %q unsupported (systemOp | userTask)",
+			switch s.Kind {
+			case stepKindSystemOp, stepKindUserTask:
+				if strings.TrimSpace(s.Operation) == "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: operation is required", idx, p.PatternID, sIdx)
+				}
+				if strings.TrimSpace(s.Adapter) != "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: adapter is an externalTask-only field, not permitted on a %s step", idx, p.PatternID, sIdx, s.Kind)
+				}
+				if strings.TrimSpace(s.InstanceOp) != "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: instanceOp is an externalTask-only field, not permitted on a %s step", idx, p.PatternID, sIdx, s.Kind)
+				}
+				if strings.TrimSpace(s.ReplyOp) != "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: replyOp is an externalTask-only field, not permitted on a %s step", idx, p.PatternID, sIdx, s.Kind)
+				}
+				if len(s.Params) != 0 {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: params is an externalTask-only field, not permitted on a %s step", idx, p.PatternID, sIdx, s.Kind)
+				}
+			case stepKindExternalTask:
+				if strings.TrimSpace(s.Adapter) == "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: adapter is required for externalTask", idx, p.PatternID, sIdx)
+				}
+				if strings.TrimSpace(s.InstanceOp) == "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: instanceOp is required for externalTask", idx, p.PatternID, sIdx)
+				}
+				if strings.TrimSpace(s.ReplyOp) == "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: replyOp is required for externalTask", idx, p.PatternID, sIdx)
+				}
+				if strings.TrimSpace(s.Operation) != "" {
+					return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: operation is a systemOp/userTask-only field, not permitted on an externalTask step", idx, p.PatternID, sIdx)
+				}
+			default:
+				return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: kind %q unsupported (systemOp | userTask | externalTask)",
 					idx, p.PatternID, sIdx, s.Kind)
-			}
-			if strings.TrimSpace(s.Operation) == "" {
-				return fmt.Errorf("pkgmgr: LoomPattern[%d] %q step %d: operation is required", idx, p.PatternID, sIdx)
 			}
 		}
 	}

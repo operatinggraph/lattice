@@ -255,6 +255,129 @@ func TestValidateLoomPatterns_EmptyStepOperation(t *testing.T) {
 	}
 }
 
+func TestValidateLoomPatterns_ExternalTaskValid(t *testing.T) {
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "leaseSigning",
+		SubjectType: "lease",
+		Steps: []StepSpec{{
+			Kind:       "externalTask",
+			Adapter:    "docusign",
+			InstanceOp: "CreateSigningInstance",
+			ReplyOp:    "ResolveSigning",
+			Params:     map[string]any{"template": "lease"},
+		}},
+	}}}
+	if err := def.validateLoomPatterns(); err != nil {
+		t.Fatalf("expected valid externalTask pattern to pass, got: %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_ExternalTaskNoOperationRequired(t *testing.T) {
+	// An externalTask must NOT require `operation` — its op vocabulary is
+	// instanceOp/replyOp.
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "externalTask", Adapter: "docusign", InstanceOp: "CreateSigningInstance", ReplyOp: "ResolveSigning"}},
+	}}}
+	if err := def.validateLoomPatterns(); err != nil {
+		t.Fatalf("externalTask must not require operation, got: %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_ExternalTaskMissingAdapter(t *testing.T) {
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "externalTask", InstanceOp: "CreateSigningInstance", ReplyOp: "ResolveSigning"}},
+	}}}
+	err := def.validateLoomPatterns()
+	if err == nil || !strings.Contains(err.Error(), "adapter") {
+		t.Fatalf("expected externalTask missing-adapter error, got %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_ExternalTaskMissingInstanceOp(t *testing.T) {
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "externalTask", Adapter: "docusign", ReplyOp: "ResolveSigning"}},
+	}}}
+	err := def.validateLoomPatterns()
+	if err == nil || !strings.Contains(err.Error(), "instanceOp") {
+		t.Fatalf("expected externalTask missing-instanceOp error, got %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_ExternalTaskMissingReplyOp(t *testing.T) {
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "externalTask", Adapter: "docusign", InstanceOp: "CreateSigningInstance"}},
+	}}}
+	err := def.validateLoomPatterns()
+	if err == nil || !strings.Contains(err.Error(), "replyOp") {
+		t.Fatalf("expected externalTask missing-replyOp error, got %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_SystemOpStillRequiresOperation(t *testing.T) {
+	// The externalTask branch must not relax the systemOp/userTask operation
+	// requirement.
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "systemOp", Operation: ""}},
+	}}}
+	if err := def.validateLoomPatterns(); err == nil {
+		t.Fatal("expected systemOp without operation to still be rejected, got nil")
+	}
+}
+
+func TestValidateLoomPatterns_SystemOpWithStrayInstanceOpRejected(t *testing.T) {
+	// A systemOp carrying an externalTask-only field must be rejected fail-closed
+	// rather than validating clean with the foreign field silently ignored.
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "systemOp", Operation: "SignLease", InstanceOp: "CreateSigningInstance"}},
+	}}}
+	err := def.validateLoomPatterns()
+	if err == nil || !strings.Contains(err.Error(), "instanceOp") {
+		t.Fatalf("expected systemOp stray-instanceOp error, got %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_UserTaskWithStrayAdapterRejected(t *testing.T) {
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps:       []StepSpec{{Kind: "userTask", Operation: "SignLease", Adapter: "docusign"}},
+	}}}
+	err := def.validateLoomPatterns()
+	if err == nil || !strings.Contains(err.Error(), "adapter") {
+		t.Fatalf("expected userTask stray-adapter error, got %v", err)
+	}
+}
+
+func TestValidateLoomPatterns_ExternalTaskWithStrayOperationRejected(t *testing.T) {
+	def := Definition{LoomPatterns: []LoomPatternSpec{{
+		PatternID:   "p",
+		SubjectType: "lease",
+		Steps: []StepSpec{{
+			Kind:       "externalTask",
+			Adapter:    "docusign",
+			InstanceOp: "CreateSigningInstance",
+			ReplyOp:    "ResolveSigning",
+			Operation:  "SignLease",
+		}},
+	}}}
+	err := def.validateLoomPatterns()
+	if err == nil || !strings.Contains(err.Error(), "operation") {
+		t.Fatalf("expected externalTask stray-operation error, got %v", err)
+	}
+}
+
 func TestValidateLoomPatterns_DuplicatePatternID(t *testing.T) {
 	def := Definition{LoomPatterns: []LoomPatternSpec{
 		{PatternID: "leaseSigning", SubjectType: "lease", Steps: []StepSpec{{Kind: "systemOp", Operation: "X"}}},

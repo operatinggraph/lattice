@@ -638,8 +638,9 @@ func (e *Engine) ensureDomainConsumers(pattern *Pattern) {
 }
 
 // eventBody is the minimal view of a core-events message Loom reads. It carries
-// the two structural correlation keys the contract defines (Contract #10 §10.6),
-// both from the Event envelope body (read-from-body, never from the subject):
+// the three structural correlation keys the contract defines (Contract #10
+// §10.6), all from the Event envelope body (read-from-body, never from the
+// subject):
 //   - requestId — the top-level field; the systemOp token (the op's own
 //     requestId Loom chose).
 //   - payload.taskKey — the userTask token (a vtx.task.<id> the
@@ -647,22 +648,27 @@ func (e *Engine) ensureDomainConsumers(pattern *Pattern) {
 //     payload object, Contract #3 §3.4; the top-level requestId on that event is
 //     the user's bound-op requestId, which Loom does not know, so it cannot be
 //     the correlation key).
+//   - payload.externalRef — the externalTask token (the bare instance handle
+//     Loom minted and parked on; the bridge's replyOp event echoes it back. The
+//     top-level requestId on that event is the bridge's result-op requestId,
+//     which Loom does not own, so it cannot be the correlation key).
 //
 // Loom stays domain-ignorant: it does not know which event is which, it tries
-// both keys against the durable token store and the pointer decides.
+// each key against the durable token store and the pointer decides.
 type eventBody struct {
 	RequestID string `json:"requestId"`
 	Payload   struct {
-		TaskKey string `json:"taskKey"`
+		TaskKey     string `json:"taskKey"`
+		ExternalRef string `json:"externalRef"`
 	} `json:"payload"`
 }
 
 // handleCompletion correlates a committed business event to its instance by a
-// direct token.<token> GET on loom-state and advances the cursor. It tries both
-// structural correlation keys (requestId for systemOp, payload.taskKey for
-// userTask); at most one resolves a live pointer (tokens are unique). There is
-// no in-memory index; the pointer's presence is the correlation + idempotency
-// guard (Contract #10 §10.6).
+// direct token.<token> GET on loom-state and advances the cursor. It tries each
+// structural correlation key (requestId for systemOp, payload.taskKey for
+// userTask, payload.externalRef for externalTask); at most one resolves a live
+// pointer (tokens are unique). There is no in-memory index; the pointer's
+// presence is the correlation + idempotency guard (Contract #10 §10.6).
 func (e *Engine) handleCompletion(ctx context.Context, msg substrate.Message) substrate.Decision {
 	if len(msg.Body) == 0 {
 		return substrate.Ack
@@ -696,17 +702,24 @@ func (e *Engine) handleCompletion(ctx context.Context, msg substrate.Message) su
 
 // correlationKeys returns the distinct, non-empty structural correlation keys to
 // try for a completion event, in order (systemOp requestId first, userTask
-// taskKey second). Trying requestId before payload.taskKey is safe because both
-// namespaces are unguessable NanoIDs: an orchestration.taskCompleted event's top-level requestId
-// is the user's bound-op id, which cannot collide with a live Loom systemOp token
-// (Loom's own op requestId), so the wrong key never resolves a live pointer.
+// taskKey second, externalTask externalRef third), de-duplicated against the
+// keys already chosen. At most one resolves a live pointer — tokens are unique
+// handles, so only the current pending step's token is live; the single
+// live-pointer invariant holds regardless of order. Trying requestId first is
+// safe because the keys are unguessable NanoIDs: a completion event's top-level
+// requestId (the bound-op or bridge result-op id) cannot collide with a live
+// Loom token (Loom's own op requestId / taskKey / instance handle), so the wrong
+// key never resolves a live pointer.
 func correlationKeys(ev eventBody) []string {
-	keys := make([]string, 0, 2)
+	keys := make([]string, 0, 3)
 	if ev.RequestID != "" {
 		keys = append(keys, ev.RequestID)
 	}
 	if ev.Payload.TaskKey != "" && ev.Payload.TaskKey != ev.RequestID {
 		keys = append(keys, ev.Payload.TaskKey)
+	}
+	if ref := ev.Payload.ExternalRef; ref != "" && ref != ev.RequestID && ref != ev.Payload.TaskKey {
+		keys = append(keys, ref)
 	}
 	return keys
 }
@@ -815,10 +828,14 @@ func (e *Engine) advanceToRunnableStep(ctx context.Context, inst *Instance, patt
 // task creation, §10.6).
 func (e *Engine) submitStep(ctx context.Context, inst *Instance, pattern *Pattern, oldToken string) error {
 	step := pattern.Steps[inst.Cursor]
-	if step.Kind == StepKindUserTask {
+	switch step.Kind {
+	case StepKindUserTask:
 		return e.submitUserTask(ctx, inst, pattern, step, oldToken)
+	case StepKindExternalTask:
+		return e.submitExternalTask(ctx, inst, pattern, step, oldToken)
+	default:
+		return e.submitSystemOp(ctx, inst, pattern, step, oldToken)
 	}
-	return e.submitSystemOp(ctx, inst, pattern, step, oldToken)
 }
 
 // submitSystemOp submits a step's bound op directly. The write-ahead token is
@@ -896,6 +913,63 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 		"instanceId", inst.InstanceID, "cursor", inst.Cursor,
 		"operation", step.Operation, "forOperation", forOperation,
 		"taskKey", taskKey, "createTaskRequestId", opRequestID)
+	return nil
+}
+
+// submitExternalTask submits the step's instanceOp and parks for the bridge's
+// replyOp (§10.5/§10.6). The write-ahead pendingToken is the bare instance
+// handle Loom mints — NOT the full vtx.<type>.<id> claim-vertex key: the handle
+// is type-free, and the instanceOp DDL prepends its own package-chosen type to
+// form the key (the engine never names a claim-vertex type — invariant a). The
+// handle is passed to instanceOp as the caller-supplied `instanceKey` field
+// (the verbatim-id seam, exactly like CreateTask's taskId), so a crash-retry
+// re-mints the same handle and the re-submitted instanceOp collapses on the
+// Contract #4 tracker. The bridge echoes the handle back as payload.externalRef;
+// Loom's third correlation key resolves token.<handle> → instance and advances.
+//
+// The instanceOp's own submission requestId is a disjoint deterministic id
+// (deriveRequestID), keeping the submission idempotency handle separate from the
+// parked handle — exactly as submitUserTask keeps the CreateTask requestId
+// disjoint from the taskId.
+//
+// A bounded StepTimeout deadline IS armed (an externalTask is a machine wait —
+// the bridge is the completer — so a never-arriving reply must trip the FR29
+// backstop, exactly like a systemOp; it is NOT the unbounded human wait of a
+// userTask, so CreateTaskTimeout does not apply). Loom stays substrate-only: the
+// external.<adapter> event is emitted by the instanceOp DDL's transactional
+// outbox, never by Loom — the relay just submits the instanceOp like any op.
+func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern *Pattern, step Step, oldToken string) error {
+	handle := deriveInstanceID(inst.InstanceID, inst.Cursor)
+	token := handle
+	inst.PendingToken = token
+
+	opRequestID := deriveRequestID(inst.InstanceID, inst.Cursor)
+	payload := map[string]any{
+		// The caller-supplied id: the BARE instance handle, type-free. The
+		// instanceOp DDL prepends its package-chosen type → vtx.<type>.<handle>.
+		"instanceKey": handle,
+		"subjectKey":  inst.SubjectKey,
+		"adapter":     step.Adapter,
+		"replyOp":     step.ReplyOp,
+	}
+	// params is opaque pass-through (no engine-side template resolution — a Loom
+	// step's params are concrete pattern data). Omitted when empty.
+	if len(step.Params) != 0 {
+		payload["params"] = step.Params
+	}
+
+	target := "vtx.meta." + pattern.PatternID
+	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey)
+	if err != nil {
+		return err
+	}
+	if err := e.state.transition(ctx, inst, token, oldToken, ob, e.cfg.StepTimeout); err != nil {
+		return err
+	}
+	e.logger.Info("loom externalTask write-ahead",
+		"instanceId", inst.InstanceID, "cursor", inst.Cursor,
+		"adapter", step.Adapter, "instanceOp", step.InstanceOp, "replyOp", step.ReplyOp,
+		"instanceKey", handle, "instanceOpRequestId", opRequestID)
 	return nil
 }
 
@@ -1003,9 +1077,25 @@ func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg subs
 // instance state and is CAS-on-running (the advance/fail paths verify the
 // pending token), so a redelivered marker / second replica is a no-op.
 //
-// A userTask token (vtx.task.<id>) routes to onUserTaskDeadline: the deadline is
-// bounded on the task-CREATION only, so the probe reads the task vertex and the
-// CreateTask op's tracker/outbox to decide created-vs-rejected.
+// The pending step's kind selects the probe:
+//   - userTask (vtx.task.<id> token) → onUserTaskDeadline: the deadline is
+//     bounded on the task-CREATION only, so the probe reads the task vertex and
+//     the CreateTask op's tracker/outbox to decide created-vs-rejected.
+//   - externalTask → onExternalTaskDeadline: the pending token is the bare
+//     instance handle, but the instanceOp's tracker/outbox are keyed by the
+//     instanceOp's own requestId (not the handle), so the probe MUST re-derive
+//     that requestId — it cannot reuse the systemOp branch (which probes the
+//     pending token directly).
+//   - systemOp → the inline probe below: the pending token IS the op requestId,
+//     so trackerExists(token)/outboxExists(token) probe the right keys.
+//
+// A userTask token is distinguishable by its vtx.task.<id> shape, but systemOp
+// and externalTask tokens are both bare NanoIDs — so the systemOp/externalTask
+// split reads the step kind from the instance's PINNED pattern at inst.Cursor
+// (authoritative; the pin is written atomically with the instance and so is
+// always present for a running instance — a missing pin is the same
+// unrecoverable invariant break advance handles, turned into a failed terminal
+// rather than an infinite Nak loop).
 func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 	inst, err := e.state.getInstance(ctx, instanceID)
 	if err != nil {
@@ -1022,6 +1112,18 @@ func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 	}
 	if isUserTaskToken(token) {
 		return e.onUserTaskDeadline(ctx, inst)
+	}
+
+	pattern, err := e.state.getPinnedPattern(ctx, inst.InstanceID)
+	if err != nil {
+		if errors.Is(err, errPatternPinMissing) {
+			return e.fail(ctx, inst, token, "pattern pin missing")
+		}
+		return err
+	}
+	if inst.Cursor >= 0 && inst.Cursor < len(pattern.Steps) &&
+		pattern.Steps[inst.Cursor].Kind == StepKindExternalTask {
+		return e.onExternalTaskDeadline(ctx, inst)
 	}
 
 	committed, err := e.trackerExists(ctx, token)
@@ -1114,6 +1216,59 @@ func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance) error {
 	// a silent wedge).
 	return e.fail(ctx, inst, inst.PendingToken,
 		fmt.Sprintf("step %d CreateTask rejected", inst.Cursor))
+}
+
+// onExternalTaskDeadline runs the read-before-act probe for an externalTask
+// whose bounded StepTimeout deadline fired. It is the systemOp ladder
+// (committed-but-missed → advance+alert; not-yet-relayed → re-arm; rejected/lost
+// → fail) with one critical difference: the pending token is the bare instance
+// HANDLE Loom parked on, but the instanceOp's Contract #4 tracker and its outbox
+// record are keyed by the instanceOp's OWN requestId (deriveRequestID), NOT the
+// handle. Probing the handle would read keys that never exist (vtx.op.<handle> /
+// outbox.<handle>) and ALWAYS wrongly fail a healthy instance — so the probe
+// re-derives the instanceOp requestId (exactly as onUserTaskDeadline re-derives
+// the CreateTask requestId) while the advance/fail act on the pending handle
+// token. Unlike a userTask there is no created-vs-human-wait split: an
+// externalTask park is a pure bounded machine wait (the bridge completes it), so
+// there is no disarm-and-go-unbounded branch.
+//
+// Every branch re-reads instance state via the caller and is CAS-on-running (the
+// advance/fail paths verify the pending token), so a redelivered marker / second
+// replica is a no-op.
+func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance) error {
+	token := inst.PendingToken
+	opRequestID := deriveRequestID(inst.InstanceID, inst.Cursor)
+
+	committed, err := e.trackerExists(ctx, opRequestID)
+	if err != nil {
+		return err
+	}
+	if committed {
+		// The instanceOp committed; the external/replyOp completion event was
+		// missed (mis-declared completionDomains / lost reply). Advance off the
+		// durable tracker on the pending handle token (§10.6).
+		e.logger.Warn("loom: completion recovered via deadline probe; check completionDomains",
+			"instanceId", inst.InstanceID, "instanceKey", token, "instanceOpRequestId", opRequestID,
+			"patternRef", inst.PatternRef)
+		return e.advance(ctx, inst.InstanceID, token)
+	}
+
+	outboxPending, err := e.state.outboxExists(ctx, opRequestID)
+	if err != nil {
+		return err
+	}
+	if outboxPending {
+		// The relay has not delivered the instanceOp yet — extend the deadline
+		// rather than fail.
+		e.logger.Info("loom: deadline fired before relay delivered instanceOp; re-arming",
+			"instanceId", inst.InstanceID, "instanceOpRequestId", opRequestID)
+		return e.state.rearmDeadline(ctx, inst.InstanceID, e.cfg.StepTimeout)
+	}
+
+	// Tracker absent and the instanceOp was relayed (no outbox record) →
+	// rejected/lost. Fail on the pending handle token.
+	return e.fail(ctx, inst, token,
+		fmt.Sprintf("step %d deadline exceeded; instanceOp rejected or lost", inst.Cursor))
 }
 
 // trackerExists reports whether the Contract #4 op tracker vtx.op.<requestId>

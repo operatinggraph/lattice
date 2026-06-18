@@ -34,6 +34,61 @@ func TestPatternValidate_AcceptsSystemOpAndUserTask_RejectsGuardsAndUnknownKinds
 			wantErr: true,
 		},
 		{
+			name:    "externalTask with adapter/instanceOp/replyOp accepted",
+			pattern: Pattern{PatternID: "px1", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge"}}},
+			wantErr: false,
+		},
+		{
+			name:    "externalTask with params accepted",
+			pattern: Pattern{PatternID: "px1b", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge", Params: json.RawMessage(`{"amount":100}`)}}},
+			wantErr: false,
+		},
+		{
+			name:    "externalTask without params accepted",
+			pattern: Pattern{PatternID: "px1c", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge"}}},
+			wantErr: false,
+		},
+		{
+			name:    "externalTask missing adapter rejected",
+			pattern: Pattern{PatternID: "px2", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge"}}},
+			wantErr: true,
+		},
+		{
+			name:    "externalTask missing instanceOp rejected",
+			pattern: Pattern{PatternID: "px3", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", ReplyOp: "ResolveCharge"}}},
+			wantErr: true,
+		},
+		{
+			name:    "externalTask missing replyOp rejected",
+			pattern: Pattern{PatternID: "px4", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge"}}},
+			wantErr: true,
+		},
+		{
+			name:    "systemOp with stray instanceOp rejected",
+			pattern: Pattern{PatternID: "px7", SubjectType: "identity", Steps: []Step{{Kind: "systemOp", Operation: "SetName", InstanceOp: "CreateCharge"}}},
+			wantErr: true,
+		},
+		{
+			name:    "userTask with stray adapter rejected",
+			pattern: Pattern{PatternID: "px8", SubjectType: "identity", Steps: []Step{{Kind: "userTask", Operation: "SetName", Adapter: "stripe"}}},
+			wantErr: true,
+		},
+		{
+			name:    "externalTask with stray operation rejected",
+			pattern: Pattern{PatternID: "px9", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge", Operation: "SetName"}}},
+			wantErr: true,
+		},
+		{
+			name:    "guarded externalTask accepted",
+			pattern: Pattern{PatternID: "px5", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge", Guard: json.RawMessage(`{"absent":"subject.data.charged"}`)}}},
+			wantErr: false,
+		},
+		{
+			name:    "externalTask with bad guard rejected",
+			pattern: Pattern{PatternID: "px6", SubjectType: "identity", Steps: []Step{{Kind: "externalTask", Adapter: "stripe", InstanceOp: "CreateCharge", ReplyOp: "ResolveCharge", Guard: json.RawMessage(`{"exists":"subject.data.charged"}`)}}},
+			wantErr: true,
+		},
+		{
 			name:    "valid guarded systemOp accepted",
 			pattern: Pattern{PatternID: "p3", SubjectType: "identity", Steps: []Step{{Kind: "systemOp", Operation: "SetName", Guard: json.RawMessage(`{"absent":"subject.data.name"}`)}}},
 			wantErr: false,

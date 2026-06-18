@@ -29,6 +29,15 @@ func (e *Engine) PauseForTest(ctx context.Context, name string) {
 	e.supervisor.Pause(ctx, name)
 }
 
+// ResumeForTest manually resumes a consumer the test paused via PauseForTest.
+// Test-only seam (same rationale as PauseForTest): it lets the externalTask
+// re-arm test pause the outbox relay so a deadline fires with the instanceOp
+// still undelivered, then resume delivery to prove the probe re-armed rather
+// than failed.
+func (e *Engine) ResumeForTest(ctx context.Context, name string) {
+	e.supervisor.Resume(ctx, name)
+}
+
 // ResetDomainForTest forces a config-divergence Reset of a per-domain consumer
 // through the supervisor (UpdateSpec + Reset), exercising the reconcile diff's
 // Reset branch — which production never reaches because the per-domain filter is

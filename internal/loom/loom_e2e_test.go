@@ -103,9 +103,29 @@ type fakeProcessor struct {
 	// op's authContext.task (the task-auth path). Empty for systemOp-only tests.
 	taskOps map[string]struct{}
 
-	mu           sync.Mutex
-	createdTasks map[string]struct{} // taskKey → minted (CreateTask)
-	createTasks  int                 // count of accepted (non-duplicate) CreateTask commits
+	// externalTask fixtures. These stand in for the real instanceOp/
+	// replyOp DDLs and the bridge:
+	//   - instanceOps: operationTypes that, on commit, mint the claim vertex
+	//     vtx.<claimType>.<payload.instanceKey> in Core KV (a package-chosen
+	//     NON-service type proves the engine names no type — invariant a), write
+	//     the Contract #4 tracker, and emit NO completion event (the real op
+	//     would emit external.<adapter> for the bridge; here replyOp models the
+	//     bridge's reply directly).
+	//   - replyOps: operationTypes that, on commit, model the bridge posting the
+	//     result back — record the outcome as an ASPECT on the claim vertex
+	//     (vtx.<claimType>.<handle>.<replyAspect>; the root data stays minimal —
+	//     invariant b / D5) and emit a completion event carrying
+	//     payload.externalRef = the handle (read from payload.externalRef).
+	instanceOps map[string]struct{}
+	replyOps    map[string]struct{}
+	claimType   string // claim-vertex type the instanceOp mints (e.g. "widget"); non-"service"
+	replyAspect string // aspect localName the replyOp writes the outcome under
+	replyEvent  string // completion event class the replyOp emits (e.g. "widget.signed")
+
+	mu              sync.Mutex
+	createdTasks    map[string]struct{} // taskKey → minted (CreateTask)
+	createTasks     int                 // count of accepted (non-duplicate) CreateTask commits
+	createdInstance int                 // count of accepted (non-duplicate) instanceOp commits
 }
 
 const replyInboxHeader = "Lattice-Reply-Inbox"
@@ -241,6 +261,66 @@ func (f *fakeProcessor) handle(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
+	// instanceOp (externalTask): mint the claim vertex
+	// vtx.<claimType>.<payload.instanceKey> (a package-chosen NON-service type —
+	// the engine supplied only the bare handle), write the tracker (dedup), reply
+	// accepted, emit NO completion event (the real op emits external.<adapter>
+	// for the bridge; replyOp models the reply directly).
+	if _, ok := f.instanceOps[env.OperationType]; ok {
+		var p struct {
+			InstanceKey string `json:"instanceKey"`
+		}
+		_ = json.Unmarshal(env.Payload, &p)
+		if !f.trackOnce(ctx, env.RequestID) {
+			reply("duplicate", "")
+			return
+		}
+		reply("accepted", "")
+		// The claim-vertex root data stays MINIMAL (at most a lifecycle scalar) —
+		// the outcome lands in an aspect via replyOp (D5 / invariant b).
+		claimKey := "vtx." + f.claimType + "." + p.InstanceKey
+		vtxBody, _ := json.Marshal(map[string]any{
+			"class": f.claimType,
+			"data":  map[string]any{"status": "pending"},
+		})
+		_, _ = f.conn.KVPut(ctx, coreKVBucket, claimKey, vtxBody)
+		f.mu.Lock()
+		f.createdInstance++
+		f.mu.Unlock()
+		return
+	}
+
+	// replyOp (externalTask): model the bridge posting the result
+	// back — record the outcome as an ASPECT on the claim vertex (root data left
+	// minimal — D5) and emit a completion event carrying payload.externalRef =
+	// the bare handle.
+	if _, ok := f.replyOps[env.OperationType]; ok {
+		var p struct {
+			ExternalRef string         `json:"externalRef"`
+			Outcome     map[string]any `json:"outcome"`
+		}
+		_ = json.Unmarshal(env.Payload, &p)
+		if !f.trackOnce(ctx, env.RequestID) {
+			reply("duplicate", "")
+			return
+		}
+		reply("accepted", "")
+		outcome := p.Outcome
+		if outcome == nil {
+			outcome = map[string]any{"result": "ok"}
+		}
+		aspectKey := "vtx." + f.claimType + "." + p.ExternalRef + "." + f.replyAspect
+		aspectBody, _ := json.Marshal(map[string]any{
+			"class":     f.claimType + "." + f.replyAspect,
+			"vertexKey": "vtx." + f.claimType + "." + p.ExternalRef,
+			"localName": f.replyAspect,
+			"data":      outcome,
+		})
+		_, _ = f.conn.KVPut(ctx, coreKVBucket, aspectKey, aspectBody)
+		publishEvent(f.replyEvent, map[string]any{"externalRef": p.ExternalRef})
+		return
+	}
+
 	// A bound op (task-authorized): on commit, simulate the commit-path
 	// auto-complete — emit orchestration.taskCompleted(taskKey) read from
 	// authContext.task.
@@ -299,6 +379,14 @@ func (f *fakeProcessor) createTaskCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.createTasks
+}
+
+// createdInstanceCount is the number of accepted (non-duplicate) instanceOp
+// commits (the externalTask exactly-once witness).
+func (f *fakeProcessor) createdInstanceCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createdInstance
 }
 
 func mustNanoIDStr() string {
