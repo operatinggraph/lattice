@@ -602,7 +602,7 @@ So that a deterministic procedure can include external I/O without Loom leaving 
 
 *FRs: FR58, NFR-S11 · Depends on: 13.1 · Model: Opus · Grounding: Contract #10 §10.5/§10.6; `docs/components/loom.md`. Review: full 3-layer (guarded engine `internal/loom`) + verify-kernel.*
 
-### Story 13.3: Bridge service actor + bootstrap provisioning
+### Story 13.3: Bridge service actor + bootstrap provisioning — ✅ DONE 2026-06-18
 
 As a platform developer,
 I want a bootstrap-provisioned bridge service identity,

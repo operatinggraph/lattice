@@ -1,6 +1,6 @@
 # Story 13.3 — Bridge service actor + bootstrap provisioning
 
-**Status:** review
+**Status:** done
 **Epic:** 13 — External I/O Bridge (orchestration core)
 **Tier:** Opus — **kernel topology / security plane**. This story mutates the primordial bootstrap set (a third root-equivalent service actor) + both kernel-verify enumerations + the bootstrap-file version + the readiness gate. Review: full 3-layer adversarial + `make verify-kernel` + **`make down && make up`**.
 **Epic spec:** `_bmad-output/planning-artifacts/epics/phase-2-epics.md` → "Story 13.3: Bridge service actor + bootstrap provisioning" (lines ~605–619) + the Epic 13 framing (~565–572). Read it for the user-story framing and the three ACs.
