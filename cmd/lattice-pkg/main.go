@@ -25,7 +25,10 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	identityhygiene "github.com/asolgan/lattice/packages/identity-hygiene"
+	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
+	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
+	servicedomain "github.com/asolgan/lattice/packages/service-domain"
 )
 
 // bootstrapJSON is the on-disk shape of lattice.bootstrap.json. We need
@@ -37,9 +40,12 @@ type bootstrapJSON struct {
 // packageRegistry maps a directory name to its Go Definition. Phase 1
 // is a static import map; future package discovery is out of scope.
 var packageRegistry = map[string]pkgmgr.Definition{
-	"rbac-domain":      rbacdomain.Package,
-	"identity-domain":  identitydomain.Package,
-	"identity-hygiene": identityhygiene.Package,
+	"rbac-domain":        rbacdomain.Package,
+	"identity-domain":    identitydomain.Package,
+	"identity-hygiene":   identityhygiene.Package,
+	"orchestration-base": orchestrationbase.Package,
+	"service-domain":     servicedomain.Package,
+	"lease-signing":      leasesigning.Package,
 }
 
 func main() {

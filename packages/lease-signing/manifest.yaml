@@ -1,0 +1,57 @@
+name: lease-signing
+version: 0.1.0
+description: |
+  Loftspace lease-application convergence vertical: the leaseapp vertex type
+  (CreateLeaseApplication + SignLease), the leaseApplicationComplete
+  actorAggregate convergence lens (§10.2 keyColumn), the §10.8 playbook
+  (triggerLoom externalTask for bgcheck/payment, assignTask SignLease,
+  triggerLoom onboarding), the externalTask instanceOp/replyOp wrapper DDLs
+  (CreateLeaseServiceInstance / RecordLeaseServiceOutcome), and the
+  backgroundCheck/collectPayment/onboarding loomPatterns. The external-call
+  outcome lives in the .outcome aspect (D5); vertex roots stay minimal.
+  Depends on identity-domain, service-domain, and orchestration-base.
+depends:
+  - identity-domain
+  - service-domain
+  - orchestration-base
+declares:
+  ddls:
+    - canonicalName: leaseapp
+      class: meta.ddl.vertexType
+    - canonicalName: leaseServiceInstance
+      class: meta.ddl.vertexType
+    - canonicalName: leaseServiceReply
+      class: meta.ddl.vertexType
+  lenses:
+    - canonicalName: leaseApplicationComplete
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+  permissions:
+    - operationType: CreateLeaseApplication
+      scope: any
+      grantsTo: [operator]
+    - operationType: CreateLeaseServiceInstance
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordLeaseServiceOutcome
+      scope: any
+      grantsTo: [operator]
+    - operationType: SignLease
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: leaseApplicationComplete
+      lensRef: leaseApplicationComplete
+  loomPatterns:
+    - patternId: backgroundCheck
+      subjectType: identity
+    - patternId: collectPayment
+      subjectType: identity
+    - patternId: onboarding
+      subjectType: identity
+  opMetas:
+    - operationType: SignLease
+    - operationType: RecordIdentityPII
+    - operationType: CreateLeaseServiceInstance
+    - operationType: RecordLeaseServiceOutcome

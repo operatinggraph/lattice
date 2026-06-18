@@ -204,3 +204,67 @@ the seam; (b) does so without touching a frozen contract. **Security-adjacent** 
 `weaver-targets` lens, so the actorAggregate BFS fallback is safe — proposal §4 Refractor note) — but
 because it touches the frozen §10.2 contract under Option (a), full 3-layer adversarial review applies
 when the convergence lens lands.
+
+## Request E6: actorAggregate projection — SCALAR body columns for a §10.2 convergence lens (discovered Story 14.4 — BLOCKING)
+
+> **STATUS: OPEN — raised during Story 14.4 implementation (2026-06-18).** Request E5 (Option (b),
+> ratified + applied via Story 14.2) closed the convergence-lens **key** seam (the bare-NanoID
+> `<targetId>.<entityId>` key, via `OutputDescriptor.KeyColumn` / `BuildKey`). This request covers the
+> **body** seam E5 did not address: the §10.2 row's **scalar** columns. **The 14.4 convergence lens
+> cannot project a Weaver-readable row until this is resolved.** Surfaced, not implemented (Story 14.4 is
+> package content; this is a Refractor `internal/` change — a CONTRACT-AMENDMENT-REQUEST, not an in-flight
+> edit).
+
+**Location:** Contract #6 §6.13 (the actorAggregate Output descriptor) + `internal/refractor/projection/output.go`
+(`OutputDescriptor.EnvelopeFn` ~39-110, `RealnessFiltered` ~204-235) + `driver.go` (~58-99).
+
+**Problem.** The §10.2 convergence row carries **scalar** columns: `violating` (bool), each `missing_<gap>`
+(bool), and the `row.<col>` param columns the §10.8 playbook templates (`entityKey`, `applicant` — strings).
+Weaver reads them as scalars: `boolColumn` (`internal/weaver/evaluator.go:452-464`) requires a Go **`bool`**
+(a non-bool value is logged as a `RowDataError` and treated as not-actionable), and the param columns are
+resolved as strings (`strategist.go` `resolveStringParam`).
+
+But the actorAggregate `EnvelopeFn` runs **every** declared `BodyColumns` entry through `RealnessFiltered`,
+which does `collect.([]any)` and returns `nil` for any non-list value (`output.go:216-219`); the driver then
+coerces `nil` → `[]` (`driver.go` / `output.go:62-66`). So a scalar body column projects into the
+`weaver-targets` document as **`[]`** (an empty list), not the scalar. Confirmed empirically against the
+live `InstallPackage` → `InstallActorAggregate` → pipeline path: a lens returning `true AS violating, true
+AS missing_signature, id.key AS applicant, app.key AS entityKey` projects
+`{"violating":[],"missing_signature":[],"applicant":[],"entityKey":[],...}`. Weaver's `boolColumn` then
+reads `[]` (not a bool) → never dispatches; the playbook's `row.applicant` resolves to a list → a data error.
+
+This is because the actorAggregate Output path was built for the **roster** lenses (`my-tasks`,
+`capabilityEphemeral`), whose body columns are always `collect(DISTINCT {...})` lists; the realness filter
+exists to drop the degenerate null-collect artifact. **No body column has ever been a scalar.** 14.2 (E5)
+proved only the **key** column with a roster-list body; the scalar-body path was never exercised.
+
+**No package-only workaround exists.** A plain (non-actorAggregate) lens writes the RETURN columns verbatim
+(scalars survive — `pipeline.go:122` "a nil EnvelopeFn writes the row verbatim") **but** reprojects only on
+its own anchor's change — it would NOT reproject when a *linked* service `.outcome` flips, which is the exact
+reason §10.2 (E5) mandates actorAggregate for a convergence lens ("the plain projection … would miss a
+linked constituent flipping"). So the lens needs actorAggregate's link-walking reprojection **and** scalar
+body columns — and the two are mutually exclusive in the current code.
+
+**Requested amendment — a per-column "scalar / passthrough" mode on the actorAggregate Output descriptor.**
+Add a descriptor field (working name **`scalarColumns`**, or a per-column kind) naming the `BodyColumns`
+that are **scalar passthroughs**: such a column is projected **verbatim** (the RETURN value as-is), bypassing
+`RealnessFiltered`. The list-collect columns (rosters) keep today's realness behavior. The empty-actor
+delete path (`EmptyBehavior` / `RealnessFilter`) must still work — for a convergence lens the realness signal
+should be a designated scalar (e.g. `entityKey` non-null when the anchor is alive), so the actor-disappearance
+retract still fires on the bare-NanoID key.
+
+**Scope notes.**
+- The lens **cypher** is correct and proven **one-row-per-anchor** at the rule-engine level (the §0.C guard
+  is satisfied): `internal/refractor/ruleengine/full` runs it green in both the all-gaps-open and
+  outcome-flipped directions. The gap is purely the **projection envelope** coercion, not the cypher.
+- The `leaseApplicationComplete` lens declaration shipped in `packages/lease-signing` is already in the
+  Option-(b) shape (keyColumn set, scalar body columns named); it is ready the moment `scalarColumns` lands.
+  No package change is needed when it does — only the descriptor field + the EnvelopeFn branch.
+- **Security-adjacent but non-auth** (the `weaver-targets` lens is off the read-path), so the same review
+  posture as E5 applies. This is a localized change to the Epic-12 Output-descriptor machinery (the same
+  surface E5/Request 5 introduced), not a frozen-contract widening.
+
+**Rationale.** §10.2 makes the convergence lens an actorAggregate (E5) for linked-constituent reprojection,
+**and** specifies scalar `violating`/`missing_*`/param columns that Weaver reads as scalars. The current
+actorAggregate Output path can deliver one but not the other. E5 closed the key seam; E6 closes the body
+seam — together they make a §10.2 convergence lens projectable end-to-end through Refractor.

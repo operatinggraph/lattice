@@ -715,7 +715,7 @@ So that the bgcheck inputs are modeled per the privacy boundary.
 
 *FRs: integration (NFR Privacy) · Depends on: identity-domain (exists) · Model: Opus · Grounding: arch Item 6; PRD §358. Review: full 3-layer (security plane).*
 
-### Story 14.4: leaseApp convergence lens + externalTask patterns + signing
+### Story 14.4: leaseApp convergence lens + externalTask patterns + signing — 🟡 package reviewed; end-to-end blocked on CAR E6 (scalar-body projection)
 
 As a vertical author,
 I want the lease-application convergence modeled across identity aspects + a service instance,
