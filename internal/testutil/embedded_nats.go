@@ -71,7 +71,10 @@ func DriveOne(t *testing.T, ctx context.Context, cp *processor.CommitPath, cons 
 		// Brief drain to let JetStream flush the ack.
 		time.Sleep(100 * time.Millisecond)
 		return outcome
-	case <-time.After(30 * time.Second):
+	// Failure deadline only — a delivered outcome returns immediately on the
+	// channel above. Sized generously so CI full-suite embedded-NATS contention
+	// (many packages, one shared server) does not blow a happy-path drive.
+	case <-time.After(60 * time.Second):
 		t.Fatalf("timed out waiting for outcome (want %q)", want)
 		return ""
 	}

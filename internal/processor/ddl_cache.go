@@ -406,12 +406,22 @@ func buildByCommand(byName map[string]MetaVertexRef, logger *slog.Logger) map[st
 		if !commandIndexEligible(ref.Kind) {
 			continue
 		}
+		// A DDL with no PermittedCommands admits no specific operationType (an
+		// empty list is the unrestricted/permissive default, not a command
+		// source), so it contributes nothing to an operationType->class index.
+		// Skip it before the empty-Kind notice — otherwise every command-less
+		// meta-vertex (lens/index/role DDLs whose Kind is not meta.ddl.*) trips
+		// the notice on each cache build despite adding nothing.
+		if len(ref.PermittedCommands) == 0 {
+			continue
+		}
 		// An empty Kind is eligible only as a test affordance (shadow-keyed
 		// fixtures ARE the executing DDL in the tests that seed them). In
-		// production every DDL declares a precise meta class (meta.ddl.vertexType
-		// etc.), so an empty Kind here means a malformed / unrecognized-class
-		// meta-vertex that should not silently become a class-inference target.
-		// Log a WARNING so the drift is visible rather than indexing it blind.
+		// production every command-owning DDL declares a precise meta class
+		// (meta.ddl.vertexType etc.), so an empty Kind on a command-owning DDL
+		// means a malformed / unrecognized-class meta-vertex that should not
+		// silently become a class-inference target. Log a WARNING so the drift
+		// is visible rather than indexing it blind.
 		if ref.Kind == "" && logger != nil {
 			logger.Warn("ddl cache: indexing an empty-Kind DDL for class inference (expected only for shadow-keyed test fixtures; a malformed meta-vertex in production)",
 				"canonicalName", name, "permittedCommands", ref.PermittedCommands)
