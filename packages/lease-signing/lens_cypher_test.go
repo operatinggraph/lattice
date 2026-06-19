@@ -299,8 +299,8 @@ func TestLeaseApplicationComplete_FreshBgcheck(t *testing.T) {
 // core of the refinement). A completed bgcheck whose validUntil is AT/BEFORE $now
 // no longer counts: missing_bgcheck RE-OPENS to true whenever the row is
 // (re)evaluated (a stale background check is a missing background check). The
-// eager auto-reopen-at-expiry via a §10.2 freshUntil column is Story 14.5; here
-// we prove the predicate alone re-opens the gap at the injected $now.
+// eager auto-reopen-at-expiry via a §10.2 freshUntil column is exercised by the
+// lease-convergence e2e; here we prove the predicate alone re-opens the gap at the injected $now.
 func TestLeaseApplicationComplete_StaleBgcheck(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -426,4 +426,75 @@ func TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop(t *testing.T) 
 	v := rows[0].Values
 	require.Equal(t, true, v["missing_bgcheck"], "no bgcheck instance → gap open")
 	require.Equal(t, false, v["missing_payment"], "completed payment → gap closed")
+	// The dedicated bgcheck OPTIONAL MATCH WHERE filters the sole providedTo
+	// neighbor (the payment) → the executor null-restore preserves the anchor with
+	// bg null → freshUntil projects as a genuine null (no timer for Weaver to arm),
+	// the anchor never drops. This is the §0.B engine fix exercised through the lens.
+	require.Nil(t, v["freshUntil"], "no fresh bgcheck → freshUntil is null (anchor preserved, no @at armed)")
+}
+
+// TestLeaseApplicationComplete_FreshUntilProjected pins the eager-freshness column
+// (§10.2): a completed FRESH bgcheck projects its validUntil as the scalar
+// freshUntil so Weaver's temporal lane schedules an @at at that instant. The
+// column is the bgcheck outcome's validUntil verbatim, projected once per anchor.
+func TestLeaseApplicationComplete_FreshUntilProjected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	const validUntil = "2026-06-18T00:05:00Z" // fresh: 5m after now
+	app := bgFreshnessFixture(t, f, validUntil)
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1, "exactly one row per anchor (bgcheck+payment fan-out, dedicated bg match ≤1 row)")
+	v := rows[0].Values
+	require.Equal(t, validUntil, v["freshUntil"],
+		"a fresh completed bgcheck projects its validUntil as the scalar freshUntil column")
+	require.Equal(t, false, v["missing_bgcheck"], "fresh bgcheck → gap closed")
+	// freshUntil is a string scalar (not a list) so Weaver's scheduleFreshness
+	// parses it as RFC3339 and arms the @at.
+	_, isString := v["freshUntil"].(string)
+	require.True(t, isString, "freshUntil must be a scalar string, not a list")
+}
+
+// TestLeaseApplicationComplete_FreshUntilNullWhenStale: a STALE bgcheck (its
+// validUntil already past $now) is excluded by the dedicated bgcheck match's
+// WHERE, so freshUntil is null (Weaver clears any standing @at — there is no
+// future deadline to arm) and the gap re-opens. One row, anchor preserved.
+func TestLeaseApplicationComplete_FreshUntilNullWhenStale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	const validUntil = "2026-06-17T23:55:00Z" // stale: 5m before now
+	app := bgFreshnessFixture(t, f, validUntil)
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["freshUntil"], "a stale bgcheck is filtered → freshUntil null (no @at to arm)")
+	require.Equal(t, true, v["missing_bgcheck"], "stale bgcheck → gap re-opens")
+}
+
+// TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding: with all gaps open
+// (no PII, no bgcheck, no payment, no signature) freshUntil is null and the
+// anchor still projects exactly one row — the eager column never drops the
+// fresh-application row.
+func TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.edge(t, "applicationFor", "app", "alice")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1, "a fresh all-gaps-open application projects exactly one row")
+	v := rows[0].Values
+	require.Nil(t, v["freshUntil"], "no completed bgcheck → freshUntil null")
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, true, v["missing_bgcheck"])
 }

@@ -44,7 +44,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "applicant", "entityKey"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "applicant", "entityKey", "freshUntil"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -101,18 +101,27 @@ func Lenses() []pkgmgr.LensSpec {
 //   - missing_payment is ever-completed: a completed payment counts forever,
 //     validUntil ignored.
 //
-// This lens ships the freshness PREDICATE only — no §10.2 freshUntil column.
-// The EAGER auto-reopen-at-expiry (projecting a single scalar freshUntil per
-// anchor so Weaver's temporal lane schedules an @at at validUntil and re-touches
-// the row the instant it lapses) is deferred: projecting that scalar cleanly
-// needs an engine change this lens does NOT make — either fixing the
-// `OPTIONAL MATCH ... WHERE` null-restore in ruleengine/full executor.go so a
-// fully-filtered optional preserves the anchor with nulls (a dedicated
-// family-filtered bgcheck match drops the anchor when the applicant has a
-// payment neighbor but no bgcheck yet — the transient convergence window), or a
-// list→scalar reducer the engine lacks (max/head/coalesce unsupported). Until
-// that lands, a stale bgcheck re-opens on the NEXT reprojection of the row, not
-// eagerly at the instant of lapse.
+// EAGER auto-reopen-at-expiry — the §10.2 freshUntil column.
+//
+//   - The lens projects a single scalar freshUntil per anchor: the completed,
+//     still-fresh bgcheck's validUntil. Weaver's temporal lane reads it
+//     (freshUntilColumn) and schedules an @at one-shot at that instant; when the
+//     timer fires it marks the row expired, the row reprojects, and the freshness
+//     predicate re-opens missing_bgcheck the moment freshness lapses — eagerly,
+//     not waiting for an incidental CDC touch.
+//   - freshUntil is read by a DEDICATED family-filtered bgcheck OPTIONAL MATCH
+//     (after the aggregation WITH) whose WHERE selects the completed, fresh
+//     bgcheck. When no fresh bgcheck exists the WHERE filters every providedTo
+//     neighbor and the executor null-restores the anchor with bg null, so
+//     freshUntil projects as a genuine null (Weaver clears any standing @at — no
+//     deadline to arm) and the anchor never drops. That null-restore is the
+//     ruleengine/full executor.go applyMatch OPTIONAL MATCH ... WHERE semantics:
+//     a fully-filtered optional preserves the source binding with nulls.
+//   - The dedicated bgcheck match yields AT MOST ONE row per anchor: the vertical
+//     dispatches at most one bgcheck per application (FR58), so at most one
+//     completed-fresh bgcheck instance is providedTo the applicant. That keeps the
+//     projection one-row-per-anchor (guardOutputKeyCollision stays satisfied).
+//     The single no-WHERE providedTo fan above still drives the missing_* counts.
 //
 // '= null' (not IS NULL) is the full engine's null test (ruleengine/full
 // executor.go equalsAny treats null = null as true and any value = null as
@@ -123,15 +132,19 @@ OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (id)<-[:providedTo]-(inst:service)
 WITH
   app.key AS entityKey,
+  id      AS applicantNode,
   id.key  AS applicant,
   app.signature.data.signedAt AS signedAt,
   id.ssn.data.value AS ssnVal,
   count(DISTINCT CASE WHEN inst.family.data.value = 'backgroundCheck' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.key ELSE null END) AS freshBgComplete,
   count(DISTINCT CASE WHEN inst.family.data.value = 'payment' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete
+OPTIONAL MATCH (applicantNode)<-[:providedTo]-(bg:service)
+  WHERE bg.family.data.value = 'backgroundCheck' AND bg.outcome.data.status = 'completed' AND bg.outcome.data.validUntil > $now
 RETURN
   entityKey AS actorKey,
   entityKey,
   applicant,
+  bg.outcome.data.validUntil AS freshUntil,
   (ssnVal = null)        AS missing_onboarding,
   (freshBgComplete = 0)  AS missing_bgcheck,
   (payComplete = 0)      AS missing_payment,

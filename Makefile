@@ -15,7 +15,7 @@ BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-conformance build vet test test-bypass test-capability-adversarial test-rollback test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-conformance build vet test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -189,6 +189,19 @@ test-health-completeness:
 .PHONY: test-rollback
 test-rollback:
 	go test ./internal/aiagent/... -run TestGate4_CompensatingOpRollback -v -p 1 -count=1
+
+## test-lease-convergence — Story 14.5 external-I/O idempotency + convergence gate.
+## Self-contained: embedded NATS, no Docker stack. Boots Processor + Refractor +
+## Loom + Weaver + the live bridge in-process, installs the real package chain,
+## drives a lease application to steady-state convergence through the live bridge
+## (Loom externalTask + bridge + temporal freshness + tasks), proves the external
+## effect is at-most-once (FR58 end-to-end), asserts D5 (outcome in aspect, root
+## data minimal), and exercises the eager bgcheck-freshness @at lapse. Compiled
+## with -tags leaseshortwindow so the freshness window is short enough to watch a
+## lapse in bounded wall-clock (the production window stays 5m).
+.PHONY: test-lease-convergence
+test-lease-convergence:
+	go test -tags leaseshortwindow ./internal/leaseconvergence/... -run TestLeaseConvergence -v -p 1 -count=1 -timeout 10m
 
 ## vet — Run go vet on all packages except vendored ANTLR-generated parsers
 ## (which contain expected unreachable-code patterns from the generator).

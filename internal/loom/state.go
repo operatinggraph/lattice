@@ -80,6 +80,13 @@ type outboxRecord struct {
 	Target    string          `json:"target,omitempty"`
 	Lane      string          `json:"lane"`
 	Actor     string          `json:"actor"`
+	// Reads is the dispatched op's ContextHint.Reads (the BARE vertex keys its
+	// DDL hydrates + validates). The relay copies it onto the op envelope so the
+	// Processor hydrates the op's OCC reads. Additive + backward-compatible: an
+	// older persisted record with no Reads field decodes to nil → a read-free
+	// envelope, exactly as before. NO `.state` suffixes — the DDLs read bare
+	// keys; a non-existent `.state` would be a HydrationMiss.
+	Reads []string `json:"reads,omitempty"`
 }
 
 // deadlineMark is the thin value stored under deadline.<instanceId> (Contract

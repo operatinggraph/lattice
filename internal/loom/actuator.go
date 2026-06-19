@@ -23,8 +23,20 @@ type opEnvelope struct {
 	Actor         string          `json:"actor"`
 	SubmittedAt   string          `json:"submittedAt"`
 	Payload       json.RawMessage `json:"payload"`
-	Class         string          `json:"class,omitempty"`
-	AuthContext   *authContext    `json:"authContext,omitempty"`
+	// Class is left empty: Loom relies on the Processor's operationType→class
+	// reverse index (Contract #2 §2.1) — each op Loom dispatches (CreateTask,
+	// the externalTask instanceOp, the lifecycle ops) is admitted by exactly one
+	// vertexType DDL, so inference is unambiguous. The field stays for an
+	// explicit override.
+	Class string `json:"class,omitempty"`
+	// ContextHint carries the OCC reads the dispatched op's DDL hydrates, copied
+	// from the outbox record's Reads; omitted for read-free ops.
+	ContextHint *contextHint `json:"contextHint,omitempty"`
+	AuthContext *authContext `json:"authContext,omitempty"`
+}
+
+type contextHint struct {
+	Reads []string `json:"reads,omitempty"`
 }
 
 type authContext struct {
@@ -84,6 +96,9 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       rec.Payload,
 	}
+	if len(rec.Reads) > 0 {
+		env.ContextHint = &contextHint{Reads: rec.Reads}
+	}
 	if rec.Target != "" {
 		env.AuthContext = &authContext{Target: rec.Target}
 	}
@@ -106,8 +121,10 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 }
 
 // buildOutbox constructs the outbox record the engine writes into a transition
-// batch (the op the relay will submit). payload is the op's payload object.
-func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string) (*outboxRecord, error) {
+// batch (the op the relay will submit). payload is the op's payload object;
+// reads is the dispatched op's ContextHint.Reads (the bare vertex keys its DDL
+// hydrates), nil/empty for read-free ops.
+func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads []string) (*outboxRecord, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("loom: marshal op payload: %w", err)
@@ -119,5 +136,6 @@ func buildOutbox(requestID, operation string, payload map[string]any, target, la
 		Target:    target,
 		Lane:      lane,
 		Actor:     actor,
+		Reads:     reads,
 	}, nil
 }

@@ -62,6 +62,24 @@ type DDLCache struct {
 	mu       sync.RWMutex
 	byName   map[string]MetaVertexRef
 	byMetaPK map[string]string // metaVertexKey → canonicalName (reverse index for invalidate-by-key)
+	// byCommand maps an operationType to the single vertexType DDL's
+	// canonicalName that admits it — the operationType→class reverse index
+	// (Contract #2 §2.1). It lets the Hydrator resolve a dispatched op's class
+	// when the envelope omits it: an engine that builds the payload knows the
+	// operationType but not the DDL canonical name. Two disciplines keep it
+	// integrity-safe:
+	//   - vertexType-ONLY: only script-bearing vertexType DDLs are indexed.
+	//     An aspectType DDL lists an op in its permittedCommands purely as a
+	//     step-6 write gate (the multi-key-write pattern: an op writing a typed
+	//     aspect names itself in that aspect's permittedCommands), but its
+	//     script is declaration-only and never executes the op — so it is never
+	//     a class-inference target. Example: RecordIdentityPII is admitted by
+	//     identity (vertexType, the executing script) + ssn + dob (aspectType
+	//     gates); only identity is indexed.
+	//   - global ambiguity guard: if two vertexType DDLs admit the same op, the
+	//     op is left OUT of the index (fall through to explicit class). Inferring
+	//     a class for an ambiguous op could run the wrong script — fail closed.
+	byCommand map[string]string
 }
 
 // NewDDLCache constructs the cache. Caller MUST invoke Refresh once
@@ -82,6 +100,7 @@ func NewDDLCache(conn *substrate.Conn, coreBucket string, logger *slog.Logger) *
 		logger:     logger,
 		byName:     map[string]MetaVertexRef{},
 		byMetaPK:   map[string]string{},
+		byCommand:  map[string]string{},
 	}
 }
 
@@ -137,6 +156,7 @@ func (c *DDLCache) Refresh(ctx context.Context) error {
 	c.mu.Lock()
 	c.byName = byName
 	c.byMetaPK = byPK
+	c.byCommand = buildByCommand(byName, c.logger)
 	c.mu.Unlock()
 
 	c.logger.Info("ddl cache: refreshed", "entries", len(byName))
@@ -271,6 +291,22 @@ func (c *DDLCache) Lookup(canonicalName string) (MetaVertexRef, bool) {
 	return ref, ok
 }
 
+// ClassForCommand resolves an operationType to the canonicalName of the single
+// vertexType DDL that admits it (Contract #2 §2.1 operationType→class reverse
+// index). It returns ok=false when the op is admitted by no vertexType DDL, or
+// by more than one (ambiguous — never guessed; the caller falls through to the
+// explicit-class requirement). It is the engine-optional `class` fallback: a
+// dispatched op that omits `class` resolves its DDL here.
+func (c *DDLCache) ClassForCommand(operationType string) (string, bool) {
+	if operationType == "" {
+		return "", false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	name, ok := c.byCommand[operationType]
+	return name, ok
+}
+
 // LookupByMetaKey returns the MetaVertexRef whose canonical meta-vertex
 // key matches the supplied 3-segment key. Useful when synchronously
 // invalidating after a committed meta-vertex mutation.
@@ -322,8 +358,19 @@ func (c *DDLCache) Invalidate(ctx context.Context, metaRootKey string) error {
 		c.byName[ref.CanonicalName] = ref
 		c.byMetaPK[ref.MetaVertexKey] = ref.CanonicalName
 	}
+	// The ambiguity guard is GLOBAL (it counts how many vertexType DDLs admit
+	// each op across the whole set), so a single-entry edit can change which
+	// ops are unambiguous — rebuild the whole reverse index from byName.
+	c.byCommand = buildByCommand(c.byName, c.logger)
+	// Log a meaningful canonicalName: the freshly-loaded name when present, else
+	// the prior name on the delete/tombstone path (ref.CanonicalName is empty when
+	// the entry is gone, which would otherwise log a useless empty string).
+	loggedName := ref.CanonicalName
+	if !ok && hadPrior {
+		loggedName = priorName
+	}
 	c.logger.Info("ddl cache: invalidated",
-		"metaKey", metaRootKey, "canonicalName", ref.CanonicalName, "present", ok)
+		"metaKey", metaRootKey, "canonicalName", loggedName, "present", ok)
 	return nil
 }
 
@@ -332,6 +379,79 @@ func (c *DDLCache) Size() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.byName)
+}
+
+// buildByCommand constructs the operationType→canonicalName reverse index from
+// the canonicalName→ref map (Contract #2 §2.1). Only vertexType DDLs are
+// considered (the script-bearing class owners): an aspectType DDL lists an op in
+// permittedCommands only as a step-6 write gate, never as the op's executing
+// script, so it must not be a class-inference target. The ambiguity guard is
+// global: an op admitted by two-or-more vertexType DDLs is dropped from the
+// index (left requiring an explicit class) rather than resolved to an arbitrary
+// one — fail closed, never guess the wrong script.
+//
+// kindEmpty (shadow-keyed test fixtures with no precise meta class) is treated
+// as vertexType-eligible: those fixtures ARE the script-bearing DDL in the tests
+// that rely on them, and aspectType fixtures that should be excluded carry the
+// explicit "aspectType" kind.
+func buildByCommand(byName map[string]MetaVertexRef, logger *slog.Logger) map[string]string {
+	// First pass: count how many vertexType-eligible DDLs admit each op and
+	// record the (single) owner seen. A count > 1 marks the op ambiguous.
+	type claim struct {
+		owner string
+		count int
+	}
+	claims := map[string]*claim{}
+	for name, ref := range byName {
+		if !commandIndexEligible(ref.Kind) {
+			continue
+		}
+		// An empty Kind is eligible only as a test affordance (shadow-keyed
+		// fixtures ARE the executing DDL in the tests that seed them). In
+		// production every DDL declares a precise meta class (meta.ddl.vertexType
+		// etc.), so an empty Kind here means a malformed / unrecognized-class
+		// meta-vertex that should not silently become a class-inference target.
+		// Log a WARNING so the drift is visible rather than indexing it blind.
+		if ref.Kind == "" && logger != nil {
+			logger.Warn("ddl cache: indexing an empty-Kind DDL for class inference (expected only for shadow-keyed test fixtures; a malformed meta-vertex in production)",
+				"canonicalName", name, "permittedCommands", ref.PermittedCommands)
+		}
+		for _, cmd := range ref.PermittedCommands {
+			if cmd == "" {
+				continue
+			}
+			c, ok := claims[cmd]
+			if !ok {
+				claims[cmd] = &claim{owner: name, count: 1}
+				continue
+			}
+			c.count++
+		}
+	}
+	byCommand := make(map[string]string, len(claims))
+	for cmd, c := range claims {
+		if c.count > 1 {
+			// Ambiguous across vertexType DDLs — do not index; the op must carry
+			// an explicit class. Logged so an accidental collision is visible.
+			if logger != nil {
+				logger.Warn("ddl cache: operationType admitted by multiple vertexType DDLs; not indexing for class inference",
+					"operationType", cmd, "vertexTypeDDLs", c.count)
+			}
+			continue
+		}
+		byCommand[cmd] = c.owner
+	}
+	return byCommand
+}
+
+// commandIndexEligible reports whether a DDL of the given Kind owns the script
+// that executes its permittedCommands (and so may seed the operationType→class
+// reverse index). vertexType DDLs own their op scripts; aspectType DDLs carry
+// declaration-only scripts and list ops solely as step-6 write gates. An empty
+// Kind (shadow-keyed fixtures) is eligible — such a fixture is the executing DDL
+// in the tests that use it.
+func commandIndexEligible(kind string) bool {
+	return kind == "vertexType" || kind == ""
 }
 
 // deriveDDLKind maps a meta-vertex class to a kind string.

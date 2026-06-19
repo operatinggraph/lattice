@@ -40,5 +40,25 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 	}
-	return append(perms, LoomLifecyclePermissions()...)
+	perms = append(perms, LoomLifecyclePermissions()...)
+	return append(perms, MarkExpiredPermissions()...)
+}
+
+// MarkExpiredPermissions returns the grant for the temporal-lane MarkExpired op.
+//
+// MarkExpired is posted by Weaver's identity:weaver service actor (Contract #10
+// §10.4), which is operator-equivalent (holdsRole → operator, exactly like the
+// Loom/Bridge service actors), so it is granted to operator at scope:any — the
+// same operator-grant idiom the Loom lifecycle ops use. The op is target-less
+// (no authContext.target — the directOp posture); auth keys on operationType +
+// actor, so the operator grant authorizes Weaver's submit.
+func MarkExpiredPermissions() []pkgmgr.PermissionSpec {
+	return []pkgmgr.PermissionSpec{
+		{
+			OperationType: "MarkExpired",
+			Scope:         "any",
+			Note:          "Authorizes Weaver (identity:weaver, operator-equivalent) to submit the temporal-lane MarkExpired freshness op (§10.4).",
+			GrantsTo:      []string{"operator"},
+		},
+	}
 }

@@ -70,6 +70,61 @@ func TestHydrate_HydrationMiss_ContextHintKey(t *testing.T) {
 	}
 }
 
+// TestHydrate_ClassInferredFromOperationType is the RF#1 dispatch case: an op
+// envelope with NO `class` field (and no payload.class) resolves its DDL from
+// the operationType via the cache's reverse index — exactly what an engine
+// dispatch envelope omits. The harness seeds vtx.meta.identity admitting
+// CreateIdentity, so the dispatched op hydrates as class=identity.
+func TestHydrate_ClassInferredFromOperationType(t *testing.T) {
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+
+	env := newTestEnvelope(testNanoID1)
+	env.Class = "" // dispatched op: class omitted, must be inferred.
+
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate (class inferred): %v", err)
+	}
+	if state.Context.ScriptClass != "identity" {
+		t.Fatalf("ScriptClass = %q, want identity (inferred from CreateIdentity)", state.Context.ScriptClass)
+	}
+	if state.Context.ScriptSource == "" {
+		t.Fatalf("ScriptSource empty after class-inferred hydrate")
+	}
+}
+
+// TestHydrate_MissingClass_UnindexedOpStillFails confirms RF#1 does not weaken
+// the fail-closed behavior for a genuinely unresolvable op: an envelope with no
+// class whose operationType is admitted by no DDL still errors MissingClass
+// (unchanged behavior).
+func TestHydrate_MissingClass_UnindexedOpStillFails(t *testing.T) {
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	h := NewHydratorWithCache(conn, testCoreBucket, cache, testLogger())
+
+	env := newTestEnvelope(testNanoID1)
+	env.Class = ""
+	env.Payload = json.RawMessage(`{"name":"Andrew"}`)
+	env.OperationType = "NoSuchUnindexedOp"
+
+	_, err := h.Hydrate(ctx, env)
+	if err == nil {
+		t.Fatalf("expected MissingClass error for an unindexed op with no class")
+	}
+	var hErr *HydrationError
+	if !errors.As(err, &hErr) || hErr.Code != "MissingClass" {
+		t.Fatalf("expected MissingClass HydrationError, got %T: %v", err, err)
+	}
+}
+
 func TestHydrate_NoScriptForClass(t *testing.T) {
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())

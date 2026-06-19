@@ -23,7 +23,21 @@ type opEnvelope struct {
 	Actor         string          `json:"actor"`
 	SubmittedAt   string          `json:"submittedAt"`
 	Payload       json.RawMessage `json:"payload"`
-	AuthContext   *authContext    `json:"authContext,omitempty"`
+	// Class is the DDL canonical name. Optional (omitempty): Weaver leaves it
+	// empty and relies on the Processor's operationType→class reverse index
+	// (Contract #2 §2.1) — every op Weaver dispatches is admitted by exactly one
+	// vertexType DDL, so inference is unambiguous. The field exists so a future
+	// caller MAY pin a class explicitly when needed.
+	Class string `json:"class,omitempty"`
+	// ContextHint carries the OCC reads the dispatched op's DDL hydrates. Weaver
+	// sets it from the plan's declared read-set (the bare vertex keys the op's
+	// script validates); omitted for read-free ops.
+	ContextHint *contextHint `json:"contextHint,omitempty"`
+	AuthContext *authContext `json:"authContext,omitempty"`
+}
+
+type contextHint struct {
+	Reads []string `json:"reads,omitempty"`
 }
 
 type authContext struct {
@@ -54,7 +68,9 @@ func newActuator(conn *substrate.Conn, lane, actor string, logger *slog.Logger) 
 }
 
 // submit publishes one remediation op under Weaver's service-actor authority.
-func (a *actuator) submit(ctx context.Context, requestID, operationType string, payload map[string]any, authTarget string) error {
+// reads is the dispatched op's ContextHint.Reads (the bare vertex keys its DDL
+// hydrates); empty for read-free ops.
+func (a *actuator) submit(ctx context.Context, requestID, operationType string, payload map[string]any, authTarget string, reads []string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("weaver: marshal op payload: %w", err)
@@ -66,6 +82,9 @@ func (a *actuator) submit(ctx context.Context, requestID, operationType string, 
 		Actor:         a.actor,
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       body,
+	}
+	if len(reads) > 0 {
+		env.ContextHint = &contextHint{Reads: reads}
 	}
 	if authTarget != "" {
 		env.AuthContext = &authContext{Target: authTarget}

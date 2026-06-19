@@ -40,6 +40,8 @@ func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		taskDDL(),
 		LoomLifecycleDDL(),
+		MarkExpiredDDL(),
+		FreshnessExpiryAspectDDL(),
 	}
 }
 

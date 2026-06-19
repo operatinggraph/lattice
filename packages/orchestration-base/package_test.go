@@ -24,14 +24,14 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 }
 
 func TestPackage_DDLsLensesPermissions(t *testing.T) {
-	if got := len(Package.DDLs); got != 2 {
-		t.Fatalf("expected 2 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 4 {
+		t.Fatalf("expected 4 DDLs, got %d", got)
 	}
 	ddlNames := map[string]bool{}
 	for _, d := range Package.DDLs {
 		ddlNames[d.CanonicalName] = true
 	}
-	for _, want := range []string{"task", "loomLifecycle"} {
+	for _, want := range []string{"task", "loomLifecycle", "freshnessMarker", "freshnessExpiry"} {
 		if !ddlNames[want] {
 			t.Fatalf("missing DDL %q (have %v)", want, ddlNames)
 		}
@@ -51,8 +51,89 @@ func TestPackage_DDLsLensesPermissions(t *testing.T) {
 			t.Fatalf("missing lens %q (have %v)", want, lensNames)
 		}
 	}
-	if got := len(Package.Permissions); got != 7 {
-		t.Fatalf("expected 7 permissions, got %d", got)
+	if got := len(Package.Permissions); got != 8 {
+		t.Fatalf("expected 8 permissions, got %d", got)
+	}
+}
+
+// TestPackage_MarkExpiredDDL pins the generic freshness-marker DDL (RF#3): a
+// vertexType DDL admitting only MarkExpired, an UNCONDITIONED-update marker
+// write (no expectedRevision in the script), a companion freshnessExpiry
+// aspect-type DDL that admits MarkExpired (the step-6 gate), a non-sensitive
+// marker aspect, an operator grant, and NO concrete type literal in the script.
+func TestPackage_MarkExpiredDDL(t *testing.T) {
+	var marker, aspect *pkgmgr.DDLSpec
+	for i := range Package.DDLs {
+		switch Package.DDLs[i].CanonicalName {
+		case "freshnessMarker":
+			marker = &Package.DDLs[i]
+		case "freshnessExpiry":
+			aspect = &Package.DDLs[i]
+		}
+	}
+	if marker == nil {
+		t.Fatal("freshnessMarker DDL missing")
+	}
+	if aspect == nil {
+		t.Fatal("freshnessExpiry aspect DDL missing")
+	}
+
+	// The marker is a vertexType DDL admitting exactly MarkExpired.
+	if marker.Class != "meta.ddl.vertexType" {
+		t.Fatalf("freshnessMarker class = %q, want meta.ddl.vertexType", marker.Class)
+	}
+	if len(marker.PermittedCommands) != 1 || marker.PermittedCommands[0] != "MarkExpired" {
+		t.Fatalf("freshnessMarker permittedCommands = %v, want [MarkExpired]", marker.PermittedCommands)
+	}
+
+	// The marker write must be an UNCONDITIONED update (no expectedRevision) so
+	// the eager re-open survives a SECOND lapse (C2). A create, or an
+	// expectedRevision, would conflict on the standing marker.
+	if !strings.Contains(marker.Script, `"op": "update"`) {
+		t.Error("freshnessMarker marker write must be an update")
+	}
+	if strings.Contains(marker.Script, "expectedRevision") {
+		t.Error("freshnessMarker marker write must be UNCONDITIONED (no expectedRevision) — else the 2nd lapse conflicts")
+	}
+	if strings.Contains(marker.Script, `"op": "create"`) {
+		t.Error("freshnessMarker marker write must NOT be a create — it conflicts on the 2nd lapse")
+	}
+
+	// Type-agnostic: the script must name no concrete anchor type.
+	for _, forbidden := range []string{"leaseapp", "leaseApp", "identity", "service"} {
+		if strings.Contains(marker.Script, forbidden) {
+			t.Errorf("freshnessMarker script must name no concrete type; found %q", forbidden)
+		}
+	}
+
+	// The aspect DDL admits MarkExpired (the step-6 gate) and is NOT sensitive
+	// (so the marker attaches to any vertex type, not just identities).
+	if aspect.Class != "meta.ddl.aspectType" {
+		t.Fatalf("freshnessExpiry class = %q, want meta.ddl.aspectType", aspect.Class)
+	}
+	if len(aspect.PermittedCommands) != 1 || aspect.PermittedCommands[0] != "MarkExpired" {
+		t.Fatalf("freshnessExpiry permittedCommands = %v, want [MarkExpired]", aspect.PermittedCommands)
+	}
+	if aspect.Sensitive {
+		t.Error("freshnessExpiry must NOT be sensitive (it attaches to any vertex type)")
+	}
+
+	// The operator grant authorizes Weaver's service actor.
+	var granted bool
+	for _, p := range Package.Permissions {
+		if p.OperationType != "MarkExpired" {
+			continue
+		}
+		granted = true
+		if p.Scope != "any" {
+			t.Fatalf("MarkExpired scope = %q, want any", p.Scope)
+		}
+		if len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
+			t.Fatalf("MarkExpired grantsTo = %v, want [operator]", p.GrantsTo)
+		}
+	}
+	if !granted {
+		t.Fatal("missing MarkExpired permission grant")
 	}
 }
 

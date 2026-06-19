@@ -59,7 +59,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	rid := env.RequestID
 
 	// 1. Resolve class.
-	class, err := resolveClass(env)
+	class, err := resolveClass(env, h.DDLs)
 	if err != nil {
 		return HydratedState{}, &HydrationError{
 			Code: "MissingClass", OperationRequestID: rid, Cause: err,
@@ -183,12 +183,21 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	}, nil
 }
 
-// resolveClass extracts the operation's class for DDL lookup.
+// resolveClass extracts the operation's class for DDL lookup. Precedence:
+//  1. the top-level `class` envelope field (explicit client hint),
+//  2. the payload's `class` field (explicit client hint, legacy fallback),
+//  3. the DDL cache's operationType→class reverse index (Contract #2 §2.1):
+//     a dispatched op that omits `class` resolves to the single vertexType DDL
+//     that admits its operationType. An ambiguous or unindexed operationType
+//     misses here and the explicit-class requirement stands.
 //
-// resolveClass extracts the DDL class name from the envelope. The top-level
-// `class` field is consulted first; the payload's `class` field is the
-// fallback. Every operation must declare its class.
-func resolveClass(env *OperationEnvelope) (string, error) {
+// The reverse-index step is auth-neutral: authorization (step 3) precedes class
+// resolution (step 4) and keys on operationType + actor + authContext, never on
+// class, so inferring the class cannot widen the auth surface. The inferred
+// class is exactly the DDL whose permittedCommands admit the operationType — the
+// same gate step 6 enforces — so it cannot run a wrong-script integrity
+// mismatch either (the ambiguity guard rejects the >1-claimant case).
+func resolveClass(env *OperationEnvelope, cache *DDLCache) (string, error) {
 	if env.Class != "" {
 		return env.Class, nil
 	}
@@ -201,6 +210,11 @@ func resolveClass(env *OperationEnvelope) (string, error) {
 					return s, nil
 				}
 			}
+		}
+	}
+	if cache != nil {
+		if class, ok := cache.ClassForCommand(env.OperationType); ok {
+			return class, nil
 		}
 	}
 	return "", fmt.Errorf("operation envelope must carry a top-level `class` field (or payload.class)")

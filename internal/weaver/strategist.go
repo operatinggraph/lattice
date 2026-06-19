@@ -71,7 +71,13 @@ type plan struct {
 	operationType string
 	authTarget    string
 	payload       func(markRevision uint64) map[string]any
-	nudge         *nudgePlan
+	// reads is the dispatched op's ContextHint.Reads: the BARE vertex keys the
+	// op's DDL script hydrates + validates (vertex_alive). The dispatcher
+	// declares them because it builds the payload and so knows the exact keys
+	// the op touches. Empty for read-free ops (StartLoomPattern, MarkExpired,
+	// most directOps). NO `.state` suffixes — the DDLs read bare keys.
+	reads []string
+	nudge *nudgePlan
 }
 
 // nudgePlan carries one nudge gap's resolved §10.8 fields to the live dispatch
@@ -158,6 +164,13 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 		return &plan{
 			operationType: opCreateTask,
 			authTarget:    taskTarget,
+			// The task DDL validates all three link endpoints with vertex_alive
+			// (orchestration-base/ddls.go) — the caller MUST hydrate them. They are
+			// the BARE keys (assignee/forOperation/scopedTo); the DDL reads no
+			// `.state` aspect, so none is listed (a non-existent .state key would be
+			// a HydrationMiss). Cross-checked against the script by
+			// TestCreateTaskReads_MatchDDLScript.
+			reads: []string{assignee, forOperation, taskTarget},
 			payload: func(markRevision uint64) map[string]any {
 				return map[string]any{
 					"assignee":         assignee,

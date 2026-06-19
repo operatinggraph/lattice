@@ -13,6 +13,10 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: loomLifecycle
       class: meta.ddl.vertexType
+    - canonicalName: freshnessMarker
+      class: meta.ddl.vertexType
+    - canonicalName: freshnessExpiry
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: capabilityEphemeral
       adapter: nats-kv
@@ -42,5 +46,8 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: FailPattern
+      scope: any
+      grantsTo: [operator]
+    - operationType: MarkExpired
       scope: any
       grantsTo: [operator]

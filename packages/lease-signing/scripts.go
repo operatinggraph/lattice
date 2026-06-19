@@ -272,20 +272,6 @@ def execute(state, op):
     fail("leaseServiceInstance DDL: unknown operationType: " + ot)
 `
 
-// bgcheckFreshnessWindow is the validity span the replyOp stamps onto every
-// service outcome as `validUntil = completedAt + window` (a Go duration string,
-// time.ParseDuration form). The lease-signing lens applies the freshness policy
-// to the BGCHECK family only: a completed bgcheck counts toward convergence
-// solely while `validUntil > $now`; once it lapses the gap re-opens (a stale
-// background check IS a missing background check). Payment ignores validUntil
-// (ever-completed), so the value stamped on a payment outcome is harmless and
-// unused — the freshness rule lives in the lens cypher, per Contract #10 §10.2.
-//
-// This is a deliberately SHORT demo window — brief enough that an end-to-end run
-// can watch a bgcheck lapse and the gap re-open within the test, while leaving
-// headroom to complete the rest of the flow first. Tune it for production.
-const bgcheckFreshnessWindow = "5m"
-
 // leaseServiceReplyDDLScript is the externalTask replyOp the bridge submits.
 // The bridge posts only {externalRef, result}; this op reconstructs the claim
 // vertex key, derives status + completedAt + validUntil, writes the .outcome

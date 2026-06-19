@@ -66,6 +66,15 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
 
+      - name: Run lease-convergence suite (Story 14.5 — external-I/O idempotency + convergence)
+        # Boots Processor + Refractor + Loom + Weaver + the live bridge in-process
+        # (embedded NATS, no extra Docker), installs the real package chain, and
+        # drives a lease application to steady-state convergence through the live
+        # bridge: drain-then-assert (AC #1), FR58 at-most-once end-to-end (AC #2),
+        # D5 gate-asserted (AC #3), and the eager bgcheck-freshness @at lapse.
+        # Compiled -tags leaseshortwindow so the freshness window is watchable.
+        run: make test-lease-convergence
+
       - name: Run all tests (unit + integration)
         # -p 1: serialize test-package execution. Many fixtures spin
         # up embedded NATS+JetStream servers; default parallelism

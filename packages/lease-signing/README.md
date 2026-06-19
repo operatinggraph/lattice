@@ -79,14 +79,19 @@ the real status.
 ## Freshness — bgcheck is freshness-gated, payment is ever-completed
 
 The §10.2 model is `missing_bgcheck = NOT EXISTS(check WHERE date > now − window)`.
-14.4 ships the freshness **PREDICATE**; the eager auto-reopen-at-expiry is **Story
-14.5** (see "Deferred to 14.5" below).
+The lens ships the freshness **PREDICATE**, and the eager auto-reopen-at-expiry is
+complete end-to-end: the temporal lane's fired `@at` submits a generic `MarkExpired`
+op (the platform `freshnessMarker` DDL in **orchestration-base**) that re-touches the
+application, reprojects the row with a fresh `$now`, and re-opens `missing_bgcheck`
+the moment freshness lapses (the `internal/leaseconvergence` e2e proves the full
+re-open → re-dispatch → re-converge chain across multiple freshness cycles).
 
 - The replyOp stamps `validUntil = completedAt + bgcheckFreshnessWindow` onto the
   `.outcome` aspect (`time.rfc3339_add` — a pure, deterministic Starlark duration
   add; the op stays read-free). `bgcheckFreshnessWindow` is a named package
-  constant (the **demo window `5m`**, short enough for 14.5's e2e to watch a
-  bgcheck lapse; 14.5 may tune it). The replyOp is family-agnostic, so it stamps
+  constant: the production default `5m` (`freshness_window.go`), or a short window
+  under `-tags leaseshortwindow` (`freshness_window_short.go`) so the e2e watches a
+  lapse in bounded wall-clock. The replyOp is family-agnostic, so it stamps
   `validUntil` on **every** outcome; the value on a payment outcome is harmless and
   unused — the freshness rule lives in the lens cypher.
 - The lens applies freshness to **bgcheck only**:
@@ -103,27 +108,38 @@ The §10.2 model is `missing_bgcheck = NOT EXISTS(check WHERE date > now − win
   sets `params["now"] = time.Now().UTC().Format(time.RFC3339)`); the `>` on
   canonical-UTC RFC3339 strings is lexicographic = chronological.
 
-**Deferred to 14.5 — eager auto-reopen-at-expiry (the §10.2 `freshUntil` column).**
-14.4 re-opens a stale bgcheck on the **next** reprojection of the row, not eagerly at
-the instant of lapse. Eager re-eval needs the lens to project a single scalar
-`freshUntil` per anchor (the bgcheck's `validUntil`) so Weaver's temporal lane
-schedules an `@at` at that instant and re-touches the row the moment freshness lapses.
-Projecting that scalar cleanly needs an **engine change 14.4 does not make**: the
-`full` engine has **no list→scalar reducer** (no `max`/`head`/`min`/`coalesce`/`UNWIND`
-— all verified unsupported), so a `collect` of validUntil over the providedTo fan-out
-projects a **list**, which Weaver rejects; and a **dedicated family-filtered
-`OPTIONAL MATCH … WHERE`** is unsafe today — when the applicant has a payment instance
-but **no bgcheck instance yet** (a real transient convergence window: payment's
-instanceOp commits + reprojects before bgcheck's), the `WHERE` filters the sole
-`providedTo` neighbor and the engine's null-restore (`internal/refractor/ruleengine/full/executor.go`
-`applyMatch`) fails to re-emit the anchor → **the row drops**. A dropped weaver-targets
-row reads to Weaver as an entity deletion (`clearClosedMarks`), which on row
-re-appearance re-dispatches a **second** bgcheck Loom instance — a second external call
-(FR58 double-act). 14.5 lands the engine fix (either making a fully-filtered optional
-preserve the anchor with nulls, or adding the list→scalar reducer) and exercises the
-eager `@at` via a short-window e2e. The
-`TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop` rule-engine test guards
-that 14.4's single-fan lens does not drop the anchor in that window.
+**Eager auto-reopen-at-expiry — the §10.2 `freshUntil` column.**
+The lens projects a single scalar `freshUntil` per anchor (the completed, still-fresh
+bgcheck's `validUntil`). Weaver's temporal lane reads it (`freshUntilColumn`), schedules
+an `@at` one-shot at that instant, and converts the firing into a `MarkExpired` op — so
+`missing_bgcheck` re-opens the moment freshness lapses (eagerly), not waiting for an
+incidental CDC touch. `freshUntil` is read by a **dedicated family-filtered bgcheck
+`OPTIONAL MATCH … WHERE`** (after the aggregation `WITH`) that selects the completed,
+fresh bgcheck. When no fresh bgcheck exists the `WHERE` filters every `providedTo`
+neighbor and the executor null-restores the anchor with `bg` null, so `freshUntil`
+projects as a genuine null (Weaver clears any standing `@at` — no deadline to arm) and
+the anchor never drops. That null-restore is the OPTIONAL MATCH `… WHERE` semantics in
+`internal/refractor/ruleengine/full/executor.go` `applyMatch`: a fully-WHERE-filtered
+optional preserves the source binding with nulls (the dedicated bgcheck match would
+otherwise drop the anchor when the applicant has a payment instance but no bgcheck yet —
+the transient convergence window; a dropped row reads to Weaver as an entity deletion via
+`clearClosedMarks` and re-dispatches a **second** bgcheck Loom instance — an FR58
+double-act). The dedicated match yields **at most one row per anchor** (FR58 dispatches at
+most one bgcheck per application, so at most one completed-fresh bgcheck instance exists),
+keeping the projection one-row-per-anchor (`guardOutputKeyCollision`). The single
+no-`WHERE` `providedTo` fan still drives the `missing_*` counts.
+
+The `bgcheckFreshnessWindow` is a **compile-time** constant baked into the replyOp DDL
+script at package-init time (the value is interpolated into `leaseServiceReplyDDLScript`
+by a package-level `var`, so it cannot be mutated at runtime). The production default
+(`5m`) lives in `freshness_window.go`; the `test-lease-convergence` gate compiles the e2e
+with `-tags leaseshortwindow` to substitute a short window (`freshness_window_short.go`)
+it can watch lapse in bounded wall-clock.
+
+The `TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop` rule-engine test guards
+that the lens never drops the anchor in the payment-before-bgcheck window;
+`TestLeaseApplicationComplete_FreshUntil*` pin the `freshUntil` projection (the value when
+fresh, null when stale/absent).
 
 ## Scalar convergence columns through the actorAggregate projection
 
@@ -160,6 +176,10 @@ set, scalar body columns named) and needs no change.
   path. So the instanceOp writes a distinct `.family` aspect the lens reads as
   `inst.family.data.value` (the `.class` aspect is still written for 14.1 shape
   fidelity).
-- **Tests use direct `.outcome` writes** (`RecordLeaseServiceOutcome` with a synthetic
-  `{externalRef, result}` payload), never a live bridge — the bridge-driven e2e is
-  14.5.
+- **The bridge-driven e2e lives in `internal/leaseconvergence`** (the
+  `test-lease-convergence` gate): it boots Processor + Refractor + Loom + Weaver + the
+  live bridge in-process, installs the real chain, drives one lease application, and
+  observes end-to-end convergence to a stable steady state, the FR58 at-most-once
+  external effect, and D5 (outcome in aspect, root data minimal). The package's own
+  `lens_cypher_test.go` proves the cypher at the rule-engine level with direct
+  `.outcome` writes.

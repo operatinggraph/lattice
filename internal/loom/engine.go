@@ -856,7 +856,11 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 
 	target := "vtx.meta." + pattern.PatternID
 	payload := map[string]any{"subjectKey": inst.SubjectKey}
-	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey)
+	// A systemOp's bound op is read-free in the Phase-2 vocabulary (the lifecycle
+	// ops are event-only — empty mutations, no vertex_alive), so no
+	// ContextHint.Reads is declared. A future systemOp that reads would set its
+	// own read-set here from the step's known target.
+	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, nil)
 	if err != nil {
 		return err
 	}
@@ -867,6 +871,21 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 		"instanceId", inst.InstanceID, "cursor", inst.Cursor,
 		"kind", step.Kind, "operation", step.Operation, "requestId", token)
 	return nil
+}
+
+// userTaskReads is the ContextHint.Reads set for a userTask's CreateTask. The
+// task DDL validates three link endpoints with vertex_alive — assignee,
+// forOperation, scopedTo. For a userTask the §10.5 invariant holds: assignee ==
+// scopedTo == the instance subject, so the three logical endpoints collapse to two
+// distinct keys (subjectKey, forOperation). Encoding the dedup here (rather than a
+// bare literal) keeps the read-set provably tied to that invariant: if a future
+// userTask ever scopes to something other than the subject, the payload + this
+// read-set must change in lock-step, and TestUserTaskReads_CoverEndpoints fails if
+// the deduped set ever stops covering all three endpoints.
+func userTaskReads(subjectKey, forOperation string) []string {
+	// assignee == subjectKey, scopedTo == subjectKey (the userTask invariant) →
+	// the assignee/scopedTo endpoints are the same key; forOperation is distinct.
+	return []string{subjectKey, forOperation}
 }
 
 // submitUserTask submits a CreateTask assigning the step's bound op to the
@@ -911,7 +930,17 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 		"expiresAt":    substrate.FormatTimestamp(time.Now().Add(userTaskGrantTTL)),
 		"taskId":       taskID,
 	}
-	ob, err := buildOutbox(opRequestID, opCreateTask, payload, inst.SubjectKey, e.cfg.Lane, e.cfg.ActorKey)
+	// The task DDL validates all three CreateTask link endpoints (assignee,
+	// forOperation, scopedTo) with vertex_alive (orchestration-base/ddls.go) — the
+	// caller MUST hydrate them. userTaskReads derives the read-set from the userTask
+	// invariant (assignee == scopedTo == the instance subject), deduping the three
+	// endpoints to the two distinct keys. BARE keys, no `.state` (the DDL reads
+	// none). The invariant + the "covers all three endpoints" property are guarded
+	// by TestUserTaskReads_CoverEndpoints (this package) — NOT by
+	// orchestration-base's TestCreateTaskReads_MatchDDLScript, which checks Weaver's
+	// un-deduped 3-key set, not Loom's deduped 2-key set.
+	reads := userTaskReads(inst.SubjectKey, forOperation)
+	ob, err := buildOutbox(opRequestID, opCreateTask, payload, inst.SubjectKey, e.cfg.Lane, e.cfg.ActorKey, reads)
 	if err != nil {
 		return err
 	}
@@ -972,7 +1001,13 @@ func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern
 	}
 
 	target := "vtx.meta." + pattern.PatternID
-	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey)
+	// The externalTask instanceOp validates the subject identity with vertex_alive
+	// (its DDL's no-orphan check), so the caller hydrates the BARE subjectKey. No
+	// `.state` (the DDL reads none). The instanceOp is the pattern's step string —
+	// the engine names no concrete op or type. The read-set is cross-checked
+	// against the owning package's DDL script by the package's drift-guard test.
+	reads := []string{inst.SubjectKey}
+	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads)
 	if err != nil {
 		return err
 	}
@@ -1001,8 +1036,9 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 	inst.Status = StatusComplete
 	inst.PendingToken = ""
 	requestID := deriveRequestID(inst.InstanceID, lifecycleCursor)
+	// CompletePattern is event-only (no mutations, no reads) — read-free envelope.
 	ob, err := buildOutbox(requestID, opCompletePattern,
-		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey)
+		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil)
 	if err != nil {
 		return err
 	}
@@ -1031,7 +1067,8 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 	if reason != "" {
 		payload["reason"] = reason
 	}
-	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey)
+	// FailPattern is event-only (no mutations, no reads) — read-free envelope.
+	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil)
 	if err != nil {
 		return err
 	}

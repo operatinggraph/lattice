@@ -292,8 +292,14 @@ func (e *Engine) handleFiredTimer(ctx context.Context, msg substrate.Message) su
 	}
 	// No authContext: MarkExpired is submitted under Weaver's service-actor
 	// authority (the target-less directOp posture); the op's DDL/grants are
-	// package data.
-	if err := e.act.submit(ctx, requestID, opMarkExpired, payload, ""); err != nil {
+	// package data. ContextHint.Reads carries the entity ROOT key: the
+	// freshnessMarker DDL hydrates it to assert the target exists + is alive
+	// before writing the (non-sensitive) marker — a stale firing whose entity was
+	// deleted fails closed rather than minting a dangling marker. The marker
+	// write itself stays an UNCONDITIONED update (no expectedRevision); the read
+	// is a parent-existence guard, not OCC on the marker.
+	reads := []string{p.EntityKey}
+	if err := e.act.submit(ctx, requestID, opMarkExpired, payload, "", reads); err != nil {
 		// Retryable publish failure (core-operations degraded): NakWithDelay on
 		// a bounded cadence, never a hot loop. The redelivery re-derives the
 		// same deterministic requestId, which collapses on the Contract #4

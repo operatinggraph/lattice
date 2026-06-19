@@ -279,7 +279,7 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 // the SAME requestId and re-publishes (idempotent at the Processor).
 func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markRevision uint64, pl *plan) substrate.Decision {
 	requestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
-	if err := e.act.submit(ctx, requestID, pl.operationType, pl.payload(markRevision), pl.authTarget); err != nil {
+	if err := e.act.submit(ctx, requestID, pl.operationType, pl.payload(markRevision), pl.authTarget, pl.reads); err != nil {
 		e.logger.Error("weaver: op publish failed; nak for retry",
 			"targetId", targetID, "entityId", entityID, "gap", col, "requestId", requestID, "err", err)
 		return substrate.Nak

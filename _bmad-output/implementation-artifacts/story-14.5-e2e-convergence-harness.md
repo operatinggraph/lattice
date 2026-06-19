@@ -1,6 +1,6 @@
 # Story 14.5 — e2e convergence harness + `test-lease-convergence` gate (the final Epic-14 story)
 
-**Status:** draft
+**Status:** review — landing with Story 14.6 (CI pending). Story 14.6 (orchestration dispatch integration) built + 3-layer-reviewed + fix-forward applied, so the harness drops the dispatch shim and AC#1 (faithful orchestration through the live bridge) + AC#2b (eager re-open via the real MarkExpired DDL) are now genuinely Met. AC#2a (FR58, with a positive control) / AC#3 (D5-by-gate) / AC#4 (gate+CI) Met. H1 (window margin, now window-derived ~8m harness ctx) + M3 (leaseconvergence build-tag-gated, runs once) fixed in 14.6. The `applyMatch` engine bugfix landed standalone earlier (e560188). Flips to `done` after CI green. (Historical: the e2e originally surfaced the dispatch gap as 3 red flags — see "Post-review adjudication (Winston)" at the foot.)
 **Epic:** 14 — Loftspace Lease-Application Reference Vertical (the closing story)
 **Tier:** Opus — the **Epic 14 capstone + the one engine fix Epic 14 still owes**. Two halves, interdependent: (1) a **drain-then-assert e2e harness** that drives a fresh lease application to **steady-state convergence through the LIVE bridge** (Weaver playbook → `triggerLoom` onboarding + bgcheck/payment `externalTask` → live `internal/bridge` → `replyOp` reproject → temporal freshness → sign task), plus the **at-most-once external-effect (FR58)** and **D5 gate-enforcement** proofs; and (2) the **EAGER bgcheck-freshness auto-reopen** carried from 14.4 — projecting a single scalar `freshUntil` column per anchor so Weaver's temporal `@at` lane re-touches the row the instant freshness lapses, which **requires an engine change 14.4 deliberately did not make** (the `internal/refractor/ruleengine/full` OPTIONAL-MATCH null-restore fix, §0.B). A new **`test-lease-convergence` CI gate** wires the e2e into CI. Review: **full 3-layer adversarial** (Blind Hunter / Edge Case Hunter / Acceptance Auditor) per `bmad-code-review` — this touches a guarded engine (Refractor) AND authors a cross-engine e2e on the orchestration plane. Plus the gates in §7.
 
@@ -340,19 +340,87 @@ These are the decisions taken while drafting (the create-story ran autonomously)
 
 ### Agent Model Used
 
-_(to be filled by the dev sub-agent — Amelia, claude-opus-4-8)_
+Amelia (dev sub-agent), claude-opus-4-8.
 
 ### Debug Log References
 
-_(to be filled by the dev sub-agent)_
+The all-engines harness surfaced three dispatch-plane integration gaps (see RED FLAGS
+in Completion Notes), diagnosed via in-harness probes: `NoDDLForClass` (class-less
+dispatch), `UnknownApplicant` (instanceOp carried no ContextHint.Reads), and a stalled
+orchestration loop (the transactional-outbox publisher was not booted). The convergence
+loop runs once all three are compensated at the harness boundary (the outbox publisher is
+real production wiring; the class + reads normalizer compensates for the engine gaps).
 
 ### Completion Notes List
 
-_(to be filled by the dev sub-agent — record: the engine-fix approach taken (a/b) + rationale; the final `freshUntil` cypher shape; the window-injection mechanism; the gate posture + CI wiring; the drain/settle/short-window timings; any RED-FLAG surfaced; the gate results)_
+- **Engine fix = approach (a), red-green proven.** Fixed `internal/refractor/ruleengine/full/executor.go`
+  `applyMatch`: when a WHERE filters every real neighbor of an OPTIONAL MATCH, the anchor
+  is null-restored from the source binding via a shared `nullBindNewVars` helper (also used
+  by `matchPatterns`'s `len(expansions)==0` branch) — NOT a list→scalar reducer. The
+  type-neutral test `TestApplyMatch_OptionalWhereFiltersAllNeighbors_PreservesAnchor`
+  (`optional_where_restore_test.go`, generic anchor/widget types) was RED before the fix
+  (0 rows — anchor dropped) and GREEN after (1 row, optional column null). Full
+  `./internal/refractor/...` + `./internal/refractor/ruleengine/full/...` suites green. The
+  fix changed one pinned-behavior test: `TestMyTasksCypher_CompleteTask_NullsActorKey` →
+  renamed `…_PreservesActorKey` (myTasks closed-task now projects the live anchor key, not
+  null; vanish-on-close is preserved through a cleaner path — `…_CompleteTask_FiltersToNull`
+  + the driver `…_FallsBackToParams` tests still pass).
+- **Final `freshUntil` cypher (≤1 row/anchor, passes `guardOutputKeyCollision`):** kept the
+  single no-WHERE `providedTo` fan for the `missing_*` counts UNCHANGED; carried `id` through
+  the aggregation WITH as `applicantNode`; ADDED a dedicated `OPTIONAL MATCH (applicantNode)<-[:providedTo]-(bg:service) WHERE bg.family.data.value = 'backgroundCheck' AND bg.outcome.data.status = 'completed' AND bg.outcome.data.validUntil > $now` projecting `bg.outcome.data.validUntil AS freshUntil`. At most one completed-fresh bgcheck exists per application (FR58), so the dedicated match yields ≤1 row; null-restores to a null `freshUntil` when none. Verified one-row-per-anchor through the live Refractor (the scalar e2e + the convergence harness both project it cleanly).
+- **Short-window = compile-time build-tag override (A2).** Removed the `const bgcheckFreshnessWindow`
+  from `scripts.go`; split into `freshness_window.go` (`//go:build !leaseshortwindow` → `"5m"`,
+  production default) + `freshness_window_short.go` (`//go:build leaseshortwindow` → `"30s"`).
+  The gate compiles with `-tags leaseshortwindow`. Tuned: converge ≈6s, settle hold 5s, so a
+  30s window does not lapse mid-converge yet the `@at` fires (~30s) within the test's bounded
+  wait. Three consecutive gate runs green (~44s each), not flaky.
+- **Gate = self-contained embedded-NATS (A3).** `make test-lease-convergence` mirrors
+  `test-rollback` (no Docker, in-process `bridge.NewEngine`); added to `.PHONY`; wired into
+  `.github/workflows/ci.yml` as a named step before "Run all tests".
+- **Harness package:** `internal/leaseconvergence` (compiles importing Processor + Refractor +
+  Loom + Weaver + bridge + the package definitions; no import cycle).
+- **FR58 via republish (A7), single pass (A8).** Tests A+B/C/E green through the live bridge:
+  drain-then-assert steady state, redelivered external event → exactly one effect, D5
+  gate-asserted (outcome in aspect, root data {}). Test D (eager freshness) runs under
+  `-tags leaseshortwindow` and asserts the eager chain up to the MarkExpired dispatch.
+- **RED FLAGS (surfaced, not papered over — see top of dev summary): three dispatch-plane
+  integration gaps the first all-engines e2e exposed (all hidden by per-engine fakeProcessors):**
+  (1) Weaver/Loom dispatch ops with NO `class` field → the Processor's class-only DDL lookup
+  rejects them (`NoDDLForClass`); (2) Loom's externalTask instanceOp carries no
+  `ContextHint.Reads`, so `CreateLeaseServiceInstance`'s `vertex_alive(subject)` fails
+  (`UnknownApplicant`); (3) `MarkExpired` has NO DDL anywhere (`docs/components/weaver.md`
+  designates it "package data, Epic 14" but 14.4 did not create it; §1/Q6 forbid 14.5 adding
+  a new op). The harness compensates for (1)+(2) with a documented dispatch-envelope
+  normalizer + boots the real transactional-outbox publisher; (3) blocks only the final
+  MarkExpired→reproject→re-open step of the eager leg, so test D asserts up to the MarkExpired
+  dispatch. **No contract gap for the null `freshUntil` scalar** (A5 verified: it projects as a
+  clean null and Weaver's `scheduleFreshness` clears the timer).
+- **Gate results:** `go build`, `make vet`, `golangci-lint run ./...` (0 issues),
+  `./internal/refractor/...`, `./internal/refractor/ruleengine/full/...`,
+  `./packages/lease-signing/...`, `./internal/{weaver,loom,bridge,pkgmgr}/...`,
+  `./packages/{service-domain,identity-domain,orchestration-base}/...`,
+  `make test-lease-convergence` (×3), `make verify-kernel`, `make test-bypass` (Gate 2: 4/4
+  BLOCKED), `make test-capability-adversarial`/TestCapAdv (Gate 3: 6/6 cleared),
+  `make verify-package-{identity,rbac,identity-hygiene}`, and `go test ./... -p 1` — all green.
 
 ### File List
 
-_(to be filled by the dev sub-agent — expected: `internal/refractor/ruleengine/full/executor.go` (modified — applyMatch null-restore), a new `internal/refractor/ruleengine/full/*_test.go` (the type-neutral applyMatch unit test), `packages/lease-signing/lenses.go` (modified — freshUntil column), `packages/lease-signing/scripts.go` (modified — window as var, if Q4 (a)), `packages/lease-signing/lens_cypher_test.go` (modified — extended no-drop regression), the new harness test package/file, `Makefile` (modified — test-lease-convergence target), `.github/workflows/*` (modified — gate wired into CI), `packages/lease-signing/README.md` (modified — Deferred→shipped), possibly `docs/components/{weaver,refractor}.md`)_
+- `internal/refractor/ruleengine/full/executor.go` (modified — `applyMatch` null-restore + `nullBindNewVars` helper; `matchPatterns` refactored onto it)
+- `internal/refractor/ruleengine/full/optional_where_restore_test.go` (new — type-neutral applyMatch unit tests)
+- `internal/refractor/ruleengine/full/mytasks_cypher_test.go` (modified — pinned-behavior test updated to the corrected null-restore semantics)
+- `packages/lease-signing/lenses.go` (modified — `freshUntil` scalar column + dedicated bgcheck match; BodyColumns; doc comment flipped to shipped)
+- `packages/lease-signing/scripts.go` (modified — removed the inline `bgcheckFreshnessWindow` const)
+- `packages/lease-signing/freshness_window.go` (new — production window, `//go:build !leaseshortwindow`)
+- `packages/lease-signing/freshness_window_short.go` (new — short window, `//go:build leaseshortwindow`)
+- `packages/lease-signing/lens_cypher_test.go` (modified — `freshUntil` assertions + extended no-drop regression)
+- `internal/leaseconvergence/harness_test.go` (new — the all-engines harness boot + helpers)
+- `internal/leaseconvergence/convergence_test.go` (new — tests A+B, C, D, E)
+- `internal/leaseconvergence/window_default_test.go` (new — `shortFreshnessWindow=false`, `//go:build !leaseshortwindow`)
+- `internal/leaseconvergence/window_short_test.go` (new — `shortFreshnessWindow=true`, `//go:build leaseshortwindow`)
+- `Makefile` (modified — `test-lease-convergence` target + `.PHONY`)
+- `.github/workflows/ci.yml` (modified — lease-convergence gate wired into CI)
+- `packages/lease-signing/README.md` (modified — Deferred→shipped; bridge-driven e2e note)
+- `docs/components/refractor.md` (modified — OPTIONAL MATCH null-restore semantics note)
 
 ---
 
@@ -368,3 +436,32 @@ The story was drafted autonomously (no mid-run checkpoints). The load-bearing op
 6. **(Q7) Harness placement.** Confirm a **dedicated harness test package** (e.g. `internal/leaseconvergence` or `test/e2e`) that can import Processor + Refractor + Loom + Weaver + bridge + the package definitions without an import cycle, using the real `leaseapp`/`service` types (the real vertical's e2e — invariant a preserved by the type-neutral engine test, not the harness).
 7. **(Q8) FR58 e2e mechanism.** Confirm the at-most-once proof is driven by **republishing the same `external.<adapter>` event** (same `instanceKey` → same `deriveReplyRequestID` → tracker collapse) — vs. a process-restart crash-recovery simulation.
 8. **(cross-cutting) Single pass vs. split.** The story recommends a **single pass**; the only natural seam is 14.5a (engine fix + lens column + unit tests) → 14.5b (the e2e harness + gate). Confirm single-pass, or sanction the split with 14.5a first.
+
+---
+
+## Lead adjudication (Winston) — answers to the open questions (BUILD TO THESE)
+
+All eight resolved. Where I add a constraint beyond the recommendation, it is **binding**.
+
+- **A1 (Q1) — Approach (a), confirmed: fix `applyMatch` null-restore.** Construct the null fallback from the source binding (factor a shared null-bind helper with `matchPatterns`'s `len(expansions)==0` branch); do NOT add a list→scalar reducer. **Binding discipline:** (i) write the type-neutral failing rule-engine test FIRST and watch it go red, THEN fix — prove the drop reproduces before you fix it; (ii) the `applyMatch` change is the single highest regression risk in this story — run the FULL `./internal/refractor/...` AND `./internal/refractor/ruleengine/full/...` suites and eyeball every existing OPTIONAL-MATCH cypher (`myTasks`, `capabilityEphemeral`, the keyColumn e2e, the scalar-lease e2e) for behavior change; (iii) **cypher shape** = keep the existing single `providedTo` fan for the `missing_*` counts UNCHANGED, ADD one dedicated family-filtered bgcheck `OPTIONAL MATCH … WHERE` projecting `bg.outcome.data.validUntil AS freshUntil`. That dedicated match must yield **≤1 row per anchor** or `guardOutputKeyCollision` fails closed — the vertical dispatches at most one bgcheck per application (FR58), so ≤1 completed bgcheck instance exists; **assert/comment that at-most-one assumption** and validate the full cypher against `guardOutputKeyCollision` before wiring the e2e.
+- **A2 (Q4) — Compile-time build-tag override, NOT a runtime `var`.** I checked the code: `bgcheckFreshnessWindow` (`scripts.go:287`, `const "5m"`) is interpolated into `leaseServiceReplyDDLScript` by a package-level `var … = fmt.Sprintf(...)` at **package-init time**, and `Package`/`DDLs()` capture that script at init too — so a test that mutates a runtime `var` after init would never reach the already-built script (and would race under `-race`). Instead: move the const into a build-tag split — `//go:build !leaseshortwindow` → `"5m"` (the production default, unchanged) and `//go:build leaseshortwindow` → a short value; the `test-lease-convergence` gate compiles the e2e with `-tags leaseshortwindow`. The harness then installs the **exact shipped `Package` var**, merely compiled with the short window (most faithful; no permanent test-only exported API; no mutable global). **Window-value trap (binding):** ONE compile-time window governs BOTH the converge phase and the lapse phase of the e2e binary, so pick it comfortably larger than (time-to-converge + the steady-state settle hold) — otherwise the bgcheck lapses mid-converge and the steady-state "remain false" assert flakes — yet small enough to watch a lapse in bounded wall-clock (low tens of seconds; tune empirically). Sanctioned fallback ONLY if threading the tag proves genuinely awkward: a parameterized `PackageWith(window)` builder with `Package = PackageWith("5m")` — flag it if you take it.
+- **A3 (Q5) — Self-contained embedded-NATS gate, confirmed** (mirror `test-rollback`; in-process `bridge.NewEngine`, no Docker). Wire it into `.github/workflows/*` alongside the existing `test-*` gates (grep `test-bypass` for the site) AND add it to the `Makefile` `.PHONY`. A target that is not invoked by CI does not satisfy AC #4 (§3 trap #5).
+- **A4 (Q2/Q6) — Zero non-Refractor engine change, confirmed.** The only engine change is the Refractor `applyMatch` fix. Weaver already consumes `freshUntil`; Loom/bridge are done; the package gains one lens column. A proposed Loom/Weaver/Processor/bridge change is a RED FLAG — surface it as blocking, do not implement. **Caveat:** if you find Weaver's `MarkExpired`/`handleFiredTimer` does not actually re-touch the row such that the freshness predicate re-evaluates (the Q2 risk), STOP and surface it — do not paper over it with a Weaver edit.
+- **A5 (Q3) — No contract amendment expected, confirmed.** `freshUntil` is the §10.2 engine-recognized column; CAR-E6 (§6.13) already projects scalar body columns verbatim. **Verify the nullable case:** when no fresh bgcheck exists, `freshUntil` projects as null and Weaver's `scheduleFreshness` clears the timer (no arm) — confirm the scalar passthrough emits a clean null (not `[]`, not a coerced row). If and only if that null case needs a clarifying sentence in §6.13, FLAG it in your closing summary — I (Winston) may amend the contract in-place (uncommitted) per Andrew; you do NOT edit `docs/contracts/*` yourself.
+- **A6 (Q7) — Dedicated harness package, confirmed.** Place it where it imports Processor + Refractor + Loom + Weaver + bridge + the package definitions without an import cycle (`internal/leaseconvergence` or `test/e2e` — your call by what compiles cleanly). Real `leaseapp`/`service` types are fine there (it is the real vertical's e2e). The type-neutral `applyMatch` unit test lives in `internal/refractor/ruleengine/full` (no concrete type) and is what preserves invariant a; the 14.4 `TestLeaseAppType_AbsentFromCore` guard must still pass.
+- **A7 (Q8) — FR58 via republish, confirmed.** Re-drive the same `external.<adapter>` event (same `instanceKey` → same `deriveReplyRequestID` → Contract #4 tracker collapse / create-only `.outcome` conflict) and assert exactly one external effect. Not a process-restart sim.
+- **A8 (single pass vs split) — Single pass, confirmed.** Land it as one capstone. Split to 14.5a (mechanism: engine fix + lens column + the two unit tests) → 14.5b (harness + gate) ONLY if the harness will not stabilize — and say so explicitly before splitting.
+
+---
+
+## Post-review adjudication (Winston) — 2026-06-18
+
+Full 3-layer review complete (Blind Hunter / Edge Case Hunter / Acceptance Auditor — all consistent). The DS implementation is **technically excellent and honest** (it surfaced the gaps rather than papering over them). Verdict:
+
+**Authored work — reviewed-CLEAN, accepted:**
+- The `applyMatch` OPTIONAL-MATCH-WHERE null-restore fix (`nullBindNewVars`) is correct (Blind Hunter enumerated every shape); my-tasks vanish-on-close AND capabilityEphemeral expired-grant revocation are preserved (Edge Case Hunter traced both to `ErrDeleteProjection`). rbac/identity optionals carry no WHERE → untouched. **Committed standalone as a decoupled bugfix: e560188** (CI-validated in isolation).
+- The `freshUntil` lens cypher (≤1 row/anchor, null handled), FR58 (Met, genuine), D5-by-gate (Met), gate+CI (Met), type-agnostic + house rules clean.
+
+**Two ACs BLOCKED on a foundational dispatch gap (the three red flags — all real, product-level):** the orchestration dispatch plane (Loom/Weaver) has only ever been tested vs `fakeProcessor` (keyed by operationType); the real Processor resolves by `class` + needs `ContextHint.Reads`, neither of which the engines set on dispatch — so AC#1 converges only via the harness's documented `normalizeDispatch` shim, and AC#2b's eager re-open is proven only "up to MarkExpired dispatch" (`MarkExpired` has no DDL). These are **out of 14.5's authored scope** and are carved into **Story 14.6 (orchestration dispatch integration)**: RF#1 (Processor operationType→class reverse index — the Contract #2 §2.1 index that was always anticipated, never built; Contract #2 to be amended in-place, uncommitted), RF#2 (engine-dispatched ops supply `ContextHint.Reads` — affects Weaver `CreateTask` + the Loom instanceOp), RF#3 (a `MarkExpired` DDL — polymorphic-entity design). See memory `project_dispatch_plane_gap`.
+
+**Landing plan:** the vertical (freshUntil lens + harness + gate) stays UNCOMMITTED — shipping `freshUntil` before a `MarkExpired` DDL would emit failing @ats in prod, and a shim-green gate shouldn't enter CI. 14.6 builds the dispatch fix (design → team review → launch), then this vertical lands faithfully (shim dropped) with H1 (window margin) + M3 (run-once) fixed, and 14.5 → done. **13.5 (retire the nudge) also waits on 14.6** (its proof leans on the faithful triggerLoom convergence).

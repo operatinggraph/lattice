@@ -533,7 +533,12 @@ func (e *Engine) resolveFunc(np *nudgePlan, expectedRevision uint64) nudge.Resol
 			"result":           result.Detail,
 			"expectedRevision": expectedRevision,
 		}
-		if err := e.act.submit(ctx, requestID, np.operation, payload, np.subject); err != nil {
+		// The nudge resolve op carries no engine-declared ContextHint.Reads: its
+		// OCC is the row revision-condition (expectedRevision) in the payload, and
+		// the resolve DDL's own reads are package data, not engine-known. (The
+		// §10.8 nudge action is retired in the Phase-2 lease vertical; this path is
+		// preserved read-free, exactly as it dispatched before.)
+		if err := e.act.submit(ctx, requestID, np.operation, payload, np.subject, nil); err != nil {
 			return "", err
 		}
 		return requestID, nil
