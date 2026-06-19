@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nats-io/nats.go/jetstream"
-
 	"github.com/asolgan/lattice/internal/refractor/subjects"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // DLQMessage is the diagnostic payload written to a rule's DLQ stream.
@@ -27,21 +26,18 @@ type DLQMessage struct {
 
 // Publish writes msg to the DLQ stream for the given ruleID.
 // The stream is created (idempotent) if absent. Subject: subjects.DLQ(ruleID).
-func Publish(ctx context.Context, js jetstream.JetStream, ruleID string, msg DLQMessage) error {
+func Publish(ctx context.Context, conn *substrate.Conn, ruleID string, msg DLQMessage) error {
 	subject := subjects.DLQ(ruleID)
 	streamName := "REFRACTOR_DLQ_" + strings.ToUpper(ruleID)
-	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	if err := conn.EnsureStream(ctx, substrate.StreamSpec{
 		Name:     streamName,
 		Subjects: []string{subject},
-		Storage:  jetstream.FileStorage,
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("failure: create DLQ stream: %w", err)
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failure: marshal DLQ message: %w", err)
 	}
-	_, err = js.Publish(ctx, subject, payload)
-	return err
+	return conn.Publish(ctx, subject, payload, nil)
 }

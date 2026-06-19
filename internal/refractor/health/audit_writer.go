@@ -9,9 +9,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
-
 	"github.com/asolgan/lattice/internal/refractor/subjects"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // auditStreamMaxAge is the default retention period for audit stream messages.
@@ -30,20 +29,20 @@ type AuditEntry struct {
 // each successful write operation. The stream is append-only (LimitsPolicy, 7-day
 // MaxAge). Call EnsureStream once at startup before WriteAudit.
 type AuditWriter struct {
-	js     jetstream.JetStream
+	conn   *substrate.Conn
 	ruleID string
 }
 
 // NewAuditWriter creates an AuditWriter for the given rule.
-// Panics if js is nil or ruleID is empty.
-func NewAuditWriter(js jetstream.JetStream, ruleID string) *AuditWriter {
-	if js == nil {
-		panic("health: NewAuditWriter: js must not be nil")
+// Panics if conn is nil or ruleID is empty.
+func NewAuditWriter(conn *substrate.Conn, ruleID string) *AuditWriter {
+	if conn == nil {
+		panic("health: NewAuditWriter: conn must not be nil")
 	}
 	if ruleID == "" {
 		panic("health: NewAuditWriter: ruleID must not be empty")
 	}
-	return &AuditWriter{js: js, ruleID: ruleID}
+	return &AuditWriter{conn: conn, ruleID: ruleID}
 }
 
 // EnsureStream creates or updates the JetStream audit stream for this rule.
@@ -51,13 +50,11 @@ func NewAuditWriter(js jetstream.JetStream, ruleID string) *AuditWriter {
 // Stream name: "AUDIT_<ruleID>"; subject: lattice.refractor.audit.<lensId>.
 // Retention: LimitsPolicy with 7-day MaxAge (NFR6 — not instantly purgeable).
 func (a *AuditWriter) EnsureStream(ctx context.Context) error {
-	cfg := jetstream.StreamConfig{
-		Name:      auditStreamName(a.ruleID),
-		Subjects:  []string{subjects.Audit(a.ruleID)},
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    auditStreamMaxAge,
-	}
-	if _, err := a.js.CreateOrUpdateStream(ctx, cfg); err != nil {
+	if err := a.conn.EnsureStream(ctx, substrate.StreamSpec{
+		Name:     auditStreamName(a.ruleID),
+		Subjects: []string{subjects.Audit(a.ruleID)},
+		MaxAge:   auditStreamMaxAge,
+	}); err != nil {
 		return fmt.Errorf("health: AuditWriter.EnsureStream %s: %w", a.ruleID, err)
 	}
 	slog.Info("health: audit stream ready", "ruleId", a.ruleID, "stream", auditStreamName(a.ruleID))
@@ -79,7 +76,7 @@ func (a *AuditWriter) WriteAudit(ctx context.Context, entityID, op string, row m
 	if err != nil {
 		return fmt.Errorf("health: AuditWriter.WriteAudit marshal: %w", err)
 	}
-	if _, err := a.js.Publish(ctx, subjects.Audit(a.ruleID), data); err != nil {
+	if err := a.conn.Publish(ctx, subjects.Audit(a.ruleID), data, nil); err != nil {
 		return fmt.Errorf("health: AuditWriter.WriteAudit publish %s: %w", entityID, err)
 	}
 	return nil

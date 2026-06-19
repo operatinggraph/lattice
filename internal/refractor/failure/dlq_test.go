@@ -13,12 +13,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asolgan/lattice/internal/refractor/failure"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // startFailureJetStreamServer starts an in-memory NATS server with JetStream enabled
 // and returns a connected JetStream handle. The server and connection are shut down
 // via t.Cleanup at the end of the test.
-func startFailureJetStreamServer(t *testing.T) jetstream.JetStream {
+func startFailureJetStreamServer(t *testing.T) (*substrate.Conn, jetstream.JetStream) {
 	t.Helper()
 	opts := &natsserver.Options{
 		JetStream: true,
@@ -40,9 +41,12 @@ func startFailureJetStreamServer(t *testing.T) jetstream.JetStream {
 		s.Shutdown()
 	})
 
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
-	return js
+	return conn, js
 }
 
 // TestPublish_WritesCorrectFields publishes a DLQMessage and reads it back from the
@@ -52,7 +56,7 @@ func TestPublish_WritesCorrectFields(t *testing.T) {
 		t.Skip("requires NATS JetStream")
 	}
 
-	js := startFailureJetStreamServer(t)
+	conn, js := startFailureJetStreamServer(t)
 	ctx := context.Background()
 
 	msg := failure.DLQMessage{
@@ -67,7 +71,7 @@ func TestPublish_WritesCorrectFields(t *testing.T) {
 		RawPayload:   `{"id":"entity-1"}`,
 	}
 
-	err := failure.Publish(ctx, js, "test-rule", msg)
+	err := failure.Publish(ctx, conn, "test-rule", msg)
 	require.NoError(t, err)
 
 	// Read back the message via an ordered consumer on the DLQ stream.

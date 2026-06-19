@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
-
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/failure"
 	"github.com/asolgan/lattice/internal/refractor/health"
@@ -81,7 +79,7 @@ type Pipeline struct {
 	retryQueue       *failure.RetryQueue
 	retryMaxAttempts int
 	retryBaseBackoff time.Duration
-	retryJS          jetstream.JetStream // for DLQ escalation after retry exhaustion
+	retryConn        *substrate.Conn // substrate connection for DLQ escalation after retry exhaustion
 
 	// Lag poller (optional). When non-nil, publishes per-lens consumer lag metrics
 	// to lattice.refractor.metrics.<lensId> at health.MetricsInterval.
@@ -233,11 +231,11 @@ func (p *Pipeline) HotReloadPlan(newPlan *simple.QueryPlan) error {
 // SetRetryQueue configures the pipeline to use q for transient write failure retry.
 // maxAttempts is the maximum number of retry attempts before DLQ escalation (0 = no retry).
 // baseBackoff is the base exponential-backoff duration (doubles each attempt).
-// js is the JetStream handle used to publish DLQ messages on exhaustion (may be nil if DLQ is not needed).
+// conn is the substrate connection used to publish DLQ messages on exhaustion (may be nil if DLQ is not needed).
 // Must be called before Run.
-func (p *Pipeline) SetRetryQueue(q *failure.RetryQueue, js jetstream.JetStream, maxAttempts int, baseBackoff time.Duration) {
+func (p *Pipeline) SetRetryQueue(q *failure.RetryQueue, conn *substrate.Conn, maxAttempts int, baseBackoff time.Duration) {
 	p.retryQueue = q
-	p.retryJS = js
+	p.retryConn = conn
 	p.retryMaxAttempts = maxAttempts
 	p.retryBaseBackoff = baseBackoff
 }
@@ -282,7 +280,7 @@ func (p *Pipeline) Supervisor() *substrate.ConsumerSupervisor {
 // supervisor) and during the brief startup window before Run registers the
 // consumer with the supervisor (PendingForConsumer reports "not managed"); the
 // lag poller treats either as "skip this cycle". This is the substrate-typed
-// replacement for reading NumPending off a raw jetstream.Consumer handle.
+// replacement for reading NumPending off a raw NATS consumer handle.
 func (p *Pipeline) Pending(ctx context.Context) (uint64, error) {
 	if p.supervisor == nil {
 		return 0, fmt.Errorf("pipeline: pending: no supervisor configured (RunOn not called)")
@@ -742,7 +740,7 @@ func (p *Pipeline) enqueueRetry(key string, rawPayload []byte, result simple.Eva
 		Attempt:     0,
 		MaxAttempts: p.retryMaxAttempts,
 		BaseBackoff: p.retryBaseBackoff,
-		JS:          p.retryJS,
+		Conn:        p.retryConn,
 		OnDLQPublished: func(rctx context.Context, errMsg string) {
 			if capturedReporter != nil {
 				if recErr := capturedReporter.RecordError(rctx, errMsg); recErr != nil {
@@ -802,13 +800,13 @@ func (p *Pipeline) Resume(ctx context.Context) {
 }
 
 // publishTerminalDLQ publishes a DLQ message for an entity whose data is permanently
-// unrecoverable (failure.CatTerminal). Uses p.retryJS — the same JetStream handle set via
-// SetRetryQueue. If p.retryJS == nil (no JetStream configured), logs and returns without
+// unrecoverable (failure.CatTerminal). Uses p.retryConn — the same substrate connection set via
+// SetRetryQueue. If p.retryConn == nil (no connection configured), logs and returns without
 // panicking, mirroring RetryQueue.escalateToDLQ. rawBody is the message body
 // stored as the DLQ rawPayload.
 func (p *Pipeline) publishTerminalDLQ(ctx context.Context, rawBody []byte, entityID, stage string, origErr error) {
-	if p.retryJS == nil {
-		slog.Error("pipeline: terminal failure, no JetStream for DLQ — entity dropped",
+	if p.retryConn == nil {
+		slog.Error("pipeline: terminal failure, no connection for DLQ — entity dropped",
 			"ruleId", p.ruleID, "entityId", entityID,
 			"stage", stage, "err", origErr)
 		return
@@ -834,7 +832,7 @@ func (p *Pipeline) publishTerminalDLQ(ctx context.Context, rawBody []byte, entit
 	}
 	// Use WithoutCancel so a DLQ publish triggered during shutdown still completes.
 	pubCtx := context.WithoutCancel(ctx)
-	if err := failure.Publish(pubCtx, p.retryJS, p.ruleID, dlqMsg); err != nil {
+	if err := failure.Publish(pubCtx, p.retryConn, p.ruleID, dlqMsg); err != nil {
 		slog.Error("pipeline: terminal DLQ publish failed",
 			"ruleId", p.ruleID, "entityId", entityID,
 			"stage", stage, "err", err)

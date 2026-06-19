@@ -14,12 +14,14 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // auditEnv holds all components needed for AuditWriter tests.
 type auditEnv struct {
-	nc *nats.Conn
-	js jetstream.JetStream
+	nc   *nats.Conn
+	conn *substrate.Conn
+	js   jetstream.JetStream
 }
 
 // startAuditServer starts an in-memory NATS server with JetStream.
@@ -45,10 +47,13 @@ func startAuditServer(t *testing.T) *auditEnv {
 	require.NoError(t, err, "connect to test NATS server")
 	t.Cleanup(func() { nc.Close(); s.Shutdown() })
 
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 
-	return &auditEnv{nc: nc, js: js}
+	return &auditEnv{nc: nc, conn: conn, js: js}
 }
 
 // readAuditMsg reads one message from the audit stream for ruleID, timing out after 2s.
@@ -75,7 +80,7 @@ func TestAuditWriter_EnsureStream_CreatesStream(t *testing.T) {
 	env := startAuditServer(t)
 
 	const ruleID = "rule-ensure"
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 
 	// Stream must exist and have the expected name.
@@ -95,7 +100,7 @@ func TestAuditWriter_EnsureStream_IsIdempotent(t *testing.T) {
 	env := startAuditServer(t)
 
 	const ruleID = "rule-idem"
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 	require.NoError(t, aw.EnsureStream(context.Background()), "second EnsureStream must be idempotent")
 }
@@ -107,7 +112,7 @@ func TestAuditWriter_WriteAudit_Upsert(t *testing.T) {
 	env := startAuditServer(t)
 
 	const ruleID = "rule-upsert"
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 
 	row := map[string]any{"name": "Alice", "score": float64(42)}
@@ -128,7 +133,7 @@ func TestAuditWriter_WriteAudit_Delete(t *testing.T) {
 	env := startAuditServer(t)
 
 	const ruleID = "rule-delete"
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 
 	require.NoError(t, aw.WriteAudit(context.Background(), "entity-del", "delete", nil))
@@ -145,7 +150,7 @@ func TestAuditWriter_RowHashIsDeterministic(t *testing.T) {
 	env := startAuditServer(t)
 
 	const ruleID = "rule-hash"
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 
 	row := map[string]any{"z": "last", "a": "first", "m": float64(99)}
@@ -183,8 +188,8 @@ func TestAuditWriter_PerRuleIsolation(t *testing.T) {
 	const ruleA = "rule-iso-audit-a"
 	const ruleB = "rule-iso-audit-b"
 
-	awA := health.NewAuditWriter(env.js, ruleA)
-	awB := health.NewAuditWriter(env.js, ruleB)
+	awA := health.NewAuditWriter(env.conn, ruleA)
+	awB := health.NewAuditWriter(env.conn, ruleB)
 	require.NoError(t, awA.EnsureStream(context.Background()))
 	require.NoError(t, awB.EnsureStream(context.Background()))
 

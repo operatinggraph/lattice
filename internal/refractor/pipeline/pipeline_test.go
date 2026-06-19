@@ -929,8 +929,8 @@ func TestPipeline_TerminalWritePublishesDLQAndContinues(t *testing.T) {
 	const ruleID = "rule-terminal"
 	p, err := pipeline.New(ruleID, "nats_kv", plan, coreKVBucket, env.adjKV, env.coreKV, ta, nil)
 	require.NoError(t, err)
-	// SetRetryQueue provides the JetStream handle used for Terminal DLQ publish.
-	p.SetRetryQueue(rq, env.js, 3, time.Millisecond)
+	// SetRetryQueue provides the substrate connection used for Terminal DLQ publish.
+	p.SetRetryQueue(rq, env.conn, 3, time.Millisecond)
 
 	startPipeline(t, env, p, ruleID)
 
@@ -1031,7 +1031,7 @@ func TestPipeline_AuditEntry_WrittenOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create the audit stream and attach the writer.
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 	p.SetAuditWriter(aw)
 
@@ -1077,7 +1077,7 @@ func TestPipeline_NoAuditEntry_OnWriteFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create the audit stream and attach the writer.
-	aw := health.NewAuditWriter(env.js, ruleID)
+	aw := health.NewAuditWriter(env.conn, ruleID)
 	require.NoError(t, aw.EnsureStream(context.Background()))
 	p.SetAuditWriter(aw)
 

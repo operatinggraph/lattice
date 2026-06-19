@@ -71,7 +71,7 @@ func TestRetryQueue_SuccessOnSecondAttempt(t *testing.T) {
 		Stage:       "write",
 		MaxAttempts: 5,
 		BaseBackoff: time.Millisecond,
-		JS:          nil, // no DLQ needed — should succeed before exhaustion
+		Conn:        nil, // no DLQ needed — should succeed before exhaustion
 		WriteFn: func(_ context.Context) error {
 			calls++
 			if calls == 1 {
@@ -112,7 +112,7 @@ func TestRetryQueue_ExhaustsToNilDLQ_NoPanic(t *testing.T) {
 		Stage:       "write",
 		MaxAttempts: 2,
 		BaseBackoff: time.Millisecond,
-		JS:          nil, // no JetStream — must not panic
+		Conn:        nil, // no JetStream — must not panic
 		WriteFn: func(_ context.Context) error {
 			return errors.New("always fails")
 		},
@@ -155,7 +155,7 @@ func TestRetryQueue_DrainOnContextCancel(t *testing.T) {
 		Stage:       "write",
 		MaxAttempts: 5,
 		BaseBackoff: time.Hour, // far future
-		JS:          nil,
+		Conn:        nil,
 		WriteFn: func(_ context.Context) error {
 			return errors.New("should never be called")
 		},
@@ -190,7 +190,7 @@ func TestRetryQueue_BackoffDoubles(t *testing.T) {
 		Stage:       "write",
 		MaxAttempts: 5,
 		BaseBackoff: base,
-		JS:          nil,
+		Conn:        nil,
 		WriteFn: func(_ context.Context) error {
 			callCount++
 			switch callCount {
@@ -235,7 +235,7 @@ func TestRetryQueue_ExhaustsToDLQ_Integration(t *testing.T) {
 		t.Skip("requires NATS JetStream")
 	}
 
-	js := startFailureJetStreamServer(t)
+	conn, js := startFailureJetStreamServer(t)
 	ctx := context.Background()
 
 	q := failure.NewRetryQueue()
@@ -249,7 +249,7 @@ func TestRetryQueue_ExhaustsToDLQ_Integration(t *testing.T) {
 		Stage:       "write",
 		MaxAttempts: 2,
 		BaseBackoff: time.Millisecond,
-		JS:          js,
+		Conn:        conn,
 		WriteFn: func(_ context.Context) error {
 			return errors.New("always fails — exhaust me")
 		},

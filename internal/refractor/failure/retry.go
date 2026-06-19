@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // RetryEntry holds all data needed to retry a write or escalate to the DLQ on exhaustion.
@@ -34,8 +34,9 @@ type RetryEntry struct {
 	// Scheduled execution time (set by RetryQueue.Enqueue and updated on reschedule)
 	NextAt time.Time
 
-	// JetStream for DLQ publish on exhaustion — may be nil (logs error instead of panicking)
-	JS jetstream.JetStream
+	// Conn is the substrate connection for DLQ publish on exhaustion — may be nil
+	// (logs an error instead of publishing).
+	Conn *substrate.Conn
 
 	// RuleSequence is the active rule version sequence stamp included in the DLQ message.
 	// Set at enqueue time from reporter.ActiveSequence() so the correct version is recorded
@@ -226,8 +227,8 @@ func (q *RetryQueue) remove(e *RetryEntry) {
 func (q *RetryQueue) escalateToDLQ(ctx context.Context, e *RetryEntry, lastErr error) {
 	slog.Error("failure: retry exhausted, routing to DLQ",
 		"ruleId", e.RuleID, "entityId", e.EntityID, "attempts", e.Attempt, "err", lastErr)
-	if e.JS == nil {
-		slog.Error("failure: no JetStream configured for DLQ publish — exhausted entry dropped",
+	if e.Conn == nil {
+		slog.Error("failure: no connection configured for DLQ publish — exhausted entry dropped",
 			"ruleId", e.RuleID, "entityId", e.EntityID)
 		return
 	}
@@ -245,7 +246,7 @@ func (q *RetryQueue) escalateToDLQ(ctx context.Context, e *RetryEntry, lastErr e
 	// Use WithoutCancel so a DLQ publish triggered at shutdown (when ctx may already
 	// be cancelled) still completes rather than being silently discarded.
 	pubCtx := context.WithoutCancel(ctx)
-	if err := Publish(pubCtx, e.JS, e.RuleID, msg); err != nil {
+	if err := Publish(pubCtx, e.Conn, e.RuleID, msg); err != nil {
 		slog.Error("failure: DLQ publish failed after retry exhaustion",
 			"ruleId", e.RuleID, "entityId", e.EntityID, "err", err)
 	} else if e.OnDLQPublished != nil {
