@@ -638,7 +638,7 @@ So that all external calls are made idempotently in one purpose-built place.
 ### Story 13.6: externalTask deadline + completion symmetry (corrects 13.2 §10.6) — ✅ DONE 2026-06-18
 Makes `externalTask` symmetric to `userTask`: the deadline is a bounded creation-deadline on the `instanceOp` submission that **disarms** on commit → unbounded bridge wait (never advances on the deadline; a rejected/lost `instanceOp` → `FailPattern`, FR29); completion is a dedicated **`orchestration.externalTaskCompleted{externalRef}`** event emitted by the `replyOp` DDL (symmetric to `orchestration.taskCompleted`), with `completionDomains: ["orchestration"]`. Corrects the 13.2 "advance on instanceOp-commit" bug + the stale "full `vtx.<type>.<id>`" externalRef wording (→ the bare handle). **Contract #10 §10.5/§10.6 amended directly** (+ revision-history). *Depends on: 13.2 · Model: Opus · Grounding: Contract #10 §10.5/§10.6 + the userTask precedent. Review: full 3-layer (all clean). **Carry: 14.4's `replyOp` DDL must emit `orchestration.externalTaskCompleted{externalRef}` + register its eventType DDL; externalTask patterns declare `completionDomains: ["orchestration"]`.***
 
-### Story 13.5: Retire Weaver's Two-Phase Nudge path — BLOCKED until 14.5 green
+### Story 13.5: Retire Weaver's Two-Phase Nudge path — ✅ DONE 2026-06-18 (closes Epic 13 + Phase 2)
 
 > **Deliberately deferred cleanup — not a forward dependency.** Move-then-delete: the `Fake*` adapters
 > relocate to the bridge in 13.4, and the nudge path is torn down **only after** the bridge path is

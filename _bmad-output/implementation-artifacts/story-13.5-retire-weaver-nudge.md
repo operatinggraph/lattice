@@ -1,6 +1,6 @@
 # Story 13.5 — Retire Weaver's Two-Phase Nudge path (tear down the dead external-I/O plane)
 
-**Status:** draft
+**Status:** done — CI green (run 27805935424, 89dd4b1, 2026-06-18). Full 3-layer review unanimous ship-ready (no over-deletion, FR58 preserved via the bridge, all 8 ACs met). The Two-Phase Nudge plane is gone: `internal/weaver/nudge/` deleted, `weaver-claims` retired (bootstrap v8→v9), Weaver imports neither bridge nor nudge (AC#3), Gate 2/3 + verify-kernel + test-lease-convergence all green. **Closes Epic 13 + Phase 2.** (Contract #07 §7.7 weaver-claims-bucket removal amended in-place but left UNCOMMITTED for Andrew.)
 **Epic:** 13 — External I/O Bridge (the **FINAL** Epic-13 story). Re-homes external idempotent I/O out of Weaver (Epic 10, superseded) into Loom + the generic `bridge`; this story removes the now-dead Weaver nudge machinery.
 **Tier:** Opus — a **plane teardown** (delete a whole dispatch path + a primordial bucket + lockstep kernel-verify enumerations). The risk is *what silently depended on it*, so the gate is **full 3-layer adversarial review** + Gate 2 + Gate 3 + verify-kernel, proving convergence stays DEFENDED with the nudge gone.
 
