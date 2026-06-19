@@ -17,6 +17,7 @@ import (
 	"github.com/asolgan/lattice/cmd/lattice/health"
 	"github.com/asolgan/lattice/cmd/lattice/identity"
 	"github.com/asolgan/lattice/cmd/lattice/lens"
+	"github.com/asolgan/lattice/cmd/lattice/loom"
 	"github.com/asolgan/lattice/cmd/lattice/op"
 	"github.com/asolgan/lattice/cmd/lattice/output"
 	"github.com/asolgan/lattice/cmd/lattice/query"
@@ -77,6 +78,7 @@ func init() {
 	rootCmd.AddCommand(authtrace.NewCommand(&flagNATSURL, &flagOutput))
 	rootCmd.AddCommand(bootstrap.NewCommand(&flagNATSURL, &flagOutput))
 	rootCmd.AddCommand(weaver.NewCommand(&flagNATSURL, &flagOutput))
+	rootCmd.AddCommand(loom.NewCommand(&flagNATSURL, &flagOutput))
 }
 
 // initCredentials loads the credential file and populates the default

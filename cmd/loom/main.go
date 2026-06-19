@@ -30,8 +30,20 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/loom"
+	"github.com/asolgan/lattice/internal/loom/control"
 	"github.com/asolgan/lattice/internal/substrate"
 )
+
+// engineControl is satisfied structurally by *loom.Engine; declared here only as
+// a compile-time check that internal/loom/control's interface hasn't drifted from
+// the engine's actual method set.
+var _ interface {
+	ListInstances(ctx context.Context) ([]loom.InstanceSummary, error)
+	ListConsumers(ctx context.Context) ([]loom.ConsumerStatus, error)
+	InspectInstance(ctx context.Context, instanceID string) (loom.InstanceDetail, error)
+	PauseConsumer(ctx context.Context, name string) (string, error)
+	ResumeConsumer(ctx context.Context, name string) error
+} = (*loom.Engine)(nil)
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -97,6 +109,12 @@ func run(logger *slog.Logger) error {
 		logger.Info("signal received; shutting down", "signal", sig.String())
 		cancel()
 	}()
+
+	controlSvc := control.NewService(engine, nil, logger)
+	if err := controlSvc.StartNATSListener(ctx, conn.NATS()); err != nil {
+		return fmt.Errorf("start control NATS listener: %w", err)
+	}
+	logger.Info("loom control service started")
 
 	logger.Info("loom ready", "instance", instance)
 	if err := engine.Start(ctx); err != nil {

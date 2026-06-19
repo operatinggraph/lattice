@@ -204,16 +204,20 @@ func (s *ConsumerSupervisor) Stop() {
 
 // Pause manually pauses the pump for name (operator control surface; FR30 / 9.4
 // disable). Idempotent. A manual pause is cleared only by Resume, never by a
-// passing probe. No-op if name is not managed.
-func (s *ConsumerSupervisor) Pause(ctx context.Context, name string) {
+// passing probe. Returns true iff name was managed and the pause was applied;
+// false (no-op) if name is not managed. The bool lets a control surface fuse the
+// managed-check and the act into one lock acquisition, with no check-then-act
+// gap a concurrent Remove could slip through.
+func (s *ConsumerSupervisor) Pause(ctx context.Context, name string) bool {
 	s.mu.Lock()
 	mc, exists := s.managed[name]
 	s.mu.Unlock()
 	if !exists {
-		return
+		return false
 	}
 	mc.state.addReason(PauseManual)
 	s.persistPaused(ctx, mc.spec, PauseManual, "")
+	return true
 }
 
 // Resume clears manual + structural pauses for name and force-exits an in-flight
@@ -225,15 +229,48 @@ func (s *ConsumerSupervisor) Pause(ctx context.Context, name string) {
 // discovered by the probe loop, or a fresh infra failure on the next pump
 // iteration — is NOT retroactively cleared by that earlier Resume; the new
 // failure re-enters its own pause state and requires its own Resume.
-func (s *ConsumerSupervisor) Resume(ctx context.Context, name string) {
+//
+// Returns true iff name was managed and the resume was applied; false (no-op)
+// if name is not managed — the bool lets a control surface fuse the
+// managed-check and the act into one lock acquisition.
+func (s *ConsumerSupervisor) Resume(ctx context.Context, name string) bool {
 	s.mu.Lock()
 	mc, exists := s.managed[name]
 	s.mu.Unlock()
 	if !exists {
-		return
+		return false
 	}
 	mc.state.operatorResume()
 	s.persistActive(context.WithoutCancel(ctx), mc.spec)
+	return true
+}
+
+// IsManaged reports whether name is currently in the supervisor's managed set.
+// Read under the same lock that guards Add/Remove, so it is a consistent,
+// race-free view at the call instant. It is the authoritative allow-list for an
+// operator control surface: Pause/Resume are silent no-ops on an unmanaged name,
+// so a caller validates IsManaged first to turn an unknown name into an explicit
+// error rather than a silently-dropped command.
+func (s *ConsumerSupervisor) IsManaged(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.managed[name]
+	return ok
+}
+
+// ManagedNames returns the names of every currently-managed consumer, read under
+// the registry lock. The returned slice is a fresh copy the caller owns; order is
+// unspecified (it is the Go map-iteration order). It is the authoritative name
+// set for an operator control surface — the lazily-populated health/state caches
+// elsewhere are not a reliable allow-list.
+func (s *ConsumerSupervisor) ManagedNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.managed))
+	for name := range s.managed {
+		names = append(names, name)
+	}
+	return names
 }
 
 // PendingForConsumer returns the number of pending (un-delivered) messages for

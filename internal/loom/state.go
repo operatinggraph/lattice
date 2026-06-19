@@ -40,6 +40,19 @@ const patternPinSuffix = ".pattern"
 
 func instanceKey(instanceID string) string { return instancePrefix + instanceID }
 
+// isInstanceRecordKey reports whether k is an instance.<id> cursor record (not an
+// instance.<id>.pattern pin sub-key). The instanceId is a NanoID (dot-free by
+// construction), so a key under the instance. prefix whose remainder contains a
+// '.' is a sub-key (the .pattern pin), never an instance record. Shared by every
+// instance.* scan (the heartbeat counter and the control-plane list) so the
+// filter discipline cannot diverge across copies.
+func isInstanceRecordKey(k string) bool {
+	if !strings.HasPrefix(k, instancePrefix) {
+		return false
+	}
+	return !strings.ContainsRune(k[len(instancePrefix):], '.')
+}
+
 func patternPinKey(instanceID string) string {
 	return instancePrefix + instanceID + patternPinSuffix
 }
@@ -126,6 +139,50 @@ func (s *stateStore) getInstance(ctx context.Context, instanceID string) (*Insta
 		return nil, fmt.Errorf("loom: unmarshal instance %q: %w", instanceID, err)
 	}
 	return &inst, nil
+}
+
+// listInstances reads every instance.<id> cursor record in loom-state (running
+// and retained terminals — only the pattern pin is deleted at terminal, the
+// record persists). The .pattern pin sub-keys are filtered out by
+// isInstanceRecordKey. A per-key read or unmarshal failure SKIPS that record
+// (logged) rather than failing the whole list — one poisoned record must not
+// blind the operator to every other instance (mirrors the heartbeat counter's
+// skip-on-read-error posture).
+//
+// Each record is decoded directly with no isDeleted soft-delete check. That is
+// correct because Loom never soft-deletes an instance cursor record: a terminal
+// is recorded by flipping Status (complete/failed) in place, never by writing an
+// isDeleted envelope over instance.<id>; the only thing the terminal batch
+// removes is the pattern pin. So every instance.<id> key that lists is a live
+// record. This mirrors runningInstanceCounter, which decodes the same keys the
+// same way.
+func (s *stateStore) listInstances(ctx context.Context, logger *slog.Logger) ([]Instance, error) {
+	keys, err := s.conn.KVListKeys(ctx, s.bucket)
+	if err != nil {
+		return nil, fmt.Errorf("loom: list instances: %w", err)
+	}
+	out := make([]Instance, 0, len(keys))
+	for _, k := range keys {
+		if !isInstanceRecordKey(k) {
+			continue
+		}
+		entry, err := s.conn.KVGet(ctx, s.bucket, k)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				// Deleted between list and read — skip.
+				continue
+			}
+			logger.Warn("loom: instance record read failed; skipping", "key", k, "err", err)
+			continue
+		}
+		var inst Instance
+		if err := json.Unmarshal(entry.Value, &inst); err != nil {
+			logger.Warn("loom: instance record unparseable; skipping", "key", k, "err", err)
+			continue
+		}
+		out = append(out, inst)
+	}
+	return out, nil
 }
 
 // resolveToken reads the token.<token> reverse pointer, returning the instanceId

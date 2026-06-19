@@ -13,6 +13,24 @@ rubric) stay in `lattice-architecture.md`; this doc tracks *what to build next*,
 
 ---
 
+## Progress board
+
+The single index of what is in flight and what has landed. Everything in the themed tables below
+defaults to **📋 Backlog**; when an item is picked up it runs the normal loop (design → review → build →
+review → commit) and surfaces here as **🏗️ Active → ✅ Done (commit)**. This board is the *index* —
+per-item detail lives in design / story docs + git history, never in agent memory and never in a
+`sprint-status` file (house rule).
+
+| Item | Status | Ref |
+|---|---|---|
+| Loom control plane *(Loupe blocker #1)* | ✅ Done | `implementation-artifacts/loom-control-plane.md` |
+| Loupe — view & control app | 🏗️ Active (stab) | — |
+| Large-file / binary handling | 📋 Next | — |
+| Refractor substrate inner-package migration | 📋 Next | — |
+| _all other items_ | 📋 Backlog | see themed tables below |
+
+---
+
 ## Active initiative — Loupe: the View & Control app *(first Edge Lattice prototype)*
 
 > **Name:** *Loupe* (tentative). A jeweler's loupe is the tool you inspect a crystal through — apt for
