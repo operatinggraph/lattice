@@ -25,8 +25,8 @@ per-item detail lives in design / story docs + git history, never in agent memor
 |---|---|---|
 | Loom control plane *(Loupe blocker #1)* | ✅ Done | `implementation-artifacts/loom-control-plane.md` |
 | Loupe — view & control app | ✅ Done (v1 stab) | `implementation-artifacts/loupe-v1.md` |
-| Large-file / binary handling | 📋 Next | — |
-| Refractor substrate inner-package migration | 📋 Next | — |
+| Large-file / binary handling | 📋 Designed (ready to launch) | `implementation-artifacts/large-file-binary-design.md` |
+| Refractor substrate inner-package migration | 📋 Designed (ready to launch) | `implementation-artifacts/substrate-migration-plan.md` |
 | _all other items_ | 📋 Backlog | see themed tables below |
 
 ---
