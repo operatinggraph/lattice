@@ -89,6 +89,20 @@ the `engine` field in the `LensSpec`. Selection logic lives in
 - **Canonical engine for new lenses.** The bootstrap-seeded Capability Lens uses `engine: "full"`.
 - **Wiring**: `cmd/refractor/main.go` constructs `full.New()` and registers it; `startPipeline` routes based on `r.ResolvedEngine == ruleengine.EngineFull`
 
+#### `OPTIONAL MATCH … WHERE` null-restore semantics
+
+When an `OPTIONAL MATCH` pattern matches real neighbors but a `WHERE` then excludes
+**every** one of them, `applyMatch` preserves the anchor row with the optional
+pattern variables bound null — the correct Cypher OPTIONAL MATCH semantics, for every
+cypher. The null fallback is constructed from the source binding (`nullBindNewVars`,
+shared with `matchPatterns`'s no-match branch), not recovered from the expansion set:
+when the pattern matched only real neighbors, the expansion set holds no null row to
+recover, so an anchor whose sole neighbor is WHERE-filtered must be null-restored
+from the source. This is what makes a dedicated family-filtered `OPTIONAL MATCH …
+WHERE` (e.g. the lease lens's `freshUntil` bgcheck match) safe: a no-fresh-match anchor
+projects with the optional column null instead of dropping the row (a dropped
+convergence row reads to Weaver as an entity deletion).
+
 ### Property model (how lens cypher reads a node)
 
 A vertex's Core KV body carries the **envelope** (`key`, `class`, provenance,

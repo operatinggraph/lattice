@@ -160,14 +160,14 @@ func (ex *executor) applyMatch(bindings []binding, m *Match) ([]binding, error) 
 					filtered = append(filtered, nb)
 				}
 			}
-			// If all real matches got filtered by WHERE, restore the null fallback.
+			// All real matches were excluded by WHERE: the OPTIONAL MATCH yields
+			// no neighbor, so the anchor survives with the pattern variables bound
+			// null (Cypher OPTIONAL MATCH ... WHERE semantics). The null fallback
+			// is constructed from the source binding — the expansion set holds only
+			// the now-filtered real rows when the pattern matched real neighbors, so
+			// there is no null row there to recover.
 			if len(filtered) == 0 {
-				for _, nb := range expanded {
-					if !isNonNullExpansion(b, nb, m.Patterns) {
-						filtered = append(filtered, nb)
-						break
-					}
-				}
+				filtered = append(filtered, nullBindNewVars(b, m.Patterns))
 			}
 			passing = filtered
 		}
@@ -207,6 +207,35 @@ func isNonNullExpansion(b, nb binding, patterns []PathPattern) bool {
 	return false
 }
 
+// nullBindNewVars clones b and binds every pattern variable in patterns that b
+// does not already carry to the OPTIONAL-MATCH null sentinel ((*nodeRef)(nil)).
+// It is the null fallback an OPTIONAL MATCH preserves when a pattern matches no
+// neighbor at all (matchPatterns) OR when a WHERE excludes every real neighbor
+// (applyMatch): both cases keep the source binding and null the newly introduced
+// variables, the correct Cypher OPTIONAL MATCH semantics.
+func nullBindNewVars(b binding, patterns []PathPattern) binding {
+	nb := cloneBinding(b)
+	for _, p := range patterns {
+		for _, n := range p.Nodes {
+			if n.Variable == "" {
+				continue
+			}
+			if _, has := nb[n.Variable]; !has {
+				nb[n.Variable] = (*nodeRef)(nil)
+			}
+		}
+		for _, r := range p.Rels {
+			if r.Variable == "" {
+				continue
+			}
+			if _, has := nb[r.Variable]; !has {
+				nb[r.Variable] = (*nodeRef)(nil)
+			}
+		}
+	}
+	return nb
+}
+
 // matchPatterns expands a binding across all comma-separated patterns in a
 // single MATCH/OPTIONAL MATCH clause. For OPTIONAL MATCH that yields zero
 // expansions, the original binding is preserved with null assignments for
@@ -222,22 +251,7 @@ func (ex *executor) matchPatterns(b binding, patterns []PathPattern, optional bo
 			}
 			if len(expansions) == 0 && optional {
 				// Null-bind every new variable introduced by this path.
-				nb := cloneBinding(cb)
-				for _, n := range p.Nodes {
-					if n.Variable != "" {
-						if _, has := nb[n.Variable]; !has {
-							nb[n.Variable] = (*nodeRef)(nil)
-						}
-					}
-				}
-				for _, r := range p.Rels {
-					if r.Variable != "" {
-						if _, has := nb[r.Variable]; !has {
-							nb[r.Variable] = (*nodeRef)(nil)
-						}
-					}
-				}
-				next = append(next, nb)
+				next = append(next, nullBindNewVars(cb, []PathPattern{p}))
 				continue
 			}
 			next = append(next, expansions...)

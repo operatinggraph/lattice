@@ -94,13 +94,16 @@ func TestMyTasksCypher_CompleteTask_FiltersToNull(t *testing.T) {
 		"a completed task must filter out (zero real taskKeys) so the wrapper deletes the key")
 }
 
-// TestMyTasksCypher_CompleteTask_NullsActorKey pins the engine behaviour the
-// MyTasksWrapper compensates for: when the anchored identity's only task is
-// filtered out, the collapsed OPTIONAL chain projects identity.key AS actorKey
-// as NULL (not the anchor key). The wrapper therefore falls back to
-// params["actorKey"] to key the deletion — without that fallback a just-closed
-// task's row would skip (linger) instead of hard-deleting.
-func TestMyTasksCypher_CompleteTask_NullsActorKey(t *testing.T) {
+// TestMyTasksCypher_CompleteTask_PreservesActorKey pins the OPTIONAL MATCH
+// null-restore semantics for the my-tasks anchor: when the anchored identity's
+// only task is WHERE-filtered, the optional chain preserves the anchor with the
+// task variables bound null, so identity.key AS actorKey projects the live
+// anchor key (not null). The collected openTasks is the single degenerate
+// null-task entry the wrapper realness-filters to empty → ErrDeleteProjection
+// keyed directly on the projected actorKey (no params fallback needed). The
+// params["actorKey"] fallback still backstops a genuinely null-actor row (the
+// driver test TestDriver_MyTasks_NullRowActor_FallsBackToParams).
+func TestMyTasksCypher_CompleteTask_PreservesActorKey(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -117,7 +120,7 @@ func TestMyTasksCypher_CompleteTask_NullsActorKey(t *testing.T) {
 		ruleengine.EventContext{Parameters: map[string]any{"actorKey": vtxKey(reg, "alice")}},
 		adjKV, coreKV)
 	require.Len(t, results, 1, "a live identity always yields exactly one row")
-	require.Nil(t, results[0].Values["actorKey"],
-		"a filtered-out sole task collapses the chain so actorKey projects null")
+	require.Equal(t, vtxKey(reg, "alice"), results[0].Values["actorKey"],
+		"the live anchor key survives a fully-filtered optional (null-preserved, not collapsed)")
 	require.Empty(t, realTaskKeys(results[0].Values))
 }
