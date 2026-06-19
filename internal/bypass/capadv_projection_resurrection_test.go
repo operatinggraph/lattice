@@ -38,9 +38,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
-
 	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // resurrectionEphKey is the disjoint ephemeral key the captured-retry chain
@@ -96,14 +95,14 @@ func runCapturedRetryChain(t *testing.T, ctx context.Context, adpt *adapter.Nats
 // ephemeral grant to a reader (i.e. the resurrection succeeded). A live body
 // (no isDeleted) with grants present means the revoked grant is back; an absent
 // key or an isDeleted tombstone means no grant — the deny is intact.
-func liveGrantResurrected(t *testing.T, ctx context.Context, kv jetstream.KeyValue) bool {
+func liveGrantResurrected(t *testing.T, ctx context.Context, kv *substrate.KV) bool {
 	t.Helper()
 	entry, err := kv.Get(ctx, resurrectionEphKey)
 	if err != nil {
 		return false // absent → no grant
 	}
 	var body map[string]any
-	if err := json.Unmarshal(entry.Value(), &body); err != nil {
+	if err := json.Unmarshal(entry.Value, &body); err != nil {
 		t.Fatalf("v5: unmarshal persisted body: %v", err)
 	}
 	if isDeleted, _ := body["isDeleted"].(bool); isDeleted {
@@ -119,8 +118,7 @@ func liveGrantResurrected(t *testing.T, ctx context.Context, kv jetstream.KeyVal
 // fail-without/pass-with proof — it documents what main does wrong.
 func TestCapAdv_V5_StaleReplay_FailsWithoutGuard(t *testing.T) {
 	ctx, conn := setupCapAdvHarness(t)
-	js := conn.JetStream()
-	kv, err := js.KeyValue(ctx, capadvCapBucket)
+	kv, err := conn.OpenKV(ctx, capadvCapBucket)
 	if err != nil {
 		t.Fatalf("v5: open capability-kv: %v", err)
 	}
@@ -145,8 +143,7 @@ func TestCapAdv_V5_StaleReplay_FailsWithoutGuard(t *testing.T) {
 // lower-seq replay.
 func TestCapAdv_V5_StaleReplay_DefendedWithGuard(t *testing.T) {
 	ctx, conn := setupCapAdvHarness(t)
-	js := conn.JetStream()
-	kv, err := js.KeyValue(ctx, capadvCapBucket)
+	kv, err := conn.OpenKV(ctx, capadvCapBucket)
 	if err != nil {
 		t.Fatalf("v5: open capability-kv: %v", err)
 	}
@@ -169,7 +166,7 @@ func TestCapAdv_V5_StaleReplay_DefendedWithGuard(t *testing.T) {
 		t.Fatalf("v5: guarded delete must leave a tombstone, not remove the key: %v", err)
 	}
 	var body map[string]any
-	if err := json.Unmarshal(entry.Value(), &body); err != nil {
+	if err := json.Unmarshal(entry.Value, &body); err != nil {
 		t.Fatalf("v5: unmarshal tombstone: %v", err)
 	}
 	if isDeleted, _ := body["isDeleted"].(bool); !isDeleted {
@@ -191,8 +188,7 @@ func TestCapAdv_V5_StaleReplay_DefendedWithGuard(t *testing.T) {
 // watermark); the adapter-level seq-0 drop is the backstop.
 func TestCapAdv_V5_AdjWatch_CannotAdvanceWatermark(t *testing.T) {
 	ctx, conn := setupCapAdvHarness(t)
-	js := conn.JetStream()
-	kv, err := js.KeyValue(ctx, capadvCapBucket)
+	kv, err := conn.OpenKV(ctx, capadvCapBucket)
 	if err != nil {
 		t.Fatalf("v5 adj: open capability-kv: %v", err)
 	}

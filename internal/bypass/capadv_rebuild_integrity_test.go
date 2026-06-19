@@ -38,6 +38,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // rebuildPrimaryKey is the PRIMARY per-actor capability doc key the rebuild
@@ -64,14 +65,14 @@ func primaryGrantRow() map[string]any {
 // liveDocPresent reports whether the persisted key surfaces a live capability doc
 // (no isDeleted) to a reader. An absent key or an isDeleted tombstone is no live
 // doc.
-func liveDocPresent(t *testing.T, ctx context.Context, kv jetstream.KeyValue, key string) bool {
+func liveDocPresent(t *testing.T, ctx context.Context, kv *substrate.KV, key string) bool {
 	t.Helper()
 	entry, err := kv.Get(ctx, key)
 	if err != nil {
 		return false
 	}
 	var body map[string]any
-	if err := json.Unmarshal(entry.Value(), &body); err != nil {
+	if err := json.Unmarshal(entry.Value, &body); err != nil {
 		t.Fatalf("v6: unmarshal persisted body: %v", err)
 	}
 	if isDeleted, _ := body["isDeleted"].(bool); isDeleted {
@@ -83,20 +84,20 @@ func liveDocPresent(t *testing.T, ctx context.Context, kv jetstream.KeyValue, ke
 
 // dumpGuardedBucket reads every live (non-tombstone) key in the bucket and
 // returns a stable JSON map of key→decoded-body for equivalence comparison.
-func dumpGuardedBucket(t *testing.T, ctx context.Context, kv jetstream.KeyValue) string {
+func dumpGuardedBucket(t *testing.T, ctx context.Context, kv *substrate.KV) string {
 	t.Helper()
-	lister, err := kv.ListKeys(ctx)
+	keys, err := kv.ListKeys(ctx)
 	if err != nil {
 		t.Fatalf("v6: list keys: %v", err)
 	}
 	out := map[string]any{}
-	for k := range lister.Keys() {
+	for _, k := range keys {
 		entry, err := kv.Get(ctx, k)
 		if err != nil {
 			continue // purged/absent
 		}
 		var v map[string]any
-		if err := json.Unmarshal(entry.Value(), &v); err != nil {
+		if err := json.Unmarshal(entry.Value, &v); err != nil {
 			t.Fatalf("v6: unmarshal %s: %v", k, err)
 		}
 		if del, _ := v["isDeleted"].(bool); del {
@@ -161,7 +162,7 @@ func replayHistorical(t *testing.T, ctx context.Context, adpt *adapter.NatsKVAda
 func TestCapAdv_V6_GuardedRebuild_RestoresEveryKey(t *testing.T) {
 	ctx, conn := setupCapAdvHarness(t)
 	js := conn.JetStream()
-	kv, err := js.KeyValue(ctx, capadvCapBucket)
+	kv, err := conn.OpenKV(ctx, capadvCapBucket)
 	if err != nil {
 		t.Fatalf("v6: open capability-kv: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestCapAdv_V6_GuardedRebuild_RestoresEveryKey(t *testing.T) {
 		t.Fatalf("v6: get after no-truncate replay: %v", err)
 	}
 	var noTruncBody map[string]any
-	if err := json.Unmarshal(entry.Value(), &noTruncBody); err != nil {
+	if err := json.Unmarshal(entry.Value, &noTruncBody); err != nil {
 		t.Fatalf("v6: unmarshal: %v", err)
 	}
 	perms, _ := noTruncBody["platformPermissions"].([]any)
@@ -219,7 +220,7 @@ func TestCapAdv_V6_GuardedRebuild_RestoresEveryKey(t *testing.T) {
 	if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: freshBucket, LimitMarkerTTL: time.Second}); err != nil {
 		t.Fatalf("v6: create fresh bucket: %v", err)
 	}
-	freshKV, err := js.KeyValue(ctx, freshBucket)
+	freshKV, err := conn.OpenKV(ctx, freshBucket)
 	if err != nil {
 		t.Fatalf("v6: open fresh bucket: %v", err)
 	}
@@ -247,8 +248,7 @@ func TestCapAdv_V6_GuardedRebuild_RestoresEveryKey(t *testing.T) {
 // guard stays always-on across the rebuild (force-truncate has no bypass window).
 func TestCapAdv_V6_GuardedRebuild_ConcurrentStaleRetryCannotResurrect(t *testing.T) {
 	ctx, conn := setupCapAdvHarness(t)
-	js := conn.JetStream()
-	kv, err := js.KeyValue(ctx, capadvCapBucket)
+	kv, err := conn.OpenKV(ctx, capadvCapBucket)
 	if err != nil {
 		t.Fatalf("v6: open capability-kv: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestCapAdv_V6_GuardedRebuild_ConcurrentStaleRetryCannotResurrect(t *testing
 		t.Fatalf("v6: primary key must remain a tombstone, not be removed: %v", err)
 	}
 	var body map[string]any
-	if err := json.Unmarshal(entry.Value(), &body); err != nil {
+	if err := json.Unmarshal(entry.Value, &body); err != nil {
 		t.Fatalf("v6: unmarshal tombstone: %v", err)
 	}
 	if isDeleted, _ := body["isDeleted"].(bool); !isDeleted {

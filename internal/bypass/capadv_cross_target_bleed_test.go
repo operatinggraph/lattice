@@ -214,7 +214,7 @@ func TestCapAdv_V4_CrossManager_DeniedBobTask(t *testing.T) {
 	ctx, _, authz := setupV4Harness(t)
 
 	aliceActorKey := "vtx.identity." + capadvNanoID4
-	bobTaskKey := "vtx.task." + capadvNanoID7   // bob's task
+	bobTaskKey := "vtx.task." + capadvNanoID7      // bob's task
 	bobLeaseKey := "vtx.leaseApp." + capadvNanoID9 // bob's lease
 
 	env := &processor.OperationEnvelope{
@@ -225,8 +225,8 @@ func TestCapAdv_V4_CrossManager_DeniedBobTask(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseApp",
 		AuthContext: &processor.AuthContext{
-			Task:   bobTaskKey,   // cross-manager task
-			Target: bobLeaseKey,  // cross-manager lease
+			Task:   bobTaskKey,  // cross-manager task
+			Target: bobLeaseKey, // cross-manager lease
 		},
 	}
 

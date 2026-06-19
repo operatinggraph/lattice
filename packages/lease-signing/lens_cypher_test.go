@@ -33,7 +33,7 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-func cypherKVs(t *testing.T) (adjKV, coreKV jetstream.KeyValue) {
+func cypherKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
 	t.Helper()
 	opts := &natsserver.Options{JetStream: true, StoreDir: t.TempDir(), NoLog: true, NoSigs: true, Port: natsserver.RANDOM_PORT}
 	s, err := natsserver.NewServer(opts)
@@ -45,10 +45,16 @@ func cypherKVs(t *testing.T) (adjKV, coreKV jetstream.KeyValue) {
 	t.Cleanup(func() { nc.Close(); s.Shutdown() })
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
-	ctx := context.Background()
-	adjKV, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-cypher-test"})
+	conn, err := substrate.Wrap(nc)
 	require.NoError(t, err)
-	coreKV, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-cypher-test"})
+	ctx := context.Background()
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "adj-cypher-test"})
+	require.NoError(t, err)
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-cypher-test"})
+	require.NoError(t, err)
+	adjKV, err = conn.OpenKV(ctx, "adj-cypher-test")
+	require.NoError(t, err)
+	coreKV, err = conn.OpenKV(ctx, "core-cypher-test")
 	require.NoError(t, err)
 	return adjKV, coreKV
 }
@@ -70,7 +76,7 @@ func cNanoID(name string) string {
 }
 
 type lensFixture struct {
-	adjKV, coreKV jetstream.KeyValue
+	adjKV, coreKV *substrate.KV
 	ids           map[string]string // logicalName -> bare NanoID
 	types         map[string]string // bare NanoID -> type
 }

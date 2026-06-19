@@ -45,19 +45,19 @@ const (
 	capadvNanoID8 = "CAdvXz8BbCdEfGhJkLmN" // 20 chars — Vector #4 lease alice
 	capadvNanoID9 = "CAdvXz9BbCdEfGhJkLmN" // 20 chars — Vector #4 lease bob
 
-	capadvCapBucket  = "capability-kv"
-	capadvCoreBucket = "core-kv"
+	capadvCapBucket    = "capability-kv"
+	capadvCoreBucket   = "core-kv"
 	capadvHealthBucket = "health-kv"
-	capadvOpsStream  = "core-operations"
+	capadvOpsStream    = "core-operations"
 
 	// Request IDs for Gate 3 operations (20 chars, substrate.Alphabet).
-	capadvReqV1Pos   = "CdV1PosRq2345678912a" // Vector #1 positive op
-	capadvReqV2Op1   = "CdV2Op1Rq2345678912b" // Vector #2 op phase A
-	capadvReqV2Op2   = "CdV2Op2Rq2345678912c" // Vector #2 op phase B excessive
-	capadvReqV3AI    = "CdV3AIRq234567891234" // Vector #3 AI actor op
-	capadvReqV4Pos   = "CdV4PosRq2345678912d" // Vector #4 positive alice
-	capadvReqV4CT    = "CdV4CTRq23456789012e" // Vector #4 cross-target
-	capadvReqV4CM    = "CdV4CMRq23456789012f" // Vector #4 cross-manager
+	capadvReqV1Pos = "CdV1PosRq2345678912a" // Vector #1 positive op
+	capadvReqV2Op1 = "CdV2Op1Rq2345678912b" // Vector #2 op phase A
+	capadvReqV2Op2 = "CdV2Op2Rq2345678912c" // Vector #2 op phase B excessive
+	capadvReqV3AI  = "CdV3AIRq234567891234" // Vector #3 AI actor op
+	capadvReqV4Pos = "CdV4PosRq2345678912d" // Vector #4 positive alice
+	capadvReqV4CT  = "CdV4CTRq23456789012e" // Vector #4 cross-target
+	capadvReqV4CM  = "CdV4CMRq23456789012f" // Vector #4 cross-manager
 )
 
 // setupCapAdvHarness starts embedded NATS and provisions Core KV, Health KV,

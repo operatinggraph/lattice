@@ -46,9 +46,9 @@ func TestGate2_Report(t *testing.T) {
 	// Go test framework exits non-zero BEFORE this roll-up fires — so
 	// reaching here with passing sub-tests is sufficient proof.
 	type reportRow struct {
-		Num        int
-		Category   string
-		Result     string
+		Num         int
+		Category    string
+		Result      string
 		Enforcement string
 	}
 

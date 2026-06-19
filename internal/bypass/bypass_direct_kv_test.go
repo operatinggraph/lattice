@@ -161,11 +161,11 @@ func TestBypass1_LegitimateWrite_HasProvenance(t *testing.T) {
 	legitimateKey := "vtx.identity." + bypassNanoID3
 	createdByOp := "vtx.op." + bypassNanoID3
 	doc := marshalJSON(map[string]interface{}{
-		"class":        "identity",
-		"isDeleted":    false,
-		"key":          legitimateKey,
-		"createdByOp":  createdByOp, // set by Processor step 8 NewCommitter
-		"data":         map[string]interface{}{"name": "legitimate"},
+		"class":       "identity",
+		"isDeleted":   false,
+		"key":         legitimateKey,
+		"createdByOp": createdByOp, // set by Processor step 8 NewCommitter
+		"data":        map[string]interface{}{"name": "legitimate"},
 	})
 	if _, err := conn.KVPut(ctx, bypassCoreBucket, legitimateKey, doc); err != nil {
 		t.Fatalf("bypass1: legitimate write: %v", err)
