@@ -1248,63 +1248,11 @@ in-place (no-reset) upgrade is ever supported; and a field-level create guard on
 
 ## Open Items (Phase 3+)
 
-Consolidated backlog of design questions deliberately deferred past the Phase 2 orchestration core.
-Each is **out of scope until scheduled** — recorded here so the gap is explicit, not lost. (The
-**Capability Lens god-cypher → contract-contribution** item that lived in the Phase 2 Orchestration
-Core section above is now **RESOLVED** — Epic 12, 2026-06-17 — and no longer part of this backlog.)
+The Phase 3+ open items and the full deferred backlog now live in one consolidated place:
+[`backlog.md`](./backlog.md). It carries the former **OI-1** (async external-call result-return — now
+framed against the **bridge** `Adapter.Execute` contract, the Two-Phase Nudge having been retired in
+Story 13.5) and **OI-2** (large-file / binary handling via NATS Object Store), alongside the full
+themed Phase-3 backlog and the active **Loupe** view-and-control initiative.
 
-### OI-1 — Async external-call result-return (real Two-Phase Nudge adapters)
-
-**Surfaced 2026-06-13 (post-Epic 10).** Epic 10 (Stories 10.1/10.2) shipped the Two-Phase Nudge
-(FR58) proven against **mocked, synchronous** reference adapters (`FakeStripe`,
-`FakeBackgroundCheck`). The idempotency boundary (claim→execute→resolve, `idempotencyKey`=`claimId`)
-is done; the **real-adapter transport is not** — `docs/components/weaver.md` marks real
-Stripe/background-check as Phase 3.
-
-**Two open sub-questions:**
-
-1. **Result-return for asynchronous vendors.** Today `Adapter.Execute(ctx, req) (Result, error)`
-   (`internal/weaver/nudge/adapter.go`) is **synchronous** — it returns the outcome inline and the
-   framework runs the Resolve leg immediately. Real background checks / payments are often
-   **asynchronous**: submit → receive a pending reference → vendor calls back via **webhook** (or the
-   platform polls) hours-to-days later. Not designed: (a) the inbound-result mechanism — a webhook
-   receiver, or reusing the temporal/`core-schedules` lane to poll; (b) an `Execute` contract that can
-   express "submitted, resolve later" (it currently must return a *final* `Result`); (c) the
-   `NudgeClaimWedged` 24h horizon is tuned for near-synchronous resolution and would mis-flag a
-   legitimately-pending async claim. The two-phase **structure** (claim recorded before the call →
-   resolve records the outcome) is compatible with async in principle — the claim simply stays
-   `state=executing` until the inbound result drives Resolve — but the mechanism is unbuilt.
-
-2. **Adapter parameterization richness.** "Who the call is about" rides `Request.Subject` +
-   `Request.Params`, resolved from the **target Lens row** (`row.<column>` substitution). That is
-   bounded by what the target cypher projects: a vendor needing fields not on the row (SSN, DOB,
-   etc.) has no path today — there is no design for an adapter to *fetch* more about the subject from
-   Core KV. Decide whether richer projection columns suffice or adapters need a read seam.
-
-**Resolution owner:** Phase 3 real-external-adapter integration.
-
-### OI-2 — Large-file / binary handling (profile photos, document PDFs)
-
-**Surfaced 2026-06-13.** Clients need to **upload and download large binary objects** — profile
-photos, scanned documents, PDFs — that do not belong in the Core KV graph or the projection plane.
-
-**Likely substrate:** **NATS Object Store** (chunked, content-addressed; native to the existing NATS
-deployment, no new infrastructure).
-
-**Hard constraint:** blobs **must not flow through the Refractor** — the CDC/projection plane is for
-graph *state*, not binary payloads (a Lens cannot and should not stream a PDF). Yet **clients need
-first-class upload/download paths**, so the object store cannot be a purely internal concern.
-
-**Open design questions:**
-- **Transport.** How does a client upload/download — a Gateway/API surface (Phase 3 Gateway scope?), a
-  direct authorized Object-Store handle, or a signed-URL-style grant? The download path especially
-  must not assume a Refractor projection.
-- **Graph linkage.** How is a stored object referenced *from* the graph — a vertex aspect carrying the
-  object-store key/digest (the graph holds the *pointer + metadata*, the store holds the *bytes*),
-  mirroring how `weaver-claims`/Health live off-graph but are join-referenced? Confirm the aspect
-  shape and that Refractor projects only the reference, never the blob.
-- **Authorization.** Read/write access to an object must be capability-gated (Contract #6) — decide
-  how a blob's access check binds to the owning vertex's grants.
-- **Lifecycle.** Orphan/GC policy when the owning vertex is deleted; retention; size limits.
-
-**Resolution owner:** Phase 3 (intersects the deferred Gateway/API surface and read-path auth).
+The **Capability Lens god-cypher → contract-contribution** item that lived in the Phase 2 Orchestration
+Core section above is **RESOLVED** (Epic 12).

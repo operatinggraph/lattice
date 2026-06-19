@@ -329,6 +329,9 @@ Architecture hardening from the `refractor-lens-decomposition-brief` (party-revi
 *(All mapped in FR Coverage Map above — none forgotten)*
 
 **Phase 2+ Deferred Architectural Capabilities** *(silent gaps named explicitly so they are not assumed away):*
+
+> **Now consolidated in [`../backlog.md`](../backlog.md)** — the single authoritative Phase-3+ backlog (themed, prioritized, with the active **Loupe** view-and-control initiative). The list below is retained for epic-context grounding.
+
 - **Historical state query support (FR51)** — replay any operation sequence into a temporary Lens target across a configurable time range. Phase 1 has the substrate (immutable `core-operations` stream, NFR-R5) but no operator-facing replay machinery.
 - **Read-path authorization for Lens targets** — direct reads from Lens targets bypass the Capability Lens write-path boundary (NFR-S2); Phase 1/2 assume trusted readers. **Rubric written (Phase 2 sprint, Decision D1, 2026-06-01), build deferred to Phase 3:** leading approach is **Postgres RLS backed by a dedicated Capability-Read Lens** (RLS policies join against a projected grants table — DB-level filter, graph traversal stays once in the Refractor); JWT carries identity id, Gateway enforces + sets `lattice.actor_id`; read-proxy is the fallback. See `lattice-architecture.md` D1.
 - **Refractor target adapter coverage** *(surfaced by Story 2.2 gap analysis §3.3, §3.4)* — Phase 1 ships only NATS KV and Postgres adapters. Elasticsearch adapter (§3.3) and NATS-subject publish-events adapter (§3.4 — required for Personal Lens fan-out per morph plan §2.1) are deferred. Adds new adapter implementations against the existing `adapter.Adapter` interface.
