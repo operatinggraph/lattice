@@ -16,8 +16,14 @@ import "errors"
 // revision-condition rejection, header malformation, or stream-level
 // rejection inside the batch). Callers can use errors.Is and the underlying
 // error from a wrapping fmt.Errorf chain to extract specifics.
+//
+// ErrBucketNotFound is returned by KVStatus when the named bucket (or its
+// backing stream) does not exist. It is the substrate-typed equivalent of
+// jetstream.ErrBucketNotFound / ErrStreamNotFound, letting callers classify a
+// missing target as a structural fault without importing jetstream.
 var (
 	ErrKeyNotFound         = errors.New("substrate: key not found")
 	ErrRevisionConflict    = errors.New("substrate: revision conflict")
 	ErrAtomicBatchRejected = errors.New("substrate: atomic batch rejected")
+	ErrBucketNotFound      = errors.New("substrate: bucket not found")
 )

@@ -316,3 +316,76 @@ func decodeKVMessage(msg jetstream.Msg, bucket, subjectPrefix string) KVEvent {
 	}
 	return evt
 }
+
+// WatchKVUpdates returns a channel of KVEvents for every key mutation in bucket
+// that occurs AFTER the call (updates-only — no history replay), driven by an
+// ephemeral JetStream KV watcher. It is the substrate-typed equivalent of
+// jetstream.KeyValue.WatchAll(UpdatesOnly()): nothing is persisted, so on a
+// reconnect the caller resumes from "now", not from a durable position. Use
+// SubscribeKVChanges instead when a durable, restart-resumable position is
+// required.
+//
+// The channel is closed when ctx is cancelled or the underlying watcher stops
+// (e.g. a transient NATS disconnect). The caller treats a closed channel as the
+// signal to reconnect by calling WatchKVUpdates again with a live ctx. The
+// watcher is stopped when the goroutine exits, so a closed channel leaks
+// nothing.
+func (c *Conn) WatchKVUpdates(ctx context.Context, bucket string) (<-chan KVEvent, error) {
+	kv, err := c.bucket(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	watcher, err := kv.WatchAll(ctx, jetstream.UpdatesOnly())
+	if err != nil {
+		return nil, fmt.Errorf("substrate: WatchKVUpdates %s: %w", bucket, err)
+	}
+	out := make(chan KVEvent)
+	go func() {
+		defer close(out)
+		defer func() { _ = watcher.Stop() }()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case entry, ok := <-watcher.Updates():
+				if !ok {
+					return
+				}
+				if entry == nil {
+					// End-of-initial-replay sentinel. With UpdatesOnly there is no
+					// replay, but jetstream still emits one nil to mark "caught up".
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- kvEventFromUpdate(entry, bucket):
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
+// kvEventFromUpdate translates a KV watcher entry into a KVEvent, mirroring
+// decodeKVMessage's tombstone handling: a Delete/Purge operation (or an
+// isDeleted envelope on a live Put) maps to IsDeleted=true.
+func kvEventFromUpdate(entry jetstream.KeyValueEntry, bucket string) KVEvent {
+	evt := KVEvent{
+		Bucket:   bucket,
+		Key:      entry.Key(),
+		Value:    entry.Value(),
+		Revision: entry.Revision(),
+	}
+	if entry.Operation() != jetstream.KeyValuePut {
+		evt.IsDeleted = true
+		return evt
+	}
+	var probe struct {
+		IsDeleted bool `json:"isDeleted"`
+	}
+	if err := json.Unmarshal(entry.Value(), &probe); err == nil {
+		evt.IsDeleted = probe.IsDeleted
+	}
+	return evt
+}

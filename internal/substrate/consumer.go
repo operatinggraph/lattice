@@ -58,6 +58,12 @@ type Message struct {
 	// unavailable. Provided so a supervised handler can reason about redelivery
 	// without reaching for a jetstream.Msg.
 	NumDelivered uint64
+	// NumPending is the number of messages still pending behind this one at
+	// delivery time (the authoritative count NATS embeds in each message's
+	// metadata). Zero when metadata is unavailable, or when this was the last
+	// message pending at delivery. Provided so a handler can detect drain
+	// ("lag == 0") without a separate consumer-info round-trip.
+	NumPending uint64
 }
 
 // HandlerFunc processes one message and returns the ack Decision. It MUST be
@@ -213,6 +219,7 @@ func newMessage(msg jetstream.Msg) Message {
 	if meta, err := msg.Metadata(); err == nil {
 		m.Sequence = meta.Sequence.Stream
 		m.NumDelivered = meta.NumDelivered
+		m.NumPending = meta.NumPending
 	}
 	return m
 }

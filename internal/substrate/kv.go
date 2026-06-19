@@ -264,6 +264,50 @@ func (c *Conn) KVDeleteRevision(ctx context.Context, bucket, key string, expecte
 	return nil
 }
 
+// KVPurge removes key and all of its prior revisions from bucket, leaving a
+// purge marker as the latest revision (a subsequent KVGet returns
+// ErrKeyNotFound). Unlike KVDelete (a soft delete-marker that preserves
+// history), Purge reclaims the per-subject history — used by a rebuild's
+// truncate so a guarded replay sees an absent key, not a stale watermark.
+// Purging an already-absent key is a no-op (returns nil) — Purge is idempotent,
+// so a whole-bucket truncate need not special-case a key deleted out from under
+// it.
+func (c *Conn) KVPurge(ctx context.Context, bucket, key string) error {
+	kv, err := c.bucket(ctx, bucket)
+	if err != nil {
+		return err
+	}
+	if err := kv.Purge(ctx, key); err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil
+		}
+		return fmt.Errorf("substrate: KV purge %s/%s: %w", bucket, key, err)
+	}
+	return nil
+}
+
+// KVStatus probes whether bucket is reachable, returning nil when it is. A
+// missing bucket (or backing stream) is mapped to ErrBucketNotFound so callers
+// can classify it as a structural fault; any other error is wrapped verbatim
+// (transient/infra). The status payload itself is discarded — this is a
+// liveness probe, not a metrics read.
+func (c *Conn) KVStatus(ctx context.Context, bucket string) error {
+	kv, err := c.bucket(ctx, bucket)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrBucketNotFound) || errors.Is(err, jetstream.ErrStreamNotFound) {
+			return fmt.Errorf("%w: bucket=%s", ErrBucketNotFound, bucket)
+		}
+		return err
+	}
+	if _, err := kv.Status(ctx); err != nil {
+		if errors.Is(err, jetstream.ErrBucketNotFound) || errors.Is(err, jetstream.ErrStreamNotFound) {
+			return fmt.Errorf("%w: bucket=%s", ErrBucketNotFound, bucket)
+		}
+		return fmt.Errorf("substrate: KV status %s: %w", bucket, err)
+	}
+	return nil
+}
+
 // IsRevisionConflict reports whether err is a NATS revision-condition
 // rejection. It checks both the typed jetstream.ErrKeyExists sentinel
 // (current nats.go) and raw API error strings (older NATS server versions
