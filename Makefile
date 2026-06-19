@@ -109,6 +109,7 @@ build:
 	go build -o bin/refractor ./cmd/refractor
 	go build -o bin/processor ./cmd/processor
 	go build -o bin/lattice ./cmd/lattice
+	go build -o bin/loupe ./cmd/loupe
 
 ## test-cli — Run the lattice CLI unit + E2E tests.
 test-cli:

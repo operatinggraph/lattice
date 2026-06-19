@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loupe — Lattice</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Loupe <span class="brand-sub">· Lattice</span></div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="corekv">Core KV</button>
+      <button class="tab" data-tab="health">Health</button>
+      <button class="tab" data-tab="control">Control</button>
+      <button class="tab" data-tab="packages">Packages</button>
+      <button class="tab" data-tab="op">Submit Op</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Core KV -->
+    <section class="panel active" id="panel-corekv">
+      <div class="panel-controls">
+        <input type="text" id="corekv-prefix" placeholder="key prefix (e.g. vtx.meta.)">
+        <input type="number" id="corekv-limit" value="500" min="1" title="max keys">
+        <button id="corekv-load">List keys</button>
+        <span class="muted" id="corekv-status"></span>
+      </div>
+      <div class="split">
+        <div class="keylist" id="corekv-keys"></div>
+        <div class="valuepane">
+          <div class="valuepane-head" id="corekv-valuehead">Select a key</div>
+          <pre id="corekv-value"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Health -->
+    <section class="panel" id="panel-health">
+      <div class="panel-controls">
+        <button id="health-load">Refresh</button>
+        <span class="rollup" id="health-overall"></span>
+        <span class="muted" id="health-status"></span>
+      </div>
+      <div class="cards" id="health-cards"></div>
+      <div class="alerts" id="health-alerts"></div>
+    </section>
+
+    <!-- Control -->
+    <section class="panel" id="panel-control">
+      <div class="panel-controls">
+        <button id="control-load">Refresh all</button>
+        <span class="muted" id="control-status"></span>
+      </div>
+      <div class="control-grid">
+        <div class="control-col" data-comp="refractor">
+          <h3>Refractor</h3>
+          <p class="muted small">Per-lens. Inspect a lens by id (health), validate it, or pause/resume/rebuild it. Lens ids come from the Health tab.</p>
+          <div class="control-action">
+            <input type="text" class="control-name" placeholder="lens id">
+            <button data-op="health">inspect</button>
+            <button data-op="validate">validate</button>
+            <button data-op="pause">pause</button>
+            <button data-op="resume">resume</button>
+            <button data-op="rebuild">rebuild</button>
+          </div>
+          <pre class="control-out"></pre>
+        </div>
+        <div class="control-col" data-comp="weaver">
+          <h3>Weaver</h3>
+          <div class="control-list"></div>
+          <div class="control-action">
+            <input type="text" class="control-name" placeholder="target id">
+            <button data-op="disable">disable</button>
+            <button data-op="enable">enable</button>
+            <button data-op="revoke">revoke</button>
+          </div>
+          <pre class="control-out"></pre>
+        </div>
+        <div class="control-col" data-comp="loom">
+          <h3>Loom</h3>
+          <div class="control-list"></div>
+          <div class="control-action">
+            <input type="text" class="control-name" placeholder="instance / consumer">
+            <button data-op="inspect">inspect</button>
+            <button data-op="pause">pause</button>
+            <button data-op="resume">resume</button>
+          </div>
+          <pre class="control-out"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Packages -->
+    <section class="panel" id="panel-packages">
+      <div class="panel-controls">
+        <button id="packages-load">Refresh</button>
+        <span class="muted" id="packages-status"></span>
+      </div>
+      <table class="grid" id="packages-table">
+        <thead><tr><th>Name</th><th>Version</th><th>Key</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- Submit Op -->
+    <section class="panel" id="panel-op">
+      <div class="op-form">
+        <div class="op-row">
+          <label>operationType
+            <input type="text" id="op-type" placeholder="e.g. CreateIdentity">
+          </label>
+          <label>lane
+            <select id="op-lane">
+              <option value="default">default</option>
+              <option value="meta">meta</option>
+              <option value="urgent">urgent</option>
+              <option value="system">system</option>
+            </select>
+          </label>
+          <label>class (optional)
+            <input type="text" id="op-class" placeholder="e.g. identity">
+          </label>
+        </div>
+        <label>payload (JSON)
+          <textarea id="op-payload" rows="10" spellcheck="false">{}</textarea>
+        </label>
+        <div class="op-actions">
+          <button id="op-submit">Submit operation</button>
+          <span class="muted" id="op-status"></span>
+        </div>
+        <div class="valuepane-head">Reply</div>
+        <pre id="op-reply"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
