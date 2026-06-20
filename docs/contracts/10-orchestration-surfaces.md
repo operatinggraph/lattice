@@ -361,7 +361,8 @@ multiplexer**; the durable bucket + work-item shape land when lane-2 does.
 
 Message scheduling is a **platform-wide capability**, not Weaver-specific — same status as Health
 KV. It is bootstrapped as core infra and usable by any component (Weaver's temporal lane is the
-first consumer; op-vertex pruner / retention are future consumers).
+first consumer; the bridge's async-result lane — re-poll + give-up timeout for long-running external
+calls (§10.6) — is the second; op-vertex pruner / retention are future consumers).
 
 ```
 stream:            core-schedules             # platform-bootstrapped, AllowMsgSchedules: true
@@ -388,6 +389,12 @@ target subject:    schedule.<component>.fired.<token...>    # publisher-chosen, 
   overwrite the earlier deadline). Each token is a **NanoID, not the dotted vertex key** (same
   discipline as §10.2/§10.3 — dots are subject-token separators); the full entity key, if needed,
   rides the **message payload**, not the subject.
+- **The bridge's async-result lane (§10.6, Phase 3)** is the second consumer: it keys per claim
+  handle — `schedule.bridge.poll.<handle>` (re-poll a still-pending external call) and
+  `schedule.bridge.timeout.<handle>` (the per-claim give-up deadline), fired
+  `schedule.bridge.poll.fired.<handle>` / `schedule.bridge.timeout.fired.<handle>` — and consumes its
+  firings via a JetStream consumer filtered on `schedule.bridge.>`. Same frozen shape as Weaver's timer
+  lane: a second publisher-chosen namespace within `schedule.>`, no change to the rules above.
 - **`core-schedules` is NEW** — it **joins the primordial stream create list** (scheduling bootstrap
   story), alongside `core-operations`/`core-events`; `AllowMsgSchedules: true` is set at provisioning.
   (It does not exist yet — same "new, joins the create list" status as `loom-state` in §10.3.)
@@ -506,6 +513,20 @@ then park; the completer is a human for userTask, the bridge for externalTask). 
   result op vs an ordinary business op), the outcome (an orchestration-domain completion correlated by a
   token) is identical. The wait for that event is **unbounded** once the `instanceOp` commits (§10.6),
   exactly as a userTask's human wait is unbounded once its task vertex exists.
+
+**Async resolution (Amended 2026-06-19 — Phase 3, async external-reply).** The bridge's adapter call
+MAY resolve **asynchronously**: a real vendor returns a *pending reference* on submit and the true
+result lands later (webhook or status-poll, minutes–days). This rides the **already-unbounded wait**
+above with no change to the completion model — the bridge posts `replyOp` (hence
+`externalTaskCompleted`) whenever resolution arrives. While pending, the bridge records an interim
+**pending marker** — a package-chosen aspect on the claim vertex written via a package `dispatch` op,
+analogous to the `.outcome` aspect (D5) — and drives **re-poll + a give-up timeout** through its §10.4
+schedule lane (`schedule.bridge.>`). A timeout posts a terminal `replyOp` with a `failed` status, so a
+never-answered call **converges** rather than parking forever. The §10.6 step `deadline.<instanceId>`
+TTL — the off-stream backstop — is sized to the external SLA (per-adapter) and the bridge's give-up
+timeout fires **before** it: the normal path is a clean bridge-posted outcome, and the Loom deadline
+catches only a genuinely dead bridge. A synchronous adapter (today's fakes) is unchanged — it resolves
+inline and posts `replyOp` immediately, writing no pending marker.
 
 **Guards — pure predicate over the subject's current state.** Absent guard = step always runs.
 

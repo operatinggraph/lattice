@@ -28,7 +28,7 @@ per-item detail lives in design / story docs + git history, never in agent memor
 | Large-file / binary handling | 📋 Designed (ready to launch) | `implementation-artifacts/large-file-binary-design.md` |
 | Refractor substrate inner-package migration | ✅ Done (Path B, d420ca4) | `implementation-artifacts/substrate-migration-plan.md` |
 | Structured adapter result *(terminal-failure producer)* | ✅ Done (828f24d) | `implementation-artifacts/structured-adapter-result-design.md` |
-| Async external-reply | 🏗️ Active (increment 1 done 0860fb1; 2–3 in progress) | `implementation-artifacts/async-reply-design.md` |
+| Async external-reply | 🏗️ Active (increments 1–2 done: 0860fb1, 0f85d45; increment 3 in design) | `implementation-artifacts/async-reply-design.md` |
 | _all other items_ | 📋 Backlog | see themed tables below |
 
 ---
