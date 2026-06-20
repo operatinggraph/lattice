@@ -16,6 +16,23 @@ import (
 // missing_<gap> snake_case bool.
 const gapColumnPrefix = "missing_"
 
+// inflightColumnPrefix and maxretriesColumnPrefix name the two engine-recognized
+// dispatch-SUPPRESSION inputs keyed off a gap column: for gap missing_<g> the
+// Lens may project inflight_<g> (a remediation is legitimately in flight — a bool)
+// and maxretries_<g> (the gap's retry cap — an integer the gate bounds its
+// weaver-state dispatch-count against). They are §10.2 BodyColumns the engine
+// reads to alter behavior — like freshUntil — NOT gaps keys: gapSuppressed skips a
+// gap whose inflight_<g> is true OR whose dispatch-count has reached
+// maxretries_<g>, while the gap itself stays violating, in both dispatch legs. The
+// prefix swap from missing_ keeps them generic with zero playbook config, and
+// because neither starts with missing_ the gap-column scans (openGapColumns,
+// markCandidateColumns) never treat a companion as a gap or mark it. Documented in
+// docs/components/weaver.md alongside freshUntil.
+const (
+	inflightColumnPrefix   = "inflight_"
+	maxretriesColumnPrefix = "maxretries_"
+)
+
 // markTTLBackstopFactor sizes the mark's NATS per-key TTL relative to its
 // lease: TTL = markTTLBackstopFactor × lease. The TTL must be STRICTLY longer
 // than the lease — the reconciler sweep is the prompt reclaim and the TTL is
@@ -25,6 +42,26 @@ const gapColumnPrefix = "missing_"
 // would make the sweep's re-attempt leg unreachable. A constant, not a config
 // knob.
 const markTTLBackstopFactor = 2
+
+// dispatchCountTTLBackstopFactor sizes the dispatch-count's NATS per-key TTL
+// relative to the mark lease: TTL = dispatchCountTTLBackstopFactor × lease. The
+// count is the per-(target, entity, gap) retry-budget accumulator (§E mechanism
+// B): incremented on each actual dispatch, deleted on gap-close, and bounded
+// against the row's maxretries_<g>. Unlike the mark (TTL ≈ one anti-storm window,
+// re-armed on reclaim), the count is CHAIN-scoped — it must survive every
+// mark-lease/TTL expiry across a multi-attempt chain so the budget accumulates,
+// and only the gap-close reset (or this backstop) ever removes it. The factor is
+// therefore much larger than markTTLBackstopFactor: it must outlast a full
+// cap-length chain, which is paced by the bridge's CallDeadline — the give-up
+// horizon at which each attempt's failed outcome lands. The sweep is suppressed
+// while a call is in flight (inflight_<g>), so attempts are CallDeadline apart,
+// NOT mark-lease apart: the worst-case chain is cap × CallDeadline ≈ 3 × 24h =
+// 72h at the defaults, and 256 × a 30min lease ≈ 128h clears it with ~1.8×
+// headroom — so the TTL never expires the count MID-chain and silently re-opens
+// the budget. It exists
+// ONLY to garbage-collect an orphaned count whose gap-close was never observed
+// (the entity vanished without a closing row). A constant, not a config knob.
+const dispatchCountTTLBackstopFactor = 256
 
 // mark is the weaver-state anti-storm in-flight record (Contract #10 §10.3),
 // keyed <targetId>.<entityId>.<gapColumn>. The CAS-create of this key is the
@@ -168,11 +205,119 @@ func (m *markStore) delete(ctx context.Context, targetID, entityID, gapColumn st
 	return nil
 }
 
+// countKeySuffix names the reserved dispatch-count key tail:
+// `<targetId>.<entityId>.<gapColumn>.__count`. The count is matched (and skipped)
+// by suffix wherever marks are enumerated — the reconciler sweep and the
+// marksInFlight gauge — because it is NOT a §10.3 mark: it has a 4th segment, so
+// splitMarkKey would reject it as corrupt. The "__count" tail can never be a
+// gapColumn (singleTokenPattern forbids the dot) nor a NanoID entityId
+// (substrate.Alphabet has no underscore), so the count, mark, and `__control`
+// key shapes are mutually disjoint.
+const countKeySuffix = ".__count"
+
+// dispatchCount is the JSON body of a `<targetId>.<entityId>.<gapColumn>.__count`
+// key: the number of actual dispatches of that gap in the current chain.
+type dispatchCount struct {
+	Count int `json:"count"`
+}
+
+// countKey builds the §E dispatch-count key. Entity is keyed by NanoID (the same
+// segment shape as the mark key), with the reserved __count tail.
+func countKey(targetID, entityID, gapColumn string) string {
+	return targetID + "." + entityID + "." + gapColumn + countKeySuffix
+}
+
+// dispatchCountCASRetries bounds the read-modify-write retry loop on the count
+// (no atomic-increment primitive exists). A handful of attempts absorbs the rare
+// concurrent increment (lane-1 vs the sweep's reclaim both firing the same gap);
+// beyond that the loser surfaces the conflict to its caller, which already treats
+// a count failure as the safe side (do not over-suppress).
+const dispatchCountCASRetries = 5
+
+// getDispatchCount reads the current dispatch-count for one gap (0 when absent —
+// no dispatch has happened yet, or the count was reset on a gap-close). The read
+// is the gate's authority: the budget is spent iff this count has reached the
+// row's maxretries_<g>.
+func (m *markStore) getDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) (int, error) {
+	entry, err := m.conn.KVGet(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var dc dispatchCount
+	if err := json.Unmarshal(entry.Value, &dc); err != nil {
+		return 0, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, err)
+	}
+	return dc.Count, nil
+}
+
+// incrementDispatchCount bumps the gap's dispatch-count by one (creating it at 1
+// on absence) and returns the new value. It is the read-modify-write analogue of
+// an atomic increment: a CAS-create on absence, else a revision-conditioned
+// update, retried a bounded number of times so a concurrent increment (lane-1 vs
+// the sweep's reclaim) does not lose a count. Every write arms the long TTL
+// backstop (dispatchCountTTLBackstopFactor × lease) — the count is chain-scoped
+// and the gap-close reset is its prompt removal; the TTL only GCs an orphan.
+func (m *markStore) incrementDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) (int, error) {
+	key := countKey(targetID, entityID, gapColumn)
+	ttl := dispatchCountTTLBackstopFactor * m.lease
+	for attempt := 0; attempt < dispatchCountCASRetries; attempt++ {
+		entry, err := m.conn.KVGet(ctx, m.bucket, key)
+		if err != nil {
+			if !errors.Is(err, substrate.ErrKeyNotFound) {
+				return 0, err
+			}
+			body, mErr := json.Marshal(dispatchCount{Count: 1})
+			if mErr != nil {
+				return 0, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+			}
+			if _, cErr := m.conn.KVCreateWithTTL(ctx, m.bucket, key, body, ttl); cErr != nil {
+				if errors.Is(cErr, substrate.ErrRevisionConflict) {
+					continue // someone created it first — re-read and update.
+				}
+				return 0, cErr
+			}
+			return 1, nil
+		}
+		var dc dispatchCount
+		if uErr := json.Unmarshal(entry.Value, &dc); uErr != nil {
+			return 0, fmt.Errorf("weaver: unmarshal dispatch-count %s: %w", entry.Key, uErr)
+		}
+		next := dc.Count + 1
+		body, mErr := json.Marshal(dispatchCount{Count: next})
+		if mErr != nil {
+			return 0, fmt.Errorf("weaver: marshal dispatch-count: %w", mErr)
+		}
+		if _, uErr := m.conn.KVUpdateWithTTL(ctx, m.bucket, key, body, entry.Revision, ttl); uErr != nil {
+			if errors.Is(uErr, substrate.ErrRevisionConflict) {
+				continue // lost the race — re-read and retry.
+			}
+			return 0, uErr
+		}
+		return next, nil
+	}
+	return 0, fmt.Errorf("weaver: dispatch-count %s contended past %d retries", key, dispatchCountCASRetries)
+}
+
+// deleteDispatchCount clears one gap's dispatch-count — the §E budget reset, run
+// from clearClosedMarks on gap-close (the same level-reconciled path that deletes
+// the mark). A missing key is success (idempotent): a closed gap with no prior
+// dispatch never had a count.
+func (m *markStore) deleteDispatchCount(ctx context.Context, targetID, entityID, gapColumn string) error {
+	err := m.conn.KVDelete(ctx, m.bucket, countKey(targetID, entityID, gapColumn))
+	if err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
+		return err
+	}
+	return nil
+}
+
 // countInFlight reports how many in-flight marks exist in the bucket, scanned
 // on the heartbeat cadence (never per-message). Reserved `<targetId>.__control`
-// dispatch-skip markers are skipped — they are not §10.3 marks (same guard the
-// reconciler sweep applies), so the marksInFlight gauge counts only real
-// in-flight dispatch.
+// dispatch-skip markers and `…__count` dispatch-count keys are skipped — neither
+// is a §10.3 mark (the same guard the reconciler sweep applies), so the
+// marksInFlight gauge counts only real in-flight dispatch.
 func (m *markStore) countInFlight(ctx context.Context) (int, error) {
 	keys, err := m.conn.KVListKeys(ctx, m.bucket)
 	if err != nil {
@@ -180,7 +325,7 @@ func (m *markStore) countInFlight(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for _, key := range keys {
-		if strings.HasSuffix(key, controlKeySuffix) {
+		if strings.HasSuffix(key, controlKeySuffix) || strings.HasSuffix(key, countKeySuffix) {
 			continue
 		}
 		n++

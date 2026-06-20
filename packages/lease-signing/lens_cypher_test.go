@@ -554,3 +554,177 @@ func TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding(t *testing.T) {
 	require.Equal(t, true, v["violating"])
 	require.Equal(t, true, v["missing_bgcheck"])
 }
+
+// inflightBgFixture seeds an applicant (PII recorded, signed — so onboarding and
+// signature are not the gap under test) whose single bgcheck service instance
+// carries a .dispatch marker (present iff withDispatch) and the given .outcome
+// status (nil → omit the .outcome aspect entirely). It is the in-flight
+// suppression fixture: the bgcheck gap stays open (no completed outcome), and the
+// dispatch/outcome shape drives inflight_bgcheck. The predicate is presence-based
+// (a .dispatch present + no .outcome), so no deadline is modeled. Returns the
+// leaseapp logical name.
+func inflightBgFixture(t *testing.T, f *lensFixture, withDispatch bool, outcomeStatus *string) string {
+	t.Helper()
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
+	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
+	f.vtx(t, "bg1", "service")
+	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	if withDispatch {
+		f.aspect(t, "bg1", "dispatch", "dispatch", map[string]any{
+			"vendorRef": "vendor-ref-1", "adapter": "backgroundCheck", "replyOp": "RecordLeaseServiceOutcome",
+			"submittedAt": "2026-06-17T00:00:00Z", "nextPollAt": "2026-06-18T00:01:00Z", "deadline": "2026-06-18T00:05:00Z",
+		})
+	}
+	if outcomeStatus != nil {
+		f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": *outcomeStatus, "completedAt": "2026-06-17T12:00:00Z"})
+	}
+	// A completed payment so missing_payment is not the only open gap — the row
+	// stays violating purely on the bgcheck dimension.
+	f.vtx(t, "pay1", "service")
+	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
+	f.edge(t, "applicationFor", "app", "alice")
+	f.edge(t, "providedTo", "bg1", "alice")
+	f.edge(t, "providedTo", "pay1", "alice")
+	return "app"
+}
+
+// TestLeaseApplicationComplete_InflightBgcheck pins the in-flight suppression
+// companion: a bgcheck with a .dispatch marker PRESENT and NO .outcome projects
+// inflight_bgcheck=true while the gap stays open (missing_bgcheck=true,
+// violating=true). Weaver reads inflight_bgcheck to skip re-dispatch of the
+// legitimately-pending call. The row also carries the constant maxretries_<g>
+// caps (the budget bound, baked from retry_budget.go).
+func TestLeaseApplicationComplete_InflightBgcheck(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	app := inflightBgFixture(t, f, true, nil)
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1, "exactly one row per anchor with a dispatch marker in the fan")
+	v := rows[0].Values
+	require.Equal(t, true, v["inflight_bgcheck"], "a .dispatch marker present, no .outcome → in flight")
+	require.Equal(t, false, v["inflight_payment"], "payment has no dispatch marker → not in flight")
+	require.Equal(t, true, v["missing_bgcheck"], "an in-flight call is NOT a completed one → gap stays open")
+	require.Equal(t, true, v["violating"], "the gap stays violating while the call is in flight")
+	requireMaxRetriesColumns(t, v)
+}
+
+// TestLeaseApplicationComplete_InflightBgcheck_DeadIrrelevant is the FIX-FIRST
+// correctness pin: inflight is PRESENCE-based, NOT deadline-bounded. A .dispatch
+// present + no .outcome is in flight regardless of the dispatch deadline — so a
+// dead/slow bridge that never posts a timeout outcome keeps inflight_bgcheck=true
+// (Weaver waits, never double-dispatching against the vendor) rather than flipping
+// it false at the deadline. The fixture's deadline is in the past relative to
+// $now, yet inflight stays true.
+func TestLeaseApplicationComplete_InflightBgcheck_DeadIrrelevant(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	// $now is AFTER the fixture's dispatch deadline (2026-06-18T00:05:00Z): under a
+	// deadline-bounded predicate this would read inflight=false (the old
+	// double-dispatch hole); under the presence-based predicate it stays true.
+	const now = "2026-06-19T00:00:00Z"
+	app := inflightBgFixture(t, f, true, nil)
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["inflight_bgcheck"], "a still-unresolved call stays in flight past its deadline (no double-dispatch)")
+	require.Equal(t, true, v["missing_bgcheck"], "the gap is still open")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseApplicationComplete_InflightBgcheck_OutcomePresent: a .dispatch marker
+// present but an .outcome already written is NOT in flight — the call resolved
+// (the create-only outcome landed), so inflight_bgcheck is false and Weaver
+// resumes dispatching a FRESH call. The status here is 'failed' (so the gap stays
+// open) to isolate the inflight predicate from the completed-gap-close path.
+func TestLeaseApplicationComplete_InflightBgcheck_OutcomePresent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	failed := "failed"
+	app := inflightBgFixture(t, f, true, &failed)
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["inflight_bgcheck"], "an .outcome present (status != null) → not in flight; re-dispatch resumes")
+	require.Equal(t, true, v["missing_bgcheck"], "a failed outcome does not close the gap")
+}
+
+// TestLeaseApplicationComplete_InflightBgcheck_NoDispatch: a bgcheck instance with
+// NO .dispatch marker (and no .outcome) is not in flight — vendorRef <> null is
+// false when the .dispatch aspect is absent, so inflight_bgcheck=false and the gap
+// is dispatchable.
+func TestLeaseApplicationComplete_InflightBgcheck_NoDispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	app := inflightBgFixture(t, f, false, nil)
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["inflight_bgcheck"], "no .dispatch aspect (vendorRef = null) → not in flight")
+	require.Equal(t, true, v["missing_bgcheck"], "the gap is open and dispatchable")
+}
+
+// requireMaxRetriesColumns asserts the lens projects the constant per-gap retry
+// caps as numeric columns equal to the package constants (the §E mechanism-B
+// budget bound Weaver reads off the row). The full engine returns numeric literals
+// as int (a Go int via the parser), but the cross-component path carries JSON
+// numbers as float64, so accept either — what matters is the integer value.
+func requireMaxRetriesColumns(t *testing.T, v map[string]any) {
+	t.Helper()
+	requireIntColumn(t, v, "maxretries_bgcheck", maxBgcheckRetries)
+	requireIntColumn(t, v, "maxretries_payment", maxPaymentRetries)
+}
+
+func requireIntColumn(t *testing.T, v map[string]any, col string, want int) {
+	t.Helper()
+	got, ok := v[col]
+	require.Truef(t, ok, "row must carry the %s column", col)
+	switch n := got.(type) {
+	case int:
+		require.Equalf(t, want, n, "%s", col)
+	case int64:
+		require.Equalf(t, want, int(n), "%s", col)
+	case float64:
+		require.Equalf(t, want, int(n), "%s", col)
+	default:
+		t.Fatalf("%s is %T, not a numeric cap", col, got)
+	}
+}
+
+// TestLeaseApplicationComplete_MaxRetriesColumns pins the constant retry-cap
+// columns: every convergence row carries maxretries_bgcheck / maxretries_payment
+// equal to the package constants, regardless of the gap state. They are the
+// package-owned budget bound Weaver compares its weaver-state dispatch-count
+// against; the budget accounting itself is proven in internal/weaver (the lens no
+// longer projects a failed-count).
+func TestLeaseApplicationComplete_MaxRetriesColumns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	// All-gaps-open application — the caps must still be present.
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.edge(t, "applicationFor", "app", "alice")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	requireMaxRetriesColumns(t, rows[0].Values)
+}

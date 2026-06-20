@@ -208,3 +208,100 @@ func TestDeleteByTargetPrefix_NoKeys(t *testing.T) {
 		t.Fatalf("deleteByTargetPrefix(ghost-target) deleted %d keys, want 0", deleted)
 	}
 }
+
+// TestDispatchCount_RoundTrip verifies the §E dispatch-count store: an absent key
+// reads 0; increment creates at 1 and then monotonically advances; delete (the
+// gap-close reset) drops it back to 0 and a later increment restarts at 1.
+func TestDispatchCount_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+
+	const targetID, gap = "t1", "missing_x"
+	entityID := "entityAAAAAAAAAAAAAA"
+
+	if got, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 0 {
+		t.Fatalf("absent dispatch-count = %d (err=%v), want 0", got, err)
+	}
+	for want := 1; want <= 4; want++ {
+		got, err := m.incrementDispatchCount(ctx, targetID, entityID, gap)
+		if err != nil || got != want {
+			t.Fatalf("increment #%d = %d (err=%v), want %d", want, got, err, want)
+		}
+		if read, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || read != want {
+			t.Fatalf("getDispatchCount after increment #%d = %d (err=%v), want %d", want, read, err, want)
+		}
+	}
+	if err := m.deleteDispatchCount(ctx, targetID, entityID, gap); err != nil {
+		t.Fatalf("deleteDispatchCount: %v", err)
+	}
+	if got, err := m.getDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 0 {
+		t.Fatalf("after the reset dispatch-count = %d (err=%v), want 0", got, err)
+	}
+	if got, err := m.incrementDispatchCount(ctx, targetID, entityID, gap); err != nil || got != 1 {
+		t.Fatalf("post-reset increment = %d (err=%v), want 1 (fresh budget)", got, err)
+	}
+	// The reset is idempotent: deleting an already-absent count is success.
+	other := "entityBBBBBBBBBBBBBB"
+	if err := m.deleteDispatchCount(ctx, targetID, other, gap); err != nil {
+		t.Fatalf("deleteDispatchCount on an absent count must be a no-op success: %v", err)
+	}
+}
+
+// TestCountKey_Shape verifies the reserved count-key shape is disjoint from the
+// mark key (2 dots) and the __control marker (1 dot): a count key has exactly 3
+// dots and the __count suffix, and __count can never be a NanoID entityId or a
+// gapColumn (no underscore in the alphabet; the dot is forbidden in a gap column),
+// so the three weaver-state key families never collide.
+func TestCountKey_Shape(t *testing.T) {
+	ck := countKey("t1", "someEntityID12345678", "missing_x")
+	if got, want := strings.Count(ck, "."), 3; got != want {
+		t.Fatalf("countKey(...) = %q has %d dots, want %d", ck, got, want)
+	}
+	if !strings.HasSuffix(ck, countKeySuffix) {
+		t.Fatalf("countKey(...) = %q does not have suffix %q", ck, countKeySuffix)
+	}
+	mk := markKey("t1", "someEntityID12345678", "missing_x")
+	if ck == mk {
+		t.Fatalf("countKey and markKey collided: %q", ck)
+	}
+	if strings.HasSuffix(mk, countKeySuffix) {
+		t.Fatalf("a real mark key %q must not carry the count suffix", mk)
+	}
+	if strings.Contains(substrate.Alphabet, "_") {
+		t.Fatalf("substrate.Alphabet contains '_' — __count count keys may now collide with NanoID-derived entityIds; escalate as a structural finding")
+	}
+}
+
+// TestDispatchCount_TTLBackstop proves the count carries the long per-key TTL
+// backstop (dispatchCountTTLBackstopFactor × lease) on the wire — the GC of an
+// orphaned count whose gap-close was never observed. The factor is far larger than
+// the mark's, so the count never expires mid-chain.
+func TestDispatchCount_TTLBackstop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx) // lease = time.Minute (see newStateTestStore)
+
+	const targetID, gap = "t1", "missing_x"
+	entityID := "entityAAAAAAAAAAAAAA"
+	if _, err := m.incrementDispatchCount(ctx, targetID, entityID, gap); err != nil {
+		t.Fatalf("increment dispatch-count: %v", err)
+	}
+	key := countKey(targetID, entityID, gap)
+	stream, err := m.conn.JetStream().Stream(ctx, "KV_weaver-state")
+	if err != nil {
+		t.Fatalf("open weaver-state stream: %v", err)
+	}
+	raw, err := stream.GetLastMsgForSubject(ctx, "$KV.weaver-state."+key)
+	if err != nil {
+		t.Fatalf("read raw count message: %v", err)
+	}
+	wantTTL := (dispatchCountTTLBackstopFactor * time.Minute).String()
+	if got := raw.Header.Get("Nats-TTL"); got != wantTTL {
+		t.Fatalf("count Nats-TTL header = %q, want %q (dispatchCountTTLBackstopFactor × lease)", got, wantTTL)
+	}
+}

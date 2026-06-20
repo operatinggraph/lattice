@@ -96,6 +96,13 @@ func (e *Engine) handleRow(ctx context.Context, msg substrate.Message) substrate
 	nak := false
 	delayed := false
 	for _, col := range e.openGapColumns(targetID, row) {
+		if e.gapSuppressed(ctx, targetID, entityID, row, col) {
+			// A remediation is in flight (inflight_<g>) or the retry budget is
+			// spent (the weaver-state dispatch-count reached maxretries_<g>): the
+			// gap stays violating but must NOT be (re-)dispatched. Skip it —
+			// mark-clearing already ran above, so a stale mark does not linger.
+			continue
+		}
 		switch e.dispatchGap(ctx, target, targetID, entityID, entityKey, col, row, msg) {
 		case substrate.Nak:
 			nak = true
@@ -240,7 +247,29 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 		// A concurrent evaluation won the CAS — the winner dispatched.
 		return substrate.Ack
 	}
+	// The CAS-create won: a fresh episode is being dispatched, so the chain's
+	// retry-budget dispatch-count advances by one. This is the SOLE
+	// per-anti-storm-window increment in lane-1 — the redelivery re-fire above
+	// re-publishes the existing episode and must not double-count. The sweep's
+	// reclaim increments at its own fresh-dispatch point (reconciler.fire-after-
+	// replace). A failed increment is logged but never blocks the dispatch: the
+	// budget is a backstop, and over-counting (re-incrementing on a redelivery
+	// that lost the CAS) is structurally impossible, while under-counting only
+	// allows one extra attempt — far safer than wedging a live dispatch.
+	e.bumpDispatchCount(ctx, targetID, entityID, col)
 	return e.fire(ctx, targetID, entityID, col, rev, pl)
+}
+
+// bumpDispatchCount increments the gap's chain-scoped retry-budget dispatch-count
+// on an actual fresh dispatch (the CAS-create-won lane-1 path and the sweep's
+// reclaim). A failure is logged, never propagated: the count is a bound, not a
+// gate on the dispatch itself, and the gapSuppressed read tolerates a stale count
+// on the safe (dispatch) side.
+func (e *Engine) bumpDispatchCount(ctx context.Context, targetID, entityID, col string) {
+	if _, err := e.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
+		e.logger.Warn("weaver: dispatch-count increment failed; the retry budget may under-count",
+			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+	}
 }
 
 // fire materializes one episode's op and fire-and-forget publishes it. A
@@ -259,6 +288,14 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 // clearClosedMarks is the level-reconciled mark-clearing pass. Returns false
 // when a delete failed (the caller Naks with delay so the reconcile re-runs
 // without hot-looping). A nil row (entity deleted) clears every candidate.
+//
+// Closing a gap also DELETES its retry-budget dispatch-count (§E mechanism B): a
+// success closes the gap, so the chain's attempt accounting resets and a later
+// reopen of the same gap starts a fresh budget. This is the reset the budget
+// exists for — the lens predicate cannot express "failures since the last
+// success," so the gap-close path here owns it. The count delete shares the
+// gap's not-currently-true condition with the mark delete, so it runs in exactly
+// the same cases (gap closed, column dropped, or entity deleted).
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
 	for _, col := range markCandidateColumns(target, row) {
@@ -267,6 +304,11 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 		}
 		if err := e.marks.delete(ctx, targetID, entityID, col); err != nil {
 			e.logger.Error("weaver: mark clear failed",
+				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+			ok = false
+		}
+		if err := e.marks.deleteDispatchCount(ctx, targetID, entityID, col); err != nil {
+			e.logger.Error("weaver: dispatch-count reset failed",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 			ok = false
 		}
@@ -290,6 +332,77 @@ func (e *Engine) boolColumn(targetID string, row map[string]any, col string) boo
 		e.issues.set(issueKeyData(targetID, col), "warning", "RowDataError", msg)
 	}
 	return b
+}
+
+// intColumn reads a §10.2 integer column off a row, returning ok=false when the
+// column is absent or carries a non-numeric value (the latter a Lens data error:
+// surfaced as a RowDataError, like boolColumn's non-bool path). JSON-decoded rows
+// carry numbers as float64; directly-constructed rows (unit tests) may carry int
+// or int64 — all coerce. A fractional float is floored to its integer part (a cap
+// is a whole count by construction). The bool form of a present-but-wrong-type
+// value is the caller's "no usable value" signal (ok=false), never a silent 0.
+func (e *Engine) intColumn(targetID string, row map[string]any, col string) (int, bool) {
+	v, ok := row[col]
+	if !ok || v == nil {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	default:
+		msg := fmt.Sprintf("target %s: row column %q is %T, not the §10.2 integer; treated as absent", targetID, col, v)
+		e.logger.Warn("weaver: " + msg)
+		e.issues.set(issueKeyData(targetID, col), "warning", "RowDataError", msg)
+		return 0, false
+	}
+}
+
+// gapSuppressed reports whether gap column gapCol (a missing_<g>) must NOT be
+// (re-)dispatched: its inflight_<g> companion is true (a remediation is
+// legitimately in flight) OR its weaver-state dispatch-count has reached the row's
+// maxretries_<g> cap (the retry budget is spent — §E mechanism B). It is the
+// dispatch gate read by BOTH dispatch legs — the lane-1 loop and the sweep's
+// reclaim — so a suppressed gap is neither freshly dispatched nor reclaimed while
+// it stays violating.
+//
+// inflight is authoritative and read first (a true inflight short-circuits the KV
+// read). An absent/non-bool inflight reads false via boolColumn (which surfaces a
+// non-bool as a RowDataError); an absent/garbled maxretries reads 0 via intColumn,
+// and a count-read failure logs and is treated as NOT-suppressing on the cap term
+// — the safe side in every case is to dispatch, so a missing/garbled companion or
+// a transient KV error never silently wedges a real gap. A gapCol without the
+// missing_ prefix has no companions, so it is never suppressed.
+func (e *Engine) gapSuppressed(ctx context.Context, targetID, entityID string, row map[string]any, gapCol string) bool {
+	g, ok := strings.CutPrefix(gapCol, gapColumnPrefix)
+	if !ok {
+		return false
+	}
+	if e.boolColumn(targetID, row, inflightColumnPrefix+g) {
+		return true
+	}
+	capN, ok := e.intColumn(targetID, row, maxretriesColumnPrefix+g)
+	if !ok || capN <= 0 {
+		// No usable cap on the row → the budget term cannot suppress (only
+		// inflight, already checked, can). A non-positive cap means "no budget
+		// configured for this gap" — never auto-suppress on it.
+		return false
+	}
+	count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapCol)
+	if err != nil {
+		// A transient count read failure must not silently wedge the gap: leave
+		// inflight authoritative and let the gap dispatch (the safe side). The next
+		// evaluation re-reads the count.
+		e.logger.Warn("weaver: dispatch-count read failed; not suppressing on the cap term",
+			"targetId", targetID, "entityId", entityID, "gap", gapCol, "err", err)
+		return false
+	}
+	return count >= capN
 }
 
 // markCandidateColumns is the union of the playbook's gaps keys and the row's

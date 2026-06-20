@@ -181,6 +181,59 @@ Lens projects the deadline: row column freshUntil = resolve + window (RFC3339)
 
 ---
 
+## Dispatch suppression — `inflight_<g>` (Lens) + the `maxretries_<g>`-bounded dispatch-count (Weaver-state)
+
+A gap is a `missing_<g>` §10.2 bool. Weaver suppresses re-dispatch of a gap on **two** grounds — a
+remediation already in flight, and a spent retry budget — sourced differently:
+
+- **`inflight_<g>` — a Lens column.** A Lens may project, **per gap**, the engine-recognized
+  **dispatch-suppression companion** `inflight_<g>` (the **prefix-swap** convention). It is a §10.2
+  `BodyColumn` Weaver reads to alter behaviour, the **same mechanism class as `freshUntil`** — **not**
+  a `gaps` key, so the gap-column scans (`openGapColumns`, `markCandidateColumns`, which match the
+  `missing_` prefix only) never treat it as a gap or write a mark at it. An **absent or non-bool**
+  `inflight_<g>` reads `false` (via `boolColumn`, which surfaces a non-bool as a `RowDataError`).
+- **The retry budget — a Weaver-state dispatch-count bounded by `maxretries_<g>`.** Weaver keeps a
+  per-`(targetId, entityId, gapColumn)` **dispatch-count** in `weaver-state`
+  (`<targetId>.<entityId>.<gapColumn>.__count`, a reserved key shape disjoint from marks and the
+  `__control` marker). It is **incremented on each actual dispatch** — the lane-1 CAS-create-and-fire
+  and the sweep's reclaim, so it tracks one-per-anti-storm-window real attempts from **both** dispatch
+  legs — and **reset (deleted) on gap-close** by `clearClosedMarks` (the same level-reconciled path
+  that deletes the mark). The Lens supplies only the **cap**: an integer `maxretries_<g>` column
+  (package policy baked into the cypher, like the freshness window). The budget term suppresses when
+  `dispatchCount(target, entity, gap) >= maxretries_<g>`.
+
+The budget lives in Weaver-state, not the Lens, because a true reset-on-success ("failures since the
+last success") is **not expressible as a lens predicate**: a lifetime `count(failed) >= cap` never
+resets, so a check that fails to the cap, then completes, then goes stale would wedge the renewal
+forever. Gap-close **is** the reset, and it lives where Weaver owns the close path. The count is
+**chain-scoped**: it persists across mark-lease/TTL expiries (a reclaim must accumulate, not reset),
+with a long TTL backstop (`dispatchCountTTLBackstopFactor × MarkLease`, far larger than the mark's)
+**only** to GC an orphaned count whose gap-close was never observed — never to expire mid-chain.
+
+The gate (`gapSuppressed` = `inflight_<g>` **OR** dispatch-count `>= maxretries_<g>`) is read in
+**both** dispatch legs:
+
+1. the **lane-1 dispatch loop** (`evaluator.go`, before `dispatchGap`), and
+2. the **sweep `reclaim`** (`reconciler.go`, beside the `violating` gate) — the **load-bearing**
+   one: a mark-lease expiry → reclaim is the actual re-dispatch path for a long-pending remediation,
+   so the lane-1 skip alone would not stop the sweeper.
+
+While either ground holds, Weaver **does not (re-)dispatch** the gap's remediation — but the gap
+**stays violating** (the entity is genuinely unsatisfied); only re-dispatch is suppressed. Every
+default is the **safe (dispatch) side**: an absent/non-bool `inflight_<g>`, an absent/non-positive
+`maxretries_<g>`, or a transient count-read failure all leave the gap dispatchable, so a missing or
+garbled input never silently wedges a real gap. Once the budget is spent the gap is the
+operator-/Loupe-visible **"needs human escalation"** terminal — a human-submitted remediation that
+*completes* closes the gap, which deletes the count, so a later reopen starts a fresh budget.
+
+The lease-signing convergence lens is the reference user — for the bgcheck/payment external-call gaps
+it projects `inflight_<g>` (a service instance with a `.dispatch` marker **present** and no
+`.outcome` — presence-based, not deadline-bounded, so a stuck-pending call is never double-dispatched
+against the vendor) and the constant `maxretries_<g>` caps; Weaver's dispatch-count enforces the
+bounded retry against those caps.
+
+---
+
 ## Control plane (FR30)
 
 Operators manage Weaver's currently-registered convergence targets via a `nats-io/nats.go/micro`

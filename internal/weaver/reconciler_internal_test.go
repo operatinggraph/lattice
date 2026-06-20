@@ -911,3 +911,160 @@ func TestMarkCreate_TTLBackstop(t *testing.T) {
 		t.Fatalf("claimId must be empty on a written mark, got %q", rec.ClaimID)
 	}
 }
+
+// TestSweep_InflightGapNotReclaimed proves SKIP SITE 2 — the load-bearing one.
+// The mark-lease expiry → sweep reclaim is the actual re-dispatch path for a
+// long-pending external call; the lane-1 skip alone does NOT stop it. An expired
+// mark over a violating row whose gap carries inflight_<g>=true must be LEFT
+// untouched, with NO re-dispatch op — exactly as the in-flight call requires.
+func TestSweep_InflightGapNotReclaimed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureInflightSweep"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	rev := h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true, "inflight_x": true,
+	})
+
+	h.pass(ctx)
+
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil || entry.Revision != rev {
+		t.Fatalf("an in-flight gap's expired mark must be left untouched by the sweep (err=%v)", err)
+	}
+	if reclaims, _, _, _ := h.engine.sweep.metrics(); reclaims != 0 {
+		t.Fatalf("sweepReclaims = %d, want 0 (in-flight suppression)", reclaims)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_ExhaustedBudgetGapNotReclaimed proves skip site 2 also fires on the §E
+// mechanism-B budget term: a violating row whose weaver-state dispatch-count has
+// reached the row's maxretries_<g> is never re-dispatched by the sweep — the mark
+// is left and no op fires (the terminal is "stop and escalate," the gap stays
+// violating).
+func TestSweep_ExhaustedBudgetGapNotReclaimed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureExhaustedSweep"
+	const cap = 3
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	rev := h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	// Seed the dispatch-count to the cap: the budget is spent.
+	for i := 0; i < cap; i++ {
+		if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+			t.Fatalf("seed dispatch-count: %v", err)
+		}
+	}
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+		"inflight_x": false, "maxretries_x": cap,
+	})
+
+	h.pass(ctx)
+
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil || entry.Revision != rev {
+		t.Fatalf("an exhausted-budget gap's expired mark must be left untouched by the sweep (err=%v)", err)
+	}
+	if reclaims, _, _, _ := h.engine.sweep.metrics(); reclaims != 0 {
+		t.Fatalf("sweepReclaims = %d, want 0 (budget-cap suppression)", reclaims)
+	}
+	h.requireNoOp(t)
+}
+
+// TestSweep_ReclaimIncrementsBudget proves a sweep reclaim (a fresh dispatch on a
+// re-armed mark) advances the chain's dispatch-count — so a multi-attempt chain
+// driven by the sweeper (not just CDC touches) accrues toward the cap. A reclaim
+// of a count-0 gap whose row cap is above 1 reclaims AND bumps the count to 1; a
+// second reclaim would take it to 2, etc.
+func TestSweep_ReclaimIncrementsBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureReclaimBudget"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+		"inflight_x": false, "maxretries_x": 5,
+	})
+
+	h.pass(ctx)
+	h.nextOp(t) // the reclaim re-dispatched
+
+	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != 1 {
+		t.Fatalf("a reclaim must increment the dispatch-count: got %d (err=%v), want 1", got, err)
+	}
+	if reclaims, _, _, _ := h.engine.sweep.metrics(); reclaims != 1 {
+		t.Fatalf("sweepReclaims = %d, want 1", reclaims)
+	}
+}
+
+// TestSweep_CountKeySurvives proves the reserved count-key guard: a
+// `…__count` dispatch-count is not a §10.3 mark (it has a 4th segment, so
+// splitMarkKey would reject it as corrupt) — the sweep must skip it entirely,
+// never enumerating it as corrupt and never deleting it, across both warm-up
+// states.
+func TestSweep_CountKeySurvives(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureCountKey"
+	entityID := testNanoID(t)
+	if _, err := h.engine.marks.incrementDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil {
+		t.Fatalf("seed dispatch-count: %v", err)
+	}
+
+	h.pass(ctx)
+	h.pass(ctx)
+
+	if got, err := h.engine.marks.getDispatchCount(ctx, targetID, entityID, "missing_x"); err != nil || got != 1 {
+		t.Fatalf("the dispatch-count must survive sweep passes: got %d (err=%v), want 1", got, err)
+	}
+	if hasIssueCode(h.engine.issues.snapshot(), "CorruptMark") {
+		t.Fatalf("a dispatch-count must never be enumerated as a CorruptMark")
+	}
+	if _, _, corrupt, _ := h.engine.sweep.metrics(); corrupt != 0 {
+		t.Fatalf("sweepCorrupt = %d, want 0 (the __count key is not a mark)", corrupt)
+	}
+	h.requireNoOp(t)
+}

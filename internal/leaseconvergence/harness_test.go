@@ -27,6 +27,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -73,20 +74,54 @@ type harness struct {
 	coreKV  *substrate.KV
 	convKV  *substrate.KV // weaver-targets
 	bgFake  *bridge.FakeBackgroundCheck
+	bgAsync *bridge.FakeAsyncCheck // registered for backgroundCheck when the async variant is selected
 	stripe  *bridge.FakeStripe
 	convRID string // the leaseApplicationComplete lens rule ID
 }
+
+// harnessConfig carries the optional horizon/adapter overrides the async
+// convergence variant needs. A zero value reproduces the production-faithful
+// synchronous harness (every duration left 0 → the engine's withDefaults applies
+// the production default; bgcheckAsync nil → the synchronous FakeBackgroundCheck
+// is registered for backgroundCheck), so the sync convergence tests pass no
+// options and are unaffected.
+type harnessConfig struct {
+	// bgcheckAsync, when non-nil, is registered for the backgroundCheck adapter
+	// in place of the synchronous FakeBackgroundCheck — the test-only async
+	// vendor (production stays synchronous; cmd/bridge is unchanged).
+	bgcheckAsync *bridge.FakeAsyncCheck
+	// Weaver knobs: a short MarkLease + SweepInterval make the reconciler sweep
+	// actually tick (and a mark's lease actually expire) within the test, so the
+	// no-double-dispatch-across-a-sweep-tick assertion exercises skip site 2.
+	weaverMarkLease     time.Duration
+	weaverSweepInterval time.Duration
+	weaverSweepWarmup   time.Duration
+	// Bridge knobs: a short PollInterval makes the @at poll chain advance fast; a
+	// short CallDeadline makes the timeout fire within the test (the failed →
+	// retry leg).
+	bridgePollInterval time.Duration
+	bridgeCallDeadline time.Duration
+}
+
+// harnessOpt mutates the harnessConfig before the stack boots.
+type harnessOpt func(*harnessConfig)
 
 // newHarness boots embedded NATS, the real bootstrap substrate (all buckets +
 // streams + primordial identities/roles via the real Seeder), installs the real
 // package chain, then starts all five engines as goroutines under a test-scoped
 // context. It returns once the convergence lens is activated and the engines'
-// consumers are up.
-func newHarness(t *testing.T) *harness {
+// consumers are up. Options override adapter/horizon defaults for the async
+// variant; with no options it is the production-faithful synchronous harness.
+func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	t.Helper()
 
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
-	s := natstest.RunServer(opts)
+	var hc harnessConfig
+	for _, opt := range opts {
+		opt(&hc)
+	}
+
+	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	s := natstest.RunServer(srvOpts)
 	t.Cleanup(s.Shutdown)
 
 	nc, err := nats.Connect(s.ClientURL())
@@ -189,7 +224,11 @@ func newHarness(t *testing.T) *harness {
 	})
 	go func() { _ = loomEng.Start(ctx) }()
 
-	// --- Weaver: lane-1 (gap dispatch) + lane-3 (temporal freshness @at).
+	// --- Weaver: lane-1 (gap dispatch) + lane-3 (temporal freshness @at). The
+	// MarkLease/SweepInterval/SweepOrphanWarmup left zero take the production
+	// defaults (withDefaults); the async variant shrinks them so the reconciler
+	// sweep ticks and a mark's lease expires within the test (exercising the
+	// sweep's re-dispatch path — skip site 2).
 	weaverEng := weaver.NewEngine(conn, weaver.Config{
 		CoreKVBucket:        bootstrap.CoreKVBucket,
 		WeaverTargetsBucket: bootstrap.WeaverTargetsBucket,
@@ -200,11 +239,19 @@ func newHarness(t *testing.T) *harness {
 		Lane:                "system",
 		Instance:            "lc-weaver",
 		HeartbeatEvery:      200 * time.Millisecond,
+		MarkLease:           hc.weaverMarkLease,
+		SweepInterval:       hc.weaverSweepInterval,
+		SweepOrphanWarmup:   hc.weaverSweepWarmup,
 		Logger:              logger,
 	})
 	go func() { _ = weaverEng.Start(ctx) }()
 
-	// --- the LIVE bridge with the real Fake adapters registered.
+	// --- the LIVE bridge. The backgroundCheck adapter is the synchronous
+	// FakeBackgroundCheck by default; the async variant swaps in a test-only
+	// FakeAsyncCheck (production stays synchronous — cmd/bridge is unchanged). The
+	// PollInterval/CallDeadline left zero take the production defaults; the async
+	// variant shrinks them so the poll chain advances and the give-up timeout
+	// fires within the test.
 	h.bgFake = bridge.NewFakeBackgroundCheck()
 	h.stripe = bridge.NewFakeStripe()
 	bridgeEng := bridge.NewEngine(conn, bridge.Config{
@@ -216,8 +263,15 @@ func newHarness(t *testing.T) *harness {
 		Instance:        "lc-bridge",
 		HeartbeatEvery:  150 * time.Millisecond,
 		RedeliveryDelay: 300 * time.Millisecond,
+		PollInterval:    hc.bridgePollInterval,
+		CallDeadline:    hc.bridgeCallDeadline,
 	})
-	require.NoError(t, bridgeEng.RegisterAdapter("backgroundCheck", h.bgFake))
+	if hc.bgcheckAsync != nil {
+		h.bgAsync = hc.bgcheckAsync
+		require.NoError(t, bridgeEng.RegisterAdapter("backgroundCheck", h.bgAsync))
+	} else {
+		require.NoError(t, bridgeEng.RegisterAdapter("backgroundCheck", h.bgFake))
+	}
 	require.NoError(t, bridgeEng.RegisterAdapter("stripe", h.stripe))
 	go func() { _ = bridgeEng.Start(ctx) }()
 
@@ -486,8 +540,21 @@ func (h *harness) aspectData(ownerKey, local string) map[string]any {
 
 // serviceHandlesFor returns the vtx.service.<handle> keys providedTo the
 // applicant, discriminated by family. It scans Core KV for the providedTo links.
+//
+// A require.Never/Eventually goroutine can outlive the test's cleanup and poll
+// this helper one last time after teardown begins: the harness cleanups run LIFO
+// (context cancel, then conn.Close, then nc.Close, then server Shutdown), so a
+// late read returns context.Canceled or, in the narrow window after the
+// connection closes, a connection-closed error. Treat BOTH as "no keys" (return
+// empty) rather than failing — a require.NoError fired from a goroutine after the
+// test completed runs t.FailNow() out of band and misattributes the failure to the
+// NEXT test in the package (the CI-flaky failure). Any other error is still a real
+// fault.
 func (h *harness) serviceOutcomes(applicantID string) (handles []string) {
 	keys, err := h.conn.KVListKeys(h.ctx, bootstrap.CoreKVBucket)
+	if errors.Is(err, context.Canceled) || substrate.IsConnectionError(err) {
+		return nil
+	}
 	require.NoError(h.t, err)
 	seen := map[string]bool{}
 	for _, k := range keys {

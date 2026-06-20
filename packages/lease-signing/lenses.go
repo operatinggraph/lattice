@@ -1,6 +1,10 @@
 package leasesigning
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/asolgan/lattice/internal/pkgmgr"
+)
 
 // Lenses returns the package's Lens declarations: the single
 // `leaseApplicationComplete` actorAggregate convergence lens (Contract #10
@@ -44,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "applicant", "entityKey", "freshUntil"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "applicant", "entityKey", "freshUntil", "inflight_bgcheck", "inflight_payment", "maxretries_bgcheck", "maxretries_payment"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -123,10 +127,48 @@ func Lenses() []pkgmgr.LensSpec {
 //     projection one-row-per-anchor (guardOutputKeyCollision stays satisfied).
 //     The single no-WHERE providedTo fan above still drives the missing_* counts.
 //
+// DISPATCH SUPPRESSION — the per-gap inflight_<g> companion + maxretries_<g> cap.
+//
+//	inflight_<g> is a §10.2 BodyColumn Weaver reads as a dispatch-suppression
+//	companion of the gap missing_<g> (the prefix-swap convention, like freshUntil):
+//	while it is true Weaver does NOT (re-)dispatch the externalTask, but the gap
+//	stays missing_<g>=true / violating — only re-dispatch is suppressed. It is
+//	counted on the SAME single no-WHERE providedTo fan as the missing_* counts, so
+//	it adds no filtered optional that could drop the anchor.
+//
+//	- inflight_<g> — a call of that family is legitimately in flight: a service
+//	  instance with a .dispatch marker present (inst.dispatch.data.vendorRef <>
+//	  null — the bridge wrote .dispatch on a Pending Execute, and vendorRef is true
+//	  iff the .dispatch aspect exists) and NO .outcome yet (status = null — the
+//	  create-only outcome has not landed). The predicate is presence-based, not
+//	  deadline-bounded: an in-flight call is one whose dispatch landed and whose
+//	  outcome has not, regardless of its give-up horizon. A dead/slow bridge that
+//	  never posts the timeout outcome therefore keeps inflight_<g>=true rather than
+//	  flipping it false at the deadline — closing the double-dispatch window where
+//	  Weaver would re-call the vendor while the original call is still pending.
+//	  Re-dispatch resumes only when the call resolves: a failed outcome lands
+//	  (status != null) → inflight_<g> false → Weaver dispatches a fresh call
+//	  (a new claim vertex / vendorRef — never a silent resubmit of the same one).
+//	- maxretries_<g> — the per-gap retry cap, a CONSTANT integer column baked from
+//	  retry_budget.go (maxBgcheckRetries / maxPaymentRetries) onto every row. The
+//	  budget itself is NOT a lens predicate (a lifetime failed-count never resets on
+//	  success): Weaver keeps a per-(target, entity, gap) dispatch-count in
+//	  weaver-state, reads this cap off the row, and stops auto-dispatching once the
+//	  count reaches it — the operator-visible "needs human escalation" terminal. The
+//	  count is deleted when the gap closes, so a later renewal starts a fresh budget.
+//	  Keeping the cap a package-owned column (like freshUntil) leaves the policy in
+//	  the package with no contract change.
+//
 // '= null' (not IS NULL) is the full engine's null test (ruleengine/full
 // executor.go equalsAny treats null = null as true and any value = null as
 // false). Do not "correct" it to unsupported IS NULL.
-const leaseApplicationCompleteSpec = `
+//
+// leaseApplicationCompleteSpec is built once at package init: the retry caps
+// (maxBgcheckRetries / maxPaymentRetries) bake into the constant maxretries_<g>
+// columns Weaver bounds its dispatch-count against, the §10.2 "the policy lives in
+// the cypher" convention (same posture as bgcheckFreshnessWindow). The cypher
+// carries no literal '%'.
+var leaseApplicationCompleteSpec = fmt.Sprintf(`
 MATCH (app:leaseapp {key: $actorKey})
 OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (id)<-[:providedTo]-(inst:service)
@@ -137,7 +179,9 @@ WITH
   app.signature.data.signedAt AS signedAt,
   id.ssn.data.value AS ssnVal,
   count(DISTINCT CASE WHEN inst.family.data.value = 'backgroundCheck' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.key ELSE null END) AS freshBgComplete,
-  count(DISTINCT CASE WHEN inst.family.data.value = 'payment' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete
+  count(DISTINCT CASE WHEN inst.family.data.value = 'payment' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete,
+  count(DISTINCT CASE WHEN inst.family.data.value = 'backgroundCheck' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS bgInflight,
+  count(DISTINCT CASE WHEN inst.family.data.value = 'payment' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS payInflight
 OPTIONAL MATCH (applicantNode)<-[:providedTo]-(bg:service)
   WHERE bg.family.data.value = 'backgroundCheck' AND bg.outcome.data.status = 'completed' AND bg.outcome.data.validUntil > $now
 RETURN
@@ -149,5 +193,9 @@ RETURN
   (freshBgComplete = 0)  AS missing_bgcheck,
   (payComplete = 0)      AS missing_payment,
   (signedAt = null)      AS missing_signature,
+  (bgInflight > 0)       AS inflight_bgcheck,
+  (payInflight > 0)      AS inflight_payment,
+  %d                     AS maxretries_bgcheck,
+  %d                     AS maxretries_payment,
   ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null)) AS violating
-`
+`, maxBgcheckRetries, maxPaymentRetries)

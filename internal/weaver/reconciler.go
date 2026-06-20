@@ -117,12 +117,16 @@ func (s *sweeper) pass(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if strings.HasSuffix(key, controlKeySuffix) {
-			// The `<targetId>.__control` dispatch-skip marker is not a
-			// §10.3 mark — it has no <entityId>.<gapColumn> tail, so
-			// splitMarkKey would reject it as corrupt. It is reserved and
-			// engine-owned (Disable/Enable/Revoke write it directly); the sweep
-			// never enumerates, reclaims, or deletes it.
+		if strings.HasSuffix(key, controlKeySuffix) || strings.HasSuffix(key, countKeySuffix) {
+			// Neither the `<targetId>.__control` dispatch-skip marker nor a
+			// `…__count` retry-budget dispatch-count is a §10.3 mark — the
+			// control marker has no <entityId>.<gapColumn> tail and the count has
+			// a 4th segment, so splitMarkKey would reject each as corrupt. Both
+			// are reserved and engine-owned (the control marker via
+			// Disable/Enable/Revoke; the count via fireEpisode/reclaim increment
+			// and clearClosedMarks reset). The sweep never enumerates, reclaims,
+			// or deletes either; the count's gap-close reset and its long TTL
+			// backstop are its only lifecycle.
 			continue
 		}
 		s.sweepMark(ctx, key)
@@ -263,6 +267,18 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 		return
 	}
 
+	if e.gapSuppressed(ctx, targetID, entityID, row, gapColumn) {
+		// Mirrors lane-1's dispatch-suppression gate: a gap with inflight_<g> set
+		// or whose weaver-state dispatch-count has reached maxretries_<g> must NOT
+		// be re-dispatched. This is the LOAD-BEARING skip — the mark-lease expiry →
+		// reclaim is the actual re-dispatch path for a long-pending external call
+		// (the lane-1 skip alone does not stop the sweep). Leave the expired mark;
+		// it is cleared by level reconcile once the gap closes, and the TTL
+		// backstop bounds it if not. The gap stays violating throughout — only
+		// re-dispatch is suppressed.
+		return
+	}
+
 	entityKey, _ := row["entityKey"].(string)
 	if entityKey == "" {
 		// Without the §10.2 entityKey echo the remediation cannot name its
@@ -305,6 +321,11 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	e.logger.Warn("weaver sweep: mark reclaimed",
 		"targetId", targetID, "entityId", entityID, "gap", gapColumn,
 		"action", rec.Action, "reason", sweepReasonLeaseExpired)
+	// A reclaim IS a fresh dispatch (a new episode against a re-armed mark), so it
+	// advances the chain's retry-budget dispatch-count exactly like the lane-1
+	// CAS-create path — this is how a multi-attempt chain driven by sweep
+	// re-dispatches (not just CDC touches) accumulates toward maxretries_<g>.
+	e.bumpDispatchCount(ctx, targetID, entityID, gapColumn)
 	// Fresh episode: the requestId derives from the replace revision. A
 	// publish failure here leaves the fresh mark holding a live lease, so the
 	// retry is real — the sweep re-attempts at that lease's expiry, and a
