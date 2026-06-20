@@ -33,8 +33,15 @@ type externalEvent struct {
 	// Params are adapter call inputs (free-form JSON; the Fake* adapters ignore
 	// them).
 	Params json.RawMessage `json:"params"`
-	// ReplyOp is the result-op type the bridge posts back.
+	// ReplyOp is the result-op type the bridge posts back on a terminal
+	// (Resolved) outcome.
 	ReplyOp string `json:"replyOp"`
+	// DispatchOp is the op the bridge posts on a Pending outcome — it records the
+	// pending marker (the vendor reference) and posts NO terminal outcome (the
+	// token stays parked). Empty means the externalTask is sync-only: a Pending
+	// adapter for it is a config error (handled like a missing adapter), never a
+	// hot Nak loop.
+	DispatchOp string `json:"dispatchOp"`
 	// IdempotencyKey is = InstanceKey (the adapter's dedup key). When present it
 	// is preferred; an empty value falls back to InstanceKey.
 	IdempotencyKey string `json:"idempotencyKey"`
@@ -80,9 +87,14 @@ func (ev externalEvent) externalRefValue() string {
 //   - adapter error (or a contained panic) → NakWithDelay + a Health issue
 //     (bounded-cadence redelivery on the same idempotencyKey; the adapter
 //     dedups, so a re-attempt is safe).
+//   - adapter returns Pending → post the dispatchOp (record the pending marker;
+//     the token stays parked, NO replyOp) → Ack. A Pending with no dispatchOp
+//     configured is a config error (a sync-only externalTask got a Pending
+//     adapter): Ack + a Health issue (never a hot Nak loop), mirroring the
+//     unregistered-adapter handling.
 //   - publish failure → NakWithDelay (the deterministic requestId makes the
 //     re-publish idempotent — it collapses on the Contract #4 tracker).
-//   - success → Ack (the ack is the commit point).
+//   - success (Resolved) → Ack (the ack is the commit point).
 func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) substrate.Decision {
 	if len(msg.Body) == 0 {
 		return substrate.Ack
@@ -143,7 +155,7 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 		return substrate.Ack
 	}
 
-	result, execErr := executeAdapter(ctx, adapter, Request{
+	dispatch, execErr := executeAdapter(ctx, adapter, Request{
 		IdempotencyKey: instanceKey,
 		Operation:      ev.ReplyOp,
 		Subject:        instanceKey,
@@ -157,14 +169,18 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 			fmt.Sprintf("adapter %q failed (transient; redelivering on the same idempotencyKey): %v", ev.Adapter, execErr))
 		return substrate.NakWithDelay
 	}
-	// A success clears any prior transient-failure / missing issue for this
-	// adapter (the condition resolved).
+	// A success (Resolved or Pending) clears any prior transient-failure / missing
+	// issue for this adapter (the condition resolved).
 	e.issues.clear("adapter:" + ev.Adapter)
+
+	if dispatch.Disposition == Pending {
+		return e.handlePending(ctx, ev, instanceKey, dispatch.Ref)
+	}
 
 	payload := map[string]any{
 		"externalRef": ev.externalRefValue(),
-		"status":      string(result.Status),
-		"result":      result.Detail,
+		"status":      string(dispatch.Result.Status),
+		"result":      dispatch.Result.Detail,
 	}
 	if err := e.act.submit(ctx, replyReqID, ev.ReplyOp, payload); err != nil {
 		e.logger.Error("bridge: publish replyOp failed; nak with delay",
@@ -178,6 +194,49 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 
 	e.logger.Info("bridge replyOp posted",
 		"instanceKey", instanceKey, "adapter", ev.Adapter, "replyOp", ev.ReplyOp, "requestId", replyReqID)
+	return substrate.Ack
+}
+
+// handlePending records the pending marker for an external call the adapter
+// submitted but has not yet resolved (a Pending Dispatch). It posts the
+// dispatchOp — payload {externalRef, vendorRef} — under a deterministic
+// dispatch-op requestId (so a redelivered Pending event collapses on the
+// Contract #4 tracker, exactly one create-only .dispatch marker), posts NO
+// replyOp and writes NO .outcome (the Loom token stays parked), and Acks.
+//
+// A Pending outcome for an externalTask with no dispatchOp configured is a config
+// error: a sync-only task was wired to an adapter that went Pending, and there is
+// nowhere to record the marker. It is handled exactly like an unregistered
+// adapter — Ack + a Health issue, never a hot Nak loop (redelivery cannot fix a
+// missing dispatchOp). A publish failure NakWithDelays (the deterministic
+// requestId makes the re-publish idempotent).
+func (e *Engine) handlePending(ctx context.Context, ev externalEvent, instanceKey, vendorRef string) substrate.Decision {
+	if ev.DispatchOp == "" {
+		e.logger.Error("bridge: adapter returned Pending but the externalTask has no dispatchOp; ack + health issue (errConfig)",
+			"adapter", ev.Adapter, "instanceKey", instanceKey)
+		e.issues.set("dispatch:"+ev.Adapter, severityError, codeDispatchOpMissing,
+			fmt.Sprintf("adapter %q returned Pending but no dispatchOp is configured for the event (config error; redelivery cannot fix it)", ev.Adapter))
+		return substrate.Ack
+	}
+
+	dispatchReqID := deriveDispatchRequestID(instanceKey)
+	payload := map[string]any{
+		"externalRef": ev.externalRefValue(),
+		"vendorRef":   vendorRef,
+	}
+	if err := e.act.submit(ctx, dispatchReqID, ev.DispatchOp, payload); err != nil {
+		e.logger.Error("bridge: publish dispatchOp failed; nak with delay",
+			"requestId", dispatchReqID, "instanceKey", instanceKey, "adapter", ev.Adapter, "err", err)
+		e.issues.set("publish:"+ev.Adapter, severityWarning, codeReplyPublishFail,
+			fmt.Sprintf("failed to publish dispatchOp for adapter %q (transient; redelivering): %v", ev.Adapter, err))
+		return substrate.NakWithDelay
+	}
+	e.issues.clear("publish:" + ev.Adapter)
+	e.issues.clear("dispatch:" + ev.Adapter)
+	e.metrics.incPending()
+
+	e.logger.Info("bridge dispatchOp posted (pending)",
+		"instanceKey", instanceKey, "adapter", ev.Adapter, "dispatchOp", ev.DispatchOp, "vendorRef", vendorRef, "requestId", dispatchReqID)
 	return substrate.Ack
 }
 
@@ -219,10 +278,10 @@ func (e *Engine) resultAlreadyLanded(ctx context.Context, replyReqID string) (bo
 // safety boundary, not the adapter: a panic inside Execute is recovered and
 // returned as an ordinary error, so the event is re-driven (NakWithDelay) on the
 // same idempotencyKey instead of crashing the dispatch goroutine.
-func executeAdapter(ctx context.Context, adapter Adapter, req Request) (result Result, err error) {
+func executeAdapter(ctx context.Context, adapter Adapter, req Request) (dispatch Dispatch, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			result = Result{}
+			dispatch = Dispatch{}
 			err = fmt.Errorf("bridge: adapter panicked during execute: %v", r)
 		}
 	}()

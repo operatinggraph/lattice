@@ -52,6 +52,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SignLease", Scope: "any"},
 			{OperationType: "CreateLeaseServiceInstance", Scope: "any"},
 			{OperationType: "RecordLeaseServiceOutcome", Scope: "any"},
+			{OperationType: "RecordServiceDispatch", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -329,6 +330,10 @@ func TestLeaseServiceInstance_MintsClaimVertex_EmitsExternalEvent(t *testing.T) 
 	if got, _ := ev["replyOp"].(string); got != "RecordLeaseServiceOutcome" {
 		t.Fatalf("external event replyOp = %q, want RecordLeaseServiceOutcome", got)
 	}
+	// The dispatchOp seam: the bridge posts this op if its adapter returns Pending.
+	if got, _ := ev["dispatchOp"].(string); got != "RecordServiceDispatch" {
+		t.Fatalf("external event dispatchOp = %q, want RecordServiceDispatch", got)
+	}
 }
 
 // findEmittedEvent reads the committed transactional-outbox aspect for an op's
@@ -362,6 +367,27 @@ func eventClasses(evs processor.EventList) []string {
 		out = append(out, e.EventType)
 	}
 	return out
+}
+
+// assertNoEmittedEvent fails if an op's transactional-outbox aspect contains any
+// event of the given class — the negative of findEmittedEvent (asserting a
+// completion signal is NOT emitted on a pending dispatch).
+func assertNoEmittedEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, requestID, class string) {
+	t.Helper()
+	outboxKey := processor.OutboxAspectKey(requestID)
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, outboxKey)
+	if err != nil {
+		t.Fatalf("read outbox aspect %s: %v", outboxKey, err)
+	}
+	ob, err := processor.ParseOutboxAspect(entry.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect %s: %v", outboxKey, err)
+	}
+	for _, e := range ob.Data.Events {
+		if e.EventType == class {
+			t.Fatalf("op %s must NOT emit a %s event, but it did (events: %v)", requestID, class, eventClasses(ob.Data.Events))
+		}
+	}
 }
 
 // TestLeaseServiceReply_RecordsOutcome_EmitsExternalTaskCompleted (test 4 — THE
@@ -472,6 +498,109 @@ func TestLeaseServiceReply_RecordsOutcome_EmitsExternalTaskCompleted(t *testing.
 	}
 	testutil.PublishOp(t, conn, reply2)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestLeaseServiceDispatch_RecordsPendingMarker_NoCompletion: the bridge submits
+// RecordServiceDispatch when its adapter returns Pending — payload
+// {externalRef, vendorRef} with NO ContextHint.Reads (the bridge's actuator sets
+// none). It must commit read-free; the .dispatch aspect is written
+// {vendorRef, submittedAt} (D5 root {}); NO .outcome aspect is written; and it
+// emits NO orchestration.externalTaskCompleted (the task is not done — the token
+// stays parked), only the service.dispatchRecorded provenance. A second dispatch
+// for the same handle is rejected by the create-only .dispatch guard.
+func TestLeaseServiceDispatch_RecordsPendingMarker_NoCompletion(t *testing.T) {
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "dispatchop")
+
+	handle := "pendHwK4rqZbVnCdLxYj"
+	instKey := "vtx.service." + handle
+	vendorRef := "vendor-ref-pending-001"
+
+	reqID := testutil.GenReqID("dispatchRec01")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordServiceDispatch",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-06-19T10:00:00Z",
+		Class:         "leaseServiceDispatch",
+		// No Reads — exactly as the bridge submits.
+		Payload: json.RawMessage(`{"externalRef":"` + handle + `","vendorRef":"` + vendorRef + `"}`),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// (a) the .dispatch aspect — {vendorRef, submittedAt: canonical-UTC(op.submittedAt)}.
+	ddoc := readDoc(t, ctx, conn, instKey+".dispatch")
+	ddata, _ := ddoc["data"].(map[string]any)
+	if got, _ := ddata["vendorRef"].(string); got != vendorRef {
+		t.Fatalf("dispatch.vendorRef = %q, want %q", got, vendorRef)
+	}
+	if got, _ := ddata["submittedAt"].(string); got != "2026-06-19T10:00:00Z" {
+		t.Fatalf("dispatch.submittedAt = %q, want canonical 2026-06-19T10:00:00Z", got)
+	}
+
+	// (b) NO .outcome aspect — the call is pending, not terminal (the token stays parked).
+	if keyExists(t, ctx, conn, instKey+".outcome") {
+		t.Fatalf("a pending dispatch must NOT write the .outcome aspect")
+	}
+
+	// (c) D5: the claim-vertex root data stays {} (the instanceOp minted it {}; the
+	// dispatch op reconstructs the key read-free and does not touch the root).
+	if keyExists(t, ctx, conn, instKey) {
+		instDoc := readDoc(t, ctx, conn, instKey)
+		if d, _ := instDoc["data"].(map[string]any); len(d) != 0 {
+			t.Fatalf("claim vertex root data must stay minimal ({}), got %v", d)
+		}
+	}
+
+	// (d) NO orchestration.externalTaskCompleted — Loom must NOT close the token on
+	// a dispatch. Only the service.dispatchRecorded provenance is emitted.
+	assertNoEmittedEvent(t, ctx, conn, reqID, "orchestration.externalTaskCompleted")
+	prov := findEmittedEvent(t, ctx, conn, reqID, "service.dispatchRecorded")
+	if got, _ := prov["vendorRef"].(string); got != vendorRef {
+		t.Fatalf("service.dispatchRecorded vendorRef = %q, want %q", got, vendorRef)
+	}
+
+	// (e) a second dispatch for the same handle is rejected by the create-only
+	// .dispatch conflict (the once-only guarantee at the DDL layer). The bridge
+	// submits no Reads (mirrored here), so the rejection is the batch conflict on
+	// the already-existing .dispatch key.
+	dispatch2 := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("dispatchRec02"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordServiceDispatch",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-06-19T11:00:00Z",
+		Class:         "leaseServiceDispatch",
+		Payload:       json.RawMessage(`{"externalRef":"` + handle + `","vendorRef":"vendor-ref-pending-002"}`),
+	}
+	testutil.PublishOp(t, conn, dispatch2)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestLeaseServiceDispatch_VendorRefRequired_Rejected: vendorRef is REQUIRED. A
+// dispatch with no vendorRef is rejected (InvalidArgument), read-free, and writes
+// no .dispatch aspect.
+func TestLeaseServiceDispatch_VendorRefRequired_Rejected(t *testing.T) {
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "dispatch-vendorref-required")
+
+	handle := "missVendorRefHandl9k"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("dispatchMiss1"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordServiceDispatch",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-06-19T12:00:00Z",
+		Class:         "leaseServiceDispatch",
+		Payload:       json.RawMessage(`{"externalRef":"` + handle + `"}`),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, "vtx.service."+handle+".dispatch") {
+		t.Fatalf("a rejected dispatch must not write the .dispatch aspect")
+	}
 }
 
 // TestLeaseServiceReply_FailedStatus_RecordsFailedOutcome: the bridge reply

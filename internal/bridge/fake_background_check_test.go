@@ -15,8 +15,11 @@ func TestFakeBackgroundCheck_ClearedStatusCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if res.Status != bridge.OutcomeCompleted {
-		t.Fatalf("Status = %q, want %q", res.Status, bridge.OutcomeCompleted)
+	if res.Disposition != bridge.Resolved {
+		t.Fatalf("a synchronous check must return Resolved, got %v", res.Disposition)
+	}
+	if res.Result.Status != bridge.OutcomeCompleted {
+		t.Fatalf("Status = %q, want %q", res.Result.Status, bridge.OutcomeCompleted)
 	}
 }
 
@@ -32,15 +35,15 @@ func TestFakeBackgroundCheck_DeclineIsTerminalFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a decline is a terminal verdict, not a transient error: %v", err)
 	}
-	if res.Status != bridge.OutcomeFailed {
-		t.Fatalf("Status = %q, want %q", res.Status, bridge.OutcomeFailed)
+	if res.Result.Status != bridge.OutcomeFailed {
+		t.Fatalf("Status = %q, want %q", res.Result.Status, bridge.OutcomeFailed)
 	}
 
 	res2, err := a.Execute(context.Background(), req)
 	if err != nil {
 		t.Fatalf("repeat Execute: %v", err)
 	}
-	if res2 != res {
-		t.Fatalf("repeat decline returned a different Result: %+v vs %+v", res2, res)
+	if res2.Result != res.Result {
+		t.Fatalf("repeat decline returned a different Result: %+v vs %+v", res2.Result, res.Result)
 	}
 }

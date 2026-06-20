@@ -18,6 +18,9 @@ func TestFakeStripe_IdempotentOnRepeatedKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute first: %v", err)
 	}
+	if first.Disposition != bridge.Resolved {
+		t.Fatalf("a synchronous charge must return Resolved, got %v", first.Disposition)
+	}
 	if got := a.SideEffects("claim-1"); got != 1 {
 		t.Fatalf("after first Execute: side effects = %d, want 1", got)
 	}
@@ -29,8 +32,8 @@ func TestFakeStripe_IdempotentOnRepeatedKey(t *testing.T) {
 	if got := a.SideEffects("claim-1"); got != 1 {
 		t.Fatalf("after repeat Execute: side effects = %d, want 1 (no second charge)", got)
 	}
-	if first != second {
-		t.Fatalf("repeat Execute returned a different Result: %+v vs %+v", first, second)
+	if first.Result != second.Result {
+		t.Fatalf("repeat Execute returned a different Result: %+v vs %+v", first.Result, second.Result)
 	}
 }
 
@@ -71,7 +74,7 @@ func TestFakeStripe_FailNextChargesNothingThenRetrySucceedsOnce(t *testing.T) {
 	if got := a.SideEffects("claim-x"); got != 1 {
 		t.Fatalf("after retry: side effects = %d, want exactly 1", got)
 	}
-	if res.Detail == "" {
+	if res.Result.Detail == "" {
 		t.Fatal("successful charge must carry a confirmation Detail")
 	}
 }
@@ -85,8 +88,8 @@ func TestFakeStripe_HappyPathStatusCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if res.Status != bridge.OutcomeCompleted {
-		t.Fatalf("Status = %q, want %q", res.Status, bridge.OutcomeCompleted)
+	if res.Result.Status != bridge.OutcomeCompleted {
+		t.Fatalf("Status = %q, want %q", res.Result.Status, bridge.OutcomeCompleted)
 	}
 }
 
@@ -103,8 +106,8 @@ func TestFakeStripe_DeclineIsTerminalFailureNoCharge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a decline is a terminal verdict, not a transient error: %v", err)
 	}
-	if res.Status != bridge.OutcomeFailed {
-		t.Fatalf("Status = %q, want %q", res.Status, bridge.OutcomeFailed)
+	if res.Result.Status != bridge.OutcomeFailed {
+		t.Fatalf("Status = %q, want %q", res.Result.Status, bridge.OutcomeFailed)
 	}
 	if got := a.SideEffects("k-declined"); got != 0 {
 		t.Fatalf("a declined charge must record NO side-effect, got %d", got)
@@ -115,8 +118,8 @@ func TestFakeStripe_DeclineIsTerminalFailureNoCharge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repeat Execute: %v", err)
 	}
-	if res2 != res {
-		t.Fatalf("repeat decline returned a different Result: %+v vs %+v", res2, res)
+	if res2.Result != res.Result {
+		t.Fatalf("repeat decline returned a different Result: %+v vs %+v", res2.Result, res.Result)
 	}
 	if got := a.SideEffects("k-declined"); got != 0 {
 		t.Fatalf("repeat decline must still record NO side-effect, got %d", got)

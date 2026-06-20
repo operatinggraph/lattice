@@ -20,19 +20,21 @@ const healthVersion = "0.1.0"
 const defaultHeartbeatEvery = 10 * time.Second
 
 // Health issue codes the dispatch path raises (Contract #5 §5.2). An
-// unregistered adapter / unparseable envelope is errConfig (severity error,
-// redelivery can never fix it); a transient adapter failure, a replyOp publish
-// failure, and a skip-probe Core KV failure are warnings (redelivery will
-// re-drive them on the same idempotencyKey, so a sustained outage is observable
-// without being treated as fatal).
+// unregistered adapter / unparseable envelope / a Pending outcome with no
+// dispatchOp configured is errConfig (severity error, redelivery can never fix
+// it); a transient adapter failure, a replyOp/dispatchOp publish failure, and a
+// skip-probe Core KV failure are warnings (redelivery will re-drive them on the
+// same idempotencyKey, so a sustained outage is observable without being treated
+// as fatal).
 const (
-	codeAdapterMissing   = "BridgeAdapterMissing"
-	codeAdapterFailed    = "BridgeAdapterFailed"
-	codeEventUnparseable = "BridgeEventUnparseable"
-	codeReplyPublishFail = "BridgeReplyPublishFailed"
-	codeSkipProbeFailed  = "BridgeSkipProbeFailed"
-	severityError        = "error"
-	severityWarning      = "warning"
+	codeAdapterMissing    = "BridgeAdapterMissing"
+	codeAdapterFailed     = "BridgeAdapterFailed"
+	codeEventUnparseable  = "BridgeEventUnparseable"
+	codeReplyPublishFail  = "BridgeReplyPublishFailed"
+	codeSkipProbeFailed   = "BridgeSkipProbeFailed"
+	codeDispatchOpMissing = "BridgeDispatchOpMissing"
+	severityError         = "error"
+	severityWarning       = "warning"
 )
 
 // bridgeHealthDoc is the Contract #5 §5.2 heartbeat document the bridge writes
@@ -346,10 +348,14 @@ func (h *heartbeater) key() string {
 }
 
 // dispatchMetrics holds the bridge's per-process dispatch counters surfaced on
-// the Contract #5 heartbeat (metrics.dispatched / skipped / adapterErrors).
+// the Contract #5 heartbeat (metrics.dispatched / pending / skipped /
+// adapterErrors). dispatched counts terminal (Resolved) replyOp posts; pending
+// counts pending-marker (dispatchOp) posts for calls the vendor has not yet
+// resolved.
 type dispatchMetrics struct {
 	mu            sync.Mutex
 	dispatched    int64
+	pending       int64
 	skipped       int64
 	adapterErrors int64
 }
@@ -357,6 +363,7 @@ type dispatchMetrics struct {
 func newDispatchMetrics() *dispatchMetrics { return &dispatchMetrics{} }
 
 func (m *dispatchMetrics) incDispatched()    { m.mu.Lock(); m.dispatched++; m.mu.Unlock() }
+func (m *dispatchMetrics) incPending()       { m.mu.Lock(); m.pending++; m.mu.Unlock() }
 func (m *dispatchMetrics) incSkipped()       { m.mu.Lock(); m.skipped++; m.mu.Unlock() }
 func (m *dispatchMetrics) incAdapterErrors() { m.mu.Lock(); m.adapterErrors++; m.mu.Unlock() }
 
@@ -365,6 +372,7 @@ func (m *dispatchMetrics) snapshot() map[string]any {
 	defer m.mu.Unlock()
 	return map[string]any{
 		"dispatched":    m.dispatched,
+		"pending":       m.pending,
 		"skipped":       m.skipped,
 		"adapterErrors": m.adapterErrors,
 	}

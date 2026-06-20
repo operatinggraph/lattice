@@ -72,35 +72,43 @@ func (f *FakeStripe) FailUntil(n int) {
 // FailNext arms the adapter to hard-fail exactly the next Execute call.
 func (f *FakeStripe) FailNext() { f.FailUntil(1) }
 
-// Execute performs the (mocked) charge exactly once per idempotencyKey. While
-// the failure mode is armed it returns an error WITHOUT charging (no side-effect,
-// no memoized Result). A Request whose Subject is StripeDeclineSubject returns a
-// terminal OutcomeFailed (err == nil) WITHOUT charging (no side-effect) and
-// memoizes that verdict. Otherwise the first call for a key records the
-// side-effect and a deterministic OutcomeCompleted Result; any later call with
-// the same key returns that Result and performs NO further side-effect. No
-// network, no real I/O.
-func (f *FakeStripe) Execute(_ context.Context, req Request) (Result, error) {
+// Execute performs the (mocked) charge exactly once per idempotencyKey. It is
+// synchronous: a successful or declined call returns a Resolved Dispatch (a
+// terminal Result inline, never Pending). While the failure mode is armed it
+// returns an error WITHOUT charging (no side-effect, no memoized Result). A
+// Request whose Subject is StripeDeclineSubject returns a terminal OutcomeFailed
+// (err == nil) WITHOUT charging (no side-effect) and memoizes that verdict.
+// Otherwise the first call for a key records the side-effect and a deterministic
+// OutcomeCompleted Result; any later call with the same key returns that Result
+// and performs NO further side-effect. No network, no real I/O.
+func (f *FakeStripe) Execute(_ context.Context, req Request) (Dispatch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failRemaining > 0 {
 		f.failRemaining--
-		return Result{}, fmt.Errorf("bridge: FakeStripe injected failure (no charge performed) for key %s", req.IdempotencyKey)
+		return Dispatch{}, fmt.Errorf("bridge: FakeStripe injected failure (no charge performed) for key %s", req.IdempotencyKey)
 	}
 	if res, seen := f.results[req.IdempotencyKey]; seen {
-		return res, nil
+		return Dispatch{Disposition: Resolved, Result: res}, nil
 	}
 	if req.Subject == StripeDeclineSubject {
 		// A decline is a terminal verdict, not a charge: no side-effect, memoized
 		// so a redelivery replays the same Failed outcome.
 		res := Result{Status: OutcomeFailed, Detail: "charge declined for " + req.Subject}
 		f.results[req.IdempotencyKey] = res
-		return res, nil
+		return Dispatch{Disposition: Resolved, Result: res}, nil
 	}
 	f.calls[req.IdempotencyKey]++
 	res := Result{Status: OutcomeCompleted, Detail: "charge confirmed for " + req.Subject}
 	f.results[req.IdempotencyKey] = res
-	return res, nil
+	return Dispatch{Disposition: Resolved, Result: res}, nil
+}
+
+// Poll is unreachable for this synchronous adapter (Execute never returns
+// Pending, so the bridge never holds a Ref to poll). It returns a clear error so
+// a wiring mistake surfaces rather than silently resolving.
+func (f *FakeStripe) Poll(_ context.Context, ref string) (Dispatch, error) {
+	return Dispatch{}, fmt.Errorf("bridge: FakeStripe is synchronous: Poll unsupported (ref %q)", ref)
 }
 
 // SideEffects reports how many times the real charge was performed for

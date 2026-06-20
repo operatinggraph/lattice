@@ -56,6 +56,9 @@ func TestFakeBackgroundCheck_IdempotentOnRepeatedKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute first: %v", err)
 	}
+	if first.Disposition != bridge.Resolved {
+		t.Fatalf("a synchronous adapter must return a Resolved disposition, got %v", first.Disposition)
+	}
 	if got := a.SideEffects("claim-1"); got != 1 {
 		t.Fatalf("after first Execute: side effects = %d, want 1", got)
 	}
@@ -67,8 +70,8 @@ func TestFakeBackgroundCheck_IdempotentOnRepeatedKey(t *testing.T) {
 	if got := a.SideEffects("claim-1"); got != 1 {
 		t.Fatalf("after repeat Execute: side effects = %d, want 1 (no second side-effect)", got)
 	}
-	if first != second {
-		t.Fatalf("repeat Execute returned a different Result: %+v vs %+v", first, second)
+	if first.Result != second.Result {
+		t.Fatalf("repeat Execute returned a different Result: %+v vs %+v", first.Result, second.Result)
 	}
 }
 

@@ -12,6 +12,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     submits the externalTask instanceOp.
 //   - RecordLeaseServiceOutcome — the bridge's service actor
 //     (operator-equivalent) submits the replyOp.
+//   - RecordServiceDispatch — the bridge's service actor (operator-equivalent)
+//     submits the dispatchOp on a Pending adapter outcome.
 //   - SignLease — the assignTask target. The applicant performs it at runtime
 //     authorized by the §10.7 ephemeral task grant (scoped to the specific
 //     application); a standing operator grant covers the direct-write /
@@ -39,6 +41,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "RecordServiceDispatch",
+			Scope:         "any",
+			Note:          "Grants the operator (the bridge's service actor) the right to submit the externalTask dispatchOp on a Pending outcome.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "SignLease",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit SignLease; the applicant signs via the ephemeral task grant (§10.7).",
@@ -56,15 +64,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     resolves forOperation to this op-meta live at submit (Loom's opMetaKey).
 //     identity-domain ships the op but no op-meta for it, so the onboarding
 //     pattern declares it here.
-//   - CreateLeaseServiceInstance / RecordLeaseServiceOutcome — declared for
-//     discoverability + the manifest cross-check. The engine resolves the
-//     externalTask instanceOp/replyOp from the step strings directly (not via
-//     forOperation), so these are hygiene, not strictly required.
+//   - CreateLeaseServiceInstance / RecordLeaseServiceOutcome /
+//     RecordServiceDispatch — declared for discoverability + the manifest
+//     cross-check. The engine resolves the externalTask instanceOp/replyOp from
+//     the step strings directly (and the bridge selects the dispatchOp from the
+//     event body), not via forOperation, so these are hygiene, not strictly
+//     required.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "SignLease"},
 		{OperationType: "RecordIdentityPII"},
 		{OperationType: "CreateLeaseServiceInstance"},
 		{OperationType: "RecordLeaseServiceOutcome"},
+		{OperationType: "RecordServiceDispatch"},
 	}
 }

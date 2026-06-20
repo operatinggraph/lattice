@@ -256,11 +256,15 @@ def execute(state, op):
         # Emit the external.<adapter> event off this op's transactional outbox.
         # The body shape matches the bridge's externalEvent reader: the bare
         # handle is the opaque correlation token (instanceKey == externalRef ==
-        # idempotencyKey by construction).
+        # idempotencyKey by construction). dispatchOp is the package-local op the
+        # bridge posts if its adapter returns Pending (it records the .dispatch
+        # marker); it is the matched pair of replyOp, which the bridge posts on a
+        # terminal outcome.
         event_data = {
             "instanceKey":    handle,
             "adapter":        adapter,
             "replyOp":        reply_op,
+            "dispatchOp":     "RecordServiceDispatch",
             "externalRef":    handle,
             "idempotencyKey": handle,
             "params":         {"family": fam},
@@ -400,3 +404,85 @@ def execute(state, op):
 
     fail("leaseServiceReply DDL: unknown operationType: " + ot)
 `, bgcheckFreshnessWindow)
+
+// leaseServiceDispatchDDLScript is the externalTask dispatchOp the bridge submits
+// when its adapter returns Pending (the external call was submitted but has not
+// resolved yet). The bridge posts {externalRef, vendorRef}; this op reconstructs
+// the claim vertex key from the bare handle and writes a create-only .dispatch
+// aspect {vendorRef, submittedAt} on it — the pending marker. It does NOT write
+// the create-only .outcome aspect and does NOT emit
+// orchestration.externalTaskCompleted: the externalTask is NOT done, so Loom's
+// token stays parked. The .dispatch and .outcome aspects are deliberately
+// separate (.outcome is the FR58 once-only terminal guard; "pending" is a
+// distinct state the lens/Weaver can read without colliding with it).
+//
+// Like the replyOp the bridge submits this with no ContextHint.Reads, so the op
+// reads NOTHING from state: the reconstructed vtx.service.<handle> vertex is
+// unhydrated on the live path. The once-only guarantee is the create-only
+// .dispatch write itself — a redelivered Pending conflicts on the existing
+// .dispatch key and the batch is rejected (atop the bridge's deterministic
+// deriveDispatchRequestID, which already collapses most redeliveries at the
+// Contract #4 tracker). submittedAt is the op's own timestamp, normalized to
+// canonical UTC for a sound lexical compare (no clock read — read-free,
+// deterministic).
+const leaseServiceDispatchDDLScript = `
+def make_aspect(vtx_key, local_name, cls, data):
+    return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def required_string(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": required non-empty string")
+    return v.strip()
+
+def required_bare_handle(p, name):
+    v = required_string(p, name)
+    for bad in [".", "*", ">", " ", "\t", "\n"]:
+        if bad in v:
+            fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
+    return v
+
+def execute(state, op):
+    ot = op.operationType
+    p = op.payload
+
+    if ot == "RecordServiceDispatch":
+        handle = required_bare_handle(p, "externalRef")
+        # Reconstruct the claim-vertex key from the bare handle (the matched-pair
+        # type the instanceOp chose). The bare-handle validation needs no state read.
+        inst_key = "vtx.service." + handle
+
+        # The vendor's opaque pending reference (the poll/webhook key the bridge
+        # got back from the adapter). Required — a Pending with no ref is meaningless.
+        vendor_ref = required_string(p, "vendorRef")
+
+        # submittedAt is the op's own timestamp, normalized to canonical UTC. The
+        # bridge supplies no timestamp; this is the dispatch instant.
+        submitted_at = time.rfc3339_utc(op.submittedAt)
+
+        # Write the .dispatch aspect {vendorRef, submittedAt} as a create-only
+        # mutation. This create-only IS the once-only guarantee: a redelivered
+        # Pending conflicts on the existing key and the batch is rejected (atop the
+        # bridge's deterministic dispatch requestId collapse). NO .outcome is
+        # written and NO orchestration.externalTaskCompleted is emitted — the task
+        # is not done, the token stays parked. The instance root, already {}, is
+        # untouched (D5).
+        mutations = [
+            make_aspect(inst_key, "dispatch", "dispatch", {"vendorRef": vendor_ref, "submittedAt": submitted_at}),
+        ]
+
+        # A provenance event marks the submit for the audit join (NOT a completion
+        # signal — Loom must NOT close the token on a dispatch).
+        events = [
+            {"class": "service.dispatchRecorded",
+             "data": {"serviceKey": inst_key, "vendorRef": vendor_ref, "submittedAt": submitted_at}},
+        ]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": inst_key}}
+
+    fail("leaseServiceDispatch DDL: unknown operationType: " + ot)
+`

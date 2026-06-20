@@ -5,10 +5,11 @@ description: |
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
   actorAggregate convergence lens (§10.2 keyColumn), the §10.8 playbook
   (triggerLoom externalTask for bgcheck/payment, assignTask SignLease,
-  triggerLoom onboarding), the externalTask instanceOp/replyOp wrapper DDLs
-  (CreateLeaseServiceInstance / RecordLeaseServiceOutcome), and the
-  backgroundCheck/collectPayment/onboarding loomPatterns. The external-call
-  outcome lives in the .outcome aspect (D5); vertex roots stay minimal.
+  triggerLoom onboarding), the externalTask instanceOp/replyOp/dispatchOp wrapper
+  DDLs (CreateLeaseServiceInstance / RecordLeaseServiceOutcome /
+  RecordServiceDispatch), and the backgroundCheck/collectPayment/onboarding
+  loomPatterns. The external-call outcome lives in the .outcome aspect and a
+  pending (async) call in the .dispatch aspect (D5); vertex roots stay minimal.
   Depends on identity-domain, service-domain, and orchestration-base.
 depends:
   - identity-domain
@@ -21,6 +22,8 @@ declares:
     - canonicalName: leaseServiceInstance
       class: meta.ddl.vertexType
     - canonicalName: leaseServiceReply
+      class: meta.ddl.vertexType
+    - canonicalName: leaseServiceDispatch
       class: meta.ddl.vertexType
   lenses:
     - canonicalName: leaseApplicationComplete
@@ -35,6 +38,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: RecordLeaseServiceOutcome
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordServiceDispatch
       scope: any
       grantsTo: [operator]
     - operationType: SignLease
@@ -55,3 +61,4 @@ declares:
     - operationType: RecordIdentityPII
     - operationType: CreateLeaseServiceInstance
     - operationType: RecordLeaseServiceOutcome
+    - operationType: RecordServiceDispatch

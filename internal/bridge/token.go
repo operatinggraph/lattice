@@ -11,6 +11,14 @@ import (
 // "", "task:", "instance:") for the same opaque value.
 const replyRequestNamespace = "bridge:reply:"
 
+// dispatchRequestNamespace prefixes the hash input for a bridge dispatch-op
+// requestId. A distinct namespace from replyRequestNamespace keeps the
+// pending-marker op id disjoint from the terminal reply-op id for the SAME opaque
+// instanceKey — both are derived for one external call, but they are two distinct
+// ops on two distinct Contract #4 trackers (the dispatch may land while the reply
+// never does), so they must never collide.
+const dispatchRequestNamespace = "bridge:dispatch:"
+
 // deriveReplyRequestID returns the deterministic result-op requestId for an
 // external call, derived solely from the opaque instanceKey. A redelivered
 // external.* event therefore yields the SAME requestId, so the re-submitted
@@ -25,6 +33,20 @@ const replyRequestNamespace = "bridge:reply:"
 // so it is a valid dot-free op requestId.
 func deriveReplyRequestID(instanceKey string) string {
 	return deriveID(replyRequestNamespace, instanceKey)
+}
+
+// deriveDispatchRequestID returns the deterministic dispatch-op requestId for an
+// external call that came back Pending, derived solely from the opaque
+// instanceKey. A redelivered external.* event therefore yields the SAME requestId,
+// so the re-submitted dispatch op collapses on the Contract #4
+// vtx.op.<requestId> tracker — exactly one create-only .dispatch marker no matter
+// how many times the Pending event is redelivered. Like deriveReplyRequestID the
+// instanceKey is opaque (its type segment, if any, is never parsed) and the
+// derivation is pure, so a restart computes the identical id and redelivery-after-
+// crash still collapses. The output is a bare NanoID (a valid dot-free op
+// requestId).
+func deriveDispatchRequestID(instanceKey string) string {
+	return deriveID(dispatchRequestNamespace, instanceKey)
 }
 
 // deriveID is the shared deterministic NanoID derivation: a stable hash over

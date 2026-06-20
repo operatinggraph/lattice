@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -38,17 +39,18 @@ func NewFakeBackgroundCheck() *FakeBackgroundCheck {
 }
 
 // Execute performs the (mocked) external action exactly once per
-// idempotencyKey. The first call for a key records the side-effect and a
-// deterministic Result; any later call with the same key returns that Result
-// and performs NO further side-effect. A Request whose Subject is
-// BackgroundCheckDeclineSubject yields a terminal OutcomeFailed (a rejected
-// check, err == nil — a definitive verdict, not a transient error); every other
-// subject clears (OutcomeCompleted). No network, no real I/O.
-func (f *FakeBackgroundCheck) Execute(_ context.Context, req Request) (Result, error) {
+// idempotencyKey. It is synchronous: it always returns a Resolved Dispatch (a
+// terminal Result inline, never Pending). The first call for a key records the
+// side-effect and a deterministic Result; any later call with the same key
+// returns that Result and performs NO further side-effect. A Request whose
+// Subject is BackgroundCheckDeclineSubject yields a terminal OutcomeFailed (a
+// rejected check, err == nil — a definitive verdict, not a transient error);
+// every other subject clears (OutcomeCompleted). No network, no real I/O.
+func (f *FakeBackgroundCheck) Execute(_ context.Context, req Request) (Dispatch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if res, seen := f.results[req.IdempotencyKey]; seen {
-		return res, nil
+		return Dispatch{Disposition: Resolved, Result: res}, nil
 	}
 	f.calls[req.IdempotencyKey]++
 	res := Result{Status: OutcomeCompleted, Detail: "background-check cleared for " + req.Subject}
@@ -56,7 +58,14 @@ func (f *FakeBackgroundCheck) Execute(_ context.Context, req Request) (Result, e
 		res = Result{Status: OutcomeFailed, Detail: "background-check declined for " + req.Subject}
 	}
 	f.results[req.IdempotencyKey] = res
-	return res, nil
+	return Dispatch{Disposition: Resolved, Result: res}, nil
+}
+
+// Poll is unreachable for this synchronous adapter (Execute never returns
+// Pending, so the bridge never holds a Ref to poll). It returns a clear error so
+// a wiring mistake surfaces rather than silently resolving.
+func (f *FakeBackgroundCheck) Poll(_ context.Context, ref string) (Dispatch, error) {
+	return Dispatch{}, fmt.Errorf("bridge: FakeBackgroundCheck is synchronous: Poll unsupported (ref %q)", ref)
 }
 
 // SideEffects reports how many times the real external action was performed for

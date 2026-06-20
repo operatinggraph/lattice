@@ -43,9 +43,11 @@ const (
 	// Fixture external-call constants. The claim TYPE is NON-service (invariant
 	// a): the bridge treats the instanceKey opaquely, so a widget token proves no
 	// type is parsed. These mirror 13.2's external_e2e_test fixtures.
-	fixtureAdapter  = "stripe"
-	fixtureReplyOp  = "ResolveCharge"
-	fixtureClaimTyp = "widget" // non-service — invariant a
+	fixtureAdapter    = "stripe"
+	fixtureReplyOp    = "ResolveCharge"
+	fixtureClaimTyp   = "widget" // non-service — invariant a
+	fixtureAsyncName  = "asyncCheck"
+	fixtureDispatchOp = "RecordWidgetDispatch" // the pending-marker op (non-service — invariant a)
 )
 
 func startNATS(t *testing.T) *nats.Conn {
@@ -98,10 +100,13 @@ type fakeProcessor struct {
 
 	resultMutations int64 // accepted (non-duplicate) replyOp commits — the exactly-once witness
 
-	mu         sync.Mutex
-	seenReqID  map[string]int // requestId → times seen (across redelivery)
-	lastRef    map[string]string
-	lastStatus map[string]string // requestId → payload.status as posted by the bridge
+	mu          sync.Mutex
+	seenReqID   map[string]int // requestId → times seen (across redelivery)
+	lastRef     map[string]string
+	lastStatus  map[string]string // requestId → payload.status as posted by the bridge
+	lastOp      map[string]string // requestId → operationType as posted by the bridge
+	lastVendor  map[string]string // requestId → payload.vendorRef (set by the dispatch op only)
+	dispatchOps int64             // accepted (non-duplicate) dispatchOp commits — the pending-marker witness
 }
 
 func newFakeProcessor(conn *substrate.Conn) *fakeProcessor {
@@ -113,6 +118,8 @@ func newFakeProcessor(conn *substrate.Conn) *fakeProcessor {
 		seenReqID:   map[string]int{},
 		lastRef:     map[string]string{},
 		lastStatus:  map[string]string{},
+		lastOp:      map[string]string{},
+		lastVendor:  map[string]string{},
 	}
 }
 
@@ -148,6 +155,7 @@ func (f *fakeProcessor) handle(ctx context.Context, msg jetstream.Msg) {
 			ExternalRef string `json:"externalRef"`
 			Status      string `json:"status"`
 			Result      string `json:"result"`
+			VendorRef   string `json:"vendorRef"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(msg.Data(), &env); err != nil {
@@ -158,12 +166,33 @@ func (f *fakeProcessor) handle(ctx context.Context, msg jetstream.Msg) {
 	f.seenReqID[env.RequestID]++
 	f.lastRef[env.RequestID] = env.Payload.ExternalRef
 	f.lastStatus[env.RequestID] = env.Payload.Status
+	f.lastOp[env.RequestID] = env.OperationType
+	f.lastVendor[env.RequestID] = env.Payload.VendorRef
 	f.mu.Unlock()
 
 	// Contract #4 dedup: write the tracker once; a repeat requestId is a no-op.
 	if !f.trackOnce(ctx, env.RequestID) {
 		return
 	}
+
+	// The pending-marker op (dispatchOp): record the .dispatch aspect
+	// {vendorRef} (mirrors the RecordServiceDispatch package op), count a
+	// dispatchOp commit, and post NO .outcome — the task stays parked.
+	if env.OperationType == fixtureDispatchOp {
+		atomic.AddInt64(&f.dispatchOps, 1)
+		if env.Payload.ExternalRef != "" {
+			aspectKey := "vtx." + f.claimType + "." + env.Payload.ExternalRef + ".dispatch"
+			aspectBody, _ := json.Marshal(map[string]any{
+				"class":     f.claimType + ".dispatch",
+				"vertexKey": "vtx." + f.claimType + "." + env.Payload.ExternalRef,
+				"localName": "dispatch",
+				"data":      map[string]any{"vendorRef": env.Payload.VendorRef},
+			})
+			_, _ = f.conn.KVPut(ctx, coreKVBucket, aspectKey, aspectBody)
+		}
+		return
+	}
+
 	atomic.AddInt64(&f.resultMutations, 1)
 
 	// Bonus (mirrors the 14.4 replyOp DDL): record the outcome as an ASPECT on
@@ -190,10 +219,30 @@ func (f *fakeProcessor) trackOnce(ctx context.Context, requestID string) bool {
 
 func (f *fakeProcessor) mutations() int { return int(atomic.LoadInt64(&f.resultMutations)) }
 
+// dispatchMutations is the count of accepted (non-duplicate) dispatchOp commits —
+// the pending-marker witness, the analogue of mutations() for the Pending path.
+func (f *fakeProcessor) dispatchMutations() int { return int(atomic.LoadInt64(&f.dispatchOps)) }
+
 func (f *fakeProcessor) sawReply(requestID string) (count int, externalRef string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.seenReqID[requestID], f.lastRef[requestID]
+}
+
+// sawOp returns the operationType the bridge posted under requestID (empty until
+// an op with that id has been seen) and the times it was seen across redelivery.
+func (f *fakeProcessor) sawOp(requestID string) (op string, count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastOp[requestID], f.seenReqID[requestID]
+}
+
+// sawVendorRef returns the payload.vendorRef the bridge posted under requestID
+// (set only by the dispatchOp; empty for a replyOp).
+func (f *fakeProcessor) sawVendorRef(requestID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastVendor[requestID]
 }
 
 // sawStatus returns the payload.status the bridge posted on the replyOp for
@@ -224,6 +273,34 @@ func publishExternalEvent(t *testing.T, ctx context.Context, conn *substrate.Con
 	ev := map[string]any{
 		"eventId":   mustNanoID(t),
 		"requestId": mustNanoID(t), // the instanceOp's own requestId — NOT what the bridge correlates on
+		"eventType": "external." + adapter,
+		"payload":   payload,
+		"timestamp": substrate.FormatTimestamp(time.Now()),
+	}
+	data, _ := json.Marshal(ev)
+	_, err := conn.JetStream().Publish(ctx, "events.external."+adapter, data)
+	require.NoError(t, err)
+}
+
+// publishAsyncExternalEvent publishes an external.<adapter> event that ALSO
+// carries the dispatchOp field — the seam the bridge posts on a Pending outcome.
+// Same FULL envelope shape as publishExternalEvent; the instanceKey is a
+// NON-service bare handle (invariant a).
+func publishAsyncExternalEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, adapter, instanceKey, replyOp, dispatchOp string, params map[string]any) {
+	t.Helper()
+	rawParams, _ := json.Marshal(params)
+	payload := map[string]any{
+		"instanceKey":    instanceKey,
+		"adapter":        adapter,
+		"params":         json.RawMessage(rawParams),
+		"replyOp":        replyOp,
+		"dispatchOp":     dispatchOp,
+		"idempotencyKey": instanceKey,
+		"externalRef":    instanceKey,
+	}
+	ev := map[string]any{
+		"eventId":   mustNanoID(t),
+		"requestId": mustNanoID(t),
 		"eventType": "external." + adapter,
 		"payload":   payload,
 		"timestamp": substrate.FormatTimestamp(time.Now()),
@@ -266,6 +343,35 @@ func startBridge(t *testing.T, ctx context.Context, conn *substrate.Conn, stripe
 	}
 	eng := bridge.NewEngine(conn, cfg)
 	require.NoError(t, eng.RegisterAdapter(fixtureAdapter, stripe))
+
+	engCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() { _ = eng.Start(engCtx) }()
+	return eng
+}
+
+// startBridgeWithAdapter constructs and starts a bridge engine with a single
+// caller-provided adapter registered under name (the async tests register a
+// FakeAsyncCheck). Same Config defaults + cfgMut seam as startBridge.
+func startBridgeWithAdapter(t *testing.T, ctx context.Context, conn *substrate.Conn, name string, adapter bridge.Adapter, cfgMut func(*bridge.Config)) *bridge.Engine {
+	t.Helper()
+	skip := true
+	cfg := bridge.Config{
+		CoreKVBucket:     coreKVBucket,
+		EventsStream:     eventsStream,
+		HealthKVBucket:   healthKVBucket,
+		ActorKey:         bridgeActorKey,
+		Lane:             bridgeLane,
+		Instance:         "bridge-" + mustNanoID(t),
+		HeartbeatEvery:   150 * time.Millisecond,
+		RedeliveryDelay:  300 * time.Millisecond,
+		SkipOnRedelivery: &skip,
+	}
+	if cfgMut != nil {
+		cfgMut(&cfg)
+	}
+	eng := bridge.NewEngine(conn, cfg)
+	require.NoError(t, eng.RegisterAdapter(name, adapter))
 
 	engCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)

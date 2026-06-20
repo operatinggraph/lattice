@@ -24,6 +24,14 @@
 //     .outcome aspect, and emits orchestration.externalTaskCompleted{externalRef}
 //     — the uniform completion signal Loom correlates on.
 //
+//   - `leaseServiceDispatch` / RecordServiceDispatch — the dispatchOp the bridge
+//     posts when its adapter returns Pending (the external call was submitted but
+//     has not resolved yet). Reconstructs vtx.service.<handle> from the bare
+//     externalRef and writes a create-only .dispatch marker {vendorRef,
+//     submittedAt}; it emits NO completion signal (the task is not done — the
+//     token stays parked). The .dispatch and .outcome aspects are separate so
+//     pending does not collide with the once-only terminal .outcome.
+//
 //   - The `leaseApplicationComplete` actorAggregate convergence lens (§10.2) —
 //     anchored on leaseapp, reading identity aspects + the service instance's
 //     .outcome aspect across the applicationFor/providedTo links, emitting the

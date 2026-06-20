@@ -14,6 +14,10 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     the bridge submits: records the .outcome aspect from
 //     {externalRef, status, result} and emits
 //     orchestration.externalTaskCompleted{externalRef}.
+//   - `leaseServiceDispatch` — RecordServiceDispatch, the externalTask dispatchOp
+//     the bridge submits when its adapter returns Pending: records a create-only
+//     .dispatch marker from {externalRef, vendorRef} and emits NO completion
+//     signal (the task is not done — the token stays parked).
 //
 // The two externalTask wrapper DDLs are a matched pair: both choose `service`
 // as the claim-vertex type, both speak the bare handle ↔ vtx.service.<handle>
@@ -37,6 +41,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		leaseAppDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
+		leaseServiceDispatchDDL(),
 	}
 }
 
@@ -206,6 +211,50 @@ func leaseServiceReplyDDL() pkgmgr.DDLSpec {
 					"lens reads status=failed as the service NOT having converged (the applicant stays unsatisfied / the gap predicate " +
 					"keeps violating). Emits the same completion + provenance events. Rejects an absent or non-{completed,failed} status " +
 					"with InvalidArgument.",
+			},
+		},
+	}
+}
+
+func leaseServiceDispatchDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "leaseServiceDispatch",
+		Class:             "meta.ddl.vertexType",
+		PermittedCommands: []string{"RecordServiceDispatch"},
+		Description: "ExternalTask dispatchOp DDL (Contract #10 §10.5/§10.6). The op the bridge submits when its adapter " +
+			"returns Pending (the external call was submitted but has not resolved yet): payload {externalRef (the bare " +
+			"handle), vendorRef (the vendor's opaque pending reference — the poll/webhook key)}. The bridge submits it with " +
+			"no ContextHint.Reads, so the op reads NOTHING from state: it reconstructs the claim vertex key " +
+			"vtx.service.<externalRef> from the bare handle and writes a create-only .dispatch aspect {vendorRef, submittedAt " +
+			"(canonical-UTC of op.submittedAt)} — the PENDING MARKER. It writes NO .outcome aspect and emits NO " +
+			"orchestration.externalTaskCompleted: the externalTask is NOT done, so Loom's token stays parked (the .dispatch " +
+			"and .outcome aspects are deliberately separate — .outcome is the FR58 once-only terminal guard, while pending is " +
+			"a distinct state). It emits service.dispatchRecorded (provenance, NOT a completion signal). The marker is recorded " +
+			"once: the .dispatch aspect is create-only, so a redelivered Pending conflicts and is rejected (atop the bridge's " +
+			"deterministic dispatch-op requestId collapse).",
+		Script: leaseServiceDispatchDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"externalRef":{"type":"string","description":"The BARE instance handle the bridge echoes (no dots / key segments); the op reconstructs vtx.service.<externalRef>. Required."},` +
+			`"vendorRef":{"type":"string","description":"The vendor's opaque pending reference (the poll/webhook key) the bridge got back from the adapter on a Pending outcome. Recorded on the .dispatch marker. Required."}},` +
+			`"required":["externalRef","vendorRef"]}`,
+		OutputSchema: `{"type":"object","properties":` +
+			`{"primaryKey":{"type":"string","description":"vtx.service.<handle> of the claim vertex the pending marker was recorded on (the operation's principal key)."}}}`,
+		FieldDescription: map[string]string{
+			"externalRef": "The bare instance handle the bridge echoes back (the same handle CreateLeaseServiceInstance received). The op reconstructs vtx.service.<externalRef> and writes the create-only .dispatch marker on it. Required.",
+			"vendorRef":   "The vendor's opaque pending reference (the poll/webhook key) the bridge received from its adapter when the external call returned Pending. Written to the .dispatch aspect; a later poll/webhook resolution carries it back. Required.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "RecordServiceDispatch — record a pending external call",
+				Payload: map[string]any{
+					"externalRef": "<bareHandle>",
+					"vendorRef":   "vendor-ref-abc123",
+				},
+				ExpectedOutcome: "Reads no state (the bridge submits no Reads). Reconstructs vtx.service.<handle> from the bare handle. " +
+					"Writes the .dispatch aspect {vendorRef, submittedAt: canonical-UTC(op.submittedAt)} as a create-only mutation " +
+					"(the instance root, already {}, is untouched — D5). Writes NO .outcome and emits NO " +
+					"orchestration.externalTaskCompleted (the task is not done — the token stays parked). Emits service.dispatchRecorded " +
+					"(provenance). Returns primaryKey. Rejects a second dispatch for the same handle (the create-only .dispatch once-only guard).",
 			},
 		},
 	}

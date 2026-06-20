@@ -53,6 +53,44 @@ type Result struct {
 	Detail string
 }
 
+// Disposition is the adapter's verdict on whether an Execute (or a Poll) reached
+// a terminal Result inline, or merely submitted the call to a vendor that will
+// resolve it later. It is orthogonal to the {Completed, Failed} Outcome: a
+// Resolved dispatch carries a terminal Outcome, a Pending dispatch carries none
+// yet. It is distinct from a returned error: an error is a (possibly transient)
+// failure the bridge re-drives; a Pending Disposition is an orderly "submitted,
+// not yet answered."
+type Disposition int
+
+const (
+	// Resolved is the terminal disposition: the call ran to a final Result inline
+	// (the Dispatch's Result field is valid). A synchronous adapter always returns
+	// Resolved.
+	Resolved Disposition = iota
+	// Pending is the in-flight disposition: the adapter submitted the call to the
+	// vendor and it will resolve later (via a Poll or a webhook). The Dispatch's
+	// Ref field carries the vendor's opaque reference; no Result is determined yet.
+	Pending
+)
+
+// Dispatch is an Adapter's response to an Execute (or a Poll) that ran without a
+// returned error. Disposition selects which other field is load-bearing:
+//
+//   - Resolved → Result is the terminal verdict (carries Status / Detail); the
+//     bridge posts the replyOp exactly as a synchronous call does.
+//   - Pending → Ref is the vendor's opaque pending reference (the poll/webhook
+//     key); Result is unset and the bridge records a pending marker instead of a
+//     terminal outcome.
+//
+// It is named Dispatch (not Outcome) to avoid colliding with the terminal-verdict
+// Outcome enum the Result carries: a Dispatch wraps that verdict together with the
+// pending/resolved decision, so the two cannot share a name.
+type Dispatch struct {
+	Disposition Disposition
+	Result      Result
+	Ref         string
+}
+
 // Adapter is the unit of "call one external system idempotently" — the external
 // integration a dispatched external call resolves to. The bridge calls Execute
 // after a visible claim already exists (the claim vertex the instanceOp minted
@@ -62,22 +100,40 @@ type Result struct {
 // The idempotencyKey on the Request (= the instanceKey) is the contract: the
 // adapter is the de-dup boundary, NOT the bridge. Two Execute calls with the
 // same idempotencyKey MUST yield exactly one external side-effect and the same
-// Result — this is what makes a redelivery/recovery re-call on the same
-// instanceKey safe. A returned error is a (possibly transient) failure: the
-// bridge surfaces it and re-drives the event on a bounded cadence; it does not
-// retry inline.
+// Dispatch — this is what makes a redelivery/recovery re-call on the same
+// instanceKey safe (a re-submitted Pending must return the same Ref, no new
+// side-effect). A returned error is a (possibly transient) failure: the bridge
+// surfaces it and re-drives the event on a bounded cadence; it does not retry
+// inline.
+//
+// Execute returns a Dispatch: a synchronous adapter returns Resolved with a
+// terminal Result (today's path); a vendor that submits-then-resolves-later
+// returns Pending with a vendor Ref. Poll resolves a previously-Pending Ref — it
+// returns Resolved once the vendor answers, Pending while still in flight, and an
+// error for a transient probe failure. Poll lands now so the SPI is stable; the
+// driver that calls it on a schedule is a later increment.
 type Adapter interface {
-	Execute(ctx context.Context, req Request) (Result, error)
+	Execute(ctx context.Context, req Request) (Dispatch, error)
+	Poll(ctx context.Context, ref string) (Dispatch, error)
 }
 
-// AdapterFunc adapts a plain function to the Adapter interface — the usual
-// convenience for a one-method interface (and a clean seam for tests and small
-// inline adapters).
-type AdapterFunc func(ctx context.Context, req Request) (Result, error)
+// AdapterFunc adapts a plain SYNCHRONOUS Execute function to the Adapter
+// interface — the usual convenience for the common case (a one-method synchronous
+// adapter), and a clean seam for tests and small inline adapters. A function-only
+// adapter is synchronous by construction, so its Poll is unreachable: it never
+// returns Pending, so the bridge never has a Ref to poll.
+type AdapterFunc func(ctx context.Context, req Request) (Dispatch, error)
 
 // Execute calls the underlying function.
-func (f AdapterFunc) Execute(ctx context.Context, req Request) (Result, error) {
+func (f AdapterFunc) Execute(ctx context.Context, req Request) (Dispatch, error) {
 	return f(ctx, req)
+}
+
+// Poll is unreachable for a synchronous AdapterFunc (it never returns Pending, so
+// no Ref is ever handed back to poll). It returns a clear error rather than a
+// silent zero Dispatch, so a wiring mistake that routes a poll here surfaces.
+func (f AdapterFunc) Poll(_ context.Context, ref string) (Dispatch, error) {
+	return Dispatch{}, fmt.Errorf("bridge: synchronous adapter: Poll unsupported (ref %q)", ref)
 }
 
 // Registry resolves an adapter name (the external event's adapter field) to a
