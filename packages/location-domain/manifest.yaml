@@ -1,0 +1,26 @@
+name: location-domain
+version: 0.1.0
+description: |
+  Spatial base domain — the place graph. Owns the unit/building/property
+  location vertex types (all class location, Contract #6 §6.9) and the
+  containedIn containment link (location → location, transitive). Provides
+  CreateLocation, TombstoneLocation, WireContainedIn, UnwireContainedIn.
+  Single DDL `location` with a locationType discriminator. No dependencies.
+depends: []
+declares:
+  ddls:
+    - canonicalName: location
+      class: meta.ddl.vertexType
+  permissions:
+    - operationType: CreateLocation
+      scope: any
+      grantsTo: [operator]
+    - operationType: TombstoneLocation
+      scope: any
+      grantsTo: [operator]
+    - operationType: WireContainedIn
+      scope: any
+      grantsTo: [operator]
+    - operationType: UnwireContainedIn
+      scope: any
+      grantsTo: [operator]

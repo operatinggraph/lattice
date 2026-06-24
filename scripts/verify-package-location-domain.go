@@ -1,0 +1,278 @@
+//go:build ignore
+
+// verify-package-location-domain.go — assertion tool for
+// `make verify-package-location-domain`.
+//
+// Connects to a running Lattice NATS instance and checks that the
+// location-domain package has been correctly installed. Asserts:
+//
+//	1 location DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
+//	8 DDL aspects: .canonicalName=location, .permittedCommands (4 ops),
+//	               .description, .script, .inputSchema, .outputSchema,
+//	               .fieldDescription, .examples (each with a valid aspect envelope)
+//	4 permission vertices (CreateLocation, TombstoneLocation, WireContainedIn,
+//	               UnwireContainedIn), scope any
+//	4 grantedBy links (each op → operator)
+//	1 package vertex (vtx.package.<NanoID>) + 1 manifest aspect (name=location-domain)
+//
+// Run via: go run ./scripts/verify-package-location-domain.go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/scripts/pkgverify"
+)
+
+const (
+	locationPackageName  = "location-domain"
+	locationDDLCanonical = "location"
+	locationCoreKVBucket = "core-kv"
+)
+
+var locationExpectedOps = []string{"CreateLocation", "TombstoneLocation", "WireContainedIn", "UnwireContainedIn"}
+
+func main() {
+	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
+	bootstrapJSONPath := pkgverify.EnvOrDefault("BOOTSTRAP_JSON_PATH", "./lattice.bootstrap.json")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := bootstrap.Load(bootstrapJSONPath); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot load primordial IDs from %s: %v\n", bootstrapJSONPath, err)
+		fmt.Fprintln(os.Stderr, "Suggestion: ensure `make up` has completed; lattice.bootstrap.json must exist.")
+		os.Exit(1)
+	}
+
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot connect to NATS at %s: %v\n", natsURL, err)
+		os.Exit(1)
+	}
+	defer nc.Close()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: jetstream context: %v\n", err)
+		os.Exit(1)
+	}
+
+	coreKV, err := js.KeyValue(ctx, locationCoreKVBucket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot open Core KV bucket %q: %v\n", locationCoreKVBucket, err)
+		os.Exit(1)
+	}
+
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot list Core KV keys: %v\n", err)
+		os.Exit(1)
+	}
+
+	var failures []string
+	okCount := 0
+	ok := func(desc string) {
+		fmt.Printf("  OK  %s\n", desc)
+		okCount++
+	}
+	fail := func(desc, reason string) {
+		msg := fmt.Sprintf("FAIL: %s: %s", desc, reason)
+		fmt.Println(" ", msg)
+		failures = append(failures, msg)
+	}
+
+	fmt.Printf("verify-package-location-domain: scanning %d Core KV keys...\n", len(allKeys))
+
+	// 1. location DDL meta-vertex.
+	locDDLKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, locationDDLCanonical)
+	if err != nil || locDDLKey == "" {
+		fail("location DDL meta-vertex", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", locationDDLCanonical, err))
+	} else {
+		ok(fmt.Sprintf("location DDL meta-vertex exists: %s", locDDLKey))
+	}
+
+	if locDDLKey != "" {
+		// 2. class.
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, locDDLKey); err != nil {
+			fail(locDDLKey+" class", fmt.Sprintf("cannot read: %v", err))
+		} else {
+			if cls, _ := env["class"].(string); cls != "meta.ddl.vertexType" {
+				fail(locDDLKey+" class", fmt.Sprintf("got %q want meta.ddl.vertexType", cls))
+			} else {
+				ok(locDDLKey + " class=meta.ddl.vertexType")
+			}
+			if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+				fail(locDDLKey+" isDeleted", "vertex is tombstoned")
+			} else {
+				ok(locDDLKey + " isDeleted=false")
+			}
+		}
+
+		// 3. canonicalName.
+		cnKey := locDDLKey + ".canonicalName"
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, cnKey); err != nil {
+			fail(cnKey, fmt.Sprintf("missing: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			val, _ := data["value"].(string)
+			if val != locationDDLCanonical {
+				fail(cnKey, fmt.Sprintf("value=%q want %q", val, locationDDLCanonical))
+			} else {
+				ok(cnKey + " value=location")
+			}
+			if err := pkgverify.CheckAspectEnvelope(env, cnKey, locDDLKey, "canonicalName"); err != nil {
+				fail(cnKey+" envelope", err.Error())
+			} else {
+				ok(cnKey + " envelope shape OK")
+			}
+		}
+
+		// 4. permittedCommands.
+		pcKey := locDDLKey + ".permittedCommands"
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pcKey); err != nil {
+			fail(pcKey, fmt.Sprintf("missing: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			cmds := pkgverify.ToStringSlice(data["commands"])
+			cmdSet := pkgverify.ToSet(cmds)
+			allPresent := true
+			for _, op := range locationExpectedOps {
+				if !cmdSet[op] {
+					fail(pcKey, fmt.Sprintf("missing command %q", op))
+					allPresent = false
+				}
+			}
+			if len(cmds) != len(locationExpectedOps) {
+				fail(pcKey, fmt.Sprintf("command count=%d want %d", len(cmds), len(locationExpectedOps)))
+				allPresent = false
+			}
+			if allPresent && len(cmds) == len(locationExpectedOps) {
+				ok(fmt.Sprintf("%s contains all %d commands", pcKey, len(locationExpectedOps)))
+			}
+			if err := pkgverify.CheckAspectEnvelope(env, pcKey, locDDLKey, "permittedCommands"); err != nil {
+				fail(pcKey+" envelope", err.Error())
+			} else {
+				ok(pcKey + " envelope shape OK")
+			}
+		}
+
+		// 5. remaining aspects present + valid envelope.
+		for _, asp := range []string{"description", "script", "inputSchema", "outputSchema", "fieldDescription", "examples"} {
+			k := locDDLKey + "." + asp
+			if env, err := pkgverify.GetEnvelope(ctx, coreKV, k); err != nil {
+				fail(k, fmt.Sprintf("missing: %v", err))
+			} else {
+				ok(k + " present")
+				if err := pkgverify.CheckAspectEnvelope(env, k, locDDLKey, asp); err != nil {
+					fail(k+" envelope", err.Error())
+				} else {
+					ok(k + " envelope shape OK")
+				}
+			}
+		}
+	}
+
+	// 6. permission vertices + scope + grantedBy-operator links.
+	permIDByOp := map[string]string{}
+	for key := range allKeys {
+		if !strings.HasPrefix(key, "vtx.permission.") {
+			continue
+		}
+		parts := strings.Split(key, ".")
+		if len(parts) != 3 {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+		if err != nil {
+			continue
+		}
+		if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+			continue
+		}
+		data, _ := env["data"].(map[string]any)
+		opType, _ := data["operationType"].(string)
+		for _, expected := range locationExpectedOps {
+			if opType == expected {
+				permIDByOp[opType] = parts[2]
+				break
+			}
+		}
+	}
+
+	operatorRoleID := bootstrap.RoleOperatorID
+	for _, op := range locationExpectedOps {
+		permID, found := permIDByOp[op]
+		if !found {
+			fail("vtx.permission.*[operationType="+op+"]", "not found in Core KV")
+			continue
+		}
+		permKey := "vtx.permission." + permID
+		ok(fmt.Sprintf("%s operationType=%s", permKey, op))
+
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, permKey); err == nil {
+			data, _ := env["data"].(map[string]any)
+			if scope, _ := data["scope"].(string); scope != "any" {
+				fail(permKey+" scope", fmt.Sprintf("got %q want any", scope))
+			} else {
+				ok(permKey + " scope=any")
+			}
+		}
+
+		linkKey := "lnk.permission." + permID + ".grantedBy.role." + operatorRoleID
+		if _, exists := allKeys[linkKey]; !exists {
+			fail(linkKey, "grantedBy.operator link not found")
+		} else if lenv, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
+			fail(linkKey, fmt.Sprintf("cannot read: %v", err))
+		} else if isDeleted, _ := lenv["isDeleted"].(bool); isDeleted {
+			fail(linkKey, "link is tombstoned")
+		} else {
+			ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<operator> exists", permID))
+		}
+	}
+
+	// 7. Package manifest.
+	pkgKey, pkgManifestKey, err := pkgverify.FindPackageManifest(ctx, coreKV, allKeys, locationPackageName)
+	if err != nil || pkgKey == "" {
+		fail("location-domain package manifest", fmt.Sprintf("vtx.package.*.manifest[name=%q] not found: %v", locationPackageName, err))
+	} else {
+		ok(fmt.Sprintf("package vertex exists: %s", pkgKey))
+		ok(fmt.Sprintf("package manifest exists: %s", pkgManifestKey))
+	}
+	if pkgManifestKey != "" {
+		if env, err := pkgverify.GetEnvelope(ctx, coreKV, pkgManifestKey); err != nil {
+			fail(pkgManifestKey+" name", fmt.Sprintf("cannot read: %v", err))
+		} else {
+			data, _ := env["data"].(map[string]any)
+			if name, _ := data["name"].(string); name != locationPackageName {
+				fail(pkgManifestKey+" name", fmt.Sprintf("got %q want %q", name, locationPackageName))
+			} else {
+				ok(pkgManifestKey + " name=location-domain")
+			}
+			if err := pkgverify.CheckAspectEnvelope(env, pkgManifestKey, pkgKey, "manifest"); err != nil {
+				fail(pkgManifestKey+" envelope", err.Error())
+			} else {
+				ok(pkgManifestKey + " envelope shape OK")
+			}
+		}
+	}
+
+	fmt.Println()
+	if len(failures) == 0 {
+		fmt.Printf("verify-package-location-domain: ALL ASSERTIONS PASSED (%d OK)\n", okCount)
+		os.Exit(0)
+	}
+	fmt.Printf("verify-package-location-domain: %d FAILURE(S) (%d OK)\n\n", len(failures), okCount)
+	for _, f := range failures {
+		fmt.Printf("  - %s\n", f)
+	}
+	fmt.Printf("\nSuggestion: run `make down && make up && make verify-package-location-domain` to reinstall from clean state.\n")
+	os.Exit(1)
+}

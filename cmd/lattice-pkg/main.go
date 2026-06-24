@@ -26,6 +26,7 @@ import (
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	identityhygiene "github.com/asolgan/lattice/packages/identity-hygiene"
 	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
+	locationdomain "github.com/asolgan/lattice/packages/location-domain"
 	objectsbase "github.com/asolgan/lattice/packages/objects-base"
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
@@ -46,6 +47,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"identity-hygiene":   identityhygiene.Package,
 	"orchestration-base": orchestrationbase.Package,
 	"service-domain":     servicedomain.Package,
+	"location-domain":    locationdomain.Package,
 	"lease-signing":      leasesigning.Package,
 	"objects-base":       objectsbase.Package,
 }
