@@ -1,6 +1,6 @@
 # Story SL.1 — location-domain package
 
-**Status:** review (build complete; all local + live-stack gates green; CI pending)
+**Status:** done (CI green — commit ae3a056)
 **Design:** `_bmad-output/implementation-artifacts/service-location-design.md` (rev.3 — §2, §5, §6)
 **Review depth:** thorough lead review (non-security: no lens, no auth-plane) — explicit per the scale-review house rule.
 
