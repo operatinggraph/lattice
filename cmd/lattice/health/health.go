@@ -96,6 +96,14 @@ func classifyKey(key string) string {
 		return "refractor-heartbeat"
 	case strings.HasPrefix(key, "health.refractor."):
 		return "refractor-event"
+	case strings.HasPrefix(key, "health.weaver.") && !strings.Contains(strings.TrimPrefix(key, "health.weaver."), "."):
+		return "weaver-heartbeat"
+	case strings.HasPrefix(key, "health.weaver."):
+		return "weaver-event"
+	case strings.HasPrefix(key, "health.loom.") && !strings.Contains(strings.TrimPrefix(key, "health.loom."), "."):
+		return "loom-heartbeat"
+	case strings.HasPrefix(key, "health.loom."):
+		return "loom-event"
 	case strings.HasPrefix(key, "health.bootstrap."):
 		return "bootstrap"
 	case strings.HasPrefix(key, "health.gates.phase1."):
@@ -128,6 +136,46 @@ func parseTimestamp(doc map[string]any, key string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339, v)
 	return t, err == nil
+}
+
+// issueSeverities extracts the severity of each entry in a heartbeat doc's
+// inline issues[] array (Contract #5 §5.2). Malformed entries are skipped.
+func issueSeverities(doc map[string]any) []string {
+	issues, ok := doc["issues"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(issues))
+	for _, it := range issues {
+		issue, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sev, ok := issue["severity"].(string); ok {
+			out = append(out, sev)
+		}
+	}
+	return out
+}
+
+// heartbeatDetails renders a short metrics summary for a Weaver/Loom heartbeat
+// row. It surfaces whichever of the common counters are present.
+func heartbeatDetails(doc map[string]any) string {
+	metrics, ok := doc["metrics"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if consumers, ok := metrics["consumers"].(map[string]any); ok {
+		parts = append(parts, fmt.Sprintf("consumers=%d", len(consumers)))
+	}
+	if targets, ok := metrics["targets"].(float64); ok {
+		parts = append(parts, fmt.Sprintf("targets=%.0f", targets))
+	}
+	if running, ok := metrics["runningInstances"].(float64); ok {
+		parts = append(parts, fmt.Sprintf("runningInstances=%.0f", running))
+	}
+	return strings.Join(parts, " ")
 }
 
 // computeSummaryRollup evaluates all health KV entries and returns structured rollup data.
@@ -200,6 +248,42 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 					row.Details = "lensLags: " + strings.Join(parts, " ")
 				}
 			}
+			overall = worstOf(overall, row.level)
+			rows = append(rows, row)
+
+		case "weaver-heartbeat", "loom-heartbeat":
+			row := componentRow{Component: k}
+			if ts, ok := parseTimestamp(doc, "heartbeatAt"); ok {
+				age := time.Since(ts).Round(time.Second)
+				row.Freshness = freshnessStr(ts)
+				if age > staleThreshold {
+					row.Status = "stale"
+					row.level = rollupYellow
+				} else {
+					row.Status = "green"
+					row.level = rollupGreen
+				}
+			} else {
+				row.Status = "unknown"
+				row.Freshness = "-"
+				row.level = rollupYellow
+			}
+			// Inline issues[] (Contract #5 §5.2): error → red, warning → yellow.
+			// Weaver/Loom embed issues in the heartbeat doc rather than as
+			// separate health.alerts.* keys, so they are evaluated here.
+			for _, it := range issueSeverities(doc) {
+				switch it {
+				case "error":
+					row.level = worstOf(row.level, rollupRed)
+					row.Status = "error"
+				case "warning":
+					row.level = worstOf(row.level, rollupYellow)
+					if row.Status == "green" {
+						row.Status = "warning"
+					}
+				}
+			}
+			row.Details = heartbeatDetails(doc)
 			overall = worstOf(overall, row.level)
 			rows = append(rows, row)
 

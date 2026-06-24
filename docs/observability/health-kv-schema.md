@@ -1,13 +1,13 @@
-# Health KV Schema — Phase 1
+# Health KV Schema
 
-> **Canonical reference.** This is the authoritative Health KV key inventory for Phase 1.
+> **Canonical reference.** This is the authoritative Health KV key inventory across all running components.
 > When in doubt, trust this file over [`/docs/contracts/05-health-kv.md`](/docs/contracts/05-health-kv.md) §5
 > for key-level details. Contract §5 retains schema-level contracts only (bucket name, key
 > naming conventions, document shape).
 
 ## Overview
 
-The Health KV bucket (`health-kv`) is the platform observability surface. Every Phase 1
+The Health KV bucket (`health-kv`) is the platform observability surface. Every long-running
 component writes structured JSON documents to named keys. The CLI (`lattice health summary`)
 reads this bucket to produce the green/yellow/red operator rollup.
 
@@ -27,7 +27,7 @@ fresh document. There is no append log. For audit history, use the event stream 
 
 ---
 
-## Key Inventory — Phase 1 Components
+## Key Inventory
 
 ### Processor
 
@@ -97,6 +97,38 @@ emitted inline in the Refractor heartbeat document (under `metrics.lensLags` and
 `metrics.lensLatency`). This key is **not emitted** in Phase 1 and is omitted from this
 inventory.
 
+### Weaver
+
+Source package: `internal/weaver/`
+
+| Key Pattern | Frequency | Source File | Emitter |
+|---|---|---|---|
+| `health.weaver.<instance>` | ≥ 10s heartbeat | `internal/weaver/health.go` | `heartbeater.emit()` |
+
+**`<instance>`** follows the convention `weaver-<NanoID>` (`cmd/weaver/main.go`; overridable via
+`WEAVER_INSTANCE`).
+
+The heartbeat `metrics` carry: `consumers` (map of consumer name → state — `running` / `pausedManual` /
+`pausedStructural` / `pausedInfra`), `targets` (registered convergence-target count), `marksInFlight`, the
+reconciler sweep counters (`sweepReclaims`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepLastRunAt`), and the
+lane-3 temporal counters (`timersScheduled`, `timersFired`). `issues[]` carry a `ConsumerPaused` warning for
+each `pausedStructural` consumer plus the engine's active config/data-error alerts (rejected targets, unknown
+gap columns, template data errors) — the FR29 "never silently drop" surface.
+
+### Loom
+
+Source package: `internal/loom/`
+
+| Key Pattern | Frequency | Source File | Emitter |
+|---|---|---|---|
+| `health.loom.<instance>` | ≥ 10s heartbeat | `internal/loom/health.go` | `heartbeater.emit()` |
+
+**`<instance>`** follows the convention `loom-<NanoID>` (`cmd/loom/main.go`; overridable via `LOOM_INSTANCE`).
+
+The heartbeat `metrics` carry: `consumers` (map of consumer name → state) and `runningInstances` (count of
+loom-state `instance.<id>` records with status `running`, scanned on the heartbeat cadence). `issues[]` carry
+a `ConsumerPaused` warning for each `pausedStructural` consumer.
+
 ### Bootstrap
 
 Source package: `internal/bootstrap/`
@@ -133,15 +165,11 @@ section above. See that section for the `<alertCode>` enum.
 
 ---
 
-## Reserved Namespaces (Phase 2+)
+## Reserved Namespaces
 
-The following key prefixes are reserved. No Phase 1 production code emits them. Reservation
-prevents future namespace collisions and documents the intended purpose.
-
-| Reserved Prefix | Intended Purpose |
-|---|---|
-| `health.weaver.*` | Weaver orchestration telemetry — task-graph status, saga state, compensating transaction tracking |
-| `health.loom.*` | Loom task-graph telemetry — lens fan-out coordination, multi-lens consistency tracking |
+The `health.weaver.*` and `health.loom.*` namespaces — formerly reserved — are emitted by the
+Phase-2 Weaver and Loom heartbeaters (see the Weaver and Loom sections above). No prefixes are
+currently reserved-but-unemitted.
 
 ---
 
@@ -254,6 +282,56 @@ prevents future namespace collisions and documents the intended purpose.
 `metrics.lensLags` and `metrics.lensLatency` are omitted when no lens is active or no
 latency samples have been recorded yet.
 
+### `health.weaver.<instance>` — Weaver heartbeat
+
+```json
+{
+  "key": "health.weaver.<instance>",
+  "component": "weaver",
+  "instance": "<instance>",
+  "version": "0.1.0",
+  "status": "starting | healthy | shutdown",
+  "heartbeatAt": "<RFC3339>",
+  "startedAt": "<RFC3339>",
+  "uptime": "<ISO-8601-duration>",
+  "metrics": {
+    "consumers": {"<consumerName>": "running | pausedManual | pausedStructural | pausedInfra"},
+    "targets": <int>,
+    "marksInFlight": <int>,
+    "sweepReclaims": <int>,
+    "sweepOrphansDeleted": <int>,
+    "sweepCorrupt": <int>,
+    "sweepLastRunAt": "<RFC3339>",
+    "timersScheduled": <int>,
+    "timersFired": <int>
+  },
+  "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>"}]
+}
+```
+
+`metrics` keys are present only when their subsystem has data (e.g. `marksInFlight` is omitted if
+the scan failed; `timers*` only when the temporal lane is wired).
+
+### `health.loom.<instance>` — Loom heartbeat
+
+```json
+{
+  "key": "health.loom.<instance>",
+  "component": "loom",
+  "instance": "<instance>",
+  "version": "0.1.0",
+  "status": "starting | healthy | shutdown",
+  "heartbeatAt": "<RFC3339>",
+  "startedAt": "<RFC3339>",
+  "uptime": "<ISO-8601-duration>",
+  "metrics": {
+    "consumers": {"<consumerName>": "running | pausedManual | pausedStructural | pausedInfra"},
+    "runningInstances": <int>
+  },
+  "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>"}]
+}
+```
+
 ### `<lensId>` — Per-lens reporter status (bare NanoID key)
 
 ```json
@@ -316,8 +394,10 @@ Default: `60s`. Configurable via:
 
 ### Component rollup algorithm
 
-1. **Heartbeat keys** (`health.processor.*`, `health.refractor.*`): extract `heartbeatAt`
-   field; compute `age = now - heartbeatAt`. If `age > staleThreshold` → yellow.
+1. **Heartbeat keys** (`health.processor.*`, `health.refractor.*`, `health.weaver.*`,
+   `health.loom.*`): extract `heartbeatAt`; compute `age = now - heartbeatAt`. If
+   `age > staleThreshold` → yellow. For Weaver/Loom, also scan the inline `issues[]`: any `error`
+   severity → red, any `warning` → yellow.
 2. **Per-lens keys** (bare NanoID): check `status` field.
    - `"paused"` → yellow
    - `"rebuilding"` → yellow
@@ -330,8 +410,8 @@ Default: `60s`. Configurable via:
 5. **Bootstrap key**: absent → red (bootstrap completion is expected on every running stack).
 6. **Overall** = worst of all component statuses.
 
-> **Note:** Sub-component event-driven keys (classified as `processor-event` or
-> `refractor-event` by `classifyKey` — e.g. `step3-latency`,
+> **Note:** Sub-component event-driven keys (classified as `processor-event`,
+> `refractor-event`, `weaver-event`, or `loom-event` by `classifyKey` — e.g. `step3-latency`,
 > `malformed-operation.*`) are intentionally excluded from the rollup. They carry
 > point-in-time event data, not steady-state heartbeat data, so they do not contribute
 > to the green/yellow/red calculation.
@@ -353,18 +433,18 @@ Overall: GREEN
 
 ## NFR-O3 Conformance
 
-NFR-O3 requires every Phase 1 component to emit to Health KV. The following table confirms
-the Phase 1 emission surface:
+NFR-O3 requires every long-running component to emit to Health KV. The following table confirms
+the emission surface:
 
 | Component | Key(s) Emitted | Emission Verified |
 |---|---|---|
 | Processor | `health.processor.<instance>` + derived keys | `internal/processor/health.go`, `health_alerts.go`, `step3_auth_trace.go` |
 | Refractor (heartbeat) | `health.refractor.<instance>` | `internal/refractor/health/lattice_heartbeater.go` |
 | Refractor (per-lens) | `<lensId>` (bare NanoID) | `internal/refractor/health/reporter.go` |
+| Weaver | `health.weaver.<instance>` | `internal/weaver/health.go` |
+| Loom | `health.loom.<instance>` | `internal/loom/health.go` |
 | Bootstrap | `health.bootstrap.complete` | `internal/bootstrap/primordial.go` |
 | Gates | `health.gates.phase1.gate<N>` | integration test suites (gates 2–5) |
 
-All Phase 1 components have a documented emission surface. NFR-O3 is satisfied for Phase 1.
-
-**Phase 2 components** (Weaver, Loom) will extend this table when implemented. Their key
-namespaces are reserved (see Reserved Namespaces section above).
+All long-running components (Processor, Refractor, Weaver, Loom) have a documented emission
+surface and are read by the `lattice health summary` rollup. NFR-O3 is satisfied.
