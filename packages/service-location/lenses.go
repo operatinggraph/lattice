@@ -84,20 +84,24 @@ func Lenses() []pkgmgr.LensSpec {
 //     granting ancestor loc. A laundry availableAt a building but unavailableAt
 //     the actor's penthouse is excluded for the penthouse chain.
 //
-// `serviceClass: svc.class` echoes the service root class `service` (Contract
-// #6 §6.5 serviceClass field). `allowedOperations` is the pattern-comprehension
-// over permitsOperation → op-meta, sourcing each op's data.operationType.
+// `svc` carries the `:service` label (root class `service`) as a self-contained
+// guard — only service vertices project, even if a non-service vertex were ever
+// wired an availableAt edge. `allowedOperations` is the pattern-comprehension
+// over permitsOperation → op-meta, keeping only ops that carry an operationType.
+// The entry carries no serviceClass: the residence scheme has no use for it, and
+// the rich class discriminator lives in the `.class` aspect a cypher cannot reach
+// (the root `class` field shadows it); a structural denial reads that aspect by
+// key at denial time.
 const capabilityServiceAccessSpec = `
 MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*0..]->(loc)<-[:availableAt]-(svc)
+OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*0..]->(loc)<-[:availableAt]-(svc:service)
 WHERE NOT (svc)-[:instanceOf]->(svcTpl)
   AND NOT (loc0)-[:containedIn*0..]->(exLoc)<-[:unavailableAt]-(svc)
 RETURN
   identity.key AS actorKey,
   collect(DISTINCT {
     service: svc.key,
-    serviceClass: svc.class,
     resolvedVia: [loc.key],
-    allowedOperations: [(svc)-[:permitsOperation]->(op) | {operationType: op.data.operationType}]
+    allowedOperations: [(svc)-[:permitsOperation]->(op) WHERE op.data.operationType <> null | {operationType: op.data.operationType}]
   }) AS serviceAccess
 `

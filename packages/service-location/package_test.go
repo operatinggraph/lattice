@@ -194,17 +194,24 @@ func TestPackage_LensCypher(t *testing.T) {
 		"$actorKey",
 		"residesIn",
 		"containedIn*0..",
-		"<-[:availableAt]-(svc)",                 // service is the INBOUND side (not inverted)
+		"<-[:availableAt]-(svc:service)",         // service is the INBOUND side (not inverted) + :service guard
 		"<-[:unavailableAt]-(svc)",               // exclusion, same direction
 		"NOT (svc)-[:instanceOf]->",              // template guard (instances carry instanceOf)
 		"NOT (loc0)-[:containedIn*0..]->(exLoc)", // per-chain exclusion anchored on the granting residence
 		"exLoc",                                  // the fresh exclusion location var
+		"operationType <> null",                  // allowedOperations drops ops with no operationType
 		"permitsOperation",
 		"serviceAccess",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("capabilityServiceAccess cypher must contain %q", want)
 		}
+	}
+	// serviceClass is not projected — the residence scheme has no use for it and
+	// it could only carry the bare root class "service" (the rich discriminator
+	// is in the .class aspect a cypher cannot reach).
+	if strings.Contains(src, "serviceClass") {
+		t.Errorf("the residence scheme must not project serviceClass (it can only be the inert bare root class)")
 	}
 	// The exclusion walks via a fresh exLoc, never the bound availability loc —
 	// reusing the matched loc would over-grant (§6.10 item 1).

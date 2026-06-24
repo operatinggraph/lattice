@@ -167,7 +167,6 @@ func freshDoc(projectedAt time.Time) *CapabilityDoc {
 		ServiceAccess: []ServiceAccessEntry{
 			{
 				Service:      capTestServiceKey,
-				ServiceClass: "service.cleaning.executive",
 				ResolvedVia:  []string{"vtx.unit.penthouse"},
 				AllowedOperations: []AllowedOperation{
 					{OperationType: "BookExecutiveCleaning"},

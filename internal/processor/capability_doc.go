@@ -45,7 +45,6 @@ type PlatformPermission struct {
 // one service vertex along with the operations they may invoke.
 type ServiceAccessEntry struct {
 	Service           string             `json:"service"`
-	ServiceClass      string             `json:"serviceClass"`
 	ResolvedVia       []string           `json:"resolvedVia"`
 	AllowedOperations []AllowedOperation `json:"allowedOperations"`
 }

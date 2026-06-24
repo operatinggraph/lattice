@@ -51,10 +51,10 @@ func TestGate3_Report(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 
 	// The adversarial vectors and their enforcement layers. Vectors #1, #3, #4,
-	// #5, #6 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per Story
-	// 1.5.4. If any sub-test fails, the Go test framework exits non-zero BEFORE
-	// this roll-up fires — so reaching here with passing sub-tests is sufficient
-	// proof.
+	// #5, #6, #7 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per
+	// Story 1.5.4. If any sub-test fails, the Go test framework exits non-zero
+	// BEFORE this roll-up fires — so reaching here with passing sub-tests is
+	// sufficient proof.
 	type reportRow struct {
 		Num         int
 		Vector      string
@@ -98,6 +98,12 @@ func TestGate3_Report(t *testing.T) {
 			Vector:      "Guarded-projection rebuild integrity",
 			Result:      "DEFENDED",
 			Enforcement: "Refractor force-truncate on a guarded rebuild: Truncate purges watermarks with the data → highest-seq replay wins (no rejected-write holes); the guard stays always-on across the rebuild so a concurrent/post-rebuild stale retry cannot resurrect the primary cap.identity doc (§6.2; Story 12.1b)",
+		},
+		{
+			Num:         7,
+			Vector:      "Cross-service access bleed",
+			Result:      "DEFENDED",
+			Enforcement: "CapabilityAuthorizer matchServiceAccess (§6.5/§6.8): a cap.svc.<actor> grant authorizes only its projected service+allowedOperations; cross-service → AuthContextMismatch, op-not-allowed → AuthDenied, missing cap.svc → deny-by-absence (NoCapabilityEntry); the cap.svc plane is guarded against stale-replay resurrection by the Vector #5 projection-write guard (service-location SL.2)",
 		},
 	}
 
