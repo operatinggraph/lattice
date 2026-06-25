@@ -67,7 +67,7 @@ self-description: `inputSchema` / `fieldDescription` / `examples`) · install / 
 Refractor / Weaver / Loom control ops · Health KV dashboard · view + upload large binaries (photos,
 lease PDFs).
 
-**Enabling work (the picked "Now" set).**
+**Enabling work (the picked "Now" set) — ✅ all shipped (see the Progress board).**
 
 | Enabling item | Why Loupe needs it | Imp | Size |
 |---|---|---|---|
@@ -86,25 +86,12 @@ only · whether to add a thin read/query convenience surface (direct KV + lens r
 
 ---
 
-## Now / near-term (picked)
+## Now / near-term — ✅ shipped
 
-The three enabling items above — **Loom control plane** (unblocks Loupe's component-control coverage),
-**Large-file / binary handling**, and **Refractor substrate inner-package migration** — are the picked
-near-term build set. Each is taken design-first (design doc → team review → launch), flagging contract
-changes.
-
-Ride-along cleanups — **triaged by the Steward (2026-06-24); none is a clean unattended XS:**
-
-- **multi-aspect atomic OCC for `UpdateMetaVertex`** → **design-needed.** `meta_ddl.go` applies
-  `expectedRevision` to only the first changed aspect by design (each aspect has an independent NATS revision
-  sequence). True atomic multi-key OCC needs a substrate multi-key per-key-revision primitive — an M+,
-  contract-adjacent commit-path change. *The Steward design tier will draft a proposal; Andrew ratifies.*
-- **freshnessExpiry marker tombstone-on-convergence** → **de-prioritized.** Per the in-code rationale
-  (`packages/orchestration-base/mark_expired.go`), a converged marker is read by nothing and harmless;
-  tombstoning buys cleanup not correctness and adds a convergence-edge write — near-zero value, Contract #10
-  §10.4-adjacent review cost.
-- **production freshness-window tuning** → 📐 **Andrew's policy call** (a staleness-tolerance vs. timer-churn
-  value judgment, not a mechanical bump) — awaiting your decision.
+The picked near-term set — **Loom control plane**, **Large-file / binary handling**, and **Refractor substrate
+inner-package migration** — all shipped (see the Progress board). The Steward-triaged ride-along cleanups
+turned out *not* to be clean small wins; they're parked at very low priority (see **Parking lot** at the
+bottom).
 
 ---
 
@@ -168,6 +155,18 @@ Ride-along cleanups — **triaged by the Steward (2026-06-24); none is a clean u
 | Loupe agent-activity console *(Loupe)* | The ops layer atop the live system map: the Steward's queue + work in flight, the **L3 contract-review queue** (Andrew's touchpoint — structured what / why / affected-consumers, not raw uncommitted diffs), per-agent Health, and board state. The agents emit Health KV like components, so Loupe watching the platform watches the agents (dogfoods the dependency-watch). Operator surface for `implementation-artifacts/agentic-ops-design.md`. | ★★ | M |
 | Conventions-linter — edit-time hook *(agentic-ops)* | ✅ Done. The 24 pre-existing `// Story N …` history-comments are swept and `STRICT=1 go run ./scripts/lint-conventions.go` is wired as a CI gate (`.github/workflows/ci.yml`); `go run ./scripts/lint-conventions.go --hook` now reads a `PostToolUse` stdin payload, scans the one edited `.go` file, and feeds advisory findings back via `hookSpecificOutput.additionalContext` (never blocks). Registration is a per-machine `.claude/settings.json` matcher (gitignored) — snippet in the script's doc comment. | ★ | XS |
 | Version-control the agentic-ops role-skills *(agentic-ops)* | ✅ Done — canonical defs live in tracked **`agents/`** (`lamplighter`, `steward` + README); **`make install-skills`** copies them into the gitignored `.claude/skills/`. Edit in `agents/`, re-install. bmad tooling skills stay local. Owner skills land here as they're authored. | ★★ | S |
+
+### Parking lot — very low priority (far, far back)
+
+Real but low-value; the Steward should **not** spend design or build effort here unless Andrew explicitly
+greenlights one (Steward triage 2026-06-24 — these were the "ride-along" cleanups that turned out not to be
+clean small wins).
+
+| Item | Why it's parked | Imp | Size |
+|---|---|---|---|
+| multi-aspect atomic OCC for `UpdateMetaVertex` | `meta_ddl.go` applies `expectedRevision` to the first changed aspect by design (each aspect has an independent NATS revision sequence); true atomic multi-key OCC needs a substrate per-key-revision primitive — M+, contract-adjacent — for marginal value. | ★ | M+ |
+| freshnessExpiry marker tombstone-on-convergence | Per `packages/orchestration-base/mark_expired.go`, a converged marker is read by nothing and harmless; tombstoning buys cleanup not correctness + adds a convergence-edge write — near-zero value, Contract #10 §10.4-adjacent. | ★ | S |
+| production freshness-window tuning | A staleness-tolerance vs. timer-churn value judgment — Andrew's call if/when it matters; not worth proactive effort. | ★ | XS |
 
 ---
 
