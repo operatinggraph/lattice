@@ -503,3 +503,8 @@ table.grid td { font-family: var(--mono); }
 .sysmap-tip-k { color: var(--text-dim); min-width: 64px; }
 .sysmap-issue { color: var(--yellow); margin-top: 2px; word-break: break-word; }
 .sysmap-tip-kv { display: inline-block; margin-top: 6px; color: var(--accent); cursor: pointer; }
+
+/* Tasks inbox — reuses the .card family; just spacing + the complete action. */
+.task-card .card-sub { white-space: normal; word-break: normal; }
+.task-scoped { margin-top: 6px; }
+.task-complete { margin-top: 10px; }

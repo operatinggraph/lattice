@@ -13,6 +13,7 @@
       <button class="tab active" data-tab="systemmap">System Map</button>
       <button class="tab" data-tab="corekv">Core KV</button>
       <button class="tab" data-tab="health">Health</button>
+      <button class="tab" data-tab="tasks">Tasks</button>
       <button class="tab" data-tab="control">Control</button>
       <button class="tab" data-tab="packages">Packages</button>
       <button class="tab" data-tab="files">Files</button>
@@ -64,6 +65,26 @@
       </div>
       <div class="cards" id="health-cards"></div>
       <div class="alerts" id="health-alerts"></div>
+    </section>
+
+    <!-- Tasks -->
+    <section class="panel" id="panel-tasks">
+      <div class="panel-controls">
+        <button id="tasks-load">Refresh</button>
+        <label class="muted">status
+          <select id="tasks-status">
+            <option value="open">open</option>
+            <option value="">all</option>
+            <option value="complete">complete</option>
+            <option value="cancelled">cancelled</option>
+          </select>
+        </label>
+        <span class="muted" id="tasks-status-msg"></span>
+      </div>
+      <p class="muted small">The task inbox — open work assigned to identities. Each card shows the
+        operation the assignee must complete (name + instructions, link-sourced from the task's
+        <code>forOperation</code>). "Complete →" jumps to Submit Op with that operation pre-selected.</p>
+      <div class="cards" id="tasks-cards"></div>
     </section>
 
     <!-- Control -->
