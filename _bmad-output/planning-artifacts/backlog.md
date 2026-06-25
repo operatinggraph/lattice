@@ -101,6 +101,40 @@ by the UX Designer (Sally) + the FE Engineer.** Flow: **PO scopes → Sally desi
 
 ---
 
+## Vertical demand backlog (PO discovery)
+
+Filed by the Vertical PO discovery loop (demand side). Each item is tagged with the **vertical** and
+the **owner** (FE = Sally + FE Engineer · pkg = Package Designer · platform = component owner). Scored
+Imp ★ / Size. The Steward + FE Engineer pick these up; the PO only files.
+
+| Item | What it is (PO view) | Vertical | Owner | Imp | Size |
+|---|---|---|---|---|---|
+| Property / Unit / Listing domain + richer application | The biggest *product* gap: `vtx.leaseapp.<id>` is a bare shell (root `{}` + one `applicationFor` link). The vertical models the *workflow* but not the *thing being leased* — there is no property/unit/listing, no rent, lease term, move-in date, applicant income/employment, co-applicants or guarantor. "What am I even applying to lease?" is unanswerable today. Needs a `loftspace-domain` (or similar) package: a unit/listing vertex type + application-detail aspects, with the convergence lens able to walk to the unit. Foundation for a real applicant app. | LoftSpace | pkg + FE | ★★★ | L |
+| Decline / manual-review application outcome | **Verified live: every application auto-approves.** Driving the real flow, both the background-check and payment externalTasks wrote `status:"completed"` unconditionally (the lease-signing LOUD-FLAG: no `failed` producer in the replyOp/lens). For leasing this is product-correctness, not an edge case — a failed credit/criminal check or a declined card must route the application to **rejected** or **manual-review**, not silently pass. The platform enabler ("Structured adapter result", terminal-failure producer) is **already shipped** (828f24d) but the lease-signing replyOp + `leaseApplicationComplete` lens have **not consumed it** — they still hard-code `completed`. Add the rejected/conditional state + a lens/FE surface for it. | LoftSpace | pkg + FE | ★★★ | M |
+| Human-readable task content on userTasks / assignTasks | **Verified live: task vertices carry only `{status, expiresAt}`** — no title, description, instructions, or which-op/form to fill. The applicant's `RecordIdentityPII` and `SignLease` tasks render as opaque keys. *Any* usable task-inbox FE is blocked until the task (orchestration-base userTask DDL + the §10.8 assignTask remediation) stamps a human-facing prompt aspect: title + description + the op/form the user should complete. Feeds every vertical's task UI, not just LoftSpace. | LoftSpace (all) | pkg → FE | ★★ | S–M |
+| LoftSpace applicant app — scoped FE | **Verified live: the vertical is headless** — every step (apply, run checks, complete PII, sign) had to be driven via `lattice op submit` as the system actor; an applicant has no way in. Scoping the greenfield FE the *Now* section flags generically: (1) application-intake form (driven by DDL self-description), (2) "my application status" tracker (submitted → checks → sign → decision), (3) task inbox to complete `RecordIdentityPII` + `SignLease`, (4) document upload (ID / lease PDF, via objects-base). Default to Loupe's vanilla HTML/CSS/JS stack. Depends on the task-content + (ideally) the property-domain items above to render meaningfully. | LoftSpace | FE | ★★★ | L |
+| Close assignTask tasks when their gap is satisfied | **Verified live bug.** After `SignLease` wrote `.signature` (closing `missing_signature`), the §10.8-spawned `SignLease` task stayed `status:"open"` — nothing reconciles an assignTask task when the underlying fact lands via another path. An applicant inbox would show a permanently-stale "Sign your lease" item after they have signed. The gap is the source of truth; the task that actuates it has no closure path on gap-satisfaction. | LoftSpace (all) | platform (orchestration) | ★★ | S–M |
+
+**Observations (low priority — folded, not filed as rows):**
+- **Operator can't see *open* gaps per anchor.** `lattice weaver list` (and Loupe by extension) shows the target's *declared* gap set, not which gaps are actually open right now — after signing, it still listed all four. "What is this application blocked on?" is unanswerable from the operator surface. Largely subsumed by the planned *Loupe system-map / agent-activity console* (★★★, Refinements & ops) — flagging the per-anchor live-gap-state requirement for whoever builds it.
+- **`make up-full` does not install the LoftSpace vertical** (only rbac / identity / objects-base). Exercising or demoing LoftSpace requires manually installing orchestration-base + service-domain + lease-signing. Minor DX nit — a `make up-loftspace` (or an opt-in vertical install) would smooth demos and this PO loop. platform/DX, ★ XS.
+
+### PO notes (dated — drives rotation)
+
+- **2026-06-24 — LoftSpace (first PO run).** Brought up `make up-full` (clean), but it omits the vertical
+  → manually installed orchestration-base + service-domain + lease-signing on top. Drove the real
+  lease-application flow end-to-end via the `lattice` CLI: created an applicant identity →
+  `CreateLeaseApplication` → watched convergence auto-dispatch via Weaver + Loom. Confirmed the
+  background-check + payment externalTasks ran through the bridge (fake adapters) and wrote `completed`
+  outcomes (with `validUntil` freshness), and two human userTasks opened (`RecordIdentityPII`,
+  `SignLease`). Drove `SignLease` to close `missing_signature`. Findings above are all **verified against
+  the live stack**, not static analysis. Stack torn down (`make down`). **Next run rotates to Clinic**
+  (forcing-function vertical — currently exists only in design docs, so expect a static
+  capability/product-gap pass: what a non-leasing domain needs that the platform/packages don't yet
+  provide).
+
+---
+
 ## Deferred backlog (Phase 3+)
 
 ### Security & trust boundary
