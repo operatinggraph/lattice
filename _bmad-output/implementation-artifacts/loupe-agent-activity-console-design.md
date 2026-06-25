@@ -1,13 +1,12 @@
 # Loupe agent-activity console — design proposal
 
-> **Status:** 🚧 **Blocked by Andrew** (2026-06-25) — Andrew rejects the §4 read-seam options (A/B/C): none
-> is an acceptable way for the console to source its board / review-queue / activity data. This is a **real
-> Andrew-gate, not loop timidity** — changing Loupe's data-access model (pure-NATS-client → reading the local
-> repo, or a KV dual-write) is an architectural-direction call Andrew owns, and he is actively holding it.
-> **Needs a different direction for §4 before it can proceed.** The §8 *lean path* — ship pane #1 (agent
-> health via Health KV) only, no repo seam — needs no §4 decision and remains the available fallback. §5.1 /
-> §9 Q2–Q4 (liveness model, `emit-agent` verb, live-emitter scope) are settled Winston-level calls, but moot
-> until §4's direction is set. Authored by Winston (Steward fire, 2026-06-25).
+> **Status:** ⏸️ **Shelved by Andrew** (2026-06-25) — Andrew rejected the §4 read-seam options (A/B/C) and
+> chose to **shelve the console for now**, redirecting the experience layer to the vertical-app front-ends.
+> Changing Loupe's data-access model (pure-NATS-client → reading the local repo, or a KV dual-write) is an
+> architectural-direction call he owns; revisit once the code-derived dependency map (§7) and the ops-state
+> data-home question have matured. The design below (incl. the §8 lean path — agent-health pane via Health KV
+> only, no repo seam — and the settled §9 Q2–Q4 calls) is **retained for that later revisit; do not build it
+> now.** Authored by Winston (Steward fire, 2026-06-25).
 > Backlog item: *Loupe agent-activity console* (★★★, M) — Refinements & ops table + the *Now / experience
 > layer* section. Layers onto the shipped live system-map landing view.
 

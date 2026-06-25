@@ -37,7 +37,7 @@ per-item detail lives in design / story docs + git history, never in agent memor
 | Task-content — **`my-tasks` lens self-describing** | ✅ Done (cypher aspect-hops `op.canonicalName`/`op.description` → `operationName`/`operationDescription` on the read-model row; refractor e2e asserts; for all consumers) | `packages/orchestration-base/lenses.go` |
 | Loupe task-inbox — **operator data layer** (`GET /api/tasks`) | ✅ Done (all-identity task list + op label resolved from forOperation meta; unit-tested, gates green) | `cmd/loupe/tasks.go` |
 | Loupe task-inbox — **FE tab** | ✅ Done (Tasks tab: cards per task with op name/description, assignee, expiry, status filter, "Complete in Submit Op →" deep-link; in-browser-verified against a live task, no console errors) | `cmd/loupe/web/{index.html,app.js,style.css}` |
-| Loupe agent-activity console *(★★★ experience)* — **design** | 🚧 Blocked by Andrew — he rejects the §4 read-seam options (A/B/C); the console's data-source model is an architectural-direction call he owns and needs a NEW direction. Q2–Q4 (liveness/verb/scope) settled but moot until §4. | `implementation-artifacts/loupe-agent-activity-console-design.md` |
+| Loupe agent-activity console *(★ experience — deferred)* — **design** | ⏸️ Shelved by Andrew (2026-06-25) — read-seam options rejected; revisit once the dependency map + ops-state data-home mature. Design retained; **do not build now.** Experience layer redirected to the vertical-app FEs. | `implementation-artifacts/loupe-agent-activity-console-design.md` |
 | _all other items_ | 📋 Backlog | see themed tables below |
 
 ---
@@ -95,15 +95,18 @@ only · whether to add a thin read/query convenience surface (direct KV + lens r
 ## Now — the experience layer (UX + FE)
 
 Prior near-term picks (Loom control plane, large-file/binary, Refractor substrate migration) all shipped; the
-ride-along cleanups are parked (see **Parking lot**). **Active focus: the experience layer — built ambitiously
-by the UX Designer (Sally) + the FE Engineer.** Flow: **PO scopes → Sally designs the UX → FE Engineer builds
-+ verifies in-browser → Winston admits.** M/L is fine (risk-bounded L2 + multi-fire).
+ride-along cleanups are parked (see **Parking lot**). **Active focus: the vertical-app front-ends — built
+ambitiously by the UX Designer (Sally) + the FE Engineer.** Flow: **PO scopes → Sally designs the UX → FE
+Engineer builds + verifies in-browser → Winston admits.** M/L is fine (risk-bounded L2 + multi-fire).
 
-- **Loupe operator surfaces (★★★)** — the live "system map" landing page + the agent-activity console (see
-  *Refinements & ops*). They make the platform *and* the autonomous agents visible — top experience priority.
-- **Vertical app front-ends (★★★)** — whatever the Vertical POs (LoftSpace, Clinic) decide their apps should
-  do. Greenfield per app (none exists yet): the PO defines the capability, Sally designs, the FE Engineer
-  builds (Loupe's vanilla HTML/CSS/JS stack as the default). Be ambitious — new app capabilities welcome.
+- **Vertical app front-ends (★★★) — the top experience priority.** Whatever the Vertical POs (LoftSpace,
+  Clinic) decide their apps should do. Greenfield per app: the PO defines the capability, Sally designs, the FE
+  Engineer builds (Loupe's vanilla HTML/CSS/JS stack as the default). LoftSpace is exercisable live with a
+  build-ready path — the `loftspace-domain` package (property / unit / listing; design build-ready) → the
+  applicant app FE (intake → status tracker → task inbox → document upload). Be ambitious — new app
+  capabilities welcome.
+- **Loupe operator surfaces** — the live "system map" landing page is ✅ shipped. The **agent-activity console
+  is ⏸️ shelved** (Andrew, 2026-06-25 — read-seam options rejected; revisit later). Not an active pick.
 
 ---
 
