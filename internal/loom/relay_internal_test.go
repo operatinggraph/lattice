@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -29,7 +30,7 @@ func TestRelay_NakWithDelayDoesNotHotLoop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	srv := natstest.RunServer(opts)
 	t.Cleanup(srv.Shutdown)
 	nc, err := nats.Connect(srv.ClientURL())

@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/adjacency"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/projection"
@@ -96,7 +97,7 @@ func ephemeralDescriptor(t *testing.T) projection.OutputDescriptor {
 
 func contractStartKVs(t *testing.T) (*substrate.KV, *substrate.KV) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 	nc, err := nats.Connect(s.ClientURL())

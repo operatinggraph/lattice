@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/weaver"
 	"github.com/asolgan/lattice/internal/weaver/control"
 )
@@ -79,7 +80,7 @@ func startTestServer(t *testing.T) *nats.Conn {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
 	}
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	srv := natstest.RunServer(opts)
 	t.Cleanup(srv.Shutdown)
 	nc, err := nats.Connect(srv.ClientURL())

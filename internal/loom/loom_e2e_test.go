@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/loom"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -24,7 +25,7 @@ import (
 
 func startNATS(t *testing.T) *nats.Conn {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 	nc, err := nats.Connect(s.ClientURL())

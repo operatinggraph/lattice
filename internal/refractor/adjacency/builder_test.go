@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/adjacency"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -19,7 +20,7 @@ func startAdjKV(t *testing.T) *substrate.KV {
 	t.Helper()
 	opts := &natsserver.Options{
 		JetStream: true,
-		StoreDir:  t.TempDir(),
+		StoreDir:  jsstore.Dir(t),
 		NoLog:     true,
 		NoSigs:    true,
 		Port:      natsserver.RANDOM_PORT,

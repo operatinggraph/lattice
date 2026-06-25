@@ -11,6 +11,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -18,7 +19,7 @@ import (
 // weaver-state bucket and returns a markStore against it.
 func newStateTestStore(t *testing.T, ctx context.Context) *markStore {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	srv := natstest.RunServer(opts)
 	t.Cleanup(srv.Shutdown)
 	nc, err := nats.Connect(srv.ClientURL())

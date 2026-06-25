@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -41,7 +42,7 @@ func startLagServer(t *testing.T) *lagEnv {
 	}
 	opts := &natsserver.Options{
 		JetStream: true,
-		StoreDir:  t.TempDir(),
+		StoreDir:  jsstore.Dir(t),
 		NoLog:     true,
 		NoSigs:    true,
 		Port:      natsserver.RANDOM_PORT,

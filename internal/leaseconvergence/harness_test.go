@@ -42,6 +42,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/bridge"
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/loom"
 	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/processor"
@@ -120,7 +121,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 		opt(&hc)
 	}
 
-	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(srvOpts)
 	t.Cleanup(s.Shutdown)
 

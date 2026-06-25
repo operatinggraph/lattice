@@ -12,6 +12,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/adjacency"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
@@ -27,7 +28,7 @@ import (
 
 func startKVs(t *testing.T) (*substrate.KV, *substrate.KV) {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 	nc, err := nats.Connect(s.ClientURL())

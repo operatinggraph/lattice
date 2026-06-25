@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/refractor/adapter"
@@ -95,7 +96,7 @@ func TestRefractor_KeyColumnLens_ProjectsBareNanoIDKey(t *testing.T) {
 		t.Skip("skipping keyColumn convergence proof e2e in -short mode")
 	}
 
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	defer s.Shutdown()
 

@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -26,7 +27,7 @@ import (
 // the AC #3 path: "Lens activation flows through the standard Processor
 // write path" (data-contracts.md §1.2 line 70).
 func TestCoreKVSource_LoadsLensFromAspect(t *testing.T) {
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := test.RunServer(opts)
 	defer s.Shutdown()
 

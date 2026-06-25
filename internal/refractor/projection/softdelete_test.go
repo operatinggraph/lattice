@@ -11,6 +11,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/projection"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -80,7 +81,7 @@ func TestSoftDelete_ReusesGuardedTombstone(t *testing.T) {
 
 func startTargetKV(t *testing.T) *substrate.KV {
 	t.Helper()
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 	nc, err := nats.Connect(s.ClientURL())

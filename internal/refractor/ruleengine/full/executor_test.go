@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/adjacency"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -28,7 +29,7 @@ func startExecKVs(t *testing.T) (adjKV, coreKV *substrate.KV) {
 	t.Helper()
 	opts := &natsserver.Options{
 		JetStream: true,
-		StoreDir:  t.TempDir(),
+		StoreDir:  jsstore.Dir(t),
 		NoLog:     true,
 		NoSigs:    true,
 		Port:      natsserver.RANDOM_PORT,

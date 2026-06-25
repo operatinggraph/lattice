@@ -12,6 +12,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -20,7 +21,7 @@ func testConn(t *testing.T) (*substrate.Conn, context.Context) {
 	opts := natsserver.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
-	opts.StoreDir = t.TempDir() // unique per test — avoid a shared-JetStream collision
+	opts.StoreDir = jsstore.Dir(t) // unique per test — avoid a shared-JetStream collision
 	s := natsserver.RunServer(&opts)
 	t.Cleanup(func() {
 		if jsCfg := s.JetStreamConfig(); jsCfg != nil {

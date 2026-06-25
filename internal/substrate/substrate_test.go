@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go/jetstream"
@@ -20,7 +21,7 @@ func startEmbeddedNATS(t *testing.T) (url string) {
 	opts := natsserver.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
-	opts.StoreDir = t.TempDir()
+	opts.StoreDir = jsstore.Dir(t)
 	s := natsserver.RunServer(&opts)
 	t.Cleanup(func() {
 		if jsCfg := s.JetStreamConfig(); jsCfg != nil {

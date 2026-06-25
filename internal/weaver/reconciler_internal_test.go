@@ -12,6 +12,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -27,7 +28,7 @@ type sweepHarness struct {
 
 func newSweepHarness(t *testing.T, ctx context.Context, opts ...func(*Config)) *sweepHarness {
 	t.Helper()
-	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	srvOpts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	srv := natstest.RunServer(srvOpts)
 	t.Cleanup(srv.Shutdown)
 	nc, err := nats.Connect(srv.ClientURL())

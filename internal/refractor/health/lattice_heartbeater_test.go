@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -26,7 +27,7 @@ func TestLatticeHeartbeater_EmitsLensLatency(t *testing.T) {
 		t.Skip("requires NATS JetStream")
 	}
 
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	defer s.Shutdown()
 	nc, err := nats.Connect(s.ClientURL())
@@ -109,7 +110,7 @@ func TestLatticeHeartbeater_SkipsZeroSampleLenses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS JetStream")
 	}
-	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: t.TempDir()}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	s := natstest.RunServer(opts)
 	defer s.Shutdown()
 	nc, err := nats.Connect(s.ClientURL())

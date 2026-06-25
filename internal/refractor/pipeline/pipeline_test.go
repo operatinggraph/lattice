@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/failure"
 	"github.com/asolgan/lattice/internal/refractor/health"
@@ -89,7 +90,7 @@ func startPipelineEnv(t *testing.T) *pipelineEnv {
 	}
 	opts := &natsserver.Options{
 		JetStream: true,
-		StoreDir:  t.TempDir(),
+		StoreDir:  jsstore.Dir(t),
 		NoLog:     true,
 		NoSigs:    true,
 		Port:      natsserver.RANDOM_PORT,
