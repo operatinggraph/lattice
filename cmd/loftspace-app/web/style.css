@@ -207,6 +207,9 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .step.active .step-dot { border-color: var(--yellow); color: var(--yellow); }
 .step.active .step-status { color: var(--yellow); }
 
+/* Tasks inbox */
+.task-card .task-scope { font-family: var(--mono); font-size: 11px; color: var(--text-dim); word-break: break-all; }
+
 /* Modal */
 .overlay {
   position: fixed;

@@ -19,6 +19,7 @@
   <nav class="tabs" role="tablist" aria-label="Applicant views">
     <button id="tab-browse" class="tab active" role="tab" aria-selected="true" aria-controls="view-browse">Browse &amp; Apply</button>
     <button id="tab-apps" class="tab" role="tab" aria-selected="false" aria-controls="view-apps">My Applications</button>
+    <button id="tab-tasks" class="tab" role="tab" aria-selected="false" aria-controls="view-tasks">Tasks</button>
   </nav>
 
   <main>
@@ -48,6 +49,17 @@
       <div id="apps" class="grid grid-wide" aria-live="polite"></div>
       <div id="apps-empty" class="empty" hidden></div>
     </section>
+
+    <!-- Tasks -->
+    <section id="view-tasks" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+      <div class="panel-controls">
+        <button id="reload-tasks" class="ghost">Refresh</button>
+        <span id="tasks-summary" class="summary"></span>
+      </div>
+
+      <div id="tasks" class="grid grid-wide" aria-live="polite"></div>
+      <div id="tasks-empty" class="empty" hidden></div>
+    </section>
   </main>
 
   <!-- Apply modal -->
@@ -76,6 +88,26 @@
         <div class="modal-actions">
           <button type="button" id="apply-cancel" class="ghost">Cancel</button>
           <button type="submit" id="apply-submit">Submit application</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Complete task modal -->
+  <div id="complete-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="complete-title">
+      <h2 id="complete-title">Complete task</h2>
+      <div id="complete-desc" class="apply-unit"></div>
+      <form id="complete-form">
+        <div class="field">
+          <label>Applies to</label>
+          <div id="tc-target" class="readonly"></div>
+        </div>
+        <div id="tc-fields"></div>
+        <p id="tc-sensitive" class="hint" hidden>These details are sensitive and are stored on your identity record.</p>
+        <div class="modal-actions">
+          <button type="button" id="complete-cancel" class="ghost">Cancel</button>
+          <button type="submit" id="complete-submit">Complete</button>
         </div>
       </form>
     </div>

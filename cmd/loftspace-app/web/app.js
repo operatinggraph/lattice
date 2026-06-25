@@ -5,7 +5,38 @@
 // /api/identities and submits CreateLeaseApplication via /api/op.
 
 const APPLICANT_KEY = "loftspace.applicant";
-const state = { listings: [], applications: [], applicant: null, current: null, view: "browse", highlight: null };
+const state = {
+  listings: [], applications: [], tasks: [],
+  applicant: null, current: null, currentTask: null, view: "browse", highlight: null,
+};
+
+// COMPLETIONS maps a userTask op to how the applicant completes it in-app. target
+// is the op's primary key field, filled from the task's scopedTo — for a userTask
+// the §10.5 invariant holds (assignee == scopedTo == the subject), so scopedTo is
+// the entity the op acts on. class is the op's DDL-inference class; reads carry the
+// scopedTo key. An op not listed here can't be completed in-app yet (the generic
+// DDL-self-describing form needs an op-catalog read model — a Core-KV op-meta scan
+// would violate P5 in a vertical app); its card links to Loupe instead.
+const COMPLETIONS = {
+  SignLease: {
+    title: "Sign your lease",
+    klass: "leaseapp",
+    targetField: "leaseAppKey",
+    fields: [],
+    submitLabel: "Sign lease",
+  },
+  RecordIdentityPII: {
+    title: "Provide your identity details",
+    klass: "identity",
+    targetField: "identityKey",
+    sensitive: true,
+    fields: [
+      { name: "ssn", label: "Social Security Number", placeholder: "123-45-6789", required: true },
+      { name: "dob", label: "Date of birth", type: "date", required: true },
+    ],
+    submitLabel: "Submit details",
+  },
+};
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -61,20 +92,24 @@ function setApplicant(value) {
   else localStorage.removeItem(APPLICANT_KEY);
   renderListings(); // re-enable/disable Apply for the new applicant
   if (state.view === "apps") loadApplications(); // re-scope the tracker to the new applicant
+  if (state.view === "tasks") loadTasks(); // re-scope the inbox to the new applicant
 }
 
-// ---- Tabs (Browse & Apply / My Applications) ----
+// ---- Tabs (Browse & Apply / My Applications / Tasks) ----
+
+const VIEWS = ["browse", "apps", "tasks"];
 
 function showView(view) {
   state.view = view;
-  const isBrowse = view === "browse";
-  $("#view-browse").hidden = !isBrowse;
-  $("#view-apps").hidden = isBrowse;
-  $("#tab-browse").classList.toggle("active", isBrowse);
-  $("#tab-apps").classList.toggle("active", !isBrowse);
-  $("#tab-browse").setAttribute("aria-selected", String(isBrowse));
-  $("#tab-apps").setAttribute("aria-selected", String(!isBrowse));
-  if (!isBrowse) loadApplications();
+  for (const v of VIEWS) {
+    const isV = v === view;
+    $("#view-" + v).hidden = !isV;
+    const tab = $("#tab-" + v);
+    tab.classList.toggle("active", isV);
+    tab.setAttribute("aria-selected", String(isV));
+  }
+  if (view === "apps") loadApplications();
+  if (view === "tasks") loadTasks();
 }
 
 // ---- Listings (Browse & Apply) ----
@@ -394,6 +429,190 @@ function renderApplicationCard(row, highlight) {
   return card;
 }
 
+// ---- Tasks (inbox) ----
+//
+// The applicant's OPEN tasks, read from the `my-tasks` lens projection (P5: a
+// vertical app reads a read-model, never Core KV — Loupe scans Core KV only as the
+// inspector). Each task is self-describing (the lens aspect-hops the op name +
+// description off the forOperation meta), and completion submits the bound op.
+
+async function loadTasks() {
+  const grid = $("#tasks");
+  const empty = $("#tasks-empty");
+  if (!state.applicant) {
+    grid.innerHTML = "";
+    state.tasks = [];
+    empty.hidden = false;
+    empty.textContent = "Select an applicant identity above to see their tasks.";
+    $("#tasks-summary").textContent = "";
+    return;
+  }
+  $("#tasks-summary").textContent = "loading…";
+  try {
+    const data = await api("/api/tasks?applicant=" + encodeURIComponent(state.applicant));
+    state.tasks = data.tasks || [];
+  } catch (e) {
+    grid.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Could not load tasks: " + e.message;
+    $("#tasks-summary").textContent = "";
+    return;
+  }
+  renderTasks();
+}
+
+function renderTasks() {
+  const grid = $("#tasks");
+  const empty = $("#tasks-empty");
+  grid.innerHTML = "";
+  if (state.tasks.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No open tasks. When your application needs you to act, it will show up here.";
+    $("#tasks-summary").textContent = "";
+    return;
+  }
+  empty.hidden = true;
+  for (const t of state.tasks) grid.append(renderTaskCard(t));
+  const n = state.tasks.length;
+  $("#tasks-summary").textContent = `${n} open task${n === 1 ? "" : "s"}`;
+}
+
+function renderTaskCard(t) {
+  const card = document.createElement("div");
+  card.className = "card task-card";
+
+  const title = document.createElement("div");
+  title.className = "addr";
+  title.textContent = t.operationName || shortKey(t.operation) || "Task";
+
+  const desc = document.createElement("div");
+  desc.className = "addr-sub";
+  desc.textContent = t.operationDescription || "";
+
+  const scope = document.createElement("div");
+  scope.className = "task-scope mono";
+  scope.textContent = t.scopedTo ? shortKey(t.scopedTo) : shortKey(t.taskKey);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  if (t.expiresAt) meta.textContent = "due " + fmtDate(t.expiresAt);
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  const badge = document.createElement("span");
+  badge.className = "badge pending";
+  badge.textContent = "open";
+  const btn = document.createElement("button");
+  const canComplete = !!COMPLETIONS[t.operationName];
+  btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
+  btn.disabled = !canComplete;
+  btn.title = canComplete ? "" : "This task type isn't completable in this app yet — use Loupe's Submit Op.";
+  if (canComplete) btn.addEventListener("click", () => openComplete(t));
+  actions.append(badge, btn);
+
+  card.append(title);
+  if (desc.textContent) card.append(desc);
+  card.append(scope);
+  if (meta.textContent) card.append(meta);
+  card.append(actions);
+  return card;
+}
+
+// ---- Complete task modal ----
+
+function openComplete(task) {
+  const desc = COMPLETIONS[task.operationName];
+  if (!desc) return;
+  state.currentTask = task;
+  $("#complete-title").textContent = desc.title;
+  $("#complete-desc").textContent = task.operationDescription || "";
+  $("#tc-target").textContent = task.scopedTo || task.taskKey;
+  $("#tc-sensitive").hidden = !desc.sensitive;
+  $("#complete-submit").textContent = desc.submitLabel || "Complete";
+
+  const host = $("#tc-fields");
+  host.innerHTML = "";
+  for (const f of desc.fields) {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    const label = document.createElement("label");
+    label.setAttribute("for", "tc-" + f.name);
+    label.textContent = f.label + (f.required ? "" : " (optional)");
+    const input = document.createElement("input");
+    input.id = "tc-" + f.name;
+    input.type = f.type || "text";
+    if (f.placeholder) input.placeholder = f.placeholder;
+    wrap.append(label, input);
+    host.append(wrap);
+  }
+  $("#complete-overlay").hidden = false;
+  const first = host.querySelector("input");
+  if (first) first.focus();
+}
+
+function closeComplete() {
+  $("#complete-overlay").hidden = true;
+  state.currentTask = null;
+}
+
+async function submitComplete(ev) {
+  ev.preventDefault();
+  const task = state.currentTask;
+  if (!task) return;
+  const desc = COMPLETIONS[task.operationName];
+  if (!desc) return;
+
+  const target = task.scopedTo || "";
+  if (!target) {
+    toast("This task has no target to act on.", "err");
+    return;
+  }
+  const payload = {};
+  payload[desc.targetField] = target;
+  for (const f of desc.fields) {
+    const v = ($("#tc-" + f.name).value || "").trim();
+    if (!v) {
+      if (f.required) {
+        toast(f.label + " is required.", "err");
+        return;
+      }
+      continue;
+    }
+    payload[f.name] = v;
+  }
+
+  const submit = $("#complete-submit");
+  submit.disabled = true;
+  try {
+    const reply = await api("/api/op", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationType: task.operationName,
+        class: desc.klass,
+        reads: [target],
+        payload,
+      }),
+    });
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not complete — " + msg, "err");
+      return;
+    }
+    closeComplete();
+    toast(desc.title + " — done.", "ok");
+    // Reload the inbox (the gap closes; a Loom-managed userTask closes its own
+    // task, an assignTask SignLease may linger until its gap-closer lands — a
+    // separate platform follow-up) and re-scope the application tracker.
+    loadTasks();
+    loadApplications();
+  } catch (e) {
+    toast("Could not complete: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 // ---- wire up ----
 
 function init() {
@@ -409,7 +628,14 @@ function init() {
   $("#apply-form").addEventListener("submit", submitApply);
   $("#tab-browse").addEventListener("click", () => showView("browse"));
   $("#tab-apps").addEventListener("click", () => showView("apps"));
+  $("#tab-tasks").addEventListener("click", () => showView("tasks"));
   $("#reload-apps").addEventListener("click", loadApplications);
+  $("#reload-tasks").addEventListener("click", loadTasks);
+  $("#complete-cancel").addEventListener("click", closeComplete);
+  $("#complete-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#complete-overlay")) closeComplete();
+  });
+  $("#complete-form").addEventListener("submit", submitComplete);
 
   loadListings();
 }
