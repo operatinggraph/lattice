@@ -238,17 +238,12 @@ run-loupe:
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loupe
 
 ## test — Run all Go unit + integration tests.
-## NOTE (Story 2.1b Gap 4): -p 1 serializes test-package execution.
-## Embedded NATS / JetStream fixtures across many packages each spin up
-## an in-process server; with default GOMAXPROCS parallelism many
-## servers run concurrently and exhaust file-descriptor/memory budgets
-## on the runner, manifesting as KV-put "context deadline exceeded"
-## timeouts in the bypass + substrate suites. Fixtures already use
-## Port = -1 (random) so port collisions are not the underlying cause;
-## -p 1 is the targeted fix until Phase 2 reduces fixture cost.
+## Test packages run concurrently (-p 4). Every embedded NATS/JetStream
+## fixture binds a random port (Port = -1) and owns a private StoreDir
+## under t.TempDir(), so concurrent packages share no JetStream file state.
 test:
-	@echo "==> go test ./... -p 1"
-	go test ./... -p 1
+	@echo "==> go test ./... -p 4"
+	go test ./... -p 4
 
 ## test-bypass — Run the Phase 1 Gate 2 adversarial bypass test suite.
 ## Requires a running Docker stack (make up). Exits 0 only when all 4 bypass

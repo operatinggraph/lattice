@@ -27,6 +27,7 @@ func startEmbeddedNATS(t *testing.T) string {
 	opts := natsserver.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
 	s := natsserver.RunServer(&opts)
 	t.Cleanup(func() {
 		if jsCfg := s.JetStreamConfig(); jsCfg != nil {

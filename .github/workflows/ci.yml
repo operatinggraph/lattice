@@ -3,7 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: &doc-paths
+      - '**/*.md'
+      - 'docs/**'
+      - '_bmad/**'
+      - '_bmad-output/**'
+      - 'agents/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore: *doc-paths
 
 jobs:
   build-and-test:
@@ -90,11 +98,11 @@ jobs:
         run: make test-object-gc
 
       - name: Run all tests (unit + integration)
-        # -p 1: serialize test-package execution. Many fixtures spin
-        # up embedded NATS+JetStream servers; default parallelism
-        # exhausts FD/mem budgets on standard runners. See Story 2.1b
-        # Gap 4 / MORPH-DEVIATIONS Deviation 14.
-        run: go test ./... -count=1 -p 1 -timeout 10m
+        # -p 4: up to four test packages run concurrently. Every embedded
+        # NATS+JetStream fixture binds a random port and owns a private
+        # StoreDir under t.TempDir(), so concurrent packages share no
+        # JetStream file state.
+        run: go test ./... -count=1 -p 4 -timeout 10m
 
       - name: Tear down
         if: always()

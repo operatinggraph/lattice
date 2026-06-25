@@ -44,10 +44,12 @@ func startBypassNATS(t *testing.T) string {
 	opts := natsserver.DefaultTestOptions
 	opts.Port = -1
 	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
 	s := natsserver.RunServer(&opts)
 	t.Cleanup(func() {
-		// Remove JetStream storage dir to prevent state leakage between
-		// tests that reuse the same port (port -1 → OS-assigned ephemeral).
+		// Each server owns a private StoreDir under t.TempDir(), so concurrently
+		// running test packages never share JetStream file state. Remove it
+		// eagerly on shutdown; t.TempDir's own cleanup then no-ops.
 		if jsCfg := s.JetStreamConfig(); jsCfg != nil {
 			defer os.RemoveAll(jsCfg.StoreDir)
 		}
