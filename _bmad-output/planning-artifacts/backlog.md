@@ -34,7 +34,7 @@ per-item detail lives in design / story docs + git history, never in agent memor
 | service-location — service-access authZ scheme *(SL.2)* | ✅ Done (e4af07c, 715b14b) | `implementation-artifacts/service-location-design.md` |
 | Loupe live system-map *(★★★ experience)* — **data layer** (`/api/systemmap` assembler) | ✅ Done (backend + unit tests; lead-reviewed, gates green) | `implementation-artifacts/loupe-v1.md` (API list) |
 | Loupe live system-map *(★★★ experience)* — **FE landing view** | ✅ Done (UX-then-FE: Sally spec → FE Engineer build → Winston in-browser-verified against `make up-full` + lead-reviewed; gates green) | `implementation-artifacts/loupe-system-map-ux.md` |
-| Loupe agent-activity console *(★★★ experience)* — **design** | 📐 Awaiting Andrew (data-source decision §4 + agent-liveness model §5.1; adversarially reviewed, claims code-verified) | `implementation-artifacts/loupe-agent-activity-console-design.md` |
+| Loupe agent-activity console *(★★★ experience)* — **design** | 🚧 Blocked — awaiting Andrew ratification (data-source decision §4 + agent-liveness model §5.1; design done, adversarially reviewed, claims code-verified) | `implementation-artifacts/loupe-agent-activity-console-design.md` |
 | _all other items_ | 📋 Backlog | see themed tables below |
 
 ---
