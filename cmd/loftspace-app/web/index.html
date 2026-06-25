@@ -16,19 +16,38 @@
     </div>
   </header>
 
-  <main>
-    <div class="panel-controls">
-      <label for="status">Show</label>
-      <select id="status" aria-label="Filter listings by status">
-        <option value="available" selected>Available</option>
-        <option value="all">All listings</option>
-      </select>
-      <button id="reload-listings" class="ghost">Refresh</button>
-      <span id="summary" class="summary"></span>
-    </div>
+  <nav class="tabs" role="tablist" aria-label="Applicant views">
+    <button id="tab-browse" class="tab active" role="tab" aria-selected="true" aria-controls="view-browse">Browse &amp; Apply</button>
+    <button id="tab-apps" class="tab" role="tab" aria-selected="false" aria-controls="view-apps">My Applications</button>
+  </nav>
 
-    <div id="listings" class="grid" aria-live="polite"></div>
-    <div id="empty" class="empty" hidden></div>
+  <main>
+    <!-- Browse & Apply -->
+    <section id="view-browse" role="tabpanel" aria-labelledby="tab-browse">
+      <div class="panel-controls">
+        <label for="status">Show</label>
+        <select id="status" aria-label="Filter listings by status">
+          <option value="available" selected>Available</option>
+          <option value="all">All listings</option>
+        </select>
+        <button id="reload-listings" class="ghost">Refresh</button>
+        <span id="summary" class="summary"></span>
+      </div>
+
+      <div id="listings" class="grid" aria-live="polite"></div>
+      <div id="empty" class="empty" hidden></div>
+    </section>
+
+    <!-- My Applications -->
+    <section id="view-apps" role="tabpanel" aria-labelledby="tab-apps" hidden>
+      <div class="panel-controls">
+        <button id="reload-apps" class="ghost">Refresh</button>
+        <span id="apps-summary" class="summary"></span>
+      </div>
+
+      <div id="apps" class="grid grid-wide" aria-live="polite"></div>
+      <div id="apps-empty" class="empty" hidden></div>
+    </section>
   </main>
 
   <!-- Apply modal -->

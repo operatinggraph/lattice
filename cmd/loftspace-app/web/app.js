@@ -5,7 +5,7 @@
 // /api/identities and submits CreateLeaseApplication via /api/op.
 
 const APPLICANT_KEY = "loftspace.applicant";
-const state = { listings: [], applicant: null, current: null };
+const state = { listings: [], applications: [], applicant: null, current: null, view: "browse", highlight: null };
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -56,9 +56,25 @@ function restoreApplicant() {
 function setApplicant(value) {
   const v = (value || "").trim();
   state.applicant = v || null;
+  state.highlight = null; // a highlight belongs to the applicant who just applied
   if (v) localStorage.setItem(APPLICANT_KEY, v);
   else localStorage.removeItem(APPLICANT_KEY);
   renderListings(); // re-enable/disable Apply for the new applicant
+  if (state.view === "apps") loadApplications(); // re-scope the tracker to the new applicant
+}
+
+// ---- Tabs (Browse & Apply / My Applications) ----
+
+function showView(view) {
+  state.view = view;
+  const isBrowse = view === "browse";
+  $("#view-browse").hidden = !isBrowse;
+  $("#view-apps").hidden = isBrowse;
+  $("#tab-browse").classList.toggle("active", isBrowse);
+  $("#tab-apps").classList.toggle("active", !isBrowse);
+  $("#tab-browse").setAttribute("aria-selected", String(isBrowse));
+  $("#tab-apps").setAttribute("aria-selected", String(!isBrowse));
+  if (!isBrowse) loadApplications();
 }
 
 // ---- Listings (Browse & Apply) ----
@@ -237,11 +253,145 @@ async function submitApply(ev) {
     closeApply();
     toast("Application submitted.", "ok", key);
     loadListings();
+    // Route to My Applications with the new application highlighted (the lens
+    // may take a moment to project, so an empty/late row is normal on first load;
+    // a Refresh shows it once projected). showView triggers the scoped load.
+    state.highlight = key || null;
+    showView("apps");
   } catch (e) {
     toast("Could not submit: " + e.message, "err");
   } finally {
     submit.disabled = false;
   }
+}
+
+// ---- My Applications (status tracker) ----
+
+async function loadApplications() {
+  const grid = $("#apps");
+  const empty = $("#apps-empty");
+  if (!state.applicant) {
+    grid.innerHTML = "";
+    state.applications = [];
+    empty.hidden = false;
+    empty.textContent = "Select an applicant identity above to see their applications.";
+    $("#apps-summary").textContent = "";
+    return;
+  }
+  $("#apps-summary").textContent = "loading…";
+  try {
+    const data = await api("/api/applications?applicant=" + encodeURIComponent(state.applicant));
+    state.applications = data.applications || [];
+  } catch (e) {
+    grid.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Could not load applications: " + e.message;
+    $("#apps-summary").textContent = "";
+    return;
+  }
+  renderApplications();
+}
+
+function renderApplications() {
+  const highlight = state.highlight;
+  const grid = $("#apps");
+  const empty = $("#apps-empty");
+  grid.innerHTML = "";
+  if (state.applications.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No applications yet. Browse a listing and apply to get started.";
+    $("#apps-summary").textContent = "";
+    return;
+  }
+  empty.hidden = true;
+  for (const row of state.applications) grid.append(renderApplicationCard(row, highlight));
+  const n = state.applications.length;
+  $("#apps-summary").textContent = `${n} application${n === 1 ? "" : "s"}`;
+}
+
+// Each step is one gap dimension, derived from the lens columns the row actually
+// carries: a closed gap is "done"; an open gap with a call in flight is "active"
+// (In progress); an open gap with nothing in flight is "todo". The lens does not
+// project a per-row "retries exhausted" signal (maxretries_<g> is a constant cap),
+// so there is no "action needed" state to derive here — a stalled automated step
+// reads as "todo".
+function stepState(done, inflight) {
+  if (done) return "done";
+  if (inflight) return "active";
+  return "todo";
+}
+
+const STEP_LABEL = { done: "Done", active: "In progress", todo: "To do" };
+
+function renderStep(num, title, st, note) {
+  const step = document.createElement("li");
+  step.className = "step " + st;
+  const dot = document.createElement("span");
+  dot.className = "step-dot";
+  dot.textContent = st === "done" ? "✓" : String(num);
+  const body = document.createElement("div");
+  body.className = "step-body";
+  const t = document.createElement("div");
+  t.className = "step-title";
+  t.textContent = title;
+  const s = document.createElement("div");
+  s.className = "step-status";
+  s.textContent = note ? `${STEP_LABEL[st]} · ${note}` : STEP_LABEL[st];
+  body.append(t, s);
+  step.append(dot, body);
+  return step;
+}
+
+function shortKey(key) {
+  const i = (key || "").lastIndexOf(".");
+  return i >= 0 ? key.slice(i + 1) : key || "—";
+}
+
+function renderApplicationCard(row, highlight) {
+  const card = document.createElement("div");
+  card.className = "card app-card";
+  if (highlight && row.entityKey === highlight) card.classList.add("highlight");
+
+  // Header: what am I leasing
+  const head = document.createElement("div");
+  head.className = "app-head";
+  const addr = document.createElement("div");
+  addr.className = "addr";
+  addr.textContent = row.unitAddress || (row.unitKey ? shortKey(row.unitKey) : "Application");
+  head.append(addr);
+  if (typeof row.unitRent === "number") {
+    const rent = document.createElement("div");
+    rent.className = "rent";
+    rent.innerHTML = `$${row.unitRent.toLocaleString()} <span>/ month</span>`;
+    head.append(rent);
+  }
+  const ref = document.createElement("div");
+  ref.className = "addr-sub mono";
+  ref.textContent = shortKey(row.entityKey);
+  head.append(ref);
+
+  // Decision banner
+  const banner = document.createElement("div");
+  if (!row.violating) {
+    banner.className = "decision ok";
+    banner.textContent = "Application complete — all steps done.";
+  } else {
+    banner.className = "decision pending";
+    banner.textContent = "In review — complete the open steps below.";
+  }
+
+  // Stepper (journey order)
+  const steps = document.createElement("ol");
+  steps.className = "stepper";
+  steps.append(
+    renderStep(1, "Onboarding (identity details)", stepState(!row.missing_onboarding, false)),
+    renderStep(2, "Background check", stepState(!row.missing_bgcheck, row.inflight_bgcheck)),
+    renderStep(3, "Payment", stepState(!row.missing_payment, row.inflight_payment)),
+    renderStep(4, "Sign lease", stepState(!row.missing_signature, false)),
+  );
+
+  card.append(head, banner, steps);
+  return card;
 }
 
 // ---- wire up ----
@@ -257,6 +407,9 @@ function init() {
   });
   $("#moveInDate").addEventListener("input", syncTermRequirement);
   $("#apply-form").addEventListener("submit", submitApply);
+  $("#tab-browse").addEventListener("click", () => showView("browse"));
+  $("#tab-apps").addEventListener("click", () => showView("apps"));
+  $("#reload-apps").addEventListener("click", loadApplications);
 
   loadListings();
 }
