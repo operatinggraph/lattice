@@ -76,23 +76,24 @@ var infraNodes = []mapNode{
 
 // skeletonEdges is the canonical data flow (architecture-overview.md §"data
 // flow"): operations land on core-operations → Processor commits to Core KV and
-// publishes core-events → Loom / Weaver / Bridge / object-store-manager consume
-// the CDC stream and submit new ops back; Refractor watches Core KV and projects
-// lenses; a Loom externalTask dispatches through the Bridge. Lens edges
+// publishes business events to core-events → Loom / Weaver / Bridge /
+// object-store-manager consume core-events and submit new ops back; the
+// Refractor is the CDC materializer, projecting lenses off Core KV's backing
+// stream; a Loom externalTask dispatches through the Bridge. Lens edges
 // (refractor → <lens>) are added per live lens in computeSystemMap.
 var skeletonEdges = []mapEdge{
 	{From: "core-operations", To: "processor", Label: "ops"},
 	{From: "processor", To: "core-kv", Label: "commit"},
 	{From: "processor", To: "core-events", Label: "outbox"},
-	{From: "core-events", To: "loom", Label: "CDC"},
-	{From: "core-events", To: "weaver", Label: "CDC"},
-	{From: "core-events", To: "bridge", Label: "CDC"},
-	{From: "core-events", To: "object-store-manager", Label: "CDC"},
+	{From: "core-events", To: "loom", Label: "consume"},
+	{From: "core-events", To: "weaver", Label: "consume"},
+	{From: "core-events", To: "bridge", Label: "consume"},
+	{From: "core-events", To: "object-store-manager", Label: "consume"},
 	{From: "loom", To: "core-operations", Label: "submit ops"},
 	{From: "weaver", To: "core-operations", Label: "submit ops"},
 	{From: "bridge", To: "core-operations", Label: "submit ops"},
 	{From: "object-store-manager", To: "core-operations", Label: "submit ops"},
-	{From: "core-kv", To: refractorID, Label: "watch"},
+	{From: "core-kv", To: refractorID, Label: "CDC"},
 	{From: "loom", To: "bridge", Label: "externalTask"},
 }
 
