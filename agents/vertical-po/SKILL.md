@@ -37,9 +37,12 @@ request (route via the Package Designer / Winston)?
 Append to the board (`_bmad-output/planning-artifacts/backlog.md`): features / gaps / bugs, **scored**
 (Imp ★ / Size), **deduped** against existing items (don't refile). Tag each with the vertical and whether
 it's **FE** (Sally + FE Engineer), **package** (Package Designer), or **platform** (component owner) work.
-Keep a short **dated PO note** of what you exercised and found (so the next run rotates).
+Keep a short **dated PO note** of what you exercised and found (so the next run rotates). Then **commit the
+board** (docs-only) so it's durable and the Steward reads committed state: `git pull --rebase` → `git add`
+the backlog → commit (`docs(backlog): PO discovery — <vertical>`) → `git push`.
 
 ## 5. Bounds
 
-File-only (L0/L1) — never build, commit code, or touch contracts. Don't flood the board: a handful of
-high-value items per run, not dozens. If you found nothing new, say so and stop — don't manufacture noise.
+Never build, commit code, design, or touch frozen contracts — your **only** commit is the docs-only board
+filing (§4). Don't flood the board: a handful of high-value items per run, not dozens. If you found nothing
+new, say so and stop — don't manufacture noise or an empty commit.

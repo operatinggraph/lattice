@@ -132,8 +132,11 @@ implementation).
 parallel agents never conflict; Winston reviews each worktree diff and merges to `main`. The **sole exception
 is a contract change**: a frozen-contract amendment is edited **in `main`, uncommitted**, because it must be
 platform-visible for Andrew's review and for other agents to build against — it cannot be hidden in a
-worktree. Shared coordination artifacts — the `backlog.md` board and `memory/` — are likewise written
-**centrally by Winston / the Steward**, not by owners in worktrees, to avoid merge conflicts on the board.
+worktree. Shared coordination artifacts — the `backlog.md` board and `memory/` — are written by **Winston /
+the Steward** and by the **staggered PO loop** (which commits its own demand filing, docs-only), **never by
+owners from inside parallel worktrees** — that, plus the 3h stagger between the two scheduled loops, is what
+avoids board merge conflicts. (The PO commits its filing rather than leaving it uncommitted so the board stays
+durable and the Steward reads committed state.)
 
 ---
 
@@ -291,7 +294,10 @@ neglected, so the Steward also tracks each component's freshness via `git log -1
 routine pick with **that component's Inquiry** — guaranteeing every component rotates through attention
 regardless of where the loud items are. Andrew may set a **per-cycle theme** that biases selection. Inquiry
 fires from three triggers — idle-fill, signal-reactive, and **coverage-rotation** — never every tick, so the
-board is replenished, not spammed.
+board is replenished, not spammed. **Batching:** a fire is not capped at one item — for **XS/S** items the
+Steward ships several per cycle (each its own green commit) until it would start an **M+** item, the eligible
+queue drains, or the budget says stop; a big item is still one-per-cycle (multi-fire). A six-hour fire
+shouldn't idle after a single small win.
 
 ### 6.2 Hooks (deterministic, harness-run — settings.json)
 

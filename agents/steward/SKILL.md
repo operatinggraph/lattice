@@ -73,6 +73,10 @@ app capabilities the POs propose are welcome — design → build, M/L fine.
 - Otherwise → **stage for Andrew** (L3 if a contract is touched; a design doc for architectural work).
   **Health-emission changes** must update the canonical Health-KV schema doc *in the same change* (keeps them
   L2-safe — the schema doc never diverges from the emission).
+- **Batch small wins — don't stop after one item.** For **XS/S** items, ship **several per cycle** (each its
+  own green commit + CI watch): pick → ship → commit → pick the next, until you'd take on an **M+** item, the
+  eligible queue drains, or the token/time budget says stop (don't thrash). A **big** item is still one per
+  cycle (multi-fire below).
 - **Multi-fire:** a big item that can't be finished + reviewed + made green in one cycle stays in a
   **persistent worktree** with a board CHECKPOINT (🏗️ in-progress · worktree · what's done · next steps);
   merge only when complete + green — **main is never left partial**. A later cycle resumes it before picking new.
