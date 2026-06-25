@@ -113,7 +113,8 @@ The existing house rule ("sub-agents never commit; Winston commits") is preserve
 risk-bounded, not size-bounded** (ratified — widened from the initial narrow start): Winston may merge a change
 without waking Andrew iff all gates are green (incl. CI), it touches **no frozen contract**, and it is
 revertible. **Size does not cap eligibility — XS through L all qualify**; size sets *review depth* (a thorough
-lead review for a small green change; **full 3-layer adversarial review for M-or-larger**) and whether the work
+lead review for a small-green change — **XS/S/M**; **full 3-layer adversarial review for L+ *or* any
+security / capability-plane or contract-adjacent change regardless of size**) and whether the work
 spans fires (**multi-fire:** a big item stays in a persistent worktree with a board CHECKPOINT and merges only
 when complete + green — main is never left partial). **Escalated to Andrew, never auto-committed:**
 frozen-contract changes (L3) and genuinely architectural / design-heavy work (produce a design doc, not an
@@ -248,25 +249,40 @@ TODO/FIXME, recent diffs, coverage/lint gaps, and inbound feature requests — t
 against a Winston-owned rubric** and admitted to the board only when they meet a **definition-of-ready**.
 Owners **file and prepare only** — they never self-prioritize above Winston.
 
+**Decide, don't defer (the prime directive).** The Steward *is* Winston; implementation and design decisions
+are **his**. Exactly **two** things escalate to Andrew: a **frozen-contract change** (`docs/contracts/*`) and a
+**final architectural / platform fork** (Gateway, read-path auth, Vault, multi-cell, HA-NATS — anything that
+reshapes the trust boundary / topology / security posture). Everything else — handler / API shape, data model,
+freshness model, naming, how the trusted dev tool sources its data, test choices — Winston decides *now* and
+builds; product / scope / priority questions route to the **PO**, not up to Andrew. Two failure modes are
+explicitly forbidden because they masquerade as caution: **parking an implementation question on the board and
+stopping** (decide it instead), and **concluding "nothing actionable"** (a defect — a lower lane wasn't
+worked). "Bias to safety" means *never red main / never a frozen contract / never force-push* — not "don't
+decide"; an implementation call is safe precisely because it's gated, reviewed, and revertible.
+
 **Work-finding never dead-ends — build → design → inquire.** An implement-only loop stalls the moment the
 easy build lane drains and everything left "wants human design review" (observed: a real cycle drained the
-ride-along cleanups and idled). So the ladder has three tiers, and "nothing actionable" almost always means a
-lower tier wasn't worked:
+ride-along cleanups and idled; another *designed* the agent-activity console then wrongly parked the whole
+thing "awaiting Andrew" on four calls that were Winston's). So the ladder has three tiers, and "nothing
+actionable" almost always means a lower tier wasn't worked:
 
 1. **Build** the top L2-eligible item — broader than the named cleanups: it *always* includes design-free
    continuous improvement (test-coverage gaps, doc/Scribe sweeps, observability build-out incl. the Loupe
    operator surfaces, simplification/refactor passes).
 2. **Design** the next item — if nothing is build-ready, the loop *produces the design* rather than escalating
    a bare "needs design" note: ground → a reviewable design doc (`implementation-artifacts/`) →
-   adversarial/party review → commit it as a **📐 awaiting-ratification** proposal. This is L1 (a proposal, no
-   contract/implementation commit), so it's unattended-safe, and it shrinks Andrew to *adjudicating* designs
-   instead of authoring them — the design-first loop, run autonomously. *Exception:* items needing a strategic
-   direction-call (Gateway, read-path auth, Vault, multi-cell) get an options-sketch + a "needs your
-   direction" flag, not a full auto-design.
+   adversarial/party review → **then resolve its open questions (prime directive): if they are all
+   implementation / design calls (the normal case), Winston ratifies them in the same fire, the doc is marked
+   `✅ Winston-ratified — build-ready`, and the loop builds it.** A doc carries **📐 awaiting-ratification**
+   only for the *specific* part that is a frozen-contract change or an architectural fork — that part is
+   flagged, the rest is built. *Exception:* items whose **fork itself** needs a strategic direction-call
+   (Gateway, read-path auth, Vault, multi-cell) get an options-sketch + "needs your direction" flag, not a
+   full auto-design — but their downstream implementation is still Winston's.
 3. **Inquire** — only when there is nothing to build *or* design, replenish candidates.
 
-Escalation stays a *proposal, never a decision*: the loop designs design-heavy work but commits **no** frozen
-contract and makes **no** final architectural call — Andrew ratifies those.
+Escalation stays a *proposal, never a decision* **for the two Andrew-items only**: the loop never commits a
+frozen contract and never makes a *final architectural fork* unattended. It does **not** escalate ordinary
+design questions — it answers them.
 
 Steward iteration:
 
@@ -294,10 +310,10 @@ neglected, so the Steward also tracks each component's freshness via `git log -1
 routine pick with **that component's Inquiry** — guaranteeing every component rotates through attention
 regardless of where the loud items are. Andrew may set a **per-cycle theme** that biases selection. Inquiry
 fires from three triggers — idle-fill, signal-reactive, and **coverage-rotation** — never every tick, so the
-board is replenished, not spammed. **Batching:** a fire is not capped at one item — for **XS/S** items the
-Steward ships several per cycle (each its own green commit) until it would start an **M+** item, the eligible
-queue drains, or the budget says stop; a big item is still one-per-cycle (multi-fire). A six-hour fire
-shouldn't idle after a single small win.
+board is replenished, not spammed. **Batching:** a fire is not capped at one item — **everything that is not
+Large is a small win**, so for **XS / S / M** items the Steward ships several per cycle (each its own green
+commit) until it would start an **L (or XL)** item, the eligible queue drains, or the budget says stop; an L+
+item is still one-per-cycle (multi-fire). A six-hour fire shouldn't idle after a single small win.
 
 ### 6.2 Hooks (deterministic, harness-run — settings.json)
 
@@ -440,7 +456,8 @@ into a dark room). Concrete enabling work, each a candidate first story:
 
 4. **L2-eligibility is risk-bounded, not size-bounded** — gated + no-frozen-contract + revertible; XS–L all
    qualify (size sets review depth + multi-fire, not eligibility). Contracts + architectural work escalate (§3).
-5. **Gate-hardening** — review scales to size (lead for small-green, **3-layer for M+**); Health-emission must
+5. **Gate-hardening** — review scales to risk (lead for small-green XS/S/M, **3-layer for L+ or any
+   security/capability-plane change**); Health-emission must
    co-update the canonical schema doc in the same change; an L2 flake-fix requires the **flake bar** (N-of-N +
    registry); Inquiry candidates are scored against a **Winston-owned rubric** + **definition-of-ready**, with
    a **starvation guard** (§3, §6.1.1).

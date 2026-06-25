@@ -1,8 +1,12 @@
 # Loupe agent-activity console — design proposal
 
-> **Status:** 📐 awaiting-ratification (the data-source decision in §4 + the agent-liveness model in §5.1
-> are the parts that need your call; the rest is buildable once those are settled). Authored by Winston
-> (Steward fire, 2026-06-25).
+> **Status:** ✅ **Winston-ratified — build-ready** (2026-06-25). All four open questions (§9) were
+> implementation / design calls — **no frozen-contract change, no architectural fork** — so Winston ratified
+> them per *decide-don't-defer* (`agentic-ops-design.md` §6.1.1) rather than parking them on Andrew. The
+> earlier "📐 awaiting Andrew ratification" status was the timidity bug in the flesh: the loop did the hard
+> part (ground → design → adversarial review) then handed the *easy* part (deciding) upward. Decisions are
+> recorded in §9; **Increment 1 (data layer) is L2-buildable now.** Authored by Winston (Steward fire,
+> 2026-06-25).
 > Backlog item: *Loupe agent-activity console* (★★★, M) — Refinements & ops table + the *Now / experience
 > layer* section. Layers onto the shipped live system-map landing view.
 
@@ -302,7 +306,25 @@ valid answer to §9 Q1.
    📐 proposal present). 3-layer review for the FE per the M+ rule.
 3. **v1.1 (later).** Wire the code-derived dependency map into affected-consumers (§7) once it exists.
 
-## 9. Open questions for Andrew (the ratify decision)
+## 9. Decisions — Winston-ratified (2026-06-25)
+
+**None of these is a frozen-contract change or an architectural fork** — `docs/observability/health-kv-schema.md`
+is a doc (not a frozen contract); the `health.agent.*` keys are a *non-breaking addition* under the existing
+key convention; the read-seam is internal to a local, trusted, single-identity dev tool. So per
+*decide-don't-defer* (`agentic-ops-design.md` §6.1.1), **Winston ratifies them — none needed Andrew:**
+
+- **Q1 (read-seam) → Option C (hybrid).** Agent health via Health KV; board / review-queue / activity via a
+  gated, read-only local repo seam. Each data class lives where its truth already is; no dual-write drift.
+- **Q2 (agent-liveness) → yes.** Agent-specific freshness (idle-is-healthy + `nextFireExpectedAt`-based
+  overdue / stuck, a separate path from the 60s daemon `staleThreshold`); best-effort emission that never
+  fails a fire; **grey-`absent`** (not red) when the stack was down.
+- **Q3 (emission mechanism) → a `lattice health emit-agent` CLI verb.** Discoverable, testable, one place.
+- **Q4 (v1 agent scope) → live emitters only** (Steward + Lamplighter + Vertical PO); absent = not shown.
+
+**Build order:** Increment 1 (data layer — `GET /api/agents` + the `repoSource` read-seam + the
+`health.agent.*` emission verb + `computeAgentHealth` + schema-doc co-update + unit tests) is L2-buildable now;
+Increment 2 (UX-then-FE rail) follows. The detailed rationale for each call is retained below (originally
+framed as questions; kept as the decision record).
 
 1. **§4 — the read-seam.** Bless Option C (hybrid: agent health via Health KV; board/review/activity via a
    gated, read-only local repo seam)? Or Option A (everything through KV, accepting the dual-write) to keep
