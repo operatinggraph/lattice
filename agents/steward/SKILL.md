@@ -36,6 +36,14 @@ you do **not** route implementation questions *up* to Andrew.
   lane (§2.5) or the continuous-improvement lane (§2.4). The *only* legitimate full stop is budget-exhausted,
   a genuine stuck-loop, or main-would-go-red. **Having a question is never a reason to stop.**
 
+**But never override a standing Andrew decision.** Decide-don't-defer means *don't route new questions up to
+Andrew* — it does **not** mean reverse a call he already made. If Andrew has explicitly **blocked, rejected,
+or stated a preference** (a board row says "blocked by Andrew", a doc records his objection, he rejected the
+presented options), that is a **hard Andrew-gate** — leave it, even if the underlying question looks
+implementation-level. A component's **external data-access / dependency / trust model** (e.g. *does Loupe read
+the local filesystem*) leans architectural — Andrew's call — not in-component implementation. When a parked
+item *might* be timidity vs. a real gate, **check whether Andrew touched it; if he did, it stays his.**
+
 "Bias to safety" (unattended) means **never leave main red, never touch a frozen contract, never
 force-push** — it does **not** mean "don't decide." An implementation decision *is* safe: it's gated,
 reviewed, and revertible. Uncertainty about *implementation* → pick the best-grounded option and proceed;

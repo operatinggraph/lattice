@@ -260,11 +260,20 @@ stopping** (decide it instead), and **concluding "nothing actionable"** (a defec
 worked). "Bias to safety" means *never red main / never a frozen contract / never force-push* — not "don't
 decide"; an implementation call is safe precisely because it's gated, reviewed, and revertible.
 
+**But never override a standing Andrew decision.** Decide-don't-defer means *don't route new questions up to
+Andrew*; it does **not** mean reverse a call he already made. If Andrew has explicitly blocked, rejected, or
+stated a preference (a board row says "blocked by Andrew", a design doc records his objection, he rejected the
+presented options), that is a **hard Andrew-gate** — leave it, even if the underlying question looks
+implementation-level. A component's **external data-access / dependency / trust model** (e.g. *does Loupe read
+the local filesystem* — the agent-activity console's §4 read-seam, which Andrew is holding) leans
+architectural — Andrew's call — not in-component implementation. When a parked item *might* be timidity vs. a
+real gate, check whether Andrew touched it: if he did, it stays his.
+
 **Work-finding never dead-ends — build → design → inquire.** An implement-only loop stalls the moment the
 easy build lane drains and everything left "wants human design review" (observed: a real cycle drained the
-ride-along cleanups and idled; another *designed* the agent-activity console then wrongly parked the whole
-thing "awaiting Andrew" on four calls that were Winston's). So the ladder has three tiers, and "nothing
-actionable" almost always means a lower tier wasn't worked:
+ride-along cleanups and idled; another hit an implementation question, wrote it on the board, and stopped as
+"nothing actionable" instead of deciding it). So the ladder has three tiers, and "nothing actionable" almost
+always means a lower tier wasn't worked:
 
 1. **Build** the top L2-eligible item — broader than the named cleanups: it *always* includes design-free
    continuous improvement (test-coverage gaps, doc/Scribe sweeps, observability build-out incl. the Loupe

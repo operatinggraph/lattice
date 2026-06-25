@@ -37,7 +37,7 @@ per-item detail lives in design / story docs + git history, never in agent memor
 | Task-content — **`my-tasks` lens self-describing** | ✅ Done (cypher aspect-hops `op.canonicalName`/`op.description` → `operationName`/`operationDescription` on the read-model row; refractor e2e asserts; for all consumers) | `packages/orchestration-base/lenses.go` |
 | Loupe task-inbox — **operator data layer** (`GET /api/tasks`) | ✅ Done (all-identity task list + op label resolved from forOperation meta; unit-tested, gates green) | `cmd/loupe/tasks.go` |
 | Loupe task-inbox — **FE tab** | ✅ Done (Tasks tab: cards per task with op name/description, assignee, expiry, status filter, "Complete in Submit Op →" deep-link; in-browser-verified against a live task, no console errors) | `cmd/loupe/web/{index.html,app.js,style.css}` |
-| Loupe agent-activity console *(★★★ experience)* — **design** | ✅ Winston-ratified — build-ready (all 4 open Qs were impl/design calls, not contract/architecture → Option C hybrid / agent-liveness yes / `lattice health emit-agent` CLI verb / live-emitters-only; **none needed Andrew**). 🏗️ Increment 1 (data layer) next. | `implementation-artifacts/loupe-agent-activity-console-design.md` |
+| Loupe agent-activity console *(★★★ experience)* — **design** | 🚧 Blocked by Andrew — he rejects the §4 read-seam options (A/B/C); the console's data-source model is an architectural-direction call he owns and needs a NEW direction. Q2–Q4 (liveness/verb/scope) settled but moot until §4. | `implementation-artifacts/loupe-agent-activity-console-design.md` |
 | _all other items_ | 📋 Backlog | see themed tables below |
 
 ---
