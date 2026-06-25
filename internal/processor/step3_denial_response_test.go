@@ -1,4 +1,4 @@
-// Story 3.4 unit tests for DenialResponseBuilder (FR22).
+// Unit tests for DenialResponseBuilder (FR22).
 //
 // Covered cases:
 //   - denial for each reason value: NoCapabilityEntry, OperationNotPermitted,

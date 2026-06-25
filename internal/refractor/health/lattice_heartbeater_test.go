@@ -1,5 +1,5 @@
-// Story 3.2b §6 — verify per-Lens latency snapshots reach Health KV
-// under `health.refractor.<instance>` (in the doc's metrics.lensLatency
+// Verify per-Lens latency snapshots reach Health KV under
+// `health.refractor.<instance>` (in the doc's metrics.lensLatency
 // sub-map per Decision #5).
 package health_test
 

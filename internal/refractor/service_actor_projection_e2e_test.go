@@ -1,4 +1,4 @@
-// Story 7.3 AC #1 / A3 — root-equivalence projection proof.
+// AC #1 / A3 — root-equivalence projection proof.
 //
 // After primordial bootstrap seeds the admin + Loom + Weaver + Bridge identities
 // and their holdsRole → operator links, the Capability Lens must project a

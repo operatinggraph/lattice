@@ -1,4 +1,4 @@
-// Story 3.3 unit tests for CapabilityAuthorizer.
+// Unit tests for CapabilityAuthorizer.
 //
 // Covered cases:
 //   - all four authContext shapes (none / service / task / both-set)

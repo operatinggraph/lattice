@@ -151,9 +151,9 @@ func TestCommit_TombstoneSetsIsDeleted(t *testing.T) {
 }
 
 func TestCommit_MixedTTLBatch_TrackerHasTTLOthersDont(t *testing.T) {
-	// Story 1.1 spike validated that a single op in a batch may carry
-	// a TTL while siblings do not. This test exercises that mixed
-	// shape end-to-end through the CommitterImpl.
+	// A single op in a batch may carry a TTL while siblings do not.
+	// This test exercises that mixed shape end-to-end through the
+	// CommitterImpl.
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{

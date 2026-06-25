@@ -1,5 +1,5 @@
-// Story 1.5.5 — install-flow integration tests proving the three
-// guarantees the "route installs through the Processor" change must hold:
+// Install-flow integration tests proving the three guarantees that
+// routing installs through the Processor must hold:
 //
 //  1. M5/B2 cache coherence — install a package via InstallPackage, then
 //     submit a domain op on a class the package JUST declared, on the SAME

@@ -19,8 +19,8 @@ package bootstrap
 //   - any other targetClass → fails with UnknownMetaClass.
 //
 // Phase 1 scope: wired through Processor for the meta lane (ops.meta.*).
-// Story 5.3 adds the .compensation sixth self-description aspect and
-// optional expectedRevision conflict detection to Update + Tombstone
+// The .compensation sixth self-description aspect and optional
+// expectedRevision conflict detection apply to the Update + Tombstone
 // branches. The compensating operation contract lives entirely in the
 // .compensation aspect; OperationReply carries no new fields (Guardrail 1).
 //

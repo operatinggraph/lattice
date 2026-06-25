@@ -1,4 +1,4 @@
-// Story 3.2b §7 — Contract #6 §6.13 byte-shape conformance test.
+// Contract #6 §6.13 byte-shape conformance test.
 //
 // Per Contract #6 §6.13: "Story 3.2's contract-conformance test runs
 // the bootstrap cypher query against a deterministically seeded graph

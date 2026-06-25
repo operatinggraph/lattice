@@ -326,7 +326,7 @@ func buildCapDoc(actorKey, capKey string, perms []processor.PlatformPermission, 
 
 // buildCreateMetaVertexPayload builds a fully-specified CreateMetaVertex
 // payload for a new DDL vertex type. All nine fields required by the
-// Story 5.1 MissingSelfDescription enforcement are present.
+// MissingSelfDescription enforcement are present.
 //
 // The DDL describes a `loftspace.bookRegistered` operation type with a non-trivial
 // input schema (two required fields of different types + one optional)

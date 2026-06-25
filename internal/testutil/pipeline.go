@@ -1,5 +1,5 @@
-// Story 4.7 cleanup — pipeline + harness helpers for external test
-// packages that exercise package-installed DDLs end-to-end.
+// Pipeline + harness helpers for external test packages that exercise
+// package-installed DDLs end-to-end.
 //
 // The processor's own integration tests use unexported helpers in
 // internal/processor/integration_test.go to provision KV buckets,

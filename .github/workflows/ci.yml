@@ -28,6 +28,11 @@ jobs:
         with:
           version: v2.11.4
 
+      - name: Conventions lint (CLAUDE.md key-shapes + no history comments)
+        # Static check: rejects `asp.` key prefixes (Contract #1) and
+        # history/changelog comments. STRICT=1 fails the build on any finding.
+        run: STRICT=1 go run ./scripts/lint-conventions.go
+
       - name: Bring up Docker stack + run primordial bootstrap
         run: make up
 

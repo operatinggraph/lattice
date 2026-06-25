@@ -2,8 +2,7 @@ package bypass
 
 // Bypass #4 — DDL Schema Violation
 //
-// Enforcement: Processor step 6 validator (ValidatorImpl from step6_validate.go,
-// Story 1.7/1.9).
+// Enforcement: Processor step 6 validator (ValidatorImpl from step6_validate.go).
 //
 // Two scenarios are tested:
 //   1. Forbidden operationType per permittedCommands: DDL declares

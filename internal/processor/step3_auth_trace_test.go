@@ -1,4 +1,4 @@
-// Story 3.5 unit tests for AuthTraceEmitter (FR23 three-plane auth failure
+// Unit tests for AuthTraceEmitter (FR23 three-plane auth failure
 // traceability).
 //
 // Covered cases:

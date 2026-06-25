@@ -12,9 +12,9 @@ import (
 )
 
 // seedWriteScopeDDL seeds a DDL meta-vertex for the supplied class using the
-// Story 1.6 shadow-key form (vtx.meta.<class>) so that the DDLCache can
-// resolve it without a NanoID-keyed canonicalName aspect. This matches the
-// pattern used by seedNoopScript and seedSensitiveAspectDDL.
+// shadow-key form (vtx.meta.<class>) so that the DDLCache can resolve it
+// without a NanoID-keyed canonicalName aspect. This matches the pattern
+// used by seedNoopScript and seedSensitiveAspectDDL.
 func seedWriteScopeDDL(t *testing.T, ctx context.Context, conn substrateConn, class string, permittedCommands []string) {
 	t.Helper()
 	root := "vtx.meta." + class

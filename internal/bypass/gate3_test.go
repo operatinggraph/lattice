@@ -1,10 +1,9 @@
 // Package bypass — Phase 1 Gate 3 roll-up.
 //
 // TestGate3_Report is the roll-up entry point for the Capability Lens
-// adversarial test suite (Story 3.7). It mirrors the structure of TestGate2_Report
-// (bypass_test.go) for the adversarial attack vectors enumerated in NFR-S3 /
-// Story 3.7 AC, extended by later stories (e.g. the projection-resurrection
-// vector, Story 12.1a).
+// adversarial test suite. It mirrors the structure of TestGate2_Report
+// (bypass_test.go) for the adversarial attack vectors enumerated in NFR-S3,
+// including the projection-resurrection vector.
 //
 // This test:
 //  1. Documents every attack vector with its enforcement layer.
@@ -51,8 +50,8 @@ func TestGate3_Report(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 
 	// The adversarial vectors and their enforcement layers. Vectors #1, #3, #4,
-	// #5, #6, #7 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW per
-	// Story 1.5.4. If any sub-test fails, the Go test framework exits non-zero
+	// #5, #6, #7 are DEFENDED; vector #2 (projection lag) is ACCEPTED-WINDOW.
+	// If any sub-test fails, the Go test framework exits non-zero
 	// BEFORE this roll-up fires — so reaching here with passing sub-tests is
 	// sufficient proof.
 	type reportRow struct {

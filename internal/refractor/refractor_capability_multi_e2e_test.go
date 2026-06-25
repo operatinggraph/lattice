@@ -1,7 +1,7 @@
-// Story 3.2b — multi-identity Capability Lens e2e + tombstone semantics.
+// Multi-identity Capability Lens e2e + tombstone semantics.
 //
-// This test closes Story 3.2 AC #1 (multi-identity), #5 (tombstone
-// re-projection), and #2 (capabilityRoleIndex live activation). The
+// This test covers AC #1 (multi-identity), #5 (tombstone re-projection),
+// and #2 (capabilityRoleIndex live activation). The
 // fixture seeds THREE deterministic identities exercising the three
 // distinct projection paths:
 //
@@ -328,9 +328,8 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 	// scopedTo target.
 	writeVertex(taskTargetKey, "leaseapp", map[string]any{"state": "pending"})
 
-	// --- topology links (these now flow through the 3.2b link-bridge bootstrapper) ---
-	// Story 4.7 rename: grantsPermission(role→permission) became
-	// grantedBy(permission→role).
+	// --- topology links (these flow through the link-bridge bootstrapper) ---
+	// The link is grantedBy(permission→role).
 	writeLink("permission", adminPermID, "grantedBy", "role", adminRoleID)
 	writeLink("permission", userPermID, "grantedBy", "role", userRoleID)
 	holdsAKey := writeLink("identity", identityAID, "holdsRole", "role", adminRoleID)

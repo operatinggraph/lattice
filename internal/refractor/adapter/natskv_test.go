@@ -183,7 +183,7 @@ func TestNatsKVAdapter_Delete_Hard(t *testing.T) {
 
 	require.NoError(t, a.Delete(context.Background(), keys, 0))
 
-	// Story 1.5.12: the default hard mode physically removes the key.
+	// The default hard mode physically removes the key.
 	_, err := kv.Get(context.Background(), "e1")
 	require.ErrorIs(t, err, substrate.ErrKeyNotFound)
 }

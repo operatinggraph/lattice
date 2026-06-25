@@ -100,6 +100,6 @@ type ScriptContext struct {
 
 	// DDLLookup contains DDL meta-vertices keyed by canonicalName (e.g., "identity").
 	// Available to the Starlark script as the `ddl` global dict.
-	// Story 1.6 populates this from the DDL cache; Story 1.7 uses it for validation.
+	// Populated from the DDL cache and used for validation.
 	DDLLookup map[string]MetaVertex
 }

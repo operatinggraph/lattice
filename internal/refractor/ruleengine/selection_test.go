@@ -9,7 +9,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/simple"
 )
 
-// Story 3.1a Decision #7 — mandatory engine-selection tests.
+// Decision #7 — mandatory engine-selection tests.
 //
 // 1) simple-only Lens, simple parse succeeds → resolved=simple
 // 2) simple-only Lens, simple parse fails    → InvalidRule (simple error)

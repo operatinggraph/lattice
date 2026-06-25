@@ -1,10 +1,9 @@
-// Package testutil — Story 4.7 helper. After kernel minimization,
-// integration tests that previously relied on bootstrap-seeded identity
-// + role DDLs now install the rbac-domain + identity-domain +
-// identity-hygiene packages on top of a freshly-seeded kernel.
+// Package testutil — installs the rbac-domain + identity-domain +
+// identity-hygiene packages on top of a freshly-seeded kernel, supplying the
+// identity + role DDLs that the kernel itself does not seed.
 //
-// Story 1.5.5 — installs route through the Processor as InstallPackage
-// ops. InstallPhase1Packages therefore stands up a REAL meta-lane
+// Installs route through the Processor as InstallPackage ops.
+// InstallPhase1Packages therefore stands up a REAL meta-lane
 // CommitPath (stub-auth) so the submitted ops are consumed: the
 // InstallPackage DDL script, step-6 validation, and step-8 atomic commit
 // all run exactly as in production. Only the auth step is stubbed — every
@@ -14,7 +13,7 @@
 //
 //	func TestMyIntegrationStuff(t *testing.T) {
 //	    ctx, conn := startEmbeddedNATSConnection(t)
-//	    bootstrap.SeedPrimordial(ctx, conn)  // kernel-only after 4.7
+//	    bootstrap.SeedPrimordial(ctx, conn)  // kernel-only
 //	    testutil.InstallPhase1Packages(t, ctx, conn)
 //	    // ...
 //	}

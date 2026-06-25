@@ -3,8 +3,8 @@
 // types — everything below is pure Go so the rest of Refractor can consume
 // the AST without leaking the vendored parser.
 //
-// Story 3.1b-i implements this AST and the parse path. The executor (3.1b-ii)
-// walks these nodes against Core/Adjacency KV to produce projections.
+// The executor walks these nodes against Core/Adjacency KV to produce
+// projections.
 package full
 
 // Direction names the orientation of a RelPattern.

@@ -1,4 +1,4 @@
-// Story 5.1 — self-description end-to-end tests.
+// Self-description end-to-end tests.
 //
 // Coverage:
 //  1. TestSelfDescription_KernelDDLsHaveAllFiveAspects — verifies that

@@ -18,8 +18,7 @@ import (
 )
 
 // startExecKVs spins up an in-memory NATS server with adj and core KV buckets.
-// Story 3.2a migrated these tests from Materializer-style synthetic keys
-// (no dots) to Contract #1 vertex keys (vtx.<type>.<id>). The bridge is
+// These tests use Contract #1 vertex keys (vtx.<type>.<id>). The bridge is
 // the executor's adjLookupID logic + EdgeEntry.OtherType extension.
 //
 // Each "logical" test name (alice, admin, room, ...) maps to a fixed
