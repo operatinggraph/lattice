@@ -18,7 +18,7 @@ BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full orchestration install-packages install-loftspace run-loupe down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -270,6 +270,15 @@ run-loupe:
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Loupe on http://127.0.0.1:7777 (Ctrl-C to stop)..."
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loupe
+
+## run-loftspace-app — Build + run the LoftSpace applicant app in the FOREGROUND.
+## Open http://127.0.0.1:7788. Requires a running deployment with the LoftSpace
+## vertical (make up-full && make install-loftspace).
+run-loftspace-app:
+	@echo "==> Building loftspace-app binary..."
+	go build -o bin/loftspace-app ./cmd/loftspace-app
+	@echo "==> LoftSpace applicant app on http://127.0.0.1:7788 (Ctrl-C to stop)..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loftspace-app
 
 ## test — Run all Go unit + integration tests.
 ## Test packages run concurrently (-p 4). Every embedded NATS/JetStream

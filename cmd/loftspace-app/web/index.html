@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LoftSpace — apply to lease</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">LoftSpace <span class="brand-sub">apply to lease</span></div>
+    <div class="who">
+      <label for="applicant">Applying as</label>
+      <select id="applicant" aria-label="Select the applicant identity"></select>
+      <button id="reload-identities" class="ghost" title="Reload applicants">↻</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="panel-controls">
+      <label for="status">Show</label>
+      <select id="status" aria-label="Filter listings by status">
+        <option value="available" selected>Available</option>
+        <option value="all">All listings</option>
+      </select>
+      <button id="reload-listings" class="ghost">Refresh</button>
+      <span id="summary" class="summary"></span>
+    </div>
+
+    <div id="listings" class="grid" aria-live="polite"></div>
+    <div id="empty" class="empty" hidden></div>
+  </main>
+
+  <!-- Apply modal -->
+  <div id="apply-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="apply-title">
+      <h2 id="apply-title">Apply to lease</h2>
+      <div id="apply-unit" class="apply-unit"></div>
+      <form id="apply-form">
+        <div class="field">
+          <label>Applicant</label>
+          <div id="apply-applicant" class="readonly"></div>
+        </div>
+        <div class="field">
+          <label for="moveInDate">Desired move-in date <span class="opt">(optional)</span></label>
+          <input type="date" id="moveInDate" />
+        </div>
+        <div class="field">
+          <label for="leaseTermMonths">Lease term, months <span class="opt" id="term-opt">(optional)</span></label>
+          <input type="number" id="leaseTermMonths" min="1" step="1" placeholder="12" />
+          <p class="hint" id="term-hint" hidden>Required when a move-in date is set.</p>
+        </div>
+        <div class="field">
+          <label for="requestedRent">Offered rent <span class="opt">(optional)</span></label>
+          <input type="number" id="requestedRent" min="0" step="1" placeholder="e.g. 2400" />
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="apply-cancel" class="ghost">Cancel</button>
+          <button type="submit" id="apply-submit">Submit application</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
