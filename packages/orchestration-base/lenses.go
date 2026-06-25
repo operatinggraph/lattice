@@ -79,9 +79,17 @@ const MyTasksBucket = "my-tasks"
 // #10 §10.1 — task relationships are links, not fields):
 //
 //	forOperation ← (task)-[:forOperation]->(op),  op.key
+//	operationName        ← op.canonicalName.data.value  (the op's human name)
+//	operationDescription ← op.description.data.value    (the op's instructions)
 //	scopedTo     ← (task)-[:scopedTo]->(t),        t.key
 //	expiresAt    ← task.data.expiresAt (scalar on the task root)
 //	status       ← task.data.status (always 'open' here; the WHERE filters it)
+//
+// operationName / operationDescription are aspect-hops off the op meta-vertex
+// (Contract #10 §10.1: "UI finds the bound op by walking forOperation to the
+// operation meta-vertex"). Projecting them makes the row self-describing — a
+// task-inbox renders a human prompt without a second read — and is null-safe
+// when the op or aspect is absent (resolveProperty returns nil).
 //
 // The non-optional identity anchor means a live identity always yields exactly
 // one row whose `openTasks` collect may contain a degenerate {taskKey:null}
@@ -102,6 +110,8 @@ RETURN
     taskKey: task.key,
     assignee: identity.key,
     forOperation: op.key,
+    operationName: op.canonicalName.data.value,
+    operationDescription: op.description.data.value,
     scopedTo: tgt.key,
     expiresAt: task.data.expiresAt
   }) AS openTasks

@@ -168,6 +168,11 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	}
 
 	writeVertex(opKey, "meta", map[string]any{"operationType": "ApproveLeaseApplication"})
+	// The op's human label lives on its meta-vertex aspects; the lens aspect-hops
+	// (op.canonicalName.data.value / op.description.data.value) to project a
+	// self-describing row.
+	writeVertex(opKey+".canonicalName", "aspect", map[string]any{"value": "ApproveLeaseApplication"})
+	writeVertex(opKey+".description", "aspect", map[string]any{"value": "Approve the pending lease application."})
 	writeVertex(targetKey, "leaseapp", map[string]any{"state": "pending"})
 	writeVertex(taskKey, "task", map[string]any{
 		"status": "open", "expiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
@@ -213,6 +218,8 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	row, _ := tasks[0].(map[string]any)
 	require.Equal(t, taskKey, row["taskKey"])
 	require.Equal(t, opKey, row["forOperation"])
+	require.Equal(t, "ApproveLeaseApplication", row["operationName"])
+	require.Equal(t, "Approve the pending lease application.", row["operationDescription"])
 	require.Equal(t, targetKey, row["scopedTo"])
 
 	// Capture the open-era watermark so the close-era tombstone can be asserted
