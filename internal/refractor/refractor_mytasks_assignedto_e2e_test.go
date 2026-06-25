@@ -1,14 +1,13 @@
-// my-tasks lens e2e: a per-identity OPEN-task projection. When a task leaves
-// `open`, the envelope wrapper's ErrDeleteProjection drives a guarded delete,
-// which the monotonic projection-write guard records as a soft tombstone
-// {isDeleted:true, projectionSeq} (Contract #6 §6.2, Contract #10 §10.1).
-// Absence and an isDeleted tombstone are equivalent for the reader: neither
-// surfaces the closed task. The guard makes the close authoritative — a stale
-// open-era re-projection carries a lower stream sequence and is rejected, so it
-// cannot resurrect the closed task. The lens reuses the proven ephemeral-lens
-// architecture (link-sourced cypher + actor fan-out + descriptor-driven delete),
-// so this test exercises the package's myTasks cypher + its §6.13 Output
-// descriptor end-to-end through the real pipeline.
+// my-tasks lens REALISTIC-ordering e2e: reproduces the real task-assignment
+// lifecycle, where the assignee identity exists LONG BEFORE any task is assigned
+// to it. The links are created as genuine Contract #1 link envelopes written to
+// Core KV (producing CDC) — NOT pre-seeded directly into adjacency — so the
+// reprojection trigger for the inbound `assignedTo` link is exercised end-to-end
+// through the real pipeline + the dedicated adjacency consumer.
+//
+// This is the regression guard for the bug where a freshly-assigned task never
+// projected into `my-tasks` because the identity-anchored lens did not reproject
+// on the inbound `task -[:assignedTo]-> identity` link mutation.
 package refractor_test
 
 import (
@@ -29,7 +28,6 @@ import (
 	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/refractor/adjacency"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
@@ -37,9 +35,9 @@ import (
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
-func TestRefractor_MyTasksLens_E2E(t *testing.T) {
+func TestRefractor_MyTasksLens_AssignedToTrigger_E2E(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping my-tasks e2e test in -short mode")
+		t.Skip("skipping my-tasks assignedTo-trigger e2e test in -short mode")
 	}
 
 	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
@@ -73,8 +71,6 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	adjKV, err := conn.OpenKV(ctx, bootstrap.RefractorAdjacencyKV)
 	require.NoError(t, err)
 
-	// my-tasks is a package-owned bucket (NOT primordial); create it the way
-	// the refractor lazily would.
 	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: orchestrationbase.MyTasksBucket})
 	require.NoError(t, err)
 	myTasksKV, err := conn.OpenKV(ctx, orchestrationbase.MyTasksBucket)
@@ -88,8 +84,6 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	// Compile the package's myTasks cypher and wire a pipeline exactly as
-	// cmd/refractor's data-driven actor-aggregate path does.
 	fullEngine := full.New()
 	var myTasksLensSpec pkgmgr.LensSpec
 	for _, l := range orchestrationbase.Lenses() {
@@ -103,12 +97,9 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 
 	adpt, err := adapter.New(myTasksKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(t, err)
-	// my-tasks is a guarded per-actor projection: a close becomes a soft
-	// tombstone carrying the watermark, and a stale lower-seq replay is rejected
-	// (Contract #6 §6.2, Contract #10 §10.1).
 	adpt.SetGuarded(true)
 
-	const lensID = "MyTasksLensId0000001"
+	const lensID = "MyTasksAsgnLensId001"
 	p, err := pipeline.New(lensID, "nats_kv", nil, bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(t, err)
 	p.UseFullEngine(fullEngine, cr)
@@ -131,11 +122,10 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	go func() { defer close(doneCh); p.Run(pipelineCtx) }()
 	t.Cleanup(func() { pipelineCancel(); <-doneCh })
 
-	// --- fixture: identity + open task + the three links ---
-	identityID := stableNanoID("mytasks-assignee")
-	taskID := stableNanoID("mytasks-task")
-	opID := stableNanoID("mytasks-op")
-	targetID := stableNanoID("mytasks-target")
+	identityID := stableNanoID("mytasks-asgn-assignee")
+	taskID := stableNanoID("mytasks-asgn-task")
+	opID := stableNanoID("mytasks-asgn-op")
+	targetID := stableNanoID("mytasks-asgn-target")
 
 	identityKey := substrate.VertexKey("identity", identityID)
 	taskKey := substrate.VertexKey("task", taskID)
@@ -154,39 +144,55 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 		_, perr := coreKV.Put(ctx, key, data)
 		require.NoError(t, perr)
 	}
-	buildEdge := func(name, fromType, fromID, toType, toID string) {
-		linkKey := substrate.LinkKey(fromType, fromID, name, toType, toID)
-		edgeID := name + ":" + fromID + ":" + toID
-		require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
-			CoreKvKey: linkKey, EdgeID: edgeID, Name: name,
-			Direction: "outbound", NodeID: fromID, OtherNodeID: toID, OtherType: toType,
-		}))
-		require.NoError(t, adjacency.Build(ctx, adjKV, adjacency.CoreKVEvent{
-			CoreKvKey: linkKey, EdgeID: edgeID, Name: name,
-			Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType,
-		}))
+	// writeLink writes a genuine Contract #1 link envelope to Core KV (key shape
+	// lnk.<srcType>.<srcId>.<rel>.<dstType>.<dstId>). The Put produces CDC that
+	// the dedicated adjacency consumer turns into adjacency edges AND that the
+	// actor-aware myTasks pipeline must reproject on. This is the REAL flow — no
+	// direct adjacency seeding.
+	writeLink := func(srcType, srcID, rel, dstType, dstID string) {
+		linkKey := substrate.LinkKey(srcType, srcID, rel, dstType, dstID)
+		body := map[string]any{
+			"key":          linkKey,
+			"class":        "link",
+			"isDeleted":    false,
+			"createdAt":    provenanceAt,
+			"lastModifiedAt": provenanceAt,
+			"sourceVertex": substrate.VertexKey(srcType, srcID),
+			"targetVertex": substrate.VertexKey(dstType, dstID),
+			"localName":    rel,
+		}
+		data, jerr := json.Marshal(body)
+		require.NoError(t, jerr)
+		_, perr := coreKV.Put(ctx, linkKey, data)
+		require.NoError(t, perr)
 	}
 
-	writeVertex(opKey, "meta", map[string]any{"operationType": "ApproveLeaseApplication"})
-	// The op's name is its root operationType (the lens projects operationName from
-	// it); its optional human instructions live in a .description aspect the lens
-	// best-effort hops to project a self-describing row.
-	writeVertex(opKey+".description", "aspect", map[string]any{"value": "Approve the pending lease application."})
+	// --- REALISTIC ORDER: the identity exists FIRST, long before any task. ---
+	writeVertex(identityKey, "identity", map[string]any{"name": "applicant"})
+
+	// Give the identity-anchor CDC time to project (it yields a deleted/absent row:
+	// the identity has no open task yet — the correct empty state).
+	expectedKey := myTasksDesc.BuildKey(identityKey)
+	time.Sleep(2 * time.Second)
+
+	// --- LATER: a task is created and assigned to the long-existing identity. ---
+	// The op meta-vertex is the operation's DDL, exactly as a dispatched userTask's
+	// forOperation points at it: the human name lives on the ROOT as
+	// data.operationType (NOT a .canonicalName aspect — package op DDLs carry none),
+	// and there is no .description aspect (the optional authoring nicety is absent).
+	// operationName must project from operationType; operationDescription stays nil.
+	writeVertex(opKey, "meta", map[string]any{"operationType": "RecordIdentityPII"})
 	writeVertex(targetKey, "leaseapp", map[string]any{"state": "pending"})
 	writeVertex(taskKey, "task", map[string]any{
 		"status": "open", "expiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
 	})
-	// task = source (later-arriving), the other vertex = target (Contract #1 §1.1).
-	buildEdge("assignedTo", "task", taskID, "identity", identityID)
-	buildEdge("forOperation", "task", taskID, "meta", opID)
-	buildEdge("scopedTo", "task", taskID, "leaseapp", targetID)
+	// task = source (later-arriving), identity = target (Contract #1 §1.1). The
+	// inbound assignedTo link is the mutation that MUST reproject the identity's row.
+	writeLink("task", taskID, "assignedTo", "identity", identityID)
+	writeLink("task", taskID, "forOperation", "meta", opID)
+	writeLink("task", taskID, "scopedTo", "leaseapp", targetID)
 
-	// Finally write the identity vertex — the CDC event the lens projects on.
-	writeVertex(identityKey, "identity", map[string]any{"name": "assignee"})
-
-	expectedKey := myTasksDesc.BuildKey(identityKey)
-
-	// --- assert the open task projects a my-tasks row for its assignee ---
+	// --- assert the freshly-assigned task projects into the identity's inbox ---
 	require.Eventually(t, func() bool {
 		entry, gErr := myTasksKV.Get(ctx, expectedKey)
 		if gErr != nil || entry == nil || len(entry.Value) == 0 {
@@ -194,6 +200,9 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 		}
 		var env map[string]any
 		if json.Unmarshal(entry.Value, &env) != nil {
+			return false
+		}
+		if isDel, _ := env["isDeleted"].(bool); isDel {
 			return false
 		}
 		tasks, _ := env["openTasks"].([]any)
@@ -204,51 +213,24 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 			}
 		}
 		return false
-	}, 25*time.Second, 100*time.Millisecond, "open task did not project into my-tasks")
+	}, 25*time.Second, 100*time.Millisecond,
+		"freshly-assigned open task did not project into my-tasks (assignedTo not a reprojection trigger)")
 
-	// Assert the projected row carries the link-walked fields.
+	// Assert the row carries the link-walked, self-describing fields.
 	entry, gErr := myTasksKV.Get(ctx, expectedKey)
 	require.NoError(t, gErr)
 	var env map[string]any
 	require.NoError(t, json.Unmarshal(entry.Value, &env))
-	require.Equal(t, identityKey, env["assignee"])
 	tasks, _ := env["openTasks"].([]any)
 	require.Len(t, tasks, 1)
 	row, _ := tasks[0].(map[string]any)
 	require.Equal(t, taskKey, row["taskKey"])
 	require.Equal(t, opKey, row["forOperation"])
-	require.Equal(t, "ApproveLeaseApplication", row["operationName"])
-	require.Equal(t, "Approve the pending lease application.", row["operationDescription"])
+	// operationName projects from the op DDL's root operationType (the real-flow
+	// source), NOT a manufactured .canonicalName aspect.
+	require.Equal(t, "RecordIdentityPII", row["operationName"])
 	require.Equal(t, targetKey, row["scopedTo"])
-
-	// Capture the open-era watermark so the close-era tombstone can be asserted
-	// to carry a strictly-greater projectionSeq.
-	openEntry, gErr := myTasksKV.Get(ctx, expectedKey)
-	require.NoError(t, gErr)
-	var openEnv map[string]any
-	require.NoError(t, json.Unmarshal(openEntry.Value, &openEnv))
-	openSeq, _ := openEnv["projectionSeq"].(float64)
-
-	// --- vanish-on-close: flip the task to complete; the guarded key must
-	// become a soft tombstone (not absent). The monotonic projection-write guard
-	// makes the close authoritative: a still-in-flight open re-projection carries
-	// a lower stream sequence and is rejected, so the key cannot be resurrected.
-	writeVertex(taskKey, "task", map[string]any{
-		"status": "complete", "expiresAt": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
-	})
-
-	require.Eventually(t, func() bool {
-		entry, err := myTasksKV.Get(ctx, expectedKey)
-		if err != nil {
-			return false // the guarded delete tombstones; the key must remain present
-		}
-		var env map[string]any
-		if err := json.Unmarshal(entry.Value, &env); err != nil {
-			return false
-		}
-		isDeleted, _ := env["isDeleted"].(bool)
-		seq, _ := env["projectionSeq"].(float64)
-		return isDeleted && seq >= openSeq
-	}, 25*time.Second, 100*time.Millisecond,
-		"closed task must become an isDeleted tombstone carrying a watermark ≥ the open-era seq")
+	// No .description aspect was authored on the op DDL → operationDescription is
+	// null (best-effort), and the row still projects with a usable name.
+	require.Nil(t, row["operationDescription"])
 }

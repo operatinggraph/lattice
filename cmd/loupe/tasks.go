@@ -9,10 +9,12 @@ import (
 )
 
 // taskOperation is the human-facing rendering of a task's forOperation target.
-// Key is the op meta-vertex key (vtx.meta.<id>); Name + Description come from
-// that meta-vertex's .canonicalName / .description aspects — the same DDL
-// self-description the op-submit form renders. A task-inbox surface uses Key to
-// link straight to the op's form (GET /api/op) so the assignee can complete it.
+// Key is the op meta-vertex key (vtx.meta.<id>); Name is the op's root
+// operationType (the field every op DDL carries), falling back to a
+// .canonicalName aspect for the handful of primordial metas that have one;
+// Description is the op's optional .description aspect. A task-inbox surface uses
+// Key to link straight to the op's form (GET /api/op) so the assignee can
+// complete it.
 type taskOperation struct {
 	Key         string `json:"key"`
 	Name        string `json:"name,omitempty"`
@@ -35,10 +37,10 @@ type taskRow struct {
 // vtx.task.<id> root it reads {status, expiresAt} and walks the task's links to
 // source assignedTo (assignee identity), forOperation (the op meta-vertex), and
 // scopedTo (the grant target). The op's human label is resolved from the meta
-// vertex's .canonicalName / .description aspects via get — the data is reachable
-// today through the forOperation link, so no prompt aspect is stamped on the
-// task. statusFilter limits the rows to one status (open|complete|cancelled);
-// "" returns every task.
+// vertex's root operationType (with a .canonicalName-aspect fallback) and its
+// optional .description aspect via get — the data is reachable today through the
+// forOperation link, so no prompt aspect is stamped on the task. statusFilter
+// limits the rows to one status (open|complete|cancelled); "" returns every task.
 func computeTasks(keys []string, get kvGetter, statusFilter string) []taskRow {
 	rows := make([]taskRow, 0)
 	for _, k := range keys {
@@ -72,7 +74,14 @@ func computeTasks(keys []string, get kvGetter, statusFilter string) []taskRow {
 			}
 		}
 		if row.Operation.Key != "" {
+			// A dispatched userTask's forOperation points at the operation's DDL
+			// meta-vertex, whose name lives on the root as data.operationType.
+			// Prefer a .canonicalName aspect (only primordial metas have one) and
+			// fall back to the root operationType so package ops still render a name.
 			row.Operation.Name = dataString(metaData(get, row.Operation.Key+".canonicalName"), "value", "name", "canonicalName")
+			if row.Operation.Name == "" {
+				row.Operation.Name = dataString(metaData(get, row.Operation.Key), "operationType", "name", "canonicalName")
+			}
 			row.Operation.Description = dataString(metaData(get, row.Operation.Key+".description"), "value", "text", "description")
 		}
 		rows = append(rows, row)

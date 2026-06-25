@@ -79,17 +79,23 @@ const MyTasksBucket = "my-tasks"
 // #10 §10.1 — task relationships are links, not fields):
 //
 //	forOperation ← (task)-[:forOperation]->(op),  op.key
-//	operationName        ← op.canonicalName.data.value  (the op's human name)
+//	operationName        ← op.data.operationType        (the op's name)
 //	operationDescription ← op.description.data.value    (the op's instructions)
 //	scopedTo     ← (task)-[:scopedTo]->(t),        t.key
 //	expiresAt    ← task.data.expiresAt (scalar on the task root)
 //	status       ← task.data.status (always 'open' here; the WHERE filters it)
 //
-// operationName / operationDescription are aspect-hops off the op meta-vertex
-// (Contract #10 §10.1: "UI finds the bound op by walking forOperation to the
-// operation meta-vertex"). Projecting them makes the row self-describing — a
-// task-inbox renders a human prompt without a second read — and is null-safe
-// when the op or aspect is absent (resolveProperty returns nil).
+// operationName reads the op meta-vertex's root `operationType`, the field every
+// op DDL carries (Contract #10 §10.1: "UI finds the bound op by walking
+// forOperation to the operation meta-vertex"). A dispatched userTask's
+// forOperation points at the operation's DDL meta-vertex, whose name lives on
+// the root as `data.operationType` — NOT as a `.canonicalName` aspect (those
+// exist only on a handful of primordial metas), so an aspect-hop projects null
+// for every package op. operationDescription stays a best-effort aspect-hop:
+// the op's optional human instructions, null when the package authored none.
+// Both are null-safe (resolveProperty returns nil when the op or field is
+// absent), keeping the row self-describing so a task-inbox renders a label
+// without a second read.
 //
 // The non-optional identity anchor means a live identity always yields exactly
 // one row whose `openTasks` collect may contain a degenerate {taskKey:null}
@@ -110,7 +116,7 @@ RETURN
     taskKey: task.key,
     assignee: identity.key,
     forOperation: op.key,
-    operationName: op.canonicalName.data.value,
+    operationName: op.data.operationType,
     operationDescription: op.description.data.value,
     scopedTo: tgt.key,
     expiresAt: task.data.expiresAt

@@ -20,9 +20,10 @@ type myTasksRow struct {
 	OpenTasks []openTaskRow `json:"openTasks"`
 }
 
-// openTaskRow is one open task inside a my-tasks row. operationName /
-// operationDescription are aspect-hops the lens already resolved off the bound op
-// meta-vertex, so the inbox renders a human prompt without a second read.
+// openTaskRow is one open task inside a my-tasks row. operationName is the bound
+// op's root operationType and operationDescription its optional .description
+// aspect — both resolved by the lens off the forOperation meta-vertex, so the
+// inbox renders a human label without a second read.
 // scopedTo is the entity the granted op acts on (for a userTask the §10.5
 // invariant holds: assignee == scopedTo == the subject), so completion targets
 // it. expiresAt is the grant horizon.

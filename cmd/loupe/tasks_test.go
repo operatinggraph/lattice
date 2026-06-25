@@ -76,4 +76,29 @@ func TestComputeTasks(t *testing.T) {
 			t.Errorf("complete task has no assignedTo link; assignee should be empty, got %q", rows[0].Assignee)
 		}
 	})
+
+	// A dispatched userTask's forOperation points at the operation's DDL
+	// meta-vertex, whose name lives on the ROOT as data.operationType with NO
+	// .canonicalName aspect (package op DDLs carry none). The op label must fall
+	// back to the root operationType so the inbox renders a name, not a blank.
+	t.Run("op name falls back to root operationType when no canonicalName aspect", func(t *testing.T) {
+		real := map[string][]byte{
+			"vtx.task.taskreal0000000000":                                      []byte(`{"class":"task","data":{"status":"open","expiresAt":"2026-07-01T00:00:00Z"}}`),
+			"lnk.task.taskreal0000000000.forOperation.meta.opddl00000000000000": []byte(`{}`),
+			// The op DDL meta: operationType on the root, no canonicalName aspect.
+			"vtx.meta.opddl00000000000000": []byte(`{"class":"meta.ddl.vertexType","data":{"operationType":"SignLease"}}`),
+		}
+		rget := func(key string) ([]byte, bool) { b, ok := real[key]; return b, ok }
+		rkeys := make([]string, 0, len(real))
+		for k := range real {
+			rkeys = append(rkeys, k)
+		}
+		rows := computeTasks(rkeys, rget, "")
+		if len(rows) != 1 {
+			t.Fatalf("want 1 task, got %d", len(rows))
+		}
+		if rows[0].Operation.Name != "SignLease" {
+			t.Errorf("op name should fall back to root operationType, got %q", rows[0].Operation.Name)
+		}
+	})
 }

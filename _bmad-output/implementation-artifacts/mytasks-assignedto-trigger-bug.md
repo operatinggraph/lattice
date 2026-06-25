@@ -1,11 +1,62 @@
 # Bug — `my-tasks` lens does not project on task assignment (assignedTo not a reprojection trigger)
 
 **Found:** 2026-06-25 (Steward, live-verifying the LoftSpace applicant task inbox / Increment C).
-**Severity:** ★★★ — makes the per-identity task inbox (and any `my-tasks` consumer: FR28 role-queue,
-the LoftSpace + future clinic task inboxes) **non-functional in the real flow**. Reproduced on a
-**clean** `up-full` stack, so it is a genuine read-path bug, not environmental.
-**Status:** 📋 Filed — needs design → **3-layer adversarial review** (core read-path engine) → fix.
-Do NOT patch the Refractor reprojection engine unattended without that review runway.
+**Severity (as filed):** ★★★. **Status: ✅ RESOLVED — NOT an engine bug (environmental).** The
+`assignedTo` reprojection trigger is **sound**; the original symptom was the stale-accumulated dev-stack
+artifact already cleared elsewhere on the board (the Refractor's CDC consumer position drifts on a
+many-times-restarted `up-full`). A clean stack projects correctly. A realistic regression test now guards
+the path. While confirming this, a **real but lower-severity (★★) gap** was found and fixed in the same
+read path (operationName projected null in the real flow — see "Second finding" below).
+
+## Investigation verdict (Steward, 2026-06-25) — four independent lines of evidence
+
+1. **Realistic-ordering e2e PASSES.** A new `internal/refractor/refractor_mytasks_assignedto_e2e_test.go`
+   reproduces the real lifecycle — the assignee **identity is written FIRST**, then (seconds later) the
+   task vertex + the three links are created as **genuine Contract #1 link envelopes written to Core KV**
+   (real CDC, NOT pre-seeded adjacency). The inbound `lnk.task.<id>.assignedTo.identity.<id>` mutation
+   reprojects the identity's row and the freshly-assigned task projects. This is exactly the scenario the
+   original report said "will fail today" — it passes.
+2. **The engine path is correct by construction.** `myTasks` is an `actorAggregate` lens, so it routes
+   through `evalLinkFanOut` (not the "no handler registered" ack-skip — that log line is emitted by every
+   *non-actor* lens consumer on every link mutation and is normal noise). `evalLinkFanOut` idempotently
+   builds adjacency from BOTH endpoints and seeds the actor enumeration from both, so an `assignedTo` link
+   reprojects the identity endpoint. The dedicated adjacency Bootstrapper *also* builds the edge from the
+   same link CDC. The sibling `capabilityEphemeral` lens uses the identical `(identity)<-[:assignedTo]-(task)`
+   pattern and ships working.
+3. **`cmd/refractor` wiring is byte-identical to the test** (`IsActorAggregate` → `InstallActorAggregate`
+   → `SetActorEnumerator`; same `DeliverLastPerSubject`, same `CoreKVFilter`). No myTasks-specific gap.
+4. **LIVE clean-stack confirmation.** `make down` → fresh `make up-full` → `make install-loftspace` →
+   created an applicant identity → minted a unit → `CreateLeaseApplication`. Weaver/Loom dispatched two
+   userTasks `assignedTo` the **pre-existing** applicant (RecordIdentityPII + SignLease). The `my-tasks`
+   bucket (`my-tasks.identity.<applicant>`) projected **both** open tasks within ~2s. The original "2 open
+   tasks, 0 lens rows" symptom did not reproduce.
+
+**Root cause of the original symptom:** environmental — same as the board's already-cleared "Refractor
+stale-stack non-projection" flag. Operational note: live-verify on a fresh `make down` + `up-full`, never a
+long-lived accumulated stack.
+
+## Second finding (★★, FIXED in the same fire) — operationName projected null in the real flow
+
+The self-describing task-content feature projected `operationName: null` / `operationDescription: null`
+live, because the lens hopped `op.canonicalName.data.value` — but a dispatched userTask's `forOperation`
+points at the operation's **DDL meta-vertex** (`meta.ddl.vertexType`), whose name lives on the **root** as
+`data.operationType`; package op DDLs carry **no** `.canonicalName` aspect (only a handful of primordial
+metas do). The original e2e masked this by *manufacturing* a `.canonicalName` aspect on the fixture op.
+
+**Fix:** the `myTasks` lens now projects `operationName ← op.data.operationType` (the field every op DDL
+carries; the same source `capabilityEphemeral` already reads). `operationDescription` stays a best-effort
+`.description`-aspect hop (null when the package authored none — the known authoring nicety). The Loupe
+operator inbox (`cmd/loupe/tasks.go`, which reads Core KV directly as the inspector) gets the matching
+fallback: prefer the `.canonicalName` aspect, fall back to the root `operationType`. Both the realistic
+refractor e2e and a new Loupe `computeTasks` sub-test assert the fallback.
+
+---
+
+## Original report (preserved)
+
+**Severity (as filed):** ★★★ — claimed the per-identity task inbox is non-functional in the real flow.
+**Status (as filed):** 📋 Filed — needs design → 3-layer adversarial review → fix. *(Superseded by the
+verdict above: the trigger is sound; the real defect was the smaller operationName-source gap, now fixed.)*
 
 ## Symptom
 
