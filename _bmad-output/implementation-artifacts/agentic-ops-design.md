@@ -171,22 +171,25 @@ the Vault/crypto-shred plane, bridge I/O) into existence? — not as a thought e
 
 ---
 
-## 6. Autonomy mechanisms — Claude routines, not cron
+## 6. Autonomy mechanisms — scheduled routine (unattended) + in-session loop
 
-The recurring driver is the **dynamic `/loop` + `ScheduleWakeup`** pattern, run **in-session**, not cron.
-This is already the established pattern in this repo: the inter-story credit-window gate runs as hourly
-`ScheduleWakeup` hops that re-check an epoch gate (CLAUDE.md). Routines win over cron here because they are:
+Two drivers, selected by whether Andrew is present:
 
-- **context-warm** — the loop resumes inside the live session with the working tree, memory, and prior
-  reasoning intact; a cron agent cold-starts and re-derives everything (the expensive path);
-- **state-paced** — dynamic `/loop` self-paces: it picks the next wake based on whether there is work
-  (CI red? Health yellow?), instead of firing on a fixed wall-clock tick and burning tokens on no-ops;
-- **token-budget-aware** — wake cadence respects the prompt-cache window (see §6.6), and work is bounded by
-  the ladder, not a blind schedule;
-- **interruptible** — Andrew can redirect mid-loop; cron runs blind.
+- **Unattended — the active operating mode.** A **local scheduled-tasks routine** (`steward-autonomous`,
+  `~/.claude/scheduled-tasks/`) fires the **Steward** on a cron — currently **every 6h** — with **no session
+  from Andrew**. This is the genuinely-autonomous mode. Each fire **cold-starts** and re-grounds from durable
+  state — the board (`backlog.md`), `memory/`, and this design doc — which is exactly why those artifacts are
+  kept truthful (cold-start is the cost; durable context is what makes it tractable). Unattended commit policy
+  is the **ratified L2 low-risk class only**; contracts and out-of-class work are escalated to Andrew on the
+  board, never committed. *Caveat:* a local scheduled task fires only while the Claude app is running (or on
+  next launch if it was closed when due) — true server-side unattendedness is the cloud-routine step below.
+- **In-session — when Andrew is driving.** The **dynamic `/loop` + `ScheduleWakeup`** pattern: context-warm
+  (resumes inside the live session with the tree, memory, and prior reasoning intact), state-paced (wakes on
+  whether there's work, not a blind tick), token-budget-aware (respects the prompt-cache window, §6.6), and
+  interruptible. The inter-story credit-window gate already runs this way (CLAUDE.md).
 
-Cron / cloud-scheduled agents (the `schedule` skill, `CronCreate`) stay available for a future
-genuinely-unattended-server deployment, but are **not** the Phase-3 mechanism.
+**Cloud-scheduled routines** (server-side, no dependency on Andrew's machine/app being open) are the next
+step beyond the local runner — same Steward prompt, hosted execution.
 
 ### 6.1 Routines (`/loop` + `ScheduleWakeup`)
 
