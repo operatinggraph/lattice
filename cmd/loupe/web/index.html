@@ -10,7 +10,8 @@
   <header class="topbar">
     <div class="brand">Loupe <span class="brand-sub">· Lattice</span></div>
     <nav class="tabs" id="tabs">
-      <button class="tab active" data-tab="corekv">Core KV</button>
+      <button class="tab active" data-tab="systemmap">System Map</button>
+      <button class="tab" data-tab="corekv">Core KV</button>
       <button class="tab" data-tab="health">Health</button>
       <button class="tab" data-tab="control">Control</button>
       <button class="tab" data-tab="packages">Packages</button>
@@ -20,8 +21,25 @@
   </header>
 
   <main>
+    <!-- System Map -->
+    <section class="panel active" id="panel-systemmap">
+      <div class="controls-bar">
+        <span class="rollup" id="sysmap-overall"></span>
+        <span class="muted" id="sysmap-summary"></span>
+        <button id="sysmap-refresh">Refresh</button>
+        <label class="sysmap-auto"><input type="checkbox" id="sysmap-auto"> auto ⟳</label>
+        <span class="muted" id="sysmap-status"></span>
+      </div>
+      <div id="sysmap-main">
+        <div id="sysmap-stage">
+          <svg id="sysmap-edges" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+      </div>
+      <!-- agent-activity console mounts in #sysmap-console — see loupe-system-map-ux.md §6 -->
+    </section>
+
     <!-- Core KV -->
-    <section class="panel active" id="panel-corekv">
+    <section class="panel" id="panel-corekv">
       <div class="panel-controls">
         <input type="text" id="corekv-prefix" placeholder="type filter (e.g. vtx.role.)">
         <input type="number" id="corekv-limit" value="500" min="1" title="max vertices">

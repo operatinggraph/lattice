@@ -43,18 +43,33 @@ function setStatus(id, msg, isError) {
 }
 
 // ---- Tabs ----
+// switchTab activates a tab+panel by name and lazy-loads it. Every drill-in
+// (the System Map's node clicks included) routes through this one path.
+function switchTab(tabName) {
+  // Leaving the System Map (via a tab button or a node drill-in) stops its
+  // auto-refresh poll so a hidden panel isn't polled.
+  const leaving = $(".tab.active");
+  if (leaving && leaving.dataset.tab === "systemmap" && tabName !== "systemmap") {
+    stopSystemMapAuto();
+  }
+  $all(".tab").forEach((b) => b.classList.remove("active"));
+  $all(".panel").forEach((p) => p.classList.remove("active"));
+  const tab = $('.tab[data-tab="' + tabName + '"]');
+  const panel = document.getElementById("panel-" + tabName);
+  if (!tab || !panel) return;
+  tab.classList.add("active");
+  panel.classList.add("active");
+  lazyLoad(tabName);
+}
+
 $all(".tab").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    $all(".tab").forEach((b) => b.classList.remove("active"));
-    $all(".panel").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
-    lazyLoad(btn.dataset.tab);
-  });
+  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
 });
 
 const loaded = {};
 function lazyLoad(tab) {
+  if (tab === "systemmap") { loadSystemMap(); return; }
+  if (tab === "corekv" && !loaded.corekv) { loadCoreKV(); loaded.corekv = true; return; }
   if (loaded[tab]) return;
   loaded[tab] = true;
   if (tab === "health") loadHealth();
@@ -480,6 +495,456 @@ $("#op-submit").addEventListener("click", async () => {
   }
 });
 
+// ---- System Map ----
+// The landing view: a hand-laid topology of the deployed components with the
+// live Health KV overlay (GET /api/systemmap). Nodes are absolutely-positioned
+// DOM in #sysmap-stage; edges are SVG paths measured from each node's box via
+// getBoundingClientRect after layout. Rendering is kind-agnostic (driven by the
+// status lookup tables) so a future kind:"agent" node is a data change, not new
+// rendering logic.
+
+const SYSMAP_TIER_Y = [40, 150, 270, 400, 530];
+const SYSMAP_NODE_H = 58;
+const SVG_NS = "http://www.w3.org/2000/svg";
+const refractorId = "refractor"; // the sole lens parent (see systemmap.go)
+
+// componentStatusClass / lensDotClass map a backend status string to the CSS
+// class that drives its color. Unknown statuses fall back to a neutral dot.
+const componentStatusClass = {
+  green: "green", stale: "stale", absent: "absent", unknown: "unknown",
+};
+const lensDotClass = {
+  active: "green", yellow: "yellow", paused: "yellow", rebuilding: "yellow", unknown: "dim",
+};
+const lensGlyph = { paused: "⏸", rebuilding: "⟳" };
+
+// sysmap holds the last-rendered data + transient render state. nodeEls maps a
+// node id to its DOM element for edge measurement; tip is the single shared
+// hover popover.
+const sysmap = { data: null, nodeEls: new Map(), tip: null, autoTimer: null, resizeTimer: null, fetchSeq: 0 };
+
+// sysmapTier derives a node's tier (0..4) from its kind + id, never hardcoded
+// x/y — so the layout survives backend node-set changes.
+function sysmapTier(node) {
+  if (node.kind === "lens") return 4;
+  if (node.kind === "infra") {
+    return node.id === "core-operations" ? 0 : 2; // core-kv / core-events = spine
+  }
+  // component
+  return node.id === "processor" ? 1 : 3;
+}
+
+async function loadSystemMap() { return refreshSystemMap(); }
+
+// refreshSystemMap is the single clock: re-fetches /api/systemmap and re-renders
+// without blanking a previously-good map until the new data arrives. The future
+// agent-activity console extends this same function rather than adding a second
+// interval.
+async function refreshSystemMap() {
+  const btn = document.getElementById("sysmap-refresh");
+  const had = !!sysmap.data;
+  const seq = ++sysmap.fetchSeq;
+  if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
+  setStatus("sysmap-status", "loading…");
+  if (!had) sysmapStageMessage("loading the system map…");
+
+  const body = await api("/api/systemmap");
+  if (seq !== sysmap.fetchSeq) return; // a newer refresh superseded this one
+  if (btn) { btn.disabled = false; btn.textContent = "Refresh"; }
+
+  if (body.error) {
+    sysmap.data = null;
+    renderSysmapError(body.error);
+    setStatus("sysmap-status", "error", true);
+    setSysmapRollup(null);
+    return;
+  }
+  sysmap.data = body;
+  renderSystemMap(body);
+  setStatus("sysmap-status", "updated just now");
+}
+
+// sysmapStage returns the stage element, (re)creating its <svg> edge layer.
+function sysmapStage() { return document.getElementById("sysmap-stage"); }
+
+function sysmapStageMessage(msg) {
+  const stage = sysmapStage();
+  if (!stage) return;
+  stage.innerHTML = "";
+  stage.style.minHeight = "";
+  const m = el("div", "sysmap-stage-msg muted", msg);
+  stage.appendChild(m);
+}
+
+function renderSysmapError(err) {
+  const stage = sysmapStage();
+  if (!stage) return;
+  stage.innerHTML = "";
+  stage.style.minHeight = "";
+  const box = el("div", "sysmap-stage-msg");
+  box.appendChild(el("div", "error-text", err));
+  const retry = el("button", null, "Retry");
+  retry.addEventListener("click", refreshSystemMap);
+  box.appendChild(retry);
+  stage.appendChild(box);
+}
+
+// setSysmapRollup drives the overall banner + one-line plain-English summary and
+// the red top-border cue. Called with null to clear (error state).
+function setSysmapRollup(data) {
+  const banner = document.getElementById("sysmap-overall");
+  const summary = document.getElementById("sysmap-summary");
+  const stage = sysmapStage();
+  if (!banner || !summary) return;
+  if (!data) {
+    banner.textContent = "";
+    banner.className = "rollup";
+    summary.textContent = "";
+    if (stage) stage.classList.remove("sysmap-red");
+    return;
+  }
+  const overall = data.overall || "green";
+  banner.textContent = overall.toUpperCase();
+  banner.className = "rollup " + overall;
+  const nodes = data.nodes || [];
+  const healthy = new Set(["green", "active", "present"]);
+  if (overall === "red") {
+    const absent = nodes.filter((n) => n.status === "absent").length;
+    summary.textContent = absent + " component(s) absent.";
+    if (stage) stage.classList.add("sysmap-red");
+  } else if (overall === "yellow") {
+    const degraded = nodes.filter((n) => !healthy.has(n.status)).length;
+    summary.textContent = degraded + " component(s)/lens(es) degraded.";
+    if (stage) stage.classList.remove("sysmap-red");
+  } else {
+    summary.textContent = "All components healthy.";
+    if (stage) stage.classList.remove("sysmap-red");
+  }
+}
+
+// renderSystemMap lays out the nodes (tiers 0-3 absolutely positioned, tier-4
+// lenses in a flex-wrap shelf), then schedules an edge pass after layout.
+function renderSystemMap(data) {
+  const stage = sysmapStage();
+  if (!stage) return;
+  setSysmapRollup(data);
+  stage.innerHTML = "";
+  sysmap.nodeEls = new Map();
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.id = "sysmap-edges";
+  svg.setAttribute("xmlns", SVG_NS);
+  stage.appendChild(svg);
+
+  const nodes = data.nodes || [];
+  const width = stage.clientWidth || 1100;
+
+  // Tiers 0-3: absolutely positioned, evenly spaced across the stage width.
+  const tierMembers = [[], [], [], []];
+  const lenses = [];
+  nodes.forEach((n) => {
+    const t = sysmapTier(n);
+    if (t === 4) { lenses.push(n); return; }
+    tierMembers[t].push(n);
+  });
+
+  // Refractor is the left-most tier-3 slot so its project edges drop cleanly
+  // into the shelf without crossing the other engines' return paths.
+  tierMembers[3].sort((a, b) => {
+    if (a.id === refractorId) return -1;
+    if (b.id === refractorId) return 1;
+    return 0;
+  });
+
+  for (let t = 0; t < 4; t++) {
+    const members = tierMembers[t];
+    members.forEach((n, i) => {
+      const node = buildSysmapNode(n);
+      node.style.left = ((i + 1) / (members.length + 1) * width) + "px";
+      node.style.top = SYSMAP_TIER_Y[t] + "px";
+      node.style.transform = "translateX(-50%)";
+      stage.appendChild(node);
+      sysmap.nodeEls.set(n.id, node);
+    });
+  }
+
+  // Tier 4: the lens shelf — flex-wrap chips, not per-node absolute placement.
+  const shelf = el("div", "sysmap-shelf");
+  shelf.style.top = SYSMAP_TIER_Y[4] + "px";
+  if (!lenses.length) {
+    shelf.appendChild(el("div", "muted", "(no lenses projecting)"));
+  } else {
+    lenses.forEach((n) => {
+      const chip = buildSysmapNode(n);
+      shelf.appendChild(chip);
+      sysmap.nodeEls.set(n.id, chip);
+    });
+  }
+  stage.appendChild(shelf);
+
+  // Empty / no-health hint: every component absent and zero lenses.
+  const components = nodes.filter((n) => n.kind === "component");
+  if (components.length && components.every((n) => n.status === "absent") && !lenses.length) {
+    const hint = el("div", "muted sysmap-hint",
+      "No live components reporting — is the stack running? (make up-full)");
+    stage.appendChild(hint);
+  }
+
+  // Size the stage to fit the shelf, then measure + draw edges after layout.
+  requestAnimationFrame(() => {
+    const stageNow = sysmapStage();
+    if (!stageNow) return;
+    const shelfEl = $(".sysmap-shelf", stageNow);
+    const bottom = shelfEl ? shelfEl.offsetTop + shelfEl.offsetHeight : SYSMAP_TIER_Y[4] + SYSMAP_NODE_H;
+    stageNow.style.minHeight = (bottom + 40) + "px";
+    drawSysmapEdges(data);
+  });
+}
+
+// buildSysmapNode renders one node element for its kind, with the status class,
+// inline content, hover tooltip, and (for component/lens) the click drill-in.
+function buildSysmapNode(n) {
+  const node = el("div", "sysmap-node " + n.kind);
+  node.dataset.status = n.status || "";
+  node.dataset.id = n.id;
+
+  if (n.kind === "component") {
+    const cls = componentStatusClass[n.status] || "unknown";
+    if (cls === "absent") node.classList.add("absent");
+    if (cls === "stale") node.classList.add("stale");
+    const head = el("div", "sysmap-node-head");
+    head.appendChild(el("span", "sysmap-dot " + cls));
+    head.appendChild(el("span", "sysmap-label", n.label));
+    if (n.status === "stale") head.appendChild(el("span", "sysmap-tag", "stale"));
+    if (n.issues && n.issues.length) head.appendChild(el("span", "sysmap-tag warn", "⚠ " + n.issues.length));
+    node.appendChild(head);
+    if (n.detail) {
+      const d = el("div", "sysmap-detail", n.detail);
+      node.appendChild(d);
+    }
+    if (n.freshness) node.appendChild(el("div", "sysmap-freshness", n.freshness));
+  } else if (n.kind === "lens") {
+    const cls = lensDotClass[n.status] || "dim";
+    node.appendChild(el("span", "sysmap-dot " + cls));
+    const g = lensGlyph[n.status];
+    if (g) node.appendChild(el("span", "sysmap-glyph", g));
+    node.appendChild(el("span", "sysmap-label", n.label));
+  } else { // infra
+    node.appendChild(el("span", "sysmap-label", n.label));
+  }
+
+  if (n.kind === "component" || n.kind === "lens") {
+    node.addEventListener("mouseenter", (e) => showSysmapTip(n, e));
+    node.addEventListener("mouseleave", hideSysmapTip);
+    node.addEventListener("click", () => drillSysmapNode(n));
+  }
+  return node;
+}
+
+// drillSysmapNode routes a node click through the shared switchTab() helper.
+// Components with a Control column (refractor/weaver/loom) go to Control; the
+// others go to Health (where their heartbeat card lives). A lens goes to Control
+// with the Refractor column prefilled with its id.
+const sysmapControlComponents = new Set(["refractor", "weaver", "loom"]);
+function drillSysmapNode(n) {
+  hideSysmapTip();
+  if (n.kind === "lens") {
+    switchTab("control");
+    const input = $('.control-col[data-comp="refractor"] .control-name');
+    if (input) { input.value = n.id; input.focus(); }
+    return;
+  }
+  if (sysmapControlComponents.has(n.id)) {
+    switchTab("control");
+    const col = $('.control-col[data-comp="' + n.id + '"]');
+    if (col && col.scrollIntoView) col.scrollIntoView({ block: "nearest" });
+    return;
+  }
+  switchTab("health");
+}
+
+// showSysmapTip places the shared popover near the hovered node with everything
+// that doesn't fit inline (§3.3): id, kind, status, detail, freshness, issues,
+// and — for a lens — a "KV" affordance into Core KV.
+function showSysmapTip(n, evt) {
+  hideSysmapTip();
+  const stage = sysmapStage();
+  if (!stage) return;
+  const tip = el("div", "sysmap-tip");
+  tip.appendChild(el("div", "sysmap-tip-id", n.id));
+  const line = (k, v) => { const r = el("div", "sysmap-tip-line"); r.appendChild(el("span", "sysmap-tip-k", k)); r.appendChild(el("span", null, v)); tip.appendChild(r); };
+  line("kind", n.kind);
+  line("status", n.status);
+  if (n.detail) line("detail", n.detail);
+  if (n.freshness) line("freshness", n.freshness);
+  (n.issues || []).forEach((i) => tip.appendChild(el("div", "sysmap-issue", i)));
+  if (n.kind === "lens") {
+    const kv = el("a", "sysmap-tip-kv", "view in Core KV");
+    kv.addEventListener("click", (e) => {
+      e.stopPropagation();
+      hideSysmapTip();
+      const prefix = $("#corekv-prefix");
+      if (prefix) prefix.value = n.id;
+      loaded.corekv = true; // suppress lazyLoad's default load — we load with the prefix below
+      switchTab("corekv");
+      loadCoreKV();
+    });
+    tip.appendChild(kv);
+  }
+
+  const node = sysmap.nodeEls.get(n.id);
+  if (node) {
+    tip.style.left = (node.offsetLeft) + "px";
+    tip.style.top = (node.offsetTop + node.offsetHeight + 6) + "px";
+  } else if (evt) {
+    tip.style.left = evt.offsetX + "px";
+    tip.style.top = evt.offsetY + "px";
+  }
+  stage.appendChild(tip);
+  sysmap.tip = tip;
+}
+
+function hideSysmapTip() {
+  if (sysmap.tip) { sysmap.tip.remove(); sysmap.tip = null; }
+}
+
+// drawSysmapEdges measures each node box relative to the stage and draws an SVG
+// path per edge. Cleared and rebuilt from boxes each pass (cheap at this scale).
+function drawSysmapEdges(data) {
+  const stage = sysmapStage();
+  const svg = document.getElementById("sysmap-edges");
+  if (!stage || !svg) return;
+  const stageBox = stage.getBoundingClientRect();
+  svg.setAttribute("width", stage.clientWidth);
+  svg.setAttribute("height", stage.scrollHeight);
+  svg.innerHTML = "";
+
+  // One shared arrowhead marker.
+  const defs = document.createElementNS(SVG_NS, "defs");
+  defs.innerHTML =
+    '<marker id="sysmap-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+    '<path d="M0,0 L10,5 L0,10 z" fill="var(--border)"/></marker>';
+  svg.appendChild(defs);
+
+  // Stage-local box for a node id.
+  const box = (id) => {
+    const e = sysmap.nodeEls.get(id);
+    if (!e) return null;
+    const r = e.getBoundingClientRect();
+    return { l: r.left - stageBox.left, t: r.top - stageBox.top, w: r.width, h: r.height };
+  };
+  const tierOf = (id) => {
+    const node = (data.nodes || []).find((x) => x.id === id);
+    return node ? sysmapTier(node) : -1;
+  };
+
+  // The upward "submit ops" returns share one gutter lane near the right edge
+  // (clamped inside the stage) so they read as a single secondary return bus
+  // rather than fanning off-stage; the bus is labelled once.
+  const returnGutter = Math.max(stageBox.width - 52, 0);
+  let returnLabelled = false;
+
+  (data.edges || []).forEach((edge) => {
+    const a = box(edge.from), b = box(edge.to);
+    if (!a || !b) return; // edge resolves only when both endpoints exist
+    const ta = tierOf(edge.from), tb = tierOf(edge.to);
+    let x1, y1, x2, y2, mx, my, path, secondary = false, suppressLabel = false;
+
+    if (ta === tb) {
+      // Same-tier: side-center → side-center, shallow arc.
+      const leftFirst = a.l < b.l;
+      x1 = leftFirst ? a.l + a.w : a.l;
+      x2 = leftFirst ? b.l : b.l + b.w;
+      y1 = a.t + a.h / 2; y2 = b.t + b.h / 2;
+      const cx = (x1 + x2) / 2;
+      path = `M${x1},${y1} C${cx},${y1 - 24} ${cx},${y2 - 24} ${x2},${y2}`;
+      mx = cx; my = (y1 + y2) / 2 - 18;
+    } else if (ta > tb) {
+      // Upward return (submit ops): up the shared right-gutter bus, dimmer +
+      // thinner. Labelled once (the lanes overlap into one visual return bus).
+      secondary = true;
+      x1 = a.l + a.w; y1 = a.t + a.h / 2;
+      x2 = b.l + b.w; y2 = b.t + b.h / 2;
+      const gutter = returnGutter;
+      path = `M${x1},${y1} C${gutter},${y1} ${gutter},${y2} ${x2},${y2}`;
+      mx = gutter; my = (y1 + y2) / 2;
+      if (returnLabelled) suppressLabel = true;
+      returnLabelled = true;
+    } else {
+      // Downward: bottom-center → top-center, cubic with vertical control.
+      x1 = a.l + a.w / 2; y1 = a.t + a.h;
+      x2 = b.l + b.w / 2; y2 = b.t;
+      const dy = (y2 - y1) * 0.4;
+      path = `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`;
+      mx = (x1 + x2) / 2; my = (y1 + y2) / 2;
+    }
+
+    const p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", path);
+    p.setAttribute("class", "sysmap-edge" + (secondary ? " secondary" : ""));
+    p.setAttribute("marker-end", "url(#sysmap-arrow)");
+    svg.appendChild(p);
+
+    if (edge.label && !suppressLabel) {
+      const g = document.createElementNS(SVG_NS, "g");
+      const t = document.createElementNS(SVG_NS, "text");
+      t.setAttribute("x", mx);
+      t.setAttribute("y", my);
+      t.setAttribute("class", "sysmap-edge-label");
+      t.setAttribute("text-anchor", "middle");
+      t.textContent = edge.label;
+      // Background rect sized from the text once it is in the DOM.
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("class", "sysmap-edge-label-bg");
+      rect.setAttribute("rx", "3");
+      g.appendChild(rect);
+      g.appendChild(t);
+      svg.appendChild(g);
+      let tb2 = null;
+      try { tb2 = t.getBBox(); } catch (_) { /* not rendered yet */ }
+      if (tb2 && tb2.width) {
+        rect.setAttribute("x", tb2.x - 3);
+        rect.setAttribute("y", tb2.y - 1);
+        rect.setAttribute("width", tb2.width + 6);
+        rect.setAttribute("height", tb2.height + 2);
+      }
+    }
+  });
+}
+
+// Auto-refresh: opt-in 10s poll, paused while the tab is backgrounded and
+// stopped when the operator leaves the System Map tab.
+function startSystemMapAuto() {
+  if (sysmap.autoTimer) return;
+  sysmap.autoTimer = setInterval(() => {
+    if (document.hidden) return;
+    refreshSystemMap();
+  }, 10000);
+}
+function stopSystemMapAuto() {
+  if (sysmap.autoTimer) { clearInterval(sysmap.autoTimer); sysmap.autoTimer = null; }
+  const cb = document.getElementById("sysmap-auto");
+  if (cb) cb.checked = false;
+}
+
+(function wireSystemMap() {
+  const refresh = document.getElementById("sysmap-refresh");
+  if (refresh) refresh.addEventListener("click", refreshSystemMap);
+  const auto = document.getElementById("sysmap-auto");
+  if (auto) auto.addEventListener("change", () => { auto.checked ? startSystemMapAuto() : stopSystemMapAuto(); });
+
+  // Re-measure + redraw on resize (debounced), only while the map is rendered.
+  window.addEventListener("resize", () => {
+    if (sysmap.resizeTimer) clearTimeout(sysmap.resizeTimer);
+    sysmap.resizeTimer = setTimeout(() => {
+      const panel = document.getElementById("panel-systemmap");
+      if (sysmap.data && panel && panel.classList.contains("active")) {
+        renderSystemMap(sysmap.data);
+      }
+    }, 120);
+  });
+})();
+
 // ---- Files (off-graph blob plane) ----
 
 // uploadObject POSTs the multipart form to /api/objects. Uses fetch directly
@@ -586,6 +1051,6 @@ async function detachObject(oid, targetKey, linkName) {
 $("#files-upload-btn").addEventListener("click", uploadObject);
 $("#files-load").addEventListener("click", loadFiles);
 
-// Load the default (Core KV) tab on first paint.
-loadCoreKV();
-loaded.corekv = true;
+// Load the default (System Map) tab on first paint.
+loadSystemMap();
+loaded.systemmap = true;

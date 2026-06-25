@@ -359,3 +359,147 @@ table.grid td { font-family: var(--mono); }
   cursor: pointer;
 }
 .file-detach:hover { border-color: var(--red); }
+
+/* ---- System Map ---- */
+#panel-systemmap .controls-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.sysmap-auto { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.sysmap-auto input { width: auto; }
+
+#sysmap-main { display: grid; grid-template-columns: 1fr; gap: 14px; }
+
+#sysmap-stage {
+  position: relative;
+  overflow: visible;
+  min-height: 600px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+}
+#sysmap-stage.sysmap-red { border-top: 1px solid var(--red); }
+
+#sysmap-edges { position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none; overflow: visible; }
+
+.sysmap-stage-msg {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.sysmap-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
+.sysmap-edge.secondary { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
+.sysmap-edge.secondary:hover { stroke: var(--text-dim); }
+.sysmap-edge-label { fill: var(--text-dim); font-family: var(--mono); font-size: 10px; }
+.sysmap-edge-label-bg { fill: var(--bg); }
+
+.sysmap-node {
+  position: absolute;
+  z-index: 1;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  cursor: default;
+}
+
+.sysmap-node.infra {
+  border-radius: 999px;
+  padding: 9px 16px;
+  min-width: 150px;
+  text-align: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.sysmap-node.component {
+  border-radius: 8px;
+  border-left-width: 3px;
+  border-left-color: var(--green);
+  padding: 8px 12px;
+  width: 180px;
+  cursor: pointer;
+}
+.sysmap-node.component.stale { border: 1px solid var(--yellow); border-left-width: 3px; border-left-color: var(--yellow); }
+.sysmap-node.component.absent {
+  border: 1px dashed var(--red);
+  opacity: 0.55;
+}
+.sysmap-node.component[data-status="unknown"] { border-left-color: var(--yellow); }
+.sysmap-node.component.absent .sysmap-label { text-decoration: line-through; color: var(--text-dim); }
+
+.sysmap-node-head { display: flex; align-items: center; gap: 7px; }
+.sysmap-label { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sysmap-node.component .sysmap-label { flex: 1; min-width: 0; }
+.sysmap-detail { font-family: var(--mono); font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.sysmap-freshness { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+.sysmap-node.lens {
+  border-radius: 6px;
+  background: var(--bg-input);
+  padding: 7px 10px;
+  width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.sysmap-node.lens .sysmap-label { font-weight: 400; flex: 1; min-width: 0; }
+.sysmap-glyph { color: var(--yellow); font-size: 11px; flex-shrink: 0; }
+
+.sysmap-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; background: var(--text-dim); display: inline-block; }
+.sysmap-dot.green { background: var(--green); }
+.sysmap-dot.yellow { background: var(--yellow); }
+.sysmap-dot.red { background: var(--red); }
+.sysmap-dot.absent { background: var(--red); }
+.sysmap-dot.stale, .sysmap-dot.unknown { background: var(--yellow); }
+.sysmap-dot.dim { background: var(--text-dim); }
+
+.sysmap-tag { font-size: 10px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-dim); flex-shrink: 0; }
+.sysmap-tag.warn { color: var(--yellow); border-color: var(--yellow); }
+
+.sysmap-shelf {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-content: flex-start;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.sysmap-shelf .sysmap-node.lens { position: static; }
+
+.sysmap-hint { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); }
+
+.sysmap-tip {
+  position: absolute;
+  z-index: 20;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  max-width: 280px;
+  pointer-events: auto;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+}
+.sysmap-tip-id { font-weight: 600; word-break: break-all; margin-bottom: 4px; }
+.sysmap-tip-line { display: flex; gap: 8px; }
+.sysmap-tip-k { color: var(--text-dim); min-width: 64px; }
+.sysmap-issue { color: var(--yellow); margin-top: 2px; word-break: break-word; }
+.sysmap-tip-kv { display: inline-block; margin-top: 6px; color: var(--accent); cursor: pointer; }
