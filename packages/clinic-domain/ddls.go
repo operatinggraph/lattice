@@ -187,8 +187,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"source). RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt (re-deriving " +
 			"remindAt = startsAt − 24h so the clinic-reminders @at re-arms for a not-yet-sent reminder), leaving the " +
 			"links + status untouched; an omitted reason clears it (the caller carries the existing reason). " +
-			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, completed, " +
-			"cancelled, noShow}. TombstoneAppointment soft-deletes the appointment. CreateAppointment AND " +
+			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, checkedIn, completed, " +
+			"cancelled, noShow}, with an optional audit note (a cancel / no-show reason, stored on .status distinct " +
+			"from the .schedule visit reason). TombstoneAppointment soft-deletes the appointment. CreateAppointment AND " +
 			"RescheduleAppointment REJECT a double-book (SlotConflict): each reads the provider's .bookings index (a " +
 			"declared, OCC-snapshotted contextHint.reads key) and kv.Reads every live candidate's schedule + status, " +
 			"failing on an overlap with a still scheduled / confirmed appointment (reschedule skips the appointment being " +
@@ -205,7 +206,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"reason":{"type":"string","description":"Visit reason / chief complaint (CreateAppointment / RescheduleAppointment; optional — on RescheduleAppointment an omitted reason clears it)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
 			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / TombstoneAppointment; required, validated alive)."},` +
-			`"status":{"type":"string","enum":["scheduled","confirmed","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required)."}},` +
+			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required)."},` +
+			`"note":{"type":"string","description":"Optional audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the operation wrote."}}}`,
@@ -217,7 +219,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"reason":         "Optional visit reason / chief complaint. Stored on the .schedule aspect when present (CreateAppointment / RescheduleAppointment; on RescheduleAppointment an omitted reason clears it).",
 			"appointmentId":  "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
 			"appointmentKey": "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus validates it alive + class=appointment; TombstoneAppointment validates it alive).",
-			"status":         "New appointment status, one of {scheduled, confirmed, completed, cancelled, noShow} (SetAppointmentStatus; required).",
+			"status":         "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required).",
+			"note":           "Optional audit note recorded with a SetAppointmentStatus transition (e.g. a cancel / no-show reason). Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -369,16 +372,18 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus"},
 		Description: "Appointment status aspect (clinic). Stored as vtx.appointment.<NanoID>.status (class " +
-			"appointmentStatus) = {value ∈ scheduled|confirmed|completed|cancelled|noShow}. Non-sensitive. Written " +
-			"by CreateAppointment (initial scheduled) and SetAppointmentStatus (transitions) — whose appointment " +
-			"vertexType DDL owns the script; this aspect-type DDL is the step-6 write gate. Declaration-only: no op " +
-			"handler.",
+			"appointmentStatus) = {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?}. " +
+			"Non-sensitive. Written by CreateAppointment (initial scheduled) and SetAppointmentStatus (transitions, with " +
+			"an optional audit note — a cancel / no-show reason, distinct from the .schedule visit reason) — whose " +
+			"appointment vertexType DDL owns the script; this aspect-type DDL is the step-6 write gate. Declaration-only: " +
+			"no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["scheduled","confirmed","completed","cancelled","noShow"]}}}`,
+			`{"value":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"]},"note":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value": "Appointment status: scheduled | confirmed | completed | cancelled | noShow.",
+			"value": "Appointment status: scheduled | confirmed | checkedIn | completed | cancelled | noShow.",
+			"note":  "Optional audit note recorded with a status transition (e.g. a cancel / no-show reason).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -897,12 +902,12 @@ def enforce_hours(provider, starts_at, ends_at):
             return
     fail("OutsideHours: provider " + provider + " is not available at the requested time (UTC weekday " + str(sw) + ", " + str(ss) + "s-" + str(es) + "s of day); no matching availability window")
 
-APPOINTMENT_STATUSES = ["scheduled", "confirmed", "completed", "cancelled", "noShow"]
+APPOINTMENT_STATUSES = ["scheduled", "confirmed", "checkedIn", "completed", "cancelled", "noShow"]
 
 def required_status(p):
     s = required_string(p, "status")
     if s not in APPOINTMENT_STATUSES:
-        fail("InvalidArgument: status: must be one of scheduled, confirmed, completed, cancelled, noShow; got " + s)
+        fail("InvalidArgument: status: must be one of scheduled, confirmed, checkedIn, completed, cancelled, noShow; got " + s)
     return s
 
 def execute(state, op):
@@ -1149,7 +1154,16 @@ def execute(state, op):
         if cls != "appointment":
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
         status = required_status(p)
-        mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", {"value": status})]
+        # Optional audit note (cancel / no-show reason for billing + records).
+        # Stored on the .status aspect, distinct from the .schedule visit reason.
+        # Omitted → the .status carries only {value} (an unconditioned upsert, so a
+        # later transition without a note clears any prior note — intended: the note
+        # belongs to the terminal cancel/no-show it was recorded with).
+        status_data = {"value": status}
+        note = optional_string(p, "note")
+        if note != None:
+            status_data["note"] = note
+        mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
         return {"mutations": mutations, "events": events,

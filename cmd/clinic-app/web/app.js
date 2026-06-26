@@ -828,6 +828,12 @@ function selectSchedAppt(a) {
     meta.textContent = a.reason;
     d.append(meta);
   }
+  if (a.statusNote) {
+    const note = document.createElement("div");
+    note.className = "sd-meta status-note";
+    note.textContent = "📝 " + a.statusNote;
+    d.append(note);
+  }
   if (a.reminderSentAt) {
     const r = new Date(a.reminderSentAt);
     const rem = document.createElement("div");
@@ -905,7 +911,7 @@ function isPast(startsAt) {
   return !isNaN(s) && s.getTime() < Date.now();
 }
 
-const ACTIVE_STATUSES = ["scheduled", "confirmed"];
+const ACTIVE_STATUSES = ["scheduled", "confirmed", "checkedIn"];
 
 function renderApptCard(a, opts) {
   const card = document.createElement("div");
@@ -932,6 +938,12 @@ function renderApptCard(a, opts) {
   const reason = document.createElement("div");
   reason.className = "meta";
   reason.textContent = a.reason || "";
+
+  // An audit note recorded with a cancel / no-show transition (clinicAppointments
+  // lens statusNote column). Absent unless a note was supplied.
+  const statusNote = document.createElement("div");
+  statusNote.className = "meta status-note";
+  statusNote.textContent = a.statusNote ? "📝 " + a.statusNote : "";
 
   // The ~24h reminder, once the clinic-reminders orchestration has fired it
   // (surfaced via the clinicAppointments lens's reminderSentAt column). Absent
@@ -975,6 +987,7 @@ function renderApptCard(a, opts) {
   if (sub.textContent) card.append(sub);
   card.append(when);
   if (reason.textContent) card.append(reason);
+  if (statusNote.textContent) card.append(statusNote);
   if (reminder.textContent) card.append(reminder);
   card.append(actions);
   return card;
@@ -993,28 +1006,38 @@ function statusClass(status) {
 // forward progress (confirm / complete) proceeds directly.
 
 const TERMINAL_STATUSES = ["completed", "cancelled", "noshow"];
-const STATUS_LABEL = { confirmed: "Confirm", completed: "Complete", noShow: "No-show", cancelled: "Cancel" };
-const STATUS_PAST = { confirmed: "confirmed", completed: "completed", noShow: "marked no-show", cancelled: "cancelled" };
+const STATUS_LABEL = { confirmed: "Confirm", checkedIn: "Check in", completed: "Complete", noShow: "No-show", cancelled: "Cancel" };
+const STATUS_PAST = { confirmed: "confirmed", checkedIn: "checked in", completed: "completed", noShow: "marked no-show", cancelled: "cancelled" };
 
 // lifecycleTransitions returns the SetAppointmentStatus targets reachable from the
 // current status (excluding Cancel, which renders as its own button alongside).
+// The day-of-visit flow is scheduled → confirmed → checkedIn → completed; check-in
+// and complete/no-show stay reachable from the earlier active states too.
 function lifecycleTransitions(status) {
   const s = (status || "").toLowerCase();
-  if (s === "scheduled") return ["confirmed", "completed", "noShow"];
-  if (s === "confirmed") return ["completed", "noShow"];
+  if (s === "scheduled") return ["confirmed", "checkedIn", "completed", "noShow"];
+  if (s === "confirmed") return ["checkedIn", "completed", "noShow"];
+  if (s === "checkedin") return ["completed", "noShow"];
   return []; // completed / cancelled / noShow are terminal
 }
 
 // setStatus drives SetAppointmentStatus to the given status and reloads via onDone.
-// noShow / cancelled prompt first (they end the appointment).
+// noShow / cancelled prompt for an optional audit note (a reason recorded on the
+// .status aspect for records / billing); cancelling the prompt aborts.
 async function setStatus(a, status, onDone) {
-  if (status === "noShow" && !confirm("Mark this appointment as a no-show?")) return;
-  if (status === "cancelled" && !confirm("Cancel this appointment?")) return;
+  const payload = { appointmentKey: a.appointmentKey, status };
+  if (status === "noShow" || status === "cancelled") {
+    const verb = status === "noShow" ? "Mark as no-show" : "Cancel this appointment";
+    const note = prompt(verb + ". Optional note (reason):", "");
+    if (note === null) return; // prompt dismissed → abort
+    const trimmed = note.trim();
+    if (trimmed) payload.note = trimmed;
+  }
   try {
     const reply = await submitOp(
       "SetAppointmentStatus",
       "appointment",
-      { appointmentKey: a.appointmentKey, status },
+      payload,
       [a.appointmentKey],
     );
     const msg = rejectionMessage(reply);

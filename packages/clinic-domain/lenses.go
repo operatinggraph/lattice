@@ -88,6 +88,7 @@ RETURN
   a.schedule.data.endsAt AS endsAt,
   a.schedule.data.reason AS reason,
   a.status.data.value AS status,
+  a.status.data.note AS statusNote,
   p.key AS patientKey,
   p.demographics.data.fullName AS patientName,
   pr.key AS providerKey,

@@ -330,6 +330,53 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 	}
 }
 
+// TestClinic_StatusCheckedInAndNote proves the day-of-visit extensions: the new
+// checkedIn status is accepted (an active, non-terminal state), and an optional
+// audit note is recorded on the .status aspect for a no-show / cancel. A later
+// noteless transition clears the note (the note belongs to the transition it was
+// recorded with).
+func TestClinic_StatusCheckedInAndNote(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-note")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0009", "Pat Note")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0009", "Dr. Note", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0009", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-09T09:00:00Z","endsAt":"2026-07-09T09:20:00Z"}`,
+		[]string{patientKey, providerKey, providerKey + ".bookings"}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// checkedIn is a valid status (the new active state).
+	clSubmit(t, ctx, conn, cp, cons, "setchkin001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"checkedIn"}`, []string{apptKey}, processor.OutcomeAccepted)
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ := status["data"].(map[string]any)
+	if st["value"] != "checkedIn" {
+		t.Fatalf("status = %v, want checkedIn", st["value"])
+	}
+	if _, hasNote := st["note"]; hasNote {
+		t.Fatalf("a noteless transition must carry no note; got %v", st["note"])
+	}
+
+	// A no-show with an audit note records the note on .status.
+	clSubmit(t, ctx, conn, cp, cons, "setnoshow01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"noShow","note":"patient never arrived"}`, []string{apptKey}, processor.OutcomeAccepted)
+	status = clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ = status["data"].(map[string]any)
+	if st["value"] != "noShow" || st["note"] != "patient never arrived" {
+		t.Fatalf("status = %v (want noShow + note), got note=%v", st["value"], st["note"])
+	}
+
+	// A later noteless transition clears the note (unconditioned upsert).
+	clSubmit(t, ctx, conn, cp, cons, "setsched001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"scheduled"}`, []string{apptKey}, processor.OutcomeAccepted)
+	status = clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ = status["data"].(map[string]any)
+	if _, hasNote := st["note"]; hasNote {
+		t.Fatalf("a noteless transition must clear the prior note; got %v", st["note"])
+	}
+}
+
 // TestClinic_RescheduleAppointment proves the move-an-appointment path: a
 // RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt,
 // re-deriving remindAt = startsAt − 24h (so the clinic-reminders @at re-arms),

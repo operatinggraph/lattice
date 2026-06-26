@@ -207,7 +207,7 @@ func TestPackage_ScriptGuards(t *testing.T) {
 	for _, want := range []string{
 		`require_live_typed`, // endpoint alive + class
 		`WrongClass`,         // endpoint-class guard
-		"scheduled, confirmed, completed, cancelled, noShow", // status enum
+		"scheduled, confirmed, checkedIn, completed, cancelled, noShow", // status enum
 		`lnk.appointment.`,                            // link direction (appointment is source)
 		`.forPatient.patient.`,                        // forPatient link shape
 		`.withProvider.provider.`,                     // withProvider link shape
