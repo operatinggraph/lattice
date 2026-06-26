@@ -13,10 +13,13 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     Loom pattern) because a reminder is a single op — no multi-step externalTask
 //     flow — exactly the objectLiveness → TombstoneObject GC precedent.
 //
-// Params{appointmentKey: row.entityKey} routes the candidate appointment key into
-// the op's payload, and Reads[row.entityKey] routes it into the op's
-// ContextHint.Reads (the liveness-guard hydration). entityKey is an
-// appointmentReminders BodyColumn — the §10.2↔§10.8 column seam (cross-checked by
+// Params{appointmentKey: row.entityKey, remindedFor: row.startsAt} routes the
+// candidate appointment key + the startsAt this reminder is for into the op's
+// payload, and Reads[row.entityKey] routes the key into the op's ContextHint.Reads
+// (the liveness-guard hydration). remindedFor lets the op record WHICH startsAt it
+// reminded for, so a later reschedule (startsAt moves) re-opens the gate and
+// re-arms the reminder. Both entityKey and startsAt are appointmentReminders
+// BodyColumns — the §10.2↔§10.8 column seam (cross-checked by
 // TestClinicReminders_PlaybookColumnsMatchLens).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{{
@@ -26,7 +29,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"missing_reminder": {
 				Action:    "directOp",
 				Operation: reminderOp,
-				Params:    map[string]string{"appointmentKey": "row.entityKey"},
+				Params:    map[string]string{"appointmentKey": "row.entityKey", "remindedFor": "row.startsAt"},
 				Reads:     []string{"row.entityKey"},
 			},
 		},

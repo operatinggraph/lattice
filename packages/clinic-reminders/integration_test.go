@@ -151,7 +151,7 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 	// appointmentReminderOp vertexType handler; the appointmentReminder aspect DDL
 	// is excluded from that index).
 	crSubmit(t, ctx, conn, cp, cons, "crrem0001", "RecordAppointmentReminder", "",
-		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+apptKey+`","remindedFor":"2026-07-01T15:00:00Z"}`, []string{apptKey}, processor.OutcomeAccepted)
 
 	rem := crReadDoc(t, ctx, conn, apptKey+".reminder")
 	if rem["class"] != "appointmentReminder" {
@@ -161,6 +161,11 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 	first, _ := rd["sentAt"].(string)
 	if first == "" {
 		t.Fatalf("reminder sentAt not written: %v", rem["data"])
+	}
+	// remindedFor (the startsAt this reminder is for) is recorded verbatim — the
+	// column the convergence gate keys on so a reschedule re-arms the reminder.
+	if rf, _ := rd["remindedFor"].(string); rf != "2026-07-01T15:00:00Z" {
+		t.Fatalf("reminder remindedFor = %q, want 2026-07-01T15:00:00Z", rf)
 	}
 
 	// Idempotent in effect: a second RecordAppointmentReminder is ACCEPTED (not

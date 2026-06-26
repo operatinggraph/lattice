@@ -141,15 +141,22 @@ func (f *remFixture) projectAt(t *testing.T, apptName, now string) []ruleengine.
 }
 
 // mkAppt seeds one appointment with a .schedule {startsAt, remindAt} + a .status,
-// optionally a .reminder {sentAt}. The anchor is named so projectAt targets it.
-func (f *remFixture) mkAppt(t *testing.T, name, startsAt, remindAt, status, sentAt string) {
+// optionally a .reminder {sentAt, remindedFor}. A sent reminder records the
+// startsAt it was for (remindedFor) — the gate converges on remindedFor = startsAt
+// and re-opens when a reschedule moves startsAt away from it. The anchor is named
+// so projectAt targets it.
+func (f *remFixture) mkAppt(t *testing.T, name, startsAt, remindAt, status, sentAt, remindedFor string) {
 	t.Helper()
 	f.vtx(t, name, "appointment")
 	f.aspect(t, name, "schedule", "appointmentSchedule", map[string]any{
 		"startsAt": startsAt, "endsAt": startsAt, "remindAt": remindAt})
 	f.aspect(t, name, "status", "appointmentStatus", map[string]any{"value": status})
 	if sentAt != "" {
-		f.aspect(t, name, "reminder", "appointmentReminder", map[string]any{"sentAt": sentAt})
+		marker := map[string]any{"sentAt": sentAt}
+		if remindedFor != "" {
+			marker["remindedFor"] = remindedFor
+		}
+		f.aspect(t, name, "reminder", "appointmentReminder", marker)
 	}
 }
 
@@ -162,7 +169,7 @@ func TestReminders_Pending(t *testing.T) {
 	}
 	f := newRemFixture(t)
 	// startsAt 5 days out, remindAt 4 days out — both AFTER now (2026-06-30T12:00Z).
-	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", "2026-07-04T15:00:00Z", "scheduled", "")
+	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", "2026-07-04T15:00:00Z", "scheduled", "", "")
 	f.vtx(t, "alice", "patient")
 	f.vtx(t, "drsam", "provider")
 	f.edge(t, "forPatient", "appt", "alice")
@@ -190,7 +197,7 @@ func TestReminders_Due(t *testing.T) {
 	}
 	f := newRemFixture(t)
 	// startsAt 3h out (future), remindAt yesterday (< now) — due.
-	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "")
+	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "", "")
 
 	v := f.projectAt(t, "appt", remNow)[0].Values
 	require.Equal(t, true, v["missing_reminder"], "remindAt passed + not sent + appointment future → due")
@@ -199,20 +206,63 @@ func TestReminders_Due(t *testing.T) {
 	require.Nil(t, v["reminderSentAt"])
 }
 
-// TestReminders_Sent — once .reminder.sentAt is present the gap is closed and
-// freshUntil goes null (the @at timer clears). Converged.
+// TestReminders_Sent — once a reminder is recorded for the CURRENT startsAt
+// (remindedFor = startsAt) the gap is closed and freshUntil goes null (the @at
+// timer clears). Converged.
 func TestReminders_Sent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "2026-06-29T15:00:05Z")
+	// Reminded FOR the current startsAt (remindedFor == startsAt) → converged.
+	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "2026-06-29T15:00:05Z", "2026-06-30T15:00:00Z")
 
 	v := f.projectAt(t, "appt", remNow)[0].Values
-	require.Equal(t, false, v["missing_reminder"], "reminderSentAt present → gap closed")
+	require.Equal(t, false, v["missing_reminder"], "remindedFor = startsAt → gap closed")
 	require.Equal(t, false, v["violating"])
-	require.Nil(t, v["freshUntil"], "freshUntil null once sent — no timer re-arms")
+	require.Nil(t, v["freshUntil"], "freshUntil null once reminded for the current time — no timer re-arms")
 	require.Equal(t, "2026-06-29T15:00:05Z", v["reminderSentAt"])
+	require.Equal(t, "2026-06-30T15:00:00Z", v["remindedFor"])
+}
+
+// TestReminders_RescheduledAfterSent — a reminder was already sent FOR an earlier
+// startsAt, then the appointment was rescheduled to a new (later) time whose
+// remindAt is still in the future: remindedFor (old) <> startsAt (new) re-opens the
+// gate, and because the new remindAt is future, freshUntil = remindAt RE-ARMS the
+// @at for the new time (it is not yet violating — the reminder will fire at the new
+// deadline). This is the reschedule re-arm the remindedFor column enables.
+func TestReminders_RescheduledAfterSent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	// Now is 2026-06-30T12:00Z. New startsAt is 5 days out, new remindAt 4 days out
+	// (both future). remindedFor records an OLD startsAt the reminder already fired
+	// for.
+	f.mkAppt(t, "appt", "2026-07-05T15:00:00Z", "2026-07-04T15:00:00Z", "scheduled", "2026-06-25T15:00:05Z", "2026-06-26T15:00:00Z")
+
+	v := f.projectAt(t, "appt", remNow)[0].Values
+	require.Equal(t, false, v["missing_reminder"], "new remindAt is still future → not yet due, but armed")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, "2026-07-04T15:00:00Z", v["freshUntil"], "remindedFor <> new startsAt → freshUntil = new remindAt re-arms the @at")
+}
+
+// TestReminders_RescheduledIntoWindow — a reminder was sent for an earlier startsAt,
+// then the appointment was moved to a time < 24h out (new remindAt already past):
+// remindedFor (old) <> startsAt (new) AND remindAt <= now → due immediately (the
+// violating-path dispatches a fresh reminder for the new time at once).
+func TestReminders_RescheduledIntoWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	// New startsAt 3h out (future); new remindAt = startsAt − 24h = 21h ago (< now).
+	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "scheduled", "2026-06-25T15:00:05Z", "2026-06-26T15:00:00Z")
+
+	v := f.projectAt(t, "appt", remNow)[0].Values
+	require.Equal(t, true, v["missing_reminder"], "remindedFor <> new startsAt + new remindAt past → due now")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"], "already due → no armed timer (violating-path dispatches)")
 }
 
 // TestReminders_Cancelled — a cancelled appointment is never reminded, even with a
@@ -222,7 +272,7 @@ func TestReminders_Cancelled(t *testing.T) {
 		t.Skip("requires NATS")
 	}
 	f := newRemFixture(t)
-	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "cancelled", "")
+	f.mkAppt(t, "appt", "2026-06-30T15:00:00Z", "2026-06-29T15:00:00Z", "cancelled", "", "")
 
 	v := f.projectAt(t, "appt", remNow)[0].Values
 	require.Equal(t, false, v["missing_reminder"], "cancelled → never reminded")
@@ -238,7 +288,7 @@ func TestReminders_PastAppointment(t *testing.T) {
 	}
 	f := newRemFixture(t)
 	// startsAt yesterday (< now), remindAt two days ago.
-	f.mkAppt(t, "appt", "2026-06-29T15:00:00Z", "2026-06-28T15:00:00Z", "scheduled", "")
+	f.mkAppt(t, "appt", "2026-06-29T15:00:00Z", "2026-06-28T15:00:00Z", "scheduled", "", "")
 
 	v := f.projectAt(t, "appt", remNow)[0].Values
 	require.Equal(t, false, v["missing_reminder"], "past appointment (startsAt <= now) → never reminded")
@@ -254,7 +304,7 @@ func TestReminders_LastMinuteBooking(t *testing.T) {
 	}
 	f := newRemFixture(t)
 	// startsAt 6h out; remindAt = startsAt − 24h = 18h ago (< now) → due immediately.
-	f.mkAppt(t, "appt", "2026-06-30T18:00:00Z", "2026-06-29T18:00:00Z", "scheduled", "")
+	f.mkAppt(t, "appt", "2026-06-30T18:00:00Z", "2026-06-29T18:00:00Z", "scheduled", "", "")
 
 	v := f.projectAt(t, "appt", remNow)[0].Values
 	require.Equal(t, true, v["missing_reminder"], "a <24h booking has a past remindAt → reminded immediately")

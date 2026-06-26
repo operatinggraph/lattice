@@ -49,10 +49,11 @@ func recordReminderVertexTypeDDL() pkgmgr.DDLSpec {
 		CanonicalName:     reminderOpDDL,
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{reminderOp},
-		Description: "Appointment-reminder op handler (clinic-reminders). RecordAppointmentReminder{appointmentKey} writes " +
-			"vtx.appointment.<NanoID>.reminder = {sentAt} on a LIVE appointment (class appointmentReminder), recording that " +
-			"the ~24h-ahead reminder fired. It is the directOp the appointmentReminders §10.8 playbook dispatches when the " +
-			"missing_reminder gap opens (the appointment's .schedule.remindAt deadline passed). Reads [appointmentKey] to " +
+		Description: "Appointment-reminder op handler (clinic-reminders). RecordAppointmentReminder{appointmentKey, remindedFor?} writes " +
+			"vtx.appointment.<NanoID>.reminder = {sentAt, remindedFor} on a LIVE appointment (class appointmentReminder), recording that " +
+			"the ~24h-ahead reminder fired for the startsAt in remindedFor. It is the directOp the appointmentReminders §10.8 playbook dispatches when the " +
+			"missing_reminder gap opens (the appointment's .schedule.remindAt deadline passed); the playbook supplies remindedFor = row.startsAt so a later " +
+			"reschedule (which moves startsAt) re-opens the gap and re-arms the reminder. Reads [appointmentKey] to " +
 			"liveness-guard the parent (never marks a reminder on an absent/tombstoned appointment). The write is an " +
 			"UNCONDITIONED update (create-if-absent / overwrite-if-present), so it is idempotent in effect and re-run-safe " +
 			"under at-least-once. Submitted under Weaver's service-actor authority. Mints NO vertex of its own type (the " +
@@ -64,19 +65,21 @@ func recordReminderVertexTypeDDL() pkgmgr.DDLSpec {
 			"point (which must read live state at send time anyway), not here.",
 		Script: recordReminderScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder fired for (required; validated alive). The caller MUST list it in ContextHint.Reads."}},` +
+			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder fired for (required; validated alive). The caller MUST list it in ContextHint.Reads."},` +
+			`"remindedFor":{"type":"string","description":"The appointment startsAt (RFC3339, canonical UTC) this reminder is for (optional; the playbook supplies row.startsAt). Recorded so a reschedule re-arms the reminder."}},` +
 			`"required":["appointmentKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder marker was written on."}}}`,
 		FieldDescription: map[string]string{
 			"appointmentKey": "Full vtx.appointment.<NanoID> key the reminder fired for. RecordAppointmentReminder validates it is alive and writes the .reminder aspect on it. The caller MUST list this key in ContextHint.Reads.",
+			"remindedFor":    "The appointment startsAt (RFC3339, canonical UTC) this reminder is for. The appointmentReminders playbook supplies it as row.startsAt; stored on .reminder so the convergence gate (remindedFor <> startsAt) re-opens — and re-arms the reminder — when a reschedule moves startsAt.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:    "RecordAppointmentReminder — mark a reminder as sent",
-				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>"},
+				Name:    "RecordAppointmentReminder — mark a reminder as sent for a startsAt",
+				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "remindedFor": "2026-07-01T15:00:00Z"},
 				ExpectedOutcome: "Validates the appointment is alive, then writes vtx.appointment.<NanoID>.reminder = {sentAt: " +
-					"op.submittedAt (canonical UTC)} as an unconditioned update (create-if-absent / overwrite-if-present), emits " +
+					"op.submittedAt (canonical UTC), remindedFor} as an unconditioned update (create-if-absent / overwrite-if-present), emits " +
 					"clinic.appointmentReminderSent, and returns primaryKey. Re-runs cleanly (idempotent in effect). Rejects with " +
 					"a ScriptError if the appointment is absent / tombstoned.",
 			},
@@ -95,20 +98,23 @@ func reminderAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{reminderOp},
 		Description: "Appointment reminder marker aspect (clinic-reminders). Stored as vtx.appointment.<NanoID>.reminder " +
-			"(class appointmentReminder) = {sentAt}. Non-sensitive. Written ONLY by RecordAppointmentReminder (whose " +
+			"(class appointmentReminder) = {sentAt, remindedFor}. Non-sensitive. Written ONLY by RecordAppointmentReminder (whose " +
 			"appointmentReminderOp vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
-			"Declaration-only: no op handler. sentAt non-null is the fact that closes the missing_reminder convergence gap.",
+			"Declaration-only: no op handler. remindedFor = the appointment startsAt this reminder was for; the gate " +
+			"(remindedFor = startsAt) closing it converges, and a reschedule (startsAt moves) re-opens it.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"sentAt":{"type":"string","description":"RFC3339 instant the reminder fired (the op's submittedAt, canonical UTC)."}}}`,
+			`{"sentAt":{"type":"string","description":"RFC3339 instant the reminder fired (the op's submittedAt, canonical UTC)."},` +
+			`"remindedFor":{"type":"string","description":"The appointment startsAt (RFC3339, canonical UTC) this reminder was for."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"sentAt": "RFC3339 instant the reminder fired (op.submittedAt, canonical UTC). Its presence (non-null) closes the missing_reminder gap.",
+			"sentAt":      "RFC3339 instant the reminder fired (op.submittedAt, canonical UTC).",
+			"remindedFor": "The appointment startsAt (RFC3339, canonical UTC) this reminder was for. remindedFor = the current startsAt closes the convergence gap; a reschedule that moves startsAt re-opens it.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "appointment reminder marker aspect",
-				Payload:         map[string]any{"sentAt": "2026-06-30T15:00:00Z"},
+				Payload:         map[string]any{"sentAt": "2026-06-30T15:00:00Z", "remindedFor": "2026-07-01T15:00:00Z"},
 				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.reminder; written by RecordAppointmentReminder.",
 			},
 		},
@@ -166,19 +172,37 @@ def execute(state, op):
         # downstream lexical compare is sound (the lease-signing idiom).
         sent_at = time.rfc3339_utc(op.submittedAt)
 
+        # remindedFor: the appointment startsAt this reminder is FOR (supplied by
+        # the appointmentReminders playbook as Params{remindedFor: row.startsAt} —
+        # already canonical UTC from clinic-domain, stored verbatim so the lens's
+        # remindedFor <> startsAt compare is byte-exact). It is what makes the
+        # reminder re-arm on reschedule: a later RescheduleAppointment moves startsAt
+        # away from this recorded value → the convergence gate re-opens → a fresh
+        # reminder fires for the new time, stamping the new remindedFor. Absent (a
+        # manual call without it) → the gap never converges by remindedFor; the
+        # playbook always supplies it.
+        reminded_for = None
+        if hasattr(p, "remindedFor"):
+            rf = getattr(p, "remindedFor")
+            if rf != None and type(rf) == type("") and len(rf.strip()) > 0:
+                reminded_for = rf.strip()
+
         # UNCONDITIONED update (no revision condition): create-if-absent /
         # overwrite-if-present. Idempotent in effect — a redelivery or sweep
-        # reclaim re-stamps sentAt; the missing_reminder gap (reminderSentAt =
-        # null) stays closed once ANY sentAt is present. The MarkExpired idiom.
+        # reclaim re-stamps the marker; the gap (remindedFor = startsAt) stays
+        # closed once the reminder for the current time is recorded. MarkExpired idiom.
         marker_key = appt_key + ".reminder"
+        marker = {"sentAt": sent_at}
+        if reminded_for != None:
+            marker["remindedFor"] = reminded_for
         mutations = [
             {"op": "update", "key": marker_key,
              "document": {"class": "appointmentReminder", "vertexKey": appt_key,
                           "localName": "reminder", "isDeleted": False,
-                          "data": {"sentAt": sent_at}}},
+                          "data": marker}},
         ]
         events = [{"class": "clinic.appointmentReminderSent",
-                   "data": {"appointmentKey": appt_key, "sentAt": sent_at}}]
+                   "data": {"appointmentKey": appt_key, "sentAt": sent_at, "remindedFor": reminded_for}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 

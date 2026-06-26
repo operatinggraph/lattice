@@ -7,18 +7,21 @@
 // location-domain → lease-signing layering): clinic-domain owns the appointment +
 // its .schedule/.status aspects; clinic-reminders ATTACHES the reminder machinery.
 //
-//	vtx.appointment.<id>.reminder = {sentAt}            (class appointmentReminder — this package)
-//	op RecordAppointmentReminder{appointmentKey}        (writes .reminder.sentAt on a live appointment)
-//	lens appointmentReminders (weaver-target, full)     (freshUntil = remindAt; missing_reminder/violating gate)
-//	playbook missing_reminder → directOp(RecordAppointmentReminder)
+//	vtx.appointment.<id>.reminder = {sentAt, remindedFor}  (class appointmentReminder — this package)
+//	op RecordAppointmentReminder{appointmentKey, remindedFor?}  (writes .reminder on a live appointment)
+//	lens appointmentReminders (weaver-target, full)     (freshUntil = remindAt; remindedFor <> startsAt gate)
+//	playbook missing_reminder → directOp(RecordAppointmentReminder, remindedFor: row.startsAt)
 //
 // The mechanism INVERTS lease-signing's freshness re-open. lease projects
 // freshUntil to RE-OPEN a converged gap at a deadline; this projects
 // freshUntil = remindAt (the .schedule.remindAt clinic-domain precomputes =
 // startsAt − 24h) so Weaver's @at temporal lane fires at the deadline →
 // MarkExpired re-touches the appointment → the row re-projects with a fresh $now →
-// missing_reminder OPENS → Weaver dispatches directOp(RecordAppointmentReminder) →
-// .reminder.sentAt closes the gap. See appointmentRemindersSpec + the design doc
+// missing_reminder OPENS → Weaver dispatches directOp(RecordAppointmentReminder,
+// remindedFor: row.startsAt) → .reminder records the startsAt it reminded for →
+// the gate (remindedFor = startsAt) closes. A reschedule that moves startsAt away
+// from the recorded remindedFor re-opens the gate and re-arms the reminder for the
+// new time. See appointmentRemindersSpec + the design doc
 // _bmad-output/implementation-artifacts/clinic-reminders-design.md.
 //
 // The actual notification channel (email/SMS) is the deferred real-adapter work;
