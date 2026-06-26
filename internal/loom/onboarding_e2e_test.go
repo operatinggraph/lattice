@@ -225,18 +225,33 @@ func TestOnboardingE2E_LongWaitRestartExactlyOnce(t *testing.T) {
 	// BEFORE the user acts. ---
 	e1 := newEngine(conn)
 	e1Ctx, e1Cancel := context.WithCancel(ctx)
-	go func() { _ = e1.Start(e1Ctx) }()
+	e1Done := make(chan struct{})
+	go func() { defer close(e1Done); _ = e1.Start(e1Ctx) }()
+	// Give the CDC pattern source a moment to load the installed pattern before
+	// the trigger arrives so handleTrigger resolves it on first delivery rather
+	// than Nak-ing for redelivery. waitTaskKey below is the real wait for the
+	// userTask park; this is only an optimisation to skip a redelivery cycle.
 	time.Sleep(700 * time.Millisecond)
 
 	instanceID := submitStartLoomPattern(t, ctx, conn, patternID, subjectKey)
 	taskKey0 := waitTaskKey(t, ctx, conn, instanceID, 0)
 	require.True(t, fp.taskCreated(taskKey0), "step 0 CreateTask must have committed before crash")
-	createTasksAfterGen1 := fp.createTaskCount()
-	require.Equal(t, 1, createTasksAfterGen1, "exactly one CreateTask before the user acts")
+	require.Equal(t, 1, fp.createTaskCount(), "exactly one CreateTask before the user acts")
 
-	// Crash generation 1 with the user not having acted (token still live).
+	// Crash generation 1 with the user not having acted (token still live). Wait
+	// for e1.Start to RETURN, not a fixed sleep: Start blocks on ctx.Done then runs
+	// the synchronous supervisor.Stop (which cancels and JOINS every consumer pump,
+	// `<-mc.done`) before returning, so a returned Start means gen-1 is fully
+	// stopped with no consumer still mid-work. The async cancel + fixed sleep this
+	// replaces was the double-process window the flake rode: under -p 4 load the
+	// 500ms could elapse before gen-1's pumps drained, leaving gen-1 and gen-2 both
+	// live on the same token. Joining the goroutine closes that window.
 	e1Cancel()
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-e1Done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("generation 1 engine did not stop within 15s after cancel")
+	}
 
 	// --- Generation 2: restart. The durable token.<taskKey> pointer is still
 	// live; the per-domain consumer resumes from its ack floor. ---
@@ -244,11 +259,17 @@ func TestOnboardingE2E_LongWaitRestartExactlyOnce(t *testing.T) {
 	e2Ctx, e2Cancel := context.WithCancel(ctx)
 	defer e2Cancel()
 	go func() { _ = e2.Start(e2Ctx) }()
-	time.Sleep(700 * time.Millisecond)
 
-	// The instance must still be parked on the SAME taskKey (no re-submission,
-	// no double CreateTask) — exactly-once across the restart.
-	require.Equal(t, 1, fp.createTaskCount(), "restart must not re-submit CreateTask for a still-pending userTask")
+	// The instance must still be parked on the SAME taskKey — no re-submission, no
+	// double CreateTask — across the restart. Assert the count NEVER exceeds 1 over
+	// a window that spans gen-2's bring-up: gen-2 re-attaches its trigger consumer
+	// (DeliverAll), the patternStarted event is redelivered, and handleTrigger must
+	// recognise the still-pending userTask as a duplicate and Ack WITHOUT
+	// re-submitting. A point-in-time Equal after a fixed settle-sleep raced this;
+	// require.Never catches a re-submission whenever within the window it occurs.
+	require.Never(t, func() bool { return fp.createTaskCount() > 1 },
+		2*time.Second, 50*time.Millisecond,
+		"restart must not re-submit CreateTask for a still-pending userTask")
 
 	// NOW the user acts. The cursor advances against the durable pointer.
 	submitBoundOp(t, ctx, conn, "SetName", taskKey0, subjectKey)
@@ -262,7 +283,8 @@ func TestOnboardingE2E_LongWaitRestartExactlyOnce(t *testing.T) {
 	inst := waitInstanceStatus(t, ctx, conn, instanceID, "complete")
 	require.Equal(t, 3, inst.Cursor)
 	// Exactly three CreateTask across BOTH generations (step 0 once despite the
-	// restart).
+	// restart). The instance is terminal here, so this count is stable — the
+	// end-to-end exactly-once witness.
 	require.Equal(t, 3, fp.createTaskCount(), "long-wait restart must not double-submit any userTask")
 }
 
