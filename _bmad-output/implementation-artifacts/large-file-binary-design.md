@@ -519,3 +519,204 @@ This is a **distinct race from §20's re-link race.** §20 closes "orphan → co
 - `TestObject_Lifecycle` — liveLinks 1→2 (dedup) →1 (detach) →0 (last detach); the `liveLinks > 0` backstop refuses to reap a still-linked object; tombstone of the orphan proceeds.
 - `TestObject_TombstoneEpochCAS_AbortsOnRelink` — restructured to orphan-before-tombstone so the §20 epoch-CAS demonstration coexists with the §21 backstop; the "proceeds" leg reaps a genuine `liveLinks = 0` orphan.
 - The full Loop A+B convergence e2e (`make test-object-gc`) still converges (the orphan has `liveLinks = 0` → backstop satisfied → reaped → bytes reclaimed).
+
+---
+
+## 22. v1b GC — owner-tombstone-cascade trigger (2026-06-26; 📐 PROPOSAL — awaiting Andrew ratification)
+
+> **Status: design proposal, not yet built.** Resolves the deferred dead-target byte LEAK that §21.2
+> left open ("Authoritative dead-target reclamation belongs to the deferred owner-tombstone-cascade
+> trigger … already 'Andrew's GC domain' per §19"). It is the trigger-side of CC4 (§18). The mechanism
+> below touches **no frozen contract**, but it adds a **fourth kernel-seeded service actor** (a graph-
+> mutating authority) — a trust-surface expansion that is Andrew's to ratify. Everything else is an
+> additive, revertible component change following the Bridge-actor precedent exactly.
+
+### 22.1 The leak, precisely (recap + grounding)
+
+After §21, the `objectLiveness` lens decides orphan-ness from the object vertex's **atomic
+`data.liveLinks` counter** (`packages/objects-base/ddls.go` `write_vertex` / `cur_live_links`), not the
+lagging adjacency projection — which closed the §21 attach-lag **data-loss** race. The cost (§21.2): an
+owner-tombstone never touches the object (it only writes the owner's own root), so `liveLinks` stays
+stale `≥ 1` and **nothing ever reaps the object**:
+
+- The `objectLiveness` lens sees `liveLinks ≥ 1` → not orphaned → Weaver never dispatches
+  `TombstoneObject`.
+- The `object-store-manager` reconcile (`internal/objectmanager/manager.go` `referencedByLiveVertex`)
+  spares any object whose **vertex** is live and names the storeName — and the object vertex *is* live
+  (stale `liveLinks`), so its bytes are spared **forever**.
+
+Net: an owner vertex tombstoned with an object still attached → the object vertex stays live + its bytes
+stay resident, indefinitely. Bounded (only attached-then-orphaned-by-owner-death objects), non-permanent
+in principle, never data loss — but a genuine reliability leak. Pinned today by
+`TestObjectLiveness_DeadTargetOwner_LeakedNotReaped` (§21.5), which this section's work will flip.
+
+**Why no existing mechanism closes it.** The fix requires a **graph mutation** — the dangling link
+(`lnk.object.<oid>.<linkName>.<deadOwnerType>.<deadOwnerId>`, still `isDeleted:false` per CC4: vertex
+tombstone does not cascade to links) must be tombstoned so `liveLinks` decrements. The byte-janitor is
+deliberately op-free ("It submits NO ops … so it needs no actor key", `cmd/object-store-manager/main.go`),
+and the lens cannot see owner-death without an adjacency/owner read that reintroduces the §21 lag hazard
+(§21: "no adjacency-derived signal separates" attach-lag from dead-target). So the trigger must read
+owner-liveness **authoritatively** (the owner's own core-kv tombstone) and **drive an op**.
+
+### 22.2 Mechanism options
+
+| Option | Sketch | Verdict |
+|---|---|---|
+| **A — core-kv vertex-tombstone consumer → `DetachObject` (RECOMMENDED)** | A durable consumer on the core-kv KV-stream subject space detects a vertex transitioning to `isDeleted`; for each dead owner it enumerates the live object→owner links and submits `DetachObject` per link. The existing Loop A+B (objectLiveness `liveLinks=0` → Weaver `directOp(TombstoneObject)` → manager byte-reclaim) does the rest. | **Chosen.** Reacts to the *authoritative* state change (no projection lag → no §21-class hazard). Adds **zero** new reap path — only detaches; reuses every existing guard (epoch-CAS §20, `liveLinks>0` op backstop §21). Mirrors the established CC4 precedent (identity-hygiene merge enumerates a secondary identity's incident links and tombstones each — `packages/identity-hygiene/{lenses,ddls}.go`), generalized type-agnostically. |
+| B — lens + Weaver convergence (dead-target lens column) | Project "owner is dead" on the object row, gap → `directOp(DetachObject/TombstoneObject)`. | **Rejected — reintroduces §21.** "Owner is dead" can only be read from the lagging adjacency/owner projection; a not-yet-projected fresh attach is indistinguishable from a dead owner (§21). The whole point of §21 was to stop trusting a lagging projection for an irreversible decision. |
+| C — self-re-arming per-object heartbeat | Each object periodically re-checks its owners' liveness. | **Rejected — polling.** O(objects) timer churn on the temporal lane for a rare event; no authoritative trigger; latency/cost both worse than A. |
+
+### 22.3 Recommended design (Option A) — detail
+
+**Component home.** Extend `object-store-manager` (`internal/objectmanager`) with a second durable
+consumer — the **cascade**. It already owns the off-graph GC's Loop B and the reconcile; the cascade is
+the on-graph trigger that *feeds* Loop A for the dead-owner case. One always-on GC component, two loops
++ a trigger, is cleaner than a new binary.
+
+**1. Trigger — authoritative owner-tombstone detection.**
+- A durable consumer over the core-kv KV stream (`subjects.CoreKVStream(coreKVBucket)` = `KV_core-kv`) —
+  the same stream the Refractor's CDC consumer reads (`internal/refractor/consumer/bootstrap.go` uses
+  `subjects.CoreKVFilter(bucket)` = `$KV.<bucket>.>`). Core-kv keys map to KV-stream subjects
+  (`$KV.<bucket>.<key>`, key dots → subject tokens — `substrate/batch.go:177`). Two grounded filter
+  choices: the broad `$KV.core-kv.>` (verbatim Refractor parity, with in-handler root-narrowing), or the
+  tighter **`$KV.core-kv.vtx.*.*`** — `*` matches exactly one token, so it selects the 3-segment vertex
+  roots `vtx.<type>.<id>` and excludes 4-segment aspects (`vtx.T.id.aspect`) and `lnk.*` links (NanoIDs
+  and type names carry no dots, so a root is always exactly 3 segments). Prefer the tighter filter to cut
+  wake-up volume. `substrate.RunDurableConsumer` (`internal/substrate/consumer.go`) takes the
+  `FilterSubject` directly.
+- The handler strips the `$KV.<bucket>.` prefix to recover the vertex key (mirroring the Refractor's
+  `subjectPrefx`), decodes the root doc, and acts **only** when `isDeleted == true` (a tombstone). A
+  non-deleted update (create/revive/touch) is Ack'd and ignored. *(Optimization, not required for
+  correctness: track the prior value to act only on the false→true transition; at-least-once redelivery of
+  a tombstone is already idempotent — see step 3 — so re-processing a still-deleted root is harmless.)*
+- The dead vertex's **own type is irrelevant** (type-agnostic, D7): we never learn or care what kind of
+  owner it was. Object vertices themselves (`vtx.object.<id>`) appearing here are a no-op (objects are
+  link *sources*, never targets — see §22.4 edge case).
+
+**2. Enumerate the dangling links to the dead owner.**
+- **New thin substrate helper to build:** `KVListKeysPrefix(ctx, bucket, prefix)` over the nats.go
+  `ListKeysFiltered(ctx, prefix+">")` primitive (**verified present**, `nats.go@v1.52.0/jetstream/kv.go:188`;
+  §18 CC1 noted it but no substrate wrapper exists today — only the heavy *unfiltered* `KVListKeys`,
+  `internal/substrate/kv.go:189`). The cascade calls `KVListKeysPrefix(core-kv, "lnk.object.")` to list the
+  object-link space — bounded by the count of *attached objects*, not the whole graph. *(Fallback if the
+  wrapper is deferred: the existing full `KVListKeys` + a `strings.HasPrefix` filter — correct but heavier;
+  prefer the wrapper.)* `ListKeysFiltered` uses `IgnoreDeletes` for NATS hard-delete markers, but link
+  tombstones are **soft** (in-body `isDeleted:true`, still live KV entries — §18 CC1), so a soft-tombstoned
+  link still appears in the list and is filtered by the per-key `KVGet` below.
+- A link `lnk.object.<oid>.<linkName>.<tgtType>.<tgtId>` targets the dead owner iff its trailing
+  `.<tgtType>.<tgtId>` equals the dead root's `<type>.<id>`. For each match the handler `KVGet`s the link
+  and acts only on **live** links (`isDeleted == false`) — a stale match (already detached, or a dead
+  owner's link from a prior cascade) is skipped.
+
+**3. Act — submit `DetachObject` per live dangling link.**
+- The cascade submits `DetachObject{oid, targetKey=deadOwnerKey, linkName}` to `ops.<lane>` in the
+  Contract #2 §2.1 envelope shape (the same wire format `internal/weaver/actuator.go` publishes), under a
+  new service actor (§22.5), with:
+  - `requestId` = a **deterministic** NanoID derived from `(objectKey, linkKey, ownerTombstoneRevision)`
+    (mirroring `deriveID`) so an at-least-once redelivery re-publishes the SAME requestId and collapses on
+    the Contract #4 `vtx.op.<requestId>` tracker — no duplicate detach.
+  - `contextHint.reads` = `[linkKey, objectVertexKey]` (the keys `DetachObject`'s DDL hydrates:
+    `ddls.go detach_object` reads the link for liveness + the object vertex for the `liveLinks` decrement).
+  - `authContext.target` = the object vertex key (the operator grant is scope:any, so any live target
+    authorizes; the object vertex is the op's primaryKey subject).
+- `DetachObject` (existing op) tombstones the link + decrements `liveLinks` + OCC-touches the object vertex
+  → `objectLiveness` reprojects; when that was the object's **last** live link, `liveLinks` hits 0 → the
+  unchanged Loop A dispatches `TombstoneObject` → Loop B reclaims the bytes. **The cascade adds no reap
+  logic; it only detaches.**
+- Idempotency / already-done: if the link is no longer live, `DetachObject` fails `UnknownLink`
+  (`ddls.go:478`). The cascade treats a parse-confirmed `UnknownLink` reply as success (the link is
+  already detached — the desired end state) and Acks. *(The deterministic-requestId tracker collapse makes
+  a true redelivery a no-op before it even reaches the script; the `UnknownLink` path covers the case
+  where a concurrent explicit `DetachObject` won the race.)*
+
+**4. CC10 ordering (at-least-once).** The consumer submits the detach op(s) **before** acking the
+tombstone trigger message — publish-then-ack, never ack-then-act — so a crash between leaves the trigger
+re-deliverable. Combined with the deterministic requestId + `UnknownLink`-is-success, the cascade is
+exactly-once in effect over an at-least-once transport.
+
+### 22.4 Safety analysis
+
+- **No §21-class data loss.** The §21 bug reaped bytes off a *lagging projection* misread. The cascade
+  fires off the owner's *own authoritative core-kv tombstone* — the source of truth, zero lag. A fresh
+  attach to a **live** owner is never in the dead set (the owner is alive → never delivered as a
+  tombstone), so the attach-lag scenario cannot trigger a cascade detach. And even if it somehow did, the
+  worst case is a wrongful *detach* (reversible — re-attachable), not a wrongful *byte delete*; the
+  irreversible `TombstoneObject` is still gated by the §20 epoch-CAS + the §21 `liveLinks>0` op backstop,
+  which the cascade does not weaken.
+- **Owner-revival race.** A soft-tombstoned owner can be revived (`op:update`, no commit-path guard, CC2).
+  If the cascade detached an object's link and the owner is then revived, the object is wrongly detached
+  (and may subsequently be GC'd). This is the **identical** property identity-hygiene's merge already has
+  (it tombstones incident links on merge; a revived secondary identity loses them) and is acceptable:
+  owner-revival is rare, the detach is reversible by re-attach, and "the owner came back to life after we
+  reacted to its death" is an inherent at-least-once-on-tombstone semantics. Documented, not closed.
+- **Multi-owner object — only a last-link death reaps (the whole point of `liveLinks`).** An object
+  linked to owners X (dead) and Y (alive): the cascade detaches only the O→X link → `liveLinks` 2→1 →
+  `objectLiveness` still sees `liveLinks ≥ 1` → not orphaned → **not reaped** (Y's attachment is intact).
+  Reclamation happens only when the cascade detaches the object's *last* live link. An object with several
+  links to the *same* dead owner under different `linkName`s has each enumerated + detached independently;
+  the per-detach OCC on the object vertex serializes the decrements. A concurrent re-attach of the same
+  object to a *new* live owner races the detach through the same object-vertex revision (both OCC-touch it),
+  so `liveLinks` nets correctly and the object is never wrongly reaped.
+- **Object-as-target edge.** `AttachObject` forbids only a `meta` target (`ddls.go:379`), so an object
+  *could* be linked to another object (`targetKey = vtx.object.<id2>`). If that owner-object is
+  tombstoned, the cascade correctly detaches the inbound link. An object vertex tombstoned that owns no
+  inbound object-links (the common case) yields an empty enumeration → no-op. No special-casing needed.
+- **Protected / system vertices.** A `meta`/protected vertex is never an object owner (`AttachObject`
+  rejects it at attach), so a `meta.*` tombstone (if it ever occurred) enumerates zero object-links →
+  no-op. The cascade also never needs to read or mutate the dead owner itself.
+- **Volume.** The trigger consumer wakes on every vertex-root mutation (high), but only decodes
+  `isDeleted` and, for the rare tombstone, runs one bounded `lnk.object.>` enumeration. At demo/single-cell
+  scale this is fine. **Scale follow-up (noted, not built):** a per-owner reverse index (owner → object
+  links) would replace the `lnk.object.>` scan, and a tighter trigger (a `vertex.tombstoned` core-event,
+  were one emitted — none exists today, §22 grounding) would replace the all-roots watch. Both are
+  optimizations of a correct mechanism, not correctness gaps.
+
+### 22.5 The kernel change (the Andrew ratification gate)
+
+The cascade submits graph ops, so `object-store-manager` needs an **actor that holds the operator role**
+(operator is already granted `DetachObject` — `packages/objects-base/permissions.go` — so **no permission
+change is required**). This follows the Bridge service-actor precedent **exactly**:
+
+- Add a primordial `object-store-manager` service identity to the bootstrap seed
+  (`internal/bootstrap/nanoid.go`): a new `PrimordialIDsRaw` field + `ObjmgrIdentityID/Key`, a
+  `ObjmgrHoldsRoleLinkKey = lnk.identity.<id>.holdsRole.role.<operator>`, both appended to
+  `PrimordialVertexKeys()`, and `PrimordialVertexKeyCount` 29 → 31 (+1 identity, +1 holdsRole link).
+- Bump the bootstrap file `Version` "10" → "11" and the version-history comment (arch §92 service-actor
+  list: Loom + Weaver + Bridge + **object-store-manager**).
+- `cmd/object-store-manager/main.go` resolves `bootstrap.ObjmgrIdentityKey` as its actor and passes it to
+  the manager; `manager.go` gains the actor + an op-publish path (a thin `ops.<lane>` publish, copied from
+  the actuator shape — the manager must not import `internal/weaver`).
+
+**Why this is the ratification point.** It expands the kernel's set of root-equivalent, graph-mutating
+service actors from three to four. The *mechanics* are a verbatim Bridge-template addition (additive,
+revertible, no frozen contract), but the *decision* — "the GC byte-janitor should also be able to mutate
+the graph (detach links)" — is a trust-surface call in Andrew's GC domain. The alternative (a separate
+cascade binary with its own actor) has the same trust footprint with more moving parts; folding it into
+the existing always-on GC component is the lean choice. **Recommendation: ratify the fold-in.**
+
+### 22.6 Test plan (on build)
+
+- **Unit (`internal/objectmanager`):** the cascade handler (a) on a dead-owner root with N live object→owner
+  links, submits N `DetachObject` with the right `oid/targetKey/linkName` + deterministic requestId; (b)
+  skips non-`isDeleted` roots; (c) skips already-dead/non-matching links; (d) is a no-op for an object-root
+  tombstone with no inbound object-links; (e) redelivery re-submits the same requestId (idempotent).
+- **Heavy e2e (`make test-object-gc`, `internal/objectgc`, `-tags objectgc`):** extend with a
+  dead-owner→cascade→reclaim leg — attach an object to a throwaway owner, tombstone the **owner**, assert
+  the cascade detaches the link → `objectLiveness` projects `liveLinks=0` → Weaver `directOp(TombstoneObject)`
+  → manager reclaims the bytes. This closes the trigger→Loop-A→Loop-B seam the unit tests cannot.
+- **Flip `TestObjectLiveness_DeadTargetOwner_LeakedNotReaped` (§21.5):** the leak it pins is now closed via
+  the cascade, so it becomes a cascade-reclaim assertion (the lens still leaks *in isolation* — the cascade
+  is what closes the loop — so the lens-only test may stay as-is with a comment, and the e2e proves the
+  end-to-end reclaim; decide on build).
+- **Substrate (`internal/substrate`):** a `TestKVListKeysPrefix` proving the new wrapper returns only the
+  prefixed keys (incl. soft-tombstoned link keys, which must appear so the per-key `KVGet` can filter them).
+- **Gates:** `make verify-package-objects-base`, STRICT-P5/conventions, golangci, plus the bootstrap-seed
+  count/version tests (which move with the +2 entries) and verify-kernel surfaces.
+
+### 22.7 Status / ownership
+
+- **Andrew gate:** the §22.5 kernel service-actor addition (ratify the fold-in vs. a separate binary).
+- **Everything else is L2 (Winston):** the cascade consumer, the deterministic-requestId op submit, the
+  tests, and the board flip — built in a worktree, 3-layer-reviewed, gates green, merged on ratification.
+- **No frozen contract is touched** (§21.2 holds: lens BodyColumns, `TombstoneObject`/`DetachObject`
+  signatures, and the Weaver `directOp` dispatch are all unchanged; the new actor is additive seed).
