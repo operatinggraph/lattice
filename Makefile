@@ -18,7 +18,7 @@ BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain install-clinic verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -140,6 +140,19 @@ verify-package-clinic-domain:
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-domain
 	@echo "==> Running clinic-domain package assertions..."
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-package-clinic-domain.go
+
+## verify-package-clinic-reminders — Co-install the clinic vertical (orchestration-
+## base → clinic-domain → clinic-reminders) and assert clinic-reminders' KV state
+## (the 2 DDLs, the appointmentReminders lens, the weaverTarget playbook, the grant).
+verify-package-clinic-reminders:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Installing orchestration-base + clinic-domain + clinic-reminders..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-domain
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-reminders
+	@echo "==> Running clinic-reminders package assertions..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-package-clinic-reminders.go
 
 ## verify-package-service-location — Co-install service-location with its
 ## dependencies (location-domain + service-domain, plus the deps those need:
@@ -308,15 +321,21 @@ install-loftspace:
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/lease-signing
 	@echo "==> LoftSpace vertical installed. Drive it via the lattice CLI or Loupe."
 
-## install-clinic — Install the clinic-domain package onto a running up-full
-## stack (self-contained — no package dependency). Drive it via the lattice CLI
-## or Loupe; a clinic FE is a later increment.
+## install-clinic — Install the clinic vertical onto a running up-full stack, in
+## dependency order: orchestration-base → clinic-domain → clinic-reminders.
+## clinic-domain is the bookable domain; clinic-reminders adds the @at appointment-
+## reminder orchestration (needs orchestration-base for MarkExpired + the Weaver
+## tier up-full runs). Drive it via the clinic-app, the lattice CLI, or Loupe.
 install-clinic:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Installing orchestration-base..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
 	@echo "==> Installing clinic-domain..."
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-domain
-	@echo "==> clinic-domain installed. Drive it via the lattice CLI or Loupe."
+	@echo "==> Installing clinic-reminders..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-reminders
+	@echo "==> Clinic vertical installed (domain + reminders). Drive it via the clinic-app, the lattice CLI, or Loupe."
 
 ## run-loupe — Build + run Loupe (the view/control web app) in the FOREGROUND.
 ## Open http://127.0.0.1:7777. Requires a running deployment (make up / up-full).

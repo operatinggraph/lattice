@@ -7,7 +7,7 @@
 //
 //	vtx.patient.<id>      class=patient      root {}   .demographics {fullName, dob?, email?, phone?}
 //	vtx.provider.<id>     class=provider     root {}   .profile {fullName, specialty, credentials?, bio?}
-//	vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, reason?}
+//	vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, remindAt, reason?}
 //	                                                    .status   {value ∈ scheduled|confirmed|completed|cancelled|noShow}
 //	lnk.appointment.<id>.forPatient.patient.<id>       (appointment → patient, later-arriving source)
 //	lnk.appointment.<id>.withProvider.provider.<id>    (appointment → provider, later-arriving source)
@@ -35,9 +35,12 @@
 //     defers temporal/uniqueness). CreateAppointment records a requested time; it
 //     does NOT reject an overlapping or out-of-hours slot.
 //   - Recurring @every reminders / availability (@every has no consumer; §10.4
-//     ships @at one-shot).
-//   - A Weaver convergence lens / orchestrated clinic workflow (Increment 1 ships
-//     projection lenses).
+//     ships @at one-shot). One-shot @at appointment reminders ("remind 24h before")
+//     ARE built — in the sibling clinic-reminders package, which reads the .schedule
+//     remindAt this DDL precomputes. The recurring-availability case still needs @every.
+//   - A Weaver convergence lens / orchestrated clinic workflow IN THIS PACKAGE
+//     (clinic-domain stays projection-only); the clinic-reminders sibling package
+//     owns the appointment-reminder convergence lens + its directOp playbook.
 //   - Cascade-on-tombstone. Tombstone{Patient,Provider,Appointment} soft-deletes
 //     ONLY the named vertex root — its aspects and incident links are left in
 //     place (the projection lenses anchor on the live root, so a tombstoned

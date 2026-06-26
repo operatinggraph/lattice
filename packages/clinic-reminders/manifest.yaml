@@ -1,0 +1,35 @@
+name: clinic-reminders
+version: 0.1.0
+description: |
+  Clinic appointment reminders — the clinic vertical's first orchestration.
+  One-shot @at reminders ~24h before an appointment: the .reminder aspect +
+  RecordAppointmentReminder op (vertexType handler + aspectType gate), the
+  appointmentReminders weaver-target convergence lens (freshUntil = the
+  .schedule.remindAt clinic-domain precomputes; missing_reminder/violating gate),
+  and the §10.8 playbook dispatching directOp(RecordAppointmentReminder). Inverts
+  lease-signing's freshness re-open (open-at-deadline instead of reopen-at-expiry).
+  Depends on clinic-domain (the appointment + .schedule.remindAt) and
+  orchestration-base (MarkExpired re-touch at the @at firing).
+depends:
+  - clinic-domain
+  - orchestration-base
+declares:
+  ddls:
+    - canonicalName: appointmentReminderOp
+      class: meta.ddl.vertexType
+    - canonicalName: appointmentReminder
+      class: meta.ddl.aspectType
+  lenses:
+    - canonicalName: appointmentReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+  permissions:
+    - operationType: RecordAppointmentReminder
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: appointmentReminders
+      lensRef: appointmentReminders
+  opMetas:
+    - operationType: RecordAppointmentReminder

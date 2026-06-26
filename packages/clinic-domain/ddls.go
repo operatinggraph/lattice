@@ -158,7 +158,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 		Description: "Clinic appointment DDL. Vertex shape: vtx.appointment.<NanoID>, class=appointment, root data = " +
 			"{} (minimal, D5). CreateAppointment validates the patient (class=patient) + provider (class=provider) " +
-			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, reason?} + " +
+			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, remindAt, reason?} + " +
 			"the .status aspect {value: scheduled} + the forPatient link (appointment→patient) + the withProvider " +
 			"link (appointment→provider). Both links follow Contract #1 §1.1 (the later-arriving appointment is the " +
 			"source). SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, completed, " +
@@ -199,7 +199,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"reason":   "Annual checkup",
 				},
 				ExpectedOutcome: "Validates the patient (class=patient) + provider (class=provider) are alive. Atomically " +
-					"commits vtx.appointment.<NanoID> (root {}) + .schedule {startsAt, endsAt, reason} + .status {value: " +
+					"commits vtx.appointment.<NanoID> (root {}) + .schedule {startsAt, endsAt, remindAt, reason} (remindAt = " +
+					"startsAt − 24h, derived) + .status {value: " +
 					"scheduled} + the forPatient + withProvider links. Returns primaryKey (the appointment key). Rejects with " +
 					"ScriptError if the patient or provider is absent / dead / the wrong class. Does NOT check for slot " +
 					"conflicts (D6 — deferred).",
@@ -287,23 +288,26 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateAppointment"},
 		Description: "Appointment schedule aspect (clinic). Stored as vtx.appointment.<NanoID>.schedule (class " +
-			"appointmentSchedule) = {startsAt, endsAt, reason?}. Non-sensitive. Written ONLY by CreateAppointment " +
+			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?}. Non-sensitive. Written ONLY by CreateAppointment " +
 			"(whose appointment vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
-			"Declaration-only: no op handler. The booking time is REQUESTED, not conflict-checked (D6 — deferred).",
+			"Declaration-only: no op handler. remindAt = startsAt − 24h is a precomputed reminder deadline the " +
+			"clinic-reminders package's convergence lens reads (it is not a caller input). The booking time is " +
+			"REQUESTED, not conflict-checked (D6 — deferred).",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"reason":{"type":"string"}}}`,
+			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"remindAt":{"type":"string"},"reason":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"startsAt": "Appointment start (RFC3339).",
 			"endsAt":   "Appointment end (RFC3339).",
+			"remindAt": "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateAppointment, not a caller input; the clinic-reminders convergence lens projects it as freshUntil to arm the @at reminder timer.",
 			"reason":   "Visit reason / chief complaint.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "appointment schedule aspect",
-				Payload:         map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"},
-				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.schedule; written by CreateAppointment.",
+				Payload:         map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "remindAt": "2026-06-30T15:00:00Z", "reason": "Annual checkup"},
+				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.schedule; written by CreateAppointment (which derives remindAt = startsAt − 24h).",
 			},
 		},
 	}
@@ -681,8 +685,13 @@ def execute(state, op):
         require_live_typed(state, patient, "patient", "patient")
         require_live_typed(state, provider, "provider", "provider")
 
-        starts_at = required_string(p, "startsAt")
-        ends_at = required_string(p, "endsAt")
+        # Normalize startsAt / endsAt to canonical whole-second UTC (time.rfc3339_utc
+        # — a pure builtin, no clock read). This parse-validates the instants AND
+        # makes the lexical RFC3339 compares the convergence lens relies on
+        # (startsAt > $now, remindAt <= $now) sound for ANY caller offset / fractional
+        # form, not only Z-suffixed input — the lease-signing normalization idiom.
+        starts_at = time.rfc3339_utc(required_string(p, "startsAt"))
+        ends_at = time.rfc3339_utc(required_string(p, "endsAt"))
         reason = optional_string(p, "reason")
 
         appt_id = bare_nanoid_or_mint(p, "appointmentId")
@@ -695,7 +704,15 @@ def execute(state, op):
         for_patient_lnk = "lnk.appointment." + appt_id + ".forPatient.patient." + patient_id
         with_provider_lnk = "lnk.appointment." + appt_id + ".withProvider.provider." + provider_id
 
-        sched = {"startsAt": starts_at, "endsAt": ends_at}
+        # remindAt = startsAt − 24h: the reminder deadline the clinic-reminders
+        # convergence lens projects as freshUntil so the @at temporal lane fires a
+        # reminder ~24h ahead. Precomputed at write time (time.rfc3339_add — a pure
+        # builtin, no clock read) and emitted canonical UTC, so the lens needs no
+        # date arithmetic — only the RFC3339 lexical compare. A booking < 24h out
+        # yields a past remindAt → reminded immediately. rfc3339_add also parse-
+        # validates startsAt as RFC3339 (fails closed on a malformed instant).
+        sched = {"startsAt": starts_at, "endsAt": ends_at,
+                 "remindAt": time.rfc3339_add(starts_at, "-24h")}
         if reason != None:
             sched["reason"] = reason
 

@@ -220,6 +220,11 @@ func TestClinic_CreateBookable(t *testing.T) {
 	if sd, _ := sched["data"].(map[string]any); sd["startsAt"] != "2026-07-01T15:00:00Z" || sd["endsAt"] != "2026-07-01T15:30:00Z" || sd["reason"] != "Annual checkup" {
 		t.Fatalf("schedule data = %v", sched["data"])
 	}
+	// remindAt = startsAt − 24h, derived by CreateAppointment (canonical UTC) — the
+	// deadline the clinic-reminders convergence lens projects as freshUntil.
+	if sd, _ := sched["data"].(map[string]any); sd["remindAt"] != "2026-06-30T15:00:00Z" {
+		t.Fatalf("schedule remindAt = %v, want 2026-06-30T15:00:00Z (startsAt − 24h)", sched["data"])
+	}
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	if st, _ := status["data"].(map[string]any); st["value"] != "scheduled" {
 		t.Fatalf("initial status = %v, want scheduled", st["value"])
