@@ -19,6 +19,8 @@ everything else is a package.
 
 Installed packages:
 
+**Platform base** (identity, RBAC, generic substrate):
+
 - `identity-domain` — the identity vertex type + create/claim/state-machine ops.
 - `rbac-domain` — roles, permissions, and the assign/grant ops + their inverses.
 - `identity-hygiene` — duplicate-identity detection (`duplicateCandidates` Lens)
@@ -31,9 +33,45 @@ Installed packages:
   contract-contribution model (core owns the capability-kv bucket + step-3
   reader; a package projects the grant type it owns into a disjoint key space).
   Step-3's task-dispatch branch reads the new key as a single GET, no fallback.
-- `lease-signing` — the Loftspace lease-application reference vertical: a real
-  Weaver convergence target, the Loom `externalTask` patterns, and the bridge
-  adapters wired into one installable package.
+- `objects-base` — the generic large-object vertex type (object DDL +
+  attach / detach / tombstone ops), the `objectLiveness` GC convergence lens
+  (driving the `object-store-manager`'s `TombstoneObject` reclaim), and the
+  `objectAttachments` display lens. The **graph side of the off-graph blob
+  plane**: the bytes live in the NATS Object Store, the graph holds only a
+  content-addressed pointer-aspect (D5); the display lens is the apps' P5-clean
+  byte-plane read model.
+
+**LoftSpace vertical** (the lease-application reference slice):
+
+- `service-domain` — the service template + instance vertex type and lifecycle
+  ops; an instance records its external-call outcome as aspects (D5).
+- `location-domain` — the spatial base domain: unit / building / property
+  location vertices + the `containedIn` containment link.
+- `service-location` — the residence-based service-access authZ scheme
+  (`residesIn` / `availableAt` / `unavailableAt` / `permitsOperation` links) +
+  the `capabilityServiceAccess` Lens projecting `cap.svc.<actor>`.
+- `lease-signing` — the lease-application convergence vertical: the `leaseapp`
+  vertex type + `CreateLeaseApplication` / `SignLease` ops, a real Weaver
+  convergence target, the Loom `externalTask` patterns, and the bridge adapters,
+  wired into one installable package.
+- `loftspace-domain` — LoftSpace listing economics: the `.listing` + `.address`
+  aspects on a `location-domain` unit (`SetListing` / `SetUnitAddress`) + the
+  `availableListings` / `applicantRoster` projection Lenses. Introduces no new
+  vertex type.
+
+**Clinic vertical** (the 2nd reference vertical / forcing function for PHI +
+recurring schedules):
+
+- `clinic-domain` — the bookable domain: `patient` / `provider` / `appointment`
+  vertex types + their aspects and links, with `Create*` /
+  `SetAppointmentStatus` / `RescheduleAppointment` / `Tombstone*` ops and the
+  `clinicAppointments` / `clinicProviders` / `clinicPatients` projection Lenses
+  (the clinic FE's P5 read models).
+- `clinic-reminders` — the clinic vertical's first orchestration: one-shot `@at`
+  appointment reminders ~24h before the visit (the `appointmentReminders` Weaver
+  convergence target re-arms a timer and dispatches
+  `directOp(RecordAppointmentReminder)` at the deadline). Depends on
+  `clinic-domain` + `orchestration-base`.
 
 A package is **NOT** a runtime plugin. It is a *seed bundle*: at install time it
 writes meta-vertices, permissions, lens definitions, and grant links to Core KV.
