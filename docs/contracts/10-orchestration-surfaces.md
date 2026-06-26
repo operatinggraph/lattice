@@ -290,14 +290,45 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   that `<targetId>.<entityId>` and deletes any mark whose column is now `false` — it does **not** rely
   on catching the transitional flip (a coalescing watch can drop edges). `claimedAt` tags the
   episode so a stale mark from a prior closed episode can't shadow a fresh re-open.
-- **Re-fire after lease expiry — idempotency by action:** `triggerLoom` / `assignTask` re-fire is
-  **accepted as a rare double** (lease ≫ remediation latency makes it rare; Loom guard-idempotency
-  limits damage, and a duplicate task is operator-visible) — **documented bound, not a silent risk**;
-  the robust check-before-act variant is a Phase-3 hardening. *(The `nudge`-specific `claimId`
-  clauses — `claimId` minted atomically with the CAS-create, and "`nudge` is safe via `claimId`" —
-  retired 2026-06-18, 13.1: `nudge` is gone (§10.8) and external idempotency is now the
-  service-instance key on the bridge path. `claimId?` in the value shape above is left optional but
-  has no remaining producer.)*
+- **Re-fire after lease expiry — consumer-enforced idempotency by deterministic open-episode identity.**
+  A userTask reclaim is keyed by the **open-episode identity**: the mark's `claimId` (a fresh NanoID
+  minted at the mark's CAS-create, **preserved verbatim** across every reclaim-`replace`) seeds the
+  dispatched artifact's id — `assignTask`'s `taskId` and `triggerLoom`'s Loom `instanceId`. Weaver
+  re-publishes the dispatch **without** a producer-side existence check (a Weaver GET would race the
+  publish→commit propagation lag — inside that window it sees absent and re-publishes anyway, so it
+  cannot *prevent* a double; only the consumer, committing against real state, can). The **consumer** is
+  the single idempotency authority:
+  - **`assignTask` → `CreateTask`:** the task vertex lives in **Core KV**, so the `CreateTask` Starlark
+    script reads the task key via **`kv.Read()`** (§2.5 lazy on-demand read — *not* a `contextHint`
+    read, which would fatal-`HydrationMiss` on the legitimately-absent key) and branches: present **and
+    alive** (`task != None and not task.isDeleted`) → empty mutations **and** empty events (a coherent
+    silent no-op); absent **or** logically-deleted → create as normal. The existing `CreateOnly` mutation
+    is the narrow concurrent-dispatch backstop.
+  - **`triggerLoom` → `StartLoomPattern`:** the Loom instance lives in **loom-state** (no Core-KV
+    vertex), so the dedup is at **Loom**, not a Processor read — `StartLoomPattern` carries the stable
+    `claimId`-seeded `instanceId` on `loom.patternStarted`, and Loom's instance presence check +
+    `createInstance` `CreateOnly` collapse a re-emitted trigger onto the existing instance (no new
+    instance, hence no new userTask). This dedups the whole pattern — the correct altitude for
+    `triggerLoom`.
+
+  A legitimate close→reopen mints a new mark ⇒ new `claimId` ⇒ a fresh artifact; an out-of-band deletion
+  self-heals (hard-tombstone ⇒ `kv.Read()` `None` ⇒ create; logical delete ⇒ present-but-`isDeleted`
+  ⇒ create). This **supersedes** the prior "accepted rare double / check-before-act = Phase-3 hardening"
+  disposition for the two human userTask actions. **External gaps are unchanged** — their reclaim
+  re-dispatch is *intended* (re-call a dead vendor / mint a fresh service instance), episode-scoped on
+  `markRevision` and bounded by `inflight_<g>` + `maxretries_<g>`; `directOp` likewise. *(The
+  `nudge`-specific `claimId` clauses were retired 2026-06-18, 13.1; `claimId` now regains a producer —
+  the mark CAS-create — and a consumer — the userTask id derivation. `claimId?` stays optional in the
+  value shape only so reads tolerate a legacy pre-`claimId` mark mid-migration; new marks always carry
+  it.)* **Migration bound:** a userTask gap that is **already in flight at deploy** carries a
+  pre-`claimId` mark (`claimId==""`); its first post-deploy reclaim derives a stable empty-seed id that
+  differs from the id the original (pre-deploy) dispatch used, so it may create **one** duplicate
+  artifact — bounded, one-time, and self-healing (every later reclaim reuses the empty-seed id and
+  collapses). A drain of open human-task gaps before deploy avoids even that one. **`triggerLoom`
+  self-heal is bounded by Loom's instance lifecycle, not a tombstone read:** if the Loom instance has
+  reached a terminal state, a re-emitted `patternStarted` is dropped (no re-create) — unlike the
+  Core-KV task, whose hard/logical delete self-heals via `kv.Read`. A still-open gap whose instance
+  terminated is resolved by level-reconciled mark-clearing, not by re-triggering the pattern.
 - `entityKey` carries the full `vtx.<type>.<id>` (doc-is-truth); the key holds only the ID.
 
 ### `weaver-claims` — RETIRED (Amended 2026-06-18 — 13.1, External I/O Bridge)
