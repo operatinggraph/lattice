@@ -20,8 +20,9 @@ Read before proposing anything:
 
 - the mandate + Deferred / Implementation-status: `docs/components/<component>.md`;
 - the code: `internal/<component>/` (+ `cmd/<component>/`);
-- the frozen contracts it must honor: `docs/contracts/*` — **build to them, never edit**; a genuine gap is a
-  `cmd/<area>/CONTRACT-AMENDMENT-REQUEST.md`, not an in-flight edit;
+- the frozen contracts it must honor: `docs/contracts/*` — **build to them, never *commit* a change to them**;
+  a genuine gap → make the **actual edit to the contract doc in `main`, UNCOMMITTED** for Andrew to ratify
+  (never committed, no separate request doc);
 - its open backlog slice + any Health / CI signal about it.
 
 Summarize the existing pattern + constraints. Do **not** redesign from scratch (ground first — this is the
