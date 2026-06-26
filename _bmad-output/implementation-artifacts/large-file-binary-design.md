@@ -522,14 +522,16 @@ This is a **distinct race from §20's re-link race.** §20 closes "orphan → co
 
 ---
 
-## 22. v1b GC — owner-tombstone-cascade trigger (2026-06-26; 📐 PROPOSAL — awaiting Andrew ratification)
+## 22. v1b GC — owner-tombstone-cascade trigger (2026-06-26; ✅ RATIFIED + BUILT, `4e34adc`)
 
-> **Status: design proposal, not yet built.** Resolves the deferred dead-target byte LEAK that §21.2
-> left open ("Authoritative dead-target reclamation belongs to the deferred owner-tombstone-cascade
-> trigger … already 'Andrew's GC domain' per §19"). It is the trigger-side of CC4 (§18). The mechanism
-> below touches **no frozen contract**, but it adds a **fourth kernel-seeded service actor** (a graph-
-> mutating authority) — a trust-surface expansion that is Andrew's to ratify. Everything else is an
-> additive, revertible component change following the Bridge-actor precedent exactly.
+> **Status: shipped.** Andrew ratified Option A + the 4th kernel-seeded service actor; built, 3-layer-
+> reviewed, all gates green (incl. the `make test-object-gc` `TestObjectGC_OwnerTombstoneCascadeReclaims`
+> end-to-end leg), merged to main. Resolves the deferred dead-target byte LEAK that §21.2 left open
+> ("Authoritative dead-target reclamation belongs to the deferred owner-tombstone-cascade trigger …
+> already 'Andrew's GC domain' per §19"). It is the trigger-side of CC4 (§18). Touches **no frozen
+> contract**; adds a **fourth kernel-seeded service actor** (the byte-janitor's `DetachObject` authority)
+> — an additive, revertible Bridge-actor-template addition (bootstrap v10→v11,
+> `PrimordialVertexKeyCount` 29→31). The sections below describe the shipped design as implemented.
 
 ### 22.1 The leak, precisely (recap + grounding)
 
