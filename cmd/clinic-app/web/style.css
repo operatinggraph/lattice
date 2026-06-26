@@ -217,6 +217,131 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .modal .lead { color: var(--text-dim); font-size: 13px; margin: 0 0 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 
+/* Schedule calendar — segmented view toggle + period nav */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg-btn {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--text-dim);
+  padding: 6px 13px;
+}
+.seg-btn:hover { background: var(--bg-input); color: var(--text); }
+.seg-btn.active { background: var(--accent-dim); color: #fff; }
+.cal-nav { display: inline-flex; gap: 4px; }
+.cal-range { color: var(--text); font-weight: 600; font-size: 14px; }
+
+.calendar { overflow-x: auto; }
+.cal-wrap { min-width: 640px; }
+.cal-head, .cal-body {
+  display: grid;
+  grid-template-columns: 56px repeat(var(--cal-days), minmax(84px, 1fr));
+}
+.cal-day-head {
+  padding: 8px 6px;
+  text-align: center;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.cal-day-head .cal-wd {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.cal-day-head .cal-dn { font-size: 14px; font-weight: 600; }
+.cal-day-head.today { background: var(--bg-raised); }
+.cal-day-head.today .cal-dn { color: var(--accent); }
+
+.cal-body { position: relative; }
+.cal-gutter { position: relative; border-right: 1px solid var(--border); }
+.cal-hour {
+  position: absolute;
+  right: 6px;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cal-col { position: relative; border-left: 1px solid var(--border); }
+
+.cal-appt {
+  position: absolute;
+  overflow: hidden;
+  text-align: left;
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  background: rgba(90, 169, 230, 0.16);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 11px;
+  line-height: 1.25;
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+}
+.cal-appt:hover { background: rgba(90, 169, 230, 0.28); }
+.cal-appt.sel { box-shadow: 0 0 0 2px var(--accent); z-index: 3; }
+.cal-appt .cal-appt-t { font-weight: 600; }
+.cal-appt .cal-appt-who {
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.cal-appt.past { opacity: 0.55; }
+.cal-appt.confirmed { border-color: var(--green); background: rgba(76, 195, 138, 0.16); }
+.cal-appt.confirmed:hover { background: rgba(76, 195, 138, 0.28); }
+.cal-appt.completed { border-color: var(--border); background: var(--bg-input); }
+.cal-appt.cancelled {
+  border-color: var(--red);
+  background: rgba(224, 86, 74, 0.14);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.cal-appt.noshow { border-color: var(--yellow); background: rgba(224, 179, 65, 0.16); }
+
+/* Schedule detail panel (read-only — actions live on My Appointments) */
+.sched-detail {
+  position: relative;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sched-detail .sd-who { font-weight: 600; font-size: 15px; }
+.sched-detail .sd-when { font-size: 14px; }
+.sched-detail .sd-meta { color: var(--text-dim); font-size: 13px; }
+.sched-detail .sd-meta.reminder-sent { color: var(--green); }
+.sched-detail .badge { align-self: flex-start; }
+.sched-detail-x {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.sched-detail-x:hover { background: var(--bg-input); color: var(--text); }
+
 /* Toast */
 .toast {
   position: fixed;

@@ -97,10 +97,21 @@
       <div class="panel-controls">
         <label for="sched-provider">Provider</label>
         <select id="sched-provider" aria-label="Choose a provider to view their schedule"></select>
+        <div class="seg" role="group" aria-label="Calendar view">
+          <button id="sched-week" class="seg-btn active" aria-pressed="true">Week</button>
+          <button id="sched-day" class="seg-btn" aria-pressed="false">Day</button>
+        </div>
+        <div class="cal-nav" role="group" aria-label="Navigate period">
+          <button id="sched-prev" class="ghost" aria-label="Previous period">‹</button>
+          <button id="sched-today" class="ghost">Today</button>
+          <button id="sched-next" class="ghost" aria-label="Next period">›</button>
+        </div>
+        <span id="sched-range" class="cal-range" aria-live="polite"></span>
         <button id="reload-schedule" class="ghost">Refresh</button>
         <span id="schedule-summary" class="summary"></span>
       </div>
-      <div id="schedule" class="grid" aria-live="polite"></div>
+      <div id="sched-detail" class="sched-detail" hidden></div>
+      <div id="schedule" class="calendar" aria-live="polite"></div>
       <div id="schedule-empty" class="empty" hidden></div>
     </section>
   </main>

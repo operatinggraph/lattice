@@ -16,6 +16,9 @@ const state = {
   view: "book",
   highlight: null,
   rescheduling: null, // the appointment row being rescheduled (modal context)
+  schedView: "week", // Schedule tab calendar mode: "week" | "day"
+  schedAnchor: null, // a Date within the visible period (null → current week/day)
+  schedSelected: null, // appointmentKey shown in the Schedule detail panel
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -402,18 +405,28 @@ function renderAppts() {
   $("#appts-summary").textContent = `${n} appointment${n === 1 ? "" : "s"}`;
 }
 
-// ---- Provider Schedule (read-only desk view) ----
+// ---- Provider Schedule (read-only day/week calendar desk view) ----
+//
+// The Schedule tab is a positioned calendar grid: a time axis down the left, one
+// column per day (7 in Week view, 1 in Day view), and each appointment rendered as
+// a block sized to its duration and coloured by status. /api/appointments?provider=
+// returns the provider's full history; the grid filters client-side to the visible
+// period (no date-range query needed). Clicking a block opens a read-only detail
+// panel — the desk view doesn't mutate (Cancel / Reschedule live on My Appointments).
+
+const PX_PER_HOUR = 44;
 
 async function loadSchedule() {
   const provider = $("#sched-provider").value;
-  const grid = $("#schedule");
   const empty = $("#schedule-empty");
+  hideSchedDetail();
   if (!provider) {
-    grid.innerHTML = "";
+    $("#schedule").innerHTML = "";
     state.schedule = [];
     empty.hidden = false;
     empty.textContent = "Choose a provider to see their schedule.";
     $("#schedule-summary").textContent = "";
+    $("#sched-range").textContent = "";
     return;
   }
   $("#schedule-summary").textContent = "loading…";
@@ -421,29 +434,312 @@ async function loadSchedule() {
     const data = await api("/api/appointments?provider=" + encodeURIComponent(provider));
     state.schedule = data.appointments || [];
   } catch (e) {
-    grid.innerHTML = "";
+    $("#schedule").innerHTML = "";
     empty.hidden = false;
     empty.textContent = "Could not load schedule: " + e.message;
     $("#schedule-summary").textContent = "";
+    $("#sched-range").textContent = "";
     return;
   }
   renderSchedule();
 }
 
+// ---- date helpers (local wall-clock; the grid is laid out in the operator's zone) ----
+
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+// startOfWeek returns local midnight on the Monday of d's week (Mon-first columns).
+function startOfWeek(d) {
+  const x = startOfDay(d);
+  const dow = (x.getDay() + 6) % 7; // 0=Mon … 6=Sun
+  x.setDate(x.getDate() - dow);
+  return x;
+}
+
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+// schedPeriodStart is the local midnight that begins the visible period — the
+// Monday of the anchored week, or the anchored day. Defaults to the current week/day
+// when no period has been navigated to yet.
+function schedPeriodStart() {
+  const base = state.schedAnchor || new Date();
+  return state.schedView === "week" ? startOfWeek(base) : startOfDay(base);
+}
+
+function fmtHour(h) {
+  if (h % 24 === 0) return "12 AM";
+  if (h === 12) return "12 PM";
+  return h < 12 ? `${h} AM` : `${h - 12} PM`;
+}
+
+function rangeLabel(periodStart, days) {
+  if (days === 1) {
+    return periodStart.toLocaleDateString(undefined, {
+      weekday: "long", month: "long", day: "numeric", year: "numeric",
+    });
+  }
+  const end = addDays(periodStart, days - 1);
+  const sMonth = periodStart.toLocaleDateString(undefined, { month: "short" });
+  const eMonth = end.toLocaleDateString(undefined, { month: "short" });
+  const y = end.getFullYear();
+  return periodStart.getMonth() === end.getMonth()
+    ? `${sMonth} ${periodStart.getDate()} – ${end.getDate()}, ${y}`
+    : `${sMonth} ${periodStart.getDate()} – ${eMonth} ${end.getDate()}, ${y}`;
+}
+
 function renderSchedule() {
-  const grid = $("#schedule");
+  const cal = $("#schedule");
   const empty = $("#schedule-empty");
-  grid.innerHTML = "";
-  if (state.schedule.length === 0) {
+  cal.innerHTML = "";
+  if (!$("#sched-provider").value) {
     empty.hidden = false;
-    empty.textContent = "No appointments on this provider's schedule.";
+    empty.textContent = "Choose a provider to see their schedule.";
     $("#schedule-summary").textContent = "";
+    $("#sched-range").textContent = "";
     return;
   }
+
+  const days = state.schedView === "week" ? 7 : 1;
+  const periodStart = schedPeriodStart();
+  const periodEnd = addDays(periodStart, days);
+  const visible = state.schedule.filter((a) => {
+    const s = new Date(a.startsAt);
+    return !isNaN(s) && s >= periodStart && s < periodEnd;
+  });
+
+  $("#sched-range").textContent = rangeLabel(periodStart, days);
+  const n = visible.length;
+  const total = state.schedule.length;
+  $("#schedule-summary").textContent =
+    `${n} this ${state.schedView}` + (total > n ? ` · ${total} total` : "");
+
+  // The hour window fits the visible appointments, never narrower than 8 AM–6 PM.
+  let startH = 8;
+  let endH = 18;
+  for (const a of visible) {
+    const s = new Date(a.startsAt);
+    const e = new Date(a.endsAt);
+    if (!isNaN(s)) startH = Math.min(startH, s.getHours());
+    if (!isNaN(e)) endH = Math.max(endH, e.getMinutes() > 0 ? e.getHours() + 1 : e.getHours());
+  }
+  startH = Math.max(0, startH);
+  endH = Math.min(24, Math.max(endH, startH + 1));
+
+  // The (possibly empty) grid is the source of truth — an empty period still
+  // renders the week/day structure, with the summary reading "0 this week". The
+  // dashed empty placeholder is reserved for "no provider chosen".
   empty.hidden = true;
-  for (const a of state.schedule) grid.append(renderApptCard(a, { showProvider: false, cancelable: false }));
-  const n = state.schedule.length;
-  $("#schedule-summary").textContent = `${n} appointment${n === 1 ? "" : "s"}`;
+  cal.append(buildCalendar(periodStart, days, startH, endH, visible));
+}
+
+function buildCalendar(periodStart, days, startH, endH, appts) {
+  const wrap = document.createElement("div");
+  wrap.className = "cal-wrap";
+  wrap.style.setProperty("--cal-days", String(days));
+  const bodyH = (endH - startH) * PX_PER_HOUR;
+  const todayMid = startOfDay(new Date()).getTime();
+
+  const head = document.createElement("div");
+  head.className = "cal-head";
+  head.append(document.createElement("div")); // empty corner over the time gutter
+  for (let i = 0; i < days; i++) {
+    const day = addDays(periodStart, i);
+    const h = document.createElement("div");
+    h.className = "cal-day-head";
+    if (startOfDay(day).getTime() === todayMid) h.classList.add("today");
+    const wd = document.createElement("span");
+    wd.className = "cal-wd";
+    wd.textContent = day.toLocaleDateString(undefined, { weekday: "short" });
+    const dn = document.createElement("span");
+    dn.className = "cal-dn";
+    dn.textContent = day.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    h.append(wd, dn);
+    head.append(h);
+  }
+  wrap.append(head);
+
+  const body = document.createElement("div");
+  body.className = "cal-body";
+  body.style.height = bodyH + "px";
+
+  const gutter = document.createElement("div");
+  gutter.className = "cal-gutter";
+  for (let h = startH; h <= endH; h++) {
+    const lab = document.createElement("div");
+    lab.className = "cal-hour";
+    lab.style.top = (h - startH) * PX_PER_HOUR + "px";
+    lab.textContent = fmtHour(h);
+    gutter.append(lab);
+  }
+  body.append(gutter);
+
+  for (let i = 0; i < days; i++) {
+    const dayStart = startOfDay(addDays(periodStart, i));
+    const col = document.createElement("div");
+    col.className = "cal-col";
+    col.style.backgroundImage =
+      `repeating-linear-gradient(to bottom, transparent 0, transparent ${PX_PER_HOUR - 1}px, ` +
+      `var(--border) ${PX_PER_HOUR - 1}px, var(--border) ${PX_PER_HOUR}px)`;
+    const dayAppts = appts.filter((a) => {
+      const s = new Date(a.startsAt);
+      return !isNaN(s) && startOfDay(s).getTime() === dayStart.getTime();
+    });
+    for (const placed of layoutDay(dayAppts)) {
+      col.append(apptBlock(placed.a, dayStart, startH, endH, placed.lane, placed.lanes));
+    }
+    body.append(col);
+  }
+  wrap.append(body);
+  return wrap;
+}
+
+// layoutDay greedily assigns overlapping appointments to side-by-side lanes so
+// double-booked slots (booking enforces no conflict yet) render next to each other
+// instead of stacking. Returns each appointment with its lane index and the day's
+// total lane count (used for block width).
+function layoutDay(appts) {
+  const items = appts
+    .map((a) => ({ a, s: new Date(a.startsAt).getTime(), e: new Date(a.endsAt).getTime() }))
+    .filter((x) => !isNaN(x.s))
+    .sort((x, y) => x.s - y.s || x.e - y.e);
+  const laneEnds = [];
+  for (const it of items) {
+    const end = isNaN(it.e) || it.e <= it.s ? it.s + 30 * 60000 : it.e;
+    let lane = laneEnds.findIndex((le) => le <= it.s);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(end);
+    } else {
+      laneEnds[lane] = end;
+    }
+    it.lane = lane;
+  }
+  const lanes = Math.max(1, laneEnds.length);
+  return items.map((it) => ({ a: it.a, lane: it.lane, lanes }));
+}
+
+function apptBlock(a, dayStart, startH, endH, lane, lanes) {
+  const s = new Date(a.startsAt);
+  let e = new Date(a.endsAt);
+  if (isNaN(e) || e <= s) e = new Date(s.getTime() + 30 * 60000);
+  const winTop = startH * 60;
+  const winBot = endH * 60;
+  const startMin = (s - dayStart) / 60000;
+  const endMin = (e - dayStart) / 60000;
+  const top = ((Math.max(startMin, winTop) - winTop) / 60) * PX_PER_HOUR;
+  const bottom = ((Math.min(endMin, winBot) - winTop) / 60) * PX_PER_HOUR;
+  const height = Math.max(bottom - top, 20);
+  const widthPct = 100 / lanes;
+
+  const block = document.createElement("button");
+  block.type = "button";
+  block.className = "cal-appt " + statusClass(a.status);
+  if (state.schedSelected === a.appointmentKey) block.classList.add("sel");
+  if (isPast(a.startsAt) && ACTIVE_STATUSES.includes(a.status)) block.classList.add("past");
+  block.style.top = top + "px";
+  block.style.height = height + "px";
+  block.style.left = `calc(${lane * widthPct}% + 2px)`;
+  block.style.width = `calc(${widthPct}% - 4px)`;
+
+  const t = document.createElement("span");
+  t.className = "cal-appt-t";
+  t.textContent = s.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const who = document.createElement("span");
+  who.className = "cal-appt-who";
+  who.textContent = a.patientName || shortKey(a.patientKey);
+  block.append(t, who);
+  block.title =
+    `${a.patientName || shortKey(a.patientKey)} · ${fmtWhen(a.startsAt, a.endsAt)}` +
+    (a.reason ? " · " + a.reason : "") + ` · ${a.status}`;
+  block.addEventListener("click", () => selectSchedAppt(a));
+  return block;
+}
+
+// selectSchedAppt opens the read-only detail panel for a clicked block and marks it
+// selected (re-render reflects the .sel highlight; the detail panel is a separate
+// node the calendar rebuild leaves intact).
+function selectSchedAppt(a) {
+  state.schedSelected = a.appointmentKey;
+  const d = $("#sched-detail");
+  d.innerHTML = "";
+
+  const close = document.createElement("button");
+  close.className = "sched-detail-x";
+  close.setAttribute("aria-label", "Close details");
+  close.textContent = "×";
+  close.addEventListener("click", hideSchedDetail);
+
+  const who = document.createElement("div");
+  who.className = "sd-who";
+  who.textContent = a.patientName || shortKey(a.patientKey);
+
+  const when = document.createElement("div");
+  when.className = "sd-when";
+  when.textContent = fmtWhen(a.startsAt, a.endsAt);
+
+  const badge = document.createElement("span");
+  badge.className = "badge " + statusClass(a.status);
+  badge.textContent = a.status || "—";
+
+  d.append(close, who, when, badge);
+  if (a.reason) {
+    const meta = document.createElement("div");
+    meta.className = "sd-meta";
+    meta.textContent = a.reason;
+    d.append(meta);
+  }
+  if (a.reminderSentAt) {
+    const r = new Date(a.reminderSentAt);
+    const rem = document.createElement("div");
+    rem.className = "sd-meta reminder-sent";
+    rem.textContent = "🔔 Reminder sent" + (isNaN(r) ? "" : " · " + r.toLocaleString());
+    d.append(rem);
+  }
+  d.hidden = false;
+  renderSchedule();
+}
+
+function hideSchedDetail() {
+  state.schedSelected = null;
+  const d = $("#sched-detail");
+  d.hidden = true;
+  d.innerHTML = "";
+  document.querySelectorAll("#schedule .cal-appt.sel").forEach((el) => el.classList.remove("sel"));
+}
+
+// ---- Schedule navigation (period + view) ----
+
+function schedNav(direction) {
+  const step = state.schedView === "week" ? 7 : 1;
+  state.schedAnchor = addDays(schedPeriodStart(), direction * step);
+  hideSchedDetail();
+  renderSchedule();
+}
+
+function schedToday() {
+  state.schedAnchor = new Date();
+  hideSchedDetail();
+  renderSchedule();
+}
+
+function setSchedView(view) {
+  if (state.schedView === view) return;
+  state.schedView = view;
+  for (const v of ["week", "day"]) {
+    const btn = $("#sched-" + v);
+    btn.classList.toggle("active", v === view);
+    btn.setAttribute("aria-pressed", String(v === view));
+  }
+  hideSchedDetail();
+  renderSchedule();
 }
 
 // ---- Appointment card (shared by both lists) ----
@@ -676,6 +972,11 @@ function init() {
   $("#reload-appts").addEventListener("click", loadAppts);
   $("#reload-schedule").addEventListener("click", loadSchedule);
   $("#sched-provider").addEventListener("change", loadSchedule);
+  $("#sched-week").addEventListener("click", () => setSchedView("week"));
+  $("#sched-day").addEventListener("click", () => setSchedView("day"));
+  $("#sched-prev").addEventListener("click", () => schedNav(-1));
+  $("#sched-next").addEventListener("click", () => schedNav(1));
+  $("#sched-today").addEventListener("click", schedToday);
 }
 
 document.addEventListener("DOMContentLoaded", init);
