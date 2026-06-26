@@ -8,7 +8,8 @@
 //
 //	3 vertexType DDLs: patient (CreatePatient + TombstonePatient), provider
 //	  (CreateProvider + TombstoneProvider), appointment (CreateAppointment +
-//	  SetAppointmentStatus + TombstoneAppointment), each with its self-description.
+//	  RescheduleAppointment + SetAppointmentStatus + TombstoneAppointment), each
+//	  with its self-description.
 //	4 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
 //	  appointmentStatus — their step-6 write gates.
 //	7 permission vertices (one per op), scope any, granted to operator.
@@ -39,7 +40,7 @@ const (
 var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider",
-	"CreateAppointment", "SetAppointmentStatus", "TombstoneAppointment",
+	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment",
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -104,10 +105,10 @@ func main() {
 	ddlChecks := []ddlCheck{
 		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient"}},
 		{canonical: "provider", class: "meta.ddl.vertexType", ops: []string{"CreateProvider", "TombstoneProvider"}},
-		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "TombstoneAppointment"}},
+		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"}},
 		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider"}},
-		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment"}},
+		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
 		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus"}},
 	}
 

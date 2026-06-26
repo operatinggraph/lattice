@@ -41,7 +41,7 @@ func TestPackage_DDLs(t *testing.T) {
 	vertexCmds := map[string][]string{
 		"patient":     {"CreatePatient", "TombstonePatient"},
 		"provider":    {"CreateProvider", "TombstoneProvider"},
-		"appointment": {"CreateAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		"appointment": {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 	}
 	for name, wantCmds := range vertexCmds {
 		vertex, ok := byName[name]
@@ -71,7 +71,7 @@ func TestPackage_DDLs(t *testing.T) {
 	aspectWriters := map[string][]string{
 		"patientDemographics": {"CreatePatient"},
 		"providerProfile":     {"CreateProvider"},
-		"appointmentSchedule": {"CreateAppointment"},
+		"appointmentSchedule": {"CreateAppointment", "RescheduleAppointment"},
 		"appointmentStatus":   {"CreateAppointment", "SetAppointmentStatus"},
 	}
 	for name, wantCmds := range aspectWriters {
@@ -131,7 +131,8 @@ func TestPackage_Permissions(t *testing.T) {
 	wantPerms := map[string]bool{
 		"CreatePatient": false, "TombstonePatient": false,
 		"CreateProvider": false, "TombstoneProvider": false,
-		"CreateAppointment": false, "SetAppointmentStatus": false, "TombstoneAppointment": false,
+		"CreateAppointment": false, "RescheduleAppointment": false,
+		"SetAppointmentStatus": false, "TombstoneAppointment": false,
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
 		t.Fatalf("expected %d permissions, got %d", len(wantPerms), got)
@@ -207,8 +208,10 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		"scheduled, confirmed, completed, cancelled, noShow", // status enum
 		`lnk.appointment.`,                      // link direction (appointment is source)
 		`.forPatient.patient.`,                  // forPatient link shape
-		`.withProvider.provider.`,               // withProvider link shape
-		`make_aspect_upsert(appt_key, "status"`, // SetAppointmentStatus upsert
+		`.withProvider.provider.`,                 // withProvider link shape
+		`make_aspect_upsert(appt_key, "status"`,   // SetAppointmentStatus upsert
+		`make_aspect_upsert(appt_key, "schedule"`, // RescheduleAppointment rewrites .schedule
+		`clinic.appointmentRescheduled`,           // RescheduleAppointment event
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {
 			t.Errorf("appointment script must reference %q", want)

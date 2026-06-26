@@ -3,7 +3,8 @@
 // Clinic app — book · my appointments · provider schedule (Increment A). Vanilla
 // JS, no build step. The Go server does all NATS I/O; this view reads
 // /api/providers + /api/patients + /api/appointments and submits CreatePatient /
-// CreateProvider / CreateAppointment / SetAppointmentStatus via /api/op.
+// CreateProvider / CreateAppointment / RescheduleAppointment / SetAppointmentStatus
+// via /api/op.
 
 const PATIENT_KEY = "clinic.patient";
 const state = {
@@ -14,6 +15,7 @@ const state = {
   patient: null, // the selected patient key (the trusted-tool context)
   view: "book",
   highlight: null,
+  rescheduling: null, // the appointment row being rescheduled (modal context)
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -288,6 +290,25 @@ function addMinutesRFC3339(localValue, minutes) {
   return d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
+// toLocalInputValue formats a stored RFC3339 (UTC) instant back into the local
+// "YYYY-MM-DDTHH:MM" a <input type=datetime-local> expects, for prefilling the
+// reschedule modal with the appointment's current time.
+function toLocalInputValue(rfc3339) {
+  const d = new Date(rfc3339);
+  if (isNaN(d)) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// durationMinutes derives the appointment length (minutes) from its start/end so
+// the reschedule modal can prefill the duration select.
+function durationMinutes(startsAt, endsAt) {
+  const s = new Date(startsAt);
+  const e = new Date(endsAt);
+  if (isNaN(s) || isNaN(e) || e <= s) return 30;
+  return Math.round((e - s) / 60000);
+}
+
 async function submitBook(ev) {
   ev.preventDefault();
   if (!state.patient) {
@@ -488,11 +509,22 @@ function renderApptCard(a, opts) {
   actions.append(badge);
 
   if (opts.cancelable && ACTIVE_STATUSES.includes(a.status)) {
+    const btns = document.createElement("span");
+    btns.className = "card-btns";
+
+    const reschedule = document.createElement("button");
+    reschedule.className = "ghost";
+    reschedule.textContent = "Reschedule";
+    reschedule.addEventListener("click", () => openReschedule(a));
+    btns.append(reschedule);
+
     const cancel = document.createElement("button");
     cancel.className = "ghost danger";
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => cancelAppt(a));
-    actions.append(cancel);
+    btns.append(cancel);
+
+    actions.append(btns);
   }
 
   card.append(title);
@@ -529,6 +561,73 @@ async function cancelAppt(a) {
   }
 }
 
+// ---- Reschedule (move an appointment to a new time) ----
+//
+// RescheduleAppointment rewrites the .schedule aspect with new times; the op
+// re-derives remindAt = startsAt − 24h so the ~24h reminder re-arms for a
+// not-yet-sent reminder. The existing reason is round-tripped (the op clears it if
+// omitted), and the provider / patient links + status are untouched server-side.
+
+function openReschedule(a) {
+  state.rescheduling = a;
+  const who = a.providerName || shortKey(a.providerKey);
+  $("#reschedule-context").textContent = `${who} · currently ${fmtWhen(a.startsAt, a.endsAt)}`;
+  $("#rs-startsAt").value = toLocalInputValue(a.startsAt);
+  const dur = durationMinutes(a.startsAt, a.endsAt);
+  const sel = $("#rs-duration");
+  sel.value = String(dur);
+  if (!sel.value) sel.value = "30"; // a non-standard length falls back to 30 min
+  $("#reschedule-overlay").hidden = false;
+  $("#rs-startsAt").focus();
+}
+
+function closeReschedule() {
+  $("#reschedule-overlay").hidden = true;
+  state.rescheduling = null;
+}
+
+async function submitReschedule(ev) {
+  ev.preventDefault();
+  const a = state.rescheduling;
+  if (!a) {
+    closeReschedule();
+    return;
+  }
+  const when = $("#rs-startsAt").value;
+  if (!when) {
+    toast("Pick a new date and time.", "err");
+    return;
+  }
+  const startsAt = toRFC3339(when);
+  const endsAt = addMinutesRFC3339(when, Number($("#rs-duration").value || 30));
+  if (!startsAt || !endsAt) {
+    toast("That date/time is not valid.", "err");
+    return;
+  }
+
+  const payload = { appointmentKey: a.appointmentKey, startsAt, endsAt };
+  if (a.reason) payload.reason = a.reason; // round-trip the existing reason (omitted → cleared)
+
+  const submit = $("#reschedule-submit");
+  submit.disabled = true;
+  try {
+    const reply = await submitOp("RescheduleAppointment", "appointment", payload, [a.appointmentKey]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not reschedule — " + msg, "err");
+      return;
+    }
+    state.highlight = a.appointmentKey;
+    closeReschedule();
+    toast("Appointment rescheduled.", "ok");
+    loadAppts();
+  } catch (e) {
+    toast("Could not reschedule: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 // ---- Tabs ----
 
 const VIEWS = ["book", "appts", "schedule"];
@@ -560,6 +659,12 @@ function init() {
     if (e.target === $("#patient-overlay")) closeNewPatient();
   });
   $("#patient-form").addEventListener("submit", submitNewPatient);
+
+  $("#reschedule-cancel").addEventListener("click", closeReschedule);
+  $("#reschedule-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#reschedule-overlay")) closeReschedule();
+  });
+  $("#reschedule-form").addEventListener("submit", submitReschedule);
 
   $("#provider").addEventListener("change", refreshBookEnabled);
   $("#add-provider-submit").addEventListener("click", submitAddProvider);

@@ -55,6 +55,9 @@ declares:
     - operationType: CreateAppointment
       scope: any
       grantsTo: [operator]
+    - operationType: RescheduleAppointment
+      scope: any
+      grantsTo: [operator]
     - operationType: SetAppointmentStatus
       scope: any
       grantsTo: [operator]

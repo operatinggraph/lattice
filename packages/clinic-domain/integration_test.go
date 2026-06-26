@@ -45,11 +45,11 @@ const (
 	clConsumerCapKey = "cap.identity." + clConsumerID
 )
 
-// clinicOps are the seven ops the staff actor needs.
+// clinicOps are the eight ops the staff actor needs.
 var clinicOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider",
-	"CreateAppointment", "SetAppointmentStatus", "TombstoneAppointment",
+	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment",
 }
 
 func clStaffCapDoc() *processor.CapabilityDoc {
@@ -263,6 +263,73 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 	if del, _ := status["isDeleted"].(bool); del {
 		t.Fatalf("status aspect should be alive after upsert; got isDeleted=%v", del)
 	}
+}
+
+// TestClinic_RescheduleAppointment proves the move-an-appointment path: a
+// RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt,
+// re-deriving remindAt = startsAt − 24h (so the clinic-reminders @at re-arms),
+// while leaving the .status aspect and the forPatient/withProvider links untouched.
+// A re-supplied reason is preserved; an omitted reason clears it; a non-Z offset is
+// normalized to canonical UTC; a tombstoned target is rejected.
+func TestClinic_RescheduleAppointment(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "reschedule")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0007", "Erin Mover")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0007", "Dr. Reyes", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0007", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z","reason":"Annual checkup"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// Reschedule to a new day, re-supplying the reason (the FE round-trips it). The
+	// startsAt is given with a +02:00 offset to prove canonical-UTC normalization.
+	clSubmit(t, ctx, conn, cp, cons, "resched0001", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","startsAt":"2026-07-12T18:00:00+02:00","endsAt":"2026-07-12T18:30:00+02:00","reason":"Annual checkup"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+
+	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
+	sd, _ := sched["data"].(map[string]any)
+	if sd["startsAt"] != "2026-07-12T16:00:00Z" || sd["endsAt"] != "2026-07-12T16:30:00Z" {
+		t.Fatalf("after reschedule, schedule times = %v, want startsAt 2026-07-12T16:00:00Z / endsAt 2026-07-12T16:30:00Z (UTC-normalized)", sched["data"])
+	}
+	// remindAt re-derived = new startsAt − 24h (so the @at reminder re-arms).
+	if sd["remindAt"] != "2026-07-11T16:00:00Z" {
+		t.Fatalf("after reschedule, remindAt = %v, want 2026-07-11T16:00:00Z (new startsAt − 24h)", sd["remindAt"])
+	}
+	if sd["reason"] != "Annual checkup" {
+		t.Fatalf("after reschedule, reason = %v, want preserved Annual checkup", sd["reason"])
+	}
+	if del, _ := sched["isDeleted"].(bool); del {
+		t.Fatalf("schedule aspect should be alive after reschedule; got isDeleted=%v", del)
+	}
+	// Status untouched (still scheduled) and the links still present.
+	if st, _ := clReadDoc(t, ctx, conn, apptKey+".status")["data"].(map[string]any); st["value"] != "scheduled" {
+		t.Fatalf("status = %v after reschedule, want scheduled (untouched)", st["value"])
+	}
+	forPatient := "lnk.appointment." + apptID + ".forPatient.patient." + patientKey[len("vtx.patient."):]
+	if clMissing(t, ctx, conn, forPatient) {
+		t.Fatalf("forPatient link should survive a reschedule")
+	}
+
+	// Reschedule again with NO reason → the reason is cleared.
+	clSubmit(t, ctx, conn, cp, cons, "resched0002", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","startsAt":"2026-07-13T09:00:00Z","endsAt":"2026-07-13T09:20:00Z"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+	sd2, _ := clReadDoc(t, ctx, conn, apptKey+".schedule")["data"].(map[string]any)
+	if _, present := sd2["reason"]; present {
+		t.Fatalf("an omitted reason should clear it; got reason=%v", sd2["reason"])
+	}
+	if sd2["startsAt"] != "2026-07-13T09:00:00Z" || sd2["remindAt"] != "2026-07-12T09:00:00Z" {
+		t.Fatalf("second reschedule schedule = %v, want startsAt 2026-07-13T09:00:00Z / remindAt 2026-07-12T09:00:00Z", sd2)
+	}
+
+	// A tombstoned appointment cannot be rescheduled.
+	clSubmit(t, ctx, conn, cp, cons, "tombappt0001", "TombstoneAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+	clSubmit(t, ctx, conn, cp, cons, "resched0003", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","startsAt":"2026-07-14T09:00:00Z","endsAt":"2026-07-14T09:20:00Z"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
 }
 
 // TestClinic_RejectsBadStatus proves the status enum guard.

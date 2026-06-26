@@ -134,6 +134,7 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .card .meta.reminder-sent { color: var(--green); }
 .card.past { opacity: 0.6; }
 .card-actions { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-btns { display: flex; align-items: center; gap: 8px; }
 
 .badge {
   display: inline-block;

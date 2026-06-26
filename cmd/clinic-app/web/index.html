@@ -137,6 +137,36 @@
     </div>
   </div>
 
+  <!-- Reschedule modal -->
+  <div id="reschedule-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="reschedule-title">
+      <h2 id="reschedule-title">Reschedule appointment</h2>
+      <p class="lead" id="reschedule-context">Pick a new date and time.</p>
+      <form id="reschedule-form">
+        <div class="field-row">
+          <div class="field">
+            <label for="rs-startsAt">New date &amp; time</label>
+            <input type="datetime-local" id="rs-startsAt" />
+            <p class="hint">Requested time — availability isn't enforced yet.</p>
+          </div>
+          <div class="field">
+            <label for="rs-duration">Duration</label>
+            <select id="rs-duration">
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="45">45 min</option>
+              <option value="60">60 min</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="reschedule-cancel" class="ghost">Cancel</button>
+          <button type="submit" id="reschedule-submit">Reschedule</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
 
   <script src="app.js"></script>

@@ -12,13 +12,14 @@
 //	lnk.appointment.<id>.forPatient.patient.<id>       (appointment → patient, later-arriving source)
 //	lnk.appointment.<id>.withProvider.provider.<id>    (appointment → provider, later-arriving source)
 //
-// Seven ops (all known-key-reads, no prefix scans):
+// Eight ops (all known-key-reads, no prefix scans):
 //
 //	CreatePatient / TombstonePatient
 //	CreateProvider / TombstoneProvider
 //	CreateAppointment (mints the appointment + .schedule + .status{scheduled} + both links, validating
-//	                   patient + provider alive + class) / SetAppointmentStatus (upsert .status) /
-//	                   TombstoneAppointment
+//	                   patient + provider alive + class) / RescheduleAppointment (rewrite .schedule with new
+//	                   times, re-deriving remindAt so the @at reminder re-arms) / SetAppointmentStatus
+//	                   (upsert .status) / TombstoneAppointment
 //
 // Two PROJECTION lenses are the P5 query surface a clinic FE reads (never Core
 // KV): clinicAppointments (one row per appointment, joined to patient + provider)

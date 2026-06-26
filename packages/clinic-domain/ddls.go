@@ -155,13 +155,16 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     appointmentVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 		Description: "Clinic appointment DDL. Vertex shape: vtx.appointment.<NanoID>, class=appointment, root data = " +
 			"{} (minimal, D5). CreateAppointment validates the patient (class=patient) + provider (class=provider) " +
 			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, remindAt, reason?} + " +
 			"the .status aspect {value: scheduled} + the forPatient link (appointment→patient) + the withProvider " +
 			"link (appointment→provider). Both links follow Contract #1 §1.1 (the later-arriving appointment is the " +
-			"source). SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, completed, " +
+			"source). RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt (re-deriving " +
+			"remindAt = startsAt − 24h so the clinic-reminders @at re-arms for a not-yet-sent reminder), leaving the " +
+			"links + status untouched; an omitted reason clears it (the caller carries the existing reason). " +
+			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, completed, " +
 			"cancelled, noShow}. TombstoneAppointment soft-deletes the appointment. NOTE (D6): this DDL records a " +
 			"REQUESTED time — it does NOT enforce slot-uniqueness, double-book rejection, or provider hours (the " +
 			"separate deferred temporal-availability item; Capability-KV §06 defers it).",
@@ -169,11 +172,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"patient":{"type":"string","description":"vtx.patient.<NanoID> the appointment is for (CreateAppointment; required, validated alive + class=patient)."},` +
 			`"provider":{"type":"string","description":"vtx.provider.<NanoID> the appointment is with (CreateAppointment; required, validated alive + class=provider)."},` +
-			`"startsAt":{"type":"string","description":"Appointment start, RFC3339 (CreateAppointment; required). Caller supplies canonical UTC."},` +
-			`"endsAt":{"type":"string","description":"Appointment end, RFC3339 (CreateAppointment; required). Caller supplies canonical UTC."},` +
-			`"reason":{"type":"string","description":"Visit reason / chief complaint (CreateAppointment; optional)."},` +
+			`"startsAt":{"type":"string","description":"Appointment start, RFC3339 (CreateAppointment / RescheduleAppointment; required). Caller supplies canonical UTC."},` +
+			`"endsAt":{"type":"string","description":"Appointment end, RFC3339 (CreateAppointment / RescheduleAppointment; required). Caller supplies canonical UTC."},` +
+			`"reason":{"type":"string","description":"Visit reason / chief complaint (CreateAppointment / RescheduleAppointment; optional — on RescheduleAppointment an omitted reason clears it)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
-			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (SetAppointmentStatus / TombstoneAppointment; required, validated alive)."},` +
+			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / TombstoneAppointment; required, validated alive)."},` +
 			`"status":{"type":"string","enum":["scheduled","confirmed","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
@@ -181,11 +184,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"patient":        "Full vtx.patient.<NanoID> key the appointment is for. CreateAppointment validates it is alive + class=patient and writes the forPatient link (appointment→patient). The caller MUST list this key in ContextHint.Reads.",
 			"provider":       "Full vtx.provider.<NanoID> key the appointment is with. CreateAppointment validates it is alive + class=provider and writes the withProvider link (appointment→provider). The caller MUST list this key in ContextHint.Reads.",
-			"startsAt":       "Appointment start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateAppointment; required).",
-			"endsAt":         "Appointment end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateAppointment; required).",
-			"reason":         "Optional visit reason / chief complaint. Stored on the .schedule aspect when present.",
+			"startsAt":       "Appointment start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateAppointment / RescheduleAppointment; required).",
+			"endsAt":         "Appointment end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateAppointment / RescheduleAppointment; required).",
+			"reason":         "Optional visit reason / chief complaint. Stored on the .schedule aspect when present (CreateAppointment / RescheduleAppointment; on RescheduleAppointment an omitted reason clears it).",
 			"appointmentId":  "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
-			"appointmentKey": "Full vtx.appointment.<NanoID> key of an existing appointment (SetAppointmentStatus validates it alive + class=appointment; TombstoneAppointment validates it alive).",
+			"appointmentKey": "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus validates it alive + class=appointment; TombstoneAppointment validates it alive).",
 			"status":         "New appointment status, one of {scheduled, confirmed, completed, cancelled, noShow} (SetAppointmentStatus; required).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -204,6 +207,20 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"scheduled} + the forPatient + withProvider links. Returns primaryKey (the appointment key). Rejects with " +
 					"ScriptError if the patient or provider is absent / dead / the wrong class. Does NOT check for slot " +
 					"conflicts (D6 — deferred).",
+			},
+			{
+				Name: "RescheduleAppointment — move an appointment to a new time",
+				Payload: map[string]any{
+					"appointmentKey": "vtx.appointment.<NanoID>",
+					"startsAt":       "2026-07-02T16:00:00Z",
+					"endsAt":         "2026-07-02T16:30:00Z",
+					"reason":         "Annual checkup",
+				},
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment, then rewrites the .schedule " +
+					"aspect {startsAt, endsAt, remindAt, reason?} with the new times — re-deriving remindAt = startsAt − 24h " +
+					"(canonical UTC) so the clinic-reminders @at re-arms for a not-yet-sent reminder. The forPatient / " +
+					"withProvider links + the .status aspect are untouched. An omitted reason clears it (the caller carries " +
+					"the existing reason). Returns primaryKey. Does NOT check slot conflicts (D6 — deferred).",
 			},
 			{
 				Name:    "SetAppointmentStatus — confirm an appointment",
@@ -286,11 +303,12 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     scheduleAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment"},
 		Description: "Appointment schedule aspect (clinic). Stored as vtx.appointment.<NanoID>.schedule (class " +
-			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?}. Non-sensitive. Written ONLY by CreateAppointment " +
-			"(whose appointment vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
-			"Declaration-only: no op handler. remindAt = startsAt − 24h is a precomputed reminder deadline the " +
+			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?}. Non-sensitive. Written by CreateAppointment " +
+			"(initial) and RescheduleAppointment (new times) — whose appointment vertexType DDL owns the script; this " +
+			"aspect-type DDL is the step-6 write gate. Declaration-only: no op handler. remindAt = startsAt − 24h is a " +
+			"precomputed reminder deadline the " +
 			"clinic-reminders package's convergence lens reads (it is not a caller input). The booking time is " +
 			"REQUESTED, not conflict-checked (D6 — deferred).",
 		Script: aspectDeclarationOnlyScript,
@@ -559,14 +577,16 @@ def execute(state, op):
     fail("provider DDL: unknown operationType: " + ot)
 `
 
-// appointmentDDLScript handles CreateAppointment + SetAppointmentStatus +
-// TombstoneAppointment. CreateAppointment validates BOTH endpoints (patient +
-// provider) alive + class, then atomically mints the appointment vertex + the
-// .schedule + .status{scheduled} aspects + the forPatient + withProvider links
-// (Contract #1 §1.1 — the later-arriving appointment is the source).
-// SetAppointmentStatus is an unconditioned upsert of the .status aspect (no
-// read-merge — status is its own aspect). It records a REQUESTED time and does
-// NOT enforce slot conflicts (D6 — deferred).
+// appointmentDDLScript handles CreateAppointment + RescheduleAppointment +
+// SetAppointmentStatus + TombstoneAppointment. CreateAppointment validates BOTH
+// endpoints (patient + provider) alive + class, then atomically mints the
+// appointment vertex + the .schedule + .status{scheduled} aspects + the forPatient
+// + withProvider links (Contract #1 §1.1 — the later-arriving appointment is the
+// source). RescheduleAppointment rewrites the .schedule aspect with new times
+// (re-deriving remindAt = startsAt − 24h), an unconditioned upsert that leaves the
+// links + status untouched. SetAppointmentStatus is an unconditioned upsert of the
+// .status aspect (no read-merge — status is its own aspect). The booking time is
+// REQUESTED, not slot-conflict-checked (D6 — deferred).
 const appointmentDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -727,6 +747,41 @@ def execute(state, op):
         ]
         events = [{"class": "clinic.appointmentCreated",
                    "data": {"appointmentKey": appt_key, "patient": patient, "provider": provider}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": appt_key}}
+
+    if ot == "RescheduleAppointment":
+        appt_key = required_string(p, "appointmentKey")
+        parts_of(appt_key, "appointmentKey", "appointment")
+        if not vertex_alive(state, appt_key):
+            fail("UnknownAppointment: " + appt_key)
+        cls = class_of(state, appt_key)
+        if cls != "appointment":
+            fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
+
+        # New times: normalize to canonical whole-second UTC (parse-validates the
+        # instants AND makes the convergence lens's lexical RFC3339 compares sound
+        # for any caller offset) — exactly the CreateAppointment idiom.
+        starts_at = time.rfc3339_utc(required_string(p, "startsAt"))
+        ends_at = time.rfc3339_utc(required_string(p, "endsAt"))
+        reason = optional_string(p, "reason")
+
+        # Re-derive remindAt = startsAt − 24h so the clinic-reminders convergence
+        # lens re-projects a fresh freshUntil and the @at temporal lane re-arms for
+        # the NEW time (for a not-yet-sent reminder). An already-sent reminder does
+        # NOT re-fire — the reminders gate keys on reminderSentAt = null (a bounded
+        # limitation; the remindedFor refinement is a tracked follow-up).
+        sched = {"startsAt": starts_at, "endsAt": ends_at,
+                 "remindAt": time.rfc3339_add(starts_at, "-24h")}
+        if reason != None:
+            sched["reason"] = reason
+
+        # Unconditioned upsert of the WHOLE .schedule aspect: the caller carries the
+        # existing reason (the FE round-trips it); an omitted reason clears it. The
+        # forPatient / withProvider links + the .status aspect are untouched.
+        mutations = [make_aspect_upsert(appt_key, "schedule", "appointmentSchedule", sched)]
+        events = [{"class": "clinic.appointmentRescheduled",
+                   "data": {"appointmentKey": appt_key, "startsAt": starts_at, "endsAt": ends_at}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 
