@@ -60,15 +60,16 @@ func unitLeaseApplicationsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "unitLeaseApplications",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateLeaseApplication"},
+		PermittedCommands: []string{"CreateLeaseApplication", "WithdrawLeaseApplication"},
 		Description: "Per-unit live-application index aspect (LoftSpace). Stored as vtx.unit.<NanoID>.leaseApplications " +
 			"= {applications: [{leaseApp: vtx.leaseapp.<id>, applicant: vtx.identity.<id>}, ...]}. Non-sensitive; " +
-			"attaches to a location unit, not an identity. Maintained ONLY by CreateLeaseApplication (whose leaseapp " +
-			"vertexType DDL owns the script): it reads the index on demand (kv.Read, §2.5 — NOT a declared read, since " +
-			"the unit may have no index yet), prunes tombstoned applications, REJECTS a second live application by the " +
-			"same applicant (DuplicateApplication; a unit accepts many different applicants), and rewrites the index " +
-			"OCC-guarded so concurrent applications fail closed. This aspect-type DDL exists so step-6's " +
-			"permittedCommands check, keyed on the mutation's class, admits the write. Declaration-only: no op handler.",
+			"attaches to a location unit, not an identity. Maintained by CreateLeaseApplication (reads the index on " +
+			"demand via kv.Read §2.5 — NOT a declared read, since the unit may have no index yet — prunes tombstoned " +
+			"applications, REJECTS a second live application by the same applicant (DuplicateApplication; a unit accepts " +
+			"many different applicants), and rewrites the index OCC-guarded so concurrent applications fail closed) and " +
+			"by WithdrawLeaseApplication (prunes the withdrawn application's entry, OCC-guarded the same way). Both " +
+			"scripts live on the leaseapp vertexType DDL; this aspect-type DDL exists so step-6's permittedCommands " +
+			"check, keyed on the mutation's class, admits the write. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{"applications":{"type":"array","items":{"type":"object","properties":{"leaseApp":{"type":"string"},"applicant":{"type":"string"}}}}}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -98,7 +99,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -110,7 +111,10 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"a unit-less application can never exist — there is no missing_unit gap). It optionally writes a .terms " +
 			"aspect {moveInDate, leaseTermMonths, requestedRent?} when moveInDate is supplied. SignLease writes the .signature aspect {signedAt (canonical-UTC " +
 			"RFC3339)} on the application (the fact that closes the missing_signature gap); it is the assignTask " +
-			"forOperation target the §10.8 playbook binds.",
+			"forOperation target the §10.8 playbook binds. WithdrawLeaseApplication{leaseAppKey, unit} soft-deletes the " +
+			"application (the convergence lens filters isDeleted → the row drops from My Applications) and prunes its " +
+			"entry from the unit's .leaseApplications index (OCC-guarded), verifying the unit via the appliesToUnit link " +
+			"— the complement to the duplicate-application guard so an applicant can back out + re-apply.",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication; required, validated alive)."},` +
@@ -125,12 +129,12 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the created or signed application (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
 			"applicant":       "Full vtx.identity.<NanoID> key of the applicant this application is for. CreateLeaseApplication requires it, validates the identity is alive, and writes the applicationFor link (the convergence link the lens walks).",
-			"unit":            "Full vtx.unit.<NanoID> key of the location-domain unit being applied for. CreateLeaseApplication requires it, validates it is alive, and writes the appliesToUnit link (leaseapp→unit). The convergence lens walks it and projects the unit's address / rent as informational columns. Required (no unit-less application).",
+			"unit":            "Full vtx.unit.<NanoID> key of the location-domain unit being applied for. CreateLeaseApplication requires it, validates it is alive, and writes the appliesToUnit link (leaseapp→unit). The convergence lens walks it and projects the unit's address / rent as informational columns. Required (no unit-less application). WithdrawLeaseApplication also requires it (verified via the appliesToUnit link) to prune the per-unit index.",
 			"moveInDate":      "Optional requested move-in date (RFC3339). When supplied, CreateLeaseApplication writes the .terms aspect {moveInDate, leaseTermMonths, requestedRent?} and requires leaseTermMonths. Informational application detail (not read by the convergence lens).",
 			"leaseTermMonths": "Requested lease term in months. Required when moveInDate is supplied; written to the .terms aspect.",
 			"requestedRent":   "Optional monthly rent the applicant offers. Written to the .terms aspect when supplied (only meaningful alongside moveInDate).",
 			"leaseAppId":      "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
-			"leaseAppKey":     "Full vtx.leaseapp.<NanoID> key of the application to sign. SignLease validates it is alive and writes the .signature aspect, flipping the missing_signature gap false.",
+			"leaseAppKey":     "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it. The caller lists it in ContextHint.Reads.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -148,6 +152,15 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Validates the application is alive. Writes the .signature aspect {signedAt: <op.submittedAt, canonical UTC>} " +
 					"on the application (root data stays {} — D5). Emits leaseapp.leaseSigned{leaseAppKey}. Returns primaryKey. " +
 					"Rejects a non-existent application or one already signed (the .signature CreateOnly guard).",
+			},
+			{
+				Name:    "WithdrawLeaseApplication — applicant cancels / backs out of an application",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "unit": "vtx.unit.<unitNanoID>"},
+				ExpectedOutcome: "Validates the application is alive and that unit is its appliesToUnit target (via the link). " +
+					"Soft-deletes the leaseapp (isDeleted=True, root stays {} — D5) so the convergence row deletes and it drops " +
+					"from My Applications, and prunes its entry from the unit's .leaseApplications index (OCC-guarded), freeing " +
+					"the applicant to re-apply to the same unit. Emits leaseapp.applicationWithdrawn{leaseAppKey, unit}. Returns " +
+					"primaryKey. Rejects a non-existent application or a unit that is not the application's unit (UnitMismatch).",
 			},
 		},
 	}

@@ -46,6 +46,15 @@ def make_aspect_upsert_occ(vtx_key, local_name, cls, data, expected_revision):
     m["expectedRevision"] = expected_revision
     return m
 
+def make_vtx_tombstone(key, cls):
+    # Soft-delete a vertex (isDeleted=True). UNCONDITIONED — a concurrent withdraw
+    # tombstones to the same state (idempotent), and nothing else writes the
+    # leaseapp ROOT (SignLease writes the .signature aspect, a different key). The
+    # convergence lens anchors on the leaseapp and filters isDeleted, so the row
+    # deletes (EmptyBehavior). Root data stays {} (D5).
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": True, "data": {}}}
+
 def bare_nanoid_or_mint(p, name):
     if not hasattr(p, name):
         return nanoid.new()
@@ -246,6 +255,60 @@ def execute(state, op):
         ]
         events = [{"class": "leaseapp.leaseSigned",
                    "data": {"leaseAppKey": app_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": app_key}}
+
+    if ot == "WithdrawLeaseApplication":
+        # Withdraw / cancel an application: soft-delete the leaseapp so it drops
+        # from My Applications (the convergence lens anchors on it + filters
+        # isDeleted → EmptyBehavior delete), and prune its entry from the unit's
+        # live-application index so it stops counting against the per-applicant
+        # duplicate guard. The complement to CreateLeaseApplication's guard — an
+        # applicant who applied to the wrong unit can back out + re-apply.
+        app_key = required_string(p, "leaseAppKey")
+        _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
+        if not vertex_alive(state, app_key):
+            fail("UnknownLeaseApplication: " + app_key)
+
+        # The unit the application applies to (the FE carries it on the row). Verify
+        # it is genuinely THIS application's unit via the deterministic appliesToUnit
+        # link (kv.Read) — mirroring clinic's withProvider check — so a wrong /
+        # fabricated unit can't be used to prune a different unit's index.
+        unit = required_string(p, "unit")
+        _, unit_id = parts_of(unit, "unit", "unit")
+        applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + unit_id
+        link = kv.Read(applies_to_lnk)
+        if link == None or link.isDeleted:
+            fail("UnitMismatch: " + unit + " is not the unit application " + app_key + " applies to")
+
+        # Tombstone the application. The applicationFor / appliesToUnit links are
+        # left in place (non-cascading tombstone, the clinic-domain precedent) — they
+        # dangle off a tombstoned anchor every reader filters.
+        mutations = [make_vtx_tombstone(app_key, "leaseapp")]
+
+        # Prune this application's entry from the unit's index. The duplicate guard
+        # ALSO self-prunes tombstoned entries on the next apply, but pruning here
+        # keeps the index clean immediately (it also feeds a future by-unit landlord
+        # lens). OCC-guarded on the snapshot revision so a concurrent
+        # CreateLeaseApplication for the same unit fails closed. Absent index →
+        # nothing to prune.
+        idx_key = unit + ".leaseApplications"
+        idx = kv.Read(idx_key)
+        if idx != None and not idx.isDeleted:
+            kept = []
+            apps_val = idx.data.get("applications")
+            if apps_val != None and type(apps_val) == type([]):
+                for entry in apps_val:
+                    if type(entry) != type({}):
+                        continue
+                    cand_key = entry.get("leaseApp")
+                    if cand_key == None or cand_key == app_key:
+                        continue
+                    kept.append({"leaseApp": cand_key, "applicant": entry.get("applicant")})
+            mutations.append(make_aspect_upsert_occ(unit, "leaseApplications", "unitLeaseApplications", {"applications": kept}, idx.revision))
+
+        events = [{"class": "leaseapp.applicationWithdrawn",
+                   "data": {"leaseAppKey": app_key, "unit": unit}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
 

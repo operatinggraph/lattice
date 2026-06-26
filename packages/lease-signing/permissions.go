@@ -52,6 +52,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit SignLease; the applicant signs via the ephemeral task grant (§10.7).",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "WithdrawLeaseApplication",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit WithdrawLeaseApplication (the applicant cancels / backs out of an application via the trusted-tool app).",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }
 

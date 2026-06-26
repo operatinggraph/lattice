@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.2.0
+version: 0.3.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -46,6 +46,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: SignLease
+      scope: any
+      grantsTo: [operator]
+    - operationType: WithdrawLeaseApplication
       scope: any
       grantsTo: [operator]
   weaverTargets:

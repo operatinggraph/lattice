@@ -583,7 +583,48 @@ function renderApplicationCard(row, highlight) {
   );
 
   card.append(head, banner, steps);
+
+  // Withdraw: back out of an application before approval (frees the applicant to
+  // re-apply to the same unit). Hidden once approved — the unit is being leased.
+  if (!row.applicantApproved && row.unitKey) {
+    const actions = document.createElement("div");
+    actions.className = "card-actions";
+    const wd = document.createElement("button");
+    wd.className = "ghost danger";
+    wd.textContent = "Withdraw application";
+    wd.addEventListener("click", () => withdrawApplication(row));
+    actions.append(wd);
+    card.append(actions);
+  }
   return card;
+}
+
+// withdrawApplication submits WithdrawLeaseApplication (tombstones the leaseapp +
+// prunes the unit's application index) after a confirm, then reloads — the
+// withdrawn application drops from the tracker and the unit frees for re-apply.
+async function withdrawApplication(row) {
+  if (!confirm("Withdraw this application? You'll be able to apply to this unit again.")) return;
+  try {
+    const reply = await api("/api/op", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationType: "WithdrawLeaseApplication",
+        class: "leaseapp",
+        reads: [row.entityKey],
+        payload: { leaseAppKey: row.entityKey, unit: row.unitKey },
+      }),
+    });
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not withdraw — " + msg, "err");
+      return;
+    }
+    toast("Application withdrawn.", "ok");
+    loadApplications();
+  } catch (e) {
+    toast("Could not withdraw: " + e.message, "err");
+  }
 }
 
 // ---- Tasks (inbox) ----

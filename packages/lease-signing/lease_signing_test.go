@@ -50,6 +50,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
 			{OperationType: "SignLease", Scope: "any"},
+			{OperationType: "WithdrawLeaseApplication", Scope: "any"},
 			{OperationType: "CreateLeaseServiceInstance", Scope: "any"},
 			{OperationType: "RecordLeaseServiceOutcome", Scope: "any"},
 			{OperationType: "RecordServiceDispatch", Scope: "any"},
@@ -1040,6 +1041,81 @@ func TestCreateLeaseApplication_TombstonedPriorApplication_AllowsReapply(t *test
 	if em["leaseApp"].(string) != second {
 		t.Fatalf("index entry = %v, want the live re-application %q", em, second)
 	}
+}
+
+// withdraw submits WithdrawLeaseApplication{leaseAppKey, unit} (class leaseapp,
+// reads=[leaseAppKey]) and asserts the outcome.
+func withdraw(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, unitKey string, want processor.MessageOutcome) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "WithdrawLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","unit":"` + unitKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// indexApps returns the unit's .leaseApplications index entries (nil if absent).
+func indexApps(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey string) []any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, unitKey+".leaseApplications")
+	data, _ := doc["data"].(map[string]any)
+	apps, _ := data["applications"].([]any)
+	return apps
+}
+
+// TestWithdrawLeaseApplication drives the real withdraw op: a wrong unit is
+// rejected (UnitMismatch) without tombstoning; the correct withdraw tombstones the
+// application AND prunes the unit index; the applicant can then re-apply to the
+// same unit; an unknown / already-withdrawn application is rejected.
+func TestWithdrawLeaseApplication(t *testing.T) {
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "withdraw")
+
+	applicant := seedApplicant(t, ctx, conn, "BBWDAPPAHJKMNPQRSTUV")
+	unit := seedUnit(t, ctx, conn, "BBWDUUUUHJKMNPQRSTUV")
+	otherUnit := seedUnit(t, ctx, conn, "BBWDOTHRHJKMNPQRSTUV")
+
+	first := applyToUnit(t, ctx, conn, cp, cons, "wdFirstAAAA", applicant, unit, processor.OutcomeAccepted)
+	if first == "" {
+		t.Fatalf("first application should commit")
+	}
+	if apps := indexApps(t, ctx, conn, unit); len(apps) != 1 {
+		t.Fatalf("index should hold 1 application before withdraw, got %v", apps)
+	}
+
+	// Wrong unit → UnitMismatch (rejected), and the application is NOT tombstoned.
+	withdraw(t, ctx, conn, cp, cons, "wdWrongUnit", first, otherUnit, processor.OutcomeRejected)
+	if d, _ := readDoc(t, ctx, conn, first)["isDeleted"].(bool); d {
+		t.Fatalf("a wrong-unit withdraw must NOT tombstone the application")
+	}
+
+	// Correct unit → Accepted: tombstoned + index pruned.
+	withdraw(t, ctx, conn, cp, cons, "wdCorrect01", first, unit, processor.OutcomeAccepted)
+	if d, _ := readDoc(t, ctx, conn, first)["isDeleted"].(bool); !d {
+		t.Fatalf("withdraw must tombstone the application")
+	}
+	if apps := indexApps(t, ctx, conn, unit); len(apps) != 0 {
+		t.Fatalf("index should be empty after withdraw (pruned), got %v", apps)
+	}
+
+	// Re-apply (same applicant, same unit) → Accepted: the withdrawal unblocked it.
+	second := applyToUnit(t, ctx, conn, cp, cons, "wdReapply01", applicant, unit, processor.OutcomeAccepted)
+	if second == "" || second == first {
+		t.Fatalf("re-application after withdrawal should commit to a new key; got %q (first=%q)", second, first)
+	}
+	if apps := indexApps(t, ctx, conn, unit); len(apps) != 1 {
+		t.Fatalf("index should hold exactly the re-application, got %v", apps)
+	}
+
+	// Double-withdraw the now-tombstoned first application → Rejected (UnknownLeaseApplication).
+	withdraw(t, ctx, conn, cp, cons, "wdDouble001", first, unit, processor.OutcomeRejected)
 }
 
 // TestSignLease_WritesSignatureAspect (test 8 — the assignTask gap closure; D5).
