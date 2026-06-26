@@ -19,6 +19,8 @@ const state = {
   schedView: "week", // Schedule tab calendar mode: "week" | "day"
   schedAnchor: null, // a Date within the visible period (null → current week/day)
   schedSelected: null, // appointmentKey shown in the Schedule detail panel
+  hoursDraft: [], // SetProviderHours windows being composed for the selected provider
+  hoursProvider: null, // the provider key the draft is scoped to (reset on change)
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -77,6 +79,20 @@ function rejectionMessage(reply) {
     return reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
   }
   return null;
+}
+
+// friendlyBookingRejection maps an op rejection message to operator-readable text
+// for the booking / reschedule paths: a double-book (SlotConflict) and an
+// out-of-availability-window booking (OutsideHours) are the two domain rejections
+// CreateAppointment / RescheduleAppointment raise. Anything else passes through.
+function friendlyBookingRejection(msg) {
+  if (msg.indexOf("SlotConflict") !== -1) {
+    return "That time overlaps another appointment for this provider. Pick another slot.";
+  }
+  if (msg.indexOf("OutsideHours") !== -1) {
+    return "That time is outside the provider's availability (UTC). Set hours under “Manage availability” or pick a time inside them.";
+  }
+  return msg;
 }
 
 // ---- Patient context (the trusted-tool switcher) ----
@@ -268,6 +284,119 @@ async function submitAddProvider() {
   }
 }
 
+// ---- Provider availability (SetProviderHours) ----
+//
+// The editor composes a UTC weekly-availability window list for the provider
+// selected in the Book form and submits SetProviderHours (which REPLACES the
+// provider's .hours aspect). Write-mostly: the currently-persisted windows are not
+// shown here (that needs a clinicProviders lens projection of .hours — a follow-up);
+// the draft list shows exactly what "Save availability" will set. Times are UTC to
+// match the op's UTC weekday / seconds-of-day enforcement.
+
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function hmsToSeconds(hhmm) {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm || "");
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 3600 + min * 60;
+}
+
+function secondsToHMS(sec) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec % 3600) / 60))}`;
+}
+
+// hoursDraftForSelectedProvider returns the Book form's selected provider key,
+// resetting the draft when the selection changed (so one provider's draft can't
+// be saved onto another).
+function hoursDraftForSelectedProvider() {
+  const prov = $("#provider").value;
+  if (prov !== state.hoursProvider) {
+    state.hoursProvider = prov;
+    state.hoursDraft = [];
+  }
+  return prov;
+}
+
+function renderHoursDraft() {
+  const list = $("#hours-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.hoursDraft.length) {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = "No windows added — saving clears this provider's hours (always available).";
+    list.appendChild(p);
+    return;
+  }
+  state.hoursDraft.forEach((w, i) => {
+    const row = document.createElement("div");
+    row.className = "hours-row";
+    const label = document.createElement("span");
+    label.textContent = `${DAY_NAMES[w.day]} ${secondsToHMS(w.openSec)}–${secondsToHMS(w.closeSec)} UTC`;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "ghost danger";
+    rm.textContent = "Remove";
+    rm.addEventListener("click", () => {
+      state.hoursDraft.splice(i, 1);
+      renderHoursDraft();
+    });
+    row.appendChild(label);
+    row.appendChild(rm);
+    list.appendChild(row);
+  });
+}
+
+function addHoursWindow() {
+  if (!hoursDraftForSelectedProvider()) {
+    toast("Select a provider first.", "err");
+    return;
+  }
+  const day = Number($("#hours-day").value);
+  const openSec = hmsToSeconds($("#hours-open").value);
+  const closeSec = hmsToSeconds($("#hours-close").value);
+  if (openSec === null || closeSec === null) {
+    toast("Enter valid open and close times.", "err");
+    return;
+  }
+  if (openSec >= closeSec) {
+    toast("Open time must be before close time.", "err");
+    return;
+  }
+  state.hoursDraft.push({ day, openSec, closeSec });
+  renderHoursDraft();
+}
+
+async function saveProviderHours() {
+  const provider = hoursDraftForSelectedProvider();
+  if (!provider) {
+    toast("Select a provider first.", "err");
+    return;
+  }
+  const btn = $("#hours-save");
+  btn.disabled = true;
+  try {
+    const reply = await submitOp("SetProviderHours", "provider",
+      { providerKey: provider, windows: state.hoursDraft }, [provider]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not set hours — " + msg, "err");
+      return;
+    }
+    const n = state.hoursDraft.length;
+    toast(n ? `Availability saved (${n} window${n === 1 ? "" : "s"}).` : "Availability cleared (always available).", "ok");
+    $("#manage-hours").open = false;
+  } catch (e) {
+    toast("Could not set hours: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---- Book ----
 
 function refreshBookEnabled() {
@@ -348,10 +477,7 @@ async function submitBook(ev) {
       [state.patient, provider, provider + ".bookings"]);
     const msg = rejectionMessage(reply);
     if (msg) {
-      const friendly = msg.indexOf("SlotConflict") === 0
-        ? "That time overlaps an existing appointment for this provider. Pick another slot."
-        : msg;
-      toast("Booking rejected — " + friendly, "err");
+      toast("Booking rejected — " + friendlyBookingRejection(msg), "err");
       return;
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
@@ -921,10 +1047,7 @@ async function submitReschedule(ev) {
       [a.appointmentKey, a.providerKey + ".bookings"]);
     const msg = rejectionMessage(reply);
     if (msg) {
-      const friendly = msg.indexOf("SlotConflict") !== -1
-        ? "That time overlaps another appointment for this provider. Pick another slot."
-        : msg;
-      toast("Could not reschedule — " + friendly, "err");
+      toast("Could not reschedule — " + friendlyBookingRejection(msg), "err");
       return;
     }
     state.highlight = a.appointmentKey;
@@ -976,8 +1099,24 @@ function init() {
   });
   $("#reschedule-form").addEventListener("submit", submitReschedule);
 
-  $("#provider").addEventListener("change", refreshBookEnabled);
+  $("#provider").addEventListener("change", () => {
+    refreshBookEnabled();
+    // A provider change invalidates the availability draft (it is scoped per
+    // provider); re-render so an open editor reflects the new provider's empty draft.
+    if ($("#manage-hours").open) {
+      hoursDraftForSelectedProvider();
+      renderHoursDraft();
+    }
+  });
   $("#add-provider-submit").addEventListener("click", submitAddProvider);
+  $("#manage-hours").addEventListener("toggle", () => {
+    if ($("#manage-hours").open) {
+      hoursDraftForSelectedProvider();
+      renderHoursDraft();
+    }
+  });
+  $("#hours-add").addEventListener("click", addHoursWindow);
+  $("#hours-save").addEventListener("click", saveProviderHours);
   $("#book-form").addEventListener("submit", submitBook);
 
   $("#tab-book").addEventListener("click", () => showView("book"));

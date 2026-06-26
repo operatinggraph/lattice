@@ -27,6 +27,7 @@ const (
 	scheduleAspectDDL     = "appointmentSchedule"
 	statusAspectDDL       = "appointmentStatus"
 	bookingsAspectDDL     = "providerBookings"
+	hoursAspectDDL        = "providerHours"
 )
 
 // DDLs returns the package's seven DDL meta-vertex declarations:
@@ -66,6 +67,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		scheduleAspectTypeDDL(),
 		statusAspectTypeDDL(),
 		bookingsAspectTypeDDL(),
+		hoursAspectTypeDDL(),
 	}
 }
 
@@ -118,11 +120,14 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     providerVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateProvider", "TombstoneProvider"},
+		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderHours"},
 		Description: "Clinic provider DDL. Vertex shape: vtx.provider.<NanoID>, class=provider, root data = {} " +
 			"(minimal, D5 — the data lives in the .profile aspect). CreateProvider mints the provider + writes the " +
 			".profile aspect {fullName (required), specialty (required), credentials?, bio?} atomically. " +
-			"TombstoneProvider soft-deletes one.",
+			"TombstoneProvider soft-deletes one. SetProviderHours upserts the .hours availability aspect " +
+			"{windows: [{day (0=Sun..6=Sat), openSec, closeSec}]} (UTC seconds-of-day) — the opt-in business-hours " +
+			"windows CreateAppointment / RescheduleAppointment enforce (an out-of-hours booking is rejected " +
+			"OutsideHours); an absent .hours aspect or windows=[] means the provider is unconstrained.",
 		Script: providerDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"fullName":{"type":"string","description":"The provider's full name (CreateProvider; required)."},` +
@@ -130,7 +135,8 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			`"credentials":{"type":"string","description":"Post-nominal credentials, e.g. MD (CreateProvider; optional)."},` +
 			`"bio":{"type":"string","description":"Short provider bio (CreateProvider; optional)."},` +
 			`"providerId":{"type":"string","description":"Optional bare NanoID for the new provider vertex (CreateProvider); absent → minted."},` +
-			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider; required, validated alive)."}},` +
+			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderHours; required, validated alive)."},` +
+			`"windows":{"type":"array","description":"Availability windows (SetProviderHours; required). Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.provider.<NanoID> the operation wrote."}}}`,
@@ -140,7 +146,8 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			"credentials": "Optional post-nominal credentials (e.g. MD, RN). Stored on the .profile aspect when present.",
 			"bio":         "Optional short provider bio. Stored on the .profile aspect when present.",
 			"providerId":  "Optional bare NanoID (no dots / key segments) for the new provider vertex. Absent → minted with nanoid.new().",
-			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex to tombstone (TombstoneProvider).",
+			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderHours sets its availability).",
+			"windows":     "Availability windows (SetProviderHours). A list of {day:0-6 (Sun=0), openSec, closeSec} where openSec/closeSec are UTC seconds-of-day (0..86400) and openSec<closeSec. An empty list clears the constraint (provider becomes unconstrained).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -148,6 +155,20 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology", "credentials": "MD"},
 				ExpectedOutcome: "Mints vtx.provider.<NanoID> (class=provider, root {}) + the .profile aspect " +
 					"{fullName, specialty, credentials}. Returns primaryKey (the provider key).",
+			},
+			{
+				Name: "SetProviderHours — Mon/Wed 09:00–17:00 UTC",
+				Payload: map[string]any{
+					"providerKey": "vtx.provider.<NanoID>",
+					"windows": []any{
+						map[string]any{"day": 1, "openSec": 32400, "closeSec": 61200},
+						map[string]any{"day": 3, "openSec": 32400, "closeSec": 61200},
+					},
+				},
+				ExpectedOutcome: "Validates the provider is alive + class=provider and each window (day 0-6, " +
+					"0<=openSec<closeSec<=86400), then upserts vtx.provider.<NanoID>.hours {windows}. Subsequent " +
+					"CreateAppointment / RescheduleAppointment reject a booking outside these windows (OutsideHours). " +
+					"windows=[] clears the constraint.",
 			},
 		},
 	}
@@ -172,7 +193,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"declared, OCC-snapshotted contextHint.reads key) and kv.Reads every live candidate's schedule + status, " +
 			"failing on an overlap with a still scheduled / confirmed appointment (reschedule skips the appointment being " +
 			"moved) (Capability-KV §06 — enforced via the op's own Starlark logic). RescheduleAppointment therefore " +
-			"requires the provider key. Provider availability windows are the next increment.",
+			"requires the provider key. Both also enforce the provider's opt-in availability windows (the .hours aspect, " +
+			"set by SetProviderHours): a booking outside a provider's business hours is rejected (OutsideHours); a provider " +
+			"with no .hours is unconstrained.",
 		Script: appointmentDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patient":{"type":"string","description":"vtx.patient.<NanoID> the appointment is for (CreateAppointment; required, validated alive + class=patient)."},` +
@@ -315,8 +338,8 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"aspect-type DDL is the step-6 write gate. Declaration-only: no op handler. remindAt = startsAt − 24h is a " +
 			"precomputed reminder deadline the " +
 			"clinic-reminders package's convergence lens reads (it is not a caller input). CreateAppointment " +
-			"conflict-checks the booking against the provider's .bookings index (double-book rejection); provider hours " +
-			"are the next increment.",
+			"conflict-checks the booking against the provider's .bookings index (double-book rejection) and the " +
+			"provider's opt-in .hours availability windows (OutsideHours rejection).",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"remindAt":{"type":"string"},"reason":{"type":"string"}}}`,
@@ -401,6 +424,43 @@ func bookingsAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "provider bookings index aspect",
 				Payload:         map[string]any{"appts": []any{"vtx.appointment.abc123", "vtx.appointment.def456"}},
 				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.bookings; initialized empty by CreateProvider, appended by CreateAppointment.",
+			},
+		},
+	}
+}
+
+// hoursAspectTypeDDL declares the .hours availability aspect (class providerHours)
+// — the step-6 write gate for SetProviderHours. Declaration-only (the script lives
+// on the provider vertexType DDL). NON-sensitive. The aspect is OPT-IN: a provider
+// with no .hours (or windows=[]) is unconstrained, so this is backward-compatible
+// with providers created before the capability shipped. CreateAppointment /
+// RescheduleAppointment read it on demand (kv.Read, §2.5 — NOT a declared/OCC read:
+// hours are config, not a concurrency serialization point) to reject a booking
+// outside a provider's windows (OutsideHours). Windows are UTC seconds-of-day so
+// the membership test is exact integer arithmetic over time.weekday /
+// time.seconds_of_day (no mixed-width "HH:MM" lexical hazard).
+func hoursAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     hoursAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetProviderHours"},
+		Description: "Provider availability-hours aspect (clinic). Stored as vtx.provider.<NanoID>.hours (class " +
+			"providerHours) = {windows: [{day (0=Sun..6=Sat), openSec, closeSec}]} where openSec/closeSec are UTC " +
+			"seconds-of-day (0..86400) with openSec<closeSec. Non-sensitive. OPT-IN: an absent aspect or windows=[] " +
+			"means the provider is unconstrained. Written ONLY by SetProviderHours (whose provider vertexType DDL " +
+			"owns the script); this aspect-type DDL is the step-6 write gate. Read on demand by CreateAppointment / " +
+			"RescheduleAppointment to enforce the windows (OutsideHours rejection). Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"windows":{"type":"array","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"windows": "Availability windows: a list of {day:0-6 (Sun=0), openSec, closeSec} (UTC seconds-of-day). An appointment is admitted only if its [start,end] falls inside one window on its weekday.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "provider hours aspect",
+				Payload:         map[string]any{"windows": []any{map[string]any{"day": 1, "openSec": 32400, "closeSec": 61200}}},
+				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.hours; written by SetProviderHours; enforced by CreateAppointment / RescheduleAppointment.",
 			},
 		},
 	}
@@ -528,6 +588,13 @@ def make_aspect(vtx_key, local_name, cls, data):
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
+def make_aspect_upsert(vtx_key, local_name, cls, data):
+    # Unconditioned update: create-if-absent / overwrite-if-present (the .hours
+    # aspect is opt-in, so SetProviderHours may be the first writer).
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
 def make_tombstone(key):
     return {"op": "tombstone", "key": key,
             "document": {"isDeleted": True, "data": {}}}
@@ -585,6 +652,28 @@ def vertex_alive(state, key):
         return False
     return True
 
+def class_of(state, key):
+    if key not in state:
+        return None
+    doc = state[key]
+    if doc == None or not hasattr(doc, "class"):
+        return None
+    return getattr(doc, "class")
+
+def require_int_in(w, name, lo, hi):
+    # Each window arrives as a dict (a nested JSON object). day / openSec / closeSec
+    # must be integers in range. Whole-number JSON decodes to a Starlark int.
+    if type(w) != type({}):
+        fail("InvalidArgument: windows: each window must be an object; got " + type(w))
+    v = w.get(name)
+    if v == None:
+        fail("InvalidArgument: windows: " + name + ": required")
+    if type(v) != type(0):
+        fail("InvalidArgument: windows: " + name + ": must be an integer; got " + type(v))
+    if v < lo or v > hi:
+        fail("InvalidArgument: windows: " + name + ": must be in [" + str(lo) + ", " + str(hi) + "]; got " + str(v))
+    return v
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -621,6 +710,38 @@ def execute(state, op):
             fail("UnknownProvider: " + prkey)
         mutations = [make_tombstone(prkey)]
         events = [{"class": "clinic.providerTombstoned", "data": {"providerKey": prkey}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": prkey}}
+
+    if ot == "SetProviderHours":
+        prkey = required_string(p, "providerKey")
+        parts_of(prkey, "providerKey", "provider")
+        if not vertex_alive(state, prkey):
+            fail("UnknownProvider: " + prkey)
+        cls = class_of(state, prkey)
+        if cls != "provider":
+            fail("WrongClass: providerKey: " + prkey + " has class " + str(cls) + ", required provider")
+        # windows is required (pass [] to clear the constraint). Each window is
+        # {day:0-6 (Sun=0), openSec, closeSec} in UTC seconds-of-day, openSec<closeSec.
+        if not hasattr(p, "windows"):
+            fail("InvalidArgument: windows: required (use [] to clear)")
+        windows = getattr(p, "windows")
+        if type(windows) != type([]):
+            fail("InvalidArgument: windows: must be a list")
+        clean = []
+        for w in windows:
+            day = require_int_in(w, "day", 0, 6)
+            open_sec = require_int_in(w, "openSec", 0, 86400)
+            close_sec = require_int_in(w, "closeSec", 0, 86400)
+            if not (open_sec < close_sec):
+                fail("InvalidArgument: windows: openSec must be < closeSec; got openSec=" + str(open_sec) + " closeSec=" + str(close_sec))
+            clean.append({"day": day, "openSec": open_sec, "closeSec": close_sec})
+        # Unconditioned upsert of the WHOLE .hours aspect (create-if-absent — it is
+        # opt-in, CreateProvider does not init it). No OCC: hours are config, not a
+        # concurrency serialization point (the .bookings index is the only one).
+        mutations = [make_aspect_upsert(prkey, "hours", "providerHours", {"windows": clean})]
+        events = [{"class": "clinic.providerHoursSet",
+                   "data": {"providerKey": prkey, "windowCount": len(clean)}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": prkey}}
 
@@ -743,6 +864,39 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+def enforce_hours(provider, starts_at, ends_at):
+    # Opt-in provider availability windows (Capability-KV §06 — the op's own Starlark
+    # logic). Read the provider's .hours aspect on demand (kv.Read, §2.5 — NOT a
+    # declared/OCC read: hours are config, not the booking serialization point). An
+    # absent / deleted aspect or windows=[] means UNCONSTRAINED (backward-compatible
+    # with providers created before this capability). Otherwise the appointment's
+    # [start, end] must sit inside ONE window on its UTC weekday. Times are exact
+    # integers (time.weekday 0=Sun..6=Sat, time.seconds_of_day 0..86399) so the
+    # membership test is integer arithmetic — no mixed-width string-compare hazard.
+    hours = kv.Read(provider + ".hours")
+    if hours == None or hours.isDeleted:
+        return
+    windows = hours.data.get("windows")
+    if windows == None or type(windows) != type([]) or len(windows) == 0:
+        return
+    sw = time.weekday(starts_at)
+    ew = time.weekday(ends_at)
+    ss = time.seconds_of_day(starts_at)
+    es = time.seconds_of_day(ends_at)
+    if sw != ew:
+        fail("OutsideHours: appointment spans more than one UTC day (start weekday " + str(sw) + ", end weekday " + str(ew) + "); book within a single availability window")
+    for w in windows:
+        if type(w) != type({}):
+            continue
+        d = w.get("day")
+        o = w.get("openSec")
+        c = w.get("closeSec")
+        if d == None or o == None or c == None:
+            continue
+        if d == sw and o <= ss and es <= c:
+            return
+    fail("OutsideHours: provider " + provider + " is not available at the requested time (UTC weekday " + str(sw) + ", " + str(ss) + "s-" + str(es) + "s of day); no matching availability window")
+
 APPOINTMENT_STATUSES = ["scheduled", "confirmed", "completed", "cancelled", "noShow"]
 
 def required_status(p):
@@ -778,6 +932,10 @@ def execute(state, op):
         # compare lexically == chronologically.
         if not (starts_at < ends_at):
             fail("InvalidArgument: endsAt: must be strictly after startsAt; got startsAt=" + starts_at + " endsAt=" + ends_at)
+
+        # Provider availability windows (opt-in; OutsideHours if the booking falls
+        # outside the provider's .hours). Checked before the double-book fan-out.
+        enforce_hours(provider, starts_at, ends_at)
 
         appt_id = bare_nanoid_or_mint(p, "appointmentId")
         appt_key = "vtx.appointment." + appt_id
@@ -911,6 +1069,10 @@ def execute(state, op):
         # original reschedule lacked this guard).
         if not (starts_at < ends_at):
             fail("InvalidArgument: endsAt: must be strictly after startsAt; got startsAt=" + starts_at + " endsAt=" + ends_at)
+
+        # Provider availability windows (opt-in; OutsideHours if the new time falls
+        # outside the provider's .hours) — the move must land inside business hours too.
+        enforce_hours(provider, starts_at, ends_at)
 
         # Double-book detection for the MOVE: the new interval must not overlap any
         # OTHER live, non-terminal appointment of this provider — the appointment

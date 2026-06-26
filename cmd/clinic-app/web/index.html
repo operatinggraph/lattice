@@ -54,12 +54,44 @@
               </div>
               <button type="button" id="add-provider-submit">Add provider</button>
             </details>
+            <details class="inline-add" id="manage-hours">
+              <summary>🕑 Manage availability (UTC)</summary>
+              <p class="hint">Set the selected provider's bookable hours, in UTC. Bookings outside these windows are rejected. No windows = always available.</p>
+              <div id="hours-list" class="hours-list" aria-live="polite"></div>
+              <div class="field-row">
+                <div class="field">
+                  <label for="hours-day">Day</label>
+                  <select id="hours-day">
+                    <option value="1">Monday</option>
+                    <option value="2">Tuesday</option>
+                    <option value="3">Wednesday</option>
+                    <option value="4">Thursday</option>
+                    <option value="5">Friday</option>
+                    <option value="6">Saturday</option>
+                    <option value="0">Sunday</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="hours-open">Open</label>
+                  <input type="time" id="hours-open" value="09:00" />
+                </div>
+                <div class="field">
+                  <label for="hours-close">Close</label>
+                  <input type="time" id="hours-close" value="17:00" />
+                </div>
+                <div class="field hours-add-field">
+                  <label>&nbsp;</label>
+                  <button type="button" id="hours-add" class="ghost">＋ Add window</button>
+                </div>
+              </div>
+              <button type="button" id="hours-save">Save availability</button>
+            </details>
           </div>
           <div class="field-row">
             <div class="field">
               <label for="startsAt">Date &amp; time</label>
               <input type="datetime-local" id="startsAt" />
-              <p class="hint">Double-booking this provider is rejected; provider hours aren't enforced yet.</p>
+              <p class="hint">Double-booking this provider is rejected, and bookings outside the provider's availability hours (if set, in UTC) are rejected.</p>
             </div>
             <div class="field">
               <label for="duration">Duration</label>

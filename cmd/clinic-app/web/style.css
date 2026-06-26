@@ -194,6 +194,18 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .inline-add[open] summary { margin-bottom: 12px; color: var(--text); }
 .inline-add .field:last-of-type { margin-bottom: 12px; }
 
+/* Availability (SetProviderHours) editor */
+.hours-add-field { flex: 0 0 auto; display: flex; flex-direction: column; justify-content: flex-end; }
+.hours-list { margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px; }
+.hours-list .muted { margin: 0; font-size: 13px; color: var(--text-dim); }
+.hours-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); font-size: 13px;
+}
+button.ghost.danger { color: var(--red, #d9534f); border-color: var(--red, #d9534f); }
+button.ghost.danger:hover { background: var(--red, #d9534f); color: #fff; }
+
 /* Modal (new patient) */
 .overlay {
   position: fixed;

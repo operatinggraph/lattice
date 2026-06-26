@@ -192,6 +192,17 @@ func cryptoModule() *starlarkstruct.Struct {
 // `validUntil = completedAt + window`); the result is whole-second UTC RFC3339,
 // directly comparable against `$now` by the same lexical rule.
 //
+//   - time.weekday(s) → int 0..6, the UTC weekday of s (Sunday=0 … Saturday=6,
+//     matching Go's time.Weekday). Lets an op test "what day of the week is this
+//     instant" without a clock — e.g. provider-availability windows.
+//   - time.seconds_of_day(s) → int 0..86399, the UTC seconds-since-midnight of s
+//     (h*3600 + m*60 + sec). The time-of-day companion to weekday; integers
+//     compare exactly (no mixed-width "HH:MM" lexical-prefix hazard).
+//
+// Both are pure too: weekday / seconds_of_day are a function of the instant only,
+// taken in UTC (the host zone is never consulted), so a replayed operation
+// reproduces byte-identical output.
+//
 // A malformed input raises a Starlark error; CreateTask surfaces it as a
 // structured ScriptError ("InvalidArgument: expiresAt: ...").
 func timeModule() *starlarkstruct.Struct {
@@ -237,9 +248,42 @@ func timeModule() *starlarkstruct.Struct {
 		return starlarklib.String(t.Add(d).UTC().Format(time.RFC3339)), nil
 	})
 
+	weekdayFn := starlarklib.NewBuiltin("weekday", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+		if len(args) != 1 || len(kwargs) != 0 {
+			return nil, errBuiltin("time.weekday(s) takes exactly 1 positional argument")
+		}
+		s, ok := args[0].(starlarklib.String)
+		if !ok {
+			return nil, errBuiltin("time.weekday: argument must be a string, got " + args[0].Type())
+		}
+		t, err := time.Parse(time.RFC3339Nano, string(s))
+		if err != nil {
+			return nil, errBuiltin("InvalidArgument: not a valid RFC3339 timestamp: " + string(s))
+		}
+		return starlarklib.MakeInt(int(t.UTC().Weekday())), nil
+	})
+
+	secondsOfDayFn := starlarklib.NewBuiltin("seconds_of_day", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+		if len(args) != 1 || len(kwargs) != 0 {
+			return nil, errBuiltin("time.seconds_of_day(s) takes exactly 1 positional argument")
+		}
+		s, ok := args[0].(starlarklib.String)
+		if !ok {
+			return nil, errBuiltin("time.seconds_of_day: argument must be a string, got " + args[0].Type())
+		}
+		t, err := time.Parse(time.RFC3339Nano, string(s))
+		if err != nil {
+			return nil, errBuiltin("InvalidArgument: not a valid RFC3339 timestamp: " + string(s))
+		}
+		u := t.UTC()
+		return starlarklib.MakeInt(u.Hour()*3600 + u.Minute()*60 + u.Second()), nil
+	})
+
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlarklib.StringDict{
-		"rfc3339_utc": rfc3339UTCFn,
-		"rfc3339_add": rfc3339AddFn,
+		"rfc3339_utc":    rfc3339UTCFn,
+		"rfc3339_add":    rfc3339AddFn,
+		"weekday":        weekdayFn,
+		"seconds_of_day": secondsOfDayFn,
 	})
 }
 

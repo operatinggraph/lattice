@@ -45,10 +45,10 @@ const (
 	clConsumerCapKey = "cap.identity." + clConsumerID
 )
 
-// clinicOps are the eight ops the staff actor needs.
+// clinicOps are the nine ops the staff actor needs.
 var clinicOps = []string{
 	"CreatePatient", "TombstonePatient",
-	"CreateProvider", "TombstoneProvider",
+	"CreateProvider", "TombstoneProvider", "SetProviderHours",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment",
 }
 
@@ -456,6 +456,88 @@ func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
 	clSubmit(t, ctx, conn, cp, cons, "rccancel01", "SetAppointmentStatus", "appointment",
 		`{"appointmentKey":"`+a1+`","status":"cancelled"}`, []string{a1}, processor.OutcomeAccepted)
 	resched("rcres0008", a2, "2026-09-01T10:00:00Z", "2026-09-01T10:30:00Z", processor.OutcomeAccepted)
+}
+
+// TestClinic_ProviderHoursEnforced proves Increment 2b: a provider's opt-in
+// availability windows (the .hours aspect, set by SetProviderHours) gate
+// CreateAppointment + RescheduleAppointment. A booking outside the windows is
+// rejected (OutsideHours); inside is accepted; a provider with no .hours is
+// unconstrained; windows=[] clears the constraint; and SetProviderHours validates
+// its windows. Weekdays (UTC): 2026-06-28=Sun, 06-29=Mon, 07-01=Wed, 07-04=Sat.
+func TestClinic_ProviderHoursEnforced(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "provider-hours")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "phpat0001", "Holly Hours")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "phprv0001", "Dr. Mon", "Cardiology")
+	bk := providerKey + ".bookings"
+
+	// Set Mon(1) + Wed(3) 09:00–17:00 UTC (32400–61200 seconds-of-day).
+	clSubmit(t, ctx, conn, cp, cons, "phhours001", "SetProviderHours", "provider",
+		`{"providerKey":"`+providerKey+`","windows":[{"day":1,"openSec":32400,"closeSec":61200},{"day":3,"openSec":32400,"closeSec":61200}]}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+
+	// The .hours aspect landed with both windows.
+	hours := clReadDoc(t, ctx, conn, providerKey+".hours")
+	if hours["class"] != "providerHours" {
+		t.Fatalf("hours class = %v, want providerHours", hours["class"])
+	}
+	if wd, _ := hours["data"].(map[string]any); wd["windows"] == nil {
+		t.Fatalf("hours windows missing: %v", hours["data"])
+	} else if w, _ := wd["windows"].([]any); len(w) != 2 {
+		t.Fatalf("hours windows = %v, want 2", wd["windows"])
+	}
+
+	mkAppt := func(label, start, end string, want processor.MessageOutcome) string {
+		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
+			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
+			[]string{patientKey, providerKey, bk}, want)
+	}
+
+	// Monday 10:00–10:30 — inside the window → accepted.
+	a1 := mkAppt("phappt0001", "2026-06-29T10:00:00Z", "2026-06-29T10:30:00Z", processor.OutcomeAccepted)
+	// Monday 08:00–08:30 — before open (32400) → OutsideHours rejected.
+	mkAppt("phappt0002", "2026-06-29T08:00:00Z", "2026-06-29T08:30:00Z", processor.OutcomeRejected)
+	// Monday 16:30–17:30 — ends after close (61200) → rejected.
+	mkAppt("phappt0003", "2026-06-29T16:30:00Z", "2026-06-29T17:30:00Z", processor.OutcomeRejected)
+	// Monday 16:30–17:00 — ends EXACTLY at close (boundary inclusive) → accepted.
+	mkAppt("phappt0004", "2026-06-29T16:30:00Z", "2026-06-29T17:00:00Z", processor.OutcomeAccepted)
+	// Wednesday 09:00–09:30 — starts EXACTLY at open (boundary inclusive) → accepted.
+	mkAppt("phappt0005", "2026-07-01T09:00:00Z", "2026-07-01T09:30:00Z", processor.OutcomeAccepted)
+	// Sunday 10:00–10:30 — no window that day → OutsideHours rejected.
+	mkAppt("phappt0006", "2026-06-28T10:00:00Z", "2026-06-28T10:30:00Z", processor.OutcomeRejected)
+
+	// A reschedule must also honour the windows: move a1 (Mon, in-hours) to Sunday
+	// 10:00 → rejected; to Wednesday 10:00 (in-hours) → accepted.
+	a1Key := "vtx.appointment." + a1
+	resched := func(label, start, end string, want processor.MessageOutcome) {
+		clSubmit(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
+			`{"appointmentKey":"`+a1Key+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
+			[]string{a1Key, bk}, want)
+	}
+	resched("phres0001", "2026-06-28T10:00:00Z", "2026-06-28T10:30:00Z", processor.OutcomeRejected)
+	resched("phres0002", "2026-07-01T10:00:00Z", "2026-07-01T10:30:00Z", processor.OutcomeAccepted)
+
+	// A DIFFERENT provider with NO .hours is unconstrained — a Sunday booking is fine.
+	freeProvider := createProvider(t, ctx, conn, cp, cons, "phprv0002", "Dr. Always", "GeneralPractice")
+	clSubmit(t, ctx, conn, cp, cons, "phappt0007", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+freeProvider+`","startsAt":"2026-06-28T03:00:00Z","endsAt":"2026-06-28T03:30:00Z"}`,
+		[]string{patientKey, freeProvider, freeProvider + ".bookings"}, processor.OutcomeAccepted)
+
+	// Clearing the constraint (windows=[]) makes the original provider unconstrained:
+	// a Sunday booking is now accepted.
+	clSubmit(t, ctx, conn, cp, cons, "phhours002", "SetProviderHours", "provider",
+		`{"providerKey":"`+providerKey+`","windows":[]}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+	mkAppt("phappt0008", "2026-06-28T20:00:00Z", "2026-06-28T20:30:00Z", processor.OutcomeAccepted)
+
+	// SetProviderHours validation: day out of range (7) and openSec>=closeSec → rejected.
+	clSubmit(t, ctx, conn, cp, cons, "phbad0001", "SetProviderHours", "provider",
+		`{"providerKey":"`+providerKey+`","windows":[{"day":7,"openSec":32400,"closeSec":61200}]}`,
+		[]string{providerKey}, processor.OutcomeRejected)
+	clSubmit(t, ctx, conn, cp, cons, "phbad0002", "SetProviderHours", "provider",
+		`{"providerKey":"`+providerKey+`","windows":[{"day":1,"openSec":61200,"closeSec":32400}]}`,
+		[]string{providerKey}, processor.OutcomeRejected)
 }
 
 // TestClinic_RejectsBadStatus proves the status enum guard.

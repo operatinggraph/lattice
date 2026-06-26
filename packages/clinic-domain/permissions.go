@@ -20,6 +20,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		mk("TombstonePatient"),
 		mk("CreateProvider"),
 		mk("TombstoneProvider"),
+		mk("SetProviderHours"),
 		mk("CreateAppointment"),
 		mk("RescheduleAppointment"),
 		mk("SetAppointmentStatus"),

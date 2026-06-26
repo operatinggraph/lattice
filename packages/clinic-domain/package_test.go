@@ -23,14 +23,14 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the eight DDLs: three vertexType owners (patient,
-// provider, appointment) and five aspectType step-6 gates. The aspect DDLs MUST
+// TestPackage_DDLs pins the nine DDLs: three vertexType owners (patient,
+// provider, appointment) and six aspectType step-6 gates. The aspect DDLs MUST
 // be NON-sensitive (they attach to patient/provider/appointment vertices, not an
 // identity — a sensitive aspect there would trip step-6's sensitiveAspectScope),
 // and each names ONLY its writer op(s) in permittedCommands.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 8 {
-		t.Fatalf("expected 8 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 9 {
+		t.Fatalf("expected 9 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -40,7 +40,7 @@ func TestPackage_DDLs(t *testing.T) {
 
 	vertexCmds := map[string][]string{
 		"patient":     {"CreatePatient", "TombstonePatient"},
-		"provider":    {"CreateProvider", "TombstoneProvider"},
+		"provider":    {"CreateProvider", "TombstoneProvider", "SetProviderHours"},
 		"appointment": {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 	}
 	for name, wantCmds := range vertexCmds {
@@ -74,6 +74,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"appointmentSchedule": {"CreateAppointment", "RescheduleAppointment"},
 		"appointmentStatus":   {"CreateAppointment", "SetAppointmentStatus"},
 		"providerBookings":    {"CreateProvider", "CreateAppointment", "RescheduleAppointment"},
+		"providerHours":       {"SetProviderHours"},
 	}
 	for name, wantCmds := range aspectWriters {
 		asp, ok := byName[name]
@@ -126,12 +127,12 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins all seven ops granted to operator (scope any) and
-// nothing else, plus the two projection lenses and no package dependency.
+// TestPackage_Permissions pins all nine ops granted to operator (scope any) and
+// nothing else, plus the three projection lenses and no package dependency.
 func TestPackage_Permissions(t *testing.T) {
 	wantPerms := map[string]bool{
 		"CreatePatient": false, "TombstonePatient": false,
-		"CreateProvider": false, "TombstoneProvider": false,
+		"CreateProvider": false, "TombstoneProvider": false, "SetProviderHours": false,
 		"CreateAppointment": false, "RescheduleAppointment": false,
 		"SetAppointmentStatus": false, "TombstoneAppointment": false,
 	}
@@ -207,15 +208,32 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`require_live_typed`, // endpoint alive + class
 		`WrongClass`,         // endpoint-class guard
 		"scheduled, confirmed, completed, cancelled, noShow", // status enum
-		`lnk.appointment.`,                        // link direction (appointment is source)
-		`.forPatient.patient.`,                    // forPatient link shape
-		`.withProvider.provider.`,                 // withProvider link shape
-		`make_aspect_upsert(appt_key, "status"`,   // SetAppointmentStatus upsert
-		`make_aspect_upsert(appt_key, "schedule"`, // RescheduleAppointment rewrites .schedule
-		`clinic.appointmentRescheduled`,           // RescheduleAppointment event
+		`lnk.appointment.`,                            // link direction (appointment is source)
+		`.forPatient.patient.`,                        // forPatient link shape
+		`.withProvider.provider.`,                     // withProvider link shape
+		`make_aspect_upsert(appt_key, "status"`,       // SetAppointmentStatus upsert
+		`make_aspect_upsert(appt_key, "schedule"`,     // RescheduleAppointment rewrites .schedule
+		`clinic.appointmentRescheduled`,               // RescheduleAppointment event
+		`enforce_hours(provider, starts_at, ends_at)`, // both ops enforce provider hours
+		`OutsideHours`,                                // the availability-window rejection
+		`time.weekday(starts_at)`,                     // weekday membership
+		`time.seconds_of_day(starts_at)`,              // time-of-day membership
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {
 			t.Errorf("appointment script must reference %q", want)
+		}
+	}
+
+	// The provider script owns SetProviderHours (the .hours writer) + its validation.
+	for _, want := range []string{
+		`SetProviderHours`,                       // op handler
+		`make_aspect_upsert(prkey, "hours"`,      // upserts the .hours aspect
+		`require_int_in(w, "day", 0, 6)`,         // weekday range validation
+		`require_int_in(w, "openSec", 0, 86400)`, // seconds-of-day range validation
+		`clinic.providerHoursSet`,                // event
+	} {
+		if !strings.Contains(providerDDLScript, want) {
+			t.Errorf("provider script must reference %q", want)
 		}
 	}
 }

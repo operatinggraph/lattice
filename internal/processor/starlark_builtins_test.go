@@ -177,6 +177,117 @@ func TestTimeRFC3339Add_WrongArity(t *testing.T) {
 	}
 }
 
+// --- time.weekday ---
+
+// TestTimeWeekday verifies the UTC weekday (Sunday=0 … Saturday=6) of an
+// instant, including offset normalization (the day is taken in UTC, not the
+// input's local zone).
+func TestTimeWeekday(t *testing.T) {
+	mod := timeModule()
+	fn, err := mod.Attr("weekday")
+	if err != nil || fn == nil {
+		t.Fatalf("time.weekday attr: %v", err)
+	}
+	thread := &starlarklib.Thread{Name: "test"}
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"2026-06-28T12:00:00Z", 0}, // Sunday
+		{"2026-06-29T12:00:00Z", 1}, // Monday
+		{"2026-07-01T12:00:00Z", 3}, // Wednesday
+		{"2026-07-04T12:00:00Z", 6}, // Saturday
+		// 2026-06-29T01:00:00+09:00 == 2026-06-28T16:00:00Z → Sunday (UTC), not Monday.
+		{"2026-06-29T01:00:00+09:00", 0},
+	}
+	for _, tc := range cases {
+		res, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String(tc.in)}, nil)
+		if err != nil {
+			t.Fatalf("time.weekday(%q): %v", tc.in, err)
+		}
+		got, ok := res.(starlarklib.Int)
+		if !ok {
+			t.Fatalf("time.weekday(%q) returned %s, want int", tc.in, res.Type())
+		}
+		gi, _ := got.Int64()
+		if int(gi) != tc.want {
+			t.Fatalf("time.weekday(%q) = %d, want %d", tc.in, gi, tc.want)
+		}
+	}
+}
+
+func TestTimeWeekday_Malformed(t *testing.T) {
+	mod := timeModule()
+	fn, _ := mod.Attr("weekday")
+	thread := &starlarklib.Thread{Name: "test"}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String("not-a-time")}, nil); err == nil {
+		t.Fatal("time.weekday(garbage) expected error")
+	} else if !strings.Contains(err.Error(), "InvalidArgument") {
+		t.Fatalf("time.weekday error = %q, want InvalidArgument", err.Error())
+	}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{}, nil); err == nil {
+		t.Fatal("time.weekday() with 0 args expected error")
+	}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.MakeInt(1)}, nil); err == nil {
+		t.Fatal("time.weekday(int) expected error")
+	}
+}
+
+// --- time.seconds_of_day ---
+
+// TestTimeSecondsOfDay verifies UTC seconds-since-midnight, including offset
+// normalization (the time-of-day is taken in UTC).
+func TestTimeSecondsOfDay(t *testing.T) {
+	mod := timeModule()
+	fn, err := mod.Attr("seconds_of_day")
+	if err != nil || fn == nil {
+		t.Fatalf("time.seconds_of_day attr: %v", err)
+	}
+	thread := &starlarklib.Thread{Name: "test"}
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"2026-06-28T00:00:00Z", 0},
+		{"2026-06-28T09:00:00Z", 32400},      // 9*3600
+		{"2026-06-28T17:00:00Z", 61200},      // 17*3600
+		{"2026-06-28T23:59:59Z", 86399},      // last second of the day
+		{"2026-06-28T09:30:15Z", 34215},      // 9*3600+30*60+15
+		{"2026-06-28T18:00:00+09:00", 32400}, // == 09:00:00Z
+	}
+	for _, tc := range cases {
+		res, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String(tc.in)}, nil)
+		if err != nil {
+			t.Fatalf("time.seconds_of_day(%q): %v", tc.in, err)
+		}
+		got, ok := res.(starlarklib.Int)
+		if !ok {
+			t.Fatalf("time.seconds_of_day(%q) returned %s, want int", tc.in, res.Type())
+		}
+		gi, _ := got.Int64()
+		if int(gi) != tc.want {
+			t.Fatalf("time.seconds_of_day(%q) = %d, want %d", tc.in, gi, tc.want)
+		}
+	}
+}
+
+func TestTimeSecondsOfDay_Malformed(t *testing.T) {
+	mod := timeModule()
+	fn, _ := mod.Attr("seconds_of_day")
+	thread := &starlarklib.Thread{Name: "test"}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.String("nope")}, nil); err == nil {
+		t.Fatal("time.seconds_of_day(garbage) expected error")
+	} else if !strings.Contains(err.Error(), "InvalidArgument") {
+		t.Fatalf("time.seconds_of_day error = %q, want InvalidArgument", err.Error())
+	}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{}, nil); err == nil {
+		t.Fatal("time.seconds_of_day() with 0 args expected error")
+	}
+	if _, err := starlarklib.Call(thread, fn, starlarklib.Tuple{starlarklib.MakeInt(1)}, nil); err == nil {
+		t.Fatal("time.seconds_of_day(int) expected error")
+	}
+}
+
 // --- crypto.sha256 ---
 
 // TestCryptoSha256_KnownDigest verifies that crypto.sha256("") equals the

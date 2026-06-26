@@ -12,10 +12,10 @@
 //	lnk.appointment.<id>.forPatient.patient.<id>       (appointment → patient, later-arriving source)
 //	lnk.appointment.<id>.withProvider.provider.<id>    (appointment → provider, later-arriving source)
 //
-// Eight ops (all known-key-reads, no prefix scans):
+// Nine ops (all known-key-reads + on-demand kv.Read, no prefix scans):
 //
 //	CreatePatient / TombstonePatient
-//	CreateProvider / TombstoneProvider
+//	CreateProvider / TombstoneProvider / SetProviderHours (upsert the opt-in .hours availability windows)
 //	CreateAppointment (mints the appointment + .schedule + .status{scheduled} + both links, validating
 //	                   patient + provider alive + class) / RescheduleAppointment (rewrite .schedule with new
 //	                   times, re-deriving remindAt so the @at reminder re-arms) / SetAppointmentStatus
@@ -32,9 +32,11 @@
 //     are stored plain under the trusted-tool posture; real PHI handling +
 //     right-to-be-forgotten is the deferred Vault plane (clinic is its forcing
 //     function — patient-record deletion is its validating flow).
-//   - Availability / double-book / provider-hours enforcement (Capability-KV §06
-//     defers temporal/uniqueness). CreateAppointment records a requested time; it
-//     does NOT reject an overlapping or out-of-hours slot.
+//   - Recurring-availability / @every scheduling (Capability-KV §06 defers the
+//     recurring case). Op-time double-book rejection (CreateAppointment +
+//     RescheduleAppointment, via the provider .bookings OCC index) and provider
+//     business-hours rejection (the opt-in .hours windows) ARE enforced here, via
+//     "the operation's own Starlark logic" (§06's sanctioned path).
 //   - Recurring @every reminders / availability (@every has no consumer; §10.4
 //     ships @at one-shot). One-shot @at appointment reminders ("remind 24h before")
 //     ARE built — in the sibling clinic-reminders package, which reads the .schedule

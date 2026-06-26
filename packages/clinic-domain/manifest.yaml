@@ -6,11 +6,12 @@ description: |
   .schedule, .status, provider .bookings) and links (forPatient, withProvider),
   written by the Create*/Reschedule/SetAppointmentStatus/Tombstone* ops. Three
   projection lenses (clinicAppointments, clinicProviders, clinicPatients) are the
-  P5 read models a clinic FE reads. CreateAppointment rejects a double-book
-  (SlotConflict) via the provider's OCC-snapshotted .bookings index.
-  No package dependency. PHI/Vault, provider-hours availability, and @every
-  recurring schedules are the separate deferred items this vertical forces — out
-  of scope here.
+  P5 read models a clinic FE reads. CreateAppointment + RescheduleAppointment reject
+  a double-book (SlotConflict) via the provider's OCC-snapshotted .bookings index,
+  and an out-of-hours booking (OutsideHours) via the provider's opt-in .hours
+  availability windows (SetProviderHours). No package dependency. PHI/Vault and
+  @every recurring schedules are the separate deferred items this vertical forces —
+  out of scope here.
 declares:
   ddls:
     - canonicalName: patient
@@ -28,6 +29,8 @@ declares:
     - canonicalName: appointmentStatus
       class: meta.ddl.aspectType
     - canonicalName: providerBookings
+      class: meta.ddl.aspectType
+    - canonicalName: providerHours
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: clinicAppointments
@@ -53,6 +56,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: TombstoneProvider
+      scope: any
+      grantsTo: [operator]
+    - operationType: SetProviderHours
       scope: any
       grantsTo: [operator]
     - operationType: CreateAppointment
