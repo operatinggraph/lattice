@@ -31,7 +31,7 @@ Key sub-packages:
 | `lens/` | `CoreKVSource` (durable consumer over `vtx.meta.>`, routes `meta.lens` class to loader); `Rule` type; `translateSpec` from `LensSpec` to `Rule`; engine selection via registry |
 | `adapter/` | `Adapter` interface; `nats_kv` adapter; Postgres adapter; `PoolManager` for Postgres connection pooling |
 | `adjacency/` | Adjacency KV read helpers |
-| `consumer/` | `Bootstrapper` (builds adjacency index from link CDC events); `Manager` (manages per-lens durable JetStream consumers) |
+| `consumer/` | `Bootstrapper` (builds the adjacency index from link CDC events). Per-lens durable JetStream consumers are owned by each `pipeline.Pipeline` via `substrate.ConsumerSupervisor` (see Lens lifecycle step 5). |
 | `control/` | `Service` — control plane on the NATS `micro.Service` framework; endpoints at `lattice.ctrl.refractor.<lensId>.<op>` |
 | `health/` | `LatticeHeartbeater`; `Reporter`; `AuditWriter` (subjects `lattice.refractor.audit.<lensId>`); `LagPoller` (subjects `lattice.refractor.metrics.<lensId>`) |
 | `ruleengine/` | Registry + engine interfaces; `simple/` (v1 legacy parser); `full/` (openCypher via ANTLR4) + `full/cypher/` (generated lexer/parser) |
@@ -159,7 +159,7 @@ near-duplicate identities.
 2. **`CoreKVSource`** consumes `vtx.meta.>` via the durable consumer; routes entries with class `meta.lens` to the spec parser. CDC ordering is not guaranteed — if the `.spec` aspect arrives before its parent vertex, it is buffered in `pendingSpecs` until the parent vertex's class is observed
 3. **`translateSpec`** converts `LensSpec` → `Rule`; engine selection via `Registry.SelectForLens`; `CompiledRule` populated
 4. **`startPipeline`** (in `cmd/refractor/main.go`) constructs the adapter (opens the target KV bucket / Postgres table), wires a `pipeline.Pipeline`, installs a `LatencyRingBuffer`, launches a `health.Reporter`
-5. **`consumer.Manager`** creates a durable JetStream consumer on `KV_core-kv` backing stream filtered to the lens's source-key prefix
+5. **The pipeline's `substrate.ConsumerSupervisor`** (built in `pipeline.Pipeline.RunOn`, configured from `cmd/refractor/main.go`) creates a durable JetStream consumer (durable name `refractor-<ruleID>`) on the `KV_core-kv` backing stream filtered to the lens's source-key prefix
 6. **Each CDC event** → `pipeline.Pipeline.HandleMessage` → engine evaluates → projection row(s) emitted → `EnvelopeFn` wraps row → adapter writes to target
 7. **Latency** tracked in `pipeline.LatencyRingBuffer` (128-sample ring buffer, thread-safe). Per-mutation health signals via `LatticeHeartbeater.LensLatencyProvider`
 8. **Lens spec update** → `CoreKVSource.updateCB` fires; `ClassifyUpdate` determines whether a hot-swap (query change only) or full pipeline restart is required
