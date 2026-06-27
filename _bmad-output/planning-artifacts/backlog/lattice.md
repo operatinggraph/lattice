@@ -61,6 +61,35 @@ only · whether to add a thin read/query convenience surface (direct KV + lens r
 ---
 
 
+## Component maintenance
+
+Grounded, definition-of-ready maintenance/observability items surfaced by the **Surveyor** from the
+component code + docs + Health/CI signals. Tagged by component; the Steward round-robins these alongside
+features. None below needs a frozen-contract change or is an architectural fork.
+
+| Item | What + why (grounding refs) | Imp | Size | Status |
+|---|---|---|---|---|
+| **[Refractor] Capability-Lens liveness/lag alert** | Documented *Known gap* (`docs/components/refractor.md` §289-296): the Capability Lens runs through the **generic** per-lens health path with **no** Capability-aware threshold/alert — nothing fires when it's `paused`, accumulating `consumerLag`, or grossly behind. This is the operational backstop for the Processor's **absent per-op freshness gate** (security-adjacent: a dead/lagging Capability projector silently serves stale authz). Confirmed: no alert/threshold code exists in `internal/refractor/health/`. Add a Capability-Lens-aware liveness+lag threshold that emits a distinct Health KV signal / anomaly the **Lamplighter** (and Loupe) can surface; dovetails with FR54 anomaly-detection. Refs: `internal/refractor/health/reporter.go`, `health/lag_poller.go`, `capabilityenv/`. | ★★ | S–M | 📋 ready |
+| **[Refractor] Postgres adapter `Truncater`** | The Postgres adapter doesn't implement `adapter.Truncater`, so a `Pipeline.Rebuild(truncate=true)` against a SQL-target lens **silently skips** the truncate (warn at `internal/refractor/pipeline/pipeline.go:400`) — stale rows survive a rebuild. NATS-KV is the only adapter with truncate today (`adapter/natskv.go:17`). Add `TRUNCATE`/`DELETE FROM` on the target table so SQL-target rebuilds clear cleanly. **No live impact yet** (no Postgres-target lens ships — verified), but a prerequisite for the deferred **Postgres read-model**. Refs: `adapter/adapter.go:23` (the `Truncater` iface), `adapter/postgres*.go`, `pipeline/pipeline.go:394-400`. | ★ (★★ once a Postgres-target lens ships) | S | 📋 ready |
+| **[Refractor] Doc drift — `consumer.Manager` retired** | The substrate migration retired `consumer.Manager` (rule consumers moved to `ConsumerSupervisor` / `RunDurableConsumer`; `internal/refractor/consumer/` now holds only the adjacency `Bootstrapper` — verified). `docs/components/refractor.md` still lists it in the sub-package table (line 34: *"`Manager` (manages per-lens durable JetStream consumers)"*) and in lens-lifecycle step 5 (line 162). Correct both. Pure doc fix (`docs/` is editable, not a frozen contract). | ★ | XS | 📋 ready |
+
+### Survey log (round-robin rotation)
+
+_The Surveyor notes each run here so the next run rotates to the least-recently-surveyed component._
+
+- **2026-06-26 — Refractor** (`internal/refractor` + `cmd/refractor` + `docs/components/refractor.md`).
+  Substrate migration **verified clean** — raw `nats.go`/`jetstream` confined to `control/service.go` (the
+  accepted `micro.Service` exception); the residual `cmd/refractor` `js.CreateKeyValue` is Andrew-adjudicated
+  (provisioning belongs to bootstrap, no `substrate.EnsureKV`). Codebase debt near-zero (no real TODO/FIXME;
+  active de-flaking — 489c64a, 715b14b). Filed 3 grounded items above; remaining Refractor deferreds
+  (link-tombstone re-projection, cross-instance latency rollup, Elasticsearch adapter, negative/retraction
+  projection, lens-target write restriction) already tracked in the Deferred backlog. **Next rotation:** Core
+  (`internal/processor`/`bootstrap`/`substrate`) — the next-stalest un-surveyed component (Loupe's lane is
+  already saturated).
+
+---
+
+
 ## Deferred backlog (Phase 3+)
 
 ### Security & trust boundary
