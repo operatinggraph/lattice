@@ -115,11 +115,11 @@ _The Surveyor notes each run here so the next run rotates to the least-recently-
 > Andrew's (see the cross-lane rules in [../backlog.md](../backlog.md)).
 
 ### Security & trust boundary
-| Item | What it is | Imp | Size |
-|---|---|---|---|
-| Read-path authorization (D1) | Reads from lens targets (Postgres / KV) bypass the write-path Capability boundary. Rubric in `lattice-architecture.md` D1: Postgres RLS + a Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` serviceAccess read-auth. | ★★★ | L |
-| Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L |
-| NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate level (today defended only by overwrite-by-reprojection). | ★★ | M |
+| Item | What it is | Imp | Size | Status |
+|---|---|---|---|---|
+| Read-path authorization (D1) | Reads from lens targets (Postgres / KV) bypass the write-path Capability boundary. Rubric in `lattice-architecture.md` D1: Postgres RLS + a Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` serviceAccess read-auth. | ★★★ | L | 📐 **awaiting-Andrew** — design: [`read-path-authorization-d1-design.md`](../../implementation-artifacts/read-path-authorization-d1-design.md). Designs through the enforcement-boundary fork (Postgres-RLS vs read-gateway-over-NATS-KV) + the authN/Gateway seam; uncommitted Contract #6 §6.14 edit staged for ratification. |
+| Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | The **read-actor auth seam** (JWT→`lattice.actor_id`, token-revocation KV) is designed as D1 increment 1 in the row above; the full internet-facing Gateway (NGINX/Envoy hardening, IdP) is the deferred sibling. |
+| NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate level (today defended only by overwrite-by-reprojection). | ★★ | M | 📋 |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size |
