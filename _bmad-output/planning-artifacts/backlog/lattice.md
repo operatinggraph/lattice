@@ -154,12 +154,12 @@ _The Surveyor notes each run here so the next run rotates to the least-recently-
 | Starlark guards (Loom) | The reserved `{reads, starlark}` guard escape hatch needs a verified-pure sandbox (the declarative grammar covers current flows). | ★ | M |
 
 ### Read-model / projection maturity
-| Item | What it is | Imp | Size |
-|---|---|---|---|
-| Historical state query (FR51) | Operators query operational state across a configurable time range. | ★★ | M |
-| Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M |
-| Negative / filter-retraction projection | True "emit-only-when-violating" (Weaver targets currently project one row per candidate with a `violating` flag, avoiding retraction work). | ★ | M |
-| Link-tombstone re-projection · cross-instance latency rollup | Two projection edge-cases / observability gaps (current approaches work). | ★ | S each |
+| Item | What it is | Imp | Size | Status |
+|---|---|---|---|---|
+| Historical state query (FR51) | Operators query historical state across a configurable time range — point-in-time graph reconstruction + a queryable ledger/audit surface, by replaying the immutable record. | ★★ | M→L | 📐 **awaiting-Andrew** — design: [`historical-state-query-design.md`](../../implementation-artifacts/historical-state-query-design.md). Two-layer design (ledger/delta archive lenses ship-now; point-in-time reconstruction is the ambitious increment). Builds to **reserved** contract seams (Contract #2 §2.3 `replay` lane, #4 §4.3 `replaying` status, #3 NFR-E4 deterministic replay) — **no frozen-contract change**. One architectural fork flagged: reconstruction source (delta-archive vs op-ledger re-execution) — designer recommends the **delta archive**. → ✅ Andrew-ratified once he signs off. |
+| Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | 📋 |
+| Negative / filter-retraction projection | True "emit-only-when-violating" (Weaver targets currently project one row per candidate with a `violating` flag, avoiding retraction work). | ★ | M | 📋 |
+| Link-tombstone re-projection · cross-instance latency rollup | Two projection edge-cases / observability gaps (current approaches work). | ★ | S each | 📋 |
 
 ### Refinements & ops
 | Item | What it is | Imp | Size |
