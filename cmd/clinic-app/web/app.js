@@ -665,6 +665,35 @@ function slotTimeLabel(ms) {
   return `${h}:${m} ${ap}`;
 }
 
+// noSlotsReason names why a date has no open slots, distinguishing the two
+// "blocked date" cases the picker should call out — the provider doesn't work
+// that weekday, or is on time-off that whole day — from the generic
+// fully-booked / duration fallback (returns "" for that case so the caller
+// keeps its default line). Mirrors computeOpenSlots' UTC-day interpretation so
+// the reason matches the slots that would be shown. Time-off ranges are authored
+// whole-day (.timeOff stores [from, (to+1day)) UTC), so a date is "on time-off"
+// when the full UTC day falls inside one range.
+function noSlotsReason(p, dateStr) {
+  const dayStart = Date.parse(dateStr + "T00:00:00Z");
+  if (isNaN(dayStart)) return "";
+  const dayEnd = dayStart + 86400000;
+  const weekday = new Date(dayStart).getUTCDay();
+  const timeOff = Array.isArray(p.timeOff) ? p.timeOff : [];
+  const cover = timeOff.find((r) => {
+    const rf = Date.parse(r.from), rt = Date.parse(r.to);
+    return !isNaN(rf) && !isNaN(rt) && rf <= dayStart && dayEnd <= rt;
+  });
+  if (cover) {
+    return `${p.name} is on time-off that day` + (cover.reason ? ` (${cover.reason})` : "") + " — pick another date.";
+  }
+  const days = [...new Set(p.hours.map((w) => w.day))].sort((a, b) => a - b);
+  if (!days.includes(weekday)) {
+    const list = days.map((d) => DAY_NAMES[d].slice(0, 3)).join(", ");
+    return `${p.name} doesn't see patients on ${DAY_NAMES[weekday]}s — available ${list}.`;
+  }
+  return "";
+}
+
 // refreshSlots re-renders the open-slot buttons for the selected provider + date +
 // duration. Idempotent and safe to call on any of those changing.
 async function refreshSlots() {
@@ -691,7 +720,7 @@ async function refreshSlots() {
   if (!slots.length) {
     const m = document.createElement("p");
     m.className = "muted";
-    m.textContent = "No open slots that day — try another date or a shorter duration.";
+    m.textContent = noSlotsReason(p, dateStr) || "No open slots that day — try another date or a shorter duration.";
     box.appendChild(m);
     return;
   }
