@@ -105,12 +105,28 @@ limiter occasionally trips — that trip is the signal the window is fully used.
 
 ## 7. Isolation (parallel-safe)
 
-**Code** changes run in an isolated **git worktree** (commit + push to `main`, no PR). **Documents — the
-backlog / lane files, design docs, and contracts — are edited directly in `main`** (never siloed in a
-worktree); **contract** edits are left **uncommitted** for Andrew to ratify (as we do today). Always: **scoped
-`git add <paths>`** (never `-A` / `commit -a`), **`git pull --rebase`** before push, **detect-reuse stack**
-(never `make down` a stack you didn't start). The two streams edit **disjoint code** (worktrees) and
-**disjoint lane files** (in main), so concurrent commits rebase cleanly almost always.
+**Roles are skills, followed inline — not spawned.** An advancer **follows** the owner / fe-engineer /
+lamplighter **playbook inline as Winston** (Skill tool, or read `agents/<role>/SKILL.md`); it does **not**
+Agent-spawn them (only generic agent types are registered — a spawn fails, and a cold agent just re-derives
+what the advancer already has loaded). The advancer *is* Winston: it builds and admits; there is no separate
+hand-up.
+
+**Code in a worktree, docs in `main`.** **CODE** runs in an isolated **git worktree** the fire creates (commit
++ push to `main`, no PR) — **not the main checkout**: `go build ./...` / `golangci-lint` / `go test` in a
+*shared* checkout would compile the other stream's uncommitted in-progress code and fail spuriously.
+**Documents — the backlog / lane files, design docs, and contracts — are edited directly in `main`** (never a
+worktree); **contract** edits stay **uncommitted** for Andrew. Always: **scoped `git add <paths>`** (never
+`-A` / `commit -a`), **`git pull --rebase`** before push. The two streams touch **disjoint code** (worktrees)
+and **disjoint lane files** (main), so concurrent commits rebase cleanly almost always.
+
+**Shared core stack vs. your own app binary.** `make down` (the CORE STACK — NATS + processor / refractor /
+weaver / loom / bridge / objmgr / Loupe) is forbidden if you didn't start it (shared by every fire + Andrew).
+**But the single binary you just rebuilt — `bin/<vertical>-app` (:7788 / :7799) or `bin/loupe` — is yours to
+cycle** to serve + verify new (`go:embed`'d) assets: reuse the running core stack, `pkill` the stale binary,
+rebuild, relaunch it in the **background**, verify in-browser, leave it running. (A changed lens / DDL won't
+hot-reload under a live stack — the **F-004** gap — so verify those via tests + the ephemeral-stack e2e
+targets.) A *stale running binary serves the OLD assets* — restarting your own binary is how you verify, and is
+**not** `make down`.
 
 ## 8. Rollout
 
