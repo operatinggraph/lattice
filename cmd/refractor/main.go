@@ -47,6 +47,7 @@ type pipelineEntry struct {
 	pipeline      *pipeline.Pipeline
 	reporter      *health.Reporter
 	canonicalName string // keyed under lensLatency in heartbeats.
+	authPlane     bool   // projects the capability-kv authorization surface (projection.IsAuthPlane).
 }
 
 func main() {
@@ -156,6 +157,45 @@ func main() {
 				continue
 			}
 			out[lensID] = pending
+		}
+		return out
+	}
+
+	// CapabilityLensProvider for the heartbeater — liveness of the auth-plane
+	// (capability-kv) lenses for the §5.5 capability backstop. Read-only: status
+	// from the lens reporter, lag from the supervised consumer; no authz path,
+	// Core KV, or projection is touched. Errors collapse to a skipped lens.
+	hb.CapabilityLensProvider = func() []health.CapabilityLensStatus {
+		mu.Lock()
+		entries := make([]*pipelineEntry, 0, len(registry))
+		for _, entry := range registry {
+			if entry.authPlane && entry.pipeline != nil && entry.reporter != nil {
+				entries = append(entries, entry)
+			}
+		}
+		mu.Unlock()
+
+		out := make([]health.CapabilityLensStatus, 0, len(entries))
+		for _, entry := range entries {
+			st, err := entry.reporter.GetStatus(context.Background())
+			if err != nil {
+				continue
+			}
+			pending, err := entry.pipeline.Pending(context.Background())
+			if err != nil {
+				continue
+			}
+			pauseReason := ""
+			if st.PauseReason != nil {
+				pauseReason = *st.PauseReason
+			}
+			out = append(out, health.CapabilityLensStatus{
+				CanonicalName: entry.canonicalName,
+				RuleID:        st.RuleID,
+				Status:        st.Status,
+				PauseReason:   pauseReason,
+				ConsumerLag:   pending,
+			})
 		}
 		return out
 	}
@@ -311,6 +351,7 @@ func main() {
 			pipeline:      p,
 			reporter:      reporter,
 			canonicalName: r.CanonicalName,
+			authPlane:     projection.IsAuthPlane(r),
 		}
 		mu.Unlock()
 

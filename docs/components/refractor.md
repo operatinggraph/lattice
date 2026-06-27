@@ -273,10 +273,11 @@ per-lens health, and (in future) by Gateway token revocation for hard
 identity/session revocation. This subsection documents **what the
 Capability-Lens pipeline emits today**.
 
-The Capability Lens (`vtx.meta.lens.capability`, `engine: "full"`) is wired
-through the same generic per-lens health path as every other lens — there is
-**no Capability-Lens-specific liveness or lag signal, and no alerting**. The
-signals it does emit:
+A Capability Lens is any lens projecting into the `capability-kv` bucket
+(`projection.IsAuthPlane` — e.g. `capabilityRoles`, `capabilityRoleIndex`). It is
+wired through the generic per-lens health path **plus** a Capability-Lens-aware
+liveness/lag threshold on the instance heartbeat (see the last row). The signals
+it emits:
 
 | Signal | Source | Key / subject | Semantics |
 |--------|--------|---------------|-----------|
@@ -284,16 +285,21 @@ signals it does emit:
 | Consumer lag | `health.LagPoller` → `Reporter.SetConsumerLag` | `lattice.refractor.metrics.<lensId>` + the `consumerLag` field on the per-lens health entry | `NumPending` on the lens consumer, polled on an interval. |
 | Per-lens latency | `pipeline.LatencyRingBuffer` → `LatticeHeartbeater.LensLatencyProvider` | `health.refractor.<instance>.lens.<canonicalName>` | p95 / p99 / mean / count of per-event projection latency (NFR-P3 instrument). |
 | Instance heartbeat | `LatticeHeartbeater` | `health.refractor.<instance>` | 10s heartbeat with TTL purge (NFR-O1). |
+| **Capability-Lens liveness alert** | `LatticeHeartbeater.CapabilityLensProvider` → threshold eval | `health.refractor.<instance>` — `metrics.capabilityLens.<canonicalName>` `{status, consumerLag, alert}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded/unhealthy `status` when anomalous | A **paused** capability lens raises `CapabilityLensPaused` (`severity: error` ⇒ `status: unhealthy`): the authz read-model is frozen. An **active** lens with `consumerLag` over the threshold (default 100, deployment-overridable) raises `CapabilityLensLagging` (`severity: warning` ⇒ `status: degraded`). `rebuilding` and within-threshold are `ok`. The issue's `since` persists across heartbeats and the issue is dropped when it resolves. Read-only — it observes the lens reporter + supervised consumer; no authz path, Core KV, or projection is touched. |
 | Audit | `health.AuditWriter` | `lattice.refractor.audit.<lensId>` | Per-projection audit append. |
 
-**Known gap:** none of the above is Capability-Lens-aware, and there is **no
-threshold/alert** that fires when the Capability Lens is `paused`, accumulating
-`consumerLag`, or has stopped projecting (projector grossly behind). Detecting a
-dead/lagging Capability projector today requires an operator to read these
-generic signals and apply judgment. A dedicated Capability-Lens liveness alert
-(and the Gateway token-revocation hard control) are the planned follow-ups;
-until they land, the backstop for the absent freshness gate is operator-observed,
-not automated.
+This is the automated backstop for the Processor's absent per-op freshness gate:
+a dead or lagging Capability projector now degrades the Refractor heartbeat with a
+distinct, machine-readable issue the **Lamplighter** classifies and surfaces,
+rather than requiring an operator to read generic signals and apply judgment.
+
+**Residual follow-ups (not gaps in the alert itself):** the **Loupe** health
+dashboard + system-map component nodes currently derive component status from
+heartbeat *freshness only* — they do not yet read the Contract #5 `status` /
+`issues[]` fields, so the alert surfaces via the Lamplighter today, not yet on the
+Loupe component cards. Lag-threshold **hysteresis** (a one-cycle spike self-clears
+on the next heartbeat) and the Gateway token-revocation **hard** control remain
+future work.
 
 ---
 

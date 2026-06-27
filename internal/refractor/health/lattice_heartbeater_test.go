@@ -161,6 +161,76 @@ func TestLatticeHeartbeater_SkipsZeroSampleLenses(t *testing.T) {
 	require.False(t, hasLL, "lensLatency should be absent when all lenses have zero samples")
 }
 
+func TestLatticeHeartbeater_PausedCapabilityLensDegradesHealth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS JetStream")
+	}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
+	s := natstest.RunServer(opts)
+	defer s.Shutdown()
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	defer nc.Close()
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	js := conn.JetStream()
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv-cap"})
+	require.NoError(t, err)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	hb := health.NewLatticeHeartbeater(conn, "health-kv-cap", "rfx-cap", 10*time.Second, logger)
+	hb.CapabilityLensProvider = func() []health.CapabilityLensStatus {
+		return []health.CapabilityLensStatus{
+			{CanonicalName: "capabilityRoles", RuleID: "lnk-cr", Status: "paused", PauseReason: "structural"},
+		}
+	}
+
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	defer hbCancel()
+	go hb.Run(hbCtx)
+
+	kv, err := js.KeyValue(ctx, "health-kv-cap")
+	require.NoError(t, err)
+
+	deadline := time.Now().Add(10 * time.Second)
+	var doc map[string]any
+	for time.Now().Before(deadline) {
+		entry, gErr := kv.Get(ctx, "health.refractor.rfx-cap")
+		if gErr == nil && entry != nil && len(entry.Value()) > 0 {
+			var d map[string]any
+			if json.Unmarshal(entry.Value(), &d) == nil {
+				if iss, _ := d["issues"].([]any); len(iss) > 0 {
+					doc = d
+					break
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.NotNil(t, doc, "no degraded health doc landed")
+
+	require.Equal(t, "unhealthy", doc["status"], "paused capability lens must mark refractor unhealthy")
+	issues, _ := doc["issues"].([]any)
+	require.Len(t, issues, 1)
+	is, _ := issues[0].(map[string]any)
+	require.Equal(t, "CapabilityLensPaused", is["code"])
+	require.Equal(t, "error", is["severity"])
+	require.NotEmpty(t, is["since"])
+	require.Contains(t, is["message"], "capabilityRoles")
+
+	metrics, _ := doc["metrics"].(map[string]any)
+	capm, _ := metrics["capabilityLens"].(map[string]any)
+	require.NotNil(t, capm, "metrics.capabilityLens sub-map missing")
+	cr, _ := capm["capabilityRoles"].(map[string]any)
+	require.NotNil(t, cr)
+	require.Equal(t, "paused", cr["alert"])
+}
+
 func hasLensLatency(doc map[string]any) bool {
 	m, _ := doc["metrics"].(map[string]any)
 	if m == nil {
