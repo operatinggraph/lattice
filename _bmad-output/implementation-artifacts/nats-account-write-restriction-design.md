@@ -1,6 +1,13 @@
 # NATS account-level write restriction (transport-authorization / Core-KV write isolation) — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-06-27).
+**Status: ✅ Andrew-ratified (2026-06-27).** Fork resolved: **Path A** (static `nats-server.conf` +
+per-component NKey users) now, **Path B** (decentralized JWT/operator) as the documented Edge/multi-tenant
+evolution — confirmed against the official NATS auth docs (static config = simplest, centralized,
+restart-to-change-permissions; JWT = dynamic/resolver-based/multi-tenant — the exact A/B tradeoff). One
+fold-in from that doc check: **request-reply / `allow_responses`** for the control-plane responders (§3.4),
+without which the control plane goes silent under enforcement. (`auth_callout` — the 6th NATS mechanism —
+is external-IdP delegation for the Gateway/D1 *authN* layer, not this transport-*authZ* primitive; not a
+missed path.) Author: Winston (Designer fire, 2026-06-27).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Security & trust boundary → NATS
 account-level write restriction* (★★, M). Grounds in `lattice-architecture.md` (P2 sole-writer,
 the internal-service-actor model, the deferred "internal service actor key provisioning
@@ -202,7 +209,9 @@ Refractor-only). Operational buckets are owner-scoped; Health is shared.
 
 **Subscribe permissions** are permissive for internal components (they must consume `core-events`,
 read Core-KV CDC, run control responders, read their buckets); the security value is in the **publish**
-restriction. v1 does **not** lock down subscribe (a future per-identity Edge model — Personal Lens —
+restriction. (Control responders additionally need **`allow_responses`** to publish their replies —
+see §3.4 "Request-reply / control-plane replies"; the matrix's publish-allow column lists only the
+*static* subjects.) v1 does **not** lock down subscribe (a future per-identity Edge model — Personal Lens —
 is where read-side subject scoping lands; out of scope here, and that's D1/Edge territory).
 
 The **invariant that does all the work**: *no user except `processor` may publish `$KV.core-kv.>`;
@@ -251,6 +260,24 @@ auth code.
   closing) and concentrates enforcement on the **KV write subjects** + the **stream-admin verbs on
   protected streams** (§3.1). The high-value win — no direct Core-KV/auth/lens fabrication — does not
   require fine-grained JS-API ACLs, which are a deferred hardening.
+- **Request-reply / control-plane replies (NATS-docs check, folded in 2026-06-27).** The official
+  authorization docs warn explicitly: *"It is important to not break request-reply patterns"* — a
+  responder must be able to **publish the reply to the requester's `_INBOX.<id>`**, which is a
+  *dynamic* subject the static matrix cannot enumerate. This bites every component that runs a
+  request-reply **responder**: the `micro.Service` **control planes** (Loom / Weaver / Refractor —
+  they receive on `lattice.ctrl.<comp>.>` *and on the framework's `$SRV.PING/INFO/STATS.>`
+  discovery subjects*, then reply to an `_INBOX`). The §3.2 matrix grants the *request* subject but
+  **not** the reply publish, so under enforcement the control plane would go silent. **Resolution:**
+  grant every responder **`allow_responses: true`** (NATS dynamically authorizes a one-time publish
+  to the reply subject of each *received* message) rather than a blanket `publish _INBOX.>` (which
+  would let a component publish to *arbitrary* inboxes — strictly weaker). `allow_responses` also
+  covers the `$SRV.>` micro-discovery replies for free. Components needing it: **loom, weaver,
+  refractor** (control responders), the **bridge** (if it responds to any request), and any future
+  `micro.Service`. Pure clients (Processor, apps, CLI) that only *make* requests need no change —
+  they publish `$JS.API.*` / `core-operations` and the server replies to their own `_INBOX`, which
+  they *subscribe* to (subscribe is already permissive, §3.2). This is a v1 must-have, not a
+  deferral — it is the difference between "the stack runs under enforcement" and "the control plane
+  is dead on arrival."
 - **Object Store buckets.** Large-file blobs live in `$OBJ.objects-base.>` (an Object Store = a
   stream `OBJ_objects-base`). Object writes route through `core-operations`/the object-store path for
   most actors; `object-store-manager` (GC) and the provisioner get `$OBJ.objects-base.>` publish.
