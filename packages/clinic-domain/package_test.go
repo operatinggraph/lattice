@@ -29,8 +29,8 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // identity — a sensitive aspect there would trip step-6's sensitiveAspectScope),
 // and each names ONLY its writer op(s) in permittedCommands.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 9 {
-		t.Fatalf("expected 9 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 10 {
+		t.Fatalf("expected 10 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -40,7 +40,7 @@ func TestPackage_DDLs(t *testing.T) {
 
 	vertexCmds := map[string][]string{
 		"patient":     {"CreatePatient", "TombstonePatient"},
-		"provider":    {"CreateProvider", "TombstoneProvider", "SetProviderHours"},
+		"provider":    {"CreateProvider", "TombstoneProvider", "SetProviderHours", "SetProviderTimeOff"},
 		"appointment": {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 	}
 	for name, wantCmds := range vertexCmds {
@@ -75,6 +75,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"appointmentStatus":   {"CreateAppointment", "SetAppointmentStatus"},
 		"providerBookings":    {"CreateProvider", "CreateAppointment", "RescheduleAppointment"},
 		"providerHours":       {"SetProviderHours"},
+		"providerTimeOff":     {"SetProviderTimeOff"},
 	}
 	for name, wantCmds := range aspectWriters {
 		asp, ok := byName[name]
@@ -132,7 +133,7 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 func TestPackage_Permissions(t *testing.T) {
 	wantPerms := map[string]bool{
 		"CreatePatient": false, "TombstonePatient": false,
-		"CreateProvider": false, "TombstoneProvider": false, "SetProviderHours": false,
+		"CreateProvider": false, "TombstoneProvider": false, "SetProviderHours": false, "SetProviderTimeOff": false,
 		"CreateAppointment": false, "RescheduleAppointment": false,
 		"SetAppointmentStatus": false, "TombstoneAppointment": false,
 	}
@@ -214,10 +215,12 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`make_aspect_upsert(appt_key, "status"`,       // SetAppointmentStatus upsert
 		`make_aspect_upsert(appt_key, "schedule"`,     // RescheduleAppointment rewrites .schedule
 		`clinic.appointmentRescheduled`,               // RescheduleAppointment event
-		`enforce_hours(provider, starts_at, ends_at)`, // both ops enforce provider hours
-		`OutsideHours`,                                // the availability-window rejection
-		`time.weekday(starts_at)`,                     // weekday membership
-		`time.seconds_of_day(starts_at)`,              // time-of-day membership
+		`enforce_hours(provider, starts_at, ends_at)`,    // both ops enforce provider hours
+		`OutsideHours`,                                   // the availability-window rejection
+		`time.weekday(starts_at)`,                        // weekday membership
+		`time.seconds_of_day(starts_at)`,                 // time-of-day membership
+		`enforce_time_off(provider, starts_at, ends_at)`, // both ops enforce provider time-off
+		`ProviderUnavailable`,                            // the time-off-overlap rejection
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {
 			t.Errorf("appointment script must reference %q", want)
@@ -231,6 +234,9 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`require_int_in(w, "day", 0, 6)`,         // weekday range validation
 		`require_int_in(w, "openSec", 0, 86400)`, // seconds-of-day range validation
 		`clinic.providerHoursSet`,                // event
+		`SetProviderTimeOff`,                     // time-off op handler
+		`make_aspect_upsert(prkey, "timeOff"`,    // upserts the .timeOff aspect
+		`clinic.providerTimeOffSet`,              // time-off event
 	} {
 		if !strings.Contains(providerDDLScript, want) {
 			t.Errorf("provider script must reference %q", want)

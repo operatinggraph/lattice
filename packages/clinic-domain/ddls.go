@@ -28,6 +28,7 @@ const (
 	statusAspectDDL       = "appointmentStatus"
 	bookingsAspectDDL     = "providerBookings"
 	hoursAspectDDL        = "providerHours"
+	timeOffAspectDDL      = "providerTimeOff"
 )
 
 // DDLs returns the package's seven DDL meta-vertex declarations:
@@ -68,6 +69,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		statusAspectTypeDDL(),
 		bookingsAspectTypeDDL(),
 		hoursAspectTypeDDL(),
+		timeOffAspectTypeDDL(),
 	}
 }
 
@@ -120,14 +122,18 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     providerVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderHours"},
+		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderHours", "SetProviderTimeOff"},
 		Description: "Clinic provider DDL. Vertex shape: vtx.provider.<NanoID>, class=provider, root data = {} " +
 			"(minimal, D5 — the data lives in the .profile aspect). CreateProvider mints the provider + writes the " +
 			".profile aspect {fullName (required), specialty (required), credentials?, bio?} atomically. " +
 			"TombstoneProvider soft-deletes one. SetProviderHours upserts the .hours availability aspect " +
-			"{windows: [{day (0=Sun..6=Sat), openSec, closeSec}]} (UTC seconds-of-day) — the opt-in business-hours " +
-			"windows CreateAppointment / RescheduleAppointment enforce (an out-of-hours booking is rejected " +
-			"OutsideHours); an absent .hours aspect or windows=[] means the provider is unconstrained.",
+			"{windows: [{day (0=Sun..6=Sat), openSec, closeSec}]} (UTC seconds-of-day) — the opt-in recurring-weekly " +
+			"business-hours windows CreateAppointment / RescheduleAppointment enforce (an out-of-hours booking is " +
+			"rejected OutsideHours); an absent .hours aspect or windows=[] means the provider is unconstrained. " +
+			"SetProviderTimeOff upserts the .timeOff exceptions aspect {ranges: [{from, to, reason?}]} (RFC3339 UTC " +
+			"instants) — the opt-in date-specific blackout layer on top of the recurring hours (vacation / holiday / " +
+			"out-sick): a booking overlapping any blocked range is rejected ProviderUnavailable, even if it falls " +
+			"inside the weekly .hours; an absent .timeOff aspect or ranges=[] means no blackouts.",
 		Script: providerDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"fullName":{"type":"string","description":"The provider's full name (CreateProvider; required)."},` +
@@ -135,8 +141,9 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			`"credentials":{"type":"string","description":"Post-nominal credentials, e.g. MD (CreateProvider; optional)."},` +
 			`"bio":{"type":"string","description":"Short provider bio (CreateProvider; optional)."},` +
 			`"providerId":{"type":"string","description":"Optional bare NanoID for the new provider vertex (CreateProvider); absent → minted."},` +
-			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderHours; required, validated alive)."},` +
-			`"windows":{"type":"array","description":"Availability windows (SetProviderHours; required). Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}}},` +
+			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderHours / SetProviderTimeOff; required, validated alive)."},` +
+			`"windows":{"type":"array","description":"Availability windows (SetProviderHours; required). Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}},` +
+			`"ranges":{"type":"array","description":"Time-off blackout ranges (SetProviderTimeOff; required). Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. A booking overlapping any range is rejected (ProviderUnavailable). An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.provider.<NanoID> the operation wrote."}}}`,
@@ -146,8 +153,9 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			"credentials": "Optional post-nominal credentials (e.g. MD, RN). Stored on the .profile aspect when present.",
 			"bio":         "Optional short provider bio. Stored on the .profile aspect when present.",
 			"providerId":  "Optional bare NanoID (no dots / key segments) for the new provider vertex. Absent → minted with nanoid.new().",
-			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderHours sets its availability).",
+			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderHours sets its recurring availability; SetProviderTimeOff sets its date-specific blackouts).",
 			"windows":     "Availability windows (SetProviderHours). A list of {day:0-6 (Sun=0), openSec, closeSec} where openSec/closeSec are UTC seconds-of-day (0..86400) and openSec<closeSec. An empty list clears the constraint (provider becomes unconstrained).",
+			"ranges":      "Time-off blackout ranges (SetProviderTimeOff). A list of {from, to, reason?} where from/to are RFC3339 UTC instants and from<to. A booking whose [start,end) overlaps any range is rejected (ProviderUnavailable) even when it falls inside the weekly .hours. An empty list clears all blackouts.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -169,6 +177,19 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 					"0<=openSec<closeSec<=86400), then upserts vtx.provider.<NanoID>.hours {windows}. Subsequent " +
 					"CreateAppointment / RescheduleAppointment reject a booking outside these windows (OutsideHours). " +
 					"windows=[] clears the constraint.",
+			},
+			{
+				Name: "SetProviderTimeOff — block a vacation week",
+				Payload: map[string]any{
+					"providerKey": "vtx.provider.<NanoID>",
+					"ranges": []any{
+						map[string]any{"from": "2026-07-06T00:00:00Z", "to": "2026-07-13T00:00:00Z", "reason": "Vacation"},
+					},
+				},
+				ExpectedOutcome: "Validates the provider is alive + class=provider and each range (from/to RFC3339 " +
+					"UTC, from<to), then upserts vtx.provider.<NanoID>.timeOff {ranges}. Subsequent CreateAppointment / " +
+					"RescheduleAppointment reject a booking overlapping any range (ProviderUnavailable), even inside the " +
+					"weekly .hours. ranges=[] clears all blackouts.",
 			},
 		},
 	}
@@ -196,7 +217,10 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"moved) (Capability-KV §06 — enforced via the op's own Starlark logic). RescheduleAppointment therefore " +
 			"requires the provider key. Both also enforce the provider's opt-in availability windows (the .hours aspect, " +
 			"set by SetProviderHours): a booking outside a provider's business hours is rejected (OutsideHours); a provider " +
-			"with no .hours is unconstrained. Both also reject a startsAt at or before op.submittedAt " +
+			"with no .hours is unconstrained. Both also enforce the provider's opt-in date-specific time-off (the .timeOff " +
+			"aspect, set by SetProviderTimeOff): a booking overlapping any blackout range is rejected (ProviderUnavailable), " +
+			"even when it falls inside the weekly .hours; a provider with no .timeOff is unrestricted. Both also reject a " +
+			"startsAt at or before op.submittedAt " +
 				"(ScheduleInPast) — a soft past-time guard (submittedAt is caller-supplied; the host clock is " +
 				"not exposed to Starlark).",
 		Script: appointmentDDLScript,
@@ -468,6 +492,47 @@ func hoursAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "provider hours aspect",
 				Payload:         map[string]any{"windows": []any{map[string]any{"day": 1, "openSec": 32400, "closeSec": 61200}}},
 				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.hours; written by SetProviderHours; enforced by CreateAppointment / RescheduleAppointment.",
+			},
+		},
+	}
+}
+
+// timeOffAspectTypeDDL declares the .timeOff exceptions aspect (class
+// providerTimeOff) — the step-6 write gate for SetProviderTimeOff. Declaration-only
+// (the script lives on the provider vertexType DDL). NON-sensitive (operational, not
+// PHI). The aspect is OPT-IN: a provider with no .timeOff (or ranges=[]) has no
+// blackouts, so this is backward-compatible with providers created before the
+// capability shipped. It is the date-specific blackout LAYER on top of the recurring
+// weekly .hours: a booking must satisfy BOTH (inside an .hours window AND outside
+// every .timeOff range). CreateAppointment / RescheduleAppointment read it on demand
+// (kv.Read, §2.5 — NOT a declared/OCC read: time-off is config, not a concurrency
+// serialization point) to reject a booking overlapping any blocked range
+// (ProviderUnavailable). Ranges are canonical-UTC RFC3339 instants so the half-open
+// overlap test is the same lexical-==-chronological compare CreateAppointment uses
+// for double-book detection.
+func timeOffAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     timeOffAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetProviderTimeOff"},
+		Description: "Provider time-off exceptions aspect (clinic). Stored as vtx.provider.<NanoID>.timeOff (class " +
+			"providerTimeOff) = {ranges: [{from, to, reason?}]} where from/to are canonical-UTC RFC3339 instants with " +
+			"from<to. Non-sensitive (operational, not PHI). OPT-IN: an absent aspect or ranges=[] means no blackouts. " +
+			"The date-specific blackout LAYER on top of the recurring weekly .hours — a booking must be inside an .hours " +
+			"window AND outside every .timeOff range. Written ONLY by SetProviderTimeOff (whose provider vertexType DDL " +
+			"owns the script); this aspect-type DDL is the step-6 write gate. Read on demand by CreateAppointment / " +
+			"RescheduleAppointment to reject a booking overlapping any range (ProviderUnavailable). Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"ranges":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"ranges": "Time-off blackout ranges: a list of {from, to, reason?} (RFC3339 UTC instants, from<to). A booking whose [start,end) overlaps any range is rejected (ProviderUnavailable).",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "provider time-off aspect",
+				Payload:         map[string]any{"ranges": []any{map[string]any{"from": "2026-07-06T00:00:00Z", "to": "2026-07-13T00:00:00Z", "reason": "Vacation"}}},
+				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.timeOff; written by SetProviderTimeOff; enforced by CreateAppointment / RescheduleAppointment.",
 			},
 		},
 	}
@@ -752,6 +817,52 @@ def execute(state, op):
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": prkey}}
 
+    if ot == "SetProviderTimeOff":
+        prkey = required_string(p, "providerKey")
+        parts_of(prkey, "providerKey", "provider")
+        if not vertex_alive(state, prkey):
+            fail("UnknownProvider: " + prkey)
+        cls = class_of(state, prkey)
+        if cls != "provider":
+            fail("WrongClass: providerKey: " + prkey + " has class " + str(cls) + ", required provider")
+        # ranges is required (pass [] to clear all blackouts). Each range is
+        # {from, to, reason?} — from/to RFC3339 UTC instants with from<to. Normalize
+        # both to canonical whole-second UTC (time.rfc3339_utc — pure, no clock read)
+        # so the stored ranges compare lexically == chronologically (the overlap test
+        # CreateAppointment runs against them is sound for any caller offset).
+        if not hasattr(p, "ranges"):
+            fail("InvalidArgument: ranges: required (use [] to clear)")
+        ranges = getattr(p, "ranges")
+        if type(ranges) != type([]):
+            fail("InvalidArgument: ranges: must be a list")
+        clean = []
+        for r in ranges:
+            if type(r) != type({}):
+                fail("InvalidArgument: ranges: each range must be an object; got " + type(r))
+            rf = r.get("from")
+            rt = r.get("to")
+            if rf == None or type(rf) != type("") or len(rf.strip()) == 0:
+                fail("InvalidArgument: ranges: from: required non-empty RFC3339 string")
+            if rt == None or type(rt) != type("") or len(rt.strip()) == 0:
+                fail("InvalidArgument: ranges: to: required non-empty RFC3339 string")
+            cf = time.rfc3339_utc(rf.strip())
+            ct = time.rfc3339_utc(rt.strip())
+            if not (cf < ct):
+                fail("InvalidArgument: ranges: from must be < to; got from=" + cf + " to=" + ct)
+            cr = {"from": cf, "to": ct}
+            reason = r.get("reason")
+            if reason != None and type(reason) == type("") and len(reason.strip()) > 0:
+                cr["reason"] = reason.strip()
+            clean.append(cr)
+        # Unconditioned upsert of the WHOLE .timeOff aspect (create-if-absent — it is
+        # opt-in, CreateProvider does not init it). No OCC: time-off is config, not a
+        # concurrency serialization point (the .bookings index is the only one).
+        mutations = [make_aspect_upsert(prkey, "timeOff", "providerTimeOff", {"ranges": clean})]
+        events = [{"class": "clinic.providerTimeOffSet",
+                   "data": {"providerKey": prkey, "rangeCount": len(clean)}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": prkey}}
+
     fail("provider DDL: unknown operationType: " + ot)
 `
 
@@ -904,6 +1015,33 @@ def enforce_hours(provider, starts_at, ends_at):
             return
     fail("OutsideHours: provider " + provider + " is not available at the requested time (UTC weekday " + str(sw) + ", " + str(ss) + "s-" + str(es) + "s of day); no matching availability window")
 
+def enforce_time_off(provider, starts_at, ends_at):
+    # Opt-in provider date-specific time-off (Capability-KV §06 — the op's own
+    # Starlark logic). The blackout LAYER on top of enforce_hours: read the provider's
+    # .timeOff aspect on demand (kv.Read, §2.5 — config, not the booking serialization
+    # point). An absent / deleted aspect or ranges=[] means NO blackouts (backward-
+    # compatible with providers created before this capability). Otherwise the
+    # appointment's [start, end) must not overlap ANY blocked [from, to) range. Ranges
+    # are canonical-UTC RFC3339 (lexical == chronological); half-open overlap test
+    # (a.start < b.end AND b.start < a.end) — back-to-back (appt ending exactly at a
+    # range's from, or starting exactly at its to) does NOT overlap, so a booking up
+    # to the start of a blackout (or from its end) is allowed.
+    off = kv.Read(provider + ".timeOff")
+    if off == None or off.isDeleted:
+        return
+    ranges = off.data.get("ranges")
+    if ranges == None or type(ranges) != type([]) or len(ranges) == 0:
+        return
+    for r in ranges:
+        if type(r) != type({}):
+            continue
+        rf = r.get("from")
+        rt = r.get("to")
+        if rf == None or rt == None:
+            continue
+        if starts_at < rt and rf < ends_at:
+            fail("ProviderUnavailable: provider " + provider + " is on time-off " + rf + "/" + rt + "; requested " + starts_at + "/" + ends_at)
+
 def enforce_future(starts_at, submitted_at):
     # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic). The
     # booking MUST start strictly after op.submittedAt: a past / now booking is
@@ -962,6 +1100,10 @@ def execute(state, op):
         # Provider availability windows (opt-in; OutsideHours if the booking falls
         # outside the provider's .hours). Checked before the double-book fan-out.
         enforce_hours(provider, starts_at, ends_at)
+
+        # Provider date-specific time-off (opt-in; ProviderUnavailable if the booking
+        # overlaps a blackout range) — the exception layer on top of the weekly hours.
+        enforce_time_off(provider, starts_at, ends_at)
 
         appt_id = bare_nanoid_or_mint(p, "appointmentId")
         appt_key = "vtx.appointment." + appt_id
@@ -1104,6 +1246,10 @@ def execute(state, op):
         # Provider availability windows (opt-in; OutsideHours if the new time falls
         # outside the provider's .hours) — the move must land inside business hours too.
         enforce_hours(provider, starts_at, ends_at)
+
+        # Provider date-specific time-off (opt-in; ProviderUnavailable if the new time
+        # overlaps a blackout range) — the move must also avoid the provider's time-off.
+        enforce_time_off(provider, starts_at, ends_at)
 
         # Double-book detection for the MOVE: the new interval must not overlap any
         # OTHER live, non-terminal appointment of this provider — the appointment

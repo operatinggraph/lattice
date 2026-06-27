@@ -45,10 +45,10 @@ const (
 	clConsumerCapKey = "cap.identity." + clConsumerID
 )
 
-// clinicOps are the nine ops the staff actor needs.
+// clinicOps are the ten ops the staff actor needs.
 var clinicOps = []string{
 	"CreatePatient", "TombstonePatient",
-	"CreateProvider", "TombstoneProvider", "SetProviderHours",
+	"CreateProvider", "TombstoneProvider", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment",
 }
 
@@ -633,6 +633,83 @@ func TestClinic_PastTimeRejected(t *testing.T) {
 	if sd, _ := sched["data"].(map[string]any); sd["startsAt"] != "2026-08-01T10:00:00Z" {
 		t.Fatalf("after future reschedule, startsAt = %v, want 2026-08-01T10:00:00Z", sched["data"])
 	}
+}
+
+// TestClinic_ProviderTimeOffEnforced proves the date-specific time-off exceptions
+// layer: a provider's opt-in .timeOff blackout ranges (set by SetProviderTimeOff)
+// gate CreateAppointment + RescheduleAppointment on top of the recurring weekly
+// .hours. A booking overlapping any range is rejected (ProviderUnavailable);
+// back-to-back at a range boundary is allowed (half-open [from,to)); a booking
+// outside every range is accepted; a provider with no .timeOff is unrestricted;
+// ranges=[] clears all blackouts; and SetProviderTimeOff validates its ranges.
+func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "provider-timeoff")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "topat0001", "Tom Off")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "toprv0001", "Dr. Away", "GeneralPractice")
+	bk := providerKey + ".bookings"
+
+	// Block a vacation week 2026-07-06 00:00 → 2026-07-13 00:00 (with a reason).
+	clSubmit(t, ctx, conn, cp, cons, "tooff0001", "SetProviderTimeOff", "provider",
+		`{"providerKey":"`+providerKey+`","ranges":[{"from":"2026-07-06T00:00:00Z","to":"2026-07-13T00:00:00Z","reason":"Vacation"}]}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+
+	// The .timeOff aspect landed with one range carrying the reason.
+	off := clReadDoc(t, ctx, conn, providerKey+".timeOff")
+	if off["class"] != "providerTimeOff" {
+		t.Fatalf("timeOff class = %v, want providerTimeOff", off["class"])
+	}
+	if od, _ := off["data"].(map[string]any); od["ranges"] == nil {
+		t.Fatalf("timeOff ranges missing: %v", off["data"])
+	} else if r, _ := od["ranges"].([]any); len(r) != 1 {
+		t.Fatalf("timeOff ranges = %v, want 1", od["ranges"])
+	} else if r0, _ := r[0].(map[string]any); r0["reason"] != "Vacation" {
+		t.Fatalf("timeOff range reason = %v, want Vacation", r0["reason"])
+	}
+
+	mkAppt := func(label, start, end string, want processor.MessageOutcome) string {
+		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
+			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
+			[]string{patientKey, providerKey, bk}, want)
+	}
+
+	// Inside the blocked week → ProviderUnavailable rejected.
+	mkAppt("toappt0001", "2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", processor.OutcomeRejected)
+	// Ends EXACTLY at the range start (half-open: from is the first blocked instant) → accepted.
+	mkAppt("toappt0002", "2026-07-05T23:30:00Z", "2026-07-06T00:00:00Z", processor.OutcomeAccepted)
+	// Starts EXACTLY at the range end (half-open: to is the first free instant) → accepted.
+	mkAppt("toappt0003", "2026-07-13T00:00:00Z", "2026-07-13T00:30:00Z", processor.OutcomeAccepted)
+	// Clearly outside the range → accepted.
+	outsideKey := "vtx.appointment." + mkAppt("toappt0004", "2026-07-20T10:00:00Z", "2026-07-20T10:30:00Z", processor.OutcomeAccepted)
+
+	// A reschedule INTO the blocked week is rejected; a move to another free slot works.
+	clSubmit(t, ctx, conn, cp, cons, "tores0001", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+outsideKey+`","provider":"`+providerKey+`","startsAt":"2026-07-09T10:00:00Z","endsAt":"2026-07-09T10:30:00Z"}`,
+		[]string{outsideKey, bk}, processor.OutcomeRejected)
+	clSubmit(t, ctx, conn, cp, cons, "tores0002", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+outsideKey+`","provider":"`+providerKey+`","startsAt":"2026-07-21T10:00:00Z","endsAt":"2026-07-21T10:30:00Z"}`,
+		[]string{outsideKey, bk}, processor.OutcomeAccepted)
+
+	// A different provider with NO .timeOff is unrestricted — a booking in that week is fine.
+	freeProvider := createProvider(t, ctx, conn, cp, cons, "toprv0002", "Dr. Here", "GeneralPractice")
+	clSubmit(t, ctx, conn, cp, cons, "toappt0005", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+freeProvider+`","startsAt":"2026-07-08T10:00:00Z","endsAt":"2026-07-08T10:30:00Z"}`,
+		[]string{patientKey, freeProvider, freeProvider + ".bookings"}, processor.OutcomeAccepted)
+
+	// Clearing the blackouts (ranges=[]) makes the original provider's blocked week bookable.
+	clSubmit(t, ctx, conn, cp, cons, "tooff0002", "SetProviderTimeOff", "provider",
+		`{"providerKey":"`+providerKey+`","ranges":[]}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+	mkAppt("toappt0006", "2026-07-08T14:00:00Z", "2026-07-08T14:30:00Z", processor.OutcomeAccepted)
+
+	// SetProviderTimeOff validation: from >= to, and a missing endpoint → rejected.
+	clSubmit(t, ctx, conn, cp, cons, "tobad0001", "SetProviderTimeOff", "provider",
+		`{"providerKey":"`+providerKey+`","ranges":[{"from":"2026-08-10T00:00:00Z","to":"2026-08-05T00:00:00Z"}]}`,
+		[]string{providerKey}, processor.OutcomeRejected)
+	clSubmit(t, ctx, conn, cp, cons, "tobad0002", "SetProviderTimeOff", "provider",
+		`{"providerKey":"`+providerKey+`","ranges":[{"to":"2026-08-10T00:00:00Z"}]}`,
+		[]string{providerKey}, processor.OutcomeRejected)
 }
 
 // TestClinic_RejectsBadStatus proves the status enum guard.

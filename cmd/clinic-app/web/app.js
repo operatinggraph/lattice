@@ -83,12 +83,16 @@ function rejectionMessage(reply) {
 
 // friendlyBookingRejection maps an op rejection message to operator-readable text
 // for the booking / reschedule paths: a double-book (SlotConflict), an
-// out-of-availability-window booking (OutsideHours), and a past-dated booking
-// (ScheduleInPast) are the domain rejections CreateAppointment /
-// RescheduleAppointment raise. Anything else passes through.
+// out-of-availability-window booking (OutsideHours), a date-specific time-off
+// overlap (ProviderUnavailable), and a past-dated booking (ScheduleInPast) are the
+// domain rejections CreateAppointment / RescheduleAppointment raise. Anything else
+// passes through.
 function friendlyBookingRejection(msg) {
   if (msg.indexOf("SlotConflict") !== -1) {
     return "That time overlaps another appointment for this provider. Pick another slot.";
+  }
+  if (msg.indexOf("ProviderUnavailable") !== -1) {
+    return "The provider is on time-off (vacation / holiday / out) during that time. Pick a date outside their time-off.";
   }
   if (msg.indexOf("OutsideHours") !== -1) {
     return "That time is outside the provider's availability (UTC). Set hours under “Manage availability” or pick a time inside them.";
