@@ -607,7 +607,13 @@ function renderApplicationCard(row, highlight) {
   const banner = document.createElement("div");
   if (row.declined) {
     banner.className = "decision declined";
-    banner.textContent = "Application declined.";
+    // A landlord decline may carry a reason (declineReason); a verification decline
+    // (failed bgcheck/payment) never does. Surface the reason so a decline gives the
+    // applicant feedback rather than a bare rejection.
+    banner.textContent =
+      row.landlordDeclined && row.declineReason
+        ? "Application declined: " + row.declineReason
+        : "Application declined.";
   } else if (row.landlordApproved && row.unitStatus === "leased") {
     banner.className = "decision ok";
     banner.textContent = "Application complete — all steps done.";
@@ -1349,6 +1355,14 @@ function renderApplicantRow(a, unit) {
     note.textContent = "Unit leased to another applicant.";
     row.append(note);
   }
+  // Echo a landlord's decline reason back on the by-unit row so the landlord sees
+  // the rationale they recorded (declineReason is set only on a landlord decline).
+  if (a.landlordDeclined && a.declineReason) {
+    const reason = document.createElement("div");
+    reason.className = "applicant-note";
+    reason.textContent = "Reason: " + a.declineReason;
+    row.append(reason);
+  }
   return row;
 }
 
@@ -1357,7 +1371,15 @@ function renderApplicantRow(a, unit) {
 // any unit-leased flip the convergence lens drives) shows once reprojected.
 async function decideApplication(a, decision) {
   const who = a.applicantName || shortKey(a.applicant);
-  if (decision === "declined" && !confirm(`Decline ${who}'s application?`)) return;
+  // A decline prompts for an optional reason (applicant feedback + a fair-housing
+  // record). Cancelling the prompt aborts the decline; an empty reason still declines.
+  const payload = { leaseAppKey: a.leaseAppKey, decision };
+  if (decision === "declined") {
+    const reason = prompt(`Decline ${who}'s application?\n\nOptional reason (shown to the applicant):`, "");
+    if (reason === null) return;
+    const trimmed = reason.trim();
+    if (trimmed) payload.reason = trimmed;
+  }
   try {
     const reply = await api("/api/op", {
       method: "POST",
@@ -1366,7 +1388,7 @@ async function decideApplication(a, decision) {
         operationType: "DecideLeaseApplication",
         class: "leaseapp",
         reads: [a.leaseAppKey],
-        payload: { leaseAppKey: a.leaseAppKey, decision },
+        payload,
       }),
     });
     if (reply && reply.status === "rejected") {

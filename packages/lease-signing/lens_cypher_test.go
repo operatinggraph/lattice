@@ -350,6 +350,13 @@ func (f *lensFixture) landlordDecision(t *testing.T, appName, decision string) {
 	f.aspect(t, appName, "decision", "decision", map[string]any{"value": decision, "decidedAt": "2026-06-26T10:00:00Z"})
 }
 
+// landlordDecisionReason writes the .decision aspect with an optional reason — the
+// shape DecideLeaseApplication commits when a landlord declines with a rationale.
+func (f *lensFixture) landlordDecisionReason(t *testing.T, appName, decision, reason string) {
+	t.Helper()
+	f.aspect(t, appName, "decision", "decision", map[string]any{"value": decision, "decidedAt": "2026-06-26T10:00:00Z", "reason": reason})
+}
+
 // approvedAppFixture seeds a QUALIFIED application: alice onboarded (.ssn) + the
 // application signed (.signature), a fresh completed bgcheck, and a completed
 // payment — the four applicant gaps all closed (applicantApproved=true), but with
@@ -455,9 +462,39 @@ func TestLeaseApplicationComplete_LandlordDeclineIsTerminal(t *testing.T) {
 	require.Equal(t, "declined", v["landlordDecision"])
 	require.Equal(t, true, v["landlordDeclined"])
 	require.Equal(t, true, v["declined"], "a landlord decline folds into declined (the FE's terminal banner)")
+	require.Nil(t, v["declineReason"], "a reasonless decline projects null declineReason")
 	require.Equal(t, false, v["missing_decision"], "a decision is recorded → no awaiting-decision gap")
 	require.Equal(t, false, v["missing_listingLeased"], "declined ≠ approved → no listing flip")
 	require.Equal(t, false, v["violating"], "a landlord-declined application is terminal — no work remains, Weaver stops reconciling")
+}
+
+// TestLeaseApplicationComplete_ProjectsDeclineReason pins that a landlord decline's
+// optional reason projects as the declineReason column (the applicant FE renders it
+// on the declined banner), and that an approve carries no reason.
+func TestLeaseApplicationComplete_ProjectsDeclineReason(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	const reason = "Income below the 3x-rent threshold."
+	f := approvedAppFixture(t)
+	f.landlordDecisionReason(t, "app", "declined", reason)
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.edge(t, "appliesToUnit", "app", "unit1")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["landlordDeclined"])
+	require.Equal(t, reason, v["declineReason"], "the decline reason is projected for the applicant banner")
+
+	// Re-approve (no reason) → the unconditioned upsert overwrites; declineReason gone.
+	f.landlordDecision(t, "app", "approved")
+	rows = f.project(t, "app")
+	require.Len(t, rows, 1)
+	v = rows[0].Values
+	require.Equal(t, "approved", v["landlordDecision"])
+	require.Nil(t, v["declineReason"], "re-approving clears the prior decline reason")
 }
 
 // TestLeaseApplicationComplete_ListingLeasedGap_RequiresApplicantReadinessEvenWhenApproved

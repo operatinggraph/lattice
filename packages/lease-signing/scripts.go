@@ -279,8 +279,17 @@ def execute(state, op):
         # decidedAt is the op's own timestamp, normalized to canonical UTC (read-free,
         # mirroring SignLease's signedAt) so a downstream lexical compare is sound.
         decided_at = time.rfc3339_utc(op.submittedAt)
+        # reason is optional free-text the landlord supplies with a decline (applicant
+        # feedback + a fair-housing record). It is stored on the .decision aspect only
+        # when supplied; an approve or a reasonless decline carries none, and a later
+        # decision's unconditioned upsert overwrites it (re-approving clears a prior
+        # decline reason). The convergence lens projects it as declineReason.
+        decision_data = {"value": decision, "decidedAt": decided_at}
+        reason = optional_string(p, "reason")
+        if reason != None:
+            decision_data["reason"] = reason
         mutations = [
-            make_aspect_upsert(app_key, "decision", "decision", {"value": decision, "decidedAt": decided_at}),
+            make_aspect_upsert(app_key, "decision", "decision", decision_data),
         ]
         events = [{"class": "leaseapp.applicationDecided",
                    "data": {"leaseAppKey": app_key, "decision": decision}}]

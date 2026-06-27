@@ -1252,3 +1252,62 @@ func TestDecideLeaseApplication(t *testing.T) {
 	}
 	decide(t, ctx, conn, cp, cons, "decideTombsto", appKey, "approved", "2026-06-26T14:00:00Z", processor.OutcomeRejected)
 }
+
+// decideReason submits DecideLeaseApplication{leaseAppKey, decision, reason} so the
+// optional reason path can be exercised separately from the no-reason decide helper.
+func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, reason, submittedAt string, want processor.MessageOutcome) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason})
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "DecideLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(payload),
+		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// TestDecideLeaseApplication_Reason drives the optional decline reason: a decline
+// with a reason stores .decision.reason; re-approving (unconditioned upsert) clears
+// it; a reasonless decline carries no reason key. The reason is applicant feedback
+// + a fair-housing record, projected by the lens as declineReason.
+func TestDecideLeaseApplication_Reason(t *testing.T) {
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decidereason")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBdecrsn1cantHJKMNPQ")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+
+	// Decline with a reason → .decision{value:declined, decidedAt, reason}.
+	const reason = "Income below the 3x-rent threshold."
+	decideReason(t, ctx, conn, cp, cons, "declineRsn1", appKey, "declined", reason, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+	ddata, _ := readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
+	if got, _ := ddata["value"].(string); got != "declined" {
+		t.Fatalf("decision.value = %q, want declined", got)
+	}
+	if got, _ := ddata["reason"].(string); got != reason {
+		t.Fatalf("decision.reason = %q, want %q", got, reason)
+	}
+
+	// Re-approve (no reason) → unconditioned upsert overwrites; reason is gone.
+	decide(t, ctx, conn, cp, cons, "reapprClear1", appKey, "approved", "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
+	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
+	if got, _ := ddata["value"].(string); got != "approved" {
+		t.Fatalf("decision.value after re-approve = %q, want approved", got)
+	}
+	if _, present := ddata["reason"]; present {
+		t.Fatalf("decision.reason should be cleared after a reasonless re-approve, got %v", ddata["reason"])
+	}
+
+	// Decline again without a reason → no reason key written.
+	decide(t, ctx, conn, cp, cons, "declineNoRsn1", appKey, "declined", "2026-06-26T12:00:00Z", processor.OutcomeAccepted)
+	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
+	if _, present := ddata["reason"]; present {
+		t.Fatalf("a reasonless decline must not write a reason key, got %v", ddata["reason"])
+	}
+}

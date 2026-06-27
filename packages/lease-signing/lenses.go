@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "declined_bgcheck", "declined_payment", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "declined_bgcheck", "declined_payment", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -124,6 +124,11 @@ func Lenses() []pkgmgr.LensSpec {
 //     DecideLeaseApplication writes ('approved' | 'declined' | null). landlordApproved
 //     ≡ (landlordDecision = 'approved'), landlordDeclined ≡ (landlordDecision =
 //     'declined'). The FE renders the disposition off these.
+//   - declineReason (string, informational) — the optional free-text rationale a
+//     landlord supplies with a decline (the raw .decision.reason aspect value; null
+//     for an approve or a reasonless decline). The applicant FE surfaces it on the
+//     declined banner ("Application declined: <reason>") so a decline carries
+//     feedback rather than a bare rejection. Only meaningful when landlordDeclined.
 //   - applicantApproved (informational bool) is true once all four APPLICANT gaps
 //     are closed (ssn recorded, a fresh bgcheck, a completed payment, a signature)
 //     — De Morgan of the four missing_* (the engine has no RETURN-alias
@@ -301,6 +306,7 @@ WITH
   id.key  AS applicant,
   app.signature.data.signedAt AS signedAt,
   app.decision.data.value AS landlordDecision,
+  app.decision.data.reason AS declineReason,
   id.ssn.data.value AS ssnVal,
   u.key                     AS unitKey,
   u.address.data.line1      AS unitAddress,
@@ -344,6 +350,7 @@ RETURN
   freshUntil,
   signedAt,
   landlordDecision,
+  declineReason,
   (ssnVal = null)        AS missing_onboarding,
   (freshBgComplete = 0)  AS missing_bgcheck,
   (payComplete = 0)      AS missing_payment,

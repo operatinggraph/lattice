@@ -41,6 +41,7 @@ type applicationRow struct {
 	LandlordDecision  string   `json:"landlordDecision"`
 	LandlordApproved  bool     `json:"landlordApproved"`
 	LandlordDeclined  bool     `json:"landlordDeclined"`
+	DeclineReason     string   `json:"declineReason"`
 	MissingDecision   bool     `json:"missing_decision"`
 	MissingOnboarding bool     `json:"missing_onboarding"`
 	MissingBgcheck    bool     `json:"missing_bgcheck"`

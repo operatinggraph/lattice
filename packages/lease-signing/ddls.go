@@ -115,8 +115,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"application (the convergence lens filters isDeleted → the row drops from My Applications) and prunes its " +
 			"entry from the unit's .leaseApplications index (OCC-guarded), verifying the unit via the appliesToUnit link " +
 			"— the complement to the duplicate-application guard so an applicant can back out + re-apply. " +
-			"DecideLeaseApplication{leaseAppKey, decision} records the landlord's leasing decision as a .decision aspect " +
-			"{value (approved|declined), decidedAt (canonical-UTC RFC3339)} (UNCONDITIONED upsert — a later decision " +
+			"DecideLeaseApplication{leaseAppKey, decision, reason?} records the landlord's leasing decision as a .decision aspect " +
+			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)} (UNCONDITIONED upsert — a later decision " +
 			"overrides an earlier one, so a landlord can reverse a decline to an approve). It is the human gate the " +
 			"listing-flip waits behind: the convergence lens reads .decision.value so an approval opens missing_listingLeased " +
 			"(the unit leases) while a decline is a terminal disposition — nothing auto-leases on applicant-readiness alone.",
@@ -129,7 +129,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent (CreateLeaseApplication; optional, only with moveInDate)."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
 			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication) or decide (DecideLeaseApplication); required, validated alive."},` +
-			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."}},` +
+			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."},` +
+			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the created or signed application (the operation's principal key)."}}}`,
@@ -142,6 +143,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"leaseAppId":      "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
 			"leaseAppKey":     "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect. The caller lists it in ContextHint.Reads.",
 			"decision":        "The landlord's leasing decision (DecideLeaseApplication; required): approved or declined. Written to the .decision aspect {value, decidedAt} (UNCONDITIONED upsert — a later decision overrides an earlier one). The convergence lens reads it: approved opens missing_listingLeased (the unit leases); declined folds into the lens's declined disposition (a terminal rejection).",
+			"reason":          "Optional free-text rationale the landlord supplies with a DecideLeaseApplication decline — applicant feedback plus a fair-housing record. Stored on the .decision aspect ({value, decidedAt, reason?}) only when supplied and projected as the declineReason lens column the applicant FE renders on the declined banner. A later decision's unconditioned upsert overwrites it (re-approving clears a prior decline reason); ignored on an approve.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -177,6 +179,13 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"later decision overrides an earlier one, root stays {} — D5). approved opens the listing-leased convergence " +
 					"(the unit leases); declined is a terminal rejection. Emits leaseapp.applicationDecided{leaseAppKey, decision}. " +
 					"Returns primaryKey. Rejects a non-existent application (UnknownLeaseApplication) or an out-of-enum decision (BadDecision).",
+			},
+			{
+				Name:    "DecideLeaseApplication — landlord declines with a reason",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "decision": "declined", "reason": "Income below the 3x-rent threshold."},
+				ExpectedOutcome: "As above, but the optional reason is stored on the .decision aspect ({value, decidedAt, reason}) and projected " +
+					"as the declineReason lens column the applicant FE renders on the declined banner. A later decision (e.g. a " +
+					"re-approve) overwrites the aspect and clears the reason. reason is ignored on an approve.",
 			},
 		},
 	}

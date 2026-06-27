@@ -30,6 +30,7 @@ type applicantSummary struct {
 	Qualified        bool   `json:"qualified"`
 	LandlordApproved bool   `json:"landlordApproved"`
 	LandlordDeclined bool   `json:"landlordDeclined"`
+	DeclineReason    string `json:"declineReason"`
 }
 
 // unitApplicationsRow is the landlord's per-unit aggregate: the listed unit's
@@ -130,6 +131,7 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 			Qualified:        a.ApplicantApproved && !a.LandlordApproved && !a.LandlordDeclined,
 			LandlordApproved: a.LandlordApproved,
 			LandlordDeclined: a.LandlordDeclined,
+			DeclineReason:    a.DeclineReason,
 		})
 	}
 
