@@ -276,8 +276,8 @@ func TestLeaseApplicationComplete_ProjectsUnitColumns(t *testing.T) {
 	appKey := f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
 	unitKey := f.vtx(t, "unit1", "unit")
-	f.aspect(t, "unit1", "address", "address", map[string]any{"line1": "123 Loft St"})
-	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.aspect(t, "unit1", "address", "address", map[string]any{"line1": "123 Loft St", "city": "San Francisco", "region": "CA"})
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "rentCurrency": "USD", "bedrooms": 2, "bathrooms": 1.5, "leaseTermMonths": 12, "availableFrom": "2026-08-01T00:00:00Z", "status": "available"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "appliesToUnit", "app", "unit1")
 
@@ -287,13 +287,59 @@ func TestLeaseApplicationComplete_ProjectsUnitColumns(t *testing.T) {
 	require.Equal(t, appKey, v["entityKey"])
 	require.Equal(t, unitKey, v["unitKey"], "unitKey carried through the WITH from the appliesToUnit walk")
 	require.Equal(t, "123 Loft St", v["unitAddress"], "unitAddress aspect-hops u.address.line1")
+	require.Equal(t, "San Francisco", v["unitCity"], "unitCity aspect-hops u.address.city")
+	require.Equal(t, "CA", v["unitRegion"], "unitRegion aspect-hops u.address.region")
 	require.EqualValues(t, 2400, v["unitRent"], "unitRent aspect-hops u.listing.rentAmount")
+	require.Equal(t, "USD", v["unitCurrency"], "unitCurrency aspect-hops u.listing.rentCurrency")
+	require.EqualValues(t, 2, v["unitBedrooms"], "unitBedrooms aspect-hops u.listing.bedrooms")
+	require.EqualValues(t, 1.5, v["unitBathrooms"], "unitBathrooms aspect-hops u.listing.bathrooms")
+	require.EqualValues(t, 12, v["unitLeaseTermMonths"], "unitLeaseTermMonths aspect-hops u.listing.leaseTermMonths")
+	require.Equal(t, "2026-08-01T00:00:00Z", v["unitAvailableFrom"], "unitAvailableFrom aspect-hops u.listing.availableFrom")
 	require.Equal(t, "available", v["unitStatus"], "unitStatus aspect-hops u.listing.status")
 	// The four applicant gaps still open (no ssn/bgcheck/payment/signature); the
 	// unit columns + applicantApproved/missing_listingLeased do not flip yet.
 	require.Equal(t, false, v["applicantApproved"], "no applicant gaps closed → not approved")
 	require.Equal(t, false, v["missing_listingLeased"], "not approved → listing gap stays closed")
 	require.Equal(t, true, v["violating"], "the unit columns are informational, not gaps")
+}
+
+// TestLeaseApplicationComplete_ProjectsLeaseTerms: the applicant's own requested
+// .terms aspect (moveInDate / leaseTermMonths / requestedRent), written by
+// CreateLeaseApplication when moveInDate is supplied, projects as informational
+// scalar columns so the applicant FE can render a "terms you're agreeing to"
+// panel. Like the unit columns these are display-only — never in violating — and
+// an application without a .terms aspect projects null terms columns (the
+// graceful-degrade path the panel relies on).
+func TestLeaseApplicationComplete_ProjectsLeaseTerms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.aspect(t, "app", "terms", "terms", map[string]any{"moveInDate": "2026-09-01T00:00:00Z", "leaseTermMonths": 18, "requestedRent": 2300})
+	f.edge(t, "applicationFor", "app", "alice")
+	f.edge(t, "appliesToUnit", "app", "unit1")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1, "the .terms walk keeps one row per anchor")
+	v := rows[0].Values
+	require.Equal(t, "2026-09-01T00:00:00Z", v["termsMoveInDate"], "termsMoveInDate aspect-hops app.terms.moveInDate")
+	require.EqualValues(t, 18, v["termsLeaseTermMonths"], "termsLeaseTermMonths aspect-hops app.terms.leaseTermMonths")
+	require.EqualValues(t, 2300, v["termsRequestedRent"], "termsRequestedRent aspect-hops app.terms.requestedRent")
+	require.Equal(t, true, v["violating"], "the terms columns are informational, not gaps")
+
+	// Graceful degrade: an application with no .terms aspect projects null terms.
+	f.vtx(t, "app2", "leaseapp")
+	f.edge(t, "applicationFor", "app2", "alice")
+	f.edge(t, "appliesToUnit", "app2", "unit1")
+	rows2 := f.project(t, "app2")
+	require.Len(t, rows2, 1)
+	require.Nil(t, rows2[0].Values["termsMoveInDate"], "no .terms → null move-in (the FE omits the row)")
+	require.Nil(t, rows2[0].Values["termsLeaseTermMonths"])
+	require.Nil(t, rows2[0].Values["termsRequestedRent"])
 }
 
 // landlordDecision writes the leaseapp's .decision aspect {value, decidedAt} — the

@@ -203,6 +203,32 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .step-title { font-size: 13px; font-weight: 500; }
 .step-status { font-size: 12px; color: var(--text-dim); }
 
+/* Lease-terms review panel — the terms the applicant is agreeing to. */
+.lease-terms {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.lease-terms-head {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.lease-terms dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 14px;
+  row-gap: 5px;
+  font-size: 13px;
+}
+.lease-terms dt { color: var(--text-dim); }
+.lease-terms dd { margin: 0; color: var(--text); }
+
 .step.done .step-dot { border-color: var(--green); color: var(--green); }
 .step.done .step-status { color: var(--green); }
 .step.active .step-dot { border-color: var(--yellow); color: var(--yellow); }

@@ -53,11 +53,21 @@ type applicationRow struct {
 	Declined          bool     `json:"declined"`
 	MaxretriesBgcheck int      `json:"maxretries_bgcheck"`
 	MaxretriesPayment int      `json:"maxretries_payment"`
-	UnitKey           string   `json:"unitKey"`
-	UnitAddress       string   `json:"unitAddress"`
-	UnitRent          *float64 `json:"unitRent"`
-	UnitStatus        string   `json:"unitStatus"`
-	FreshUntil        string   `json:"freshUntil"`
+	UnitKey            string   `json:"unitKey"`
+	UnitAddress        string   `json:"unitAddress"`
+	UnitCity           string   `json:"unitCity"`
+	UnitRegion         string   `json:"unitRegion"`
+	UnitRent           *float64 `json:"unitRent"`
+	UnitCurrency       string   `json:"unitCurrency"`
+	UnitBedrooms       *float64 `json:"unitBedrooms"`
+	UnitBathrooms      *float64 `json:"unitBathrooms"`
+	UnitLeaseTerm      *float64 `json:"unitLeaseTermMonths"`
+	UnitAvailableFrom  string   `json:"unitAvailableFrom"`
+	UnitStatus         string   `json:"unitStatus"`
+	TermsMoveInDate    string   `json:"termsMoveInDate"`
+	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
+	TermsRequestedRent *float64 `json:"termsRequestedRent"`
+	FreshUntil         string   `json:"freshUntil"`
 }
 
 // computeApplications assembles the My Applications rows from the

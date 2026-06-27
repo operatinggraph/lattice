@@ -634,6 +634,14 @@ function renderApplicationCard(row, highlight) {
 
   card.append(head, banner, steps);
 
+  // Lease terms — what the applicant is actually agreeing to (rent, term, move-in,
+  // property). Projected by the convergence lens from the unit's .listing/.address
+  // and the application's own .terms. Renders only the fields that are present, so
+  // an application with no .terms (moveInDate omitted at apply) or an older lens
+  // projection degrades to whatever the row carries instead of showing blanks.
+  const terms = renderLeaseTermsPanel(row);
+  if (terms) card.append(terms);
+
   // Withdraw: back out of an application before the landlord approves (frees the
   // applicant to re-apply to the same unit). Stays available while the application is
   // qualified-but-undecided (awaiting landlord review) — the applicant may still
@@ -649,6 +657,69 @@ function renderApplicationCard(row, highlight) {
     card.append(actions);
   }
   return card;
+}
+
+// renderLeaseTermsPanel builds the "Lease terms" review panel — the terms the
+// applicant is agreeing to, so signing is no longer blind. It reads the unit's
+// listing economics + address and the application's own requested .terms, both
+// projected onto the convergence row. A term row renders only when its value is
+// present; if nothing beyond the address is known the panel is omitted entirely
+// (returns null) so it never shows an empty shell. When the applicant requested a
+// different rent than the listing asks, both are shown ("you offered …").
+function renderLeaseTermsPanel(row) {
+  const rows = [];
+  const addTerm = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    rows.push([label, value]);
+  };
+
+  const fullAddr = [row.unitAddress, row.unitCity, row.unitRegion].filter(Boolean).join(", ");
+  addTerm("Property", fullAddr);
+
+  const beds = typeof row.unitBedrooms === "number" ? `${row.unitBedrooms} bd` : "";
+  const baths = typeof row.unitBathrooms === "number" ? `${row.unitBathrooms} ba` : "";
+  addTerm("Size", [beds, baths].filter(Boolean).join(" · "));
+
+  if (typeof row.unitRent === "number") {
+    const cur = row.unitCurrency && row.unitCurrency !== "USD" ? ` ${row.unitCurrency}` : "";
+    const base = row.unitCurrency && row.unitCurrency !== "USD"
+      ? `${row.unitRent.toLocaleString()}${cur} / month`
+      : `$${row.unitRent.toLocaleString()} / month`;
+    let rent = base;
+    if (typeof row.termsRequestedRent === "number" && row.termsRequestedRent !== row.unitRent) {
+      rent += ` (you offered $${row.termsRequestedRent.toLocaleString()})`;
+    }
+    addTerm("Rent", rent);
+  }
+
+  const term = typeof row.termsLeaseTermMonths === "number"
+    ? row.termsLeaseTermMonths
+    : (typeof row.unitLeaseTermMonths === "number" ? row.unitLeaseTermMonths : null);
+  if (term !== null) addTerm("Lease term", `${term} months`);
+
+  const moveIn = row.termsMoveInDate || row.unitAvailableFrom;
+  if (moveIn) addTerm(row.termsMoveInDate ? "Requested move-in" : "Available from", fmtDate(moveIn));
+
+  if (rows.length === 0) return null;
+
+  const panel = document.createElement("div");
+  panel.className = "lease-terms";
+  const h = document.createElement("div");
+  h.className = "lease-terms-head";
+  h.textContent = row.missing_signature
+    ? "Lease terms — review before signing"
+    : "Lease terms";
+  panel.append(h);
+  const dl = document.createElement("dl");
+  for (const [label, value] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    dl.append(dt, dd);
+  }
+  panel.append(dl);
+  return panel;
 }
 
 // withdrawApplication submits WithdrawLeaseApplication (tombstones the leaseapp +

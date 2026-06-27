@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "applicant", "entityKey", "freshUntil", "inflight_bgcheck", "inflight_payment", "declined_bgcheck", "declined_payment", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitRent", "unitStatus"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "applicant", "entityKey", "freshUntil", "inflight_bgcheck", "inflight_payment", "declined_bgcheck", "declined_payment", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -96,11 +96,20 @@ func Lenses() []pkgmgr.LensSpec {
 // unitKey / unitAddress / unitRent / unitStatus are columns carried from the
 // appliesToUnit walk (the unit's key, its .address.line1, its .listing.rentAmount
 // + .listing.status — aspect-hops off the live node, read inside the aggregating
-// WITH so they survive the grouping). The first three answer "applying to lease
-// Unit X at $Y/mo" for the operator / applicant FE; unitStatus drives the
-// listing-leased convergence below. `unit` is required at CreateLeaseApplication,
-// so there is no missing_unit gap (§3 D5). appliesToUnit is 0..1, so these stay
-// scalar and one-row-per-anchor holds.
+// WITH so they survive the grouping). They answer "applying to lease Unit X at
+// $Y/mo" for the operator / applicant FE; unitStatus drives the listing-leased
+// convergence below. The richer informational set — unitCity / unitRegion (the
+// rest of .address), unitCurrency / unitBedrooms / unitBathrooms /
+// unitLeaseTermMonths / unitAvailableFrom (the rest of the listing economics),
+// and termsMoveInDate / termsLeaseTermMonths / termsRequestedRent (the
+// applicant's own requested .terms, written only when moveInDate was supplied at
+// CreateLeaseApplication) — projects the full "lease terms you are agreeing to"
+// so the applicant FE can render a terms-review panel before signing. These are
+// pure read-only scalar projections: none feeds violating / a gap predicate, so
+// the convergence logic is untouched (a null .terms simply projects null terms
+// columns). `unit` is required at CreateLeaseApplication, so there is no
+// missing_unit gap (§3 D5). appliesToUnit is 0..1, so these stay scalar and
+// one-row-per-anchor holds.
 //
 // LANDLORD-GATED LISTING-LEASED CONVERGENCE — the human decision gates the lease.
 //
@@ -288,8 +297,18 @@ WITH
   id.ssn.data.value AS ssnVal,
   u.key                     AS unitKey,
   u.address.data.line1      AS unitAddress,
+  u.address.data.city       AS unitCity,
+  u.address.data.region     AS unitRegion,
   u.listing.data.rentAmount AS unitRent,
+  u.listing.data.rentCurrency AS unitCurrency,
+  u.listing.data.bedrooms   AS unitBedrooms,
+  u.listing.data.bathrooms  AS unitBathrooms,
+  u.listing.data.leaseTermMonths AS unitLeaseTermMonths,
+  u.listing.data.availableFrom AS unitAvailableFrom,
   u.listing.data.status     AS unitStatus,
+  app.terms.data.moveInDate AS termsMoveInDate,
+  app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
+  app.terms.data.requestedRent AS termsRequestedRent,
   count(DISTINCT CASE WHEN inst.family.data.value = 'backgroundCheck' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.key ELSE null END) AS freshBgComplete,
   count(DISTINCT CASE WHEN inst.family.data.value = 'payment' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete,
   count(DISTINCT CASE WHEN inst.family.data.value = 'backgroundCheck' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS bgInflight,
@@ -303,8 +322,18 @@ RETURN
   applicant,
   unitKey,
   unitAddress,
+  unitCity,
+  unitRegion,
   unitRent,
+  unitCurrency,
+  unitBedrooms,
+  unitBathrooms,
+  unitLeaseTermMonths,
+  unitAvailableFrom,
   unitStatus,
+  termsMoveInDate,
+  termsLeaseTermMonths,
+  termsRequestedRent,
   freshUntil,
   landlordDecision,
   (ssnVal = null)        AS missing_onboarding,
