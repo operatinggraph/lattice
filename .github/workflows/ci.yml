@@ -13,10 +13,18 @@ on:
   pull_request:
     paths-ignore: *doc-paths
 
+# Four independent jobs run concurrently; wall-clock is the slowest job, not
+# the sum. Every gate that ran in the old single serial job still runs, each in
+# exactly one job:
+#   lint-build  — build, vet, golangci, conventions-lint            (no Docker)
+#   stack-gates — make up → verify-kernel → 8× verify-package →
+#                 Gate 2 → Gate 3 → hello-lattice                   (Docker)
+#   convergence — lease-convergence, object-gc                      (no Docker, embedded NATS)
+#   unit        — go test ./... -p 4                                (no Docker, embedded NATS)
 jobs:
-  build-and-test:
+  lint-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -40,6 +48,17 @@ jobs:
         # Static check: rejects `asp.` key prefixes (Contract #1) and
         # history/changelog comments. STRICT=1 fails the build on any finding.
         run: STRICT=1 go run ./scripts/lint-conventions.go
+
+  stack-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
 
       - name: Bring up Docker stack + run primordial bootstrap
         run: make up
@@ -97,6 +116,21 @@ jobs:
         env:
           GITHUB_SHA: ${{ github.sha }}
 
+      - name: Tear down
+        if: always()
+        run: make down
+
+  convergence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+
       - name: Run lease-convergence suite (Story 14.5 — external-I/O idempotency + convergence)
         # Boots Processor + Refractor + Loom + Weaver + the live bridge in-process
         # (embedded NATS, no extra Docker), installs the real package chain, and
@@ -112,13 +146,20 @@ jobs:
         # directOp(TombstoneObject) → object.tombstoned → byte-reclaim chain.
         run: make test-object-gc
 
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+
       - name: Run all tests (unit + integration)
         # -p 4: up to four test packages run concurrently. Every embedded
         # NATS+JetStream fixture binds a random port and owns a private
-        # StoreDir under t.TempDir(), so concurrent packages share no
-        # JetStream file state.
+        # StoreDir under jsstore.Dir(t), so concurrent packages share no
+        # JetStream file state. Embedded NATS only — no Docker stack needed.
         run: go test ./... -count=1 -p 4 -timeout 10m
-
-      - name: Tear down
-        if: always()
-        run: make down
