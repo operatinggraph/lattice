@@ -662,14 +662,17 @@ func TestWeaverE2E_InstallValidations(t *testing.T) {
 	// unmapped gap surfaced as Contract #5 issues on the heartbeat doc.
 	deadline := time.Now().Add(15 * time.Second)
 	var issues []map[string]any
+	var status string
 	for time.Now().Before(deadline) {
 		entry, err := conn.KVGet(ctx, healthKVBucket, "health.weaver."+instance)
 		if err == nil {
 			var doc struct {
+				Status string           `json:"status"`
 				Issues []map[string]any `json:"issues"`
 			}
 			if json.Unmarshal(entry.Value, &doc) == nil {
 				issues = doc.Issues
+				status = doc.Status
 				if hasIssue(issues, "TargetRejected") && hasIssue(issues, "GapWithoutPlaybook") {
 					break
 				}
@@ -681,6 +684,10 @@ func TestWeaverE2E_InstallValidations(t *testing.T) {
 		"rejected targets must surface a Health KV issue, got: %v", issues)
 	require.True(t, hasIssue(issues, "GapWithoutPlaybook"),
 		"a true gap with no playbook entry must surface a Health KV issue, got: %v", issues)
+	// Contract #5 §5.3: error-severity issues (TargetRejected, GapWithoutPlaybook)
+	// must drive status to "unhealthy" — never false-healthy alongside open issues.
+	require.Equal(t, "unhealthy", status,
+		"a heartbeat carrying error issues must report status:unhealthy, got %q with issues %v", status, issues)
 }
 
 func hasIssue(issues []map[string]any, code string) bool {

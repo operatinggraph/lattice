@@ -243,6 +243,15 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		}
 	}
 
+	// Contract #5 §5.2/§5.3: a heartbeat carrying issues must not report
+	// status:"healthy" (issues is empty iff healthy). Escalate the lifecycle
+	// status to the worst issue severity — any error ⇒ unhealthy, any warning ⇒
+	// degraded — so an open data/config error or a structurally-paused consumer
+	// surfaces honestly instead of false-healthy. The "starting" and "shutdown"
+	// lifecycle phases are reported verbatim (a draining/initializing component
+	// isn't "degraded").
+	status = aggregateStatus(status, issues)
+
 	doc := weaverHealthDoc{
 		Key:         h.key(),
 		Component:   "weaver",
@@ -267,6 +276,28 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 
 func (h *heartbeater) key() string {
 	return "health.weaver." + h.instance
+}
+
+// aggregateStatus reconciles the reported lifecycle status with the open issue
+// set per Contract #5 §5.3: any "error" issue ⇒ "unhealthy", otherwise any
+// "warning" issue ⇒ "degraded", otherwise the lifecycle status is kept. The
+// "starting" and "shutdown" phases are returned unchanged — an initializing or
+// draining component reports its lifecycle phase, not a steady-state health
+// grade, even if transient issues are present.
+func aggregateStatus(lifecycle string, issues []healthIssue) string {
+	if lifecycle == "starting" || lifecycle == "shutdown" {
+		return lifecycle
+	}
+	worst := lifecycle
+	for _, is := range issues {
+		switch is.Severity {
+		case "error":
+			return "unhealthy"
+		case "warning":
+			worst = "degraded"
+		}
+	}
+	return worst
 }
 
 // formatISODuration renders a duration as an ISO 8601 duration (e.g. "PT2M30S").
