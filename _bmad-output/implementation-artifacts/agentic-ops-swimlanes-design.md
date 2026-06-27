@@ -41,6 +41,13 @@
   features) by component freshness × importance×readiness — the existing component-coverage rotation, now the
   Lattice stream's core selection rule. "Features" and "maintenance" are two *kinds* of item within the lane,
   not separate rotation axes.
+- **Loupe is a Lattice-stream component** (`cmd/loupe` — disjoint from the vertical apps' `cmd/*-app`, so no
+  cross-stream collision): it is the operator/inspector and the **P5 Core-KV-reading exception**, i.e.
+  *platform* infra, not a product vertical. The Lattice Steward advances it like any component — the **owner**
+  skill for backend / handlers / read-model / observability (`cmd/loupe/*.go`), and **UX-then-FE** (Sally → FE
+  Engineer + in-browser verify) for operator-surface FE (`cmd/loupe/web`). **UX-then-FE is the FE *mechanism***,
+  not a Verticals-only thing: the **FE Engineer serves both** Loupe and the vertical apps; the difference is
+  only which steward invokes it.
 - **Reliability/observability is not a lane** — it's a pre-emption check **both** advancers run first (red
   CI/gate/Health pre-empts that stream's normal pick), fed by Lamplighter + CI.
 

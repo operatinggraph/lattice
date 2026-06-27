@@ -134,8 +134,11 @@ reason to leave an item undone; only a *standing* Andrew block/shelve is.
 ## 3. Activate (L1)
 
 Invoke the owning role's skill — **Verticals**: package work via the **owner** pattern + **UX-then-FE** (below);
-**Lattice**: the **owner** skill (named component) or **Lamplighter** (observability). The role runs the
-hardened story loop: **Cartographer grounding → design → dev → review → gates**.
+**Lattice**: the **owner** skill (named component) or **Lamplighter** (observability) — **and for Loupe
+operator-surface FE (`cmd/loupe/web`), UX-then-FE too** (Loupe is a Lattice component: owner for its
+backend/handlers, UX-then-FE for its FE; the **FE Engineer serves both Loupe and the vertical apps** — FE is a
+*mechanism*, not a Verticals-only lane). The role runs the hardened story loop: **Cartographer grounding →
+design → dev → review → gates**.
 
 **Isolation — code in a worktree, docs in `main`** (Andrew, 2026-06-26): **CODE** changes build in an
 **isolated git worktree** (commit + push to `main`, no PR). **DOCUMENTS — your lane file, design docs, and

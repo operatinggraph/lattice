@@ -160,6 +160,16 @@ durable and the Steward reads committed state.)
 
 ## 5. The flywheel — the feature engine
 
+> **Execution model superseded (2026-06-26) by `agentic-ops-swimlanes-design.md`.** The single-Steward
+> dispatch below evolved into **two parallel streams** — **Verticals** (apps: package + FE) ∥ **Lattice**
+> (platform features + component maintenance, round-robin across components; Loupe included) — split along the
+> no-collision code seam. Demand is hydrated per lane: the **Vertical PO** (verticals) + a new **Surveyor**
+> (Lattice) + PO-routed platform-*primitive* gaps. The board is split into per-lane files
+> (`planning-artifacts/backlog/{verticals,lattice}.md`). Fires are **bounded** (no budget-guessing — there's
+> no usage tool; the rate-limiter governs). **Code** runs in worktrees; **docs** (board, design docs,
+> contracts) are edited directly in `main` (contracts uncommitted). The roles + flywheel intent below stand;
+> read the swimlanes doc for *how work is selected, hydrated, and advanced*.
+
 The Package Designer + Vertical POs wire up a closed demand→supply loop. This *is* "continuous improvement
 in features," now with a named driver at each hop; Warden and Lamplighter feed the same owners with the
 reliability/observability signals.
