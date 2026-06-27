@@ -8,15 +8,19 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">LoftSpace <span class="brand-sub">apply to lease</span></div>
-    <div class="who">
+    <div class="brand">LoftSpace <span id="brand-sub" class="brand-sub">apply to lease</span></div>
+    <div class="mode-toggle" role="tablist" aria-label="Mode">
+      <button id="mode-applicant" class="mode active" role="tab" aria-selected="true" type="button">Applicant</button>
+      <button id="mode-landlord" class="mode" role="tab" aria-selected="false" type="button">Landlord</button>
+    </div>
+    <div class="who" id="applicant-who">
       <label for="applicant">Applicant</label>
       <select id="applicant" aria-label="Choose your applicant identity"></select>
       <button id="new-applicant" class="ghost" type="button">＋ New applicant</button>
     </div>
   </header>
 
-  <nav class="tabs" role="tablist" aria-label="Applicant views">
+  <nav class="tabs" id="applicant-tabs" role="tablist" aria-label="Applicant views">
     <button id="tab-browse" class="tab active" role="tab" aria-selected="true" aria-controls="view-browse">Browse &amp; Apply</button>
     <button id="tab-apps" class="tab" role="tab" aria-selected="false" aria-controls="view-apps">My Applications</button>
     <button id="tab-tasks" class="tab" role="tab" aria-selected="false" aria-controls="view-tasks">Tasks</button>
@@ -89,6 +93,18 @@
 
       <div id="docs" class="grid grid-wide" aria-live="polite"></div>
       <div id="docs-empty" class="empty" hidden></div>
+    </section>
+
+    <!-- Landlord — my units -->
+    <section id="view-landlord" role="tabpanel" hidden>
+      <div class="panel-controls">
+        <button id="post-listing" type="button">＋ Post a listing</button>
+        <button id="reload-units" class="ghost">Refresh</button>
+        <span id="units-summary" class="summary"></span>
+      </div>
+
+      <div id="units" class="grid grid-wide" aria-live="polite"></div>
+      <div id="units-empty" class="empty" hidden></div>
     </section>
   </main>
 
@@ -165,6 +181,43 @@
         <div class="modal-actions">
           <button type="button" id="applicant-cancel" class="ghost">Cancel</button>
           <button type="submit" id="applicant-submit">Create applicant</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Post a listing modal (landlord) -->
+  <div id="listing-overlay" class="overlay" hidden>
+    <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="listing-title">
+      <h2 id="listing-title">Post a listing</h2>
+      <div class="apply-unit">Create a unit and list it for lease.</div>
+      <form id="listing-form">
+        <div class="field">
+          <label for="li-line1">Address line 1</label>
+          <input type="text" id="li-line1" placeholder="123 Market St, Apt 4B" />
+        </div>
+        <div class="field">
+          <label for="li-line2">Address line 2 <span class="opt">(optional)</span></label>
+          <input type="text" id="li-line2" />
+        </div>
+        <div class="row3">
+          <div class="field"><label for="li-city">City</label><input type="text" id="li-city" placeholder="San Francisco" /></div>
+          <div class="field"><label for="li-region">Region</label><input type="text" id="li-region" placeholder="CA" /></div>
+          <div class="field"><label for="li-postal">Postal</label><input type="text" id="li-postal" placeholder="94103" /></div>
+        </div>
+        <div class="row3">
+          <div class="field"><label for="li-rent">Monthly rent</label><input type="number" id="li-rent" min="1" step="1" placeholder="2400" /></div>
+          <div class="field"><label for="li-currency">Currency</label><input type="text" id="li-currency" value="USD" /></div>
+          <div class="field"><label for="li-bedrooms">Bedrooms</label><input type="number" id="li-bedrooms" min="0" step="1" placeholder="2" /></div>
+        </div>
+        <div class="row3">
+          <div class="field"><label for="li-bathrooms">Bathrooms <span class="opt">(opt)</span></label><input type="number" id="li-bathrooms" min="0" step="0.5" /></div>
+          <div class="field"><label for="li-sqft">Sqft <span class="opt">(opt)</span></label><input type="number" id="li-sqft" min="0" step="1" /></div>
+          <div class="field"></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="listing-cancel" class="ghost">Cancel</button>
+          <button type="submit" id="listing-submit">Post listing</button>
         </div>
       </form>
     </div>

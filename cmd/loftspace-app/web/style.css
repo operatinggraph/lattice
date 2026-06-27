@@ -291,3 +291,65 @@ a.btn-link.ghost {
 a.btn-link.ghost:hover { background: var(--bg-input); color: var(--text); }
 button.ghost.danger { color: var(--red); border-color: var(--red); }
 button.ghost.danger:hover { background: var(--red); color: #fff; }
+
+/* Mode toggle (Applicant / Landlord) */
+.mode-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+}
+.mode {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.mode:hover { background: transparent; color: var(--text); }
+.mode.active, .mode.active:hover { background: var(--accent-dim); color: #fff; }
+
+/* Landlord — units */
+.unit-card { gap: 12px; }
+.unit-head { display: flex; flex-direction: column; gap: 4px; }
+.unit-head .addr { font-weight: 600; font-size: 15px; }
+.unit-sub { display: flex; align-items: center; gap: 10px; color: var(--text-dim); font-size: 13px; }
+.unit-count { color: var(--text-dim); font-size: 12px; }
+.applicants {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.applicant { display: flex; flex-direction: column; gap: 6px; }
+.applicant-info { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.applicant-name { font-weight: 500; }
+.applicant-none { color: var(--text-dim); font-size: 13px; }
+.applicant-note { color: var(--text-dim); font-size: 12px; }
+.applicant-actions { display: flex; gap: 8px; }
+.applicant-actions button { padding: 5px 12px; font-size: 12px; }
+.signed { color: var(--green); font-size: 12px; }
+
+/* Disposition badges */
+.disp {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid;
+}
+.disp.qualified { color: var(--accent); border-color: var(--accent); }
+.disp.review { color: var(--text-dim); border-color: var(--border); }
+.disp.approved { color: var(--green); border-color: var(--green); }
+.disp.leased { color: var(--green); border-color: var(--green); background: rgba(76, 195, 138, 0.08); }
+.disp.declined { color: var(--red); border-color: var(--red); }
+
+/* Wider modal + 3-up field rows (post-listing form) */
+.modal-wide { max-width: 540px; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.row3 .field { margin-bottom: 14px; }

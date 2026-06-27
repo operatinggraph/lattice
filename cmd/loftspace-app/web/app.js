@@ -5,9 +5,11 @@
 // /api/identities and submits CreateLeaseApplication via /api/op.
 
 const APPLICANT_KEY = "loftspace.applicant";
+const MODE_KEY = "loftspace.mode";
 const state = {
-  listings: [], applications: [], tasks: [], docs: [], identities: [],
+  listings: [], applications: [], tasks: [], docs: [], identities: [], units: [],
   applicant: null, current: null, currentTask: null, view: "browse", highlight: null,
+  mode: "applicant",
   docScope: null,
   // sessionUploads maps an oid uploaded THIS session to the link it was created
   // with, so the doc can be detached. A listed doc from a prior session has no
@@ -249,6 +251,44 @@ function showView(view) {
   if (view === "apps") loadApplications();
   if (view === "tasks") loadTasks();
   if (view === "docs") loadDocsView();
+}
+
+// ---- Mode (Applicant / Landlord) ----
+//
+// The two sides of the marketplace share one trusted-tool app. Applicant mode is
+// the default (Browse / My Applications / Tasks / Documents over the per-applicant
+// identity); Landlord mode swaps to a my-units view over the by-unit aggregate. The
+// chosen mode persists across reloads.
+
+const MODES = ["applicant", "landlord"];
+
+function restoreMode() {
+  const saved = (localStorage.getItem(MODE_KEY) || "").trim();
+  state.mode = MODES.includes(saved) ? saved : "applicant";
+}
+
+function setMode(mode) {
+  state.mode = MODES.includes(mode) ? mode : "applicant";
+  localStorage.setItem(MODE_KEY, state.mode);
+  applyMode();
+}
+
+function applyMode() {
+  const landlord = state.mode === "landlord";
+  $("#mode-applicant").classList.toggle("active", !landlord);
+  $("#mode-applicant").setAttribute("aria-selected", String(!landlord));
+  $("#mode-landlord").classList.toggle("active", landlord);
+  $("#mode-landlord").setAttribute("aria-selected", String(landlord));
+  $("#applicant-tabs").hidden = landlord;
+  $("#applicant-who").hidden = landlord;
+  $("#brand-sub").textContent = landlord ? "manage your units" : "apply to lease";
+  $("#view-landlord").hidden = !landlord;
+  if (landlord) {
+    for (const v of VIEWS) $("#view-" + v).hidden = true;
+    loadLandlord();
+  } else {
+    showView(state.view);
+  }
 }
 
 // ---- Listings (Browse & Apply) ----
@@ -1063,10 +1103,275 @@ async function detachDoc(oid, sess) {
   }
 }
 
+// ---- Landlord — my units ----
+//
+// The by-unit aggregate from /api/unit-applications (P5: three lens read models,
+// never Core KV): every listed unit and the live applications against it. The
+// landlord posts a listing (a CreateLocation → SetUnitAddress → SetListing chain)
+// and decides a qualified application (DecideLeaseApplication approve/decline) — the
+// human-in-the-loop the convergence lens now gates the lease behind.
+
+// DISPOSITION maps an applicantSummary.status to its badge label + class.
+const DISPOSITION = {
+  leased: { label: "Leased", cls: "leased" },
+  approved: { label: "Approved — leasing", cls: "approved" },
+  qualified: { label: "Qualified — awaiting decision", cls: "qualified" },
+  declined: { label: "Declined", cls: "declined" },
+  in_review: { label: "In review", cls: "review" },
+};
+
+// moneyAmount formats a bare rent number (the by-unit row carries no currency) as a
+// USD-style figure; the listings in this demo are USD.
+function moneyAmount(n) {
+  return typeof n === "number" ? "$" + n.toLocaleString() : "—";
+}
+
+async function loadLandlord() {
+  const grid = $("#units");
+  const empty = $("#units-empty");
+  $("#units-summary").textContent = "loading…";
+  try {
+    const data = await api("/api/unit-applications");
+    state.units = data.units || [];
+  } catch (e) {
+    grid.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Could not load units: " + e.message;
+    $("#units-summary").textContent = "";
+    return;
+  }
+  renderUnits();
+}
+
+function renderUnits() {
+  const grid = $("#units");
+  const empty = $("#units-empty");
+  grid.innerHTML = "";
+  if (state.units.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No units listed yet. Post a listing to get started.";
+    $("#units-summary").textContent = "";
+    return;
+  }
+  empty.hidden = true;
+  for (const u of state.units) grid.append(renderUnitCard(u));
+  const n = state.units.length;
+  $("#units-summary").textContent = `${n} unit${n === 1 ? "" : "s"}`;
+}
+
+function renderUnitCard(u) {
+  const card = document.createElement("div");
+  card.className = "card unit-card";
+
+  const head = document.createElement("div");
+  head.className = "unit-head";
+  const addr = document.createElement("div");
+  addr.className = "addr";
+  addr.textContent = u.unitAddress || "Unit " + shortKey(u.unitKey);
+  const sub = document.createElement("div");
+  sub.className = "unit-sub";
+  const rent = document.createElement("span");
+  rent.textContent = u.unitRent != null ? moneyAmount(u.unitRent) + " / month" : "—";
+  const status = u.unitStatus || "—";
+  const badge = document.createElement("span");
+  badge.className = "badge " + status;
+  badge.textContent = status;
+  sub.append(rent, badge);
+  head.append(addr, sub);
+
+  const count = document.createElement("div");
+  count.className = "unit-count";
+  count.textContent = u.applicationCount === 1 ? "1 application" : `${u.applicationCount} applications`;
+
+  card.append(head, count);
+
+  const list = document.createElement("div");
+  list.className = "applicants";
+  if (!u.applications || u.applications.length === 0) {
+    const none = document.createElement("div");
+    none.className = "applicant-none";
+    none.textContent = "No applications yet.";
+    list.append(none);
+  } else {
+    for (const a of u.applications) list.append(renderApplicantRow(a, u));
+  }
+  card.append(list);
+  return card;
+}
+
+function renderApplicantRow(a, unit) {
+  const row = document.createElement("div");
+  row.className = "applicant";
+
+  const info = document.createElement("div");
+  info.className = "applicant-info";
+  const name = document.createElement("span");
+  name.className = "applicant-name";
+  name.textContent = a.applicantName || shortKey(a.applicant);
+  const disp = DISPOSITION[a.status] || { label: a.status || "—", cls: "review" };
+  const badge = document.createElement("span");
+  badge.className = "disp " + disp.cls;
+  badge.textContent = disp.label;
+  info.append(name, badge);
+  if (a.signed) {
+    const signed = document.createElement("span");
+    signed.className = "signed";
+    signed.textContent = "✓ signed";
+    info.append(signed);
+  }
+  row.append(info);
+
+  const unitLeased = unit.unitStatus === "leased";
+  if (a.qualified && !unitLeased) {
+    const actions = document.createElement("div");
+    actions.className = "applicant-actions";
+    const approve = document.createElement("button");
+    approve.textContent = "Approve";
+    approve.addEventListener("click", () => decideApplication(a, "approved"));
+    const decline = document.createElement("button");
+    decline.className = "ghost danger";
+    decline.textContent = "Decline";
+    decline.addEventListener("click", () => decideApplication(a, "declined"));
+    actions.append(approve, decline);
+    row.append(actions);
+  } else if (unitLeased && a.status !== "leased" && a.status !== "declined") {
+    const note = document.createElement("div");
+    note.className = "applicant-note";
+    note.textContent = "Unit leased to another applicant.";
+    row.append(note);
+  }
+  return row;
+}
+
+// decideApplication records the landlord's approve/decline (DecideLeaseApplication)
+// for a qualified application, then reloads after a beat so the new disposition (and
+// any unit-leased flip the convergence lens drives) shows once reprojected.
+async function decideApplication(a, decision) {
+  const who = a.applicantName || shortKey(a.applicant);
+  if (decision === "declined" && !confirm(`Decline ${who}'s application?`)) return;
+  try {
+    const reply = await api("/api/op", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationType: "DecideLeaseApplication",
+        class: "leaseapp",
+        reads: [a.leaseAppKey],
+        payload: { leaseAppKey: a.leaseAppKey, decision },
+      }),
+    });
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Decision rejected — " + msg, "err");
+      return;
+    }
+    toast(decision === "approved" ? "Application approved." : "Application declined.", "ok");
+    setTimeout(loadLandlord, 800);
+  } catch (e) {
+    toast("Could not record decision: " + e.message, "err");
+  }
+}
+
+// ---- Post a listing (landlord) ----
+
+function openPostListing() {
+  $("#listing-form").reset();
+  $("#li-currency").value = "USD";
+  $("#listing-overlay").hidden = false;
+  $("#li-line1").focus();
+}
+
+function closePostListing() {
+  $("#listing-overlay").hidden = true;
+}
+
+// opOrThrow submits an op and throws on a rejection or transport error, so the
+// post-a-listing chain stops at the first failure with a message naming the step.
+async function opOrThrow(body, what) {
+  const reply = await api("/api/op", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (reply && reply.status === "rejected") {
+    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+    throw new Error(`Could not ${what} — ${msg}`);
+  }
+  return reply || {};
+}
+
+// submitPostListing runs the three-op chain that mints + lists a unit: CreateLocation
+// (the reply's primaryKey is the new vtx.unit key) → SetUnitAddress → SetListing. Each
+// step awaits the prior since the address/listing target the unit the first op mints.
+async function submitPostListing(ev) {
+  ev.preventDefault();
+  const line1 = $("#li-line1").value.trim();
+  const line2 = $("#li-line2").value.trim();
+  const city = $("#li-city").value.trim();
+  const region = $("#li-region").value.trim();
+  const postal = $("#li-postal").value.trim();
+  const rent = Number($("#li-rent").value);
+  const currency = $("#li-currency").value.trim() || "USD";
+  const bedrooms = $("#li-bedrooms").value;
+  const bathrooms = $("#li-bathrooms").value;
+  const sqft = $("#li-sqft").value;
+
+  if (!line1 || !city || !region || !postal) {
+    toast("Fill in the full address (line 1, city, region, postal).", "err");
+    return;
+  }
+  if (!(rent > 0)) {
+    toast("Enter a monthly rent greater than zero.", "err");
+    return;
+  }
+  if (bedrooms === "") {
+    toast("Enter the number of bedrooms.", "err");
+    return;
+  }
+
+  const submit = $("#listing-submit");
+  submit.disabled = true;
+  try {
+    const created = await opOrThrow(
+      { operationType: "CreateLocation", class: "location", payload: { locationType: "unit" } },
+      "create the unit",
+    );
+    const unitKey = created.primaryKey;
+    if (!unitKey) {
+      toast("The unit was created but returned no key; try Refresh.", "err");
+      return;
+    }
+
+    const addr = { unit: unitKey, line1, city, region, postal };
+    if (line2) addr.line2 = line2;
+    await opOrThrow(
+      { operationType: "SetUnitAddress", class: "loftspaceListing", reads: [unitKey], payload: addr },
+      "set the address",
+    );
+
+    const listing = { unit: unitKey, rentAmount: rent, rentCurrency: currency, bedrooms: Number(bedrooms), status: "available" };
+    if (bathrooms !== "") listing.bathrooms = Number(bathrooms);
+    if (sqft !== "") listing.sqft = Number(sqft);
+    await opOrThrow(
+      { operationType: "SetListing", class: "loftspaceListing", reads: [unitKey], payload: listing },
+      "create the listing",
+    );
+
+    closePostListing();
+    toast("Listing posted.", "ok", unitKey);
+    setTimeout(loadLandlord, 800);
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 // ---- wire up ----
 
 function init() {
   restoreApplicant();
+  restoreMode();
   loadIdentities();
   $("#applicant").addEventListener("change", (e) => setApplicant(e.target.value));
   $("#new-applicant").addEventListener("click", openNewApplicant);
@@ -1101,7 +1406,18 @@ function init() {
   });
   $("#complete-form").addEventListener("submit", submitComplete);
 
+  $("#mode-applicant").addEventListener("click", () => setMode("applicant"));
+  $("#mode-landlord").addEventListener("click", () => setMode("landlord"));
+  $("#post-listing").addEventListener("click", openPostListing);
+  $("#reload-units").addEventListener("click", loadLandlord);
+  $("#listing-cancel").addEventListener("click", closePostListing);
+  $("#listing-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#listing-overlay")) closePostListing();
+  });
+  $("#listing-form").addEventListener("submit", submitPostListing);
+
   loadListings();
+  applyMode();
 }
 
 document.addEventListener("DOMContentLoaded", init);
