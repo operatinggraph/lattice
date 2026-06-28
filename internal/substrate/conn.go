@@ -29,6 +29,17 @@ type ConnectOpts struct {
 	// ReconnectWait controls the delay between reconnect attempts.
 	// Zero means "use the nats.go default".
 	ReconnectWait time.Duration
+
+	// NKeySeedFile is the path to a per-component NKey seed file used to
+	// authenticate the connection (challenge-response; no shared secret on
+	// the wire). When set, Connect signs the server's nonce with the seed.
+	// Empty ⇒ anonymous connect (the embedded test harness and any
+	// unauthenticated server). At most one of NKeySeedFile / CredsFile is set.
+	NKeySeedFile string
+	// CredsFile is the path to a NATS user credentials file (a chained
+	// JWT + seed, for decentralized/operator mode). Empty ⇒ anonymous
+	// connect. At most one of NKeySeedFile / CredsFile is set.
+	CredsFile string
 }
 
 // Conn is substrate's opinionated NATS handle. It owns the underlying
@@ -62,6 +73,19 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	}
 	if opts.ReconnectWait > 0 {
 		natsOpts = append(natsOpts, nats.ReconnectWait(opts.ReconnectWait))
+	}
+	if opts.NKeySeedFile != "" && opts.CredsFile != "" {
+		return nil, fmt.Errorf("substrate: ConnectOpts has both NKeySeedFile and CredsFile set; exactly one credential may be supplied")
+	}
+	if opts.NKeySeedFile != "" {
+		nkeyOpt, err := nats.NkeyOptionFromSeed(opts.NKeySeedFile)
+		if err != nil {
+			return nil, fmt.Errorf("substrate: load NKey seed %q: %w", opts.NKeySeedFile, err)
+		}
+		natsOpts = append(natsOpts, nkeyOpt)
+	}
+	if opts.CredsFile != "" {
+		natsOpts = append(natsOpts, nats.UserCredentials(opts.CredsFile))
 	}
 	nc, err := nats.Connect(opts.URL, natsOpts...)
 	if err != nil {
