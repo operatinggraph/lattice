@@ -1,6 +1,11 @@
 # Design — Full-engine anchor-tombstone retraction (Refractor)
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire (Winston, architect hat) · 2026-06-27
+**Status: ✅ Andrew-ratified (2026-06-27)** · Designer fire (Winston, architect hat) · 2026-06-27
+**Scope confirmed by Andrew:** close the **root-tombstone** case now (Increments 1+2); the general
+WHERE-flip / aspect-deletion retraction stays deferred to the *"Negative / filter-retraction projection"*
+backlog row. Grounding confirmed the retraction key-tracking machinery already exists and is used by 2 of
+the 3 projection paths (simple-engine `deleteResult`; actor-aware `evaluate.go:88`) — the plain full-engine
+path is the lone fall-through, fixed here to parity. No frozen-contract change.
 **Component:** Refractor (`internal/refractor/ruleengine/full` + `internal/refractor/pipeline`)
 **Backlog row:** Lattice lane → *Read-model / projection maturity* → "Full-engine lens re-projects a
 tombstoned vertex when its keyed aspect survives" (PO-routed, Clinic; ★★, S–M).

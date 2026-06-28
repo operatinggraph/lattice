@@ -1,53 +1,44 @@
-# Weaver reclaim check-before-act probe — design
+# Weaver reclaim phantom-churn suppression — design
 
-**Status:** 📐 **awaiting-Andrew (ratification)**
+**Status:** ✅ **Andrew-ratified (2026-06-27) — Option D (Weaver-state backoff).**
 **Component:** Weaver (`internal/weaver`) · **Stream:** Lattice (Stream 2) · **Size:** S–M (one build fire)
 **Designer fire:** Winston, 2026-06-27 · **Builds on:** Contract #10 §10.3 (in-flight marks / reclaim),
-Contract #4 (idempotency tracker), the §E retry-budget machinery.
+the existing `mark` state (`state.go`) + `dispatchCount`, the §E retry-budget machinery.
+**Contract change:** **NONE.** (The earlier Option-A draft staged a §10.3 clarification; that edit is
+**withdrawn** — Option D reads/writes only Weaver-private `weaver-state` and touches no frozen contract.)
 
 ---
 
-## For Andrew (the one-look decision)
+## Decision (Andrew-ratified)
 
-**What it does, in two lines.** When the reconciler sweep reclaims an expired-lease mark for a
-**collapse-only userTask action** (`assignTask` / `triggerLoom`), it first does **one Core-KV GET of the
-prior episode's op-tracker** (`vtx.op.<requestId>`, re-derived from the mark's revision — storage-free). If
-the prior dispatch already **committed**, the reclaim is **skipped** (the effect is durably in place; a
-re-dispatch would only collapse on the existing task/instance anyway). If absent, the reclaim re-fires
-**exactly as today**. `directOp` and external gaps — where reclaim re-dispatch is the *intended* bounded
-retry — are **untouched**.
+**What it does, in two lines.** When the reconciler sweep would reclaim an expired-lease mark for a
+**collapse-only userTask action** (`assignTask` / `triggerLoom`), it applies an **exponential backoff keyed
+on the mark's own state** (`ClaimedAt` + the existing `dispatchCount`): the first reclaim still fires at
+lease-expiry (lost-dispatch recovery is unchanged), but subsequent reclaims of the *same still-open episode*
+back off (≈ lease → 1h → 2h → … capped at 24h) instead of re-firing every sweep. `directOp` and external
+gaps — where reclaim re-dispatch is the *intended* bounded retry — are **untouched**.
 
-**The headline finding you should weigh first.** The Surveyor filed this as a *correctness* gap
-("`assignTask` can mint a second task, `triggerLoom` a second pattern run"). **That correctness double is
-already closed** by the ratified §10.3 claimId-seeded consumer idempotency (shipped). What remains is **not
-correctness** — it is **wasteful phantom-reclaim churn + misleading operator noise**: an open human-task gap
-whose package projects no `inflight_<g>` column is re-dispatched every sweep (~30–60 min) for the entire
-**30-day** `assignTaskGrantTTL` window — up to ~1,440 redundant `CreateTask` ops + `vtx.op` trackers + Warn
-"mark reclaimed" log lines for a *single* pending approval, every one a no-op the consumer collapses. This
-design eliminates that at **platform altitude** without requiring every package author to add an
-`inflight_<g>` lens column.
+**Why Option D over the original Option-A probe (the ratified choice).** Grounding produced three facts that
+re-pointed the design:
+1. **The op-tracker TTL is 24 h** (Contract #4 §4.3) — so the originally-proposed Core-KV-tracker probe
+   would only suppress within a 24 h window and reset to ~1/day anyway (~1,440 → ~30). The probe's *precision*
+   ("did it commit?") buys little once you accept a daily floor.
+2. **The dispatch requestId is already stateless-derivable** (`deriveEpisodeRequestID`, `actuator.go:130`) —
+   so the probe needed no new state, *but neither does backoff*.
+3. **Weaver already keeps the per-episode state backoff needs.** The `mark` (`state.go:77`) carries
+   **`ClaimedAt`** — refreshed on every `create`/`replace` (lines 133/196), i.e. "when this episode was last
+   dispatched" — and there is already a **`dispatchCount`** key in `weaver-state` (`state.go:236`). Backoff is
+   therefore a **pure read of state Weaver already writes**, with **no Core-KV read** and **no frozen-contract
+   change** — which also disentangles this item from contract #10 (the §10.3 edit is withdrawn, leaving only
+   the unrelated L3 §10.8 edit there to settle independently).
 
-**ARCHITECTURAL FORK — probe vs. close (your call).** §10.3 *explicitly rejects* a producer-side existence
-check ("a Weaver GET would race the publish→commit propagation lag"). My design threads that needle with a
-distinction the contract didn't draw — see §6 — but it is a genuine judgment call:
-- **Option A (recommended):** ship the best-effort op-tracker probe + the §10.3 clarification. Real
-  churn/noise reduction; lens-independent; type-agnostic; one cheap GET that *net-reduces* load.
-- **Option B (minimal):** declare the item resolved-by-§10.3; do only the **observability cleanup** (fix the
-  stale `reconciler.go:229` comment + weaver.md:400, downgrade the phantom-reclaim log Warn→Debug). No
-  contract change.
-- **Option C:** do nothing — `inflight_<g>` is the sanctioned package knob; phantom churn is the package's
-  job to quiet.
-
-My recommendation is **A**: B/C leave a real operational wart (1,440× redundant ops per open human task) that
-the *platform* can fix once, cheaply, for *all* packages. But A touches a frozen-contract line you ratified
-deliberately, so it's yours to confirm. Trade-offs in §6.
-
-**FROZEN-CONTRACT change (staged UNCOMMITTED in `main` for your review).** Contract #10 §10.3 — the
-"Re-fire after lease expiry" bullet (line ~297) — is amended to **permit** the best-effort op-tracker probe
-for the collapse-only userTask actions, **distinguished** from the rejected artifact-GET. The edit is staged
-unstaged/uncommitted in `docs/contracts/10-orchestration-surfaces.md` as the proposal (the diff *is* the
-request). Affected consumers: **Weaver only** (the reclaim path); no other component reads or writes this
-surface. Only needed if you pick **Option A**.
+Option D solves the same operational wart Option A targeted — the **phantom-reclaim churn** (see §1) — at
+platform altitude, for all packages, more cheaply (no cross-component read, no contract surface), with richer
+operator observability (suppression counter + the existing dispatch count). The one trade-off vs. A
+(§7): backoff suppresses by "I dispatched recently," not "it provably committed," so a genuinely-lost
+*subsequent* re-dispatch waits a backoff interval rather than the next sweep — immaterial for a human-task
+gap open for up to 30 days, and the consumer's `claimId` idempotency makes any re-dispatch safe regardless.
+The **first** reclaim is unchanged (fires at lease-expiry), so first-dispatch-loss recovery does not regress.
 
 ---
 
@@ -59,188 +50,155 @@ surface. Only needed if you pick **Option A**.
 > (`reconciler.go:218`) without probing whether the prior episode's effect already landed — the §10.3
 > "documented rare-double." For external-I/O gaps this is harmless (the bridge de-dups on `idempotencyKey`);
 > but `assignTask` can mint a second task and `triggerLoom` a second pattern run before the first completes.
-> A bounded check-before-act probe … would collapse the double for the non-idempotent actions while leaving
-> the lease/level-reconcile recovery intact.
 
-### 1.2 What grounding revealed — the correctness double is *already closed*
+### 1.2 What grounding revealed — the *correctness* double is already closed
 
-Reading the contract before the code is what this stage is for, and it reframes the item. **Contract #10
-§10.3 (lines 293–331) already ratified the disposition** the Surveyor proposes to add:
+Reading the contract before the code reframes the item. **Contract #10 §10.3 already ratified** the
+disposition the Surveyor proposes to add:
 
-- The mark's `claimId` (minted at CAS-create, **preserved verbatim across every reclaim-`replace`**) seeds
-  the dispatched artifact's id — `assignTask`'s `taskId` (`deriveStableTaskID`) and `triggerLoom`'s Loom
-  `instanceId` (`deriveStableInstanceID`, `actuator.go:145`/`:157`). Every re-dispatch of the same open
-  episode re-supplies the **same** id.
-- The **consumer** is "the single idempotency authority": `CreateTask`'s Starlark reads the task key via
-  `kv.Read()` and silently no-ops if present-and-alive (`CreateOnly` is the narrow concurrent-dispatch
-  backstop); a re-emitted `loom.patternStarted` collapses on Loom's existing `instance.<id>`. §10.3:
-  *"This **supersedes** the prior 'accepted rare double / check-before-act = Phase-3 hardening' disposition
-  for the two human userTask actions."*
-- §10.3 **explicitly rejects** the producer-side check the Surveyor describes: *"Weaver re-publishes the
-  dispatch **without** a producer-side existence check (a Weaver GET would race the publish→commit
-  propagation lag — inside that window it sees absent and re-publishes anyway, so it cannot **prevent** a
-  double; only the consumer, committing against real state, can)."*
-- For `directOp` and external gaps, §10.3 states the reclaim re-dispatch is **intended** ("re-call a dead
-  vendor / mint a fresh service instance"), episode-scoped on `markRevision` and **bounded by `inflight_<g>`
-  + `maxretries_<g>`."
+- The mark's `claimId` (minted at CAS-create, **preserved verbatim across every reclaim-`replace`**,
+  `state.go:182`) seeds the dispatched artifact's id — `assignTask`'s `taskId` (`deriveStableTaskID`) and
+  `triggerLoom`'s `instanceId` (`deriveStableInstanceID`, `actuator.go:145/157`). Every re-dispatch of the
+  same open episode re-supplies the **same** id.
+- The **consumer** is the single idempotency authority: `CreateTask`'s Starlark `kv.Read()`-then-no-ops if
+  the task exists; a re-emitted `loom.patternStarted` collapses on Loom's existing `instance.<id>`. §10.3:
+  *"This supersedes the prior 'accepted rare double / check-before-act = Phase-3 hardening' disposition for
+  the two human userTask actions."*
 
 So `assignTask`/`triggerLoom` **cannot mint a second task/pattern** — the Surveyor's correctness claim is
-superseded by ratified contract behavior that has already shipped (the claimId machinery is live in
-`strategist.go`/`state.go`/`reconciler.go`). The code/doc comments that still call it "the documented
-rare-double … check-before-act deferred to Phase 3" (`reconciler.go:229`, `weaver.md:400`) are **stale
-doc-drift** relative to the §10.3 supersession.
+superseded by shipped behavior. The code/doc comments still calling it "the documented rare-double …
+check-before-act deferred to Phase 3" (`reconciler.go:229`, `weaver.md:400`) are **stale doc-drift**.
 
 ### 1.3 The genuine residual — phantom churn, not a double
 
-What the consumer idempotency does **not** remove is the *cost* of the redundant dispatch. Walk the canonical
+What consumer idempotency does **not** remove is the *cost* of the redundant dispatch. The canonical
 human-in-the-loop gap (`missing_approval` → `assignTask`):
 
-1. Lane-1 dispatches once; `CreateTask` commits; the approval task now exists. `missing_approval` stays
-   **true** (the human hasn't approved yet) → the gap stays **violating** → the mark stands with a 30-min
-   lease.
-2. The sweep (1-min cadence) reclaims at lease expiry (~30–60 min). It re-plans, re-`replace`s the mark
-   (new revision → new episode requestId), re-publishes `CreateTask`, **bumps the dispatch-count**, and logs
-   `Warn "weaver sweep: mark reclaimed"`. The duplicate `CreateTask` reaches the Processor, runs the DDL,
-   and the `kv.Read()` no-op collapses it — **a committed but empty op, which still writes a fresh
-   `vtx.op.<requestId>` tracker (24-h TTL)**.
-3. This repeats **every reclaim window for up to `assignTaskGrantTTL` = 30 days** (`strategist.go:28`) — the
-   grant deliberately outlives any human response. At a ~30-min effective cadence that is **~1,440 redundant
-   committed ops, ~1,440 tracker vertices, and ~1,440 misleading Warn lines** for **one** pending approval.
+1. Lane-1 dispatches once; `CreateTask` commits; the approval task exists. `missing_approval` stays **true**
+   (the human hasn't approved) → the gap stays **violating** → the mark stands with a ~30-min lease.
+2. The sweep (1-min cadence) reclaims at lease-expiry. It re-`replace`s the mark (new revision → new episode
+   requestId), re-publishes `CreateTask`, bumps `dispatchCount`, and logs `Warn "mark reclaimed"`. The
+   duplicate `CreateTask` reaches the Processor, runs the DDL, the `kv.Read()` no-op collapses it — **a
+   committed-but-empty op that still writes a fresh `vtx.op.<requestId>` tracker (24-h TTL)**.
+3. This repeats **every reclaim window for up to `assignTaskGrantTTL` = 30 days** (`strategist.go:28`). At a
+   ~30–60-min effective cadence that is **hundreds–~1,440 redundant committed ops, tracker vertices, and
+   misleading Warn lines** for **one** pending approval.
 
-The platform *does* offer a suppression knob — a package may project `inflight_<g>` (a lens column "a
-remediation is in flight"), which `gapSuppressed` (`evaluator.go:396`) honors in both dispatch legs. But it
-is **optional package work**, it is **eventually-consistent** (lens lag re-opens the window on every flip),
-and **nothing forces a human-task package to author it**. The phantom storm is the default for any userTask
-gap that omits it.
+The platform offers a suppression knob (`inflight_<g>`, honored by `gapSuppressed`, `evaluator.go:396`) — but
+it is **optional package work**, **lens-lagged**, and **nothing forces a human-task package to author it**.
+The phantom storm is the default for any userTask gap that omits it.
 
-**Intent, then:** give the *platform* a default, lens-independent way to recognize "this episode's dispatch
-already committed; re-firing only collapses" and **skip the redundant work + the false alarm** — while
-leaving the ratified consumer-idempotency authority, the level-reconcile clearing, and the TTL backstop
-exactly as they are.
+**Intent:** give the *platform* a default, lens-independent, state-cheap way to stop re-firing a
+provably-recently-dispatched collapse-only episode every sweep — while leaving consumer idempotency, the
+level-reconcile clearing, and the TTL backstop exactly as they are.
 
 ---
 
-## 2. The shape
+## 2. The shape (Option D — Weaver-state backoff)
 
-### 2.1 Where it sits (mirroring the existing reclaim path)
+### 2.1 Where it sits (a guard inside the existing reclaim path)
 
-The probe is a guard **inside `sweeper.reclaim` (`reconciler.go:231`)**, placed after the cheap gates that
-already exist (`violating`, `gapSuppressed`, registry warm-up) and **before** `planGap` — so a suppressed
-reclaim also skips the plan/registry-resolution cost:
+The backoff is a guard **inside `sweeper.reclaim` (`reconciler.go:231`)**, after the cheap gates that already
+exist (`violating`, `gapSuppressed`, registry warm-up) and **before** `planGap`/`replace`/`fire` — so a
+suppressed reclaim skips the plan-resolution, the mark write, the op publish, *and* the tracker it would
+spawn:
 
 ```
 reclaim(...):
-    target, installed := source.target(targetID)         # unchanged
-    ... orphan legs (warm-up gated) ...                  # unchanged
-    if !boolColumn(violating): return                    # unchanged (L1 parity)
-    if gapSuppressed(...): return                         # unchanged (inflight_/maxretries gate)
+    ... unchanged gates: target, orphan legs, violating, gapSuppressed ...
 
-    # NEW — best-effort, userTask-scoped:
+    # NEW — best-effort, action-gated to the two collapse-only userTask actions:
     if rec.Action in {assignTask, triggerLoom}:
-        priorReqID := deriveEpisodeRequestID(targetID, entityID, gapColumn, markRev)
-        if e.priorEpisodeCommitted(ctx, priorReqID):     # one core-kv GET of vtx.op.<priorReqID>
-            e.logger.Debug("weaver sweep: reclaim suppressed; prior episode committed (consumer idempotency holds)", ...)
-            s.bump(&s.reclaimsSuppressed)                # heartbeat counter (operator visibility)
-            return                                       # leave the mark; level-reconcile / TTL bound it
+        count   := e.dispatchCount(targetID, entityID, gapColumn)   # existing weaver-state key
+        elapsed := now - parse(rec.ClaimedAt)                       # mark field, already written every dispatch
+        if elapsed < backoffInterval(count):
+            e.logger.Debug("weaver sweep: reclaim backed off; episode dispatched recently", ...)
+            s.bump(&s.reclaimsSuppressed)                           # heartbeat counter (operator visibility)
+            return                                                   # leave the mark; do NOT replace/fire/bump
 
-    ... entityKey echo check, planGap, replace, fire ... # unchanged
+    ... entityKey echo check, planGap, replace, fire, bumpDispatchCount ...   # unchanged
 ```
 
-The mechanism is **type-agnostic** (the op-tracker exists for *every* committed op regardless of action),
-but the *application* is **action-gated** to the two collapse-only userTask actions — see §3 for why
-`directOp` is excluded.
+No new mark field, no new KV key, no Core-KV read. The guard is a pure comparison over state Weaver already
+maintains.
 
-### 2.2 The evidence: the prior episode's op-tracker (Contract #4)
+### 2.2 The backoff function
 
-`deriveEpisodeRequestID(targetID, entityID, gapColumn, markRevision)` (`actuator.go:130`) is a **pure
-function** of the mark key + its revision. Each time the mark is written (CAS-create, or reclaim-`replace`)
-the engine `fire`s an op whose requestId derives from *that exact revision* (`evaluator.go:294`). So given
-the mark at its **current** revision `markRev` (read this sweep pass), the requestId of the **last dispatch
-actually fired for this mark** is exactly `deriveEpisodeRequestID(…, markRev)` — **no new mark field is
-required**; the prior requestId is re-derived, not stored.
+```
+backoffInterval(count):
+    # count == 0 or 1  → base (≈ the mark lease) → first reclaim fires at lease-expiry as today
+    # then exponential, capped at the 24-h idempotency horizon
+    return min(base * 2^max(0, count-1), 24h)
+```
 
-The probe reads `vtx.op.<priorReqID>` from `cfg.CoreKVBucket`:
+- **`base ≈ lease`** (≈30 min): the *first* reclaim (`count` 0→1) fires at the normal lease-expiry, so a
+  genuinely-lost first dispatch still recovers promptly — **no recovery regression vs. today**.
+- **Exponential ramp, 24 h cap:** a 30-day open task sees ~30min, 1h, 2h, 4h, 8h, 16h, 24h, then ~daily —
+  roughly **a few dozen** real re-dispatches instead of ~1,440. The cap aligns with the op-tracker's 24-h
+  horizon (no point backing off past the window in which a duplicate would even be deduped at step 2).
+- **`base` / cap are config** (mirroring `MarkLease`); the defaults above ship.
 
-| Tracker state | Meaning | Probe verdict |
-|---|---|---|
-| **Present, `isDeleted:false`** | The prior dispatch **committed** (Contract #4 §4.1 — tracker written atomically at commit step 8); the task/instance is durably in place. | **Skip** the reclaim (quiet). |
-| **Absent** | Op never committed — publish failed (`fire`→Nak), Processor rejected it (auth/validation), it is still in the Processor backlog (tracker not yet written), or it committed >24 h ago and the tracker TTL-expired. | **Reclaim** as today. |
-| **Present, `isDeleted:true`** | Operator-tombstone-then-resubmit signal (Contract #4 §4.3) — treat as not-committed. | **Reclaim** as today. |
+### 2.3 Why `ClaimedAt` is the right clock (no new state)
 
-### 2.3 Read path (P5) and write path (P2)
+`ClaimedAt` is set to `now` on **every** `create` and `replace` (`state.go:133/196`) — i.e. it stamps the
+**last actual (re-)dispatch** of the open episode. A backed-off sweep does **not** `replace`, so `ClaimedAt`
+**keeps aging**; once `elapsed ≥ backoffInterval(count)` the next sweep proceeds to the real reclaim (which
+`replace`s, resetting `ClaimedAt = now`, and bumps `dispatchCount`, lengthening the next interval). The clock
+lives in shared state (the mark), so it is **instance-agnostic** — every Weaver instance computes the same
+backoff verdict, no coordination needed.
 
-- **Read path.** Weaver **already** reads Core KV directly — `newTargetSource(conn, cfg.CoreKVBucket, …)`
-  (`engine.go:284`) watches `vtx.meta.>` for the registry. Weaver is a **platform binary on the P5
-  allowed-direct-read list** (CLAUDE.md). The probe adds **one `KVGet` of `vtx.op.<id>`** on the same
-  bucket — *not* a new boundary crossing, and the op-tracker is **type-agnostic** (no concrete-type coupling,
-  so it respects "don't hardwire generic components to concrete types", D5/architecture-data-placement).
-- **Write path.** **Nothing new is written.** The probe is read-only; it *removes* writes (the redundant op
-  submit + its tracker) it would otherwise cause. P2 is strengthened, not touched.
+**Mark survival across a backoff gap.** A backed-off sweep returns without re-arming the lease, so `reclaim`
+is re-entered each sweep (a cheap compare + return — no I/O). The mark itself is kept alive by its existing
+per-key TTL backstop (`markTTLBackstopFactor × lease`, `state.go`), which is sized far larger than the 24-h
+backoff cap, so the mark never TTL-expires inside a backoff window; the periodic real reclaim re-arms it.
 
 ### 2.4 New heartbeat counter (Contract #5, author's-discretion metric)
 
-Add `reclaimsSuppressed` alongside the existing sweep counters (`reclaims`, `orphansDeleted`, `corrupt` —
-`reconciler.go:412`), surfaced under `metrics.sweep.*` in the Weaver heartbeat. It gives the operator (and
-the Lamplighter) positive evidence the probe is working — a rising `reclaimsSuppressed` with a flat
-`reclaims` is the healthy steady state for a deployment with open human tasks. **No contract change** —
-§5.4 already makes extra metrics author's discretion.
+Add `reclaimsSuppressed` alongside the existing sweep counters (`reclaims`, `orphansDeleted`, `corrupt`,
+`reconciler.go:412`), surfaced under `metrics.sweep.*`. A rising `reclaimsSuppressed` with a flat `reclaims`
+is the healthy steady state for a deployment with open human tasks — positive evidence for the operator + the
+Lamplighter. **No contract change** — §5.4 already makes extra metrics author's discretion.
 
 ---
 
-## 3. Why the probe is action-gated to userTask actions
+## 3. Why the backoff is action-gated to userTask actions
 
-The discriminator is **what a reclaim re-dispatch actually does** per action — established by §10.3:
+The discriminator is **what a reclaim re-dispatch actually does** per action (established by §10.3):
 
-| Action | Reclaim re-dispatch effect | Probe-suppress? |
+| Action | Reclaim re-dispatch effect | Back off? |
 |---|---|---|
-| `assignTask` | **Collapse-only** — same `claimId`-seeded `taskId`; `CreateTask` `kv.Read()` no-op. Re-dispatch never creates a second task; it is pure waste once committed. | **Yes** — safe + valuable. |
-| `triggerLoom` | **Collapse-only** — same `claimId`-seeded `instanceId`; Loom's instance-presence + `CreateOnly` collapse a re-emitted `patternStarted`; a *terminal* instance drops it (no re-create). §10.3: a re-trigger **never** re-calls a vendor or mints a new instance. | **Yes** — safe + valuable. |
-| `directOp` | **Intended retry** — §10.3: external gaps' reclaim re-dispatch is *intended* ("re-call a dead vendor / mint a fresh service instance"), bounded by `inflight_<g>` + `maxretries_<g>`. Re-firing **is** the next attempt. | **No** — suppressing it would break the bounded retry. |
+| `assignTask` | **Collapse-only** — same `claimId`-seeded `taskId`; `CreateTask` `kv.Read()` no-op. Re-dispatch never creates a second task; once committed it is pure waste. | **Yes** — safe + valuable. |
+| `triggerLoom` | **Collapse-only** — same `claimId`-seeded `instanceId`; Loom's instance-presence + `CreateOnly` collapse a re-emitted `patternStarted`; a terminal instance drops it. | **Yes** — safe + valuable. |
+| `directOp` | **Intended retry** — §10.3: external gaps' reclaim re-dispatch is *intended* ("re-call a dead vendor / mint a fresh service instance"), bounded by `inflight_<g>` + `maxretries_<g>`. Re-firing **is** the next attempt. | **No** — backing it off would slow the intended retry. |
 
-For the two userTask actions, re-dispatch is *only ever* a collapse — so skipping a provably-committed one
-**loses nothing** (no attempt is forgone) and **saves everything** (the op, the tracker, the count bump, the
-Warn). For `directOp`, re-dispatch is the retry mechanism itself; the probe must not run, and the existing
-`inflight_<g>` + `maxretries_<g>` bound stays the sole governor. Weaver cannot tell from the action alone
-whether a *given* `directOp` is an idempotent CAS (collapse-only) or an external-retry, so it conservatively
-excludes all `directOp` — a per-gap `reclaimMode` playbook hint could refine this later (§7), but that is
-out of scope now.
-
-**Dispatch-count interaction.** A probe-suppressed reclaim does **not** `bumpDispatchCount`. This is *more*
-correct, not a regression: the §E retry budget counts *real* attempts toward `maxretries_<g>`, and a phantom
-re-dispatch that the consumer collapses is not a real attempt. userTask gaps typically carry no
-`maxretries_<g>` (a human task should not "give up"), so the budget term is inert for them regardless; even
-where one is set, not consuming it on a collapse is the intended semantics (attempts are paced by real
-outcomes, not by mark-lease expiries — §10.3 / `state.go:50`).
+For the two userTask actions, re-dispatch is *only ever* a collapse — so pacing repeats with backoff **loses
+nothing** (the first reclaim still fires on time; the consumer collapses any later one) and **saves
+everything** (the op, the tracker, the count bump, the Warn). For `directOp`, re-dispatch is the retry
+mechanism; the backoff must not run, and `inflight_<g>` + `maxretries_<g>` stay the sole governor. Weaver
+cannot tell from the action alone whether a given `directOp` is an idempotent CAS or an external retry, so it
+conservatively excludes **all** `directOp` (a per-gap `reclaimMode` playbook hint could refine this later —
+§7, out of scope now).
 
 ---
 
-## 4. Why this is safe where the rejected check was not (the core insight)
+## 4. Why this is safe (and needs no contract change)
 
-§10.3 rejected the producer check because **GET-the-artifact races the lag**: the task/instance is created
-*asynchronously after* the op commits and propagates, so a producer GET inside that window sees absent and
-re-publishes anyway — it cannot *prevent* a double.
+§10.3 rejected a *producer-side existence check* because **GET-the-artifact races the commit-propagation lag**
+— a producer GET inside that window sees absent and re-publishes anyway, so it cannot *prevent* a double.
+**Option D does not probe anything** — it neither GETs the artifact nor the op-tracker. It only **paces its
+own re-dispatch cadence** using its own mark state. So the §10.3 prohibition is simply not engaged: there is
+no producer-side check, no race to lose, no claim to "prevent a double" (that remains the consumer's job,
+unchanged). This is why Option D needs **no §10.3 edit** — it operates entirely within Weaver's existing
+reclaim discretion (the *interval* between reclaims was never contract-fixed; only the consumer-idempotency
+disposition was).
 
-The op-tracker probe is **race-free in the only direction that matters**:
-
-- The tracker is written **atomically at commit** (Contract #4 §4.1, step 8) — it *is* the commit fact the
-  platform already uses for step-2 dedup. It is **durable and monotonic**: once present it never
-  "un-commits."
-- **Present ⟹ definitely committed ⟹ the artifact definitely exists** (the same atomic batch wrote both).
-  So "present → skip" can never cause a *wrong* skip.
-- **Absent → reclaim** is the safe default: if the op was actually mid-flight (pending pre-commit), the
-  reclaim re-fires, and the **unchanged consumer idempotency collapses the result** (same `claimId` →
-  same `taskId`/`instanceId`). Defense in depth — the probe is a *prompt*, the consumer is the *backstop*.
-
-So the probe **never claims to prevent a double** (that remains the consumer's job, per §10.3); it only
-**skips provably-redundant work** when it can cheaply read a settled commit fact. That is a different
-operation from the rejected artifact-GET, and it is the distinction the §10.3 clarification (§6) draws.
-
-**Tracker-TTL alignment.** The op-tracker lives **24 h** (Contract #4 §4.3); the mark lease is **30 min**,
-TTL-backstop **60 min**. Reclaims occur ~30–60 min after the last dispatch — three orders of magnitude
-inside the 24-h tracker horizon — so a committed prior episode's tracker is **reliably present**. After 24 h
-the tracker TTL-expires, so one reclaim per 24 h re-fires (re-creating the tracker, collapsing on the
-existing task) and goes quiet again: a 30-day open task drops from ~1,440 phantom dispatches to **~30** (one
-per day) — a ~48× reduction — with the residual handful still individually harmless.
+Safety properties:
+- **Never suppresses the first reclaim** → a lost first dispatch recovers at lease-expiry as today.
+- **Absent/unknown commit state is irrelevant** → backoff doesn't ask "did it commit"; it re-fires every
+  interval regardless, and the consumer collapses a redundant one. Defense in depth is unchanged.
+- **`directOp` excluded** → the intended external retry is untouched.
+- **Level-reconcile + TTL backstop unchanged** → once the underlying condition clears, the gap stops being
+  violating and the mark is removed on the normal path; nothing about backoff delays that.
 
 ---
 
@@ -248,129 +206,110 @@ per day) — a ~48× reduction — with the residual handful still individually 
 
 | Contract | Section | Change vs. build-to |
 |---|---|---|
-| **#10 Orchestration** | §10.3 "Re-fire after lease expiry" bullet (~line 297) | **Change** — permit the best-effort op-tracker probe for the collapse-only userTask actions, distinguished from the rejected artifact-GET. **Staged UNCOMMITTED in `main`** (Option A only). |
-| **#4 Idempotency tracker** | §4.1 / §4.3 | **Build-to** — the tracker shape, the atomic-at-commit write, the 24-h TTL are used as-is; no change. |
+| **#10 Orchestration** | §10.3 | **NONE.** The Option-A §10.3 clarification is **withdrawn**; backoff engages no producer-check prohibition. (The unrelated L3 §10.8 edit staged in the same file is a *different* item — leave it.) |
+| **#4 Idempotency tracker** | — | **Build-to** — not read by Option D at all. |
 | **#5 Health KV** | §5.4 | **Build-to** — `reclaimsSuppressed` is an author's-discretion metric; no change. |
 
-The §10.3 edit is the **only** contract change, and **only if Andrew picks Option A**. Under Option B it is
-withdrawn (the cleanup needs no contract change). It is staged unstaged in the working tree as the proposal;
-the Designer does **not** commit it.
+**No frozen-contract change.** Nothing under `docs/contracts/` is edited by this item.
 
 ---
 
-## 6. The fork in full — probe vs. close
+## 6. The options weighed (D chosen; A/B/C recorded)
 
-**Option A — ship the best-effort probe (recommended).**
-- *For:* removes ~1,440 redundant committed ops + trackers + Warn lines per open human task, for *all*
-  packages, without per-package `inflight_<g>` work; lens-independent (works even when the package projects
-  no companion column); one cheap GET on a path that already reads Core KV; **net-reduces** load (saves a
-  publish + a Processor op + a tracker write per suppressed reclaim); strictly additive — absent-tracker
-  behavior is byte-for-byte today's.
-- *Against:* touches a §10.3 line you ratified deliberately; introduces a *second* idempotency-adjacent
-  mechanism (a prompt above the consumer authority), which is conceptual surface area; the value is
-  efficiency/observability, not correctness (the correctness case is already closed).
+- **Option D — Weaver-state backoff (CHOSEN).** *For:* removes the phantom storm for all packages, no
+  per-package `inflight_<g>` work; **no Core-KV read, no contract change**; richer observability; first-retry
+  recovery unchanged. *Against:* paces by "dispatched recently," not "provably committed" (a lost *subsequent*
+  re-dispatch waits one backoff interval — immaterial for 30-day human tasks; claimId idempotency makes any
+  re-dispatch safe).
+- **Option A — best-effort Core-KV op-tracker probe.** *For:* more precise (skips only a provably-committed
+  episode). *Against:* TTL-bounded to a ~daily floor anyway (Contract #4 §4.3), a cross-component read, and it
+  edits a §10.3 line set deliberately — entangling this item with contract #10's pending L3 edit. *Rejected
+  in favor of D* (same outcome, cleaner surface).
+- **Option B — cleanup only (declare resolved-by-§10.3).** *For:* smallest surface. *Against:* leaves the
+  phantom-churn wart on every package author — a generic inefficiency in a generic component is platform work.
+- **Option C — do nothing.** *Against:* the `inflight_<g>` knob is opt-in + lens-lagged; the default storm
+  persists.
 
-**Option B — close as resolved-by-§10.3, cleanup only.**
-- *For:* no contract change; smallest surface; honors §10.3's "consumer is the single authority" literally;
-  the stale comment/doc fixes are worth doing regardless.
-- *Against:* leaves the phantom-churn wart in place; pushes the fix onto every package author (project
-  `inflight_<g>`), which is exactly the kind of platform-vs-package boundary the architecture tries to get
-  right — a *generic* inefficiency in a *generic* component is platform work.
-
-**Option C — do nothing.**
-- *For:* zero change; `inflight_<g>` is the sanctioned, already-shipped knob.
-- *Against:* the knob is opt-in and lens-lagged; the default-path storm persists.
-
-**Recommendation: A.** The churn is a real, generic, default-path cost in a generic platform component, and
-the platform can fix it once, cheaply, race-free, for everyone — which is precisely the altitude argument.
-B is a defensible fallback if you'd rather keep §10.3's producer-check prohibition absolute; in that case
-take the **cleanup half of Fire 1** (below) and drop the probe.
+The doc-drift cleanup (§1.2 — the stale `reconciler.go:229` / `weaver.md:400` "rare-double … Phase-3"
+comments, and the reclaim-fired Warn message) is folded into Option D regardless.
 
 ---
 
-## 7. Risks, alternatives, and decisions made
+## 7. Risks, alternatives, decisions made
 
-- **Risk: the probe masks a genuinely-lost dispatch.** It cannot — *absent* tracker ⇒ reclaim, unchanged.
-  Only a *committed* prior op is skipped, and a committed op's effect is durable; there is nothing to
-  recover. *(Decided: no.)*
-- **Risk: a `directOp` retry is suppressed.** Excluded by the action gate (§3). *(Decided: exclude all
+- **Risk: backoff delays recovery of a genuinely-lost dispatch.** Only *subsequent* re-dispatches are paced;
+  the **first** reclaim fires at lease-expiry unchanged, so a lost first dispatch recovers as today. A lost
+  later re-dispatch recovers after one backoff interval (hours) — acceptable for a human-task gap open for
+  days, and claimId idempotency makes the eventual re-dispatch safe. *(Decided: acceptable.)*
+- **Risk: a `directOp` retry is slowed.** Excluded by the action gate (§3). *(Decided: exclude all
   `directOp`.)*
-- **Risk: read cost per sweep.** The GET runs only on the *expired-lease reclaim* branch (already the rare,
-  storm-prone path), and it *replaces* a heavier publish+op+tracker-write — net-negative load. *(Decided:
-  acceptable.)*
-- **Alternative considered — store the artifact id / a probe flag on the mark.** Rejected: the prior
-  requestId is re-derivable from the mark revision (storage-free), and an extra mark field would add a write
-  to the very path we're trying to make quieter.
-- **Alternative considered — GET the artifact (task/instance) directly.** Rejected: it is the exact check
-  §10.3 forbids (races the lag), couples Weaver to concrete artifact types, and crosses into `loom-state`
-  for `triggerLoom`. The op-tracker is type-agnostic and race-free.
-- **Alternative considered — make the probe action-agnostic (include `directOp`).** Rejected: §10.3 makes
-  `directOp` reclaim the *intended* retry; a uniform probe would break it. A future per-gap `reclaimMode`
-  playbook hint (`collapse` | `retry`) could let an *idempotent* `directOp` opt into suppression — noted as
-  a deferred refinement, **not** designed here (avoids scope creep + a contract addition).
-- **Open question resolved — count-bump on suppression.** Do **not** bump (see §3).
-- **Open question resolved — log level.** Suppression logs at **Debug**; the existing reclaim-fired path
-  keeps its Warn. As part of the cleanup, the reclaim-fired Warn message is reframed from "rare-double" to
-  "mark reclaimed; re-dispatch (consumer collapses if already applied)".
+- **Risk: mark TTL-expires during a backoff gap.** The per-key TTL backstop (`markTTLBackstopFactor × lease`)
+  exceeds the 24-h cap by a wide margin; the periodic real reclaim re-arms it. *(Decided: safe; assert the
+  factor ≥ cap/lease in the build.)*
+- **Alternative — Option A probe.** Rejected (§6): same outcome, more surface, contract entanglement.
+- **Alternative — add a new `lastDispatchedAt` mark field.** Unnecessary: `ClaimedAt` already is exactly that
+  (refreshed on every dispatch). *(Decided: reuse `ClaimedAt`.)*
+- **Alternative — re-arm the lease on a backed-off sweep (an `extendLease` write).** Rejected: a backed-off
+  `reclaim` returning cheaply each sweep (compare + return, no I/O) is simpler than a new write path, and the
+  mark TTL backstop already covers survival. *(Decided: no extra write.)*
+- **Open question resolved — count semantics.** A backed-off sweep does **not** bump `dispatchCount` (it is
+  not a real attempt); only a real reclaim bumps it, lengthening the next interval. *(Decided.)*
+- **Open question resolved — log level.** Backed-off sweep logs **Debug**; the real reclaim-fired path keeps
+  its log, reframed from "rare-double" to "mark reclaimed; re-dispatch (consumer collapses if already
+  applied)".
+- **Future refinement (noted, not built):** a per-gap `reclaimMode` (`collapse` | `retry`) playbook hint
+  could let an idempotent `directOp` opt into backoff. Out of scope (avoids scope creep + a contract add).
 
 ---
 
 ## 8. Test strategy
 
-**Unit (`reconciler_internal_test.go`, against the existing fake-Conn harness):**
-- Probe **present** → reclaim skipped: no `replace`, no `fire`, no `bumpDispatchCount`; `reclaimsSuppressed`
-  incremented; mark left intact at its current revision.
-- Probe **absent** → reclaim proceeds: `replace` + `fire` + `bumpDispatchCount` exactly as today (the
-  existing reclaim tests, unchanged, are the regression net).
-- **Action gate**: a `directOp` expired-lease mark **never** probes and always reclaims (assert no `vtx.op`
-  GET issued for `directOp`).
-- **Tombstoned tracker** (`isDeleted:true`) → treated as absent → reclaim.
-- `deriveEpisodeRequestID(…, markRev)` round-trip: the requestId the probe derives equals the requestId the
-  prior `fire` used at that revision (pin the storage-free re-derivation invariant).
+**Unit (`reconciler_internal_test.go`, fake-Conn harness):**
+- `ClaimedAt` recent (elapsed < backoff) → reclaim backed off: no `replace`, no `fire`, no `bumpDispatchCount`;
+  `reclaimsSuppressed` incremented; mark left intact.
+- `ClaimedAt` aged past `backoffInterval(count)` → reclaim proceeds exactly as today (existing reclaim tests,
+  unchanged, are the regression net).
+- **First reclaim (count 0→1)** fires at lease-expiry regardless of backoff (no recovery regression).
+- **Backoff growth**: assert `backoffInterval` is monotonic in `count` and capped at 24 h.
+- **Action gate**: a `directOp` expired-lease mark **never** backs off (always reclaims).
 
-**E2e (`weaver_e2e_test.go`, ephemeral stack):** extend the open-userTask-gap convergence test to hold a
-`missing_*`/`assignTask` gap open across **several** sweep intervals and assert (a) exactly **one**
-`CreateTask` tracker is created (not one per sweep), (b) `reclaimsSuppressed` rises while `reclaims` stays
-flat, (c) the gap still clears promptly on level-reconcile once the underlying condition is satisfied.
-`TestWeaverE2E_MidFlightKill` (kills between CAS-create and publish → tracker absent) is the guard that the
-absent-path recovery is unbroken.
+**E2e (`weaver_e2e_test.go`, ephemeral stack):** hold a `missing_*`/`assignTask` gap open across **several**
+sweep intervals; assert (a) far fewer `CreateTask` trackers than sweep intervals (backoff pacing), (b)
+`reclaimsSuppressed` rises while `reclaims` stays low, (c) the gap still clears promptly on level-reconcile
+once satisfied. `TestWeaverE2E_MidFlightKill` (kills between CAS-create and publish) guards that
+first-dispatch-loss recovery is unbroken.
 
 **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`, STRICT lint-conventions,
-`go test ./internal/weaver/...`, and the convergence-job suite. No Gate-2/Gate-3 surface is touched
-(read-only, no auth/security plane).
+`go test ./internal/weaver/...`, the convergence-job suite. No Gate-2/Gate-3 surface touched (read-only of
+own state; no auth/security plane).
 
 ---
 
 ## 9. Decomposition for the Steward
 
-This is **one build fire** (S–M); the contract edit is Andrew's commit, not a build step.
+**One build fire (S–M), no contract step.**
 
-- **Fire 1 — the probe + cleanup (whole build).**
-  1. `priorEpisodeCommitted(ctx, requestID) bool` helper (one `KVGet` of `cfg.CoreKVBucket` /
-     `vtx.op.<requestID>`; absent/tombstoned → false; transient KV error → false = *do not suppress*, the
-     safe/dispatch side, mirroring `gapSuppressed`'s error posture).
-  2. The action-gated probe call in `sweeper.reclaim` (after `gapSuppressed`, before `planGap`).
+- **Fire 1 — the backoff guard + cleanup (whole build).**
+  1. `backoffInterval(count) time.Duration` (config base ≈ lease, exponential, 24-h cap).
+  2. The action-gated backoff guard in `sweeper.reclaim` (after `gapSuppressed`, before `planGap`), reading
+     `dispatchCount` + the mark's `ClaimedAt`.
   3. The `reclaimsSuppressed` counter + its heartbeat metric.
-  4. **Doc-drift cleanup** (do regardless of A/B): rewrite the `reconciler.go:229` comment and
-     `weaver.md:400` "documented rare-double … check-before-act deferred to Phase 3" to reflect the §10.3
-     supersession + (Option A) the shipped probe; reframe the reclaim-fired Warn message.
+  4. **Doc-drift cleanup:** rewrite the `reconciler.go:229` comment and `weaver.md:400` "documented
+     rare-double … check-before-act deferred to Phase 3" to reflect the §10.3 supersession + the shipped
+     backoff; reframe the reclaim-fired Warn message.
   5. Tests (§8).
 
-  Independently shippable + green. Under **Option B**, ship steps 4–5's cleanup half only and drop 1–3.
-
-- **(Andrew) ratify + commit the §10.3 clarification** — gates the probe build under Option A; the cleanup
-  half ships without it.
+  Independently shippable + green. **No Andrew contract commit gates this** (Option D ships standalone).
 
 ---
 
 ## 10. Grounding index (what was read)
 
-Contract #10 §10.3 (marks/reclaim/claimId supersession, lines 270–331) · Contract #4 (idempotency tracker,
-§4.1/§4.3) · Contract #5 §5.4 (author's-discretion metrics) · `internal/weaver/reconciler.go` (`sweeper`,
-`reclaim`, `sweepMark`, counters) · `internal/weaver/actuator.go` (`deriveEpisodeRequestID`,
-`deriveStableTaskID`/`InstanceID`) · `internal/weaver/strategist.go` (`assignTaskGrantTTL`, the action plans)
-· `internal/weaver/state.go` (mark/`claimId`, `inflight_`/`maxretries_`, dispatch-count) ·
-`internal/weaver/evaluator.go` (`gapSuppressed`, `fire`, `bumpDispatchCount`, `boolColumn`) ·
-`internal/weaver/engine.go` (Config buckets, `targetSource` core-kv read) · `docs/components/weaver.md`
-(Dispatch suppression, Reconciler sweep, Actuator) · `lattice-architecture.md` (P2/P5, data-placement D5) ·
-CLAUDE.md (P5 allowed-direct-read platform binaries; no-history-comments).
+Contract #10 §10.3 (marks/reclaim/claimId supersession) · Contract #4 §4.1/§4.3 (idempotency tracker, 24-h
+TTL) · Contract #5 §5.4 (author's-discretion metrics) · `internal/weaver/state.go` (`mark`{`ClaimedAt`,
+`ClaimID`, `LeaseExpiresAt`}, `dispatchCount`, `markTTLBackstopFactor`, `create`/`replace`) ·
+`internal/weaver/reconciler.go` (`sweeper`, `reclaim`, counters) · `internal/weaver/actuator.go`
+(`deriveEpisodeRequestID`, `deriveStable{Task,Instance}ID`) · `internal/weaver/strategist.go`
+(`assignTaskGrantTTL`) · `internal/weaver/evaluator.go` (`gapSuppressed`, `fire`, `bumpDispatchCount`) ·
+`internal/weaver/engine.go` (Config buckets) · `docs/components/weaver.md` (Dispatch suppression, Reconciler
+sweep) · `lattice-architecture.md` (P2/P5, data-placement D5) · CLAUDE.md (no-history-comments).
