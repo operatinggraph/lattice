@@ -20,6 +20,7 @@
     <button id="tab-book" class="tab active" role="tab" aria-selected="true" aria-controls="view-book">Book</button>
     <button id="tab-appts" class="tab" role="tab" aria-selected="false" aria-controls="view-appts">My Appointments</button>
     <button id="tab-schedule" class="tab" role="tab" aria-selected="false" aria-controls="view-schedule">Schedule</button>
+    <button id="tab-availability" class="tab" role="tab" aria-selected="false" aria-controls="view-availability">Availability</button>
   </nav>
 
   <main>
@@ -54,62 +55,7 @@
               </div>
               <button type="button" id="add-provider-submit">Add provider</button>
             </details>
-            <details class="inline-add" id="manage-hours">
-              <summary>🕑 Manage availability (UTC)</summary>
-              <p class="hint">Set the selected provider's bookable hours, in UTC. Bookings outside these windows are rejected. No windows = always available.</p>
-              <div id="hours-list" class="hours-list" aria-live="polite"></div>
-              <div class="field-row">
-                <div class="field">
-                  <label for="hours-day">Day</label>
-                  <select id="hours-day">
-                    <option value="1">Monday</option>
-                    <option value="2">Tuesday</option>
-                    <option value="3">Wednesday</option>
-                    <option value="4">Thursday</option>
-                    <option value="5">Friday</option>
-                    <option value="6">Saturday</option>
-                    <option value="0">Sunday</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label for="hours-open">Open</label>
-                  <input type="time" id="hours-open" value="09:00" />
-                </div>
-                <div class="field">
-                  <label for="hours-close">Close</label>
-                  <input type="time" id="hours-close" value="17:00" />
-                </div>
-                <div class="field hours-add-field">
-                  <label>&nbsp;</label>
-                  <button type="button" id="hours-add" class="ghost">＋ Add window</button>
-                </div>
-              </div>
-              <button type="button" id="hours-save">Save availability</button>
-            </details>
-            <details class="inline-add" id="manage-timeoff">
-              <summary>🌴 Manage time-off</summary>
-              <p class="hint">Block the selected provider's date ranges (vacation, holidays, out sick). A booking that overlaps a blackout is rejected, even inside their availability hours. Whole-day ranges, in UTC.</p>
-              <div id="timeoff-list" class="hours-list" aria-live="polite"></div>
-              <div class="field-row">
-                <div class="field">
-                  <label for="timeoff-from">From</label>
-                  <input type="date" id="timeoff-from" />
-                </div>
-                <div class="field">
-                  <label for="timeoff-to">To <span class="opt">(inclusive)</span></label>
-                  <input type="date" id="timeoff-to" />
-                </div>
-                <div class="field">
-                  <label for="timeoff-reason">Reason <span class="opt">(optional)</span></label>
-                  <input type="text" id="timeoff-reason" placeholder="Vacation" />
-                </div>
-                <div class="field hours-add-field">
-                  <label>&nbsp;</label>
-                  <button type="button" id="timeoff-add" class="ghost">＋ Add range</button>
-                </div>
-              </div>
-              <button type="button" id="timeoff-save">Save time-off</button>
-            </details>
+            <p class="hint">Manage this provider's bookable hours &amp; time-off in the <a href="#" id="go-availability">Availability</a> tab.</p>
           </div>
           <div class="field-row">
             <div class="field">
@@ -185,6 +131,74 @@
       <div id="sched-detail" class="sched-detail" hidden></div>
       <div id="schedule" class="calendar" aria-live="polite"></div>
       <div id="schedule-empty" class="empty" hidden></div>
+    </section>
+
+    <!-- Provider Availability (admin) -->
+    <section id="view-availability" role="tabpanel" aria-labelledby="tab-availability" hidden>
+      <div class="book">
+        <h2>Provider availability</h2>
+        <p class="lead">Manage a provider's recurring bookable hours and date-specific time-off. Add providers from the Book tab.</p>
+        <div class="field">
+          <label for="avail-provider">Provider</label>
+          <select id="avail-provider" aria-label="Choose a provider to manage availability"></select>
+        </div>
+        <div class="avail-editor" id="avail-hours">
+          <h3>🕑 Bookable hours (UTC)</h3>
+          <p class="hint">Set the provider's recurring weekly hours, in UTC. Bookings outside these windows are rejected. No windows = always available.</p>
+          <div id="hours-list" class="hours-list" aria-live="polite"></div>
+          <div class="field-row">
+            <div class="field">
+              <label for="hours-day">Day</label>
+              <select id="hours-day">
+                <option value="1">Monday</option>
+                <option value="2">Tuesday</option>
+                <option value="3">Wednesday</option>
+                <option value="4">Thursday</option>
+                <option value="5">Friday</option>
+                <option value="6">Saturday</option>
+                <option value="0">Sunday</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="hours-open">Open</label>
+              <input type="time" id="hours-open" value="09:00" />
+            </div>
+            <div class="field">
+              <label for="hours-close">Close</label>
+              <input type="time" id="hours-close" value="17:00" />
+            </div>
+            <div class="field hours-add-field">
+              <label>&nbsp;</label>
+              <button type="button" id="hours-add" class="ghost">＋ Add window</button>
+            </div>
+          </div>
+          <button type="button" id="hours-save">Save availability</button>
+        </div>
+        <div class="avail-editor" id="avail-timeoff">
+          <h3>🌴 Time-off</h3>
+          <p class="hint">Block the provider's date ranges (vacation, holidays, out sick). A booking that overlaps a blackout is rejected, even inside their availability hours. Whole-day ranges, in UTC.</p>
+          <div id="timeoff-list" class="hours-list" aria-live="polite"></div>
+          <div class="field-row">
+            <div class="field">
+              <label for="timeoff-from">From</label>
+              <input type="date" id="timeoff-from" />
+            </div>
+            <div class="field">
+              <label for="timeoff-to">To <span class="opt">(inclusive)</span></label>
+              <input type="date" id="timeoff-to" />
+            </div>
+            <div class="field">
+              <label for="timeoff-reason">Reason <span class="opt">(optional)</span></label>
+              <input type="text" id="timeoff-reason" placeholder="Vacation" />
+            </div>
+            <div class="field hours-add-field">
+              <label>&nbsp;</label>
+              <button type="button" id="timeoff-add" class="ghost">＋ Add range</button>
+            </div>
+          </div>
+          <button type="button" id="timeoff-save">Save time-off</button>
+        </div>
+      </div>
     </section>
   </main>
 

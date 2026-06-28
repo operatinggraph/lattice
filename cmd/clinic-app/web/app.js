@@ -253,8 +253,20 @@ async function loadProviders() {
   }
   populateProviderSelect("#provider");
   populateProviderSelect("#sched-provider", { includeAll: true });
+  populateProviderSelect("#avail-provider");
   refreshBookEnabled();
   renderSlotCalendar();
+  renderAvailEditors();
+}
+
+// renderAvailEditors re-seeds (only if the selected provider changed) and renders
+// both Availability-tab editors against #avail-provider. Safe to call any time —
+// after a roster refresh the selection is preserved, so a just-saved draft is kept.
+function renderAvailEditors() {
+  hoursDraftForSelectedProvider();
+  renderHoursDraft();
+  timeOffDraftForSelectedProvider();
+  renderTimeOffDraft();
 }
 
 function providerLabel(p) {
@@ -359,12 +371,12 @@ function secondsToHMS(sec) {
   return `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec % 3600) / 60))}`;
 }
 
-// hoursDraftForSelectedProvider returns the Book form's selected provider key,
-// re-seeding the draft from that provider's currently-projected .hours windows
+// hoursDraftForSelectedProvider returns the Availability tab's selected provider
+// key, re-seeding the draft from that provider's currently-projected .hours windows
 // whenever the selection changed (so one provider's edits can't be saved onto
 // another, and so an Add/Remove edits the live set rather than starting blank).
 function hoursDraftForSelectedProvider() {
-  const prov = $("#provider").value;
+  const prov = $("#avail-provider").value;
   if (prov !== state.hoursProvider) {
     state.hoursProvider = prov;
     const p = providerByKey(prov);
@@ -444,10 +456,9 @@ async function saveProviderHours() {
     }
     const n = state.hoursDraft.length;
     toast(n ? `Availability saved (${n} window${n === 1 ? "" : "s"}).` : "Availability cleared (always available).", "ok");
-    $("#manage-hours").open = false;
-    // Refresh the roster so the persisted windows back the booking slot picker + a
-    // re-open of this editor (the lens may take a moment to project; selection is
-    // preserved). Mirrors saveProviderTimeOff.
+    // Refresh the roster so the persisted windows back the booking slot picker + the
+    // editor (the lens may take a moment to project; selection is preserved). Mirrors
+    // saveProviderTimeOff.
     loadProviders();
   } catch (e) {
     toast("Could not set hours: " + e.message, "err");
@@ -500,11 +511,11 @@ function timeOffRangeLabel(r) {
   return f === t ? f : `${f} – ${t}`;
 }
 
-// timeOffDraftForSelectedProvider returns the Book form's selected provider key,
-// re-seeding the draft from that provider's currently-projected ranges whenever the
-// selection changed (so one provider's edits can't be saved onto another).
+// timeOffDraftForSelectedProvider returns the Availability tab's selected provider
+// key, re-seeding the draft from that provider's currently-projected ranges whenever
+// the selection changed (so one provider's edits can't be saved onto another).
 function timeOffDraftForSelectedProvider() {
-  const prov = $("#provider").value;
+  const prov = $("#avail-provider").value;
   if (prov !== state.timeOffProvider) {
     state.timeOffProvider = prov;
     const p = providerByKey(prov);
@@ -595,9 +606,8 @@ async function saveProviderTimeOff() {
     }
     const n = state.timeOffDraft.length;
     toast(n ? `Time-off saved (${n} range${n === 1 ? "" : "s"}).` : "Time-off cleared (no blocked dates).", "ok");
-    $("#manage-timeoff").open = false;
-    // Refresh the roster so the persisted ranges back the booking warning + a
-    // re-open (the lens may take a moment to project; selection is preserved).
+    // Refresh the roster so the persisted ranges back the booking warning + the
+    // editor (the lens may take a moment to project; selection is preserved).
     loadProviders();
   } catch (e) {
     toast("Could not set time-off: " + e.message, "err");
@@ -1775,7 +1785,7 @@ async function submitReschedule(ev) {
 
 // ---- Tabs ----
 
-const VIEWS = ["book", "appts", "schedule"];
+const VIEWS = ["book", "appts", "schedule", "availability"];
 
 function showView(view) {
   state.view = view;
@@ -1788,6 +1798,7 @@ function showView(view) {
   }
   if (view === "appts") loadAppts();
   if (view === "schedule") loadSchedule();
+  if (view === "availability") renderAvailEditors();
 }
 
 // ---- wire up ----
@@ -1827,16 +1838,6 @@ function init() {
 
   $("#provider").addEventListener("change", () => {
     refreshBookEnabled();
-    // A provider change invalidates the availability + time-off drafts (each is
-    // scoped per provider); re-render so an open editor reflects the new provider.
-    if ($("#manage-hours").open) {
-      hoursDraftForSelectedProvider();
-      renderHoursDraft();
-    }
-    if ($("#manage-timeoff").open) {
-      timeOffDraftForSelectedProvider();
-      renderTimeOffDraft();
-    }
     refreshTimeOffWarning();
     // A new provider has different availability — clear the chosen date and rebuild
     // the calendar so the user re-picks against the new provider's open days.
@@ -1846,20 +1847,11 @@ function init() {
   });
   $("#duration").addEventListener("change", refreshSlots);
   $("#add-provider-submit").addEventListener("click", submitAddProvider);
-  $("#manage-hours").addEventListener("toggle", () => {
-    if ($("#manage-hours").open) {
-      hoursDraftForSelectedProvider();
-      renderHoursDraft();
-    }
-  });
+  // Availability tab — its own provider picker drives both editors; a change
+  // re-seeds each draft from the newly-selected provider's projected values.
+  $("#avail-provider").addEventListener("change", renderAvailEditors);
   $("#hours-add").addEventListener("click", addHoursWindow);
   $("#hours-save").addEventListener("click", saveProviderHours);
-  $("#manage-timeoff").addEventListener("toggle", () => {
-    if ($("#manage-timeoff").open) {
-      timeOffDraftForSelectedProvider();
-      renderTimeOffDraft();
-    }
-  });
   $("#timeoff-add").addEventListener("click", addTimeOffRange);
   $("#timeoff-save").addEventListener("click", saveProviderTimeOff);
   $("#book-form").addEventListener("submit", submitBook);
@@ -1867,6 +1859,15 @@ function init() {
   $("#tab-book").addEventListener("click", () => showView("book"));
   $("#tab-appts").addEventListener("click", () => showView("appts"));
   $("#tab-schedule").addEventListener("click", () => showView("schedule"));
+  $("#tab-availability").addEventListener("click", () => showView("availability"));
+  // The Book form's pointer link jumps to the Availability tab, carrying the
+  // provider the user was about to book so the editor opens on that provider.
+  $("#go-availability").addEventListener("click", (e) => {
+    e.preventDefault();
+    const prov = $("#provider").value;
+    if (prov) $("#avail-provider").value = prov;
+    showView("availability");
+  });
   $("#reload-appts").addEventListener("click", loadAppts);
   $("#appts-filter").addEventListener("change", renderAppts);
   $("#reload-schedule").addEventListener("click", loadSchedule);

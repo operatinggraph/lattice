@@ -206,6 +206,16 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .inline-add[open] summary { margin-bottom: 12px; color: var(--text); }
 .inline-add .field:last-of-type { margin-bottom: 12px; }
 
+/* Availability tab — hours + time-off editor blocks */
+.avail-editor {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+.avail-editor h3 { margin: 0 0 4px; font-size: 14px; }
+
 /* Availability (SetProviderHours) editor */
 .hours-add-field { flex: 0 0 auto; display: flex; flex-direction: column; justify-content: flex-end; }
 .hours-list { margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px; }
