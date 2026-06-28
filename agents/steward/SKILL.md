@@ -98,7 +98,13 @@ Pre-emption order (within your stream):
    - **Verticals** → the highest **importance × readiness** READY item in `verticals.md` (PO-filed demand;
      package + FE). **No-paper-over:** if it needs a missing platform **primitive** (engine / op / substrate /
      orchestration — *not* a lens; a lens is yours to add as package work), file that to `lattice.md` and mark
-     this item **`🚧 blocked-on:`** it, then build the rest.
+     this item **`🚧 blocked-on:`** it, then build the rest. **A denormalized key-list/ref index in an aspect is
+     itself a paper-over** (*e.g. `.bookings` / `.leaseApplications` storing `vtx.*` keys for an op-time
+     conflict/uniqueness check*): "the operation's own Starlark logic" (Cap-KV §06) licenses the *check*, NOT
+     storing **relationships as keys in aspects** (Contract #1). If the clean check must enumerate a vertex's
+     neighbors (a reverse-link/set read the known-key-reads op path lacks), **file the primitive + block + WAIT**
+     — do not ship the key-list workaround. (Pure existence-uniqueness needs no set: a deterministic guard LINK
+     + `CreateOnly`.)
    - **Lattice** → **round-robin across components**: prefer the **stalest** component (§1 freshness > ~3 days
      untouched), else the top importance × readiness READY item in `lattice.md` (feature *or* maintenance). This
      guarantees every component keeps improving, not just the loud ones — stateless, derived from `git log`.
@@ -189,8 +195,10 @@ spin their own stack and never touch the shared one.)*
 - **Enforce the architecture invariants at admit** (CLAUDE.md / lattice-architecture.md). For app / FE work
   especially: **P5** — a vertical app reads **lens read-model targets, never Core KV** (only Loupe, the
   console, reads Core KV); the `lint-conventions` **P5 gate** must pass. **P2** — state changes via
-  *operations*, never direct KV writes. Also: relationships are **links** not `data` refs; readers filter
-  `isDeleted`. A change that violates these is **not** L2-eligible until fixed — don't merge it.
+  *operations*, never direct KV writes. Also: relationships are **links** — **never keys in `data`, root OR
+  aspect**; a key-list/ref index aspect (`.bookings` / `.leaseApplications` style) is a Contract #1 violation
+  *and* a paper-over (the clean form files the missing reverse-link primitive + blocks — §2 no-paper-over);
+  readers filter `isDeleted`. A change that violates these is **not** L2-eligible until fixed — don't merge it.
 - **Commit hygiene — the working tree is SHARED.** A scheduled fire shares `main`'s working tree with Andrew's
   interactive session and other fires. **Stage only the files your work changed — explicit `git add <paths>`;
   NEVER `git add -A` / `git add .` / `git commit -a`.** A broad add sweeps in unrelated, possibly *not-ready*

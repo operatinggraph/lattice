@@ -47,8 +47,15 @@ antidote to proposing shapes that drift from the code).
   *only* sanctioned direct-KV write outside Refractor's own lens targets — not Core KV, not a lens, not a vertex.
 - **Every KV reader independently filters `isDeleted` / tombstones** — soft-deleted keys remain addressable
   (Refractor must filter on read; the Processor enforces it on commit).
-- **Relationships are LINKS, not `data` refs** (Contract #1; root `data` = scalars only). A lens may *project*
-  a flattened `{ref}` but must **source it by walking the link** (documented exception: `permission` vertices).
+- **Relationships are LINKS — never keys in `data`, root OR aspect** (Contract #1; `data` = scalars only,
+  everywhere). A lens may *project* a flattened `{ref}` but must **source it by walking the link** (documented
+  exception: `permission` vertices). **A key-list / ref index stored in an aspect — a `.bookings`
+  `{appts:[vtx.…]}`, a `.leaseApplications` `{applications:[…]}` — is a VIOLATION**, even when it backs an op's
+  own guard logic. If a guard needs the *set* of a vertex's neighbors (a reverse-link enumeration the
+  known-key-reads op path lacks), that is a **missing platform primitive → file it to `lattice.md` and WAIT
+  (block the item)**; do **not** denormalize keys into an aspect to dodge the wait. Cap-KV §06's "the operation's
+  own Starlark logic" licenses the *check*, **not** storing relationships in aspects. (Pure existence-uniqueness
+  — ≤1 of X per (a,b) — needs no set: use a deterministic guard LINK + `CreateOnly`, revive-on-reuse.)
 - **Capability KV is a lens projection** (the Capability Lens), not a standalone auth store — and it is
   **security-critical**: projection correctness *is* auth correctness.
 - **Events carry references; consumers hydrate context from lens projections, not fat payloads.**
