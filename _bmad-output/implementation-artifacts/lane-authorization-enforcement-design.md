@@ -1,6 +1,7 @@
 # Lane Authorization Enforcement (Contract #2 §2.3) — design
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer (Winston) · 2026-06-28
+**Status: ✅ Andrew-ratified (2026-06-28)** · Designer (Winston) · 2026-06-28
+**Decision (Andrew, 2026-06-28): implicit-default** for the service/task paths (the recommended rule — `default`-only, no projected per-path lane grant, no extra KV read). Ready for the Lattice Steward (Fire 1 grants dark → Fire 2 enforcement + Gate-3 ungranted-lane vector).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Security & trust boundary* → "Lane authorization
 enforcement (Contract #2 §2.3)". Surveyor-filed 2026-06-28 (grounded: `LaneUnauthorized` defined-but-never-emitted).
 
