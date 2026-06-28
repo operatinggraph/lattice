@@ -55,8 +55,13 @@ const COMPLETIONS = {
 
 const $ = (sel) => document.querySelector(sel);
 
-// api issues a JSON request and throws Error(body.error) on an error response so
-// callers can surface a single message.
+// api issues a JSON request and returns the parsed body. A structured op reply
+// carries a string `status` (accepted | rejected) and is returned even on
+// rejection — a rejected op is a domain outcome the caller branches on via its
+// reply.status==="rejected" handler, not a transport error. Its .error is an
+// object {code, message}, which must NOT be thrown as-is (that surfaces
+// "[object Object]"). Only a real transport failure (!res.ok) or a non-op error
+// body throws — always with a string message.
 async function api(path, opts) {
   const res = await fetch(path, opts);
   let body = null;
@@ -65,8 +70,12 @@ async function api(path, opts) {
   } catch (_) {
     /* empty/non-JSON body */
   }
+  if (body && typeof body.status === "string") {
+    return body;
+  }
   if (!res.ok || (body && body.error)) {
-    throw new Error((body && body.error) || `HTTP ${res.status}`);
+    const e = body && body.error;
+    throw new Error((typeof e === "string" ? e : e && e.message) || `HTTP ${res.status}`);
   }
   return body;
 }
