@@ -216,6 +216,8 @@ Foundational truths the architecture rests on, stated precisely:
 
 **P6: Single-cell MVP is safe because the data model is cell-agnostic.** Key naming (`vtx.<type>.<id>`, `lnk.<youngerId>.<name>.<olderId>`) does not embed cell identity. Multi-cell is purely a routing/replication concern layered underneath — no data model or business logic changes required. Safety depends on the expected MVP data volume fitting within NATS KV single-bucket scalability limits (validated against Quantitative Targets above: up to 100K keys at MVP).
 
+**P7: A vertex's type/subtype discriminator is the envelope `class`; never a `.class`/shadow aspect.** A vertex declares *what it is* in its envelope `class` field (Contract #1 §1.1). Fine-grained subtypes use a dotted class (`service.backgroundCheck.instance`); the **type authority** that governs the subtype's ops and `permittedCommands` is discovered by walking the vertex's `instanceOf` link to the nearest registered DDL (Contract #1 §1.5 — the write-gate's type-authority resolution), so one type DDL governs unbounded subtypes with zero new DDLs. A discriminator aspect (`.class`, `.family`, `.kind`, …) that shadows the envelope class is prohibited — it splits the type across two stores and forces lens/auth readers to pick. (The meta-model already obeys this: a meta-vertex carries its kind in the envelope `class` `meta.ddl.vertexType`, and `.canonicalName` is a *name*, not a type.) Enforced by a `lint-conventions` gate (modeled on the P5 gate). Design: `_bmad-output/implementation-artifacts/instanceof-template-op-discovery-design.md`.
+
 > Deployment isolation model and Phase 3 scale-out path: see `docs/operations/deployment-isolation.md`.
 
 ## Starter / Foundation Evaluation
