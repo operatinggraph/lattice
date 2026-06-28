@@ -84,7 +84,8 @@ These metrics are recommended (not enforced) at MVP. Stream 7 may harden them in
 - `ops_rejected_total` — operations rejected at any step before commit (cumulative)
 - `p99_starlark_ms` — Starlark execution p99 latency (rolling window, recommend 5 minutes)
 - `p99_commit_path_ms` — full commit path p99 latency, step 1 through step 10 (rolling window)
-- `lane_lag` — per-lane JetStream consumer lag (messages behind head, by lane name)
+- `lane_lag` — per-lane JetStream consumer lag (messages behind head, by lane name). The **Phase-1** Processor runs a *single* durable consumer (`processor-main`) over all `ops.*` lanes, so a true per-lane split is not separable **today**: the per-lane keys are reported `null` ("not measured per-lane") and the genuine aggregate backlog is surfaced as `lane_lag_total` (a `null` total means the backlog could not be read this tick — never a fabricated `0`). The per-lane keys are **reserved**, not retired: when the Processor adopts the architecture's design-of-record **per-lane consumers** (the 3-lane-consumer model — `lattice-architecture.md`; `LATTICE_PROCESSOR_LANES_*_CONSUMERS`, one `substrate.ConsumerSupervisor` per lane), each lane reports its own real lag here and `lane_lag_total` becomes their sum. A backlog above the configured threshold raises a `ProcessorLaneLagging` warning (`status: degraded`).
+- `lane_lag_total` — aggregate JetStream consumer backlog across all lanes (`processor-main` `NumPending`); `null` when unreadable.
 
 **Refractor:**
 - `lens_count_active` — number of Lens definitions currently projecting
