@@ -103,6 +103,27 @@ WHERE` (e.g. the lease lens's `freshUntil` bgcheck match) safe: a no-fresh-match
 projects with the optional column null instead of dropping the row (a dropped
 convergence row reads to Weaver as an entity deletion).
 
+#### Anchor-tombstone retraction (plain projection lenses)
+
+The full engine is upsert-only: `ExecuteWith` re-derives a lens's rows by re-scanning
+Core KV (it ignores the CDC event's payload), and `fetchNode` filters a soft-deleted
+vertex, so a tombstoned **anchor** yields **zero rows** — but the engine never emits a
+*Delete*, so the row the anchor previously projected would linger in the lens target
+forever. The pipeline closes this: when a CDC event is a **root tombstone of the lens's
+anchor** (`isDeleted` true, event vertex type == the first `MATCH` node's label), it emits
+a Delete keyed by the anchor's output column (`full.Engine.AnchorDeleteResult` derives the
+key from the AST — the first `RETURN` item, robustly `<anchor>.key` for every shipped lens).
+This mirrors the **simple engine's `deleteResult`** and the **actor-aware capability path's**
+tombstone shortcut, which already retract; it is the non-actor twin of those two
+retraction paths.
+
+A tombstone of a **secondary** (non-anchor) node — e.g. a deleted patient on an
+appointment lens — is *not* a retraction: it re-executes so dependent fields refresh (the
+appointment row survives with `patientName` null). Retraction when an anchor drops out of
+the matched set **without** a root tombstone (a keyed-aspect deletion, or a `WHERE`
+predicate that flips) is the broader "negative / filter-retraction projection" problem,
+tracked separately on the Phase-3 backlog — not handled here.
+
 ### Property model (how lens cypher reads a node)
 
 A vertex's Core KV body carries the **envelope** (`key`, `class`, provenance,

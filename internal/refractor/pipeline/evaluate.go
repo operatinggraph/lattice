@@ -94,6 +94,22 @@ func (p *Pipeline) evaluateForEntry(ctx context.Context, entry simple.NodeEntry)
 			}}, nil
 		}
 
+		// Plain-projection anchor tombstone: retract the row the deleted anchor
+		// projected. The non-actor twin of the actor-aware shortcut above; mirrors
+		// the simple engine's deleteResult. The upsert-only re-scan path returns
+		// zero rows for a tombstoned anchor but never a Delete, so the prior row
+		// would linger forever. A secondary-node tombstone (event type != the
+		// anchor label) returns ok=false and falls through to a normal re-execute
+		// so dependent rows refresh (e.g. a deleted patient nulls an appointment's
+		// patientName without deleting the appointment row).
+		if entry.IsDeleted && p.actorEnumerator == nil {
+			eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
+			if keys, ok := p.fullEngine.AnchorDeleteResult(
+				p.fullCR, entry.CoreKVKey, eventType, entry.Properties); ok {
+				return []simple.EvalResult{{Delete: true, Keys: keys, Row: nil}}, nil
+			}
+		}
+
 		results, err := p.executeFullForActor(ctx, entry.CoreKVKey, entry.Properties)
 		if err != nil {
 			return nil, err
