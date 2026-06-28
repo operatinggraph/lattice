@@ -136,6 +136,15 @@ greenfield redesign. Cover, as the feature warrants:
     (TTL / lease / cap), not the headline number. Where the design hedges with an "interim/fallback," **check
     whether a stronger committed stance is cleaner** before defaulting to optionality or incrementalism —
     especially on the security plane, where a forgeable interim that gets reworked is worse than doing it once.
+  - **The dead-scaffolding test (the checkable form of "don't ship a half-done interim" — my single
+    most-repeated blind spot: I default to "build the inert machinery now").** For any increment you propose
+    building *before* its dependency or consumer exists, ask the yes/no question: **"Does this increment
+    realize value before its dependency/consumer exists?"** If the **consumer doesn't exist yet** *and* the
+    **security/correctness is stubbed** (allow-all, fake, deferred), it is **dead scaffolding — defer it**;
+    ratify the *design* (keep it on the shelf, ready) but sequence the *build* behind the real dependency +
+    a real consumer. Caught three times in one session (control-plane "self-asserted interim," Vault
+    "Phase A now," Personal Lens "build dark now") — all the same reflex. There is rarely pressure to ship
+    dead scaffolding; "the design is ready and sequenced" is the correct output, not "we started building."
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
   independently shippable + green, so the build is multi-fire-friendly.
 

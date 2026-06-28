@@ -1,6 +1,28 @@
 # Personal / Secure Lens (Edge fan-out) — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-06-27).
+**Status: ✅ Andrew-ratified (DESIGN; build sequenced behind D1 + a real consumer) — 2026-06-27.**
+Author: Winston (Designer fire, 2026-06-27).
+
+> **Ratification decisions (Andrew, 2026-06-27):** the **design shape is ratified** (it's sound + ready);
+> the **build is sequenced**, not started now.
+> 1. **Fork 1 (transport) — NATS-subject JetStream** is the transport-agnostic core; WS/push-bridge
+>    deferred to the Gateway epic.
+> 2. **Fork 2 (sequencing) — REVISED: defer the whole feature behind D1 *and* a concrete consumer.** The
+>    original "build the transport/projector/hydration dark *now* under the trusted-single-identity posture"
+>    is **dropped.** A renewed-skill re-review caught it as the same over-incrementalism corrected on the
+>    control plane and Vault: Personal Lens is itself a non-Processor reader whose security **is** D1's
+>    `readableAnchors` (stubbed pre-D1), and there is **no consumer** yet (the Edge node is XL/unstarted;
+>    Loupe is the all-access inspector, not a filtered-stream consumer). Machinery with no consumer *and*
+>    stubbed security is dead scaffolding — so build it only once **D1 has landed** and **a real consumer
+>    exists** (the Edge node, or a filed real-time-delta-streaming demand). The design stays on the shelf,
+>    ready.
+> 3. **Fork 3 (subject subscribe-ACL) — rides the ratified NATS account-write-restriction (#1)** (per-user
+>    NATS subscribe permissions on `lattice.sync.user.<id>`), now on firm ground.
+>
+> **Reconciliation fix folded in:** §3.3's security filter referenced D1's *pre-decomposition* single
+> `cap-read.<actor>` doc; updated to the **decomposed/unioned** model (union across `cap-read.*.<actor>` /
+> the `actor_read_grants` table) ratified for D1 today. **No frozen-contract change** (this design adds
+> none; it builds-to D1 §6.14 + Vault §3.10).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Edge & personal lenses → Personal / Secure Lens*
 (★★, L) — **subsumes** the sibling row *NATS-subject publish-events adapter* (★★, S–M), which is this
 design's Fire 1. Grounds in: `lattice-architecture.md` (D1 / Edge / Refractor decisions), `docs/components/refractor.md`
@@ -225,11 +247,14 @@ stream or bootstrap may pre-provision it — recommend bootstrap pre-provision f
    Interest Set(s). **Absent Interest Set ⇒ stream the full authorized slice** (the Interest Set is an
    efficiency/bandwidth filter, not a correctness one) — so Fire 2 is shippable before Interest-Set
    registration exists.
-3. **Security filter (D1 — Fire 3, gated).** Intersect the changed anchor with the actor's
-   `readableAnchors` (`cap-read.<actor>`, GET from Capability KV). **Until D1 is wired, this step is a
-   stub `allow-all` under the trusted-single-identity posture** (the same stub-then-real seam D1's own
-   design and the control-plane-authz design use). When D1 lands, flip the stub to the real GET. *This is
-   the single line where Personal Lens's security becomes real.*
+3. **Security filter (D1 — gated).** Intersect the changed anchor with the actor's **unioned readable
+   anchors**. Per the *ratified, decomposed* D1 model (Contract #6 §6.14, 2026-06-27), this is **not** a
+   single `cap-read.<actor>` doc — it is the **union across the actor's `cap-read.*.<actor>` slices**
+   (core base + each package's `cap-read.<domain>`), i.e. the same set the Postgres `actor_read_grants`
+   table unions for RLS. The Personal-Lens filter resolves that union (read the slices, or query
+   `actor_read_grants`) and admits the delta only if the changed anchor is in it. **No `cap-read` grant for
+   the actor ⇒ no stream** (fail-closed, mirroring §6.8). *This is the single point where Personal Lens's
+   security becomes real — and it is wholly D1-derived, which is why the whole feature is gated behind D1.*
 4. **Publish** the delta to `lattice.sync.user.<actor>` for each surviving actor (one `Upsert`/`Delete`
    call per actor, §3.1).
 
