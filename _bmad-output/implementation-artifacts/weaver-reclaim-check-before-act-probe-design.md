@@ -9,6 +9,23 @@ the existing `mark` state (`state.go`) + `dispatchCount`, the §E retry-budget m
 
 ---
 
+> **As-built note (2026-06-28, commit `04c7689`).** One grounded correction was made
+> during the build, flagged for Andrew. This design's mark-survival reasoning (§2.3, §7
+> — "the per-key TTL backstop is sized far larger than the 24-h backoff cap, so the mark
+> never TTL-expires inside a backoff window") is **false at the default constants**:
+> `markTTLBackstopFactor = 2`, so the mark TTL is `2 × lease` ≈ **60 m**, far *shorter*
+> than the 24-h cap. A backed-off mark would therefore TTL-expire mid-backoff into a
+> **markless open gap**, and a later CDC redelivery of the still-violating row would mint
+> a fresh `claimId` → a new `taskId` → a **duplicate task** (`fireEpisode` CAS-creates on
+> mark absence). The build closes this **within Option D's mechanism** (no extra writes,
+> no new field): a userTask reclaim **sizes the re-armed mark's per-key TTL to outlast the
+> next backoff window** (`backoffInterval(count+1)` + a sweep-cadence margin, floored at
+> the default backstop), so the mark is always reclaimed — TTL re-armed — before it can
+> die. `directOp` marks keep the byte-identical default TTL. With survival guaranteed the
+> backoff reaches the full 24-h cap as intended (≈ 36 reclaims / 30 days, not ~1,440).
+> The §7 "no extra write" decision still holds — the fix only *sizes* the existing reclaim
+> write's TTL, it adds no write. Not a contract change.
+
 ## Decision (Andrew-ratified)
 
 **What it does, in two lines.** When the reconciler sweep would reclaim an expired-lease mark for a
