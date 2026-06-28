@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -946,13 +947,11 @@ func TestCreateLeaseApplication_DuplicateSameApplicantSameUnit_Rejected(t *testi
 	if first == "" {
 		t.Fatalf("first application should commit")
 	}
-	// The unit's index now holds the first application.
-	idxDoc := readDoc(t, ctx, conn, unit+".leaseApplications")
-	idxData, _ := idxDoc["data"].(map[string]any)
-	if apps, _ := idxData["applications"].([]any); len(apps) != 1 {
-		t.Fatalf("index should hold 1 application after first apply, got %v", idxData["applications"])
+	// The per-(applicant, unit) guard link now exists + is alive.
+	if !keyExists(t, ctx, conn, guardLinkKey(applicant, unit)) {
+		t.Fatalf("guard link should be alive after the first apply")
 	}
-	// Same applicant, same unit, second time → rejected.
+	// Same applicant, same unit, second time → rejected (the guard blocks it).
 	applyToUnit(t, ctx, conn, cp, cons, "dupSecondBBB", applicant, unit, processor.OutcomeRejected)
 }
 
@@ -972,20 +971,14 @@ func TestCreateLeaseApplication_DifferentApplicantsSameUnit_Allowed(t *testing.T
 	if a == "" || b == "" || a == b {
 		t.Fatalf("both distinct-applicant applications should commit to distinct keys; got a=%q b=%q", a, b)
 	}
-	// The unit's index now holds BOTH applications.
-	idxDoc := readDoc(t, ctx, conn, unit+".leaseApplications")
-	idxData, _ := idxDoc["data"].(map[string]any)
-	apps, _ := idxData["applications"].([]any)
-	if len(apps) != 2 {
-		t.Fatalf("index should hold 2 applications (alice + bob), got %v", apps)
+	// Each applicant has their own per-(applicant, unit) guard link — the guard is
+	// per-pair, not a unit lock, so both are alive and distinct.
+	if !keyExists(t, ctx, conn, guardLinkKey(alice, unit)) || !keyExists(t, ctx, conn, guardLinkKey(bob, unit)) {
+		t.Fatalf("both applicants' guard links should be alive (alice=%v bob=%v)",
+			keyExists(t, ctx, conn, guardLinkKey(alice, unit)), keyExists(t, ctx, conn, guardLinkKey(bob, unit)))
 	}
-	seen := map[string]bool{}
-	for _, e := range apps {
-		em, _ := e.(map[string]any)
-		seen[em["applicant"].(string)] = true
-	}
-	if !seen[alice] || !seen[bob] {
-		t.Fatalf("index should carry both applicants; got %v", seen)
+	if guardLinkKey(alice, unit) == guardLinkKey(bob, unit) {
+		t.Fatalf("distinct applicants must map to distinct guard links")
 	}
 }
 
@@ -1006,48 +999,52 @@ func TestCreateLeaseApplication_SameApplicantDifferentUnits_Allowed(t *testing.T
 	}
 }
 
-// TestCreateLeaseApplication_TombstonedPriorApplication_AllowsReapply: a
-// withdrawn (tombstoned) application is pruned from the index and does NOT block
-// the same applicant re-applying to the same unit.
-func TestCreateLeaseApplication_TombstonedPriorApplication_AllowsReapply(t *testing.T) {
+// TestCreateLeaseApplication_ReapplyAfterWithdraw_RevivesGuardLink: a withdraw
+// frees (tombstones) the per-(applicant, unit) guard link; a re-apply then
+// REVIVES that same tombstoned link (a blind create would collide with the
+// tombstone — revive-on-create) rather than minting a new one, and the new
+// application commits. The guard link is the authoritative uniqueness record,
+// freed only by WithdrawLeaseApplication.
+func TestCreateLeaseApplication_ReapplyAfterWithdraw_RevivesGuardLink(t *testing.T) {
 	ctx, conn := setupLeaseEnv(t)
-	cp, cons := newLeasePipeline(t, ctx, conn, "tombstone-reapply")
+	cp, cons := newLeasePipeline(t, ctx, conn, "guard-revive")
 
 	applicant := seedApplicant(t, ctx, conn, "BBTMAPPAHJKMNPQRSTUV")
 	unit := seedUnit(t, ctx, conn, "BBTMUUUUHJKMNPQRSTUV")
+	gk := guardLinkKey(applicant, unit)
 
-	first := applyToUnit(t, ctx, conn, cp, cons, "tombFirstAAA", applicant, unit, processor.OutcomeAccepted)
+	first := applyToUnit(t, ctx, conn, cp, cons, "revFirstAAAA", applicant, unit, processor.OutcomeAccepted)
 	if first == "" {
 		t.Fatalf("first application should commit")
 	}
-	// Logically tombstone the first application (a withdrawal): overwrite its
-	// vertex envelope with isDeleted=true (the guard prunes on the vertex flag).
-	tomb := map[string]any{"class": "leaseapp", "isDeleted": true, "data": map[string]any{}}
-	tb, _ := json.Marshal(tomb)
-	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, first, tb); err != nil {
-		t.Fatalf("tombstone first application: %v", err)
+	if !keyExists(t, ctx, conn, gk) {
+		t.Fatalf("guard link should be alive after the first apply")
 	}
-	// Re-apply: the dead first application is pruned, so this is allowed.
-	second := applyToUnit(t, ctx, conn, cp, cons, "tombSecondBB", applicant, unit, processor.OutcomeAccepted)
-	if second == "" {
-		t.Fatalf("re-application after withdrawal should commit")
+
+	// Withdraw frees the guard link (tombstones it — present but isDeleted).
+	withdraw(t, ctx, conn, cp, cons, "revWithdraw0", first, unit, applicant, processor.OutcomeAccepted)
+	if keyExists(t, ctx, conn, gk) {
+		t.Fatalf("guard link should be tombstoned (not alive) after withdraw")
 	}
-	// The rebuilt index holds only the live re-application (the dead one pruned).
-	idxDoc := readDoc(t, ctx, conn, unit+".leaseApplications")
-	idxData, _ := idxDoc["data"].(map[string]any)
-	apps, _ := idxData["applications"].([]any)
-	if len(apps) != 1 {
-		t.Fatalf("index should hold exactly the live re-application (dead pruned), got %v", apps)
+	if d, _ := readDoc(t, ctx, conn, gk)["isDeleted"].(bool); !d {
+		t.Fatalf("withdrawn guard link should be a tombstone (isDeleted=true), not absent — re-apply must revive it")
 	}
-	em, _ := apps[0].(map[string]any)
-	if em["leaseApp"].(string) != second {
-		t.Fatalf("index entry = %v, want the live re-application %q", em, second)
+
+	// Re-apply: the tombstoned guard is revived (same key, alive again) and the new
+	// application commits to a fresh key.
+	second := applyToUnit(t, ctx, conn, cp, cons, "revSecondBB", applicant, unit, processor.OutcomeAccepted)
+	if second == "" || second == first {
+		t.Fatalf("re-application after withdrawal should commit to a new key; got %q (first=%q)", second, first)
+	}
+	if !keyExists(t, ctx, conn, gk) {
+		t.Fatalf("guard link should be revived (alive) after re-apply")
 	}
 }
 
-// withdraw submits WithdrawLeaseApplication{leaseAppKey, unit} (class leaseapp,
-// reads=[leaseAppKey]) and asserts the outcome.
-func withdraw(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, unitKey string, want processor.MessageOutcome) {
+// withdraw submits WithdrawLeaseApplication{leaseAppKey, unit, applicant} (class
+// leaseapp, reads=[leaseAppKey]; the unit / applicant / guard links are kv.Read on
+// demand) and asserts the outcome.
+func withdraw(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, unitKey, applicantKey string, want processor.MessageOutcome) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -1056,55 +1053,64 @@ func withdraw(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		Actor:         lsActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseapp",
-		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","unit":"` + unitKey + `"}`),
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","unit":"` + unitKey + `","applicant":"` + applicantKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, want)
 }
 
-// indexApps returns the unit's .leaseApplications index entries (nil if absent).
-func indexApps(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey string) []any {
-	t.Helper()
-	doc := readDoc(t, ctx, conn, unitKey+".leaseApplications")
-	data, _ := doc["data"].(map[string]any)
-	apps, _ := data["applications"].([]any)
-	return apps
+// guardLinkKey reconstructs the per-(applicant, unit) duplicate-guard link key
+// lnk.identity.<aid>.appliedToUnit.unit.<uid> from the full applicant + unit
+// vertex keys (the deterministic existence-uniqueness guard).
+func guardLinkKey(applicantKey, unitKey string) string {
+	aid := strings.TrimPrefix(applicantKey, "vtx.identity.")
+	uid := strings.TrimPrefix(unitKey, "vtx.unit.")
+	return "lnk.identity." + aid + ".appliedToUnit.unit." + uid
 }
 
-// TestWithdrawLeaseApplication drives the real withdraw op: a wrong unit is
-// rejected (UnitMismatch) without tombstoning; the correct withdraw tombstones the
-// application AND prunes the unit index; the applicant can then re-apply to the
-// same unit; an unknown / already-withdrawn application is rejected.
+// TestWithdrawLeaseApplication drives the real withdraw op: a wrong unit
+// (UnitMismatch) or wrong applicant (ApplicantMismatch) is rejected without
+// tombstoning; the correct withdraw tombstones the application AND frees the
+// per-(applicant, unit) guard link; the applicant can then re-apply to the same
+// unit; an unknown / already-withdrawn application is rejected.
 func TestWithdrawLeaseApplication(t *testing.T) {
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "withdraw")
 
 	applicant := seedApplicant(t, ctx, conn, "BBWDAPPAHJKMNPQRSTUV")
+	otherApplicant := seedApplicant(t, ctx, conn, "BBWDAPP2HJKMNPQRSTUV")
 	unit := seedUnit(t, ctx, conn, "BBWDUUUUHJKMNPQRSTUV")
 	otherUnit := seedUnit(t, ctx, conn, "BBWDOTHRHJKMNPQRSTUV")
+	gk := guardLinkKey(applicant, unit)
 
 	first := applyToUnit(t, ctx, conn, cp, cons, "wdFirstAAAA", applicant, unit, processor.OutcomeAccepted)
 	if first == "" {
 		t.Fatalf("first application should commit")
 	}
-	if apps := indexApps(t, ctx, conn, unit); len(apps) != 1 {
-		t.Fatalf("index should hold 1 application before withdraw, got %v", apps)
+	if !keyExists(t, ctx, conn, gk) {
+		t.Fatalf("guard link should be alive before withdraw")
 	}
 
 	// Wrong unit → UnitMismatch (rejected), and the application is NOT tombstoned.
-	withdraw(t, ctx, conn, cp, cons, "wdWrongUnit", first, otherUnit, processor.OutcomeRejected)
+	withdraw(t, ctx, conn, cp, cons, "wdWrongUnit", first, otherUnit, applicant, processor.OutcomeRejected)
 	if d, _ := readDoc(t, ctx, conn, first)["isDeleted"].(bool); d {
 		t.Fatalf("a wrong-unit withdraw must NOT tombstone the application")
 	}
 
-	// Correct unit → Accepted: tombstoned + index pruned.
-	withdraw(t, ctx, conn, cp, cons, "wdCorrect01", first, unit, processor.OutcomeAccepted)
+	// Wrong applicant → ApplicantMismatch (rejected), and the application is NOT tombstoned.
+	withdraw(t, ctx, conn, cp, cons, "wdWrongAppl", first, unit, otherApplicant, processor.OutcomeRejected)
+	if d, _ := readDoc(t, ctx, conn, first)["isDeleted"].(bool); d {
+		t.Fatalf("a wrong-applicant withdraw must NOT tombstone the application")
+	}
+
+	// Correct unit + applicant → Accepted: tombstoned + guard link freed.
+	withdraw(t, ctx, conn, cp, cons, "wdCorrect01", first, unit, applicant, processor.OutcomeAccepted)
 	if d, _ := readDoc(t, ctx, conn, first)["isDeleted"].(bool); !d {
 		t.Fatalf("withdraw must tombstone the application")
 	}
-	if apps := indexApps(t, ctx, conn, unit); len(apps) != 0 {
-		t.Fatalf("index should be empty after withdraw (pruned), got %v", apps)
+	if keyExists(t, ctx, conn, gk) {
+		t.Fatalf("guard link should be freed (tombstoned) after withdraw")
 	}
 
 	// Re-apply (same applicant, same unit) → Accepted: the withdrawal unblocked it.
@@ -1112,12 +1118,12 @@ func TestWithdrawLeaseApplication(t *testing.T) {
 	if second == "" || second == first {
 		t.Fatalf("re-application after withdrawal should commit to a new key; got %q (first=%q)", second, first)
 	}
-	if apps := indexApps(t, ctx, conn, unit); len(apps) != 1 {
-		t.Fatalf("index should hold exactly the re-application, got %v", apps)
+	if !keyExists(t, ctx, conn, gk) {
+		t.Fatalf("guard link should be revived (alive) after re-apply")
 	}
 
 	// Double-withdraw the now-tombstoned first application → Rejected (UnknownLeaseApplication).
-	withdraw(t, ctx, conn, cp, cons, "wdDouble001", first, unit, processor.OutcomeRejected)
+	withdraw(t, ctx, conn, cp, cons, "wdDouble001", first, unit, applicant, processor.OutcomeRejected)
 }
 
 // TestSignLease_WritesSignatureAspect (test 8 — the assignTask gap closure; D5).

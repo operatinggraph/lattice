@@ -973,8 +973,10 @@ async function submitProfile(ev, row) {
 }
 
 // withdrawApplication submits WithdrawLeaseApplication (tombstones the leaseapp +
-// prunes the unit's application index) after a confirm, then reloads — the
+// frees the per-(applicant, unit) guard link) after a confirm, then reloads — the
 // withdrawn application drops from the tracker and the unit frees for re-apply.
+// The op verifies applicant against the application's applicationFor link, so the
+// current applicant (whose My Applications view this is) is passed through.
 async function withdrawApplication(row) {
   if (!confirm("Withdraw this application? You'll be able to apply to this unit again.")) return;
   try {
@@ -985,7 +987,7 @@ async function withdrawApplication(row) {
         operationType: "WithdrawLeaseApplication",
         class: "leaseapp",
         reads: [row.entityKey],
-        payload: { leaseAppKey: row.entityKey, unit: row.unitKey },
+        payload: { leaseAppKey: row.entityKey, unit: row.unitKey, applicant: state.applicant },
       }),
     });
     if (reply && reply.status === "rejected") {

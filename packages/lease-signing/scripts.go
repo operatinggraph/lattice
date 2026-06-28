@@ -35,17 +35,6 @@ def make_aspect_upsert(vtx_key, local_name, cls, data):
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
-def make_aspect_upsert_occ(vtx_key, local_name, cls, data, expected_revision):
-    # Like make_aspect_upsert but carries an explicit expectedRevision so the
-    # commit applies an OCC condition (an update with no expectedRevision commits
-    # UNCONDITIONED — step8_commit.go). The per-unit application-index
-    # serialization point: two concurrent applications for one unit snapshot the
-    # index at the same revision, both rewrite it, and the second commit
-    # RevisionConflicts (fail closed, never a silent duplicate).
-    m = make_aspect_upsert(vtx_key, local_name, cls, data)
-    m["expectedRevision"] = expected_revision
-    return m
-
 def make_vtx_tombstone(key, cls):
     # Soft-delete a vertex (isDeleted=True). UNCONDITIONED — a concurrent withdraw
     # tombstones to the same state (idempotent), and nothing else writes the
@@ -54,6 +43,29 @@ def make_vtx_tombstone(key, cls):
     # deletes (EmptyBehavior). Root data stays {} (D5).
     return {"op": "update", "key": key,
             "document": {"class": cls, "isDeleted": True, "data": {}}}
+
+def make_link_revive_occ(key, source, target, cls, local_name, expected_revision):
+    # Revive a soft-deleted guard link (isDeleted=True → False), CAS-guarded on its
+    # tombstone revision. A blind make_link (op:create) would COLLIDE with the
+    # existing tombstone key, so a re-apply after a withdraw must revive, not create
+    # (the userTask-self-heal / object-GC-re-link precedent). The CAS serializes two
+    # concurrent re-applies: both snapshot the same revision, both update, the second
+    # RevisionConflicts (fail closed, never a silent duplicate).
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": {}},
+            "expectedRevision": expected_revision}
+
+def make_link_tombstone(key, source, target, cls, local_name):
+    # Soft-delete a guard link (isDeleted=True). UNCONDITIONED — a withdraw is the
+    # authority that the application (and so the guard) is gone; a live application
+    # (alive guard) blocks any concurrent re-apply at CreateLeaseApplication, so no
+    # revive races this tombstone. Frees the (applicant, unit) pair for re-apply.
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": True,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": {}}}
 
 def bare_nanoid_or_mint(p, name):
     if not hasattr(p, name):
@@ -193,48 +205,30 @@ def execute(state, op):
         # "this application applies to this unit." The convergence lens walks it.
         applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + unit_id
 
-        # Per-unit live-application guard (Capability-KV §06 — the operation's own
-        # Starlark logic; no platform scan, no frozen contract). The unit carries a
-        # .leaseApplications index aspect listing its live applications as
-        # {leaseApp, applicant} entries. Read it ON DEMAND (kv.Read, §2.5) — NOT a
-        # declared contextHint.reads key: the unit is a location-domain vertex and
-        # the index does not exist until the FIRST application, so a declared read
-        # would HydrationMiss on a never-applied unit. Absent → unconstrained (the
-        # index is created on the first application). For each existing entry,
-        # kv.Read the application: a tombstoned / absent leaseapp is pruned (does
-        # not block); a still-live application by the SAME applicant is a
-        # DuplicateApplication — a unit accepts many DIFFERENT applicants (normal
-        # leasing: the landlord chooses) but not the same applicant twice. The index
-        # is rewritten OCC-guarded on its read revision (present) or CreateOnly
-        # (absent), so two concurrent applications for one unit fail closed (the
-        # second conflicts), never a silent duplicate.
-        idx_key = unit + ".leaseApplications"
-        idx = kv.Read(idx_key)
-        idx_present = idx != None and not idx.isDeleted
-        kept = []
-        if idx_present:
-            apps_val = idx.data.get("applications")
-            if apps_val != None and type(apps_val) == type([]):
-                for entry in apps_val:
-                    if type(entry) != type({}):
-                        continue
-                    cand_key = entry.get("leaseApp")
-                    cand_applicant = entry.get("applicant")
-                    if cand_key == None:
-                        continue
-                    cand = kv.Read(cand_key)
-                    if cand == None or cand.isDeleted:
-                        continue
-                    # Still live: keep it in the rebuilt index, and block a repeat
-                    # by the same applicant.
-                    kept.append({"leaseApp": cand_key, "applicant": cand_applicant})
-                    if cand_applicant == applicant:
-                        fail("DuplicateApplication: applicant " + applicant + " already has a live application " + cand_key + " for unit " + unit)
-        kept.append({"leaseApp": app_key, "applicant": applicant})
-        if idx_present:
-            index_mut = make_aspect_upsert_occ(unit, "leaseApplications", "unitLeaseApplications", {"applications": kept}, idx.revision)
+        # Per-(applicant, unit) live-application guard (Capability-KV §06 — the
+        # operation's own Starlark logic; no platform scan, no frozen contract). The
+        # constraint is pure existence-uniqueness — at most ONE live application per
+        # applicant+unit (a unit accepts many DIFFERENT applicants: normal leasing,
+        # the landlord chooses) — so it needs no list: a DETERMINISTIC guard LINK
+        # keyed on the pair IS the constraint (relationships are links, never keys in
+        # an aspect — Contract #1). lnk.identity.<a>.appliedToUnit.unit.<u> reads as
+        # "this applicant applied to this unit" (§1.1: the link is the later-arriving
+        # fact; source = the applicant, target = the unit). Read it ON DEMAND (kv.Read,
+        # §2.5; the unit may have no guard yet, so a declared read would HydrationMiss):
+        #   - alive  → DuplicateApplication (the applicant already has a live one).
+        #   - absent → make_link (op:create) is the guard: two concurrent first-applies
+        #              both create, the second RevisionConflicts on the key (fail closed).
+        #   - tombstoned (a prior withdraw freed it) → REVIVE via CAS (a blind create
+        #              would collide with the tombstone — revive-on-create), CAS-guarded
+        #              so two concurrent re-applies fail closed.
+        guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + unit_id
+        guard = kv.Read(guard_key)
+        if guard != None and not guard.isDeleted:
+            fail("DuplicateApplication: applicant " + applicant + " already has a live application for unit " + unit)
+        if guard != None:
+            guard_mut = make_link_revive_occ(guard_key, applicant, unit, "appliedToUnit", "appliedToUnit", guard.revision)
         else:
-            index_mut = make_aspect(unit, "leaseApplications", "unitLeaseApplications", {"applications": kept})
+            guard_mut = make_link(guard_key, applicant, unit, "appliedToUnit", "appliedToUnit", {})
 
         # Root data minimal (D5): {} on root. The applicant + unit are links; the
         # status/gaps are lens-computed, never stored.
@@ -242,9 +236,9 @@ def execute(state, op):
             make_vtx(app_key, "leaseapp", {}),
             make_link(app_for_lnk, app_key, applicant, "applicationFor", "applicationFor", {}),
             make_link(applies_to_lnk, app_key, unit, "appliesToUnit", "appliesToUnit", {}),
-            # The rebuilt per-unit application index (pruned + appended), OCC-guarded
-            # on the snapshot revision — see the duplicate-application guard above.
-            index_mut,
+            # The per-(applicant, unit) uniqueness guard link — created, or revived
+            # from a prior withdraw's tombstone (CAS). See the guard logic above.
+            guard_mut,
         ]
 
         # .terms (D3): the applicant's requested lease terms — additive
@@ -335,51 +329,49 @@ def execute(state, op):
     if ot == "WithdrawLeaseApplication":
         # Withdraw / cancel an application: soft-delete the leaseapp so it drops
         # from My Applications (the convergence lens anchors on it + filters
-        # isDeleted → EmptyBehavior delete), and prune its entry from the unit's
-        # live-application index so it stops counting against the per-applicant
-        # duplicate guard. The complement to CreateLeaseApplication's guard — an
-        # applicant who applied to the wrong unit can back out + re-apply.
+        # isDeleted → EmptyBehavior delete), and FREE the per-(applicant, unit)
+        # guard link so it stops blocking a re-apply. The complement to
+        # CreateLeaseApplication's guard — an applicant who applied to the wrong
+        # unit can back out + re-apply (the guard revives on re-apply).
         app_key = required_string(p, "leaseAppKey")
         _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
             fail("UnknownLeaseApplication: " + app_key)
 
-        # The unit the application applies to (the FE carries it on the row). Verify
-        # it is genuinely THIS application's unit via the deterministic appliesToUnit
-        # link (kv.Read) — mirroring clinic's withProvider check — so a wrong /
-        # fabricated unit can't be used to prune a different unit's index.
+        # The unit + applicant the application is for (the FE carries both on the
+        # row). Verify each is genuinely THIS application's endpoint via its
+        # deterministic leaseapp-anchored link (kv.Read) — mirroring clinic's
+        # withProvider check — so a wrong / fabricated unit or applicant can't be
+        # used to free a different pair's guard. The (applicant, unit) pair then
+        # reconstructs the guard-link key deterministically.
         unit = required_string(p, "unit")
         _, unit_id = parts_of(unit, "unit", "unit")
         applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + unit_id
-        link = kv.Read(applies_to_lnk)
-        if link == None or link.isDeleted:
+        ulink = kv.Read(applies_to_lnk)
+        if ulink == None or ulink.isDeleted:
             fail("UnitMismatch: " + unit + " is not the unit application " + app_key + " applies to")
+
+        applicant = required_string(p, "applicant")
+        _, applicant_id = parts_of(applicant, "applicant", "identity")
+        app_for_lnk = "lnk.leaseapp." + app_id + ".applicationFor.identity." + applicant_id
+        alink = kv.Read(app_for_lnk)
+        if alink == None or alink.isDeleted:
+            fail("ApplicantMismatch: " + applicant + " is not the applicant of application " + app_key)
 
         # Tombstone the application. The applicationFor / appliesToUnit links are
         # left in place (non-cascading tombstone, the clinic-domain precedent) — they
         # dangle off a tombstoned anchor every reader filters.
         mutations = [make_vtx_tombstone(app_key, "leaseapp")]
 
-        # Prune this application's entry from the unit's index. The duplicate guard
-        # ALSO self-prunes tombstoned entries on the next apply, but pruning here
-        # keeps the index clean immediately (it also feeds a future by-unit landlord
-        # lens). OCC-guarded on the snapshot revision so a concurrent
-        # CreateLeaseApplication for the same unit fails closed. Absent index →
-        # nothing to prune.
-        idx_key = unit + ".leaseApplications"
-        idx = kv.Read(idx_key)
-        if idx != None and not idx.isDeleted:
-            kept = []
-            apps_val = idx.data.get("applications")
-            if apps_val != None and type(apps_val) == type([]):
-                for entry in apps_val:
-                    if type(entry) != type({}):
-                        continue
-                    cand_key = entry.get("leaseApp")
-                    if cand_key == None or cand_key == app_key:
-                        continue
-                    kept.append({"leaseApp": cand_key, "applicant": entry.get("applicant")})
-            mutations.append(make_aspect_upsert_occ(unit, "leaseApplications", "unitLeaseApplications", {"applications": kept}, idx.revision))
+        # Free the per-(applicant, unit) guard link: tombstone it so a re-apply
+        # revives it. UNCONDITIONED (the withdraw is the authority the application is
+        # gone; an alive guard blocks any concurrent re-apply, so no revive races
+        # this). Read it first so a never-guarded application (legacy data) writes no
+        # phantom key — absent → nothing to free.
+        guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + unit_id
+        guard = kv.Read(guard_key)
+        if guard != None and not guard.isDeleted:
+            mutations.append(make_link_tombstone(guard_key, applicant, unit, "appliedToUnit", "appliedToUnit"))
 
         events = [{"class": "leaseapp.applicationWithdrawn",
                    "data": {"leaseAppKey": app_key, "unit": unit}}]
