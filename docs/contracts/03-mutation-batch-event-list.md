@@ -190,6 +190,40 @@ revisions[ops[i].Key] = firstSeq + uint64(i)   // for i in 0..N-1
 
 **Reply propagation.** The Processor filters these revisions to the operation's business mutation keys (excluding the idempotency tracker key) and surfaces them on the accepted reply as `OperationReply.Revisions` (per Contract #2 §2.4). Clients use this map for read-your-own-writes polling against Core KV. Events carry no revisions — `PublishBatchAck` has no revisions field because events are not KV entries.
 
+### 3.10 Sensitive-aspect encryption at rest
+
+An aspect whose aspect-type DDL declares `sensitive: true` (Contract #1 §sensitivity lookup; Contract #7
+reserved `sensitive` aspect type) is stored in Core KV with its `data` **encrypted** (ciphertext), never
+in plaintext. This is the storage-format invariant behind crypto-shredding (right-to-erasure on an
+immutable ledger): destroying the per-identity key renders the ciphertext — in live KV and in the
+JetStream history — permanently unrecoverable.
+
+**Commit-path placement.** Encryption is Processor commit-path middleware, applied **after** step-6
+validation and **before** the step-8 atomic commit:
+
+1. Step 4 (hydrate) decrypts any sensitive aspect read into the Starlark context, so scripts operate on
+   plaintext (Starlark never sees ciphertext or key material).
+2. Step 6 (validate) validates schema / `permittedCommands` / `sensitiveAspectScope` against the
+   **plaintext** mutation, exactly as for non-sensitive aspects.
+3. After validation, for each mutation whose resolved DDL is `sensitive`, the Processor encrypts
+   `mutation.data` with the anchoring identity's data-encryption key (DEK), replacing it with a ciphertext
+   envelope `{ ct, nonce, keyId }`. If the anchoring identity has no `vtx.identity.<id>.piiKey` aspect, the
+   Processor lazily provisions one (the wrapped DEK reference — never key material) and adds it to the
+   **same** atomic batch.
+4. Step 8 commits ciphertext (and any new `piiKey`) atomically. Plaintext sensitive `data` never lands in
+   Core KV.
+
+**Key custody.** The per-identity DEK is wrapped by an external key-management backend (the Vault); only
+the **wrapped** DEK is referenced from `piiKey`, satisfying "key material never in Core KV." Encryption is
+non-deterministic (random nonce) and is compatible with last-writer-wins-by-revision and `requestId`
+idempotency (which key on the request, not on content).
+
+**Readers.** Direct Core-KV readers observe ciphertext. The Refractor's default projection path copies the
+ciphertext as-is — so sensitive aspects are unreadable at general lens targets without an explicit
+decryption seam. Plaintext is produced only by the Processor (for Starlark) and by an explicit
+Vault-decrypt consumer (a trusted tool, or the read-path-authorized Secure Lens). `ShredIdentityKey`
+destroys the DEK, after which no consumer can decrypt.
+
 ## Revision history
 
 | Date | Change |
