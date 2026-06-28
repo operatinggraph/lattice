@@ -73,6 +73,16 @@ read + internalize:
   `internal/<component>/` (or `cmd/<x>` / `packages/<x>`). Summarize the **existing pattern** you must extend.
 - **The frozen contracts it must honor:** `docs/contracts/*` — **build to them**; if the feature genuinely
   needs a change, that's the L3-propose path (§4), not a redesign of the contract.
+- **Primary vendor docs for any external-technology choice** (NATS, Postgres/RLS, JWT, …). Do **not**
+  recommend an external-tech approach from training-prior — read the vendor's own docs *during the design
+  fire*. (Trialed the hard way 2026-06-27: a NATS auth recommendation made without the docs missed the
+  `allow_responses` request-reply gotcha the official docs flag prominently.)
+- **The established internal pattern this should MIRROR.** Before proposing any shape, ask: *has the codebase
+  already solved the analogous problem, and am I mirroring that solution?* A read-path mirror of a decomposed
+  write-path **must** decompose the same way; an extension of a component must extend its existing machinery,
+  not reinvent a parallel one. **Never greenfield a monolith where the codebase already decomposed** (trialed
+  2026-06-27: a `capabilityRead` god-cypher was drafted that contradicted the §6.1 contract-contribution
+  decomposition the write side already established — Epic 12).
 - **The vision + ideation (so the design serves the real intent, not a local optimum):**
   - Brainstorming inventory: `_bmad-output/brainstorming/brainstorming-session-2026-04-08.md` (125-item
     inventory, stream decomposition, dependency graph, boundary contracts, adversarial pre-mortem — many
@@ -104,9 +114,28 @@ greenfield redesign. Cover, as the feature warrants:
   lens projection serves it, P5), the write path (which operations, P2), and any **orchestration** (Loom
   pattern / Weaver convergence lens / `@at`/`@every` / directOp) — name the precedent you're mirroring.
 - **Contract surface:** exactly which `docs/contracts/*` sections it touches (if any) and whether it needs a
-  *change* vs. just *building to* them.
+  *change* vs. just *building to* them. **If an existing convention/constraint creates friction, question
+  whether the convention deserves to exist** — flag it for Andrew with a proposed touch-up — rather than
+  contorting the design around it (trialed 2026-06-27: the §6.4 "PascalCase" prescription was unenforced and
+  silly; the right move was to relax it, not work around it).
+- **Reconciliation with the existing mental model (pre-empt the principal's "but didn't we…?").** A short
+  section that explicitly answers: *Didn't we already handle this?* (name the machinery that exists and why
+  the gap remains — e.g. "2 of 3 projection paths retract; the plain full-engine path is the lone
+  fall-through"); *Does this duplicate or contradict an established pattern / the architecture's
+  design-of-record?* (if a roadmap end-state differs from a Phase-1 simplification you're documenting, say so
+  — "reserved for X," not "by permanent design"); *Does this introduce new state — and do we already keep
+  that state somewhere?* The whole point is that the principal should not have to *ask* these.
 - **Migration / compatibility, test strategy** (what proves it — unit + the ephemeral-stack e2e), **risks +
   alternatives considered**, and **open questions** (which you then resolve in §4).
+  - **Alternatives discipline (most-violated — earn the recommendation):** prefer the **simplest extension of
+    state/machinery that already exists** over a clever *new* mechanism. For **each rejected alternative,
+    re-ask "could a variant of this *beat* my recommendation?"** — do not reject the use-what-we-have option
+    for a narrow reason (trialed 2026-06-27: a Weaver reclaim *probe* was recommended while the cleaner answer
+    — back off using the mark state Weaver already writes — sat *rejected* in the alternatives for a narrow
+    storage reason; Andrew's one question surfaced it). **Quantify a benefit with its bounding constraint**
+    (TTL / lease / cap), not the headline number. Where the design hedges with an "interim/fallback," **check
+    whether a stronger committed stance is cleaner** before defaulting to optionality or incrementalism —
+    especially on the security plane, where a forgeable interim that gets reworked is worse than doing it once.
 - **Decomposition for the Steward:** break L/XL into the increments the Steward will build fire-by-fire, each
   independently shippable + green, so the build is multi-fire-friendly.
 
@@ -142,6 +171,27 @@ shared with Andrew + other fires; if you see files you didn't touch, leave them.
 exit** (bounded; the rate-limiter governs cadence). If genuinely nothing is left to design (every item is
 already designed — 📐 awaiting-Andrew / ✅ Andrew-ratified — or 🚧-gated), say so and stop — **no empty commit**
 — but per §0 that should be rare given the depth of the feature backlog.
+
+## 6. Fold ratification feedback back into this skill (the improvement loop)
+
+Ratification happens **with Andrew present** — it is the most valuable signal the Designer ever gets, and it
+is otherwise ephemeral. So: **when Andrew's feedback during ratification (or any review) reveals a *better*
+approach, or a *recurring blind spot*, capture the generalized lesson before you close — don't just apply it
+to the one design.** Concretely:
+
+1. **Edit this skill** (`agents/designer/SKILL.md`) — add the lesson as a structural check in §2 (grounding)
+   or §3 (the design doc / alternatives discipline), so the *next* design starts better instead of
+   re-learning it. The design improves once; the skill must improve so the blind spot can't recur.
+2. **Write a `feedback`-type memory** capturing the blind spot + the corrected instinct (the *why*), so it
+   surfaces in future fires even before the skill is re-read.
+3. Prefer a **structural fix** (a check that makes the mistake hard to repeat) over a note that merely
+   describes it.
+
+This is not optional polish — it is how the role compounds. A blind spot Andrew has to catch *twice* is a
+skill that failed to learn. (Established 2026-06-27 after a ratification session surfaced five recurring
+design blind spots — under-grounding in primary sources, not reconciling with the principal's mental model,
+anchoring on a new mechanism over the simplest extension of what exists, over-hedging vs. committing, and
+quantifying without bounds. All five are now structural checks in §2–§3 above.)
 
 ## Bounds
 
