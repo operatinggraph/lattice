@@ -1,8 +1,14 @@
 # Historical State Query (FR51) — design
 
-**Status: 📐 awaiting-Andrew (ratification)**
+**Status: 🅿️ Design reviewed & kept — BUILD DEFERRED (parking lot, very far back).**
+Andrew, 2026-06-27: **defer the whole thing** (not even the cheap Layer-1a audit surface now) — low
+near-term value (single-user experiment; the point-in-time-reconstruction consumer is thin) and a
+standing storage cost not worth paying yet. The **design is kept on the shelf**, ready to revive when a
+concrete need arises (an incident postmortem, a vertical that needs time-travel, a real audit requirement).
+Fork-1 (reconstruction source) is **A — committed-delta archive** by the design's recommendation (B has
+the auth-circularity flaw) — to be reconfirmed if/when un-parked.
 **Component:** Refractor (read side) · reuses the Processor's deterministic mutation core
-**Backlog row:** Lattice lane → *Read-model / projection maturity → Historical state query (FR51)*
+**Backlog row:** Lattice lane → *Parking lot — very low priority (far, far back)*
 **Author:** Winston (Designer fire, 2026-06-27)
 
 ---
