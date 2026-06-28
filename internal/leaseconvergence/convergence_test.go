@@ -94,6 +94,7 @@ func (h *harness) assertSteadyState(appID string, hold time.Duration) {
 // the replyOps, the SignLease/RecordIdentityPII ops closed their gaps, and Refractor
 // reprojected to a stable converged row.
 func TestLeaseConvergence_DrainThenAssert_SteadyState(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
@@ -164,6 +165,7 @@ func TestLeaseConvergence_DrainThenAssert_SteadyState(t *testing.T) {
 // drain-until-converged tests already require this flip; this test asserts it
 // EXPLICITLY (the unit's listing actually became leased, economics intact).
 func TestLeaseConvergence_ListingLeasedOnApproval(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
@@ -210,6 +212,7 @@ func TestLeaseConvergence_ListingLeasedOnApproval(t *testing.T) {
 // the row converge. This closes the auto-lease race the old applicantApproved-gated
 // flip had.
 func TestLeaseConvergence_NoLeaseUntilLandlordApproves(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
@@ -256,6 +259,7 @@ func TestLeaseConvergence_NoLeaseUntilLandlordApproves(t *testing.T) {
 // violating settles to false (no work remains; Weaver stops reconciling). The
 // decline is a definitive disposition, not a transient gap.
 func TestLeaseConvergence_LandlordDeclineIsTerminal(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
@@ -299,6 +303,7 @@ func TestLeaseConvergence_LandlordDeclineIsTerminal(t *testing.T) {
 // outcome lives in the .outcome ASPECT, and the service + leaseapp vertex ROOT data
 // stays minimal ({}). A regression that fattens root data fails this gate.
 func TestLeaseConvergence_D5_OutcomeInAspect_RootMinimal(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
@@ -340,6 +345,7 @@ func TestLeaseConvergence_D5_OutcomeInAspect_RootMinimal(t *testing.T) {
 // external effect lands — exactly one charge on the adapter and exactly one
 // .outcome aspect for that service throughout.
 func TestLeaseConvergence_FR58_RetriedExternalCall_AtMostOnce(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
@@ -407,6 +413,7 @@ func TestLeaseConvergence_FR58_RetriedExternalCall_AtMostOnce(t *testing.T) {
 // Runs ONLY under -tags leaseshortwindow (the gate), where the freshness window
 // is short enough to watch two lapses in bounded wall-clock.
 func TestLeaseConvergence_BgcheckFreshness_EagerReopen(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
 	}
