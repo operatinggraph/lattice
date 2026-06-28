@@ -45,10 +45,10 @@ const (
 	clConsumerCapKey = "cap.identity." + clConsumerID
 )
 
-// clinicOps are the ten ops the staff actor needs.
+// clinicOps are the ops the staff actor needs.
 var clinicOps = []string{
 	"CreatePatient", "TombstonePatient",
-	"CreateProvider", "TombstoneProvider", "SetProviderHours", "SetProviderTimeOff",
+	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment",
 }
 
@@ -246,6 +246,58 @@ func TestClinic_CreateBookable(t *testing.T) {
 	if ld := clReadDoc(t, ctx, conn, withProvider); ld["sourceVertex"] != apptKey || ld["targetVertex"] != providerKey {
 		t.Fatalf("withProvider link endpoints = src %v tgt %v", ld["sourceVertex"], ld["targetVertex"])
 	}
+}
+
+// TestClinic_SetProviderProfile proves SetProviderProfile edits an existing
+// provider's .profile through the real Processor: it REPLACES the aspect with the
+// supplied fields (an omitted credentials/bio is DROPPED, not merged — the same
+// full-replace semantics SetProviderHours/SetProviderTimeOff use), keeps fullName +
+// specialty required (the roster lens keys on fullName), and rejects an unknown
+// provider.
+func TestClinic_SetProviderProfile(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "set-profile")
+
+	providerKey := createProvider(t, ctx, conn, cp, cons, "spprv0001", "Dr. Sam Okafor", "Cardiology")
+
+	// Edit: new name + specialty + credentials + bio → accepted, all four land.
+	clSubmit(t, ctx, conn, cp, cons, "spedit001", "SetProviderProfile", "provider",
+		`{"providerKey":"`+providerKey+`","fullName":"Dr. Samira Okafor","specialty":"Interventional Cardiology","credentials":"MD, FACC","bio":"Structural heart"}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+	prof := clReadDoc(t, ctx, conn, providerKey+".profile")
+	if prof["class"] != "providerProfile" {
+		t.Fatalf("profile class = %v, want providerProfile", prof["class"])
+	}
+	pd, _ := prof["data"].(map[string]any)
+	if pd["fullName"] != "Dr. Samira Okafor" || pd["specialty"] != "Interventional Cardiology" ||
+		pd["credentials"] != "MD, FACC" || pd["bio"] != "Structural heart" {
+		t.Fatalf("edited profile = %v", prof["data"])
+	}
+
+	// Full-replace semantics: omit credentials + bio → they are DROPPED.
+	clSubmit(t, ctx, conn, cp, cons, "spedit002", "SetProviderProfile", "provider",
+		`{"providerKey":"`+providerKey+`","fullName":"Dr. Samira Okafor","specialty":"Cardiology"}`,
+		[]string{providerKey}, processor.OutcomeAccepted)
+	pd2, _ := clReadDoc(t, ctx, conn, providerKey+".profile")["data"].(map[string]any)
+	if pd2["specialty"] != "Cardiology" {
+		t.Fatalf("replaced specialty = %v, want Cardiology", pd2["specialty"])
+	}
+	if _, ok := pd2["credentials"]; ok {
+		t.Fatalf("credentials must be dropped on a full-replace edit, got %v", pd2["credentials"])
+	}
+	if _, ok := pd2["bio"]; ok {
+		t.Fatalf("bio must be dropped on a full-replace edit, got %v", pd2["bio"])
+	}
+
+	// Missing fullName → rejected (required).
+	clSubmit(t, ctx, conn, cp, cons, "spbad001", "SetProviderProfile", "provider",
+		`{"providerKey":"`+providerKey+`","specialty":"Cardiology"}`,
+		[]string{providerKey}, processor.OutcomeRejected)
+
+	// Unknown provider → rejected.
+	clSubmit(t, ctx, conn, cp, cons, "spbad002", "SetProviderProfile", "provider",
+		`{"providerKey":"vtx.provider.spnope0000000000000","fullName":"Ghost","specialty":"None"}`,
+		[]string{"vtx.provider.spnope0000000000000"}, processor.OutcomeRejected)
 }
 
 // TestClinic_DoubleBookRejected proves op-time double-book rejection: CreateAppointment

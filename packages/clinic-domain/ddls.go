@@ -125,11 +125,14 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     providerVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderHours", "SetProviderTimeOff"},
+		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff"},
 		Description: "Clinic provider DDL. Vertex shape: vtx.provider.<NanoID>, class=provider, root data = {} " +
 			"(minimal, D5 — the data lives in the .profile aspect). CreateProvider mints the provider + writes the " +
 			".profile aspect {fullName (required), specialty (required), credentials?, bio?} atomically. " +
-			"TombstoneProvider soft-deletes one. SetProviderHours upserts the .hours availability aspect " +
+			"SetProviderProfile edits an existing provider's .profile — it REPLACES the aspect with the supplied " +
+			"{fullName (required), specialty (required), credentials?, bio?} (the editor seeds the form from the " +
+			"projected profile so a replace edits the live set; fullName + specialty stay required so the roster " +
+			"lens never loses the provider). TombstoneProvider soft-deletes one. SetProviderHours upserts the .hours availability aspect " +
 			"{windows: [{day (0=Sun..6=Sat), openSec, closeSec}]} (UTC seconds-of-day) — the opt-in recurring-weekly " +
 			"business-hours windows CreateAppointment / RescheduleAppointment enforce (an out-of-hours booking is " +
 			"rejected OutsideHours); an absent .hours aspect or windows=[] means the provider is unconstrained. " +
@@ -139,24 +142,24 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			"inside the weekly .hours; an absent .timeOff aspect or ranges=[] means no blackouts.",
 		Script: providerDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"fullName":{"type":"string","description":"The provider's full name (CreateProvider; required)."},` +
-			`"specialty":{"type":"string","description":"The provider's clinical specialty, e.g. Cardiology (CreateProvider; required)."},` +
-			`"credentials":{"type":"string","description":"Post-nominal credentials, e.g. MD (CreateProvider; optional)."},` +
-			`"bio":{"type":"string","description":"Short provider bio (CreateProvider; optional)."},` +
+			`{"fullName":{"type":"string","description":"The provider's full name (CreateProvider / SetProviderProfile; required)."},` +
+			`"specialty":{"type":"string","description":"The provider's clinical specialty, e.g. Cardiology (CreateProvider / SetProviderProfile; required)."},` +
+			`"credentials":{"type":"string","description":"Post-nominal credentials, e.g. MD (CreateProvider / SetProviderProfile; optional)."},` +
+			`"bio":{"type":"string","description":"Short provider bio (CreateProvider / SetProviderProfile; optional)."},` +
 			`"providerId":{"type":"string","description":"Optional bare NanoID for the new provider vertex (CreateProvider); absent → minted."},` +
-			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderHours / SetProviderTimeOff; required, validated alive)."},` +
+			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderProfile / SetProviderHours / SetProviderTimeOff; required, validated alive)."},` +
 			`"windows":{"type":"array","description":"Availability windows (SetProviderHours; required). Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}},` +
 			`"ranges":{"type":"array","description":"Time-off blackout ranges (SetProviderTimeOff; required). Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. A booking overlapping any range is rejected (ProviderUnavailable). An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.provider.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"fullName":    "The provider's full name. Stored on the .profile aspect (CreateProvider; required).",
-			"specialty":   "The provider's clinical specialty (e.g. Cardiology). Stored on the .profile aspect (CreateProvider; required).",
-			"credentials": "Optional post-nominal credentials (e.g. MD, RN). Stored on the .profile aspect when present.",
-			"bio":         "Optional short provider bio. Stored on the .profile aspect when present.",
+			"fullName":    "The provider's full name. Stored on the .profile aspect (CreateProvider / SetProviderProfile; required).",
+			"specialty":   "The provider's clinical specialty (e.g. Cardiology). Stored on the .profile aspect (CreateProvider / SetProviderProfile; required).",
+			"credentials": "Optional post-nominal credentials (e.g. MD, RN). Stored on the .profile aspect when present (CreateProvider / SetProviderProfile).",
+			"bio":         "Optional short provider bio. Stored on the .profile aspect when present (CreateProvider / SetProviderProfile).",
 			"providerId":  "Optional bare NanoID (no dots / key segments) for the new provider vertex. Absent → minted with nanoid.new().",
-			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderHours sets its recurring availability; SetProviderTimeOff sets its date-specific blackouts).",
+			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderProfile edits its profile; SetProviderHours sets its recurring availability; SetProviderTimeOff sets its date-specific blackouts).",
 			"windows":     "Availability windows (SetProviderHours). A list of {day:0-6 (Sun=0), openSec, closeSec} where openSec/closeSec are UTC seconds-of-day (0..86400) and openSec<closeSec. An empty list clears the constraint (provider becomes unconstrained).",
 			"ranges":      "Time-off blackout ranges (SetProviderTimeOff). A list of {from, to, reason?} where from/to are RFC3339 UTC instants and from<to. A booking whose [start,end) overlaps any range is rejected (ProviderUnavailable) even when it falls inside the weekly .hours. An empty list clears all blackouts.",
 		},
@@ -166,6 +169,19 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology", "credentials": "MD"},
 				ExpectedOutcome: "Mints vtx.provider.<NanoID> (class=provider, root {}) + the .profile aspect " +
 					"{fullName, specialty, credentials}. Returns primaryKey (the provider key).",
+			},
+			{
+				Name: "SetProviderProfile — edit an existing provider's profile",
+				Payload: map[string]any{
+					"providerKey": "vtx.provider.<NanoID>",
+					"fullName":    "Dr. Samira Okafor",
+					"specialty":   "Cardiology",
+					"credentials": "MD, FACC",
+				},
+				ExpectedOutcome: "Validates the provider is alive + class=provider, then REPLACES " +
+					"vtx.provider.<NanoID>.profile with {fullName, specialty, credentials?, bio?}. fullName + " +
+					"specialty are required (the roster lens keys on fullName); an omitted credentials/bio clears " +
+					"that field. Returns primaryKey (the provider key).",
 			},
 			{
 				Name: "SetProviderHours — Mon/Wed 09:00–17:00 UTC",
@@ -228,8 +244,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"aspect, set by SetProviderTimeOff): a booking overlapping any blackout range is rejected (ProviderUnavailable), " +
 			"even when it falls inside the weekly .hours; a provider with no .timeOff is unrestricted. Both also reject a " +
 			"startsAt at or before op.submittedAt " +
-				"(ScheduleInPast) — a soft past-time guard (submittedAt is caller-supplied; the host clock is " +
-				"not exposed to Starlark).",
+			"(ScheduleInPast) — a soft past-time guard (submittedAt is caller-supplied; the host clock is " +
+			"not exposed to Starlark).",
 		Script: appointmentDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"patient":{"type":"string","description":"vtx.patient.<NanoID> the appointment is for (CreateAppointment / RescheduleAppointment; required; on create validated alive + class=patient, on reschedule it must be the appointment's actual patient — list patient+'.bookings' in contextHint.reads for the patient-side double-book check)."},` +
@@ -337,16 +353,17 @@ func demographicsAspectTypeDDL() pkgmgr.DDLSpec {
 }
 
 // profileAspectTypeDDL declares the .profile aspect (class providerProfile) — the
-// step-6 write gate for CreateProvider. Declaration-only; NON-sensitive.
+// step-6 write gate for CreateProvider + SetProviderProfile. Declaration-only;
+// NON-sensitive.
 func profileAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     profileAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateProvider"},
+		PermittedCommands: []string{"CreateProvider", "SetProviderProfile"},
 		Description: "Provider profile aspect (clinic). Stored as vtx.provider.<NanoID>.profile (class " +
-			"providerProfile) = {fullName, specialty, credentials?, bio?}. Non-sensitive. Written ONLY by " +
-			"CreateProvider (whose provider vertexType DDL owns the script); this aspect-type DDL is the step-6 " +
-			"write gate. Declaration-only: no op handler.",
+			"providerProfile) = {fullName, specialty, credentials?, bio?}. Non-sensitive. Written by " +
+			"CreateProvider (mints it) and SetProviderProfile (replaces it) — both owned by the provider " +
+			"vertexType DDL script; this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"fullName":{"type":"string"},"specialty":{"type":"string"},"credentials":{"type":"string"},"bio":{"type":"string"}}}`,
@@ -922,6 +939,34 @@ def execute(state, op):
         mutations = [make_aspect_upsert(prkey, "timeOff", "providerTimeOff", {"ranges": clean})]
         events = [{"class": "clinic.providerTimeOffSet",
                    "data": {"providerKey": prkey, "rangeCount": len(clean)}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": prkey}}
+
+    if ot == "SetProviderProfile":
+        prkey = required_string(p, "providerKey")
+        parts_of(prkey, "providerKey", "provider")
+        if not vertex_alive(state, prkey):
+            fail("UnknownProvider: " + prkey)
+        cls = class_of(state, prkey)
+        if cls != "provider":
+            fail("WrongClass: providerKey: " + prkey + " has class " + str(cls) + ", required provider")
+        full_name = required_string(p, "fullName")
+        specialty = required_string(p, "specialty")
+        profile = {"fullName": full_name, "specialty": specialty}
+        credentials = optional_string(p, "credentials")
+        if credentials != None:
+            profile["credentials"] = credentials
+        bio = optional_string(p, "bio")
+        if bio != None:
+            profile["bio"] = bio
+        # Unconditioned upsert REPLACING the whole .profile aspect (it always exists —
+        # CreateProvider mints it). The editor seeds the form from the projected
+        # profile (fullName/specialty/credentials/bio all carried by clinicProviders),
+        # so a replace edits the live set; fullName + specialty stay required so the
+        # provider never loses the fields its roster lens (WHERE fullName <> null) and
+        # booking picker depend on. Mirrors SetProviderHours / SetProviderTimeOff.
+        mutations = [make_aspect_upsert(prkey, "profile", "providerProfile", profile)]
+        events = [{"class": "clinic.providerProfileSet", "data": {"providerKey": prkey}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": prkey}}
 

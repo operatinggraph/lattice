@@ -101,7 +101,9 @@ RETURN
 // instead of a raw vtx.provider.<id> key. The WHERE keeps only providers carrying
 // a `.profile` aspect (the `<> null` aspect-presence idiom availableListings
 // uses). The per-row key is the provider key (the IntoKey default); `providerKey`
-// repeats it in the body.
+// repeats it in the body. specialty / credentials / bio are projected so the
+// provider EDITOR UI can read-modify-write the full profile (SetProviderProfile
+// replaces the whole .profile, so the form seeds every editable field from here).
 //
 // timeOff projects the provider's opt-in .timeOff aspect's `ranges` array verbatim
 // (a list of {from, to, reason?} canonical-UTC RFC3339 ranges written by
@@ -127,6 +129,7 @@ RETURN
   pr.profile.data.fullName AS name,
   pr.profile.data.specialty AS specialty,
   pr.profile.data.credentials AS credentials,
+  pr.profile.data.bio AS bio,
   pr.timeOff.data.ranges AS timeOff,
   pr.hours.data.windows AS hours`
 

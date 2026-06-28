@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.5.0
+version: 0.6.0
 description: |
   Clinic bookable domain. Self-contained package owning three vertex types —
   patient, provider, appointment — with their aspects (.demographics, .profile,
@@ -61,6 +61,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: TombstoneProvider
+      scope: any
+      grantsTo: [operator]
+    - operationType: SetProviderProfile
       scope: any
       grantsTo: [operator]
     - operationType: SetProviderHours

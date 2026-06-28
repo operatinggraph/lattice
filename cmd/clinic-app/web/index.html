@@ -142,6 +142,29 @@
           <label for="avail-provider">Provider</label>
           <select id="avail-provider" aria-label="Choose a provider to manage availability"></select>
         </div>
+        <div class="avail-editor" id="avail-profile">
+          <h3>✏️ Provider details</h3>
+          <p class="hint">Edit the selected provider's name, specialty, and credentials. Saving replaces the whole profile — name and specialty are required.</p>
+          <div class="field">
+            <label for="edit-prov-name">Full name</label>
+            <input type="text" id="edit-prov-name" placeholder="Dr. Sam Okafor" />
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="edit-prov-specialty">Specialty</label>
+              <input type="text" id="edit-prov-specialty" placeholder="Cardiology" />
+            </div>
+            <div class="field">
+              <label for="edit-prov-credentials">Credentials <span class="opt">(optional)</span></label>
+              <input type="text" id="edit-prov-credentials" placeholder="MD" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="edit-prov-bio">Bio <span class="opt">(optional)</span></label>
+            <textarea id="edit-prov-bio" placeholder="Short provider bio"></textarea>
+          </div>
+          <button type="button" id="edit-prov-save">Save provider details</button>
+        </div>
         <div class="avail-editor" id="avail-hours">
           <h3>🕑 Bookable hours (UTC)</h3>
           <p class="hint">Set the provider's recurring weekly hours, in UTC. Bookings outside these windows are rejected. No windows = always available.</p>

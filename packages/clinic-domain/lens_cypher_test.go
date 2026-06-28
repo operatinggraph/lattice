@@ -248,7 +248,7 @@ func TestClinicProviders_RostersNamedProviders(t *testing.T) {
 	}
 	f := newLensFixture(t)
 	namedKey := f.vtx(t, "drsam", "provider")
-	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology", "credentials": "MD"})
+	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology", "credentials": "MD", "bio": "Heart specialist"})
 	// A provider with NO .profile aspect must be excluded by the WHERE filter.
 	f.vtx(t, "ghost", "provider")
 
@@ -259,6 +259,8 @@ func TestClinicProviders_RostersNamedProviders(t *testing.T) {
 	require.Equal(t, "Dr. Sam Okafor", v["name"])
 	require.Equal(t, "Cardiology", v["specialty"])
 	require.Equal(t, "MD", v["credentials"])
+	// bio projects so the provider editor can seed it (read-modify-write).
+	require.Equal(t, "Heart specialist", v["bio"])
 	// A provider with no .timeOff aspect projects a null timeOff column.
 	require.Nil(t, v["timeOff"], "timeOff is null when the provider has declared no blackouts")
 	// Likewise no .hours aspect → a null hours column.

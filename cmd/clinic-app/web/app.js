@@ -263,10 +263,74 @@ async function loadProviders() {
 // both Availability-tab editors against #avail-provider. Safe to call any time —
 // after a roster refresh the selection is preserved, so a just-saved draft is kept.
 function renderAvailEditors() {
+  seedProviderEdit();
   hoursDraftForSelectedProvider();
   renderHoursDraft();
   timeOffDraftForSelectedProvider();
   renderTimeOffDraft();
+}
+
+// seedProviderEdit fills the "Provider details" editor from the selected provider's
+// projected profile (name / specialty / credentials / bio — all carried by the
+// clinicProviders lens). Like the hours / time-off editors it re-seeds ONLY when
+// the selected provider changes, so an in-progress edit survives a roster refresh;
+// with no provider selected the fields are cleared + disabled.
+function seedProviderEdit() {
+  const prov = $("#avail-provider").value;
+  if (prov === state.editProvider) return;
+  state.editProvider = prov;
+  const p = providerByKey(prov);
+  $("#edit-prov-name").value = p ? p.name || "" : "";
+  $("#edit-prov-specialty").value = p ? p.specialty || "" : "";
+  $("#edit-prov-credentials").value = p ? p.credentials || "" : "";
+  $("#edit-prov-bio").value = p ? p.bio || "" : "";
+  const disabled = !prov;
+  for (const id of ["#edit-prov-name", "#edit-prov-specialty", "#edit-prov-credentials", "#edit-prov-bio", "#edit-prov-save"]) {
+    $(id).disabled = disabled;
+  }
+}
+
+// saveProviderEdit submits SetProviderProfile for the selected provider. The op
+// REPLACES the whole .profile, so the form (seeded from the projected profile)
+// carries every field; name + specialty are required so the roster lens never
+// loses the provider. Mirrors saveProviderHours / saveProviderTimeOff (no re-seed
+// after save — the form already shows what was saved, and the projection may lag).
+async function saveProviderEdit() {
+  const prov = $("#avail-provider").value;
+  if (!prov) {
+    toast("Select a provider first.", "err");
+    return;
+  }
+  const name = $("#edit-prov-name").value.trim();
+  const specialty = $("#edit-prov-specialty").value.trim();
+  const credentials = $("#edit-prov-credentials").value.trim();
+  const bio = $("#edit-prov-bio").value.trim();
+  if (!name || !specialty) {
+    toast("Provider name and specialty are required.", "err");
+    return;
+  }
+  const payload = { providerKey: prov, fullName: name, specialty };
+  if (credentials) payload.credentials = credentials;
+  if (bio) payload.bio = bio;
+
+  const btn = $("#edit-prov-save");
+  btn.disabled = true;
+  try {
+    const reply = await submitOp("SetProviderProfile", "provider", payload, [prov]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not save provider details — " + msg, "err");
+      return;
+    }
+    toast("Provider details saved.", "ok");
+    // Refresh the roster so the picker label (name · specialty) reflects the edit;
+    // the selection is preserved, so seedProviderEdit keeps the just-saved form.
+    loadProviders();
+  } catch (e) {
+    toast("Could not save provider details: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function providerLabel(p) {
@@ -1854,6 +1918,7 @@ function init() {
   // Availability tab — its own provider picker drives both editors; a change
   // re-seeds each draft from the newly-selected provider's projected values.
   $("#avail-provider").addEventListener("change", renderAvailEditors);
+  $("#edit-prov-save").addEventListener("click", saveProviderEdit);
   $("#hours-add").addEventListener("click", addHoursWindow);
   $("#hours-save").addEventListener("click", saveProviderHours);
   $("#timeoff-add").addEventListener("click", addTimeOffRange);

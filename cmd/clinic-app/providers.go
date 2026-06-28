@@ -44,6 +44,7 @@ type providerRow struct {
 	Name        string         `json:"name"`
 	Specialty   string         `json:"specialty"`
 	Credentials string         `json:"credentials,omitempty"`
+	Bio         string         `json:"bio,omitempty"`
 	TimeOff     []timeOffRange `json:"timeOff,omitempty"`
 	Hours       []hoursWindow  `json:"hours,omitempty"`
 }

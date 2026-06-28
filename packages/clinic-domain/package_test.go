@@ -40,7 +40,7 @@ func TestPackage_DDLs(t *testing.T) {
 
 	vertexCmds := map[string][]string{
 		"patient":     {"CreatePatient", "TombstonePatient"},
-		"provider":    {"CreateProvider", "TombstoneProvider", "SetProviderHours", "SetProviderTimeOff"},
+		"provider":    {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff"},
 		"appointment": {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 	}
 	for name, wantCmds := range vertexCmds {
@@ -70,7 +70,7 @@ func TestPackage_DDLs(t *testing.T) {
 
 	aspectWriters := map[string][]string{
 		"patientDemographics": {"CreatePatient"},
-		"providerProfile":     {"CreateProvider"},
+		"providerProfile":     {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule": {"CreateAppointment", "RescheduleAppointment"},
 		"appointmentStatus":   {"CreateAppointment", "SetAppointmentStatus"},
 		"providerBookings":    {"CreateProvider", "CreateAppointment", "RescheduleAppointment"},
@@ -129,12 +129,13 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins all nine ops granted to operator (scope any) and
+// TestPackage_Permissions pins every op granted to operator (scope any) and
 // nothing else, plus the three projection lenses and no package dependency.
 func TestPackage_Permissions(t *testing.T) {
 	wantPerms := map[string]bool{
 		"CreatePatient": false, "TombstonePatient": false,
-		"CreateProvider": false, "TombstoneProvider": false, "SetProviderHours": false, "SetProviderTimeOff": false,
+		"CreateProvider": false, "TombstoneProvider": false,
+		"SetProviderProfile": false, "SetProviderHours": false, "SetProviderTimeOff": false,
 		"CreateAppointment": false, "RescheduleAppointment": false,
 		"SetAppointmentStatus": false, "TombstoneAppointment": false,
 	}
@@ -210,12 +211,12 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`require_live_typed`, // endpoint alive + class
 		`WrongClass`,         // endpoint-class guard
 		"scheduled, confirmed, checkedIn, completed, cancelled, noShow", // status enum
-		`lnk.appointment.`,                            // link direction (appointment is source)
-		`.forPatient.patient.`,                        // forPatient link shape
-		`.withProvider.provider.`,                     // withProvider link shape
-		`make_aspect_upsert(appt_key, "status"`,       // SetAppointmentStatus upsert
-		`make_aspect_upsert(appt_key, "schedule"`,     // RescheduleAppointment rewrites .schedule
-		`clinic.appointmentRescheduled`,               // RescheduleAppointment event
+		`lnk.appointment.`,                               // link direction (appointment is source)
+		`.forPatient.patient.`,                           // forPatient link shape
+		`.withProvider.provider.`,                        // withProvider link shape
+		`make_aspect_upsert(appt_key, "status"`,          // SetAppointmentStatus upsert
+		`make_aspect_upsert(appt_key, "schedule"`,        // RescheduleAppointment rewrites .schedule
+		`clinic.appointmentRescheduled`,                  // RescheduleAppointment event
 		`enforce_hours(provider, starts_at, ends_at)`,    // both ops enforce provider hours
 		`OutsideHours`,                                   // the availability-window rejection
 		`time.weekday(starts_at)`,                        // weekday membership
@@ -223,8 +224,8 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`enforce_time_off(provider, starts_at, ends_at)`, // both ops enforce provider time-off
 		`ProviderUnavailable`,                            // the time-off-overlap rejection
 		`PatientDoubleBook`,                              // patient-side double-book rejection (across providers)
-		`patient_bookings_key = patient + ".bookings"`,  // patient .bookings index read
-		`make_aspect_upsert_occ(patient, "bookings"`,    // OCC-guarded patient index rewrite
+		`patient_bookings_key = patient + ".bookings"`,   // patient .bookings index read
+		`make_aspect_upsert_occ(patient, "bookings"`,     // OCC-guarded patient index rewrite
 		`WrongPatient`,                                   // reschedule validates the passed patient via the forPatient link
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {
@@ -248,6 +249,9 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`SetProviderTimeOff`,                     // time-off op handler
 		`make_aspect_upsert(prkey, "timeOff"`,    // upserts the .timeOff aspect
 		`clinic.providerTimeOffSet`,              // time-off event
+		`SetProviderProfile`,                     // profile-edit op handler
+		`make_aspect_upsert(prkey, "profile"`,    // replaces the .profile aspect
+		`clinic.providerProfileSet`,              // profile-edit event
 	} {
 		if !strings.Contains(providerDDLScript, want) {
 			t.Errorf("provider script must reference %q", want)
