@@ -195,8 +195,9 @@ to the substrate directly. The flow:
    pre-computes the complete mutation set — every DDL/lens/permission/grant key —
    as **logical documents** (`{class, data, isDeleted}`, no provenance).
 2. **Idempotency check.** The op is keyed so a re-install of the same name +
-   version is a no-op; a different version fails closed (no in-place upgrade
-   path yet).
+   version is a no-op. A **different** version, or a same-version `--force`,
+   takes the in-place **upgrade** path (F-004 — see
+   [Upgrade / dev-loop refresh](#upgrade--in-place-dev-loop-refresh-f-004) below).
 3. **Submit `InstallPackage`.** `cmd/lattice-pkg` publishes the op (operator
    credential = the admin identity from `lattice.bootstrap.json`). The kernel
    script iterates the mutation set, enforces the install guardrails (key-shape,
@@ -233,6 +234,65 @@ currently submits tombstones unconditionally — see the
 [package-install contract](/docs/contracts/08-package-install.md) for the
 documented race window and the per-key-revision follow-up.
 
+## Upgrade / in-place dev-loop refresh (F-004)
+
+A package can be **upgraded in place** on a running stack — no `make down`, no
+teardown. `lattice-pkg` is upgrade-aware:
+
+```
+lattice-pkg install <dir>                  # different version → auto-upgrade in place
+lattice-pkg install --force <dir>          # same version → re-apply changed bodies (dev refresh)
+lattice-pkg install --dry-run <dir>        # preview the create/update/tombstone delta, submit nothing
+lattice-pkg upgrade <dir>                  # explicit upgrade; errors if not installed
+```
+
+**Mechanism.** `Installer.Upgrade` reads the installed package's `.manifest`
+`declaredKeys`, rebuilds the new manifest, and **diffs by key**:
+
+- a key only in the new manifest → **create**,
+- a key only in the old → **tombstone** (sorted),
+- a key in both whose logical body changed → **update** (creation provenance —
+  `createdAt`/`createdBy`/`createdByOp` — is carried forward; only `lastModified*`
+  is re-stamped with the upgrade actor); an unchanged body is **skipped**.
+
+The whole delta is submitted as ONE `UpgradePackage` op and lands in a **single
+step-8 atomic batch** (all-or-nothing, with the package `version` aspect bumped in
+the same batch — version and entity-set are never inconsistent). The same step-8
+**protected-key guard** that defends install rejects any `update`/`tombstone` of a
+protected kernel/auth root, so an upgrade can never touch primordial state. After
+commit, the Refractor re-projects the changed lenses and the Processor's
+`vtx.meta.*` cache invalidates in-commit — converged with no restart.
+
+**Version-independent entity keys** (Contract #8 §8.1) make this work: an entity's
+`vtx.meta.<id>` / `vtx.<type>.<id>` derives from package **name + entity tag**, not
+the version, so a surviving lens/DDL/role keeps its key across versions (an *update*
+of a stable key, not a re-mint that would orphan vertices and break every NanoID
+cross-ref — a `lensRef`, a `grantedBy` link).
+
+> **One-time re-mint on a long-lived pre-F-004 stack.** A stack that installed
+> packages *before* the version-independent-key change holds version-salted keys.
+> The **first** upgrade/`--force` computes version-free keys, so old∩new is empty →
+> the delta is **create-all-new + tombstone-all-old** (a blue-green re-mint inside
+> the one atomic batch — Refractor sees the old lens deactivate and the new lens
+> activate+rebuild with no window). This is expected and self-heals; thereafter keys
+> are stable and upgrades are true in-place updates. A fresh `make up` (which
+> re-seeds the kernel) never shows it.
+
+**Caveat — a brand-new entity needs a fresh kernel.** The Refractor activates
+lenses and the Processor loads the DDL cache at **install** time; an *added* lens /
+role / op in a same-version `--force` won't hot-reload under a live stack. For a
+brand-new entity, use `make down && up-<vertical>`. *Edited* existing lenses/DDLs
+re-project live.
+
+**Dev-loop Makefile targets** wrap this for the common edit-test loop on a running
+stack:
+
+- `make reinstall-package PKG=packages/<dir>` — diff-apply one edited package in
+  place.
+- `make refresh-clinic` / `make refresh-loftspace` — diff-apply the vertical's
+  packages **and** rebuild+restart its FE binary (`bin/clinic-app` /
+  `bin/loftspace-app`) in one command.
+
 ## Atomicity contract
 
 **Install OR fail entire.** The single step-8 atomic batch on `core-kv` provides
@@ -260,20 +320,28 @@ write is needed.
 ## Known limitations
 
 - **No dependency-resolution graph** — a missing dependency warns rather than refuses.
-- **No in-place upgrade** — a different version on an already-installed package fails closed.
+- **No in-flight-instance version pinning** — an in-place upgrade re-projects lenses
+  and swaps DDLs immediately; a Loom pattern instance mid-flight is not fenced to the
+  DDL version it started on (F-004 follow-on G6, built behind a concrete need).
 - **No NATS account-level auth** — the install actor is the filesystem-bound admin credential; substrate-level write enforcement is 🔭 Designed (the ratified NATS account write-restriction hardening — credential seam shipped, enforcement pending).
 
 ## CLI
 
 ```
-lattice-pkg install <path-to-package-dir>
+lattice-pkg install [--force] [--dry-run] <path-to-package-dir>
+lattice-pkg upgrade [--dry-run] <path-to-package-dir>
 lattice-pkg uninstall <package-canonical-name>
 lattice-pkg list
 ```
 
 `install` reads the manifest + Go `Definition` and submits the `InstallPackage`
-op. `uninstall` enumerates from the `vtx.package.<NanoID>.manifest` aspect and
-submits `UninstallPackage`. `list` reads all `vtx.package.>` keys and prints them.
+op on a fresh install; on an already-installed package it auto-upgrades on a
+version change (`--force` re-applies same-version edits) via the `UpgradePackage`
+op (see [Upgrade](#upgrade--in-place-dev-loop-refresh-f-004)). `--dry-run` previews
+the create/update/tombstone delta without submitting. `upgrade` is the explicit
+upgrade verb (errors if not installed). `uninstall` enumerates from the
+`vtx.package.<NanoID>.manifest` aspect and submits `UninstallPackage`. `list`
+reads all `vtx.package.>` keys and prints them.
 
 ## Authoring a new package — quick reference
 

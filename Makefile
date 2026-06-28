@@ -5,6 +5,8 @@
 #   make up              — start the kernel (NATS + Postgres, bootstrap, refractor, processor)
 #   make up-full         — full stack on latest: kernel + orchestration tier + core packages + Loupe
 #   make install-loftspace — add the LoftSpace lease-app vertical onto a running up-full
+#   make refresh-clinic  — dev-loop: diff-apply edited clinic packages + restart clinic-app (no teardown)
+#   make reinstall-package PKG=packages/<dir> — diff-apply one edited package in place
 #   make run-loupe       — build + run Loupe (view/control UI) on http://127.0.0.1:7777
 #   make down            — tear down everything cleanly
 #   make verify-bootstrap — assert primordial state; exit 0 on success
@@ -18,7 +20,7 @@ BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace reinstall-package verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -336,6 +338,65 @@ install-clinic:
 	@echo "==> Installing clinic-reminders..."
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-reminders
 	@echo "==> Clinic vertical installed (domain + reminders). Drive it via the clinic-app, the lattice CLI, or Loupe."
+
+## reinstall-package — Dev-loop: diff-apply ONE edited package's DDL/lens onto the
+## RUNNING stack in place, no `make down` (F-004 upgrade-aware install). PKG=<dir>,
+## e.g. `make reinstall-package PKG=packages/clinic-domain`. A same-version edit
+## lands via --force; a bumped version auto-upgrades. The Processor commits the
+## create/update/tombstone delta in one atomic batch and the Refractor re-projects
+## the changed lenses live. CAVEAT: an ADDED lens/role/op won't activate under a
+## live stack (the Refractor + DDL cache load lenses at install time) — for a
+## brand-new entity use `make down && up-<vertical>`. See docs/components/_packages.md.
+reinstall-package:
+	@if [ -z "$(PKG)" ]; then echo "usage: make reinstall-package PKG=packages/<dir>"; exit 2; fi
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Diff-applying $(PKG) in place (no teardown)..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force $(PKG)
+
+## refresh-clinic — Dev-loop refresh of the Clinic vertical onto the RUNNING stack,
+## no `make down`: diff-apply the vertical's packages in place (F-004 upgrade-aware
+## install) AND rebuild+restart bin/clinic-app, so an edited handler / lens / DDL
+## lands in one command. Requires an already-running up-clinic (or up-full +
+## install-clinic). Mirrors up-clinic minus the teardown + up-full. CAVEAT: an
+## ADDED lens/role/op won't activate under a live stack — use `make down && up-clinic`.
+refresh-clinic:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Diff-applying clinic packages in place..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-domain
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-reminders
+	@echo "==> Rebuilding clinic-app binary..."
+	go build -o bin/clinic-app ./cmd/clinic-app
+	@echo "==> Restarting clinic-app..."
+	-pkill -f "bin/clinic-app" 2>/dev/null || true
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/clinic-app >clinic-app.log 2>&1 </dev/null &
+	@sleep 1
+	@echo "==> Clinic refreshed (packages diff-applied + clinic-app restarted). Patient app: http://127.0.0.1:7799"
+
+## refresh-loftspace — Dev-loop refresh of the LoftSpace vertical onto the RUNNING
+## stack, no `make down`: diff-apply the vertical's packages in place (F-004
+## upgrade-aware install) AND rebuild+restart bin/loftspace-app. Requires an
+## already-running up-loftspace (or up-full + install-loftspace). Mirrors
+## up-loftspace minus the teardown + up-full. CAVEAT: an ADDED lens/role/op won't
+## activate under a live stack — use `make down && up-loftspace`.
+refresh-loftspace:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Diff-applying loftspace packages in place..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/location-domain
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-domain
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
+	@echo "==> Rebuilding loftspace-app binary..."
+	go build -o bin/loftspace-app ./cmd/loftspace-app
+	@echo "==> Restarting loftspace-app..."
+	-pkill -f "bin/loftspace-app" 2>/dev/null || true
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loftspace-app >loftspace-app.log 2>&1 </dev/null &
+	@sleep 1
+	@echo "==> LoftSpace refreshed (packages diff-applied + loftspace-app restarted). Applicant app: http://127.0.0.1:7788"
 
 ## run-loupe — Build + run Loupe (the view/control web app) in the FOREGROUND.
 ## Open http://127.0.0.1:7777. Requires a running deployment (make up / up-full).

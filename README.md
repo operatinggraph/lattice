@@ -319,3 +319,23 @@ make test-bypass
 make test-capability-adversarial
 make test-rollback
 ```
+
+### Dev-loop: apply a package edit without a teardown
+
+Packages upgrade **in place** on a running stack — no `make down`. After editing a
+package's DDL, lens, or permissions:
+
+```console
+# Diff-apply one edited package (create/update/tombstone in one atomic op)
+make reinstall-package PKG=packages/clinic-domain
+
+# Refresh a whole vertical: diff-apply its packages + rebuild/restart its FE binary
+make refresh-clinic        # or: make refresh-loftspace
+
+# Preview the delta without submitting
+lattice-pkg install --dry-run packages/clinic-domain
+```
+
+An *added* lens/role/op still needs a fresh kernel (`make down && up-<vertical>`) —
+the Refractor activates lenses at install time; *edited* existing lenses re-project
+live. See [Capability Packages → Upgrade](docs/components/_packages.md#upgrade--in-place-dev-loop-refresh-f-004).
