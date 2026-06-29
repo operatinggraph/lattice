@@ -159,15 +159,22 @@ func groupLandlordRowsByUnit(rows []protectedLandlordRow) []landlordUnitGroup {
 		g, ok := groups[uk]
 		if !ok {
 			g = &landlordUnitGroup{UnitKey: uk, Applications: []protectedLandlordRow{}}
-			if r.UnitAddress != nil {
-				g.UnitAddress = *r.UnitAddress
-			}
-			if r.UnitStatus != nil {
-				g.UnitStatus = *r.UnitStatus
-			}
-			g.UnitRent = r.UnitRent
 			groups[uk] = g
 			order = append(order, uk)
+		}
+		// Fill the unit facets from ANY row that carries them, not only the first.
+		// Every row for a unit projects identical facets (same unit vertex), so this
+		// is a no-op in the normal case — but it keeps the card populated if the
+		// first row to arrive happened to have a null facet (e.g. an application
+		// created before the unit's address was set).
+		if g.UnitAddress == "" && r.UnitAddress != nil {
+			g.UnitAddress = *r.UnitAddress
+		}
+		if g.UnitStatus == "" && r.UnitStatus != nil {
+			g.UnitStatus = *r.UnitStatus
+		}
+		if g.UnitRent == nil && r.UnitRent != nil {
+			g.UnitRent = r.UnitRent
 		}
 		g.Applications = append(g.Applications, r)
 	}
@@ -194,8 +201,10 @@ func (s *server) handleLandlordApplications(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if s.pgPool == nil {
-		s.writeError(w, http.StatusBadGateway,
-			"protected read model not configured (set LOFTSPACE_APP_PG_DSN and ensure Postgres + the lease-signing protected lens are up)")
+		// Log the deployment detail; return a generic message so a signed-in caller
+		// learns no env-var names or topology from the boundary.
+		s.logger.Error("landlord protected read requested but pgPool is nil (set LOFTSPACE_APP_PG_DSN + ensure Postgres and the lease-signing protected lens are up)")
+		s.writeError(w, http.StatusBadGateway, "protected read model unavailable")
 		return
 	}
 	ctx, cancel := s.reqContext(r)

@@ -1832,14 +1832,18 @@ async function loadLandlordRLS() {
     const apps = data.applicationCount || 0;
     el.hidden = false;
     if (units.length === 0) {
-      el.textContent = "🔒 RLS read boundary: signed in as this identity, Postgres scopes you to 0 units — you manage none. (The list above is the trusted operator console.)";
+      // 0 can mean "manages nothing" OR "grant revoked" — both correctly return
+      // empty (no oracle); state the scope, not a cause we cannot distinguish here.
+      el.textContent = "🔒 RLS read boundary: Postgres scopes you to 0 units. (The list above is the trusted operator console, which sees all units.)";
       return;
     }
     el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}). The operator console above sees all units; this is your enforced per-landlord scope.`;
   } catch (e) {
     // The boundary is not provisioned in every dev posture; do not break the view.
+    // Show a fixed string (server wording is for the console/log, not the banner).
+    console.warn("landlord RLS boundary unavailable:", e);
     el.hidden = false;
-    el.textContent = "🔒 RLS read boundary unavailable (" + e.message + ")";
+    el.textContent = "🔒 RLS read boundary unavailable in this dev posture.";
   }
 }
 

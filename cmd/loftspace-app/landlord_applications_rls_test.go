@@ -125,6 +125,43 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 	})
 
+	// White-box: the txn-local actor var must be DISCARDED at COMMIT on the SAME
+	// pooled connection — the pooling-safety crux (the strongest assertion, ported
+	// from the applicant RLS proof). Set actor=Larry, read (2 rows), commit; then
+	// re-query the SAME conn with NO actor set: a leaked is_local var would still
+	// return Larry's rows. It must return 0 (FORCE RLS + unset actor → deny-all).
+	t.Run("txn-local actor is discarded on the pooled conn (no leak)", func(t *testing.T) {
+		conn, err := reader.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", subLarry); err != nil {
+			t.Fatalf("set_config: %v", err)
+		}
+		var n1 int
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM read_landlord_lease_applications").Scan(&n1); err != nil {
+			t.Fatalf("count in txn: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if n1 != 2 {
+			t.Fatalf("inside the txn Larry must see his 2 rows, got %d", n1)
+		}
+		var n2 int
+		if err := conn.QueryRow(ctx, "SELECT count(*) FROM read_landlord_lease_applications").Scan(&n2); err != nil {
+			t.Fatalf("count after commit: %v", err)
+		}
+		if n2 != 0 {
+			t.Fatalf("after COMMIT the actor var must be gone (RLS deny-all), got %d rows", n2)
+		}
+	})
+
 	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
 	authn, signer, err := setupReadAuth(discardLogger(), true)
 	if err != nil {

@@ -181,7 +181,18 @@ func (s *server) authenticateRead(r *http.Request) (auth.VerifiedActor, error) {
 	}
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
-	return s.authn.Authenticate(ctx, tok)
+	actor, err := s.authn.Authenticate(ctx, tok)
+	if err != nil {
+		return auth.VerifiedActor{}, err
+	}
+	// Defense in depth: the verifier requires a `sub` claim, but a protected read
+	// keys RLS off actor.Subject (set_config('lattice.actor_id', …)). Refuse an
+	// empty/blank subject here rather than depend on the RLS policy to deny an
+	// empty actor — a missing principal must never reach the read path.
+	if strings.TrimSpace(actor.Subject) == "" {
+		return auth.VerifiedActor{}, fmt.Errorf("token has no subject")
+	}
+	return actor, nil
 }
 
 // handleDevToken implements POST /api/dev-token {subject} → {token, expiresAt} —

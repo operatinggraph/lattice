@@ -70,6 +70,11 @@ func TestDeriveLandlordRowFlags(t *testing.T) {
 		{"nil", nil, false, false, false},
 		{"approved", &approved, true, false, false},
 		{"declined", &declined, false, true, true},
+		// A non-nil value that matches no case must stay fully neutral (a future
+		// fall-through default that set a flag would be caught here).
+		{"pending", strPtr("pending"), false, false, false},
+		{"empty", strPtr(""), false, false, false},
+		{"garbage", strPtr("APPROVED"), false, false, false}, // case-sensitive; no match
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -90,18 +95,22 @@ func TestGroupLandlordRowsByUnit(t *testing.T) {
 	available := "available"
 	var rent float64 = 4200
 
-	// Two applications to unit-L and one to the co-managed unit-CO (this landlord's
-	// row for it), plus a malformed row with a nil unit_key that must be skipped.
+	emptyUK := ""
+
+	// unit-L: its FIRST row carries NO facets (all nil); a LATER row has them — the
+	// defensive fill must still populate the card. unit-CO: the co-managed row. Plus
+	// a nil-unit_key orphan AND an empty-string-unit_key row, both of which skip.
 	rows := []protectedLandlordRow{
+		{EntityKey: "vtx.leaseapp.app-L1", UnitKey: &uL}, // first row, facets nil
 		{EntityKey: "vtx.leaseapp.app-L2", UnitKey: &uL, UnitAddress: &addrL, UnitStatus: &available, UnitRent: &rent},
-		{EntityKey: "vtx.leaseapp.app-L1", UnitKey: &uL, UnitAddress: &addrL, UnitStatus: &available, UnitRent: &rent},
 		{EntityKey: "vtx.leaseapp.app-CO", UnitKey: &uCO, UnitStatus: &leased},
-		{EntityKey: "vtx.leaseapp.orphan"}, // nil unit_key → skipped
+		{EntityKey: "vtx.leaseapp.orphan"},                  // nil unit_key → skipped
+		{EntityKey: "vtx.leaseapp.blank", UnitKey: &emptyUK}, // empty-string unit_key → skipped
 	}
 
 	groups := groupLandlordRowsByUnit(rows)
 	if len(groups) != 2 {
-		t.Fatalf("want 2 unit groups (orphan skipped), got %d: %+v", len(groups), groups)
+		t.Fatalf("want 2 unit groups (nil + empty-string unit_key skipped), got %d: %+v", len(groups), groups)
 	}
 	// Stable sort by unitKey: unit-CO < unit-L.
 	if groups[0].UnitKey != uCO || groups[1].UnitKey != uL {
@@ -110,13 +119,17 @@ func TestGroupLandlordRowsByUnit(t *testing.T) {
 	if len(groups[1].Applications) != 2 {
 		t.Errorf("unit-L should carry 2 applications, got %d", len(groups[1].Applications))
 	}
+	// The defensive fill: unit-L's facets came from its SECOND row (the first was nil).
 	if groups[1].UnitAddress != addrL || groups[1].UnitRent == nil || *groups[1].UnitRent != rent || groups[1].UnitStatus != available {
-		t.Errorf("unit-L facets not seeded from its row: %+v", groups[1])
+		t.Errorf("unit-L facets not filled from a later row (first-row-nil case): %+v", groups[1])
 	}
 	if groups[0].UnitStatus != leased {
 		t.Errorf("unit-CO status = %q, want leased", groups[0].UnitStatus)
 	}
 }
+
+// strPtr returns a pointer to a string literal for the nullable-column fixtures.
+func strPtr(s string) *string { return &s }
 
 func TestGroupLandlordRowsByUnit_Empty(t *testing.T) {
 	if got := groupLandlordRowsByUnit(nil); len(got) != 0 {
