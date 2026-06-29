@@ -547,17 +547,22 @@ owns; the union across slices is the actor's full readable set.
 **The merge point — the Postgres `actor_read_grants` table (Path A).** Every read-grant lens **also**
 projects to a shared table whose primary key carries the **contributing lens** so producers stay disjoint:
 ```
-actor_read_grants(actor_id, anchor_id, grant_source, projection_seq)   PRIMARY KEY (actor_id, anchor_id, grant_source)
+actor_read_grants(actor_id, anchor_id, grant_source, projection_seq, is_deleted)   PRIMARY KEY (actor_id, anchor_id, grant_source)
 ```
 `anchor_id` is the resource's **bare NanoID** (the opaque match token; no `anchor_type` column — RLS never
 matches on type). `grant_source` (the lens canonical name, e.g. `cap-read.residence`) makes each lens **own
 its rows** — a revoke from one package deletes only that package's rows, never another's, exactly like the
 write-side disjoint key prefixes. `projection_seq` carries the §6.2/§6.8 monotonic guard (upsert/delete
 applies only when incoming seq > stored, per row key) so a stale CDC replay cannot resurrect a revoked grant.
-RLS then **unions across all sources natively** via the set-membership policy (a row visible if **any** of its
-`authz_anchors` NanoIDs is granted): `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT
-anchor_id FROM actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true))))`. No app-side
-multi-key union; the table *is* the merge.
+**A revoke is a seq-guarded soft tombstone (`is_deleted = true`), not a hard `DELETE`** — the monotonic guard
+above requires the revoked row's `projection_seq` to be **retained** (a hard delete discards the watermark, so
+a later stale re-insert at a lower seq would resurrect the grant); the row and its seq are kept, and the
+membership lookup/RLS policy filters live grants (`AND NOT is_deleted`). This reuses the standard Postgres
+soft-delete convention. RLS then **unions across all sources natively** via the set-membership policy (a row
+visible if **any** of its `authz_anchors` NanoIDs is granted by a live grant): `USING (EXISTS (SELECT 1 FROM
+unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM actor_read_grants WHERE actor_id =
+current_setting('lattice.actor_id', true) AND NOT is_deleted)))`. No app-side multi-key union; the table *is*
+the merge.
 
 **Authz-anchor convention (protected-by-default; `authzAnchors` is a set).** A business read-model target
 is **protected by default** — readable only through the authz boundary — **unless it explicitly declares
@@ -583,8 +588,9 @@ boundary authenticates the reader (D1 increment 1: a signed JWT keyed to the Ide
 - **Protected data → Postgres-RLS (the enforcement boundary).** The business read model lives in a Postgres
   table with an `authz_anchors` column (a set — e.g. `text[]`) + a **set-membership** RLS policy:
   `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM
-  actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true))))` (a row is visible if **any**
-  of its anchors — bare NanoIDs — is granted). The boundary sets `SET LOCAL lattice.actor_id` per session; enforcement is
+  actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true) AND NOT is_deleted)))` (a row is
+  visible if **any** of its anchors — bare NanoIDs — is granted by a **live** grant). The boundary sets
+  `SET LOCAL lattice.actor_id` per session; enforcement is
   DB-native and **unbypassable by app code**. **Every protected table is created with `ENABLE ROW LEVEL
   SECURITY` AND `FORCE ROW LEVEL SECURITY`**, so a table whose policy was never generated **denies all rows**
   (a fail-closed outage, never a silent leak). This is the destination for **all** protected read models.
