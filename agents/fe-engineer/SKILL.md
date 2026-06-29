@@ -53,11 +53,23 @@ you are building*:
    console) reads Core KV. Health KV + control planes are fine to read for operator surfaces; writes are
    always ops (`POST /api/op`). Keep blobs off the graph (object store), per existing patterns. Prefer
    **self-truthing** views — render from live lens projections / Health KV, never a static image.
-3. **Verify in-browser — never ask the human to check.** Use the preview tooling: `preview_start`, reload,
+3. **Verify — headless first, in-browser only when something *rendered* changed.** Most correctness is provable
+   **headlessly**: `go test`, `curl` the endpoints/JSON shape, `node --check` the JS. **Do that first, always.**
+   Open a browser **only** when the change is in *rendered* output (layout/markup/interaction) **and** a writable
+   stack exists to populate it — otherwise note visual verification is pending (don't claim it works unseen) and
+   move on. Reaching for the browser when a curl would do is the habit that OOM'd the machine.
+   - **Browser hygiene (prevents the Chrome OOM — mandatory).** A browser renderer holds its RAM until the tab
+     **closes**, so every verify that opens a tab and leaves it open accumulates across fires until Chrome (and
+     the host) run out of memory. Therefore: **reuse ONE tab** — `navigate` an existing tab, do **not**
+     `tabs_create` per check — and **close that tab when the verify is done** (`tabs_close_mcp`). Never leave
+     verify tabs open across fires. If you find many stale tabs already open, close them before starting.
+   - **In-browser checks** (when warranted): use the preview tooling — `preview_start`, reload,
    `preview_console_logs` / `preview_network` for errors, `preview_snapshot` for structure,
    `preview_click` / `preview_fill` to exercise interactions, then `preview_screenshot` for proof. Fix issues
-   from source and re-check. *(If preview tooling isn't available in this run, build + run the server + curl
-   the endpoints as a fallback and note that visual verification is pending — don't claim it works unseen.)*
+   from source and re-check. *(Unattended, `preview_start` trips a TCC prompt — use `claude-in-chrome` on the
+   already-running app URL instead, and still obey the one-tab / close-when-done rule above. If no browser
+   tooling is available, build + run the server + curl the endpoints as the fallback and note visual
+   verification is pending.)*
    **Serve your NEW assets — cycle your own binary, don't `make down` the core stack.** Your rebuilt assets are
    `go:embed`'d, so a *stale running binary* serves the OLD ones — you must restart **your** binary to verify.
    **`make down` = the shared CORE STACK** (NATS + components + Loupe) → never, if you didn't start it. **But

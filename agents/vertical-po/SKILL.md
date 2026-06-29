@@ -35,6 +35,13 @@ kills *everything* — both apps and any stack the Steward has up.** So coordina
   plus the `lattice` CLI / Loupe for operator actions: the **lease-application** flow (LoftSpace) or the
   **appointments + scheduling** domain (Clinic); exercise the packages it leans on (`orchestration-base`,
   `lease-signing`, `loftspace-domain` / `clinic-domain` / `clinic-reminders`, identity, location).
+- **Browser hygiene — REUSE one tab, CLOSE it when done (this loop OOM'd the host once).** A browser renderer
+  holds its RAM until the tab closes, so a few exercise cycles that each open tabs and leave them open pile up
+  until Chrome and the machine run out of memory. **Prefer the API path** — most PO ground-truthing here is
+  already `curl`/`/api/*` + Loupe `/api/vertex` (cheap, headless); reach for the browser only to see *rendered*
+  UX. When you do: **`navigate` one reused tab, never `tabs_create` per check, and `tabs_close_mcp` it when
+  done** — and close any stale tabs you find first. Leave the *stack* up for Andrew; do **not** leave verify
+  tabs open.
 
 ## 3. Think as the product owner
 

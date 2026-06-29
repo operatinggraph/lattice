@@ -173,11 +173,21 @@ is YOURS to cycle** against the still-running core stack; that is *not* `make do
 serve + verify your new assets. Unattended: reuse the running core stack → `pkill -f "bin/<that-binary>"` →
 rebuild (`go build -o bin/<x> ./cmd/<x>`) → **relaunch it in the BACKGROUND** (with `NATS_URL` /
 `BOOTSTRAP_JSON_PATH`; assets are `go:embed`'d, so the rebuilt binary serves the new ones — `make
-run-<vertical>-app` is *foreground / human-only*, don't use it unattended) → verify in-browser → **leave the new
+run-<vertical>-app` is *foreground / human-only*, don't use it unattended) → verify → **leave the new
 binary running** so Andrew sees the latest. *(A changed lens / DDL is different: a same-version reinstall won't
 reload under a live stack — the **F-004** upgrade gap — so verify lens/package changes via unit tests + the
 ephemeral-stack e2e targets (`make verify-package-*`, `make test-*-convergence`, `make test-object-gc`), which
 spin their own stack and never touch the shared one.)*
+
+**Verify headless-first; the browser is the OOM risk — one tab, closed when done.** Prove correctness
+**headlessly** (`go test`, `curl` the JSON, `node --check`) — that covers most fires and is what most of this
+loop already does. Open a browser **only** when *rendered* output changed **and** a writable stack can populate
+it; otherwise note visual verification pending and move on. A browser renderer holds its RAM until the tab
+**closes**, so leaving verify tabs open accumulates across fires until Chrome and the host run out of memory (it
+has). **Mandatory: reuse ONE tab** (`navigate`, never `tabs_create` per check), **close it when done**
+(`tabs_close_mcp`), and close any stale verify tabs you find before starting. Unattended use `claude-in-chrome`
+on the running app URL (not `preview_start` — TCC prompt), same one-tab/close rule. The **app binary** you leave
+running; the **browser tab** you do not.
 
 ## 4. Admit
 
