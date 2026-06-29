@@ -235,8 +235,9 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 	// lastModifiedAt, not a wall-clock read (Story 1.5.4 §3.2).
 	require.Equal(t, provenanceAt, env["projectedAt"])
 
+	// Protected kernel actor: full per-lane submission grant (Contract #2 §2.3).
 	lanes, _ := env["lanes"].([]any)
-	require.ElementsMatch(t, []any{"default"}, lanes)
+	require.ElementsMatch(t, []any{"default", "meta", "urgent", "system"}, lanes)
 
 	revs, _ := env["projectedFromRevisions"].(map[string]any)
 	require.NotEmpty(t, revs, "projectedFromRevisions must include at least anchor + lens-def revisions")

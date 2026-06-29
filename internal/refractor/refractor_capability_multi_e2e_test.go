@@ -455,6 +455,10 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		require.Containsf(t, env, "roles", "identity %s missing roles", label)
 		require.NotContainsf(t, env, "serviceAccess", "identity %s must not carry serviceAccess (Path B)", label)
 		require.Equalf(t, "1.0", env["version"], "identity %s wrong envelope version", label)
+		// Ordinary role-holder: the rbac cap.roles lens grants the `default`
+		// lane only (Contract #2 §2.3 — "most actors hold `default` only").
+		require.ElementsMatchf(t, []any{"default"}, env["lanes"],
+			"identity %s cap.roles must grant the default lane only", label)
 	}
 
 	// --- assert role-index lens produced at least one cap.role-by-operation.<op> entry ---

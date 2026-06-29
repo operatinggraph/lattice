@@ -66,7 +66,15 @@ func CapabilityLensDefinition() LensDefinition {
 			BodyColumns:        []string{"platformPermissions"},
 			EmptyBehavior:      "delete",
 			Freshness:          "auto",
-			Lanes:              []string{"default"},
+			// Per-lane submission grant (Contract #2 §2.3). The protected
+			// kernel-seeded system actors (admin + Loom + Weaver + Bridge +
+			// object-store-manager) carry the full root-grant set: `meta`
+			// (serialized DDL — installs/lens DDL), `system` (engine result/
+			// dispatch ops), `urgent`, and `default`. This matches their
+			// uniform root platformPermissions above; per-actor lane scoping is
+			// a future refinement. Ordinary actors get only `default` from the
+			// rbac cap.roles.<actor> lens.
+			Lanes:              []string{"default", "meta", "urgent", "system"},
 			StaticEmptyColumns: []string{"ephemeralGrants", "serviceAccess", "roles"},
 		},
 		// The anchor projects only the protected (kernel-seeded) system

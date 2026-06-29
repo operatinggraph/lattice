@@ -40,6 +40,13 @@ func Lenses() []pkgmgr.LensSpec {
 				BodyColumns:      []string{"platformPermissions", "roles"},
 				EmptyBehavior:    "delete",
 				Freshness:        "auto",
+				// Per-lane submission grant (Contract #2 §2.3): every ordinary
+				// role-holder gets the `default` lane only ("most actors hold
+				// `default` only"). A static baseline on the descriptor — not a
+				// graph-derived value — so it needs no cypher change. Privileged
+				// lanes (meta/urgent/system) are reserved to the protected
+				// kernel actors via the core cap.<actor> lens.
+				Lanes: []string{"default"},
 			},
 		},
 		{

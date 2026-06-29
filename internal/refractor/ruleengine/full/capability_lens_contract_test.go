@@ -261,17 +261,23 @@ func TestCapabilityLens_ContractConformance(t *testing.T) {
 	require.Containsf(t, revs, "vtx.meta.test-lens",
 		"projectedFromRevisions must include lens-def revision; got %v", revs)
 
-	// `lanes`: must be a non-empty string array including "default".
+	// `lanes`: the protected kernel actor's full per-lane submission grant
+	// (Contract #2 §2.3) — default + the privileged meta/urgent/system lanes.
+	wantLanes := []string{"default", "meta", "urgent", "system"}
 	lanes, ok := envRow["lanes"].([]string)
 	if !ok {
 		// Allow []any as well for JSON round-trip safety.
 		la, okAny := envRow["lanes"].([]any)
 		require.Truef(t, okAny, "envelope.lanes must be a string array; got %T", envRow["lanes"])
-		require.NotEmpty(t, la, "envelope.lanes must not be empty")
-		require.Equal(t, "default", la[0])
+		got := make([]string, 0, len(la))
+		for _, v := range la {
+			s, isStr := v.(string)
+			require.Truef(t, isStr, "envelope.lanes entries must be strings; got %T", v)
+			got = append(got, s)
+		}
+		require.ElementsMatch(t, wantLanes, got)
 	} else {
-		require.NotEmpty(t, lanes, "envelope.lanes must not be empty")
-		require.Equal(t, "default", lanes[0])
+		require.ElementsMatch(t, wantLanes, lanes)
 	}
 
 	// `platformPermissions`: array of {operationType, scope} carrying the fixed
