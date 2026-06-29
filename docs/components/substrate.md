@@ -264,10 +264,26 @@ substrate-owned enum, never `jetstream.DeliverPolicy`), `DeliverGroup` (queue
 group, NFR12 fan-out across instances), `RedeliveryDelay`, `ProbeInterval`,
 `AckWait`, `MaxAckPending` (caps un-acked in-flight messages; `1` forces
 server-side serialization — the Processor's `meta` lane uses it for the Contract
-#2 §3.7 DDL-serialization guarantee; `0` leaves the JetStream default), plus the
-`Handler`/`Classify`/`Probe`/`Health`/`Logger` hooks. The supervisor hard-codes
-nothing about stream shape — it is agnostic between event-stream durables
-(`events.<domain>.>`) and KV-CDC durables (`$KV.<bucket>.>`).
+#2 §3.7 DDL-serialization guarantee; `0` leaves the JetStream default), `Workers`
+(see below), plus the `Handler`/`Classify`/`Probe`/`Health`/`Logger` hooks. The
+supervisor hard-codes nothing about stream shape — it is agnostic between
+event-stream durables (`events.<domain>.>`) and KV-CDC durables
+(`$KV.<bucket>.>`).
+
+`Workers` gives a consumer **intra-durable concurrency**: a value above one starts
+N pump goroutines that all bind the **same** durable, and JetStream load-balances
+the pull consumer across them (each message delivered to exactly one worker;
+`MaxAckPending` caps total in-flight across all of them). Each worker is an
+independent pump with its own pause state machine, sharing only the durable — so
+no worker races another. An operator `Pause`/`Resume` is lane-wide (it fans out to
+every worker); an infra/structural pause stays per-worker (self-healing per
+worker). `Workers` ≤ 1 (the default, and every Loom/Weaver/Refractor consumer) is
+a single pump with the JetStream default prefetch untouched; a fan-out worker
+bounds its prefetch (`fanOutPullMaxMessages`) so the server can fairly distribute a
+finite backlog instead of letting one iterator hoard it. This is the **pull**-
+consumer equivalent of a queue group; the push-only `DeliverGroup` field is
+unrelated to it. The Processor's per-lane fan-out
+(`LATTICE_PROCESSOR_LANES_<LANE>_CONSUMERS`) is the first user.
 
 | Method | Behaviour |
 |--------|-----------|

@@ -91,10 +91,20 @@ DDL mutation; non-`meta` lanes run concurrently with `meta` and stay safe via th
 RWMutex-guarded value-copy DDL-cache snapshot + step-8 OCC. On startup the
 Processor retires the legacy single `processor-main` durable
 (`substrate.DeleteStreamConsumer`, idempotent); its un-acked messages redeliver to
-the per-lane durables, idempotent via the step-2 dedup tracker. *(Per-lane
-intra-concurrency — a queue-group fan-out from
-`LATTICE_PROCESSOR_LANES_<LANE>_CONSUMERS`, `meta` clamped to one — is the next
-scaling increment.)*
+the per-lane durables, idempotent via the step-2 dedup tracker.
+
+Each lane runs **N concurrent pump goroutines** (`substrate.ConsumerSpec.Workers`),
+all binding the lane's single durable — JetStream load-balances the pull consumer
+across them, delivering each message to exactly one worker. The counts come from
+`processor.LaneConsumers(os.Getenv)`: the `LATTICE_PROCESSOR_LANES_<LANE>_CONSUMERS`
+override (`LANE` = `DEFAULT|URGENT|SYSTEM|META`) over the defaults **`default=2`,
+`urgent=4`, `system=2`, `meta=1`** (a malformed or sub-1 value keeps the lane
+default). `meta` is **fail-closed clamped to one worker** regardless of any
+override — its serialization (single pump + `MaxAckPending=1`) is never widened.
+Within a non-`meta` lane two operations can therefore commit **concurrently**;
+causal dependencies stay correct through the step-8 OCC (`expectedRevision` per
+mutation) and the operation's `reads`, **not** through lane FIFO ordering (which
+the lanes never guaranteed).
 
 | Step | Name | What happens |
 |------|------|-------------|
