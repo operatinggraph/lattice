@@ -1,6 +1,6 @@
 # Design — D1.3: populate the grant table, and the un-thrashed sequence to the demo
 
-**Status: 📐 awaiting-Andrew (ratification)** · Author: Winston (Designer fire, 2026-06-29) · Supersedes the
+**Status: ✅ Andrew-ratified (2026-06-29) — build-ready** · Author: Winston (Designer fire, 2026-06-29) · Supersedes the
 implicit "grants already exist" assumption in
 [`first-postgres-read-model-and-read-boundary-design.md`](first-postgres-read-model-and-read-boundary-design.md)
 §R4.
