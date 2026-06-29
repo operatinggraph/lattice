@@ -140,6 +140,34 @@ type TargetPostgresConfig struct {
 	Key          []string `json:"key"`
 	QueryTimeout string   `json:"queryTimeout"`         // optional, e.g., "5s"
 	DeleteMode   string   `json:"deleteMode,omitempty"` // optional; "hard" (default) or "soft"
+
+	// Read-path authorization (Contract #6 §6.14, D1.3). A business read model
+	// is protected by default; one of Protected/Public should be declared
+	// explicitly. Protected provisions an RLS table (FORCE ROW LEVEL SECURITY +
+	// the set-membership policy) at activation and projects an authz_anchors
+	// column; Public is the auditable opt-out for genuinely public models.
+	Protected bool `json:"protected,omitempty"`
+	Public    bool `json:"public,omitempty"`
+
+	// Columns declares the business columns of a protected table (name + verbatim
+	// Postgres type) so Refractor can provision the table from the lens spec. The
+	// platform always adds authz_anchors text[] and projection_seq; key columns
+	// are provisioned as text. Ignored for a non-protected lens (its table is
+	// provisioned out-of-band).
+	Columns []PostgresColumn `json:"columns,omitempty"`
+
+	// GrantTable marks this lens as a cap-read.* grant projector. Its rows are
+	// written to the shared actor_read_grants table through the seq-guarded grant
+	// writer (not the last-writer-wins business adapter). The table name defaults
+	// to actor_read_grants and the key to (actor_id, anchor_id, grant_source).
+	GrantTable bool `json:"grantTable,omitempty"`
+}
+
+// PostgresColumn declares one provisioned column of a protected read-model
+// table: Type is the verbatim Postgres column type (e.g. "text", "bigint").
+type PostgresColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 // TargetNATSKVConfig is the expected shape of LensSpec.TargetConfig
@@ -403,8 +431,30 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		if err := json.Unmarshal(spec.TargetConfig, &cfg); err != nil {
 			return nil, fmt.Errorf("lens %q: targetConfig unmarshal: %w", spec.ID, err)
 		}
-		if cfg.DSN == "" || cfg.Table == "" || len(cfg.Key) == 0 {
+		// A grant lens projects to the shared actor_read_grants table via the
+		// seq-guarded writer; its table + composite key default from the platform
+		// (the lens need only RETURN actor_id/anchor_id/grant_source).
+		table, key := cfg.Table, cfg.Key
+		if cfg.GrantTable {
+			if table == "" {
+				table = adapter.GrantTable
+			}
+			if len(key) == 0 {
+				key = append([]string(nil), adapter.GrantKeyColumns...)
+			}
+		}
+		if cfg.DSN == "" || table == "" || len(key) == 0 {
 			return nil, fmt.Errorf("lens %q: targetConfig.{dsn,table,key} required for postgres", spec.ID)
+		}
+		if cfg.Protected && cfg.Public {
+			return nil, fmt.Errorf("lens %q: targetConfig cannot be both protected and public", spec.ID)
+		}
+		if cfg.Protected && cfg.GrantTable {
+			return nil, fmt.Errorf("lens %q: a grant-table lens is not a protected business model (set neither protected nor public)", spec.ID)
+		}
+		cols, arrayCols, err := translatePostgresColumns(spec.ID, cfg)
+		if err != nil {
+			return nil, err
 		}
 		dm, err := adapter.ParseDeleteMode(cfg.DeleteMode)
 		if err != nil {
@@ -413,11 +463,16 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		r.Into = IntoConfig{
 			Target:          "postgres",
 			DSN:             cfg.DSN,
-			Table:           cfg.Table,
-			Key:             KeyField(cfg.Key),
+			Table:           table,
+			Key:             KeyField(key),
 			QueryTimeoutRaw: cfg.QueryTimeout,
 			QueryTimeout:    parseTimeoutOrDefault(cfg.QueryTimeout, 30*time.Second),
 			DeleteMode:      string(dm),
+			Protected:       cfg.Protected,
+			Public:          cfg.Public,
+			GrantTable:      cfg.GrantTable,
+			Columns:         cols,
+			ArrayColumns:    arrayCols,
 		}
 	case "nats_kv":
 		var cfg TargetNATSKVConfig
@@ -457,6 +512,29 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 	r.ResolvedEngine = attempted[len(attempted)-1]
 	r.CompiledRule = compiled
 	return r, nil
+}
+
+// translatePostgresColumns converts a protected lens's declared columns into
+// adapter.ColumnDef provisioning specs and derives the set of array columns the
+// ProtectedAdapter must encode as Postgres arrays. The platform always treats
+// authz_anchors as a text[] array; a declared column whose type ends in "[]" is
+// also an array column. Returns empty slices for a non-protected lens (its table
+// is provisioned out-of-band, and declared columns are ignored).
+func translatePostgresColumns(lensID string, cfg TargetPostgresConfig) (cols []adapter.ColumnDef, arrayCols []string, err error) {
+	if !cfg.Protected {
+		return nil, nil, nil
+	}
+	arrayCols = []string{adapter.AuthzAnchorsColumn}
+	for _, c := range cfg.Columns {
+		if c.Name == "" || c.Type == "" {
+			return nil, nil, fmt.Errorf("lens %q: targetConfig.columns entry needs both name and type", lensID)
+		}
+		cols = append(cols, adapter.ColumnDef{Name: c.Name, Type: c.Type})
+		if strings.HasSuffix(strings.TrimSpace(c.Type), "[]") {
+			arrayCols = append(arrayCols, c.Name)
+		}
+	}
+	return cols, arrayCols, nil
 }
 
 // unwrapSpecBody returns either the original body (bare LensSpec) or the

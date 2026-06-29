@@ -227,11 +227,41 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			// The adapter is thin: it upserts into a pre-existing table.
-			// Target tables are provisioned out-of-band (the adapter and
-			// Refractor never issue table DDL) — see
-			// docs/components/refractor.md.
-			return adapter.NewPostgresAdapter(pool, r.Into.Table, r.Into.Key, r.Into.QueryTimeout, deleteMode)
+			// A grant lens projects to the shared actor_read_grants table through
+			// the seq-guarded grant writer (Contract #6 §6.14), provisioned here.
+			if r.Into.GrantTable {
+				gw, err := adapter.NewPostgresGrantWriter(pool, r.Into.QueryTimeout)
+				if err != nil {
+					return nil, err
+				}
+				if err := gw.Provision(ctx); err != nil {
+					return nil, fmt.Errorf("lens %q: provision grant table: %w", r.ID, err)
+				}
+				return adapter.NewGrantWriterAdapter(gw)
+			}
+			// A protected read model: provision the actor_read_grants table the
+			// RLS policy references, then the RLS-locked business table (FORCE ROW
+			// LEVEL SECURITY + the §6.14 set-membership policy) from the lens spec
+			// (read-path authorization, D1.3). A non-protected table stays
+			// provisioned out-of-band (the adapter issues no DDL).
+			base, err := adapter.NewPostgresAdapter(pool, r.Into.Table, r.Into.Key, r.Into.QueryTimeout, deleteMode)
+			if err != nil {
+				return nil, err
+			}
+			if !r.Into.Protected {
+				return base, nil
+			}
+			gw, err := adapter.NewPostgresGrantWriter(pool, r.Into.QueryTimeout)
+			if err != nil {
+				return nil, err
+			}
+			if err := gw.Provision(ctx); err != nil {
+				return nil, fmt.Errorf("lens %q: provision grant table: %w", r.ID, err)
+			}
+			if err := adapter.ProvisionProtectedTable(ctx, pool, r.Into.Table, r.Into.Key, r.Into.Columns, r.Into.QueryTimeout); err != nil {
+				return nil, fmt.Errorf("lens %q: provision protected table: %w", r.ID, err)
+			}
+			return adapter.NewProtectedAdapter(base, r.Into.ArrayColumns)
 		default:
 			return nil, fmt.Errorf("unknown adapter target %q", r.Into.Target)
 		}

@@ -14,6 +14,16 @@ import (
 // row's authz_anchors against the anchors granted to the current actor here.
 const GrantTable = "actor_read_grants"
 
+// AuthzAnchorsColumn is the platform-added array column every protected
+// read-model table carries (Contract #6 §6.14): the set of bare-NanoID match
+// tokens the RLS policy unnests. It is always a text[] array column.
+const AuthzAnchorsColumn = "authz_anchors"
+
+// GrantKeyColumns is the composite key a grant-projecting lens RETURNs, in
+// order — the primary key of actor_read_grants. A lens targeting the grant
+// table projects exactly these three columns.
+var GrantKeyColumns = []string{"actor_id", "anchor_id", "grant_source"}
+
 // ColumnDef declares one column of a generated protected read-model table.
 // Type is the verbatim Postgres column type (e.g. "text", "bigint", "jsonb");
 // the caller (the protected lens) owns the type because the lens RETURN — not
@@ -121,9 +131,16 @@ func BuildProtectedTableDDL(table string, keyCols []string, body []ColumnDef) ([
 	// CREATE POLICY has no IF NOT EXISTS; DROP-then-CREATE makes activation
 	// idempotent and lets a policy revision (e.g. a new column) take effect on
 	// the next activation without manual intervention.
+	//
+	// FOR SELECT scopes the filter to the read path. A FOR ALL policy's USING
+	// clause is also applied as the INSERT/UPDATE WITH CHECK, which would reject
+	// a non-superuser writer that sets no lattice.actor_id (the trusted Refractor
+	// projector) — so the policy governs reads only; writes stay governed by
+	// table GRANTs + the trusted projector posture (P2). FORCE RLS still
+	// deny-alls reads on a table whose policy was never generated (H3).
 	dropPolicy := fmt.Sprintf("DROP POLICY IF EXISTS %s ON %s", pol, qt)
 	createPolicy := fmt.Sprintf(
-		"CREATE POLICY %s ON %s USING (\n"+
+		"CREATE POLICY %s ON %s FOR SELECT USING (\n"+
 			"  EXISTS (SELECT 1 FROM unnest(authz_anchors) a\n"+
 			"          WHERE a IN (SELECT anchor_id FROM %s\n"+
 			"                      WHERE actor_id = current_setting('lattice.actor_id', true)\n"+
@@ -189,6 +206,13 @@ func (w *PostgresGrantWriter) withTimeout(ctx context.Context) (context.Context,
 	return ctx, func() {}
 }
 
+// Probe checks the pool can reach the server (mirrors PostgresAdapter.Probe),
+// so a grant-writer-backed pipeline participates in the infrastructure-pause
+// probe loop like any other adapter.
+func (w *PostgresGrantWriter) Probe(ctx context.Context) error {
+	return w.pool.Ping(ctx)
+}
+
 // Provision creates the actor_read_grants table if it does not exist.
 // Idempotent — safe to call at every grant-lens activation.
 func (w *PostgresGrantWriter) Provision(ctx context.Context) error {
@@ -241,6 +265,32 @@ WHERE EXCLUDED.projection_seq > ` + `"` + GrantTable + `"` + `.projection_seq`
 	_, err := w.pool.Exec(ctx, q, actorID, anchorID, grantSource, int64(projectionSeq))
 	if err != nil {
 		return fmt.Errorf("grant writer: revoke: %w", err)
+	}
+	return nil
+}
+
+// ProvisionProtectedTable runs BuildProtectedTableDDL against the pool, creating
+// (idempotently) the protected read-model table with FORCE ROW LEVEL SECURITY
+// and the §6.14 set-membership policy. Called at protected-lens activation,
+// AFTER the actor_read_grants table exists (the policy references it). timeout,
+// when positive, bounds the DDL batch.
+func ProvisionProtectedTable(ctx context.Context, pool *pgxpool.Pool, table string, keyCols []string, body []ColumnDef, timeout time.Duration) error {
+	if pool == nil {
+		return fmt.Errorf("rls: provision: pool must not be nil")
+	}
+	stmts, err := BuildProtectedTableDDL(table, keyCols, body)
+	if err != nil {
+		return err
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	for _, stmt := range stmts {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("rls: provision %q: %w", table, err)
+		}
 	}
 	return nil
 }

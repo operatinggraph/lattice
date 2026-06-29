@@ -78,11 +78,13 @@ The RLS-provisioning primitive lives in `adapter/rls.go`:
 - **`BuildProtectedTableDDL(table, keyCols, body)`** generates `CREATE TABLE IF NOT EXISTS`
   with the caller's key + body columns plus two platform columns — `authz_anchors text[]`
   (the §6.14 set of bare-NanoID match tokens) and `projection_seq bigint` — then
-  `ENABLE` **and** `FORCE ROW LEVEL SECURITY` and the **set-membership policy**: a row is
-  visible iff the current actor (`current_setting('lattice.actor_id', true)`, NULL-safe →
+  `ENABLE` **and** `FORCE ROW LEVEL SECURITY` and the **set-membership policy** (`FOR SELECT`):
+  a row is visible iff the current actor (`current_setting('lattice.actor_id', true)`, NULL-safe →
   deny when unset) holds a **live** grant for **any** of the row's `authz_anchors`. Because
   the table is FORCE-RLS'd, a table whose policy was never generated **denies all rows**
-  (a fail-closed outage, never a silent leak — §6.14 H3).
+  (a fail-closed outage, never a silent leak — §6.14 H3). The policy is `FOR SELECT` so it
+  governs the read path only and never acts as an INSERT `WITH CHECK` that would block the
+  trusted (no-actor) Refractor projector's writes.
 - **`PostgresGrantWriter`** provisions and maintains the shared **`actor_read_grants`** table
   (the read-auth source of truth that every `cap-read.*` grant lens projects into). Its
   `UpsertGrant` / `RevokeGrant` enforce the §6.14 **monotonic-seq guard** (a write takes
@@ -100,11 +102,30 @@ The RLS-provisioning primitive lives in `adapter/rls.go`:
 > seq-guarded **soft tombstone**; the RLS policy and the membership lookup filter
 > `NOT is_deleted`. This reuses the existing Postgres soft-delete convention.
 
-**Status:** the provisioning primitive + grant writer ship as a tested library (the H3
-deny-all and H4 no-resurrect proofs run against a real Postgres under `POSTGRES_TEST_DSN`).
-The activation wiring (a protected lens declares `protected: true` + its columns, and
-`startPipeline` provisions on activation) and the first protected business read model
-(lease applications) + the read boundary land in the following D1.3 increments.
+**Activation wiring.** A postgres lens spec declares the read-path posture in its
+`targetConfig`:
+
+- **`protected: true`** + a `columns: [{name, type}]` list → at activation `buildAdapter`
+  (`cmd/refractor/main.go`) provisions the `actor_read_grants` table (the policy references
+  it) and then the RLS-locked business table from the spec, and wraps the Postgres adapter in
+  a **`ProtectedAdapter`** that encodes the `authz_anchors` (and any declared `text[]`) column
+  as a Postgres array — the full engine emits a list as `[]any`, which the base adapter would
+  otherwise coerce to JSONB.
+- **`grantTable: true`** → the lens projects to `actor_read_grants` through the seq-guarded
+  **`GrantWriterAdapter`** (table + composite key `actor_id, anchor_id, grant_source` default
+  from the platform; the lens need only RETURN those three). Its `Delete` path tombstones via
+  `RevokeGrant`; it intentionally does **not** support truncate (the table is shared across
+  every `grant_source`).
+- **`public: true`** → the auditable opt-out; no RLS, provisioned out-of-band like any plain
+  SQL-target lens. A lens may not be both `protected` and `public`.
+
+**Status:** the provisioning primitive, grant writer, the two read-path adapters, and the
+activation wiring all ship (the H3 deny-all, H4 no-resurrect, and an end-to-end seam proof —
+a protected row written through `ProtectedAdapter` + a grant through `GrantWriterAdapter` →
+RLS shows it only to the granted actor — run against a real Postgres under `POSTGRES_TEST_DSN`).
+**No protected lens ships yet**, so the path is dormant; the first protected business read
+model (lease applications), its `cap-read.residence` grant lens, and the read boundary land in
+the following D1.3 increments (the Verticals stream).
 
 ---
 

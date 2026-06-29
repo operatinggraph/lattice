@@ -71,6 +71,14 @@ type IntoConfig struct {
 	QueryTimeoutRaw string        `yaml:"query_timeout"` // e.g. "5s", "30s" — parsed into QueryTimeout by Parse()
 	QueryTimeout    time.Duration `yaml:"-"`             // populated by Parse(); defaults to 30s for postgres rules
 	DeleteMode      string        `yaml:"delete_mode"`   // "hard" (default) or "soft"; defaulted+validated by Parse()
+
+	// Read-path authorization (Contract #6 §6.14, D1.3) — populated from the
+	// LensSpec postgres targetConfig by translateSpec; not from YAML.
+	Protected    bool                `yaml:"-"` // provision an RLS table at activation + project authz_anchors
+	Public       bool                `yaml:"-"` // explicit public opt-out (no RLS)
+	GrantTable   bool                `yaml:"-"` // project to actor_read_grants via the seq-guarded writer
+	Columns      []adapter.ColumnDef `yaml:"-"` // declared business columns to provision (protected only)
+	ArrayColumns []string            `yaml:"-"` // columns to encode as Postgres arrays (authz_anchors + text[] body cols)
 }
 
 // RetryConfig describes retry behaviour for transient write failures.

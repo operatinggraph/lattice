@@ -41,6 +41,9 @@ func TestBuildProtectedTableDDL_Shape(t *testing.T) {
 	// for ANY of its authz_anchors; live grants only (NOT is_deleted); the actor
 	// comes from the session GUC, NULL-safe (deny when unset).
 	assert.Contains(t, createPol, `CREATE POLICY "rls_read_lease_applications" ON "read_lease_applications"`)
+	// FOR SELECT — the policy governs reads only, so it never acts as a WITH CHECK
+	// that would block the trusted (no-actor) projector's writes.
+	assert.Contains(t, createPol, `FOR SELECT USING (`)
 	assert.Contains(t, createPol, `unnest(authz_anchors)`)
 	assert.Contains(t, createPol, `anchor_id FROM "actor_read_grants"`)
 	assert.Contains(t, createPol, `current_setting('lattice.actor_id', true)`)
