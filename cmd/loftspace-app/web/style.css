@@ -148,6 +148,7 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .badge.available { color: var(--green); border-color: var(--green); }
 .badge.pending { color: var(--yellow); border-color: var(--yellow); }
 .badge.leased { color: var(--text-dim); border-color: var(--border); }
+.badge.withdrawn { color: var(--red); border-color: var(--red); }
 
 .empty {
   color: var(--text-dim);

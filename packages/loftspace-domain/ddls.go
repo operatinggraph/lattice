@@ -52,11 +52,12 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"attach the leasable facets onto an EXISTING location unit (vtx.unit.<NanoID>, class=location, owned by " +
 			"location-domain) — this package introduces NO vertex type. SetListing writes the .listing aspect " +
 			"{rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom (RFC3339 date), " +
-			"leaseTermMonths, status ∈ available|pending|leased}. SetUnitAddress writes the .address aspect " +
+			"leaseTermMonths, status ∈ available|pending|leased|withdrawn}. SetUnitAddress writes the .address aspect " +
 			"{line1, line2?, city, region, postal}. SetListingStatus is a status-only transition: it reads the " +
 			"existing .listing (kv.Read) and rewrites ONLY status, preserving the economics verbatim (rejects a " +
 			"unit with no listing) — the op a lease-application's convergence directOp dispatches to mark a unit " +
-			"leased on approval. All three are unconditioned upserts (create-if-absent / overwrite-if-present) so " +
+			"leased on approval, and the op a landlord calls to take a unit off-market (withdrawn) or relist it " +
+			"(available). All three are unconditioned upserts (create-if-absent / overwrite-if-present) so " +
 			"an operator can correct a listing or flip status by hand. The target unit MUST be alive + " +
 			"class=location; the caller lists the unit key in ContextHint.Reads. Neither aspect is sensitive (they " +
 			"attach to a unit, not an identity).",
@@ -70,7 +71,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			`"sqft":{"type":"integer","description":"Floor area in square feet (SetListing; optional, > 0)."},` +
 			`"availableFrom":{"type":"string","description":"Earliest move-in date, RFC3339 (SetListing; required)."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Lease term in months (SetListing; required, > 0)."},` +
-			`"status":{"type":"string","enum":["available","pending","leased"],"description":"Listing availability state (SetListing / SetListingStatus; required)."},` +
+			`"status":{"type":"string","enum":["available","pending","leased","withdrawn"],"description":"Listing availability state (SetListing / SetListingStatus; required). 'withdrawn' = off-market (hidden from applicant Browse; relist by flipping back to 'available')."},` +
 			`"line1":{"type":"string","description":"Street address line 1 (SetUnitAddress; required)."},` +
 			`"line2":{"type":"string","description":"Street address line 2 (SetUnitAddress; optional)."},` +
 			`"city":{"type":"string","description":"City (SetUnitAddress; required)."},` +
@@ -88,7 +89,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"sqft":            "Optional floor area in square feet (integer > 0). Stored on the .listing aspect when present (SetListing).",
 			"availableFrom":   "Earliest move-in date, RFC3339. Stored verbatim on the .listing aspect (SetListing).",
 			"leaseTermMonths": "Lease term in months (integer > 0). Stored on the .listing aspect (SetListing).",
-			"status":          "Listing availability, one of {available, pending, leased}. Stored on the .listing aspect (SetListing sets it alongside the economics; SetListingStatus rewrites only this field, preserving the rest).",
+			"status":          "Listing availability, one of {available, pending, leased, withdrawn}. 'withdrawn' takes the unit off-market (hidden from applicant Browse; relist via SetListingStatus status=available). Stored on the .listing aspect (SetListing sets it alongside the economics; SetListingStatus rewrites only this field, preserving the rest).",
 			"line1":           "Street address line 1. Stored on the .address aspect (SetUnitAddress).",
 			"line2":           "Optional street address line 2. Stored on the .address aspect when present (SetUnitAddress).",
 			"city":            "City. Stored on the .address aspect (SetUnitAddress).",
@@ -283,12 +284,12 @@ def optional_number(p, name, allow_zero):
             fail("InvalidArgument: " + name + ": must be > 0")
     return v
 
-LISTING_STATUSES = ["available", "pending", "leased"]
+LISTING_STATUSES = ["available", "pending", "leased", "withdrawn"]
 
 def required_status(p):
     s = required_string(p, "status")
     if s not in LISTING_STATUSES:
-        fail("InvalidArgument: status: must be one of available, pending, leased; got " + s)
+        fail("InvalidArgument: status: must be one of available, pending, leased, withdrawn; got " + s)
     return s
 
 def copy_data(d):

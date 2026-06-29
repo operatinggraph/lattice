@@ -49,6 +49,12 @@ type listingRow struct {
 // flattened projection row. statusFilter "" or "all" returns every listing;
 // otherwise only listings whose status matches. A row that fails to decode or
 // carries no unitKey (a tombstoned projection entry) is skipped.
+//
+// withdrawn (off-market) units are NEVER returned to the applicant Browse — not
+// even under "all" — since this endpoint is applicant-facing; a landlord pulls a
+// vacancy to hide it from prospects. The landlord surface reads the lens directly
+// (handleUnitApplications), so it still sees withdrawn units to relist them. A
+// caller may opt back in only by filtering explicitly for status=withdrawn.
 func computeListings(keys []string, get kvGetter, statusFilter string) []listingRow {
 	rows := make([]listingRow, 0)
 	for _, k := range keys {
@@ -58,6 +64,9 @@ func computeListings(keys []string, get kvGetter, statusFilter string) []listing
 		}
 		var p listingProjection
 		if json.Unmarshal(raw, &p) != nil || p.UnitKey == "" {
+			continue
+		}
+		if p.Status == "withdrawn" && statusFilter != "withdrawn" {
 			continue
 		}
 		if statusFilter != "" && statusFilter != "all" && p.Status != statusFilter {

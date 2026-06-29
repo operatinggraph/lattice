@@ -40,7 +40,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "loftspace-domain",
-	Version:     "0.2.0",
+	Version:     "0.3.0",
 	Description: "LoftSpace listing economics: the .listing + .address aspects on a location unit, written by SetListing / SetUnitAddress / SetListingStatus. Depends on location-domain; introduces no vertex type.",
 	Depends:     []string{"location-domain"},
 	DDLs:        DDLs(),

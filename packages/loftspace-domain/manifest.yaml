@@ -1,5 +1,5 @@
 name: loftspace-domain
-version: 0.2.0
+version: 0.3.0
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on

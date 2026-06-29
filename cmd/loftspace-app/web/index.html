@@ -212,7 +212,7 @@
   <div id="listing-overlay" class="overlay" hidden>
     <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="listing-title">
       <h2 id="listing-title">Post a listing</h2>
-      <div class="apply-unit">Create a unit and list it for lease.</div>
+      <div class="apply-unit" id="listing-sub">Create a unit and list it for lease.</div>
       <form id="listing-form">
         <div class="field">
           <label for="li-line1">Address line 1</label>
@@ -242,7 +242,7 @@
           <div class="field"><label for="li-sqft">Sqft <span class="opt">(opt)</span></label><input type="number" id="li-sqft" min="0" step="1" /></div>
           <div class="field"></div>
         </div>
-        <div class="field">
+        <div class="field" id="li-photos-field">
           <label for="li-photos">Photos <span class="opt">(optional)</span></label>
           <input type="file" id="li-photos" accept="image/*" multiple />
           <p class="hint">Add one or more photos applicants will see on the listing. You can add or remove photos later from the unit's 📷 Photos button.</p>

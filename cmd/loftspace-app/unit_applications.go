@@ -60,6 +60,12 @@ type unitApplicationsRow struct {
 	UnitStatus       string             `json:"unitStatus"`
 	ApplicationCount int                `json:"applicationCount"`
 	Applications     []applicantSummary `json:"applications"`
+	// Listing / Address are the full nested economics + address (the same shapes
+	// the applicant Browse renders) so the landlord's Edit-listing form pre-fills
+	// every field, not just the summary facets above. Null when the unit has no
+	// listing projection (e.g. an application whose unit lost its listing).
+	Listing json.RawMessage `json:"listing,omitempty"`
+	Address json.RawMessage `json:"address,omitempty"`
 }
 
 // applicationStatus reduces a convergence row to the landlord's coarse
@@ -112,11 +118,15 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 	}
 
 	// Seed from listings so every listed unit appears, even with no applicants.
+	// The full nested listing/address (via toRow) feed the landlord's Edit form.
 	for _, l := range listings {
 		u := ensure(l.UnitKey)
 		u.UnitStatus = l.Status
 		u.UnitRent = l.RentAmount
 		u.UnitAddress = l.AddrLine1
+		row := l.toRow()
+		u.Listing = row.Listing
+		u.Address = row.Address
 	}
 	// An application fills a unit the listing did not seed (lost its listing), or
 	// confirms the same facets it reads from the same .listing/.address aspects.

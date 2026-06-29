@@ -281,6 +281,22 @@ func TestLoftspace_SetListingStatus(t *testing.T) {
 	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["status"] != "leased" {
 		t.Fatalf("a bad-status SetListingStatus mutated the listing: %v", d)
 	}
+
+	// Off-market: a landlord takes the unit off-market (withdrawn) and relists it
+	// (available) — the same status-only transition, preserving the economics
+	// verbatim. Proves the new enum value round-trips both ways.
+	setListingStatus(t, ctx, conn, cp, cons, "toWithdrawn1", unitKey, "loftspaceListing",
+		`{"unit":"`+unitKey+`","status":"withdrawn"}`, processor.OutcomeAccepted)
+	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["status"] != "withdrawn" {
+		t.Fatalf("withdraw did not take: %v", d)
+	} else if d["rentCurrency"] != "USD" || d["availableFrom"] != "2026-08-01T00:00:00Z" {
+		t.Fatalf("withdraw dropped economics: %v", d)
+	}
+	setListingStatus(t, ctx, conn, cp, cons, "relist00001", unitKey, "loftspaceListing",
+		`{"unit":"`+unitKey+`","status":"available"}`, processor.OutcomeAccepted)
+	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["status"] != "available" {
+		t.Fatalf("relist did not restore available: %v", d)
+	}
 }
 
 // TestLoftspace_SetListingStatusRejectsDeadUnit proves the alive guard on the

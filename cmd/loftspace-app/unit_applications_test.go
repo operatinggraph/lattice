@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func f64(v float64) *float64 { return &v }
 
@@ -138,6 +141,42 @@ func TestGroupByUnit_Empty(t *testing.T) {
 
 func bptr(v bool) *bool { return &v }
 func iptr(v int) *int   { return &v }
+
+// TestGroupByUnit_CarriesListingForEdit proves the landlord row carries the full
+// nested listing/address (the Edit-form pre-fill source) and that a withdrawn
+// (off-market) unit still appears in the landlord view so the landlord can relist
+// it — the applicant Browse hides withdrawn, the landlord surface does not.
+func TestGroupByUnit_CarriesListingForEdit(t *testing.T) {
+	listings := []listingProjection{
+		{UnitKey: "vtx.unit.u1", Status: "withdrawn", RentAmount: f64(2200), RentCurrency: "USD",
+			Bedrooms: f64(2), AvailableFrom: "2026-09-01T00:00:00Z", LeaseTermMonths: f64(12),
+			AddrLine1: "5 Pine St", AddrCity: "Portland", AddrRegion: "OR", AddrPostal: "97201"},
+	}
+	units := groupByUnit(nil, nil, listings)
+	if len(units) != 1 {
+		t.Fatalf("a withdrawn listed unit must still appear in the landlord view; got %d units", len(units))
+	}
+	u := units[0]
+	if u.UnitStatus != "withdrawn" {
+		t.Errorf("want status withdrawn, got %q", u.UnitStatus)
+	}
+	if u.Listing == nil || u.Address == nil {
+		t.Fatalf("Edit pre-fill needs the full listing+address; got listing=%s address=%s", u.Listing, u.Address)
+	}
+	var L, A map[string]any
+	if err := json.Unmarshal(u.Listing, &L); err != nil {
+		t.Fatalf("listing decode: %v", err)
+	}
+	if L["rentAmount"].(float64) != 2200 || L["leaseTermMonths"].(float64) != 12 || L["status"] != "withdrawn" {
+		t.Errorf("listing pre-fill fields: got %v", L)
+	}
+	if err := json.Unmarshal(u.Address, &A); err != nil {
+		t.Fatalf("address decode: %v", err)
+	}
+	if A["postal"] != "97201" || A["city"] != "Portland" {
+		t.Errorf("address pre-fill fields: got %v", A)
+	}
+}
 
 // TestGroupByUnit_CarriesQualificationProfile proves the derived qualification
 // signals (never the raw financials) flow from the convergence row to the landlord

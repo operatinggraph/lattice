@@ -75,6 +75,31 @@ func TestComputeListings_FiltersStatusAndReshapes(t *testing.T) {
 	}
 }
 
+// TestComputeListings_HidesWithdrawn proves an off-market (withdrawn) unit never
+// reaches the applicant Browse — not under the default filter, not under "all" —
+// but is still returned when explicitly filtered for (the landlord path is not
+// this endpoint, but the explicit filter is the deliberate opt-in escape hatch).
+func TestComputeListings_HidesWithdrawn(t *testing.T) {
+	entries := map[string]string{
+		"vtx.unit.aaa": `{"unitKey":"vtx.unit.aaa","status":"available","rentAmount":2400}`,
+		"vtx.unit.www": `{"unitKey":"vtx.unit.www","status":"withdrawn","rentAmount":1800}`,
+	}
+	get := fakeKV(entries)
+
+	if all := computeListings(keysOf(entries), get, "all"); len(all) != 1 || all[0].UnitKey != "vtx.unit.aaa" {
+		t.Fatalf(`"all" must hide the withdrawn unit; got %+v`, all)
+	}
+	if def := computeListings(keysOf(entries), get, ""); len(def) != 1 || def[0].UnitKey != "vtx.unit.aaa" {
+		t.Fatalf(`default must hide the withdrawn unit; got %+v`, def)
+	}
+	if avail := computeListings(keysOf(entries), get, "available"); len(avail) != 1 {
+		t.Fatalf(`"available" should return only the available unit; got %+v`, avail)
+	}
+	if wd := computeListings(keysOf(entries), get, "withdrawn"); len(wd) != 1 || wd[0].UnitKey != "vtx.unit.www" {
+		t.Fatalf(`explicit "withdrawn" filter should return the withdrawn unit; got %+v`, wd)
+	}
+}
+
 func TestComputeListings_SkipsUndecodable(t *testing.T) {
 	entries := map[string]string{
 		"vtx.unit.aaa": `not json`,

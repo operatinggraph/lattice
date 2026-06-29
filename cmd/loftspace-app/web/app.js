@@ -24,6 +24,11 @@ const state = {
   lightbox: null,
   // photoUnitKey is the unit whose manage-photos modal (landlord) is open.
   photoUnitKey: null,
+  // editUnitKey is set when the listing modal is in EDIT mode (vs post). editStatus
+  // holds the unit's current listing status so an edit preserves it (SetListing
+  // requires status, and an edit must not silently relist a withdrawn/leased unit).
+  editUnitKey: null,
+  editStatus: null,
 };
 
 // DOC_SLOTS labels the upload "slot" (the link name) for display.
@@ -1656,6 +1661,36 @@ function renderUnitCard(u) {
   meta.className = "unit-meta-row";
   meta.append(count, photoBtn);
 
+  // Edit is offered whenever the unit has a listing to edit (full economics come
+  // down on u.listing/u.address for the pre-fill).
+  if (u.listing) {
+    const editBtn = document.createElement("button");
+    editBtn.className = "ghost";
+    editBtn.textContent = "✎ Edit listing";
+    editBtn.title = "Fix the rent, address, or other details";
+    editBtn.addEventListener("click", () => openEditListing(u));
+    meta.append(editBtn);
+  }
+  // Off-market: a landlord pulls a vacancy (renovating, sold, listed elsewhere)
+  // without faking a lease. Available/pending → Unpublish (withdrawn, hidden from
+  // applicant Browse); withdrawn → Relist (back to available). A leased unit shows
+  // neither (it's occupied; the convergence flow owns its status).
+  if (status === "available" || status === "pending") {
+    const offBtn = document.createElement("button");
+    offBtn.className = "ghost danger";
+    offBtn.textContent = "Unpublish";
+    offBtn.title = "Take this unit off-market (hidden from applicants); relist anytime";
+    offBtn.addEventListener("click", () => setListingStatus(u, "withdrawn"));
+    meta.append(offBtn);
+  } else if (status === "withdrawn") {
+    const relistBtn = document.createElement("button");
+    relistBtn.className = "ghost";
+    relistBtn.textContent = "Relist";
+    relistBtn.title = "Put this unit back on the market";
+    relistBtn.addEventListener("click", () => setListingStatus(u, "available"));
+    meta.append(relistBtn);
+  }
+
   card.append(head, meta);
 
   const list = document.createElement("div");
@@ -1822,17 +1857,85 @@ async function decideApplication(a, decision) {
   }
 }
 
-// ---- Post a listing (landlord) ----
+// ---- Post / edit a listing (landlord) ----
 
 function openPostListing() {
+  state.editUnitKey = null;
+  state.editStatus = null;
   $("#listing-form").reset();
   $("#li-currency").value = "USD";
+  $("#listing-title").textContent = "Post a listing";
+  $("#listing-sub").textContent = "Create a unit and list it for lease.";
+  $("#listing-submit").textContent = "Post listing";
+  $("#li-photos-field").hidden = false; // photos only on post (a new unit)
+  $("#listing-overlay").hidden = false;
+  $("#li-line1").focus();
+}
+
+// openEditListing reuses the post-listing modal in EDIT mode: it pre-fills every
+// field from the unit's projected listing/address (u.listing / u.address from
+// /api/unit-applications) and, on submit, skips CreateLocation and re-runs
+// SetUnitAddress + SetListing against the existing unit. The current status is
+// preserved (editStatus) so a fix to a withdrawn or leased unit never silently
+// relists it. Photos are managed via the 📷 button, so the photo field is hidden.
+function openEditListing(u) {
+  const li = u.listing || {};
+  const ad = u.address || {};
+  state.editUnitKey = u.unitKey;
+  state.editStatus = li.status || u.unitStatus || "available";
+  $("#listing-form").reset();
+  $("#li-line1").value = ad.line1 || "";
+  $("#li-line2").value = ad.line2 || "";
+  $("#li-city").value = ad.city || "";
+  $("#li-region").value = ad.region || "";
+  $("#li-postal").value = ad.postal || "";
+  $("#li-rent").value = li.rentAmount != null ? li.rentAmount : "";
+  $("#li-currency").value = li.rentCurrency || "USD";
+  $("#li-bedrooms").value = li.bedrooms != null ? li.bedrooms : "";
+  // availableFrom is RFC3339 (e.g. 2026-08-01T00:00:00Z); a <input type=date> wants YYYY-MM-DD.
+  $("#li-availfrom").value = (li.availableFrom || "").slice(0, 10);
+  $("#li-leaseterm").value = li.leaseTermMonths != null ? li.leaseTermMonths : "";
+  $("#li-bathrooms").value = li.bathrooms != null ? li.bathrooms : "";
+  $("#li-sqft").value = li.sqft != null ? li.sqft : "";
+  $("#listing-title").textContent = "Edit listing";
+  $("#listing-sub").textContent = u.unitAddress || shortKey(u.unitKey);
+  $("#listing-submit").textContent = "Save changes";
+  $("#li-photos-field").hidden = true;
   $("#listing-overlay").hidden = false;
   $("#li-line1").focus();
 }
 
 function closePostListing() {
   $("#listing-overlay").hidden = true;
+  state.editUnitKey = null;
+  state.editStatus = null;
+}
+
+// setListingStatus flips a unit's listing status (SetListingStatus, status-only —
+// the economics are preserved) for the landlord Unpublish / Relist actions, then
+// reloads after a beat so the new disposition shows once reprojected.
+async function setListingStatus(u, status) {
+  try {
+    const reply = await api("/api/op", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationType: "SetListingStatus",
+        class: "loftspaceListing",
+        reads: [u.unitKey],
+        payload: { unit: u.unitKey, status },
+      }),
+    });
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not change status — " + msg, "err");
+      return;
+    }
+    toast(status === "withdrawn" ? "Unit taken off-market." : "Unit relisted.", "ok");
+    setTimeout(loadLandlord, 800);
+  } catch (e) {
+    toast("Could not change status: " + e.message, "err");
+  }
 }
 
 // opOrThrow submits an op and throws on a rejection or transport error, so the
@@ -1889,17 +1992,23 @@ async function submitPostListing(ev) {
     return;
   }
 
+  const editing = !!state.editUnitKey;
   const submit = $("#listing-submit");
   submit.disabled = true;
   try {
-    const created = await opOrThrow(
-      { operationType: "CreateLocation", class: "location", payload: { locationType: "unit" } },
-      "create the unit",
-    );
-    const unitKey = created.primaryKey;
-    if (!unitKey) {
-      toast("The unit was created but returned no key; try Refresh.", "err");
-      return;
+    // EDIT reuses the existing unit; POST mints one (CreateLocation → its
+    // primaryKey is the new vtx.unit key).
+    let unitKey = state.editUnitKey;
+    if (!editing) {
+      const created = await opOrThrow(
+        { operationType: "CreateLocation", class: "location", payload: { locationType: "unit" } },
+        "create the unit",
+      );
+      unitKey = created.primaryKey;
+      if (!unitKey) {
+        toast("The unit was created but returned no key; try Refresh.", "err");
+        return;
+      }
     }
 
     const addr = { unit: unitKey, line1, city, region, postal };
@@ -1916,18 +2025,27 @@ async function submitPostListing(ev) {
       bedrooms: Number(bedrooms),
       availableFrom: availFrom + "T00:00:00Z", // SetListing wants RFC3339
       leaseTermMonths: Number(leaseTerm),
-      status: "available",
+      // POST defaults to available; EDIT preserves the unit's current status so a
+      // fix never silently relists a withdrawn unit or un-leases a leased one.
+      status: editing ? state.editStatus || "available" : "available",
     };
     if (bathrooms !== "") listing.bathrooms = Number(bathrooms);
     if (sqft !== "") listing.sqft = Number(sqft);
     await opOrThrow(
       { operationType: "SetListing", class: "loftspaceListing", reads: [unitKey], payload: listing },
-      "create the listing",
+      editing ? "save the listing" : "create the listing",
     );
 
-    // Photos are best-effort: the listing is already posted, so a failed photo
-    // upload warns but never unwinds the unit. The new unit invalidates its (empty)
-    // photo cache so Browse refetches.
+    if (editing) {
+      closePostListing();
+      toast("Listing updated.", "ok", unitKey);
+      setTimeout(loadLandlord, 800);
+      return;
+    }
+
+    // Photos are best-effort (POST only): the listing is already posted, so a
+    // failed photo upload warns but never unwinds the unit. The new unit
+    // invalidates its (empty) photo cache so Browse refetches.
     const files = Array.from(($("#li-photos").files) || []);
     let uploaded = 0;
     for (const f of files) {
