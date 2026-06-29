@@ -176,6 +176,17 @@ type TargetNATSKVConfig struct {
 	Bucket     string   `json:"bucket"`
 	Key        []string `json:"key"`
 	DeleteMode string   `json:"deleteMode,omitempty"` // optional; "hard" (default) or "soft"
+
+	// Protected and GrantTable are read-path-authorization (Contract #6 §6.14)
+	// postgres concepts that cannot be honored on a NATS-KV target: RLS is the
+	// enforcement boundary and NATS-KV has no row-level guard, and the grant
+	// table is the shared Postgres actor_read_grants. They are parsed here only
+	// so a misdirected declaration fails closed at activation (D1 §3.3) rather
+	// than being silently dropped — which would world-publish a model the author
+	// believed was protected, or scatter the read-auth source of truth onto a
+	// regular bucket.
+	Protected  bool `json:"protected,omitempty"`
+	GrantTable bool `json:"grantTable,omitempty"`
 }
 
 // NewCoreKVSource constructs a watcher. logger may be nil.
@@ -481,6 +492,18 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		}
 		if cfg.Bucket == "" || len(cfg.Key) == 0 {
 			return nil, fmt.Errorf("lens %q: targetConfig.{bucket,key} required for nats_kv", spec.ID)
+		}
+		// A protected read model must target postgres — RLS is the enforcement
+		// boundary and NATS-KV has no row-level guard, so honoring protected:true
+		// on a NATS-KV target would world-publish what the author believed was
+		// access-controlled. A grant lens must target the shared Postgres
+		// actor_read_grants. Either flag on a NATS-KV target fails closed at
+		// activation (Contract #6 §6.14, D1 §3.3).
+		if cfg.Protected {
+			return nil, fmt.Errorf("lens %q: a protected read model must target postgres, not nats_kv (Contract #6 §6.14: NATS-KV has no row-level enforcement)", spec.ID)
+		}
+		if cfg.GrantTable {
+			return nil, fmt.Errorf("lens %q: a grant-table lens must target postgres (the shared actor_read_grants table), not nats_kv (Contract #6 §6.14)", spec.ID)
 		}
 		dm, err := adapter.ParseDeleteMode(cfg.DeleteMode)
 		if err != nil {

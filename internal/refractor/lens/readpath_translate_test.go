@@ -94,6 +94,63 @@ func TestTranslateSpec_Protected_BadColumn_Rejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "name and type")
 }
 
+func TestTranslateSpec_Protected_OnNATSKV_Rejected(t *testing.T) {
+	// A protected read model must target postgres — RLS is the enforcement
+	// boundary and NATS-KV has no row-level guard. Honoring protected:true on a
+	// NATS-KV target (or silently dropping it) would world-publish a model the
+	// author believed was access-controlled, so it fails closed at activation.
+	spec := &LensSpec{
+		ID:         "kv-protected",
+		TargetType: "nats_kv",
+		CypherRule: "MATCH (a:application) RETURN a.id AS application_id",
+		TargetConfig: mustJSON(t, map[string]any{
+			"bucket":    "read-lease-applications",
+			"key":       []string{"application_id"},
+			"protected": true,
+		}),
+	}
+	_, err := translateSpec(spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must target postgres")
+}
+
+func TestTranslateSpec_GrantTable_OnNATSKV_Rejected(t *testing.T) {
+	// A grant lens projects to the shared Postgres actor_read_grants table; on a
+	// NATS-KV target the grant flag is meaningless and would scatter the
+	// read-auth source of truth onto a regular bucket. Fails closed.
+	spec := &LensSpec{
+		ID:         "kv-grant",
+		TargetType: "nats_kv",
+		CypherRule: "MATCH (i:identity) RETURN i.id AS actor_id, i.id AS anchor_id",
+		TargetConfig: mustJSON(t, map[string]any{
+			"bucket":     "actor-read-grants",
+			"key":        []string{"actor_id"},
+			"grantTable": true,
+		}),
+	}
+	_, err := translateSpec(spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must target postgres")
+}
+
+func TestTranslateSpec_PlainNATSKV_Unaffected(t *testing.T) {
+	// The existing path: a plain (public/operational) NATS-KV read model that
+	// sets none of the read-path-authz flags is untouched by the guard.
+	spec := &LensSpec{
+		ID:         "kv-plain",
+		TargetType: "nats_kv",
+		CypherRule: "MATCH (l:listing) RETURN l.id AS listing_id",
+		TargetConfig: mustJSON(t, map[string]any{
+			"bucket": "listings-index",
+			"key":    []string{"listing_id"},
+		}),
+	}
+	r, err := translateSpec(spec)
+	require.NoError(t, err)
+	assert.Equal(t, "nats_kv", r.Into.Target)
+	assert.Equal(t, "listings-index", r.Into.Bucket)
+}
+
 func TestTranslateSpec_NonProtected_NoProvisioning(t *testing.T) {
 	// A plain postgres lens (the existing path) carries none of the read-path flags.
 	r, err := translateSpec(protectedSpec(t, nil))
