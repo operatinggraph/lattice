@@ -76,7 +76,14 @@ read + internalize:
 - **Primary vendor docs for any external-technology choice** (NATS, Postgres/RLS, JWT, …). Do **not**
   recommend an external-tech approach from training-prior — read the vendor's own docs *during the design
   fire*. (Trialed the hard way 2026-06-27: a NATS auth recommendation made without the docs missed the
-  `allow_responses` request-reply gotcha the official docs flag prominently.)
+  `allow_responses` request-reply gotcha the official docs flag prominently.) **Two sharpenings (2026-06-28):**
+  (1) **the authoritative sources + our pin are recorded in `docs/vendors.md`** (CLAUDE.md points to it) —
+  consult it, cite the upstream (`nats.io` / `github.com/nats-io` ADRs for NATS), and **corroborate against the
+  pinned version's** docs/source; an unqualified web search is a last resort, never the citation. (2) **Check
+  the actual pin before claiming any version gate or "version fork."** Read `go.mod` / `docker-compose.yml` /
+  CI for the real version. (Trialed: a design framed a "NATS 2.12→2.14 floor bump" as the one fork — but the
+  platform was *already* pinned to 2.14 in `go.mod` + `docker-compose.yml`; the "fork" was stale documentation,
+  not a decision. A version claim that turns out to be already-satisfied is wasted ratification attention.)
 - **The established internal pattern this should MIRROR.** Before proposing any shape, ask: *has the codebase
   already solved the analogous problem, and am I mirroring that solution?* A read-path mirror of a decomposed
   write-path **must** decompose the same way; an extension of a component must extend its existing machinery,
@@ -102,6 +109,26 @@ vertices/aspects/links in Core KV; operational state lives outside (Health KV, W
 `lnk.<tA>.<idA>.<rel>.<tB>.<idB>`, link names read "source relation target" (later-arriving vertex = source);
 meta-vertices `vtx.meta.<NanoID>`. Relationships are **links**, not `data` refs; every reader filters
 tombstones. **Capability KV is a lens projection** (projection correctness = auth correctness).
+
+**Two design reflexes Andrew enforced (2026-06-28) — apply them before proposing a shape:**
+
+- **Core-KV reads default to *Processor-side*.** A write-path read belongs **inside the Processor** — the op
+  declares its keys in `contextHint.reads`, the Processor JIT-hydrates them, and a DDL `kv.Read` resolves
+  against that hydrated state. Do **not** put Core-KV reads in an engine (Loom/Weaver). **Loom's
+  guard-evaluation is the *only* sanctioned non-Processor Core-KV reader — do not widen it.** (Trialed: a draft
+  resolved externalTask `params` by having *Loom* read Core KV; the ratified shape is Loom *declares*
+  `contextHint.reads`, the Processor hydrates, the instanceOp DDL resolves — Core-KV reads stay in the
+  Processor, and the params get the OCC-hydrated commit snapshot for free.)
+- **A workaround that bends an invariant/convention is a RED FLAG — re-verify the premise that forced it.** If
+  a design bends a frozen convention (link directionality §1.1 "later-arriving = source", the write-path
+  no-scans rule) or invents parallel machinery *"because capability X is impossible on the substrate,"* **stop
+  and verify the substrate/transport mechanics first** — the "impossible" premise is often wrong. (Trialed: a
+  draft claimed reverse-link enumeration was "an unbounded whole-type scan" and **inverted a link against §1.1**
+  to make the hub a prefix — but NATS subject filters allow mid-token `*` wildcards, so an *inbound* filter
+  `lnk.*.*.<rel>.<hubType>.<hubId>` is server-side bounded; the inverted link was unnecessary *and* a §1.1
+  violation.) Corollaries from the same fire: prefer **paging** (cursor/limit) over a fail-closed hard cap for
+  any enumeration (a cap rejects a legitimately high-degree hub), and **lazy** call-time reads over
+  pre-hydration when the read-set has no exact-key form.
 
 ## 3. Write the design doc
 
