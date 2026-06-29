@@ -27,7 +27,7 @@ outside this pipeline may write to Core KV.
 
 Key files:
 
-- `commit_path.go` — `CommitPath.HandleMessage` drives the 9-step loop; `Deps` bundles all injected interfaces; `MakePipeline` is the production wiring entry point
+- `commit_path.go` — `CommitPath.dispatch` runs the 9-step loop and returns an ack `Decision`; `SupervisedHandler` adapts it to a `substrate.ConsumerSupervisor` (the production delivery path); `HandleMessage` is the in-process adapter (test harness) that applies the `Decision` to a `jetstream.Msg`; `Deps` bundles all injected interfaces; `MakePipeline` is the production wiring entry point
 - `step1_consume.go` — parses + validates the `OperationEnvelope` wire format
 - `step3_auth.go` — `Authorizer` interface; `StubAuthorizer` (test-only); `CapabilityAuthorizer` (production default); `SelectAuthorizerArgs` wiring entry point
 - `step3_denial_response.go` — `DenialResponseBuilder` for FR22 structured denial replies
@@ -68,21 +68,32 @@ Key files:
 
 ## The 9-step write path
 
-Each message delivered by the JetStream consumer enters `CommitPath.HandleMessage`
-and exits with one of five outcomes: `accepted`, `duplicate`, `rejected`,
-`malformed`, or `retryable` (nak for re-delivery).
+The operation consumer runs on a `substrate.ConsumerSupervisor` — the same
+supervised pump Loom/Weaver/Refractor use. A single `processor-main` durable
+filtered to the four lane subjects (`ops.{default,urgent,system,meta}`) delivers
+each operation to `CommitPath.dispatch`, which runs the steps below, publishes any
+client reply, and returns an ack `Decision` the supervisor applies — the supervisor
+owns disposition, the commit path owns the reply. Each message exits with one of
+five outcomes: `accepted`, `duplicate`, `rejected`, `malformed`, or `retryable`
+(`NakWithDelay` — redelivered on a bounded backoff floor, never a hot-loop). The
+in-process test harness drives the same `dispatch` through `HandleMessage`,
+applying the returned `Decision` to the JetStream message itself (`Ack` via the
+explicit step-9 Acker boundary). *(A single all-lanes consumer is a Phase-1
+simplification; per-lane consumers — real per-lane `lane_lag`, independent
+draining, `meta` serialized — are the design-of-record adoption tracked in the
+Lattice backlog.)*
 
 | Step | Name | What happens |
 |------|------|-------------|
-| 1 | **Consume** | `parseEnvelopeFromMessage` — deserializes `OperationEnvelope` from the JetStream message; validates `requestId` (must be a valid 20-char NanoID), `lane` (must be a recognized enum value), `operationType`, `actor`, `submittedAt`, and `payload`. Malformed → term with reason; if a reply inbox is present, reply with `EnvelopeMalformed` code. |
-| 2 | **Dedup** | `CheckDedup` — reads the tracker key `vtx.op.<requestId>` from Core KV. If already present, emit `DuplicateDetected` log + health marker, reply with `duplicate`, ack, return. On KV error, nak for re-delivery. |
+| 1 | **Consume** | `parseEnvelopeFromBody` — deserializes `OperationEnvelope` from the delivered message body; validates `requestId` (must be a valid 20-char NanoID), `lane` (must be a recognized enum value), `operationType`, `actor`, `submittedAt`, and `payload`. Malformed → term with reason; if a reply inbox is present, reply with `EnvelopeMalformed` code. |
+| 2 | **Dedup** | `CheckDedup` — reads the tracker key `vtx.op.<requestId>` from Core KV. If already present, emit `DuplicateDetected` log + health marker, reply with `duplicate`, return `Ack`. On KV error, return `NakWithDelay` (redeliver on the backoff floor). |
 | 3 | **Auth** | `Authorizer.Authorize` — in production, `CapabilityAuthorizer` reads `cap.identity.<actorId>` from Capability KV, checks lane authorization + permission match. A missing entry denies (`NoCapabilityEntry`). There is no projection-freshness gate: a stale-but-permission-matching projection is allowed; `projectedAt` is recorded as provenance in the auth trace, not compared against a ceiling. `ephemeralGrants[].expiresAt` (a real grant TTL) is still enforced. Denied → term with reason, reply with structured denial (FR22 when `DenialBuilder` is wired). Auth trace emitted fire-and-forget via `AuthTraceEmitter` (FR23) for both allowed and denied decisions when configured. |
 | 4 | **Hydrate** | `Hydrator.Hydrate` — loads `contextHint.Reads` (explicit per-key reads) from Core KV into the `HydratedState` map. The graph topology an op needs is delivered as declared command parameters, not discovered by scanning: a Lens projects topology into its own bucket, the client reads the lens, and the resulting keys travel back in `ContextHint.Reads`. The script validates each declared key (envelope class, endpoint touch, not tombstoned) before acting on it. |
 | 5 | **Execute** | `Executor.Execute` — compiles and runs the DDL's `.script` aspect in the Starlark sandbox via `StarlarkRunner.Run`. Produces `ScriptResult{Mutations, Events, ResponseDetail}`. Timeout: 250ms wall budget + 1,000,000 step limit. |
 | 6 | **Validate** | `Validator.Validate` — checks `permittedCommands` (operation type must be in the DDL's list), `sensitiveAspectScope` (script may not create underscore-prefixed aspects except system-reserved ones), and key-pattern checks. `DDLViolation` → term, reply with `DDLViolation` code. |
 | 7 | **Materialize events** | Assigns per-event NanoIDs to events in `ScriptResult.Events` before the commit. NanoIDs are generated via `substrate.NewNanoID()` — entropy is from `crypto/rand`, not PCG (the script's `nanoid` global uses a PCG seeded from the requestId for deterministic per-script behavior; step 7 uses real entropy). **Enforces the event-domain model:** every event `class` must be `<domain>.<eventName>` (Contract #3 §3.4) — a dot-free class (no domain segment) is rejected; the Event document's `domain` field is set from the class's first segment. |
-| 8 | **Commit** | `Committer.Commit` — calls `substrate.AtomicBatch` on the `core-kv` bucket. Batch includes all mutation ops + the tracker `vtx.op.<requestId>` as a create-only entry + the faithful EventList at `vtx.op.<id>.events`. Revision conditions on update ops; any condition failure → `ErrAtomicBatchRejected`. If the tracker was the conflicting key (concurrent re-delivery), short-circuit as duplicate. If a business mutation conflicted → `RevisionConflict` reply, term. On transient failure: nak. |
-| 9 | **Ack** | `Acker.Ack` — JetStream ack the original message. The explicit Acker boundary ensures the reply is already sent before the ack fires. Ack failure is non-fatal from the caller's perspective (commit + reply already durable); the message will be re-delivered and step-2 dedup short-circuits. |
+| 8 | **Commit** | `Committer.Commit` — calls `substrate.AtomicBatch` on the `core-kv` bucket. Batch includes all mutation ops + the tracker `vtx.op.<requestId>` as a create-only entry + the faithful EventList at `vtx.op.<id>.events`. Revision conditions on update ops; any condition failure → `ErrAtomicBatchRejected`. If the tracker was the conflicting key (concurrent re-delivery), short-circuit as duplicate. If a business mutation conflicted → `RevisionConflict` reply, term. On transient failure: `NakWithDelay` (redeliver on the backoff floor). |
+| 9 | **Dispose** | The commit path returns its ack `Decision` (`Ack` on success) after the reply is published; the `ConsumerSupervisor` applies it. The in-process adapter applies the same `Decision` to the JetStream message, routing `Ack` through the explicit step-9 `Acker` boundary (the NFR-R1 crash-at-ack fault-injection seam). Ack failure is non-fatal (commit + reply already durable); the message redelivers and step-2 dedup short-circuits. |
 
 **Event publishing (asynchronous, not a numbered step).** The faithful EventList
 persisted in the step-8 atomic batch as `vtx.op.<id>.events` is published by the

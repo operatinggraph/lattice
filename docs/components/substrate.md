@@ -196,11 +196,15 @@ completion, *then* the ack is applied):
 - `Term` — poison message; never redelivered (event-loss-accepting — log loudly first).
 
 `Message` fields handed to the handler: `Subject`, `Body`, `Sequence`
-(backing-stream sequence, for diagnostics). **Read-from-body discipline:** the
-handler reads routing/identity from `Body`, not `Subject`. `Subject` is provided
-**only** for mechanical key recovery (e.g. the outbox strips `"$KV.<bucket>."` to
-recover the Core KV key for its tombstone delete) and diagnostics — never design
-a consumer that parses the subject for identity.
+(backing-stream sequence, for diagnostics), `NumDelivered`, `NumPending`, plus
+`ReplySubject` and `Header(key) string` for request-reply consumers. **Read-from-body
+discipline:** the handler reads routing/identity from `Body`, not `Subject`.
+`Subject` is provided **only** for mechanical key recovery (e.g. the outbox strips
+`"$KV.<bucket>."` to recover the Core KV key for its tombstone delete) and
+diagnostics — never design a consumer that parses the subject for identity.
+`ReplySubject` + `Header` exist for the first request-reply consumer (the Processor
+commit path, which answers the submitting client via the `Lattice-Reply-Inbox`
+header); event/CDC consumers leave them unused.
 
 `DurableConsumerConfig` fields:
 - `Stream string` — the JetStream stream (e.g. `"KV_core-kv"`).
@@ -252,8 +256,10 @@ and Weaver, like Refractor, import only `substrate/*`.
 #### Spec registry + reconcile
 
 Each `ConsumerSpec` is a full, caller-supplied description of one supervised
-consumer — stream, `FilterSubject`, durable name (`Name`, also the registry
-key), `DeliverPolicy` (`DeliverAll` or `DeliverLastPerSubject` — a
+consumer — stream, `FilterSubject` (or `FilterSubjects`, the multi-filter set for
+a durable that must cover several discrete subjects — e.g. the Processor's
+`processor-main` over the four `ops.<lane>` subjects; mutually exclusive with
+`FilterSubject`), durable name (`Name`, also the registry key), `DeliverPolicy` (`DeliverAll` or `DeliverLastPerSubject` — a
 substrate-owned enum, never `jetstream.DeliverPolicy`), `DeliverGroup` (queue
 group, NFR12 fan-out across instances), `RedeliveryDelay`, `ProbeInterval`,
 `AckWait`, plus the `Handler`/`Classify`/`Probe`/`Health`/`Logger` hooks. The
@@ -331,9 +337,10 @@ Policy stays with the caller via three `ConsumerSpec` hooks:
   idempotent — at-least-once delivery means the same message can arrive again
   after a `Nak`, a pause/resume, or a crash-before-ack.
 
-`Message` carries `Subject`, `Body`, `Sequence`, and `NumDelivered` (the
-JetStream delivery count, 1 on first delivery) — enough for a supervised
-handler to reason about redelivery without a `jetstream.Msg`.
+`Message` carries `Subject`, `Body`, `Sequence`, `NumDelivered` (the JetStream
+delivery count, 1 on first delivery), `NumPending`, and — for request-reply
+consumers — `ReplySubject` and `Header(key)` — enough for a supervised handler to
+reason about redelivery and answer a caller without a `jetstream.Msg`.
 
 #### HealthSink — persist + restore
 

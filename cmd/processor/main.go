@@ -135,19 +135,29 @@ func run(logger *slog.Logger) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Ensure consumer before starting the heartbeater so it can report the
-	// consumer's real backlog (lane_lag). Attaching here — before Run — keeps
-	// the heartbeat emit loop's read of the handle race-free.
-	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
-		StreamName:     stream,
-		Durable:        durable,
+	// Register the operation consumer on a substrate ConsumerSupervisor (the same
+	// supervised pump Loom/Weaver/Refractor use). Add both creates the durable and
+	// starts its pump goroutine, so the supervisor must be ready before the
+	// heartbeater so the heartbeat can read the consumer's real backlog (lane_lag)
+	// via the supervisor. A single all-lanes spec preserves the existing
+	// processor-main durable (byte-identical config: the same four lane filters,
+	// 30s AckWait, DeliverAll) — no lane split, no durable migration.
+	sup := substrate.NewConsumerSupervisor(conn)
+	spec := substrate.ConsumerSpec{
+		Name:           durable,
+		Stream:         stream,
 		FilterSubjects: filter,
-	}, logger)
-	if err != nil {
-		cancel()
-		return err
+		DeliverPolicy:  substrate.DeliverAll,
+		AckWait:        30 * time.Second,
+		Handler:        cp.SupervisedHandler(),
+		Logger:         logger,
 	}
-	hb.AttachConsumer(cons)
+	if err := sup.Add(ctx, spec); err != nil {
+		cancel()
+		return fmt.Errorf("register operation consumer: %w", err)
+	}
+	defer sup.Stop()
+	hb.AttachBacklogReader(sup, durable)
 
 	// Start heartbeater.
 	hbDone := make(chan struct{})
@@ -160,11 +170,6 @@ func run(logger *slog.Logger) error {
 	// graceful heartbeater shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	consumeErrCh := make(chan error, 1)
-	go func() {
-		consumeErrCh <- cp.Run(ctx, cons)
-	}()
 
 	// Start the durable transactional-outbox consumer: it publishes each
 	// committed operation's persisted EventList to `core-events`, then
@@ -184,19 +189,18 @@ func run(logger *slog.Logger) error {
 		"healthKey", "health.processor."+instance,
 	)
 
-	select {
-	case sig := <-sigCh:
-		logger.Info("signal received; shutting down", "signal", sig.String())
-		cancel()
-	case err := <-consumeErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			cancel()
-			<-hbDone
-			<-outboxDone
-			return err
-		}
-	}
+	// The supervised pump reconnects internally on transient consume errors, so
+	// there is no consume-error channel to select on: the process runs until a
+	// shutdown signal arrives.
+	sig := <-sigCh
+	logger.Info("signal received; shutting down", "signal", sig.String())
 
+	// Stop the operation pump FIRST (it runs on its own context, independent of
+	// ctx), so no operation commits after the outbox publisher is torn down — an
+	// op that committed in that gap would otherwise defer its event publication
+	// to the next process start. Stop is idempotent with the deferred Stop.
+	sup.Stop()
+	cancel()
 	<-hbDone
 	<-outboxDone
 	logger.Info("processor exited cleanly", "instance", instance)

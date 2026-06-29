@@ -299,9 +299,16 @@ func (s *ConsumerSupervisor) PendingForConsumer(ctx context.Context, name string
 func (s *ConsumerSupervisor) createConsumer(ctx context.Context, spec ConsumerSpec) (jetstream.Consumer, error) {
 	cfg := jetstream.ConsumerConfig{
 		Durable:       spec.Name,
-		FilterSubject: spec.FilterSubject,
 		DeliverPolicy: toJetstreamDeliverPolicy(spec.DeliverPolicy),
 		AckPolicy:     jetstream.AckExplicitPolicy,
+	}
+	// FilterSubjects (the multi-filter set) and FilterSubject (the single filter)
+	// are mutually exclusive on a JetStream consumer config — setting both is
+	// rejected by the server. The set form takes precedence when supplied.
+	if len(spec.FilterSubjects) > 0 {
+		cfg.FilterSubjects = spec.FilterSubjects
+	} else {
+		cfg.FilterSubject = spec.FilterSubject
 	}
 	if spec.DeliverGroup != "" {
 		cfg.DeliverGroup = spec.DeliverGroup
@@ -333,6 +340,9 @@ func validateSpec(spec ConsumerSpec) error {
 	}
 	if spec.Handler == nil {
 		return fmt.Errorf("substrate: ConsumerSupervisor: spec %q: Handler required", spec.Name)
+	}
+	if spec.FilterSubject != "" && len(spec.FilterSubjects) > 0 {
+		return fmt.Errorf("substrate: ConsumerSupervisor: spec %q: FilterSubject and FilterSubjects are mutually exclusive", spec.Name)
 	}
 	return nil
 }

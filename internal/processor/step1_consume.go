@@ -76,14 +76,14 @@ func EnsureConsumer(ctx context.Context, js jetstream.JetStream, cc ConsumerConf
 	return cons, nil
 }
 
-// parseEnvelopeFromMessage runs step 1 on a delivered JetStream message.
-// Returns the parsed envelope on success or an error describing why the
-// message is malformed (step-1 reject path).
-func parseEnvelopeFromMessage(m jetstream.Msg) (*OperationEnvelope, error) {
-	if m == nil || len(m.Data()) == 0 {
+// parseEnvelopeFromBody runs step 1 on a delivered message's body. Returns the
+// parsed envelope on success or an error describing why the message is malformed
+// (step-1 reject path). An empty body is itself a malformed message.
+func parseEnvelopeFromBody(body []byte) (*OperationEnvelope, error) {
+	if len(body) == 0 {
 		return nil, fmt.Errorf("step 1: empty message body")
 	}
-	return ParseEnvelope(m.Data())
+	return ParseEnvelope(body)
 }
 
 // extractRequestIDBestEffort tries to pull a requestId out of a payload

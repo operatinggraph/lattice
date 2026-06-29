@@ -10,8 +10,16 @@ import (
 	"time"
 
 	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/nats-io/nats.go/jetstream"
 )
+
+// LaneBacklogReader reads a durable consumer's pending backlog by durable name.
+// The substrate ConsumerSupervisor satisfies it (PendingForConsumer), letting the
+// heartbeater report the real lane_lag without holding a jetstream.Consumer
+// handle — keeping the sole Core-KV writer on the same substrate boundary as
+// every other component.
+type LaneBacklogReader interface {
+	PendingForConsumer(ctx context.Context, name string) (uint64, error)
+}
 
 // defaultLaneLagThreshold is the consumer-backlog count above which the
 // heartbeat raises a ProcessorLaneLagging warning (status ⇒ degraded). Mirrors
@@ -70,11 +78,13 @@ type HealthHeartbeater struct {
 	// always emits.
 	capAuthorizer *CapabilityAuthorizer
 
-	// Durable consumer handle for real backlog (lane_lag) reporting. Attached
-	// by the cmd wiring once EnsureConsumer returns, before Run starts (so no
-	// concurrent access with the emit loop). nil ⇒ backlog reported as null,
-	// never a fabricated zero.
-	consumer jetstream.Consumer
+	// Lane-backlog reader for real lane_lag reporting, plus the durable name to
+	// query. Attached by the cmd wiring once the ConsumerSupervisor has the
+	// Processor consumer registered, before Run starts (so no concurrent access
+	// with the emit loop). A nil reader ⇒ backlog reported as null, never a
+	// fabricated zero.
+	backlog        LaneBacklogReader
+	backlogDurable string
 
 	// lagThreshold is the backlog count above which ProcessorLaneLagging fires.
 	lagThreshold uint64
@@ -142,11 +152,13 @@ func (h *HealthHeartbeater) AttachCapabilityAuthorizer(ca *CapabilityAuthorizer)
 	h.capAuthorizer = ca
 }
 
-// AttachConsumer wires the durable JetStream consumer so each heartbeat reports
-// its real backlog (lane_lag). Must be called before Run starts — the emit loop
-// reads the handle without synchronization.
-func (h *HealthHeartbeater) AttachConsumer(cons jetstream.Consumer) {
-	h.consumer = cons
+// AttachBacklogReader wires the lane-backlog reader (the ConsumerSupervisor) and
+// the durable name to query so each heartbeat reports its real backlog
+// (lane_lag). Must be called before Run starts — the emit loop reads the handle
+// without synchronization.
+func (h *HealthHeartbeater) AttachBacklogReader(r LaneBacklogReader, durable string) {
+	h.backlog = r
+	h.backlogDurable = durable
 }
 
 // SetLagThreshold overrides the backlog count above which ProcessorLaneLagging
@@ -231,7 +243,7 @@ func (h *HealthHeartbeater) buildHealthDoc(ctx context.Context, lifecycle string
 	if havePending && pending > h.lagThreshold {
 		active["ProcessorLaneLagging"] = activeIssue{
 			severity: "warning",
-			message:  fmt.Sprintf("operation backlog %d exceeds threshold %d on consumer processor-main", pending, h.lagThreshold),
+			message:  fmt.Sprintf("operation backlog %d exceeds threshold %d on consumer %s", pending, h.lagThreshold, h.backlogDurable),
 		}
 	}
 	issues := h.reconcileIssues(active, now)
@@ -252,18 +264,18 @@ func (h *HealthHeartbeater) buildHealthDoc(ctx context.Context, lifecycle string
 }
 
 // consumerPending returns the durable consumer's current backlog (NumPending)
-// and whether it could be read. A nil consumer or a transient Info error
-// yields (0, false) so the caller reports null rather than a fabricated zero.
+// and whether it could be read. A nil reader or a transient read error yields
+// (0, false) so the caller reports null rather than a fabricated zero.
 func (h *HealthHeartbeater) consumerPending(ctx context.Context) (uint64, bool) {
-	if h.consumer == nil {
+	if h.backlog == nil {
 		return 0, false
 	}
-	info, err := h.consumer.Info(ctx)
+	pending, err := h.backlog.PendingForConsumer(ctx, h.backlogDurable)
 	if err != nil {
-		h.logger.Debug("health: consumer info unavailable", "error", err)
+		h.logger.Debug("health: consumer backlog unavailable", "error", err)
 		return 0, false
 	}
-	return info.NumPending, true
+	return pending, true
 }
 
 // activeIssue is a transient (severity, message) for an issue open this tick,

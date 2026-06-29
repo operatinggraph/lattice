@@ -7,23 +7,20 @@ import (
 	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
 )
 
-// fakeConsumer satisfies jetstream.Consumer by embedding the interface (only
-// Info is exercised; any other call would panic on the nil embedded value).
-type fakeConsumer struct {
-	jetstream.Consumer
+// fakeBacklogReader satisfies LaneBacklogReader for the heartbeat lane_lag tests:
+// PendingForConsumer returns the configured pending count, or err when set.
+type fakeBacklogReader struct {
 	pending uint64
 	err     error
 }
 
-func (f fakeConsumer) Info(context.Context) (*jetstream.ConsumerInfo, error) {
+func (f fakeBacklogReader) PendingForConsumer(context.Context, string) (uint64, error) {
 	if f.err != nil {
-		return nil, f.err
+		return 0, f.err
 	}
-	return &jetstream.ConsumerInfo{NumPending: f.pending}, nil
+	return f.pending, nil
 }
 
 func newTestHeartbeater() *HealthHeartbeater {
@@ -138,7 +135,7 @@ func TestBuildHealthDocLaneLag(t *testing.T) {
 
 	t.Run("below threshold → total reported, healthy", func(t *testing.T) {
 		h := newTestHeartbeater()
-		h.AttachConsumer(fakeConsumer{pending: 5})
+		h.AttachBacklogReader(fakeBacklogReader{pending: 5}, "processor-main")
 		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
 		if total := laneLagTotal(t, doc); total != uint64(5) {
 			t.Fatalf("lane_lag_total = %v, want 5", total)
@@ -150,7 +147,7 @@ func TestBuildHealthDocLaneLag(t *testing.T) {
 
 	t.Run("above threshold → lagging warning, degraded", func(t *testing.T) {
 		h := newTestHeartbeater()
-		h.AttachConsumer(fakeConsumer{pending: 250})
+		h.AttachBacklogReader(fakeBacklogReader{pending: 250}, "processor-main")
 		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
 		if total := laneLagTotal(t, doc); total != uint64(250) {
 			t.Fatalf("lane_lag_total = %v, want 250", total)
@@ -168,7 +165,7 @@ func TestBuildHealthDocLaneLag(t *testing.T) {
 
 	t.Run("info error → null total, no false-healthy fabrication", func(t *testing.T) {
 		h := newTestHeartbeater()
-		h.AttachConsumer(fakeConsumer{err: errors.New("server unreachable")})
+		h.AttachBacklogReader(fakeBacklogReader{err: errors.New("server unreachable")}, "processor-main")
 		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
 		if total := laneLagTotal(t, doc); total != nil {
 			t.Fatalf("lane_lag_total = %v, want nil on Info error", total)
@@ -180,7 +177,7 @@ func TestBuildHealthDocLaneLag(t *testing.T) {
 
 	t.Run("starting lifecycle protected even when lagging", func(t *testing.T) {
 		h := newTestHeartbeater()
-		h.AttachConsumer(fakeConsumer{pending: 250})
+		h.AttachBacklogReader(fakeBacklogReader{pending: 250}, "processor-main")
 		doc := h.buildHealthDoc(ctx, "starting", time.Now())
 		if doc.Status != "starting" {
 			t.Fatalf("status = %q, want starting (protected)", doc.Status)
@@ -190,7 +187,7 @@ func TestBuildHealthDocLaneLag(t *testing.T) {
 	t.Run("custom threshold via SetLagThreshold", func(t *testing.T) {
 		h := newTestHeartbeater()
 		h.SetLagThreshold(10)
-		h.AttachConsumer(fakeConsumer{pending: 20})
+		h.AttachBacklogReader(fakeBacklogReader{pending: 20}, "processor-main")
 		doc := h.buildHealthDoc(ctx, "healthy", time.Now())
 		if doc.Status != "degraded" {
 			t.Fatalf("status = %q, want degraded at custom threshold 10/pending 20", doc.Status)

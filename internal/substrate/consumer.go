@@ -64,6 +64,20 @@ type Message struct {
 	// message pending at delivery. Provided so a handler can detect drain
 	// ("lag == 0") without a separate consumer-info round-trip.
 	NumPending uint64
+	// ReplySubject is the NATS reply subject of the delivered message
+	// (msg.Reply()), for request-reply consumers that publish a reply to the
+	// caller's inbox. Empty for fire-and-forget event/CDC messages. The first
+	// request-reply consumer of the supervisor (the Processor commit path) reads
+	// it to answer the submitting client; event consumers (Loom/Weaver/Refractor)
+	// leave it unused.
+	ReplySubject string
+	// Header returns the value of a delivered-message header by key, or "" if the
+	// header is absent or the message carried none. Provided so a request-reply
+	// handler can honor an in-band reply inbox (the Lattice-Reply-Inbox header,
+	// which JetStream pull consumers require because they rewrite Reply() to the
+	// stream ACK subject) without reaching for a jetstream.Msg. Nil on a Message
+	// the caller constructed directly without a header source.
+	Header func(key string) string
 }
 
 // HandlerFunc processes one message and returns the ack Decision. It MUST be
@@ -235,9 +249,17 @@ func (c *Conn) ConsumerCaughtUp(ctx context.Context, stream, durable string) (bo
 // newMessage builds the caller-facing Message view from a raw JetStream
 // message. Sequence is the backing-stream sequence when metadata is available.
 func newMessage(msg jetstream.Msg) Message {
+	hdr := msg.Headers()
 	m := Message{
-		Subject: msg.Subject(),
-		Body:    msg.Data(),
+		Subject:      msg.Subject(),
+		Body:         msg.Data(),
+		ReplySubject: msg.Reply(),
+		Header: func(key string) string {
+			if hdr == nil {
+				return ""
+			}
+			return hdr.Get(key)
+		},
 	}
 	if meta, err := msg.Metadata(); err == nil {
 		m.Sequence = meta.Sequence.Stream

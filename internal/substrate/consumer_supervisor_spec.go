@@ -127,8 +127,16 @@ type ConsumerSpec struct {
 	// Stream is the JetStream stream the durable binds to.
 	Stream string
 	// FilterSubject restricts delivery to matching subjects. Empty delivers all
-	// subjects on the stream.
+	// subjects on the stream. Mutually exclusive with FilterSubjects — set one or
+	// the other, never both.
 	FilterSubject string
+	// FilterSubjects restricts delivery to a SET of subjects (the multi-filter
+	// form JetStream supports natively). Use it when one durable must cover
+	// several discrete subjects that no single wildcard captures exactly — e.g.
+	// the Processor's `processor-main` over [ops.default, ops.urgent, ops.system,
+	// ops.meta]. When non-empty it takes precedence; FilterSubject must then be
+	// empty (JetStream rejects a consumer config that sets both).
+	FilterSubjects []string
 	// DeliverPolicy selects where delivery starts (DeliverAll by default).
 	DeliverPolicy DeliverPolicy
 	// DeliverGroup sets the JetStream queue group (NFR12 fan-out across

@@ -81,10 +81,10 @@ func NewCommitPath(deps Deps) *CommitPath {
 	return &CommitPath{deps: deps}
 }
 
-// HandleMessage runs the commit path against a single JetStream-delivered
-// message. The returned MessageOutcome is purely informational — the
-// commit path itself decides ack/nack/term against the message internally.
-// Returning the outcome lets tests assert on which branch fired.
+// MessageOutcome is the branch the commit path took for a delivered operation.
+// It is purely informational — the caller (the ConsumerSupervisor in production,
+// or the jetstream adapter in the in-process test harness) applies the returned
+// substrate.Decision; returning the outcome lets tests assert which branch fired.
 type MessageOutcome string
 
 const (
@@ -92,21 +92,57 @@ const (
 	OutcomeDuplicate MessageOutcome = "duplicate"
 	OutcomeRejected  MessageOutcome = "rejected"
 	OutcomeMalformed MessageOutcome = "malformed"
-	OutcomeRetryable MessageOutcome = "retryable" // transient failure → nak
+	OutcomeRetryable MessageOutcome = "retryable" // transient failure → redeliver
 )
 
-// HandleMessage executes steps 1-3 then the stubbed 4-10. It is the
-// single function tests + Run both call.
+// SupervisedHandler adapts the commit path to a substrate ConsumerSupervisor
+// pump: it runs the commit path for one delivered operation and returns the ack
+// Decision the supervisor applies. The client reply is published by the commit
+// path itself (application output), separate from ack disposition.
+//
+// The error channel is always nil in this delivery model: every commit-path
+// outcome maps to a self-contained Decision (Ack on success/duplicate, Term on a
+// permanent rejection, NakWithDelay on a transient KV failure so a still-failing
+// dependency is retried on a bounded floor, never a hot-loop). This mirrors
+// Loom/Weaver, whose supervised handlers likewise carry their verdict on the
+// Decision and leave Classify/Probe unset; per-lane infra-pause classification
+// is a later increment of the per-lane-consumers adoption.
+func (cp *CommitPath) SupervisedHandler() substrate.SupervisedHandler {
+	return func(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
+		_, decision := cp.dispatch(ctx, msg)
+		return decision, nil
+	}
+}
+
+// HandleMessage runs the commit path against a single JetStream-delivered
+// message and applies the resulting disposition to that message. It drives the
+// in-process test harnesses; production wiring drives the same logic through
+// SupervisedHandler under a ConsumerSupervisor. Both call dispatch — the single
+// source of commit-path truth — and differ only in HOW they dispose: the
+// supervisor applies the Decision; this adapter applies it to the jetstream.Msg,
+// routing Ack through the explicit step-9 Acker boundary so the NFR-R1
+// crash-at-ack fault-injection seam is preserved.
 func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) MessageOutcome {
+	outcome, decision := cp.dispatch(ctx, messageFromJetstream(msg))
+	cp.disposeJetstream(ctx, decision, msg)
+	return outcome
+}
+
+// dispatch executes steps 1-3 then the stubbed 4-10 for one delivered operation,
+// publishes any client reply, and returns the branch outcome plus the ack
+// Decision the caller must apply. It performs NO ack/nak/term itself — that
+// disposition belongs to the caller (the supervisor, or HandleMessage's
+// jetstream adapter).
+func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (MessageOutcome, substrate.Decision) {
 	cp.deps.Metrics.OpsConsumed.Add(1)
 
 	// --- Step 1: consume + parse envelope. ---
-	env, err := parseEnvelopeFromMessage(msg)
+	env, err := parseEnvelopeFromBody(msg.Body)
 	if err != nil {
 		cp.deps.Metrics.OpsMalformed.Add(1)
 		reason := err.Error()
 		// Best-effort requestId recovery for health-marker keying.
-		rid := extractRequestIDBestEffort(msg.Data())
+		rid := extractRequestIDBestEffort(msg.Body)
 		cp.deps.Logger.Warn("MalformedOperation: terminating with term=true",
 			"reason", reason, "recoveredRequestId", rid)
 		if cp.deps.Heartbeater != nil {
@@ -117,12 +153,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		// notified; fire-and-forget publishers get nothing (the
 		// MalformedOperation health marker is the trail).
 		cp.maybeReplyMalformed(msg, rid, reason)
-		if termErr := msg.TermWithReason("malformed envelope: " + reason); termErr != nil {
-			cp.deps.Logger.Warn("term-with-reason failed; falling back to term",
-				"error", termErr)
-			_ = msg.Term()
-		}
-		return OutcomeMalformed
+		return OutcomeMalformed, substrate.Term
 	}
 	cp.deps.Logger.Info("step 1: envelope parsed",
 		"requestId", env.RequestID,
@@ -133,10 +164,9 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	// --- Step 2: dedup. ---
 	dedup, err := CheckDedup(ctx, cp.deps.Conn, cp.deps.CoreBucket, env.RequestID)
 	if err != nil {
-		cp.deps.Logger.Warn("step 2: dedup lookup failed; nak for redelivery",
+		cp.deps.Logger.Warn("step 2: dedup lookup failed; redelivering on the backoff floor",
 			"requestId", env.RequestID, "error", err)
-		_ = msg.Nak()
-		return OutcomeRetryable
+		return OutcomeRetryable, substrate.NakWithDelay
 	}
 	if dedup.Outcome == DedupDuplicate {
 		cp.deps.Metrics.OpsDuplicates.Add(1)
@@ -147,10 +177,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		// aspect) and the durable outbox consumer owns publishing. A redelivery
 		// therefore simply acks — there is nothing to re-derive or re-publish here.
 		cp.replyTo(msg, BuildDuplicateReply(env.RequestID, dedup.Tracker))
-		if ackErr := msg.Ack(); ackErr != nil {
-			cp.deps.Logger.Warn("ack on duplicate failed", "error", ackErr)
-		}
-		return OutcomeDuplicate
+		return OutcomeDuplicate, substrate.Ack
 	}
 
 	// --- Step 3: auth (stub). ---
@@ -161,8 +188,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 			"requestId", env.RequestID, "error", err)
 		cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeAuthInfrastructureFailure,
 			"authorizer error", map[string]any{"underlying": err.Error()}))
-		_ = msg.TermWithReason("authorizer error: " + err.Error())
-		return OutcomeRejected
+		return OutcomeRejected, substrate.Term
 	}
 	if !decision.Authorized {
 		cp.deps.Metrics.OpsRejected.Add(1)
@@ -183,8 +209,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		// Emit FR23 three-plane auth trace record asynchronously.
 		// Fire-and-forget — does not block step 3 path.
 		cp.deps.TraceEmitter.Emit(env, decision)
-		_ = msg.TermWithReason("auth denied: " + decision.Reason)
-		return OutcomeRejected
+		return OutcomeRejected, substrate.Term
 	}
 	// Capture the resolved permission so downstream steps receive auth provenance
 	// without re-reading Capability KV. Allocated by CapabilityAuthorizer; nil
@@ -229,8 +254,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 						"constraint":  ddlErr.ViolatedConstraint,
 						"mutationKey": ddlErr.MutationKey,
 					}))
-				_ = msg.TermWithReason("DDLViolation: " + ddlErr.Detail)
-				return OutcomeRejected
+				return OutcomeRejected, substrate.Term
 			}
 			return cp.handleStubFailure(ctx, msg, env, "validate", err)
 		}
@@ -249,8 +273,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 		cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeDDLViolation,
 			"response.primaryKey is not within the committed write footprint",
 			map[string]any{"primaryKey": result.PrimaryKey}))
-		_ = msg.TermWithReason("DDLViolation: primaryKey not within write footprint")
-		return OutcomeRejected
+		return OutcomeRejected, substrate.Term
 	}
 
 	now := cp.deps.Clock()
@@ -275,8 +298,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 					"root": protErr.Root,
 					"op":   protErr.Op,
 				}))
-			_ = msg.TermWithReason("ProtectedKey: " + protErr.Root)
-			return OutcomeRejected
+			return OutcomeRejected, substrate.Term
 		}
 		// If the commit failed because the tracker already exists, a
 		// previous redelivery committed and we're racing with our own
@@ -288,8 +310,7 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 				cp.deps.Logger.Info("commit: tracker already exists (concurrent redelivery); ack + duplicate reply",
 					"requestId", env.RequestID)
 				cp.replyTo(msg, BuildDuplicateReply(env.RequestID, probe.Tracker))
-				_ = msg.Ack()
-				return OutcomeDuplicate
+				return OutcomeDuplicate, substrate.Ack
 			}
 			// Tracker not present — genuine revision conflict on one of
 			// the business mutations. Surface as RevisionConflict
@@ -305,18 +326,17 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 					confErr.Error(), map[string]any{
 						"conflictingKey": confErr.ConflictingKey,
 					}))
-				_ = msg.TermWithReason("RevisionConflict")
-				return OutcomeRejected
+				return OutcomeRejected, substrate.Term
 			}
 		}
-		// Genuine commit failure → nak so JetStream redelivers. Because
-		// the tracker is only created on a successful atomic batch, a
-		// failed commit leaves the world in the pre-commit state and
-		// redelivery is safe (Contract #4 §4.4).
-		cp.deps.Logger.Warn("step 8: commit failed; nak for redelivery",
+		// Genuine commit failure → redeliver on the backoff floor so JetStream
+		// retries without hot-looping a still-failing dependency. Because the
+		// tracker is only created on a successful atomic batch, a failed commit
+		// leaves the world in the pre-commit state and redelivery is safe
+		// (Contract #4 §4.4).
+		cp.deps.Logger.Warn("step 8: commit failed; redelivering on the backoff floor",
 			"requestId", env.RequestID, "error", err)
-		_ = msg.Nak()
-		return OutcomeRetryable
+		return OutcomeRetryable, substrate.NakWithDelay
 	}
 
 	// Event publication is outbox-only: the faithful EventList was persisted in
@@ -335,18 +355,52 @@ func (cp *CommitPath) HandleMessage(ctx context.Context, msg jetstream.Msg) Mess
 	// success reply. PrimaryKey is empty for multi-key ops (clients read the
 	// committed key set from Revisions).
 	cp.replyTo(msg, BuildAcceptedReplyWithRevisions(env.RequestID, now, result.PrimaryKey, commitAck.Revisions))
+	cp.deps.Logger.Info("step 8: committed", "requestId", env.RequestID)
+	return OutcomeAccepted, substrate.Ack
+}
 
-	// --- Step 9: explicit Acker boundary. ---
-	acker := cp.deps.AckerFactory(msg, cp.deps.Logger)
-	if ackErr := acker.Ack(ctx); ackErr != nil {
-		cp.deps.Logger.Warn("step 9: ack failed", "requestId", env.RequestID, "error", ackErr)
-		// Ack failure: JetStream will redeliver; tracker short-circuits.
-		// We still consider the operation accepted from the caller's
-		// perspective because step 8 was durable + reply was sent.
-		return OutcomeAccepted
+// messageFromJetstream builds the substrate.Message view dispatch consumes from a
+// raw jetstream.Msg, for the in-process adapter path. It mirrors the supervisor's
+// own message construction (Subject/Body/ReplySubject + a header accessor) so the
+// adapter and the supervised path feed dispatch identical inputs.
+func messageFromJetstream(msg jetstream.Msg) substrate.Message {
+	hdr := msg.Headers()
+	return substrate.Message{
+		Subject:      msg.Subject(),
+		Body:         msg.Data(),
+		ReplySubject: msg.Reply(),
+		Header: func(key string) string {
+			if hdr == nil {
+				return ""
+			}
+			return hdr.Get(key)
+		},
 	}
-	cp.deps.Logger.Info("step 9: ack", "requestId", env.RequestID)
-	return OutcomeAccepted
+}
+
+// disposeJetstream applies a commit-path Decision to the underlying jetstream.Msg
+// for the adapter path. Ack routes through the explicit step-9 Acker boundary
+// (the NFR-R1 fault-injection seam); the other dispositions map directly.
+func (cp *CommitPath) disposeJetstream(ctx context.Context, d substrate.Decision, msg jetstream.Msg) {
+	switch d {
+	case substrate.Term:
+		if err := msg.Term(); err != nil {
+			cp.deps.Logger.Warn("term failed", "error", err)
+		}
+	case substrate.Nak:
+		if err := msg.Nak(); err != nil {
+			cp.deps.Logger.Warn("nak failed", "error", err)
+		}
+	case substrate.NakWithDelay:
+		if err := msg.NakWithDelay(substrate.DefaultRedeliveryDelay); err != nil {
+			cp.deps.Logger.Warn("nak-with-delay failed", "error", err)
+		}
+	default: // substrate.Ack — step-9 explicit Acker boundary.
+		acker := cp.deps.AckerFactory(msg, cp.deps.Logger)
+		if ackErr := acker.Ack(ctx); ackErr != nil {
+			cp.deps.Logger.Warn("step 9: ack failed", "error", ackErr)
+		}
+	}
 }
 
 // commitWithTaskAutoComplete commits the operation, injecting the §10.6
@@ -484,7 +538,7 @@ func resolvedPermissionProjectedAt(rp *ResolvedPermission) string {
 	return rp.ProjectedAt
 }
 
-func (cp *CommitPath) handleStubFailure(ctx context.Context, msg jetstream.Msg, env *OperationEnvelope, step string, err error) MessageOutcome {
+func (cp *CommitPath) handleStubFailure(ctx context.Context, msg substrate.Message, env *OperationEnvelope, step string, err error) (MessageOutcome, substrate.Decision) {
 	cp.deps.Metrics.OpsRejected.Add(1)
 	cp.deps.Logger.Warn("step returned error",
 		"step", step, "requestId", env.RequestID, "error", err)
@@ -501,8 +555,7 @@ func (cp *CommitPath) handleStubFailure(ctx context.Context, msg jetstream.Msg, 
 	code, details := classifyStepError(err)
 	cp.replyTo(msg, BuildRejectedReply(env.RequestID, code,
 		fmt.Sprintf("step %s failed: %s", step, err.Error()), details))
-	_ = msg.TermWithReason(string(code) + ": " + err.Error())
-	return OutcomeRejected
+	return OutcomeRejected, substrate.Term
 }
 
 // classifyStepError maps a typed step-4/5 error onto the wire-shape
@@ -540,24 +593,25 @@ func classifyStepError(err error) (ErrorCode, map[string]any) {
 	return ErrCodeInternalError, nil
 }
 
-// replySubject returns the subject to publish replies to for a delivered
-// JetStream message. JetStream pull consumers rewrite msg.Reply() to the
-// stream's ACK subject; callers that want a direct reply carry their inbox
-// in the Lattice-Reply-Inbox header, which takes precedence.
-func replySubject(msg jetstream.Msg) string {
-	if hdr := msg.Headers(); hdr != nil {
-		if inbox := hdr.Get("Lattice-Reply-Inbox"); inbox != "" {
+// replySubjectFromMessage returns the subject to publish replies to for a
+// delivered message. JetStream pull consumers rewrite the reply subject to the
+// stream's ACK subject; callers that want a direct reply carry their inbox in the
+// Lattice-Reply-Inbox header, which takes precedence. A Message constructed
+// without a header source (nil Header) falls back to ReplySubject.
+func replySubjectFromMessage(msg substrate.Message) string {
+	if msg.Header != nil {
+		if inbox := msg.Header("Lattice-Reply-Inbox"); inbox != "" {
 			return inbox
 		}
 	}
-	return msg.Reply()
+	return msg.ReplySubject
 }
 
 // replyTo publishes a reply envelope to the caller's reply subject.
 // Errors are logged (the commit is already durable, so failure to reply
 // is observability-only).
-func (cp *CommitPath) replyTo(msg jetstream.Msg, reply OperationReply) {
-	subject := replySubject(msg)
+func (cp *CommitPath) replyTo(msg substrate.Message, reply OperationReply) {
+	subject := replySubjectFromMessage(msg)
 	if subject == "" {
 		return
 	}
@@ -571,8 +625,8 @@ func (cp *CommitPath) replyTo(msg jetstream.Msg, reply OperationReply) {
 	}
 }
 
-func (cp *CommitPath) maybeReplyMalformed(msg jetstream.Msg, requestID, reason string) {
-	subject := replySubject(msg)
+func (cp *CommitPath) maybeReplyMalformed(msg substrate.Message, requestID, reason string) {
+	subject := replySubjectFromMessage(msg)
 	if subject == "" {
 		return
 	}
@@ -590,22 +644,6 @@ func (cp *CommitPath) maybeReplyMalformed(msg jetstream.Msg, requestID, reason s
 		return
 	}
 	_ = cp.deps.Conn.NATS().Publish(subject, b)
-}
-
-// Run drives a Consume loop until ctx is cancelled. The callback wires
-// each delivered message through HandleMessage. Errors from Consume
-// itself are logged; the caller decides when to stop the consumer.
-func (cp *CommitPath) Run(ctx context.Context, cons jetstream.Consumer) error {
-	cc, err := cons.Consume(func(m jetstream.Msg) {
-		cp.HandleMessage(ctx, m)
-	})
-	if err != nil {
-		return fmt.Errorf("processor: start Consume: %w", err)
-	}
-	defer cc.Stop()
-
-	<-ctx.Done()
-	return nil
 }
 
 // MakeStubPipeline is a convenience wrapper over MakePipeline for callers that
