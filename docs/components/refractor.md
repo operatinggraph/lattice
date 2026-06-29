@@ -306,7 +306,7 @@ it emits:
 | Consumer lag | `health.LagPoller` → `Reporter.SetConsumerLag` | `lattice.refractor.metrics.<lensId>` + the `consumerLag` field on the per-lens health entry | `NumPending` on the lens consumer, polled on an interval. |
 | Per-lens latency | `pipeline.LatencyRingBuffer` → `LatticeHeartbeater.LensLatencyProvider` | `health.refractor.<instance>.lens.<canonicalName>` | p95 / p99 / mean / count of per-event projection latency (NFR-P3 instrument). |
 | Instance heartbeat | `LatticeHeartbeater` | `health.refractor.<instance>` | 10s heartbeat with TTL purge (NFR-O1). |
-| **Capability-Lens liveness alert** | `LatticeHeartbeater.CapabilityLensProvider` → threshold eval | `health.refractor.<instance>` — `metrics.capabilityLens.<canonicalName>` `{status, consumerLag, alert}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded/unhealthy `status` when anomalous | A **paused** capability lens raises `CapabilityLensPaused` (`severity: error` ⇒ `status: unhealthy`): the authz read-model is frozen. An **active** lens with `consumerLag` over the threshold (default 100, deployment-overridable) raises `CapabilityLensLagging` (`severity: warning` ⇒ `status: degraded`). `rebuilding` and within-threshold are `ok`. The issue's `since` persists across heartbeats and the issue is dropped when it resolves. Read-only — it observes the lens reporter + supervised consumer; no authz path, Core KV, or projection is touched. |
+| **Capability-Lens liveness alert** | `LatticeHeartbeater.CapabilityLensProvider` → threshold eval | `health.refractor.<instance>` — `metrics.capabilityLens.<canonicalName>` `{status, consumerLag, alert}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded/unhealthy `status` when anomalous | A **paused** capability lens raises `CapabilityLensPaused` (`severity: error` ⇒ `status: unhealthy`): the authz read-model is frozen. An **active** lens with `consumerLag` over the threshold (default 100, deployment-overridable) raises `CapabilityLensLagging` (`severity: warning` ⇒ `status: degraded`) — **debounced**: it raises only after the lens stays over threshold for N consecutive heartbeats (default 3 ≈ 30s sustained) and clears once lag falls to/below a lower clear-threshold band, so a one-cycle spike does not flap. `rebuilding` and within-threshold are `ok`. The issue's `since` persists across heartbeats and the issue is dropped when it resolves. Read-only — it observes the lens reporter + supervised consumer; no authz path, Core KV, or projection is touched. |
 | Audit | `health.AuditWriter` | `lattice.refractor.audit.<lensId>` | Per-projection audit append. |
 
 This is the automated backstop for the Processor's absent per-op freshness gate:
@@ -314,13 +314,16 @@ a dead or lagging Capability projector now degrades the Refractor heartbeat with
 distinct, machine-readable issue the **Lamplighter** classifies and surfaces,
 rather than requiring an operator to read generic signals and apply judgment.
 
-**Residual follow-ups (not gaps in the alert itself):** the **Loupe** health
-dashboard + system-map component nodes currently derive component status from
-heartbeat *freshness only* — they do not yet read the Contract #5 `status` /
-`issues[]` fields, so the alert surfaces via the Lamplighter today, not yet on the
-Loupe component cards. Lag-threshold **hysteresis** (a one-cycle spike self-clears
-on the next heartbeat) and the Gateway token-revocation **hard** control remain
-future work.
+**Residual follow-ups (not gaps in the alert itself):** the Gateway
+token-revocation **hard** control — a paused/lagging capability lens degrades
+health but cannot itself force-revoke a stale token — remains future work, landing
+with the Gateway / read-path authorization (D1). The earlier
+Loupe-reads-freshness-only and lag-threshold-hysteresis residuals have **both
+shipped**: Loupe's `componentLiveness` now fuses heartbeat freshness with the §5.4
+`status` and the worst §5.5 `issues[]` severity on its component cards and
+system-map nodes, and the lag alert now **debounces** (raise only after several
+consecutive over-threshold heartbeats, with a lower clear-threshold band) so a
+one-cycle spike no longer flaps the heartbeat degraded→healthy.
 
 ---
 
