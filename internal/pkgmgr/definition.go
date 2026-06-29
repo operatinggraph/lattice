@@ -182,6 +182,32 @@ type WeaverTargetSpec struct {
 	// Gaps maps each `missing_<gap>` violation column to the remediation
 	// action the engine runs when that column is set.
 	Gaps map[string]GapActionSpec
+
+	// Augur is the optional, default-absent AI-reasoning escalation policy
+	// (Contract #10 §10.8 "Augur escalation"). When set, the installer emits it
+	// into the meta.weaverTarget body so the Weaver registry parses it into a
+	// runtime AugurPolicy; nil emits no `augur` key (the frozen-contract shape).
+	Augur *AugurSpec
+}
+
+// AugurSpec mirrors the engine's AugurPolicy (Contract #10 §10.8 "Augur
+// escalation") so the emitted body deserializes cleanly. Escalate lists the
+// stuck-gap triggers redirected to AI reasoning; Pattern is the reasoning
+// externalTask pattern ref (shipped verbatim, resolved live in the engine);
+// Model is an optional adapter override. AutoApply is DESIGNED, not enabled.
+type AugurSpec struct {
+	Escalate  []string
+	Pattern   string
+	Model     string
+	AutoApply *AugurAutoApplySpec
+}
+
+// AugurAutoApplySpec mirrors the engine's AugurAutoApply (Contract #10 §10.8):
+// the OPTIONAL auto-apply allow-list. Validated fail-closed at install, but no
+// escalation path consumes it until Andrew ratifies the autonomy boundary.
+type AugurAutoApplySpec struct {
+	Actions       []string
+	MinConfidence float64
 }
 
 // GapActionSpec mirrors the engine's GapAction (Contract #10 §10.8 action

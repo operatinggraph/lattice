@@ -391,3 +391,58 @@ func TestEmit_DeterministicKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestEmit_WeaverTarget_AugurBlockRoundTripsThroughEngineParse proves the
+// optional §10.8 augur block survives the full emit path (augurBody → spec
+// aspect → weaver.Target parse). A target with no augur block round-trips to
+// the frozen-contract shape (Augur == nil), asserted by the base test above.
+func TestEmit_WeaverTarget_AugurBlockRoundTripsThroughEngineParse(t *testing.T) {
+	def := orchestrationDef()
+	def.WeaverTargets[0].Augur = &pkgmgr.AugurSpec{
+		Escalate: []string{"unplannable"},
+		Pattern:  "augurReasoning",
+		Model:    "claude-opus-4-8",
+		AutoApply: &pkgmgr.AugurAutoApplySpec{
+			Actions: []string{"triggerLoom"}, MinConfidence: 0.8,
+		},
+	}
+	def.LoomPatterns = append(def.LoomPatterns, pkgmgr.LoomPatternSpec{
+		PatternID:   "augurReasoning",
+		SubjectType: "lease",
+		Steps: []pkgmgr.StepSpec{{
+			Kind: "externalTask", Adapter: "augur",
+			InstanceOp: "CreateAugurReasoningClaim", ReplyOp: "RecordProposal",
+		}},
+	})
+
+	ops, _, err := pkgmgr.BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+	targetID := pkgmgr.EntityNanoIDForTest(def.Name, "weaverTarget:leaseSigning")
+	specDoc := findDoc(ops, "vtx.meta."+targetID+".spec")
+	if specDoc == nil {
+		t.Fatalf("no weaver-target spec aspect emitted")
+	}
+	raw, err := json.Marshal(specDoc["data"])
+	if err != nil {
+		t.Fatalf("marshal target body: %v", err)
+	}
+	var target weaver.Target
+	if err := json.Unmarshal(raw, &target); err != nil {
+		t.Fatalf("emitted augur-bearing body does not deserialize into weaver.Target: %v", err)
+	}
+	if target.Augur == nil {
+		t.Fatalf("augur block dropped on the emit path")
+	}
+	if len(target.Augur.Escalate) != 1 || target.Augur.Escalate[0] != "unplannable" {
+		t.Errorf("escalate not round-tripped: %+v", target.Augur.Escalate)
+	}
+	if target.Augur.Pattern != "augurReasoning" || target.Augur.Model != "claude-opus-4-8" {
+		t.Errorf("pattern/model not round-tripped: %+v", target.Augur)
+	}
+	if target.Augur.AutoApply == nil || target.Augur.AutoApply.MinConfidence != 0.8 ||
+		len(target.Augur.AutoApply.Actions) != 1 {
+		t.Errorf("autoApply not round-tripped: %+v", target.Augur.AutoApply)
+	}
+}

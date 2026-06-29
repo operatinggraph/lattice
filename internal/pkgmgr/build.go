@@ -379,11 +379,52 @@ func weaverTargetSpecBody(t WeaverTargetSpec, lensRef string) map[string]any {
 	for col, ga := range t.Gaps {
 		gaps[col] = gapActionBody(ga)
 	}
-	return map[string]any{
+	body := map[string]any{
 		"targetId": t.TargetID,
 		"lensRef":  lensRef,
 		"gaps":     gaps,
 	}
+	if t.Augur != nil {
+		body["augur"] = augurBody(t.Augur)
+	}
+	return body
+}
+
+// augurBody emits the optional §10.8 `augur` escalation block, including only
+// the fields the engine parses and omitting empty optionals so the emitted body
+// matches the engine's AugurPolicy shape. The pattern ref is shipped verbatim
+// (the engine resolves it live at dispatch). Emitted only when t.Augur != nil,
+// so a target without escalation round-trips to the frozen-contract shape.
+func augurBody(a *AugurSpec) map[string]any {
+	body := map[string]any{}
+	if len(a.Escalate) > 0 {
+		escalate := make([]any, len(a.Escalate))
+		for i, e := range a.Escalate {
+			escalate[i] = e
+		}
+		body["escalate"] = escalate
+	}
+	if a.Pattern != "" {
+		body["pattern"] = a.Pattern
+	}
+	if a.Model != "" {
+		body["model"] = a.Model
+	}
+	if a.AutoApply != nil {
+		auto := map[string]any{}
+		if len(a.AutoApply.Actions) > 0 {
+			actions := make([]any, len(a.AutoApply.Actions))
+			for i, act := range a.AutoApply.Actions {
+				actions[i] = act
+			}
+			auto["actions"] = actions
+		}
+		if a.AutoApply.MinConfidence != 0 {
+			auto["minConfidence"] = a.AutoApply.MinConfidence
+		}
+		body["autoApply"] = auto
+	}
+	return body
 }
 
 // gapActionBody emits one playbook entry, including only the fields the engine

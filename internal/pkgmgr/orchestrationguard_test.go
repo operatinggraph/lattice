@@ -397,3 +397,103 @@ func TestValidateOpMetas_DuplicateOperationType(t *testing.T) {
 		t.Fatalf("expected duplicate-operationType error, got %v", err)
 	}
 }
+
+// augurExternalTaskPattern is a minimal valid §10.5 externalTask LoomPattern an
+// augur.pattern ref can resolve to in-package.
+func augurExternalTaskPattern(id string) LoomPatternSpec {
+	return LoomPatternSpec{
+		PatternID:   id,
+		SubjectType: "leaseapp",
+		Steps: []StepSpec{{
+			Kind: "externalTask", Adapter: "augur",
+			InstanceOp: "CreateAugurReasoningClaim", ReplyOp: "RecordProposal",
+		}},
+	}
+}
+
+func augurTargetDef(a *AugurSpec, patterns ...LoomPatternSpec) Definition {
+	return Definition{
+		WeaverTargets: []WeaverTargetSpec{{
+			TargetID: "leaseSigning",
+			LensRef:  "leaseSigningCandidates",
+			Gaps: map[string]GapActionSpec{
+				"missing_approval": {Action: "assignTask", Operation: "Approve", Assignee: "row.a", Target: "row.t"},
+			},
+			Augur: a,
+		}},
+		LoomPatterns: patterns,
+	}
+}
+
+func TestValidateWeaverTargets_AugurNilOK(t *testing.T) {
+	if err := augurTargetDef(nil).validateWeaverTargets(); err != nil {
+		t.Fatalf("a target with no augur block must pass: %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AugurValid(t *testing.T) {
+	def := augurTargetDef(&AugurSpec{
+		Escalate: []string{"unplannable", "exhausted"},
+		Pattern:  "augurReasoning",
+		Model:    "claude-opus-4-8",
+		AutoApply: &AugurAutoApplySpec{
+			Actions: []string{"triggerLoom", "directOp"}, MinConfidence: 0.9,
+		},
+	}, augurExternalTaskPattern("augurReasoning"))
+	if err := def.validateWeaverTargets(); err != nil {
+		t.Fatalf("a fully-populated valid augur block must pass: %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AugurRejections(t *testing.T) {
+	cases := []struct {
+		name    string
+		spec    *AugurSpec
+		wantSub string
+	}{
+		{"empty escalate", &AugurSpec{Pattern: "p"}, "escalate is empty"},
+		{"unknown trigger", &AugurSpec{Escalate: []string{"someday"}, Pattern: "p"}, "not a known trigger"},
+		{"missing pattern", &AugurSpec{Escalate: []string{"unplannable"}}, "pattern is required"},
+		{"bad autoApply action", &AugurSpec{Escalate: []string{"unplannable"}, Pattern: "p",
+			AutoApply: &AugurAutoApplySpec{Actions: []string{"DropTable"}}}, "not a known action"},
+		{"minConfidence too high", &AugurSpec{Escalate: []string{"unplannable"}, Pattern: "p",
+			AutoApply: &AugurAutoApplySpec{MinConfidence: 1.5}}, "out of range"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// No in-package pattern declared, so the pattern-is-externalTask check
+			// defers (cross-package) — these cases exercise the structural rules.
+			err := augurTargetDef(tc.spec).validateWeaverTargets()
+			if err == nil {
+				t.Fatalf("%s: must be rejected", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("%s: unexpected reason: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestValidateWeaverTargets_AugurPatternNotExternalTask(t *testing.T) {
+	// An in-package pattern that exists but carries no externalTask step is the
+	// one check only the installer can make.
+	systemOnly := LoomPatternSpec{
+		PatternID:   "augurReasoning",
+		SubjectType: "leaseapp",
+		Steps:       []StepSpec{{Kind: "systemOp", Operation: "DoThing"}},
+	}
+	def := augurTargetDef(&AugurSpec{Escalate: []string{"unplannable"}, Pattern: "augurReasoning"}, systemOnly)
+	err := def.validateWeaverTargets()
+	if err == nil || !strings.Contains(err.Error(), "no externalTask step") {
+		t.Fatalf("an augur.pattern resolving to a non-externalTask in-package pattern must be rejected, got %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AugurPatternCrossPackageDeferred(t *testing.T) {
+	// A pattern not declared in this package may live in an already-installed
+	// one — like a cross-package LensRef, resolution defers to the engine.
+	def := augurTargetDef(&AugurSpec{Escalate: []string{"unplannable"}, Pattern: "installedElsewhere"})
+	if err := def.validateWeaverTargets(); err != nil {
+		t.Fatalf("a cross-package augur.pattern must not be failed at install: %v", err)
+	}
+}

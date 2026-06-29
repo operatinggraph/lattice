@@ -27,6 +27,16 @@ const (
 	loomPatternClass  = "meta.loomPattern"
 )
 
+// Augur escalation triggers (Contract #10 §10.8 "Augur escalation"): the
+// stuck-gap conditions a target's `augur.escalate` may redirect to AI
+// reasoning. `unplannable` = a missing_* column with no gaps[col] entry;
+// `exhausted` = a gap whose retry budget is spent. Restated here (not imported)
+// so the registry validates the block without an extra dependency.
+const (
+	escalateUnplannable = "unplannable"
+	escalateExhausted   = "exhausted"
+)
+
 // singleTokenPattern accepts a value usable as a single NATS KV key segment,
 // subject token, and durable-name segment: no dots, no wildcards, no spaces.
 // Applied to targetId and gap-column names at install time and to the engine
@@ -59,6 +69,33 @@ type Target struct {
 	TargetID string               `json:"targetId"`
 	LensRef  string               `json:"lensRef"`
 	Gaps     map[string]GapAction `json:"gaps"`
+	// Augur is the optional, default-absent AI-reasoning escalation policy
+	// (Contract #10 §10.8 "Augur escalation"). With no augur block a target
+	// behaves exactly as the frozen contract — an unplannable gap fails closed.
+	// The block redirects that dead-end to the Augur reasoning tier.
+	Augur *AugurPolicy `json:"augur,omitempty"`
+}
+
+// AugurPolicy is a target's parsed `augur` block (Contract #10 §10.8 "Augur
+// escalation"): which stuck-gap triggers escalate to AI reasoning, the
+// reasoning externalTask pattern to dispatch, and the optional adapter model
+// override. AutoApply is parsed and validated but NOT consumed — the autonomy
+// boundary stays human-in-the-loop until Andrew ratifies it (design Fire 3).
+type AugurPolicy struct {
+	Escalate  []string        `json:"escalate,omitempty"`
+	Pattern   string          `json:"pattern,omitempty"`
+	Model     string          `json:"model,omitempty"`
+	AutoApply *AugurAutoApply `json:"autoApply,omitempty"`
+}
+
+// AugurAutoApply is the OPTIONAL auto-apply allow-list (Contract #10 §10.8):
+// a proposal whose action ∈ Actions, confidence ≥ MinConfidence, and which
+// passes deterministic validation MAY skip the human gate. DESIGNED, not
+// enabled — parsed + validated fail-closed so a package cannot smuggle a
+// malformed block, but no escalation path acts on it yet.
+type AugurAutoApply struct {
+	Actions       []string `json:"actions,omitempty"`
+	MinConfidence float64  `json:"minConfidence,omitempty"`
 }
 
 // targetSource is Weaver's registry loader. It subscribes to Core KV under
@@ -370,6 +407,50 @@ func validateTarget(t *Target) error {
 		}
 		if _, reserved := ga.Params["expectedRevision"]; reserved {
 			return fmt.Errorf("gaps key %q: param \"expectedRevision\" is reserved (the engine writes the OCC revision-condition under that payload field)", col)
+		}
+	}
+	if err := validateAugurPolicy(t.Augur); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAugurPolicy runs the §10.8 "Augur escalation" structural validations
+// on a target's optional augur block. A nil block is the default (the target
+// fails closed on an unplannable gap) and is always valid. When present, the
+// block must be actionable: at least one escalate trigger (each ∈ {unplannable,
+// exhausted}) and a non-empty pattern. The pattern's resolution to an installed
+// meta.loomPattern whose body is an externalTask is NOT checked here — the
+// pattern registry is CDC-async, so (exactly like triggerLoom's pattern ref)
+// resolution is deferred to dispatch time. The optional autoApply block is
+// validated fail-closed (its actions ⊆ the §10.8 action table, minConfidence ∈
+// [0,1]) even though no escalation path consumes it yet — the autonomy boundary
+// stays human-in-the-loop until ratified, but a malformed block must never load.
+func validateAugurPolicy(a *AugurPolicy) error {
+	if a == nil {
+		return nil
+	}
+	if len(a.Escalate) == 0 {
+		return fmt.Errorf("augur block present but escalate is empty (omit the block to disable escalation, or list a trigger)")
+	}
+	for _, trig := range a.Escalate {
+		if trig != escalateUnplannable && trig != escalateExhausted {
+			return fmt.Errorf("augur.escalate value %q is not a known trigger (%s | %s)",
+				trig, escalateUnplannable, escalateExhausted)
+		}
+	}
+	if a.Pattern == "" {
+		return fmt.Errorf("augur block present but pattern is required (the reasoning externalTask pattern to dispatch)")
+	}
+	if a.AutoApply != nil {
+		for _, act := range a.AutoApply.Actions {
+			if act != actionTriggerLoom && act != actionAssignTask && act != actionDirectOp {
+				return fmt.Errorf("augur.autoApply.actions value %q is not a known action (%s | %s | %s)",
+					act, actionTriggerLoom, actionAssignTask, actionDirectOp)
+			}
+		}
+		if a.AutoApply.MinConfidence < 0 || a.AutoApply.MinConfidence > 1 {
+			return fmt.Errorf("augur.autoApply.minConfidence %v is out of range (must be in [0,1])", a.AutoApply.MinConfidence)
 		}
 	}
 	return nil

@@ -239,3 +239,101 @@ func TestValidateTarget_GapColumnCharsetAndReservedParam(t *testing.T) {
 		t.Fatalf("unexpected rejection reason for reserved param: %v", err)
 	}
 }
+
+func TestValidateTarget_AugurPolicy(t *testing.T) {
+	t.Parallel()
+
+	withAugur := func(a *AugurPolicy) *Target {
+		return &Target{
+			TargetID: "fixtureAugur",
+			Gaps:     map[string]GapAction{"missing_a": {Action: actionDirectOp, Operation: "FixA"}},
+			Augur:    a,
+		}
+	}
+
+	// A nil augur block is the frozen-contract default — always valid.
+	if err := validateTarget(withAugur(nil)); err != nil {
+		t.Fatalf("a target with no augur block must pass: %v", err)
+	}
+
+	// The minimal valid block: one known trigger + a pattern. autoApply absent.
+	if err := validateTarget(withAugur(&AugurPolicy{
+		Escalate: []string{escalateUnplannable}, Pattern: "augurReasoning",
+	})); err != nil {
+		t.Fatalf("a minimal valid augur block must pass: %v", err)
+	}
+
+	// A fully-populated valid block: both triggers, a model override, and a
+	// well-formed autoApply allow-list (parsed + validated even though no
+	// escalation path consumes it yet).
+	if err := validateTarget(withAugur(&AugurPolicy{
+		Escalate: []string{escalateUnplannable, escalateExhausted},
+		Pattern:  "augurReasoning",
+		Model:    "claude-opus-4-8",
+		AutoApply: &AugurAutoApply{
+			Actions: []string{actionTriggerLoom, actionDirectOp}, MinConfidence: 0.9,
+		},
+	})); err != nil {
+		t.Fatalf("a fully-populated valid augur block must pass: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		policy  *AugurPolicy
+		wantSub string
+	}{
+		{"empty escalate", &AugurPolicy{Pattern: "p"}, "escalate is empty"},
+		{"unknown trigger", &AugurPolicy{Escalate: []string{"someday"}, Pattern: "p"}, "not a known trigger"},
+		{"missing pattern", &AugurPolicy{Escalate: []string{escalateUnplannable}}, "pattern is required"},
+		{"bad autoApply action", &AugurPolicy{Escalate: []string{escalateUnplannable}, Pattern: "p",
+			AutoApply: &AugurAutoApply{Actions: []string{"DropTable"}}}, "not a known action"},
+		{"minConfidence too high", &AugurPolicy{Escalate: []string{escalateUnplannable}, Pattern: "p",
+			AutoApply: &AugurAutoApply{MinConfidence: 1.5}}, "out of range"},
+		{"minConfidence negative", &AugurPolicy{Escalate: []string{escalateUnplannable}, Pattern: "p",
+			AutoApply: &AugurAutoApply{MinConfidence: -0.1}}, "out of range"},
+	}
+	for _, tc := range cases {
+		err := validateTarget(withAugur(tc.policy))
+		if err == nil {
+			t.Fatalf("%s: must be rejected", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.wantSub) {
+			t.Fatalf("%s: unexpected rejection reason: %v", tc.name, err)
+		}
+	}
+}
+
+// TestRegistry_AugurBlockRoundTrips proves the augur block survives the
+// spec-aspect unwrap + JSON unmarshal the CDC source runs (the path a
+// pkgmgr-emitted body takes into a runtime Target).
+func TestRegistry_AugurBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+	s := newTestSource(t)
+	id := testNanoID(t)
+	spec := targetSpecFixture("augurRoundTrip")
+	spec["augur"] = map[string]any{
+		"escalate":  []any{"unplannable"},
+		"pattern":   "augurReasoning",
+		"model":     "claude-opus-4-8",
+		"autoApply": map[string]any{"actions": []any{"triggerLoom"}, "minConfidence": 0.8},
+	}
+	s.handle(vertexEvent(t, id, weaverTargetClass))
+	s.handle(specEvent(t, id, spec))
+
+	tgt, ok := s.target("augurRoundTrip")
+	if !ok {
+		t.Fatalf("target augurRoundTrip not registered after augur-bearing spec")
+	}
+	if tgt.Augur == nil {
+		t.Fatalf("augur block dropped on unmarshal")
+	}
+	if len(tgt.Augur.Escalate) != 1 || tgt.Augur.Escalate[0] != escalateUnplannable {
+		t.Fatalf("escalate not round-tripped: %+v", tgt.Augur.Escalate)
+	}
+	if tgt.Augur.Pattern != "augurReasoning" || tgt.Augur.Model != "claude-opus-4-8" {
+		t.Fatalf("pattern/model not round-tripped: %+v", tgt.Augur)
+	}
+	if tgt.Augur.AutoApply == nil || tgt.Augur.AutoApply.MinConfidence != 0.8 {
+		t.Fatalf("autoApply not round-tripped: %+v", tgt.Augur.AutoApply)
+	}
+}
