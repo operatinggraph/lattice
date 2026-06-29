@@ -137,9 +137,10 @@ and **disjoint lane files** (main), so concurrent commits rebase cleanly almost 
 weaver / loom / bridge / objmgr / Loupe) is forbidden if you didn't start it (shared by every fire + Andrew).
 **But the single binary you just rebuilt — `bin/<vertical>-app` (:7788 / :7799) or `bin/loupe` — is yours to
 cycle** to serve + verify new (`go:embed`'d) assets: reuse the running core stack, `pkill` the stale binary,
-rebuild, relaunch it in the **background**, verify in-browser, leave it running. (A changed lens / DDL won't
-hot-reload under a live stack — the **F-004** gap — so verify those via tests + the ephemeral-stack e2e
-targets.) A *stale running binary serves the OLD assets* — restarting your own binary is how you verify, and is
+rebuild, relaunch it in the **background**, verify in-browser, leave it running. (**F-004** SHIPPED in-place package refresh —
+`make reinstall-package` / `refresh-<vertical>` diff-apply an EDITED lens / DDL on the running stack with no
+teardown — but a newly-ADDED entity or any primordial/kernel-seed change still needs a fresh bootstrap and
+won't hot-reload, so verify those via tests + the ephemeral-stack e2e targets.) A *stale running binary serves the OLD assets* — restarting your own binary is how you verify, and is
 **not** `make down`.
 
 ## 8. Rollout

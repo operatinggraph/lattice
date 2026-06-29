@@ -76,9 +76,10 @@ you are building*:
    `bin/<vertical>-app` (:7788/:7799) / `bin/loupe` is YOURS to cycle:** **reuse the running core stack**, then
    `pkill -f "bin/<x>"` → `go build -o bin/<x> ./cmd/<x>` → **relaunch in the BACKGROUND** (with `NATS_URL` /
    `BOOTSTRAP_JSON_PATH`; `make run-<vertical>-app` is foreground/human-only) → verify → **leave the new binary
-   running**. If no core stack is up, `make up-<vertical>` and leave it up. (A changed **lens/DDL** won't
-   hot-reload under a live stack — the **F-004** gap — so verify those via unit tests + the ephemeral-stack e2e
-   targets, not the live stack.)
+   running**. If no core stack is up, `make up-<vertical>` and leave it up. (**F-004** SHIPPED in-place package refresh —
+   `make reinstall-package` / `refresh-<vertical>` diff-apply an EDITED **lens/DDL** on the running stack with no
+   teardown — but a newly-ADDED entity or any primordial/kernel-seed change still needs a fresh bootstrap and
+   won't hot-reload, so verify those via unit tests + the ephemeral-stack e2e targets, not the live stack.)
 4. **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`,
    `STRICT=1 go run ./scripts/lint-conventions.go`, and `go test ./cmd/loupe/...`.
 5. **Hand up** to Winston with a screenshot / proof + the gate results.

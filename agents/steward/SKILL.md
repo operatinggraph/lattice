@@ -202,10 +202,12 @@ serve + verify your new assets. Unattended: reuse the running core stack → `pk
 rebuild (`go build -o bin/<x> ./cmd/<x>`) → **relaunch it in the BACKGROUND** (with `NATS_URL` /
 `BOOTSTRAP_JSON_PATH`; assets are `go:embed`'d, so the rebuilt binary serves the new ones — `make
 run-<vertical>-app` is *foreground / human-only*, don't use it unattended) → verify → **leave the new
-binary running** so Andrew sees the latest. *(A changed lens / DDL is different: a same-version reinstall won't
-reload under a live stack — the **F-004** upgrade gap — so verify lens/package changes via unit tests + the
-ephemeral-stack e2e targets (`make verify-package-*`, `make test-*-convergence`, `make test-object-gc`), which
-spin their own stack and never touch the shared one.)*
+binary running** so Andrew sees the latest. *(A changed lens / DDL is different: **F-004** SHIPPED in-place
+package refresh — `make reinstall-package PKG=…` / `refresh-<vertical>` diff-apply an EDITED package on the
+running stack with no teardown — but a newly-ADDED entity or any primordial/kernel-seed change still needs a
+fresh bootstrap and won't hot-reload, so verify those via unit tests + the ephemeral-stack e2e targets
+(`make verify-package-*`, `make test-*-convergence`, `make test-object-gc`), which spin their own stack and
+never touch the shared one.)*
 
 **Verify headless-first; the browser is the OOM risk — one tab, closed when done.** Prove correctness
 **headlessly** (`go test`, `curl` the JSON, `node --check`) — that covers most fires and is what most of this
