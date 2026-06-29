@@ -16,11 +16,15 @@
 SHELL := /bin/bash
 NATS_URL ?= nats://localhost:4222
 BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
+# The loftspace-app read-boundary DSN (D1.3): a NON-superuser, SELECT-only role so
+# Postgres RLS is enforced (the lattice superuser would bypass it). See
+# provision-loftspace-role.
+LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:5432/lattice?sslmode=disable
 
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace reinstall-package verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role reinstall-package verify-package-service-location verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -241,15 +245,38 @@ up-full:
 ## Loupe is the operator/inspector. Logs: loftspace-app.log (+ the up-full logs).
 up-loftspace:
 	@$(MAKE) up-full
+	@$(MAKE) provision-loftspace-role
 	@$(MAKE) install-loftspace
 	@echo "==> Building loftspace-app binary..."
 	go build -o bin/loftspace-app ./cmd/loftspace-app
 	@echo "==> Killing any prior loftspace-app process..."
 	-pkill -f "bin/loftspace-app" 2>/dev/null || true
-	@echo "==> Starting loftspace-app in background..."
-	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loftspace-app >loftspace-app.log 2>&1 </dev/null &
+	@echo "==> Starting loftspace-app in background (D1.3 read boundary: non-superuser SELECT-only role + dev-auth)..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		LOFTSPACE_APP_PG_DSN="$(LOFTSPACE_APP_PG_DSN)" LOFTSPACE_APP_DEV_AUTH=1 \
+		./bin/loftspace-app >loftspace-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> LoftSpace ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · applicant app: http://127.0.0.1:7788"
+
+## provision-loftspace-role — Create the loftspace-app's Postgres read role: a
+## NON-superuser, SELECT-only role (D1.3 Fire 3). The app MUST NOT read as the
+## `lattice` superuser — superusers (and BYPASSRLS roles) skip RLS entirely, so the
+## protected lease-applications model would leak every actor's rows. SELECT-only
+## bounds the WRITE blast radius — a compromised app cannot forge a grant row or
+## mutate any read model (it can still read the dev DB's lens tables). Default
+## privileges FOR the lattice (Refractor) role cover tables created at later lens
+## activation; the explicit grant covers tables that already exist. Idempotent.
+provision-loftspace-role:
+	@echo "==> Provisioning loftspace-app non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='loftspace_app') THEN \
+		    CREATE ROLE loftspace_app LOGIN PASSWORD 'loftspace_app_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO loftspace_app;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO loftspace_app;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO loftspace_app;"
 
 ## up-clinic — One-command Clinic vertical: up-full → install-clinic → build +
 ## start clinic-app (:7799) in the background alongside Loupe (:7777). The clinic
@@ -390,11 +417,14 @@ refresh-loftspace:
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-domain
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
+	@$(MAKE) provision-loftspace-role
 	@echo "==> Rebuilding loftspace-app binary..."
 	go build -o bin/loftspace-app ./cmd/loftspace-app
 	@echo "==> Restarting loftspace-app..."
 	-pkill -f "bin/loftspace-app" 2>/dev/null || true
-	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loftspace-app >loftspace-app.log 2>&1 </dev/null &
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		LOFTSPACE_APP_PG_DSN="$(LOFTSPACE_APP_PG_DSN)" LOFTSPACE_APP_DEV_AUTH=1 \
+		./bin/loftspace-app >loftspace-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> LoftSpace refreshed (packages diff-applied + loftspace-app restarted). Applicant app: http://127.0.0.1:7788"
 

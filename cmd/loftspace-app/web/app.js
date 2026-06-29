@@ -115,6 +115,61 @@ async function api(path, opts) {
   return body;
 }
 
+// ---- Read-boundary token (D1.3 Fire 3) ----
+// The My Applications list is served from the PROTECTED Postgres read model as an
+// authenticated actor: RLS returns only the signed-in applicant's rows, so the
+// request must carry a verified JWT (there is no client-side applicant filter to
+// forge). In the trusted-tool DEMO posture the app mints a short-lived token for
+// the selected applicant via POST /api/dev-token (the explicit stand-in for the
+// deferred Gateway/IdP login); a production deployment wires a real IdP and the FE
+// would present that token instead. The token is cached per subject until shortly
+// before expiry.
+let readTokenCache = { subject: null, token: null, exp: 0 };
+
+// bareId extracts the bare identity NanoID (the RLS principal / JWT subject) from
+// a full vtx.identity.<id> key.
+function bareId(fullKey) {
+  const i = (fullKey || "").lastIndexOf(".");
+  return i >= 0 ? fullKey.slice(i + 1) : fullKey || "";
+}
+
+async function readToken() {
+  if (!state.applicant) return null;
+  const subject = bareId(state.applicant);
+  const now = Date.now();
+  if (readTokenCache.subject === subject && readTokenCache.token && now < readTokenCache.exp - 60000) {
+    return readTokenCache.token;
+  }
+  const res = await fetch("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) {
+    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
+  }
+  const body = await res.json();
+  readTokenCache = { subject, token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
+  return body.token;
+}
+
+// authedGet fetches a protected endpoint with the read-boundary Bearer token. On
+// a 401 (e.g. the app restarted with a fresh ephemeral dev-auth key, invalidating
+// a cached token) it clears the cache and retries once with a freshly minted token.
+async function authedGet(path) {
+  let token = await readToken();
+  if (!token) throw new Error("select an applicant identity to sign in");
+  try {
+    return await api(path, { headers: { Authorization: "Bearer " + token } });
+  } catch (e) {
+    if (!/HTTP 401|authentication required/i.test(e.message)) throw e;
+    readTokenCache = { subject: null, token: null, exp: 0 };
+    token = await readToken();
+    if (!token) throw e;
+    return api(path, { headers: { Authorization: "Bearer " + token } });
+  }
+}
+
 function toast(msg, kind, extra) {
   const t = $("#toast");
   t.className = "toast " + (kind || "");
@@ -653,8 +708,9 @@ async function loadApplications() {
   }
   $("#apps-summary").textContent = "loading…";
   try {
-    const data = await api("/api/applications?applicant=" + encodeURIComponent(state.applicant));
+    const data = await authedGet("/api/applications");
     state.applications = data.applications || [];
+    state.appsScope = data.scope || "";
   } catch (e) {
     grid.innerHTML = "";
     empty.hidden = false;
@@ -723,7 +779,96 @@ function shortKey(key) {
   return i >= 0 ? key.slice(i + 1) : key || "—";
 }
 
+// renderProtectedApplicationCard renders one application from the protected,
+// RLS-scoped read model: the unit header, a coarse decision/status banner, the
+// lease-terms panel (the scalars the protected model carries), the signed-lease
+// download, and Withdraw. The detailed per-step journey is omitted — it depends on
+// the Weaver convergence aggregate the protected model does not (yet) carry — and
+// the card says so once.
+function renderProtectedApplicationCard(row, highlight) {
+  const card = document.createElement("div");
+  card.className = "card app-card";
+  if (highlight && row.entityKey === highlight) card.classList.add("highlight");
+
+  const head = document.createElement("div");
+  head.className = "app-head";
+  const addr = document.createElement("div");
+  addr.className = "addr";
+  addr.textContent = row.unitAddress || (row.unitKey ? shortKey(row.unitKey) : "Application");
+  head.append(addr);
+  if (typeof row.unitRent === "number") {
+    const rent = document.createElement("div");
+    rent.className = "rent";
+    rent.innerHTML = `$${row.unitRent.toLocaleString()} <span>/ month</span>`;
+    head.append(rent);
+  }
+  const ref = document.createElement("div");
+  ref.className = "addr-sub mono";
+  ref.textContent = shortKey(row.entityKey);
+  head.append(ref);
+
+  const banner = document.createElement("div");
+  if (row.declined) {
+    banner.className = "decision declined";
+    banner.textContent =
+      row.landlordDeclined && row.declineReason
+        ? "Application declined: " + row.declineReason
+        : "Application declined.";
+  } else if (row.landlordApproved && row.unitStatus === "leased") {
+    banner.className = "decision ok";
+    banner.textContent = "Application complete — lease executed.";
+  } else if (row.landlordApproved) {
+    banner.className = "decision ok";
+    banner.textContent = "Approved — finalizing lease.";
+  } else if (row.signedAt) {
+    banner.className = "decision pending";
+    banner.textContent = "Signed — awaiting landlord decision.";
+  } else {
+    banner.className = "decision pending";
+    banner.textContent = "In review.";
+  }
+  card.append(head, banner);
+
+  const terms = renderLeaseTermsPanel(row);
+  if (terms) card.append(terms);
+
+  const note = document.createElement("div");
+  note.className = "addr-sub";
+  note.textContent = "Step-by-step tracking returns when the protected read model carries gap state.";
+  card.append(note);
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  if (row.signedAt) {
+    const lease = document.createElement("a");
+    lease.className = "ghost btn-link";
+    lease.textContent = "📄 Signed lease";
+    lease.href = "/api/lease-document?leaseAppKey=" + encodeURIComponent(row.entityKey);
+    lease.target = "_blank";
+    lease.rel = "noopener";
+    lease.title = "Signed on " + fmtDate(row.signedAt);
+    actions.append(lease);
+  }
+  if (!row.landlordApproved && row.unitKey) {
+    const wd = document.createElement("button");
+    wd.className = "ghost danger";
+    wd.textContent = "Withdraw application";
+    wd.addEventListener("click", () => withdrawApplication(row));
+    actions.append(wd);
+  }
+  if (actions.childElementCount > 0) card.append(actions);
+  return card;
+}
+
 function renderApplicationCard(row, highlight) {
+  // The PROTECTED Postgres read model (D1.3 Fire 3) carries the application's
+  // display scalars but not the Weaver-internal convergence aggregate (the per-gap
+  // stepper booleans, §10.2 — D1.5 rolls a protected gap model onto this pattern).
+  // In that scope render a compact, honest card instead of a stepper whose every
+  // step would falsely read "to do".
+  if (state.appsScope === "rls") {
+    return renderProtectedApplicationCard(row, highlight);
+  }
   const card = document.createElement("div");
   card.className = "card app-card";
   if (highlight && row.entityKey === highlight) card.classList.add("highlight");
@@ -1355,7 +1500,7 @@ async function loadDocsView() {
   // Refresh applications so the scope selector lists the applicant's current
   // applications; a failure is non-fatal (the identity scope still works).
   try {
-    const data = await api("/api/applications?applicant=" + encodeURIComponent(state.applicant));
+    const data = await authedGet("/api/applications");
     state.applications = data.applications || [];
   } catch (_) {
     /* keep whatever applications we already had */

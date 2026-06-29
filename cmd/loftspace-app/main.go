@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
@@ -105,12 +106,51 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
+	// The read boundary (D1.3 Fire 3) — the protected lease-applications Postgres
+	// read model + the JWT-authenticated reader. Both dependencies are optional at
+	// startup: a missing DSN or auth posture is NOT fatal (the UI still serves and
+	// /api/applications returns a clean error), but a configured DSN that cannot
+	// be parsed IS fatal (a misconfiguration the operator must fix).
+	var pgPool *pgxpool.Pool
+	if dsn := readModelDSN(); dsn != "" {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		pgPool = pool
+		// pgxpool.New is lazy (no connection yet); ping so a dead/unauthorized
+		// Postgres surfaces at boot rather than as a per-request 502. Non-fatal:
+		// the pool reconnects lazily if Postgres comes up later.
+		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := pool.Ping(pingCtx); err != nil {
+			logger.Warn("protected read model pool configured but unreachable at startup; /api/applications will 502 until Postgres is reachable",
+				"error", err)
+		} else {
+			logger.Info("protected read model pool configured")
+		}
+		cancel()
+	} else {
+		logger.Warn("LOFTSPACE_APP_PG_DSN / REFRACTOR_PG_DSN unset; /api/applications will report the protected read model is unconfigured")
+	}
+
+	authn, signer, err := setupReadAuth(logger, isLoopbackHost(hostOf(addr)))
+	if err != nil {
+		return err
+	}
+	if authn == nil {
+		logger.Warn("read boundary has no auth posture (set LOFTSPACE_APP_DEV_AUTH or LOFTSPACE_APP_JWT_PUBLIC_KEY); /api/applications will return 401")
+	}
+
 	srv := &server{
 		conn:        conn,
 		adminActor:  adminActor,
 		logger:      logger,
 		natsTimeout: natsRequestLimit,
 		uploadCap:   uploadCap,
+		pgPool:      pgPool,
+		authn:       authn,
+		devSigner:   signer,
 	}
 
 	mux := http.NewServeMux()
@@ -167,6 +207,16 @@ func warnIfNonLoopback(logger *slog.Logger, addr string) {
 		"addr", addr)
 }
 
+// hostOf returns the host portion of a listen address, or "" when it cannot be
+// parsed (treated as non-loopback by isLoopbackHost — fail safe).
+func hostOf(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
 // isLoopbackHost reports whether host is a loopback bind. An empty host (the
 // bare ":7788" form) means all interfaces and is NOT loopback.
 func isLoopbackHost(host string) bool {
@@ -187,4 +237,15 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// readModelDSN resolves the protected read model's Postgres DSN. It prefers the
+// app-specific LOFTSPACE_APP_PG_DSN (which may name a non-superuser, SELECT-only
+// role distinct from Refractor's projector role) and falls back to the shared
+// REFRACTOR_PG_DSN. Empty when neither is set.
+func readModelDSN() string {
+	if v := strings.TrimSpace(os.Getenv("LOFTSPACE_APP_PG_DSN")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("REFRACTOR_PG_DSN"))
 }

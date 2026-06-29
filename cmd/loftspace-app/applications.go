@@ -1,147 +1,154 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
-	"sort"
-	"strings"
-
-	"github.com/asolgan/lattice/internal/bootstrap"
 )
 
-// applicationKeyPrefix is the OutputKeyPattern prefix of the lease-signing
-// `leaseApplicationComplete` convergence lens (Contract #10 §10.2:
-// "leaseApplicationComplete.{actorSuffix}"). The My Applications tracker reads
-// these rows out of the shared weaver-targets read model — never Core KV (P5).
-const applicationKeyPrefix = "leaseApplicationComplete."
-
-// applicationRow is one projected `leaseApplicationComplete` row, the live state
-// of a single lease application. The gap booleans drive the FE stepper; the
-// inflight_ companion distinguishes "in progress" from "to do"; the declined_
-// companion marks a standing business rejection (a failed check that no retry has
-// superseded) so the FE shows "Declined" instead of a silent forever-"in review";
-// the unit columns are the informational "what am I leasing" header. applicantApproved
-// is true once the four APPLICANT gaps are all closed — but that means "qualified,
-// pending the landlord decision," not "done." The landlord decision is the human gate
-// the lease waits behind: landlordDecision carries the raw .decision value
-// (approved|declined|""), landlordApproved/landlordDeclined are its booleans, and
-// missing_decision marks a qualified application still awaiting that decision. The FE
-// reads landlordApproved (+ unitStatus leased) for "complete," missing_decision for
-// "awaiting landlord review," and declined (which now also covers a landlord decline)
-// for the terminal rejection banner.
-// maxretries_<g> is the lens's CONSTANT integer retry-budget cap baked onto every
-// row (a count, not a flag — it is an int, not a bool: typing it bool drops every
-// row on decode). unitRent is a pointer so an absent listing rent stays absent
-// rather than 0.
-type applicationRow struct {
+// protectedApplicationRow is one row of the PROTECTED lease-applications Postgres read
+// model (read_lease_applications, D1.3 Fire 2), returned by the authenticated
+// reader. RLS has already scoped the rows to the requesting actor before they
+// reach here, so there is no client-side filter.
+//
+// The protected model carries the application's display scalars (unit / terms /
+// signed / landlord-decision) but NOT the Weaver-internal convergence aggregate
+// (the missing_*/inflight_*/declined_* gap booleans) — that state is §10.2
+// Weaver-only today; D1.5 rolls a protected gap model onto this pattern. The FE
+// renders a coarse status from landlordDecision + signedAt until then. The
+// derived booleans below are computed from landlord_decision so the existing FE
+// keys keep meaning.
+//
+// Nullable columns (the OPTIONAL unit/terms/signature/decision walks) are
+// pointers so an absent value stays absent rather than rendering a misleading
+// zero/empty.
+type protectedApplicationRow struct {
 	EntityKey          string   `json:"entityKey"`
 	Applicant          string   `json:"applicant"`
-	Violating          bool     `json:"violating"`
-	ApplicantApproved  bool     `json:"applicantApproved"`
-	LandlordDecision   string   `json:"landlordDecision"`
+	UnitKey            *string  `json:"unitKey"`
+	UnitAddress        *string  `json:"unitAddress"`
+	UnitCity           *string  `json:"unitCity"`
+	UnitRegion         *string  `json:"unitRegion"`
+	UnitRent           *float64 `json:"unitRent"`
+	UnitCurrency       *string  `json:"unitCurrency"`
+	UnitStatus         *string  `json:"unitStatus"`
+	SignedAt           *string  `json:"signedAt"`
+	LandlordDecision   *string  `json:"landlordDecision"`
 	LandlordApproved   bool     `json:"landlordApproved"`
 	LandlordDeclined   bool     `json:"landlordDeclined"`
-	DeclineReason      string   `json:"declineReason"`
-	MissingDecision    bool     `json:"missing_decision"`
-	MissingOnboarding  bool     `json:"missing_onboarding"`
-	MissingBgcheck     bool     `json:"missing_bgcheck"`
-	MissingPayment     bool     `json:"missing_payment"`
-	MissingSignature   bool     `json:"missing_signature"`
-	InflightBgcheck    bool     `json:"inflight_bgcheck"`
-	InflightPayment    bool     `json:"inflight_payment"`
-	DeclinedBgcheck    bool     `json:"declined_bgcheck"`
-	DeclinedPayment    bool     `json:"declined_payment"`
 	Declined           bool     `json:"declined"`
-	MaxretriesBgcheck  int      `json:"maxretries_bgcheck"`
-	MaxretriesPayment  int      `json:"maxretries_payment"`
-	UnitKey            string   `json:"unitKey"`
-	UnitAddress        string   `json:"unitAddress"`
-	UnitCity           string   `json:"unitCity"`
-	UnitRegion         string   `json:"unitRegion"`
-	UnitRent           *float64 `json:"unitRent"`
-	UnitCurrency       string   `json:"unitCurrency"`
-	UnitBedrooms       *float64 `json:"unitBedrooms"`
-	UnitBathrooms      *float64 `json:"unitBathrooms"`
-	UnitLeaseTerm      *float64 `json:"unitLeaseTermMonths"`
-	UnitAvailableFrom  string   `json:"unitAvailableFrom"`
-	UnitStatus         string   `json:"unitStatus"`
-	TermsMoveInDate    string   `json:"termsMoveInDate"`
+	DeclineReason      *string  `json:"declineReason"`
+	TermsMoveInDate    *string  `json:"termsMoveInDate"`
 	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
 	TermsRequestedRent *float64 `json:"termsRequestedRent"`
-	SignedAt           string   `json:"signedAt"`
-	FreshUntil         string   `json:"freshUntil"`
-	// Applicant qualification profile — the DERIVED signals the landlord decides
-	// on (SetApplicantProfile; the raw financials are never projected). All
-	// pointers so an application with no .profile yet stays absent rather than
-	// rendering a misleading false/0.
-	ProfileSubmitted   bool  `json:"profileSubmitted"`
-	IncomeToRentMet    *bool `json:"incomeToRentMet"`
-	EmploymentVerified *bool `json:"employmentVerified"`
-	ReferenceCount     *int  `json:"referenceCount"`
-	HasCoApplicant     *bool `json:"hasCoApplicant"`
-	HasGuarantor       *bool `json:"hasGuarantor"`
-	// guarantorIncomeToRentMet — does the guarantor's own income cover 3× rent (the
-	// standard reason a guarantor backs a thin-income applicant). Null until a
-	// guarantor income is supplied against a unit with a known listing rent.
-	GuarantorIncomeToRentMet *bool `json:"guarantorIncomeToRentMet"`
 }
 
-// computeApplications assembles the My Applications rows from the
-// `leaseApplicationComplete` lens read model. It keeps only keys under the
-// convergence prefix, decodes each row, and — when applicant is non-empty —
-// keeps only that applicant's applications (the trusted-tool view scope; §2 of
-// the UX design). A row that fails to decode or carries no entityKey (a
-// tombstoned projection) is skipped. Rows sort by entityKey for a stable view.
-func computeApplications(keys []string, get kvGetter, applicant string) []applicationRow {
-	rows := make([]applicationRow, 0)
-	for _, k := range keys {
-		if !strings.HasPrefix(k, applicationKeyPrefix) {
-			continue
-		}
-		raw, ok := get(k)
-		if !ok {
-			continue
-		}
-		var row applicationRow
-		if json.Unmarshal(raw, &row) != nil || row.EntityKey == "" {
-			continue
-		}
-		if applicant != "" && row.Applicant != applicant {
-			continue
-		}
-		rows = append(rows, row)
+// selectApplicationsSQL reads the protected model. It carries NO auth WHERE — the
+// RLS policy (FORCE ROW LEVEL SECURITY + the set-membership policy) injects the
+// actor scope from the txn-local lattice.actor_id session variable. Rows sort by
+// app_id for a stable view.
+const selectApplicationsSQL = `
+SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
+       unit_rent, unit_currency, unit_status, signed_at, landlord_decision,
+       decline_reason, terms_move_in_date, terms_lease_term_months,
+       terms_requested_rent
+FROM read_lease_applications
+ORDER BY app_id`
+
+// queryApplications runs the protected read inside a per-request transaction with
+// a txn-local actor session variable. The transaction is the pooling-safety crux:
+// set_config(..., is_local=true) is discarded at COMMIT/ROLLBACK, so the pooled
+// connection returns clean and the next request inherits no actor (deny) until it
+// sets its own. The query itself carries no auth filter — RLS is the scope.
+//
+// actorID must be the bare identity NanoID (VerifiedActor.Subject), matching the
+// actor_id column in actor_read_grants and the §6.14 anchor representation.
+func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([]protectedApplicationRow, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].EntityKey < rows[j].EntityKey })
-	return rows
+	defer tx.Rollback(ctx)
+
+	// set_config(name, value, is_local=true) is the parameterized, injection-safe
+	// equivalent of `SET LOCAL` (which cannot take a bind parameter): is_local=true
+	// scopes the setting to this transaction.
+	if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actorID); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, selectApplicationsSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]protectedApplicationRow, 0)
+	for rows.Next() {
+		var row protectedApplicationRow
+		if err := rows.Scan(
+			&row.EntityKey, &row.Applicant, &row.UnitKey, &row.UnitAddress,
+			&row.UnitCity, &row.UnitRegion, &row.UnitRent, &row.UnitCurrency,
+			&row.UnitStatus, &row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
+			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
+		); err != nil {
+			return nil, err
+		}
+		deriveLandlordFlags(&row)
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// handleApplications implements GET /api/applications?applicant= — the My
-// Applications status tracker, served from the `leaseApplicationComplete` lens
-// rows in the shared weaver-targets read model (NOT Core KV; P5). applicant
-// scopes the rows to one applicant identity; omit it to list every application.
+// deriveLandlordFlags recomputes the landlord-decision booleans the FE keys on
+// from the raw landlord_decision string, since the protected model projects the
+// raw value (not the booleans the Weaver convergence lens derived).
+func deriveLandlordFlags(row *protectedApplicationRow) {
+	if row.LandlordDecision == nil {
+		return
+	}
+	switch *row.LandlordDecision {
+	case "approved":
+		row.LandlordApproved = true
+	case "declined":
+		row.LandlordDeclined = true
+		row.Declined = true
+	}
+}
+
+// handleApplications implements GET /api/applications — the My Applications
+// tracker, served from the PROTECTED lease-applications Postgres read model as an
+// AUTHENTICATED actor (D1.3 Fire 3). The actor comes ONLY from the verified JWT;
+// RLS returns only that actor's rows, so there is no client-supplied applicant
+// filter (a `?applicant=` query param does nothing — RLS keys off the verified
+// session var, not the param). The old weaver-targets KVListKeys + client-side
+// filter (the read-path leak, §10.2) is removed.
 func (s *server) handleApplications(w http.ResponseWriter, r *http.Request) {
-	conn, ok := s.requireConn(w)
-	if !ok {
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
+		return
+	}
+	if s.pgPool == nil {
+		s.writeError(w, http.StatusBadGateway,
+			"protected read model not configured (set LOFTSPACE_APP_PG_DSN and ensure Postgres + the lease-signing protected lens are up)")
 		return
 	}
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	bucket := bootstrap.WeaverTargetsBucket
-	keys, err := conn.KVListKeys(ctx, bucket)
+	rows, err := queryApplications(ctx, s.pgPool, actor.Subject)
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+bucket+": "+err.Error()+" (is lease-signing installed and the Refractor projecting?)")
+		// Log the detail (which can carry the failing SQL / schema names) and return
+		// a generic message — never echo a raw DB error to the client.
+		s.logger.Error("read protected lease applications", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected lease-applications model")
 		return
 	}
-	get := func(key string) ([]byte, bool) {
-		entry, err := conn.KVGet(ctx, bucket, key)
-		if err != nil {
-			return nil, false
-		}
-		return entry.Value, true
-	}
-	applicant := strings.TrimSpace(r.URL.Query().Get("applicant"))
-	rows := computeApplications(keys, get, applicant)
-	s.writeJSON(w, http.StatusOK, map[string]any{"applications": rows, "count": len(rows)})
+	s.writeJSON(w, http.StatusOK, map[string]any{"applications": rows, "count": len(rows), "scope": "rls"})
 }

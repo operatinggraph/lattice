@@ -10,6 +10,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -27,6 +31,21 @@ type server struct {
 	// uploadCap bounds a single document upload (OBJECTS_MAX_UPLOAD_BYTES); the
 	// substrate ObjectPut enforces it as the authoritative per-blob limit.
 	uploadCap int64
+
+	// The read boundary (D1.3 Fire 3). pgPool is the protected lease-applications
+	// read-model pool; nil when LOFTSPACE_APP_PG_DSN is unset → protected reads
+	// return a clean 502 rather than panicking. authn verifies the read actor's
+	// JWT; nil when no auth posture is configured → protected reads 401 (fail
+	// closed). devSigner mints demo tokens; nil unless LOFTSPACE_APP_DEV_AUTH.
+	pgPool    *pgxpool.Pool
+	authn     *auth.Authenticator
+	devSigner *devSigner
+}
+
+// pgxBeginner is the subset of *pgxpool.Pool the protected read uses — a single
+// Begin so the query path can be unit-tested with a fake transaction.
+type pgxBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -47,6 +66,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/objects", s.handleObjects)
 	mux.HandleFunc("/api/objects/", s.handleObjects)
 	mux.HandleFunc("/api/lease-document", s.handleLeaseDocument)
+	mux.HandleFunc("/api/dev-token", s.handleDevToken)
 }
 
 // writeJSON encodes v as JSON with the given status code.
