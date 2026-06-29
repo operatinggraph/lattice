@@ -110,7 +110,7 @@ vertices/aspects/links in Core KV; operational state lives outside (Health KV, W
 meta-vertices `vtx.meta.<NanoID>`. Relationships are **links**, not `data` refs; every reader filters
 tombstones. **Capability KV is a lens projection** (projection correctness = auth correctness).
 
-**Three design reflexes Andrew enforced (2026-06-28) — apply them before proposing a shape:**
+**Four design reflexes Andrew enforced (2026-06-28/29) — apply them before proposing a shape:**
 
 - **Core-KV reads default to *Processor-side*.** A write-path read belongs **inside the Processor** — the op
   declares its keys in `contextHint.reads`, the Processor JIT-hydrates them, and a DDL `kv.Read` resolves
@@ -139,6 +139,22 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   Two corollaries: prefer a **structural** fail-closed (e.g. Postgres `FORCE ROW LEVEL SECURITY` ⇒ missing
   policy = deny-all) over a *lint* that only catches it later; and a "source of truth" projection (a grant
   table) inherits the monotonic-seq guard — never guard-exempt it, or a stale replay resurrects a revoked grant.
+- **An identifier's REPRESENTATION follows its USE — and a missing primitive is debt to *add*, not a workaround
+  to *enshrine* in a contract.** Before standardizing how an identifier is represented, ask *what is it used
+  for **here**?* — an **opaque match token** (any unique value suffices), a **dereferenceable address** (must
+  be the full hydratable key), or a **display label**? Carry the **minimum the use needs**, and do **not**
+  borrow a precedent that served a *different* use. (Trialed 2026-06-29: I standardized a read-path RLS anchor
+  on the **full vertex key**, citing §6.5 `serviceAccess.service` for "consistency" — but §6.5's full key is a
+  write-path *read-hint address* the Processor dereferences, whereas an RLS anchor is an *opaque match token*
+  for which a **bare NanoID** suffices and the `vtx.<type>.` prefix is dead weight. Same word ("anchor"),
+  different jobs; the precedent didn't transfer.) And when a representation is *forced by a missing engine/
+  substrate primitive* ("the cypher engine has no string function, so the lens must project the full key"),
+  the right move is to **add the small primitive** (a targeted, fail-closed `nanoIdFromKey` — ~15 lines), not
+  to bake the workaround into a **frozen contract**. A missing primitive is platform debt to pay down, not a
+  constraint to contort the data model around. (Complements the red-flag reflex above: there the constraint
+  was *false*; here it was *real* but still the wrong thing to accommodate. And when the principal pushes back
+  on a representation, **re-derive from "what does it need"** — don't defend the prior shape with fresh
+  rationalizations, which is what I did for a round before the NanoID landed.)
 
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
