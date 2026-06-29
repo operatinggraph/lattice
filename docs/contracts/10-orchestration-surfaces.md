@@ -415,7 +415,11 @@ multiplexer**; the durable bucket + work-item shape land when lane-2 does.
 Message scheduling is a **platform-wide capability**, not Weaver-specific — same status as Health
 KV. It is bootstrapped as core infra and usable by any component (Weaver's temporal lane is the
 first consumer; the bridge's async-result lane — re-poll + give-up timeout for long-running external
-calls (§10.6) — is the second; op-vertex pruner / retention are future consumers).
+calls (§10.6) — is the second; the recurring **platform sweep** (`@every`, below) is the third).
+Op-vertex / tracker **retention** is **not** a schedule-lane consumer: idempotency trackers expire by
+**NATS per-key TTL** (Contract #4 §4.3) and the events-outbox aspect is **tombstoned by the outbox
+consumer on confirmed publish** — so the historically-anticipated "op-vertex pruner" (#49) has no
+residual class to prune and is retired (see `implementation-artifacts/recurring-schedules-and-op-vertex-pruner-design.md`).
 
 ```
 stream:            core-schedules             # platform-bootstrapped, AllowMsgSchedules: true
@@ -466,6 +470,36 @@ target subject:    schedule.<component>.fired.<token...>    # publisher-chosen, 
   redelivers), so the converted op carries a **deterministic `requestId`** derived from the schedule
   subject (`schedule.<domain>.<kind>.<token...>` + fire instant) → Contract #4's `vtx.op.<requestId>`
   tracker collapses redeliveries. A redelivered timer does **not** double-act.
+
+### Recurring schedules (`@every` / cron) — NATS 2.14 (the platform floor)
+
+Recurring schedules need NATS 2.14, which **is the platform floor** (`go.mod` / `docker-compose.yml` pin
+`nats:2.14`; Contract #4 §4.3) — so no version gate applies. `@at` (one-shot, available since NATS 2.12)
+and `@every <duration>` / 6-field cron (recurring, NATS 2.14) share the
+same lane, headers, subject discipline, and dedup rule. The recurring form differs only in lifecycle:
+
+- **The schedule message persists and re-fires indefinitely.** For `@every`/cron the scheduler keeps the
+  schedule message at its subject and republishes a fresh copy to the fired target on **every** interval
+  (a one-shot `@at` auto-purges after its single delivery). Per-subject rollup still holds
+  (`MaxMsgsPerSubject: 1`, `Nats-Rollup: sub` auto-applied) — **one active schedule per subject**.
+- **Re-publishing the same subject REPLACES the prior schedule** (retune the cadence); **cancellation** =
+  purge the schedule subject, delete the schedule message by sequence, or the atomic
+  `Nats-Schedule-Next: purge` conditional stop. There is no implicit expiry — a recurring schedule runs
+  until removed (a publisher that arms one owns stopping it; idempotent re-arm on restart is the norm).
+- **Per-occurrence dedup extends the one-shot rule verbatim.** Each occurrence's converted op carries a
+  **deterministic `requestId`** derived from the schedule subject **+ the occurrence instant** (the fired
+  message's stored timestamp, or `Nats-Schedule-Next`), so an at-least-once redelivery of the *same*
+  occurrence collapses on the Contract #4 tracker while a *new* occurrence is genuinely new work. A
+  fire that drives a level-reconcile **handler** (not an op — e.g. a recurring sweep) is idempotent by
+  the handler's own construction and needs no tracker.
+- **The fired copy carries `Nats-Scheduler`** (the schedule subject that produced it) **and
+  `Nats-Schedule-Next`** (the next-invocation instant). Past-due `@every` ticks after a restart fire
+  immediately (catch-up); the scheduler coalesces overdue ticks rather than replaying each missed one.
+- **First recurring consumer:** the platform recurring **sweep** — Weaver's reconciler sweep runs from a
+  durable `@every` schedule (`schedule.weaver.sweep` → `schedule.weaver.sweep.fired`) rather than an
+  in-process ticker, giving single-fire-across-replicas + an operator-visible, retunable cadence (the
+  #47 "replaces cron" intent). Design:
+  `implementation-artifacts/recurring-schedules-and-op-vertex-pruner-design.md`.
 
 ---
 

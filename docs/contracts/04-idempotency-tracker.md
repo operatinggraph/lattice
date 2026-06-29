@@ -51,7 +51,7 @@ The tracker uses the universal envelope (Contract #1 §1.3). Provenance fields a
 
 ### 4.3 Retention via NATS Per-Key TTL
 
-Trackers are written with a **24-hour per-key TTL** at commit step 8, using NATS JetStream's per-message TTL feature (ADR-48, introduced in NATS 2.11; Lattice's minimum platform is NATS 2.12 for atomic batch support, 2.14 recommended). After 24 hours, NATS publishes a `PURGE` marker for the tracker's key with header `Nats-Marker-Reason: MaxAge`, which Refractor and other CDC consumers observe as an explicit expiry event.
+Trackers are written with a **24-hour per-key TTL** at commit step 8, using NATS JetStream's per-message TTL feature (ADR-48, introduced in NATS 2.11; Lattice's platform floor is **NATS 2.14** — pinned in `go.mod` / `docker-compose.yml` — which subsumes per-key TTL (2.11+), atomic batch (2.12+), and recurring `@every`/cron message schedules (2.14+; Contract #10 §10.4)). After 24 hours, NATS publishes a `PURGE` marker for the tracker's key with header `Nats-Marker-Reason: MaxAge`, which Refractor and other CDC consumers observe as an explicit expiry event.
 
 **Configuration requirements:**
 - The Core KV bucket must be provisioned with `allow_msg_ttl: true` (substrate responsibility at bucket creation — Story 1.4 acceptance criterion)

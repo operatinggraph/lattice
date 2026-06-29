@@ -1,6 +1,6 @@
 # Design — Native `@every` recurring schedules (the temporal scheduler / cron-killer, #47) + the formal retirement of the op-vertex pruner (#49)
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-06-28 (Winston, lattice-designer) · Backlog row: *Refinements & ops → "op-vertex pruner + `@every` schedules"* (`planning-artifacts/backlog/lattice.md`).
+**Status: ✅ Andrew-ratified (2026-06-28)** · Designer fire 2026-06-28 (Winston, lattice-designer) · Backlog row: *Refinements & ops → "op-vertex pruner + `@every` schedules"* (`planning-artifacts/backlog/lattice.md`). **Ready for the Lattice Steward.**
 
 ---
 
@@ -8,15 +8,15 @@
 
 **What it does, in two lines.** Promotes the temporal lane from one-shot `@at` to NATS-native **`@every` recurring schedules** — the durable, operator-visible, multi-instance-single-fire "cron" the platform's vision (brainstorm #47, "replaces cron") has always wanted — and migrates the platform's only real in-process cron (the Weaver reconciler sweep, today a `time.Ticker`) onto it. In the same breath it **formally retires the op-vertex pruner (#49)**: grounding shows NATS per-key TTL (Contract #4 §4.3) + the outbox-tombstone already GC every op-vertex class, so the pruner has no work to do — the long-standing `weaver/pruner/` slot in the architecture tree is vestigial.
 
-**Two decisions for your call** (both designed-through below, not left open):
+**Ratification outcome (Andrew, 2026-06-28):**
 
-1. **NATS version floor: 2.12 → 2.14 (recommend: bump it).** `@at` works on 2.12; **`@every`/cron require NATS 2.14** (vendor-confirmed — see §2.3). Contract #4 §4.3 already calls 2.14 "recommended." I recommend making 2.14 the **hard floor** (it's a single, Andrew-controlled deployment; 2.14 also unlocks cron expressions + timezones for free). The alternative — keep `@every` an opt-in capability gated on 2.14 with the self-rescheduling `@at` chain as the 2.12 fallback — bifurcates the temporal lane for no real benefit on a controlled deployment. **This is the one genuine fork.** My recommendation: bump to 2.14.
+1. **NATS version — NO fork: the platform is *already* on NATS 2.14.** The draft framed a "2.12 → 2.14 floor bump." Andrew corrected the premise: the implementation already pins **NATS 2.14** (`go.mod` `github.com/nats-io/nats-server/v2 v2.14.0`; `docker-compose.yml` `nats:2.14-alpine`). `@every`/cron are supported on the running platform **today** — there is nothing to bump. The "2.12 floor" was outdated documentation, now **fixed**: Contract #4 §4.3 corrected to state the **NATS 2.14 platform floor** (committed with this ratification); the §10.4 heading relaxed from "requires 2.14" (a gate) to "2.14, the platform floor — no version gate." (Two `lattice-architecture.md` "atomic batch via NATS 2.12" mentions are planning-owned and *not* stale-as-floor — flagged to the planning lead, §6.7.)
 
-2. **Frozen-contract edit — Contract #10 §10.4, staged UNCOMMITTED in `main`.** §10.4 already *reserves* `@every` ("Phase 2 uses @at one-shot") and already *names* "op-vertex pruner / retention" as a future schedule-lane consumer (line 418). My edit (a) lifts `@every` from reserved to **specified** (recurrence persists + re-fires; cancellation = replace/purge the schedule subject or `Nats-Schedule-Next: purge`; the per-occurrence deterministic-`requestId` rule extends the existing `@at` dedup rule; 2.14 floor), and (b) replaces the stale "op-vertex pruner / retention are future consumers" clause with the reconciled reality. **The diff is the proposal** — review it in the working tree; I have **not** staged it. ⚠️ Note `docs/contracts/10-orchestration-surfaces.md` already carries unrelated uncommitted edits from other fires — §11 below lists exactly which lines are *mine* so you can disentangle.
+2. **Frozen-contract edit — Contract #10 §10.4 + the §4.3 fix — ✅ ratified + committed with this ratification.** §10.4 already *reserved* `@every` and *named* "op-vertex pruner / retention" as a future consumer. The edit (a) lifts `@every` from reserved to **specified** (recurrence persists + re-fires; cancellation = replace/purge the schedule subject or `Nats-Schedule-Next: purge`; the per-occurrence deterministic-`requestId` rule extends the existing `@at` dedup rule), and (b) replaces the stale "op-vertex pruner / retention are future consumers" clause with the NATS-TTL reconciliation. The §4.3 fix records the 2.14 floor.
 
-**No architectural fork** beyond the version-floor call. No Gateway / read-path-auth / Vault / multi-cell entanglement. The lane is operational infra (P1), not Core KV.
+**No architectural fork.** No Gateway / read-path-auth / Vault / multi-cell entanglement. The lane is operational infra (P1), not Core KV.
 
-**The Lattice Steward builds this only after you mark it ✅ Andrew-ratified.**
+**✅ Andrew-ratified — ready for the Lattice Steward.**
 
 ---
 
