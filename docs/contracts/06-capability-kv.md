@@ -525,32 +525,51 @@ owns; the union across slices is the actor's full readable set.
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `readableAnchors` | yes (may be empty `[]`) | The resource anchors **this lens** grants. Each entry: `anchorType` (vertex type), `anchorId` (bare NanoID), `via` (justifying link path — the read analog of §6.5 `resolvedVia`, for auditability). The actor's effective set is the **union over all `cap-read.*.<actor>` slices**. |
+| `readableAnchors` | yes (may be empty `[]`) | The resource anchors **this lens** grants. Each entry: `anchorType` (vertex type — audit/convenience only, see note), `anchorId` (the resource's **bare NanoID**, extracted from its vertex key via `nanoIdFromKey` — see the representation note below), `via` (justifying link path — the read analog of §6.5 `resolvedVia`, for auditability). The actor's effective set is the **union over all `cap-read.*.<actor>` slices**. |
 | `key`/`actor`/`version`/`projectedAt`/`projectionSeq` | yes | As §6.3 (read-path mirror). |
+
+> **Representation note (`anchorId`) — the anchor is an opaque match token = the bare NanoID (Andrew,
+> 2026-06-29).** An RLS anchor is an **opaque membership token**, *not* a dereferenceable address: enforcement
+> only asks "is this row's anchor ∈ the actor's granted anchors?" — it never reads the vertex, never branches
+> on type. So `anchorId` is the resource's **bare NanoID** (`Lk2Pn6mQrtwzKbcXvP3T`), which is **globally
+> unique by construction** and therefore a sufficient token; **`anchor_type` plays no role in the match.**
+> (Contrast §6.5 `serviceAccess.service`/`resolvedVia`, which carry the **full vertex key** `vtx.<type>.<id>`
+> *because there it is a write-path **read-hint address** the Processor dereferences/hydrates by* — a
+> genuinely different use; the two are not the same kind of thing and must not be conflated.) The bare NanoID
+> is produced by **`nanoIdFromKey(<vertexKey>)`** — a targeted, fail-closed cypher function added to the
+> auth-plane engine to strip the `vtx.<type>.` prefix (the engine had no string function, which is why **D1.1
+> shipped the full key as a pre-function interim** — its lens is revised to `nanoIdFromKey` once the function
+> lands; see the Lattice-lane prerequisite). **The membership join matches NanoID-to-NanoID** — both
+> `actor_read_grants.anchor_id` and the read-model row's `authzAnchors` carry bare NanoIDs; the policy compares
+> them directly with **no `anchor_type` concatenation**. `anchorType` is retained on the NATS-KV
+> `readableAnchors` doc as **audit-only metadata** (which vertex type a grant is for) — never in the match.
 
 **The merge point — the Postgres `actor_read_grants` table (Path A).** Every read-grant lens **also**
 projects to a shared table whose primary key carries the **contributing lens** so producers stay disjoint:
 ```
-actor_read_grants(actor_id, anchor_type, anchor_id, grant_source, projection_seq)   PRIMARY KEY (actor_id, anchor_type, anchor_id, grant_source)
+actor_read_grants(actor_id, anchor_id, grant_source, projection_seq)   PRIMARY KEY (actor_id, anchor_id, grant_source)
 ```
-`grant_source` (the lens canonical name, e.g. `cap-read.residence`) makes each lens **own its rows** — a
-revoke from one package deletes only that package's rows, never another's, exactly like the write-side
-disjoint key prefixes. `projection_seq` carries the §6.2/§6.8 monotonic guard (upsert/delete applies only
-when incoming seq > stored, per row key) so a stale CDC replay cannot resurrect a revoked grant. RLS then
-**unions across all sources natively** via the set-membership policy (a row visible if **any** of its
-`authz_anchors` is granted): `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT
-anchor_type||'.'||anchor_id FROM actor_read_grants WHERE actor_id = current_setting('lattice.actor_id'))))`.
-No app-side multi-key union; the table *is* the merge.
+`anchor_id` is the resource's **bare NanoID** (the opaque match token; no `anchor_type` column — RLS never
+matches on type). `grant_source` (the lens canonical name, e.g. `cap-read.residence`) makes each lens **own
+its rows** — a revoke from one package deletes only that package's rows, never another's, exactly like the
+write-side disjoint key prefixes. `projection_seq` carries the §6.2/§6.8 monotonic guard (upsert/delete
+applies only when incoming seq > stored, per row key) so a stale CDC replay cannot resurrect a revoked grant.
+RLS then **unions across all sources natively** via the set-membership policy (a row visible if **any** of its
+`authz_anchors` NanoIDs is granted): `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT
+anchor_id FROM actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true))))`. No app-side
+multi-key union; the table *is* the merge.
 
 **Authz-anchor convention (protected-by-default; `authzAnchors` is a set).** A business read-model target
 is **protected by default** — readable only through the authz boundary — **unless it explicitly declares
 `public: true`** (an auditable opt-out for genuinely public/operational models, e.g. a public listings
-index). A protected target projects an **`authzAnchors`** column: a **set** of `<anchorType>.<anchorId>`
-values (e.g. `["unit.Lk2Pn6mQrtwzKbcXvP3T", "building.Qz7Rp2mN…"]`). **A row is readable if the actor holds
-a grant for ANY anchor in its set.** The set admits **coarse / hierarchical** grants without per-leaf
-materialization: a building manager holds one `building.<id>` grant, and each unit-scoped row carries both
-its leaf anchor (`unit.<id>`) **and** its container anchors (`building.<id>`); a provider holds the
-`patient.<id>` anchors they cover, and each appointment row carries `patient.<id>`. A target that is
+index). A protected target projects an **`authzAnchors`** column: a **set** of **bare NanoIDs** (e.g.
+`["Lk2Pn6mQrtwzKbcXvP3T", "Qz7Rp2mN…"]`, extracted via `nanoIdFromKey`) — the same opaque-token
+representation as `actor_read_grants.anchor_id` (the join is NanoID-to-NanoID, § representation note).
+**A row is readable if the actor holds a grant for ANY anchor in its set.** The set admits **coarse /
+hierarchical** grants without per-leaf materialization: a building manager holds one grant for the
+**building's** NanoID, and each unit-scoped row carries both its leaf anchor (the **unit's** NanoID) **and**
+its container anchors (the **building's** NanoID); a provider holds the **patient** NanoIDs they cover, and
+each appointment row carries its **patient's** NanoID. A target that is
 **neither** `public: true` **nor** projects a resolvable `authzAnchors` **fails closed** (activation/lint
 error; on Postgres, deny-all — see Enforcement) — **omission denies, never silently serves**, mirroring
 §6.8. The conventions-lint audits only the small explicit-`public: true` set; it deliberately cannot infer
@@ -563,16 +582,16 @@ boundary authenticates the reader (D1 increment 1: a signed JWT keyed to the Ide
 `actor_id`; checked against the token-revocation KV — brainstorm #118/#111), then:
 - **Protected data → Postgres-RLS (the enforcement boundary).** The business read model lives in a Postgres
   table with an `authz_anchors` column (a set — e.g. `text[]`) + a **set-membership** RLS policy:
-  `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT anchor_type||'.'||anchor_id FROM
-  actor_read_grants WHERE actor_id = current_setting('lattice.actor_id'))))` (a row is visible if **any** of
-  its anchors is granted). The boundary sets `SET LOCAL lattice.actor_id` per session; enforcement is
+  `USING (EXISTS (SELECT 1 FROM unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM
+  actor_read_grants WHERE actor_id = current_setting('lattice.actor_id', true))))` (a row is visible if **any**
+  of its anchors — bare NanoIDs — is granted). The boundary sets `SET LOCAL lattice.actor_id` per session; enforcement is
   DB-native and **unbypassable by app code**. **Every protected table is created with `ENABLE ROW LEVEL
   SECURITY` AND `FORCE ROW LEVEL SECURITY`**, so a table whose policy was never generated **denies all rows**
   (a fail-closed outage, never a silent leak). This is the destination for **all** protected read models.
 - **`actor_read_grants` is `projectionSeq`-guarded (the read-auth source of truth).** Unlike business
   read-model tables (which may be last-writer-wins — the Postgres adapter is guard-exempt there), the grant
   table inherits the §6.2/§6.8 **monotonic-seq guarantee**: an upsert/delete applies only when its incoming
-  `projectionSeq` exceeds the stored one (per `(actor_id, anchor_type, anchor_id, grant_source)`), so a stale
+  `projectionSeq` exceeds the stored one (per `(actor_id, anchor_id, grant_source)`), so a stale
   CDC replay **cannot resurrect a revoked grant**. Each lens's projection upserts/tombstones **only its own
   `grant_source` rows** (so revoking one source never wipes another's coexisting grant), and a package
   uninstall retracts its `grant_source` rows via the standard lens-eviction.
