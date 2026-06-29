@@ -224,6 +224,55 @@ decryption seam. Plaintext is produced only by the Processor (for Starlark) and 
 Vault-decrypt consumer (a trusted tool, or the read-path-authorized Secure Lens). `ShredIdentityKey`
 destroys the DEK, after which no consumer can decrypt.
 
+### 3.11 Sensitive-object (blob) encryption at rest
+
+The blob analog of §3.10. An object (the off-graph blob plane, Contract #7 §7.2 — `vtx.object.<oid>` +
+`.content` aspect + bytes in `core-objects`) created with `sensitive: true` has its **bytes** stored as
+**ciphertext**, encrypted client-side before they are streamed onto the §7.2 bytes plane. This makes a
+document-PII blob (a lease PDF, an ID scan, a signature image) crypto-shreddable on the same immutable
+ledger and under the **same per-identity key** as §3.10's aspect-PII.
+
+**Envelope encryption (bulk bytes never reach the Vault).** A `sensitive` object is encrypted with a random
+per-object Content Encryption Key (CEK) — `ciphertext = AES-256-GCM(CEK, nonce, plaintext)` — and the
+**CEK**, not the bytes, is wrapped under the governing identity's §3.10 DEK
+(`wrappedCEK = Vault.WrapKey(governingIdentity, CEK)`). The Vault handles only the small CEK; the bulk
+bytes never leave the uploader. There is **no new key hierarchy**: the §3.10 per-identity DEK (referenced
+from `vtx.identity.<id>.piiKey`, the *wrapped* DEK, never key material) is the only secret, and
+`ShredIdentityKey` already destroys it.
+
+**Storage format.** The `.content` aspect (written through the Processor by `AttachObject`, P2) carries the
+envelope alongside the existing reference metadata:
+
+```
+vtx.object.<oid>.content = {
+    digest, size, contentType, storeName,                          # digest = PLAINTEXT digest (post-decrypt integrity)
+    sensitive:  true,
+    encryption: { algo: "AES-256-GCM", nonce, wrappedCEK, keyId }  # keyId = governing identity's piiKey reference
+}
+```
+
+`wrappedCEK`/`nonce`/`keyId` are safe in plaintext in Core KV — a wrapped CEK is inert without the identity
+DEK, exactly as §3.10's `{ ct, nonce, keyId }` envelope is.
+
+**Content-addressing.** A `sensitive` object is **not** cross-identity content-addressed: its oid is
+identity-salted — `oid = sha256NanoID("object:" + keyId + ":" + digest)` — so identical plaintext from two
+identities yields **distinct** vertices (no shared-ownership linkage; no cross-identity PII linkage leak),
+while a same-identity re-upload still dedups (deterministic oid, same governing identity). A non-sensitive
+object is unchanged: `oid = sha256NanoID("object:" + digest)`, content-addressed, plaintext bytes.
+
+**Readers (opt-in decrypt; ciphertext-safe by default).** A direct bytes reader observes ciphertext; the
+default object-serve path streams ciphertext (its existing `octet-stream`/`attachment` anti-XSS posture), so
+a `sensitive` object is unreadable without an explicit decrypt — no read-path authorization required for the
+default path (the §3.10 posture). Plaintext is produced only by an authorized Vault-unwrap consumer (a
+trusted tool, or the read-path-authorized Secure Lens): `CEK = Vault.UnwrapKey(keyId, wrappedCEK)`, then
+local AES-256-GCM decrypt with GCM-tag **and** plaintext-`digest` verification.
+
+**Erasure.** `ShredIdentityKey(identity)` destroys the §3.10 DEK; thereafter no `wrappedCEK` wrapped under
+it can be unwrapped, so every one of that identity's `sensitive` blobs — in live `core-objects` and in any
+backup — is permanent gibberish. The guarantee is key-destruction, not byte-deletion: a shredded blob is
+inert ciphertext, reclaimed by the ordinary ownership GC (`objectLiveness` → `TombstoneObject` →
+`object-store-manager`) when its ownership reaches zero — there is no blob-specific shred path.
+
 ## Revision history
 
 | Date | Change |

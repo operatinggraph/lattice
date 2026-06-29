@@ -1,6 +1,6 @@
 # Crypto-shred for object-store blobs — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-06-28).
+**Status: ✅ Andrew-ratified (2026-06-28).** Author: Winston (Designer fire, 2026-06-28). Build-sequenced behind the ratified Vault feature (A+B), which is behind D1 — designed-not-built, on the shelf for the Lattice Steward. Contract #3 §3.11 committed with the ratification.
 
 > Backlog row: `planning-artifacts/backlog/lattice.md` → *Privacy / Vault → [Object Store] Crypto-shred
 > for object-store blobs* (★★, M). Filed 2026-06-27 by the prior Designer fire (Vault re-review §2.6) as
