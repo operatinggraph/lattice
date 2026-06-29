@@ -282,11 +282,6 @@ func sha256NanoID(s string) string {
 // activates the lens from it (cypherRule + targetConfig + engine +
 // projectionKind + the §6.13 Output descriptor).
 func lensSpecBody(lensID string, l LensSpec) map[string]any {
-	keyField := l.IntoKey
-	if len(keyField) == 0 {
-		keyField = []string{"key"}
-	}
-
 	var targetType string
 	var targetConfig map[string]any
 	switch l.Adapter {
@@ -295,13 +290,40 @@ func lensSpecBody(lensID string, l LensSpec) map[string]any {
 		targetConfig = map[string]any{
 			"dsn":   l.DSN,
 			"table": l.Table,
-			"key":   keyField,
+		}
+		// A GrantTable lens with no declared key omits it so Refractor applies
+		// the platform grant composite (actor_id, anchor_id, grant_source);
+		// every other postgres lens defaults to ["key"].
+		if len(l.IntoKey) > 0 {
+			targetConfig["key"] = l.IntoKey
+		} else if !l.GrantTable {
+			targetConfig["key"] = []string{"key"}
 		}
 		if l.QueryTimeout != "" {
 			targetConfig["queryTimeout"] = l.QueryTimeout
 		}
+		if l.Protected {
+			targetConfig["protected"] = true
+		}
+		if l.Public {
+			targetConfig["public"] = true
+		}
+		if l.GrantTable {
+			targetConfig["grantTable"] = true
+		}
+		if len(l.Columns) > 0 {
+			cols := make([]map[string]any, len(l.Columns))
+			for i, c := range l.Columns {
+				cols[i] = map[string]any{"name": c.Name, "type": c.Type}
+			}
+			targetConfig["columns"] = cols
+		}
 	default: // "nats-kv" or empty
 		targetType = "nats_kv"
+		keyField := l.IntoKey
+		if len(keyField) == 0 {
+			keyField = []string{"key"}
+		}
 		targetConfig = map[string]any{
 			"bucket": l.Bucket,
 			"key":    keyField,

@@ -113,6 +113,126 @@ func TestLensSpecBody_IntoKey_DefaultsToKey(t *testing.T) {
 	}
 }
 
+func TestLensSpecBody_Postgres_Protected(t *testing.T) {
+	body := lensSpecBody("lens-id-p", LensSpec{
+		CanonicalName: "leaseApplications",
+		Adapter:       "postgres",
+		Table:         "read_lease_applications",
+		Engine:        "full",
+		Spec:          "MATCH (n) RETURN n.key AS key",
+		IntoKey:       []string{"key"},
+		Protected:     true,
+		Columns: []PostgresColumn{
+			{Name: "status", Type: "text"},
+			{Name: "submitted_at", Type: "bigint"},
+		},
+	})
+	cfg := body["targetConfig"].(map[string]any)
+	if cfg["protected"] != true {
+		t.Errorf("targetConfig.protected: want true, got %v", cfg["protected"])
+	}
+	if _, has := cfg["public"]; has {
+		t.Error("public should be absent when not set")
+	}
+	if _, has := cfg["grantTable"]; has {
+		t.Error("grantTable should be absent when not set")
+	}
+	cols, ok := cfg["columns"].([]map[string]any)
+	if !ok {
+		t.Fatalf("columns: not []map[string]any, got %T", cfg["columns"])
+	}
+	if len(cols) != 2 || cols[0]["name"] != "status" || cols[0]["type"] != "text" ||
+		cols[1]["name"] != "submitted_at" || cols[1]["type"] != "bigint" {
+		t.Errorf("columns: unexpected shape %v", cols)
+	}
+	// An empty DSN is serialized verbatim; Refractor resolves it at activation.
+	if cfg["dsn"] != "" {
+		t.Errorf("targetConfig.dsn: want empty, got %v", cfg["dsn"])
+	}
+}
+
+func TestLensSpecBody_Postgres_Public(t *testing.T) {
+	body := lensSpecBody("lens-id-pub", LensSpec{
+		CanonicalName: "publicListings",
+		Adapter:       "postgres",
+		Table:         "listings_view",
+		Spec:          "MATCH (n) RETURN n.key AS key",
+		Public:        true,
+	})
+	cfg := body["targetConfig"].(map[string]any)
+	if cfg["public"] != true {
+		t.Errorf("targetConfig.public: want true, got %v", cfg["public"])
+	}
+	if _, has := cfg["protected"]; has {
+		t.Error("protected should be absent for a public lens")
+	}
+}
+
+// A GrantTable lens with no declared key omits `key` so Refractor applies the
+// platform grant composite (actor_id, anchor_id, grant_source); its table also
+// defaults at activation, so it serializes an empty table.
+func TestLensSpecBody_Postgres_GrantTable_OmitsKeyDefault(t *testing.T) {
+	body := lensSpecBody("lens-id-g", LensSpec{
+		CanonicalName: "cap-read.residence",
+		Adapter:       "postgres",
+		Spec:          "MATCH (n) RETURN n.actor_id AS actor_id",
+		GrantTable:    true,
+	})
+	cfg := body["targetConfig"].(map[string]any)
+	if cfg["grantTable"] != true {
+		t.Errorf("targetConfig.grantTable: want true, got %v", cfg["grantTable"])
+	}
+	if _, has := cfg["key"]; has {
+		t.Errorf("key should be omitted for a grant lens (platform defaults the composite), got %v", cfg["key"])
+	}
+}
+
+// A GrantTable lens may still pin an explicit key.
+func TestLensSpecBody_Postgres_GrantTable_ExplicitKeyKept(t *testing.T) {
+	body := lensSpecBody("lens-id-g2", LensSpec{
+		CanonicalName: "cap-read.residence",
+		Adapter:       "postgres",
+		Spec:          "MATCH (n) RETURN n.actor_id AS actor_id",
+		GrantTable:    true,
+		IntoKey:       []string{"actor_id", "anchor_id", "grant_source"},
+	})
+	cfg := body["targetConfig"].(map[string]any)
+	keys, ok := cfg["key"].([]string)
+	if !ok || len(keys) != 3 {
+		t.Fatalf("key: want explicit 3-col key, got %v (%T)", cfg["key"], cfg["key"])
+	}
+}
+
+func TestValidateLensReadPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		lens    LensSpec
+		wantErr bool
+	}{
+		{"protected postgres ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true}, false},
+		{"public postgres ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Public: true}, false},
+		{"grant postgres ok", LensSpec{CanonicalName: "L", Adapter: "postgres", GrantTable: true}, false},
+		{"plain postgres ok", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t"}, false},
+		{"protected on nats-kv rejected", LensSpec{CanonicalName: "L", Adapter: "nats-kv", Bucket: "b", Protected: true}, true},
+		{"grant on default adapter rejected", LensSpec{CanonicalName: "L", Adapter: "", Bucket: "b", GrantTable: true}, true},
+		{"columns on nats-kv rejected", LensSpec{CanonicalName: "L", Adapter: "nats-kv", Bucket: "b", Columns: []PostgresColumn{{Name: "x", Type: "text"}}}, true},
+		{"protected and public rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true, Public: true}, true},
+		{"protected and grant rejected", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t", Protected: true, GrantTable: true}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def := Definition{Name: "pkg", Version: "0.1.0", Lenses: []LensSpec{tc.lens}}
+			err := def.validateLensReadPath()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
 // minimalDDL returns a DDLSpec satisfying buildInstallBatch's self-description
 // gate, with the given canonicalName/class/sensitivity.
 func minimalDDL(name, class string, sensitive bool) DDLSpec {

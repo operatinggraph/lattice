@@ -161,3 +161,50 @@ func TestTranslateSpec_NonProtected_NoProvisioning(t *testing.T) {
 	assert.Nil(t, r.Into.Columns)
 	assert.Nil(t, r.Into.ArrayColumns)
 }
+
+func TestTranslateSpec_EmptyDSN_ResolvesFromEnv(t *testing.T) {
+	// A package declares posture, not a connection string: an empty DSN resolves
+	// from REFRACTOR_PG_DSN at activation (mirroring the bootstrap contract_view
+	// lens), so the package manifest never carries a deployment DSN.
+	t.Setenv("REFRACTOR_PG_DSN", "postgres://resolved-host/db")
+	spec := &LensSpec{
+		ID:         "pg-no-dsn",
+		TargetType: "postgres",
+		CypherRule: "MATCH (a:application) RETURN a.id AS application_id",
+		TargetConfig: mustJSON(t, map[string]any{
+			"dsn":   "",
+			"table": "read_lease_applications",
+			"key":   []string{"application_id"},
+		}),
+	}
+	r, err := translateSpec(spec)
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://resolved-host/db", r.Into.DSN)
+}
+
+func TestTranslateSpec_DeclaredDSN_OverridesEnv(t *testing.T) {
+	// An explicitly declared DSN is honored verbatim — env is only the fallback.
+	t.Setenv("REFRACTOR_PG_DSN", "postgres://env-host/db")
+	r, err := translateSpec(protectedSpec(t, nil))
+	require.NoError(t, err)
+	assert.Equal(t, "postgres://localhost/test", r.Into.DSN)
+}
+
+func TestTranslateSpec_EmptyDSN_NoEnv_Rejected(t *testing.T) {
+	// Fail closed: an empty DSN with REFRACTOR_PG_DSN unset is a hard error, not a
+	// silent fallback to a dev default.
+	t.Setenv("REFRACTOR_PG_DSN", "")
+	spec := &LensSpec{
+		ID:         "pg-no-dsn-no-env",
+		TargetType: "postgres",
+		CypherRule: "MATCH (a:application) RETURN a.id AS application_id",
+		TargetConfig: mustJSON(t, map[string]any{
+			"dsn":   "",
+			"table": "read_lease_applications",
+			"key":   []string{"application_id"},
+		}),
+	}
+	_, err := translateSpec(spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dsn")
+}

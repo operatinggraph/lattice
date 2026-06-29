@@ -83,13 +83,12 @@ func TestValidateLensAdapters_EmptyAdapter_RequiresBucket(t *testing.T) {
 	}
 }
 
-func TestValidateLensAdapters_Postgres_RequiresDSNAndTable(t *testing.T) {
+func TestValidateLensAdapters_Postgres_RequiresTable(t *testing.T) {
 	cases := []struct {
 		name string
 		lens LensSpec
 	}{
 		{"missing both", LensSpec{CanonicalName: "L", Adapter: "postgres"}},
-		{"missing DSN", LensSpec{CanonicalName: "L", Adapter: "postgres", Table: "t"}},
 		{"missing Table", LensSpec{CanonicalName: "L", Adapter: "postgres", DSN: "postgres://x"}},
 	}
 	for _, tc := range cases {
@@ -99,6 +98,32 @@ func TestValidateLensAdapters_Postgres_RequiresDSNAndTable(t *testing.T) {
 				t.Fatalf("expected validation error for %s, got nil", tc.name)
 			}
 		})
+	}
+}
+
+// A postgres lens may omit DSN — Refractor resolves it from REFRACTOR_PG_DSN at
+// activation, so a package declares posture + columns, not a connection string.
+func TestValidateLensAdapters_Postgres_EmptyDSN_Allowed(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses:  []LensSpec{{CanonicalName: "L", Adapter: "postgres", Table: "t"}},
+	}
+	if err := def.validateLensAdapters(); err != nil {
+		t.Fatalf("expected empty-DSN postgres lens to pass (env-resolved at activation), got: %v", err)
+	}
+}
+
+// A GrantTable lens defaults its Table to actor_read_grants, so it needs neither
+// Table nor DSN declared.
+func TestValidateLensAdapters_Postgres_GrantTable_TableOptional(t *testing.T) {
+	def := Definition{
+		Name:    "pkg",
+		Version: "0.1.0",
+		Lenses:  []LensSpec{{CanonicalName: "L", Adapter: "postgres", GrantTable: true}},
+	}
+	if err := def.validateLensAdapters(); err != nil {
+		t.Fatalf("expected grant-table lens with no Table to pass, got: %v", err)
 	}
 }
 

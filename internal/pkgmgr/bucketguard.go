@@ -2,7 +2,6 @@ package pkgmgr
 
 import (
 	"fmt"
-	"strings"
 )
 
 // reservedBucketAliases maps a short, provision-time alias to the canonical
@@ -46,18 +45,40 @@ func (def Definition) validateLensAdapters() error {
 				return fmt.Errorf("pkgmgr: Lens[%d] %q (nats-kv): Bucket is required", idx, l.CanonicalName)
 			}
 		case "postgres":
-			var missing []string
-			if l.DSN == "" {
-				missing = append(missing, "DSN")
-			}
-			if l.Table == "" {
-				missing = append(missing, "Table")
-			}
-			if len(missing) > 0 {
-				return fmt.Errorf("pkgmgr: Lens[%d] %q (postgres): %s required", idx, l.CanonicalName, strings.Join(missing, ", "))
+			// DSN is no longer required: a package declares posture + columns,
+			// and Refractor resolves an empty DSN from REFRACTOR_PG_DSN at
+			// activation (mirroring the bootstrap contract_view lens). Table is
+			// required for a plain/protected lens, but a GrantTable lens defaults
+			// it to the shared actor_read_grants table at activation.
+			if l.Table == "" && !l.GrantTable {
+				return fmt.Errorf("pkgmgr: Lens[%d] %q (postgres): Table required", idx, l.CanonicalName)
 			}
 		default:
 			return fmt.Errorf("pkgmgr: Lens[%d] %q: unknown Adapter %q (must be \"nats-kv\" or \"postgres\")", idx, l.CanonicalName, l.Adapter)
+		}
+	}
+	return nil
+}
+
+// validateLensReadPath rejects an incoherent read-path-authorization posture on
+// a lens before any KV operation, mirroring the fail-closed checks Refractor's
+// translateSpec applies at activation (Contract #6 §6.14, D1.3) so a malformed
+// declaration is caught at build/install time rather than silently dropped — a
+// dropped posture would world-publish a model the author believed protected, or
+// scatter the read-auth source of truth onto a regular bucket. Pure (no I/O).
+func (def Definition) validateLensReadPath() error {
+	for idx, l := range def.Lenses {
+		hasPosture := l.Protected || l.Public || l.GrantTable || len(l.Columns) > 0
+		if hasPosture && l.Adapter != "postgres" {
+			return fmt.Errorf(
+				"pkgmgr: Lens[%d] %q declares a read-path posture (protected/public/grantTable/columns) but its Adapter is %q — RLS and the shared actor_read_grants table are Postgres concepts; a NATS-KV target has no row-level enforcement (Contract #6 §6.14)",
+				idx, l.CanonicalName, l.Adapter)
+		}
+		if l.Protected && l.Public {
+			return fmt.Errorf("pkgmgr: Lens[%d] %q cannot be both Protected and Public (Contract #6 §6.14)", idx, l.CanonicalName)
+		}
+		if l.Protected && l.GrantTable {
+			return fmt.Errorf("pkgmgr: Lens[%d] %q: a GrantTable lens is not a protected business model — set neither Protected nor Public (Contract #6 §6.14)", idx, l.CanonicalName)
 		}
 	}
 	return nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -454,8 +455,17 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 				key = append([]string(nil), adapter.GrantKeyColumns...)
 			}
 		}
-		if cfg.DSN == "" || table == "" || len(key) == 0 {
-			return nil, fmt.Errorf("lens %q: targetConfig.{dsn,table,key} required for postgres", spec.ID)
+		// A package-declared protected/grant lens carries posture + columns, not a
+		// deployment DSN — so an empty DSN resolves from REFRACTOR_PG_DSN at
+		// activation (the same env source the bootstrap contract_view lens uses).
+		// This keeps the connection string out of the package manifest; the
+		// resolved value still fails closed below if neither is set.
+		dsn := cfg.DSN
+		if dsn == "" {
+			dsn = os.Getenv("REFRACTOR_PG_DSN")
+		}
+		if dsn == "" || table == "" || len(key) == 0 {
+			return nil, fmt.Errorf("lens %q: targetConfig.{dsn,table,key} required for postgres (dsn may be left empty to resolve from REFRACTOR_PG_DSN at activation)", spec.ID)
 		}
 		if cfg.Protected && cfg.Public {
 			return nil, fmt.Errorf("lens %q: targetConfig cannot be both protected and public", spec.ID)
@@ -473,7 +483,7 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		}
 		r.Into = IntoConfig{
 			Target:          "postgres",
-			DSN:             cfg.DSN,
+			DSN:             dsn,
 			Table:           table,
 			Key:             KeyField(key),
 			QueryTimeoutRaw: cfg.QueryTimeout,

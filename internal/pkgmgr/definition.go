@@ -22,6 +22,7 @@ func (def Definition) validateAll() error {
 	for _, check := range []func() error{
 		def.validateLensBuckets,
 		def.validateLensAdapters,
+		def.validateLensReadPath,
 		def.validateWeaverTargets,
 		def.validateLoomPatterns,
 		def.validateOpMetas,
@@ -364,11 +365,15 @@ type LensSpec struct {
 	// projection. Must not be a reserved short alias (see validateLensBuckets).
 	Bucket string
 
-	// DSN is the Postgres connection string (postgres adapter only).
+	// DSN is the Postgres connection string (postgres adapter only). A package
+	// declares posture + columns, not a deployment connection string, so DSN may
+	// be left empty: Refractor resolves it from REFRACTOR_PG_DSN at activation.
 	DSN string
 
-	// Table is the Postgres table name (postgres adapter only). The table must
-	// already exist — the installer and Refractor never issue table DDL.
+	// Table is the Postgres table name (postgres adapter only). A plain (non-
+	// protected) table must already exist — the installer and Refractor never
+	// issue DDL for it. A Protected table is provisioned from Columns at
+	// activation; a GrantTable lens defaults the table to actor_read_grants.
 	Table string
 
 	// QueryTimeout is the per-query deadline for the postgres adapter, e.g.
@@ -389,10 +394,43 @@ type LensSpec struct {
 
 	// IntoKey is the lens's primary output-key column list — the RETURN
 	// column(s) the adapter keys each projected record under. Empty defaults to
-	// ["key"] (the per-row envelope key produced by an actor-aggregate lens).
+	// ["key"] (the per-row envelope key produced by an actor-aggregate lens),
+	// except for a GrantTable lens, whose key defaults to the platform's grant
+	// composite (actor_id, anchor_id, grant_source) at activation.
 	// An operation-aggregate index keys by its aggregation column instead (e.g.
 	// ["operationType"] for the role-by-operation index).
 	IntoKey []string
+
+	// Protected marks this lens as a read-path-authorized business read model
+	// (Contract #6 §6.14, postgres only). At activation Refractor provisions an
+	// RLS table (FORCE ROW LEVEL SECURITY + the set-membership policy) from
+	// Columns and projects an authz_anchors column. Mutually exclusive with
+	// Public.
+	Protected bool
+
+	// Public is the auditable opt-out: a genuinely public postgres read model
+	// that declines read-path authorization. Mutually exclusive with Protected.
+	Public bool
+
+	// GrantTable marks this lens as a cap-read.* grant projector (postgres only).
+	// Its rows are written to the shared actor_read_grants table through the
+	// seq-guarded grant writer; Table defaults to actor_read_grants and IntoKey
+	// to (actor_id, anchor_id, grant_source). Not a protected business model.
+	GrantTable bool
+
+	// Columns declares the business columns of a Protected table (name + verbatim
+	// Postgres type) so Refractor can provision the table from the lens spec. The
+	// platform always adds authz_anchors text[] and projection_seq; key columns
+	// are provisioned as text. Ignored for a non-protected lens.
+	Columns []PostgresColumn
+}
+
+// PostgresColumn declares one provisioned column of a Protected read-model
+// table: Type is the verbatim Postgres column type (e.g. "text", "bigint").
+// Mirrors the Refractor-side lens.PostgresColumn on-wire shape.
+type PostgresColumn struct {
+	Name string
+	Type string
 }
 
 // OutputDescriptorSpec mirrors the on-wire §6.13 Output descriptor a package
