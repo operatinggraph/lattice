@@ -1,7 +1,10 @@
 # Design — Operation/permission discovery via `instanceOf` template
 
-**Status: 📐 awaiting-Andrew (ratification)**
-**Author:** Winston (Designer fire, 2026-06-28)
+**Status: ✅ Andrew-ratified (2026-06-28) · pre-build §10 adversarial gate ✅ RUN + DISCHARGED (2026-06-29) → BUILD-READY**
+(P7 added to `lattice-architecture.md`; Contract #1 §1.5/§1.6 + #2 §2.1 ratified & committed. The one open
+build-readiness item — the §10 pre-build adversarial pass — was run on 2026-06-29; findings F1/F2/F3 folded
+into §2.3 + §9. The Lattice Steward may now build Fire 1, **with** the Verticals service-instance consumer.)
+**Author:** Winston (Designer fire, 2026-06-28; §10 gate discharged 2026-06-29)
 **Backlog row:** `planning-artifacts/backlog/lattice.md` → *Lattice feature backlog → Refinements & ops →
 "Operation/permission discovery via `instanceOf` template"* (★★, M–L). Conditional enabler for the
 Verticals "Service-instance modeling — envelope-class discriminator" refactor
@@ -179,12 +182,29 @@ resolveGoverningDDL(mutation, batch, workingSet):
 
 - **`instanceOfTargetOf`** finds the live `lnk.<vtxRoot>.instanceOf.<tType>.<tId>` link, preferring the
   **batch** (a create-time link is in the same atomic batch) over the **working set** (hydrated reads) over
-  an **on-demand** Core KV read. It honors tombstones (a tombstoned `instanceOf` is no link).
+  an **on-demand** Core KV read. It honors tombstones — **a tombstoned `instanceOf` is skipped *before* the
+  `visited` check**, so a tombstoned-then-relived link can't poison the cycle guard (§10 F-cycle).
+  - **Ambiguity is fail-closed (§10 F1).** If a vertex has **more than one live `instanceOf` link**, the
+    resolver does **not** pick one (and never "picks the one that admits the op") — it returns *notFound* →
+    permissive default, exactly as the `ClassForCommand` reverse index already fails closed on an
+    op admitted by two DDLs (`ddl_cache.go:79`). The platform gate must not assume the domain's
+    "at most one live `instanceOf`" invariant; a buggy/forged second link can only ever **remove** enforcement
+    (land on today's permissive default), never **steer** the gate to a more-admitting DDL. The single-link
+    case is the only one that resolves.
 - **Terminal** is either a `vtx.meta.*` DDL (read via the cache's `LookupByMetaKey`) or a business vertex
-  whose own class resolves to a DDL. Both are already in the DDL cache; no schema invention.
+  whose own class resolves to a DDL. **The terminal `vertexType` DDL is always read from the committed DDL
+  cache, never from an in-batch meta mutation (§10 F2)** — an attacker cannot mint a DDL meta-vertex in the
+  same batch (that requires the meta-lane `InstallPackage`/`UpgradePackage` op + operator authority), so the
+  authority the gate resolves against is always platform-controlled committed state. Intermediate
+  `instance → template` hops may be in-batch; the *authority* is not.
 - **Bound** `MAX_INSTANCEOF_HOPS = 4` + a `visited` cycle guard makes the walk terminating and abuse-proof
   (the deepest real domain chain is 2). Exceeding the bound or hitting a cycle yields *notFound* →
   permissive default (fail-**open** to today's behavior, never fail-into-a-wrong-DDL).
+- **OCC consistency (§10 F3).** The resolver's `instanceOf` reads resolve from the **OCC-hydrated working
+  set** (declared via `contextHint.reads` on the hot path); an **on-demand** Core-KV read is the
+  un-snapshotted fallback only and is read at the batch's `expectedRevision` floor. Prefer declaration so the
+  authority read is consistent with the rest of the atomic batch (no torn read of a concurrently-mutated
+  `instanceOf`).
 
 The resolved DDL feeds the **existing** `permittedCommands` / sensitivity checks verbatim
 (`step6_validate.go:113-147`). The only new surface is *which* DDL those checks run against.
@@ -426,7 +446,9 @@ Verticals refactor).
 | **Silent permissive-default regression** if a consumer ships a fine-grained class *without* an `instanceOf` link | Fire 1 test (c) pins the parity; the Verticals refactor draws `instanceOf` in every create batch by construction; P7 lint + a Gate-3 adversarial vector (a fine-grained write with no `instanceOf` must not gain enforcement it shouldn't, and a malformed `instanceOf` must not resolve to a wrong DDL) |
 | **Validator read cost** (per-write `instanceOf` reads) | Lazy batch→working-set→on-demand resolution; `contextHint.reads` keeps the hot path read-free; the walk is ≤2 hops for real domains; §7.4 precompute reserved if latency shows |
 | **Cycle / unbounded walk** via crafted `instanceOf` links | `MAX_INSTANCEOF_HOPS = 4` + `visited` cycle guard → *notFound* → permissive default (fail-open to today, never into a wrong DDL) |
-| **Wrong-DDL resolution** (walk reaches the *wrong* type) | Terminal requires a **vertexType** DDL; tombstoned `instanceOf` links are ignored; ambiguity is impossible (a vertex has at most one live `instanceOf` per the domain model — assert this in tests) |
+| **Wrong-DDL resolution** (walk reaches the *wrong* type) | Terminal requires a **committed vertexType** DDL (never an in-batch meta — §10 F2); tombstoned `instanceOf` links are skipped before the cycle guard; **multiple live `instanceOf` links fail closed to *notFound*/permissive (§10 F1)** — the gate never picks the admitting one, so a forged second link can only remove enforcement, never steer it |
+| **Multiple live `instanceOf` links** (forged or buggy) | Fail-closed → *notFound* → permissive default (mirrors the `ClassForCommand` ambiguity guard); the platform gate does **not** rely on the domain's single-link invariant — a test asserts >1 live link resolves to permissive, not to the admitting DDL |
+| **OCC / torn read of `instanceOf`** | Reads resolve from the OCC-hydrated working set (declared via `contextHint.reads`); on-demand is the un-snapshotted fallback at the batch revision floor (§10 F3) |
 | **Backward compatibility** | Exact `Lookup` runs first and unchanged; every shipping coarse-class vertex resolves identically; the walk only runs on a miss |
 
 **Test strategy.** Unit: the `resolveGoverningDDL` table (§6.1 a–e) + the cache/working-set seams. Integration
@@ -437,13 +459,71 @@ Gate 2 (bypass) + Gate 3 (capability-adversarial) gain a fine-grained-class writ
 
 ---
 
-## 10. Review
+## 10. Review — pre-build adversarial pass ✅ RUN (2026-06-29) — gate DISCHARGED
 
-This is a security-plane, cross-cutting change to the sole Core-KV writer's write-gate. Per the Designer
-skill (§3) a substantial design warrants an adversarial/party pass **before the Steward builds** — recommend
-a `bmad-party-mode` or adversarial review focused on: the permissive-default fail-open boundary (§4 last
-paragraph), the auth-neutrality claim (§2.4 — prove no path lets the discriminator class reach step 3), and
-the cycle/depth bound. Fold findings in before Fire 1. (Mirrors the D1 design's §8 pre-build gate.)
+This is a security-plane, cross-cutting change to the sole Core-KV writer's write-gate, so the design
+self-flagged a pre-build adversarial pass (the Designer-lane obligation; mirrors the D1 design's §8 gate).
+**The pass was run** (Winston, adversarial-security + edge-case-hunter lenses, code-grounded in
+`internal/processor/{step3_auth,step6_validate,ddl_cache}.go` + Contract #1 §1.5/§1.6) on the three named
+boundaries plus an edge-case sweep. Findings are folded into §2.3 + §9 above. A `bmad-party-mode` pass remains
+available if Andrew wants a second set of lenses at Fire-1 build, but the gate that blocked build-readiness is
+**discharged** — the Steward may build Fire 1 against the folded design.
+
+### Boundary 1 — the permissive-default fail-open (§4 last paragraph): **CONFIRMED SAFE, no new escalation.**
+A fine-grained-class write with **no** `instanceOf` chain lands on the permissive default, identical to today.
+The adversarial question — *does the lift let an attacker bypass `permittedCommands` that today bites?* — is
+**no**: (a) the op still passes **step-3 auth on `operationType`** (confirmed: `step3_auth.go:97-98` keys on
+`operationType` + `lane` + actor; the discriminator class is not an input); (b) the running **script is
+selected by `operationType`** (`ClassForCommand`), not by the vertex class, so a permissive miss can't run an
+arbitrary script; (c) the vertex's `class` is set by the **script** (step 5), not freely by the client, so the
+permissive default doesn't hand the client a free class. The permissive default is a *structural integrity*
+gate (is op X sane on a vertex of this type), strictly **below** the auth boundary — fail-open here is
+fail-open to today's exact posture. Hardening the permissive default for fine-grained classes stays out of
+scope (§6.5 — would break §1.6's flexible-write model); the lift *restores parity*, it doesn't widen.
+
+### Boundary 2 — the auth-neutrality claim (§2.4): **CONFIRMED SAFE, structurally.**
+Step 3 (auth) runs **before** step 5 (script) and step 6 (the write-gate). The fine-grained discriminator
+class does not exist on the wire — it is produced by the script at step 5 and read from the mutation
+**document** at step 6 (`step6_validate.go:99-102`). So the discriminator class **cannot** reach step 3 by
+construction — there is no path. The two `class` references in `step3_auth.go` (:140/:184) route on the
+**actor's** class for platform-key derivation (an identity-plane concern), unrelated to the mutation's
+discriminator. The envelope `class` (op→script hint) is likewise decoupled from auth (auth is on
+`operationType`, not the resolved script — §5.2 cross-ref). The lift moves exactly one resolution (the
+write-gate's class→DDL); auth and dispatch are byte-identical.
+
+### Boundary 3 — the cycle/depth bound: **CONFIRMED SAFE**, with one folded sharpening.
+`MAX_INSTANCEOF_HOPS = 4` + a `visited` cycle guard make the walk terminating; a cycle or an over-deep chain
+yields *notFound* → permissive default, never an infinite loop and never a wrong DDL. **Folded (F-cycle):** a
+tombstoned `instanceOf` is skipped **before** the `visited` check, so a tombstoned-then-relived link can't
+poison the guard. Per-write cost on the miss path is bounded (≤4 link reads + ≤4 class reads), lazy, and
+read-free on the hot path when `contextHint` is populated.
+
+### Edge-case sweep — three findings, all folded into §2.3/§9:
+
+- **F1 (HIGH → folded): multiple live `instanceOf` links must fail closed.** The design originally *assumed*
+  the domain invariant "at most one live `instanceOf`." The **platform gate cannot rely on a domain
+  invariant** — a buggy package or a forged second link could present two. If the resolver "picked the one
+  that admits the op," that would be a real steering hole (apply op X to a vertex whose primary type forbids
+  it). **Fold:** on >1 live `instanceOf`, the resolver returns *notFound* → permissive default — never picks —
+  mirroring the existing `ClassForCommand` ambiguity guard (`ddl_cache.go:79`, "fail closed, never guess"). A
+  second link can then only *remove* enforcement (land on today's permissive default), never *steer* it. Test
+  added to §6.1 / §9.
+- **F2 (MEDIUM → folded): the terminal authority must be committed, never in-batch.** An attacker minting a
+  DDL meta-vertex in the same batch to point `instanceOf` at it is impossible (meta-lane `InstallPackage`/
+  `UpgradePackage` + operator authority — and lane authorization now enforces the `meta` lane), but the
+  resolver should **state** it: the terminal `vertexType` DDL is read from the **committed DDL cache**, so the
+  authority is always platform-controlled. Intermediate `instance→template` hops may be in-batch; the
+  authority is not. Folded into §2.3.
+- **F3 (MEDIUM → folded): OCC consistency of the `instanceOf` read.** An un-snapshotted on-demand Core-KV read
+  of the `instanceOf` link could tear against a concurrent mutation. **Fold:** resolve from the
+  OCC-hydrated working set (declared via `contextHint.reads`) on the hot path; the on-demand read is the
+  fallback only, at the batch revision floor. Folded into §2.3 + §6.1's "lazy batch→working-set→on-demand"
+  discipline.
+
+**Verdict:** the three named boundaries are safe; the edge sweep surfaced one HIGH (multi-`instanceOf`
+fail-closed) and two MEDIUM hardenings, all folded. **Gate discharged — Fire 1 is build-ready** (built with
+the Verticals consumer per §6.4). The Gate-3 adversarial vector (§9) gains the multi-`instanceOf` and
+no-`instanceOf` cases alongside the wrong-DDL case.
 
 ---
 

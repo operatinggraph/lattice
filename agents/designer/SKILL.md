@@ -156,6 +156,24 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   on a representation, **re-derive from "what does it need"** — don't defend the prior shape with fresh
   rationalizations, which is what I did for a round before the NanoID landed.)
 
+- **"Resolved from the row / from context / from X" is not a mechanism — NAME the transport and verify it
+  carries the data in code.** When a design routes data to a downstream consumer through an orchestration hop
+  (Loom pattern → externalTask → instanceOp; a trigger → a handler; an event → a projector), do not write
+  *"resolved from the row"* / *"hydrated from context"* and move on — **trace the actual payload shape end to
+  end** and confirm the named channel exists. This is the **transport cousin of the assumed-producer /
+  dead-scaffolding blind spot** ([[feedback_designer_chain_grounding]]): there the *producer* was assumed; here
+  the *transport* is assumed. (Trialed 2026-06-29: the Augur design §3.3 said the reasoning op's
+  `{targetId, gapColumn}` params were *"resolved from the row,"* but `StartLoomPattern` carries only
+  `{patternRef, subjectKey, instanceId}` and externalTask params resolve **only** against the subject
+  vertex — there is no row→pattern channel, so the whole escalation branch was build-BLOCKED until an addendum
+  corrected the mechanism.) **Corollary — an orchestration wrapper that orchestrates nothing is ceremony:
+  remove it, don't feed it.** When the fix looks like "add a contract channel so the wrapper can receive the
+  data" (the Augur Option B: a `StartLoomPattern` trigger-params amendment), first ask *what is the wrapper
+  buying?* — if the episode is **single-step** (call → record, nothing to park/advance), the Loom/externalTask
+  wrapper earns nothing, and the **simplest extension is to drop it** and dispatch the op directly (the bridge
+  is loom-agnostic; a Weaver `directOp` already carries a params map). Removing surface beats amending a frozen
+  contract to feed dead ceremony.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
