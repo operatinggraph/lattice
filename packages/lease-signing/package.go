@@ -60,9 +60,10 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.10.0",
+	Version: "0.11.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
-		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the §10.8 playbook " +
+		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
+		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2), the §10.8 playbook " +
 		"(triggerLoom externalTask for bgcheck/payment, assignTask SignLease, triggerLoom onboarding, directOp " +
 		"SetListingStatus to mark the unit leased on approval), the externalTask " +
 		"instanceOp/replyOp wrapper DDLs, the bgcheck/payment/onboarding loomPatterns, and SetApplicantProfile " +

@@ -54,6 +54,69 @@ func Lenses() []pkgmgr.LensSpec {
 				Freshness:        "auto",
 			},
 		},
+		{
+			// leaseApplicationsRead — the protected Postgres read model for the
+			// applicant-facing "My Applications" view (D1.3 Fire 2, the
+			// applicant-self milestone). Contract #6 §6.14: protected-by-default,
+			// one authz_anchors set of bare-NanoID match tokens per row, RLS
+			// returning only rows the reading actor is granted.
+			//
+			// This REPLACES the read-path leak loftspace-app's handleApplications
+			// has today — it lists the §10.2 weaver-targets bucket via KVListKeys
+			// and filters client-side on a forgeable `?applicant=` param (any
+			// caller reads every application). Here RLS does the scoping in the
+			// database: an actor's session sets lattice.actor_id (from a VERIFIED
+			// JWT, Fire 3), and the set-membership policy returns only rows whose
+			// authz_anchors intersect the actor's granted anchors.
+			//
+			// authz_anchors = [nanoIdFromKey(applicant identity key)] — the
+			// applicant-self anchor. The shipped base cap-read.<actor> self-anchor
+			// (D1.1) grants each applicant their own NanoID, so RLS matches
+			// applicant=A's rows for A's session and nobody else's (the headline:
+			// A sees only A's applications). The LANDLORD/residence audience (a
+			// second anchor for a unit owner/manager) is a LATER increment: it
+			// needs a cap-read.residence grant slice AND a landlord→unit ownership
+			// link that loftspace-domain does not model yet, so the milestone
+			// projects the single applicant anchor only.
+			//
+			// Adapter postgres + Protected: Refractor provisions the RLS table
+			// (FORCE ROW LEVEL SECURITY + the policy) from Columns at activation
+			// (Fire 1) and adds authz_anchors text[] + projection_seq. DSN is left
+			// empty: Refractor resolves it from REFRACTOR_PG_DSN at activation, so
+			// the package declares posture + columns, not a deployment connection
+			// string. Plain (non-actorAggregate) projection: one row per leaseapp,
+			// keyed by the application's bare NanoID; the convergence/gap state
+			// stays in the leaseApplicationComplete actorAggregate lens above
+			// (Weaver-internal §10.2 orchestration state) — this read model carries
+			// the application's own identity + display scalars (unit, terms,
+			// signature, landlord decision), the hops off the leaseapp and its
+			// applicationFor identity / appliesToUnit unit.
+			CanonicalName: "leaseApplicationsRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_lease_applications",
+			Engine:        "full",
+			Spec:          leaseApplicationsReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"app_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "applicant", Type: "text"},
+				{Name: "unit_key", Type: "text"},
+				{Name: "unit_address", Type: "text"},
+				{Name: "unit_city", Type: "text"},
+				{Name: "unit_region", Type: "text"},
+				{Name: "unit_rent", Type: "double precision"},
+				{Name: "unit_currency", Type: "text"},
+				{Name: "unit_status", Type: "text"},
+				{Name: "signed_at", Type: "text"},
+				{Name: "landlord_decision", Type: "text"},
+				{Name: "decline_reason", Type: "text"},
+				{Name: "terms_move_in_date", Type: "text"},
+				{Name: "terms_lease_term_months", Type: "double precision"},
+				{Name: "terms_requested_rent", Type: "double precision"},
+			},
+		},
 	}
 }
 
@@ -400,3 +463,57 @@ RETURN
   %d                     AS maxretries_payment,
   ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased'))) AS violating
 `, maxBgcheckRetries, maxPaymentRetries)
+
+// leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
+// Fire 2). A plain one-row-per-leaseapp projection: it anchors on every leaseapp,
+// OPTIONAL-walks the applicationFor link to the applicant identity and the
+// appliesToUnit link to the leased unit, and projects the application's own
+// identity + display scalars plus the §6.14 authz_anchors set.
+//
+//   - app_id (the IntoKey) is the application's bare NanoID (nanoIdFromKey on the
+//     full leaseapp key), the §6.14 bare-NanoID convention; entity_key keeps the
+//     full vtx.leaseapp.<id> key as a body column for the FE.
+//   - applicant is the applicant identity's full key (a display/scope value);
+//     unit_* / terms_* / signed_at / landlord_decision / decline_reason are the
+//     pure scalar hops off the unit's .address/.listing, the applicant's own
+//     requested .terms, and the application's .signature/.decision aspects — the
+//     same display columns leaseApplicationComplete projects, minus the
+//     service-instance convergence aggregate (that stays Weaver-internal §10.2
+//     state; D1.5 may roll the gap state onto a protected model later).
+//   - authz_anchors = [nanoIdFromKey(id.key)] — the applicant-self anchor only
+//     (the milestone). applicationFor is a REQUIRED MATCH (not OPTIONAL): a
+//     leaseapp with no applicant link projects NO row, so the read model holds
+//     only well-formed applications and every row's authz_anchors carries exactly
+//     one real applicant NanoID — never a null/empty set the adapter would choke
+//     on, and never a row no anchor protects. (A leaseapp is always minted WITH
+//     its applicationFor link at CreateLeaseApplication, so this excludes only a
+//     transient pre-link window or a malformed shell — both of which correctly
+//     stay out of the read model until they are well-formed.) The
+//     landlord/residence anchor is a later increment (needs cap-read.residence +
+//     a landlord→unit ownership link loftspace-domain does not model yet).
+//
+// '= null' / '<> null' is the full engine's null test (not IS NULL); list
+// literals + nanoIdFromKey in RETURN are the cap-read base lens's proven shape.
+const leaseApplicationsReadSpec = `
+MATCH (app:leaseapp)
+MATCH (app)-[:applicationFor]->(id:identity)
+OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+RETURN
+  nanoIdFromKey(app.key)         AS app_id,
+  app.key                        AS entity_key,
+  id.key                         AS applicant,
+  u.key                          AS unit_key,
+  u.address.data.line1           AS unit_address,
+  u.address.data.city            AS unit_city,
+  u.address.data.region          AS unit_region,
+  u.listing.data.rentAmount      AS unit_rent,
+  u.listing.data.rentCurrency    AS unit_currency,
+  u.listing.data.status          AS unit_status,
+  app.signature.data.signedAt    AS signed_at,
+  app.decision.data.value        AS landlord_decision,
+  app.decision.data.reason       AS decline_reason,
+  app.terms.data.moveInDate      AS terms_move_in_date,
+  app.terms.data.leaseTermMonths AS terms_lease_term_months,
+  app.terms.data.requestedRent   AS terms_requested_rent,
+  [nanoIdFromKey(id.key)]        AS authz_anchors
+`
