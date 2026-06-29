@@ -400,20 +400,14 @@ func TestEmit_WeaverTarget_AugurBlockRoundTripsThroughEngineParse(t *testing.T) 
 	def := orchestrationDef()
 	def.WeaverTargets[0].Augur = &pkgmgr.AugurSpec{
 		Escalate: []string{"unplannable"},
-		Pattern:  "augurReasoning",
+		Op:       "CreateAugurReasoningClaim",
+		Adapter:  "augur",
+		ReplyOp:  "RecordProposal",
 		Model:    "claude-opus-4-8",
 		AutoApply: &pkgmgr.AugurAutoApplySpec{
 			Actions: []string{"triggerLoom"}, MinConfidence: 0.8,
 		},
 	}
-	def.LoomPatterns = append(def.LoomPatterns, pkgmgr.LoomPatternSpec{
-		PatternID:   "augurReasoning",
-		SubjectType: "lease",
-		Steps: []pkgmgr.StepSpec{{
-			Kind: "externalTask", Adapter: "augur",
-			InstanceOp: "CreateAugurReasoningClaim", ReplyOp: "RecordProposal",
-		}},
-	})
 
 	ops, _, err := pkgmgr.BuildInstallBatchForTest(def)
 	if err != nil {
@@ -438,8 +432,9 @@ func TestEmit_WeaverTarget_AugurBlockRoundTripsThroughEngineParse(t *testing.T) 
 	if len(target.Augur.Escalate) != 1 || target.Augur.Escalate[0] != "unplannable" {
 		t.Errorf("escalate not round-tripped: %+v", target.Augur.Escalate)
 	}
-	if target.Augur.Pattern != "augurReasoning" || target.Augur.Model != "claude-opus-4-8" {
-		t.Errorf("pattern/model not round-tripped: %+v", target.Augur)
+	if target.Augur.Op != "CreateAugurReasoningClaim" || target.Augur.Adapter != "augur" ||
+		target.Augur.ReplyOp != "RecordProposal" || target.Augur.Model != "claude-opus-4-8" {
+		t.Errorf("op/adapter/replyOp/model not round-tripped: %+v", target.Augur)
 	}
 	if target.Augur.AutoApply == nil || target.Augur.AutoApply.MinConfidence != 0.8 ||
 		len(target.Augur.AutoApply.Actions) != 1 {

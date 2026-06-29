@@ -4,20 +4,24 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations.
 //
-// A single `augurproposal` vertex-type DDL owns the externalTask matched pair
-// that drives one Augur reasoning episode against the bridge's standard
-// `{externalRef, status, result}` reply contract:
+// A single `augurproposal` vertex-type DDL owns the matched pair that drives one
+// Augur reasoning episode against the bridge's standard `{externalRef, status,
+// result}` reply contract. The reasoning call is single-step, so Weaver
+// dispatches it directly (Option F — no Loom wrapper): CreateAugurReasoningClaim
+// is submitted as a Weaver directOp, and the bridge replyOp records the verdict.
 //
-//   - CreateAugurReasoningClaim (the instanceOp) mints the claim vertex
-//     vtx.augurproposal.<handle> write-ahead of the reasoning call, recording the
-//     TRUSTED gap context (.gap aspect) + the forCandidate / forTarget links, and
-//     emits external.<adapter> off its own transactional outbox.
+//   - CreateAugurReasoningClaim (the instanceOp, Weaver's directOp) mints the
+//     claim vertex vtx.augurproposal.<handle> write-ahead of the reasoning call,
+//     recording the TRUSTED gap context (.gap aspect) + the forCandidate /
+//     forTarget links, and emits external.<adapter> off its own transactional
+//     outbox.
 //   - RecordProposal (the replyOp the bridge posts on a terminal outcome) reads
 //     the trusted gap context back from that claim vertex, decodes the model's
 //     structured proposal from the opaque `result` string, applies the design §5
-//     record-time deterministic-validation boundary, and writes the proposal's
+//     record-time deterministic-validation boundary, writes the proposal's
 //     model-derived aspects (.proposed / .rationale / .confidence / .provenance /
-//     .review) create-only, then emits orchestration.externalTaskCompleted.
+//     .review) create-only, and emits augur.proposalRecorded for the review lens.
+//     There is no Loom instance to unpark, so no externalTaskCompleted is emitted.
 //
 // The load-bearing safety split (design §5): the entity/target IDENTITY the
 // proposal acts on is read from the instanceOp-minted claim vertex — NEVER from
@@ -87,8 +91,8 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"reviewedAt, dispatchedAt} (the replyOp's model-derived data + verdict). Relationships are LINKS: " +
 			"forCandidate (proposal→candidate: the escalated entity), forTarget (proposal→weaverTarget meta: " +
 			"the target whose gap was stuck). Both links: proposal is the later-arriving source (Contract #1 " +
-			"§1.1). CreateAugurReasoningClaim is the Loom externalTask instanceOp: it mints the claim vertex " +
-			"write-ahead with the .gap aspect + links (no-orphan, FR29/P4) and emits external.<adapter>. " +
+			"§1.1). CreateAugurReasoningClaim is the reasoning instanceOp Weaver submits as a directOp: it mints " +
+			"the claim vertex write-ahead with the .gap aspect + links (no-orphan, FR29/P4) and emits external.<adapter>. " +
 			"RecordProposal is the bridge replyOp (payload {externalRef, status, result}): it reads the " +
 			"trusted gap context back from the claim, decodes the model proposal from the opaque result " +
 			"string, and applies the design §5 record-time deterministic-validation boundary — a proposal is " +
@@ -107,23 +111,21 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.augurproposal.<handle> of the recorded proposal. The recorded review.state (pending | invalid) is read from the proposal's .review aspect, not the op response."}}}`,
 		FieldDescription: map[string]string{
-			"externalRef": "The bare instanceKey handle the Loom externalTask minted (no dots / key segments / whitespace); the claim vertex key is vtx.augurproposal.<externalRef>. RecordProposal rejects if no live claim vertex exists for it (the CreateAugurReasoningClaim instanceOp must commit write-ahead).",
+			"externalRef": "The bare instanceKey handle Weaver minted for the reasoning episode (no dots / key segments / whitespace); the claim vertex key is vtx.augurproposal.<externalRef>. RecordProposal rejects if no live claim vertex exists for it (the CreateAugurReasoningClaim instanceOp must commit write-ahead).",
 			"status":      "The adapter's terminal outcome verbatim: completed (the model returned a structured proposal in result) or failed (a modeled refusal — the proposal is stored invalid with the refusal as its rationale, never dispatchable). Any other value rejects the op.",
 			"result":      "The model's structured-output proposal as a JSON string {action, params, confidence, rationale, model, promptHash, catalogHash, reasonedAt}. The §5 validator decodes it and validates action ∈ {triggerLoom, assignTask, directOp}, confidence ∈ [0,1], and no scope escape (a params entity-key other than the escalated candidate, read from the trusted claim). Required when status=completed.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name: "CreateAugurReasoningClaim — mint the claim vertex write-ahead of the reasoning call (the Loom instanceOp)",
+				Name: "CreateAugurReasoningClaim — mint the claim vertex write-ahead of the reasoning call (Weaver's directOp)",
 				Payload: map[string]any{
 					"instanceKey": "augurEpisodeHJKMNPQRST",
 					"adapter":     "augur",
 					"replyOp":     "RecordProposal",
-					"params": map[string]any{
-						"targetId":  "vtx.meta.<weaverTargetNanoID>",
-						"entityId":  "vtx.leaseapp.<applicantNanoID>",
-						"gapColumn": "missing_approval",
-						"trigger":   "unplannable",
-					},
+					"targetId":    "vtx.meta.<weaverTargetNanoID>",
+					"entityId":    "vtx.leaseapp.<applicantNanoID>",
+					"gapColumn":   "missing_approval",
+					"trigger":     "unplannable",
 				},
 				ExpectedOutcome: "Validates the weaver target + candidate are alive (no-orphan). Mints vtx.augurproposal." +
 					"augurEpisodeHJKMNPQRST with root {} (D5), the .gap aspect carrying the TRUSTED escalation context, and " +
@@ -140,7 +142,7 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Reads the trusted entity (vtx.leaseapp.<applicantNanoID>) from the claim's .gap aspect, " +
 					"decodes the proposal from result. The action is in the allowed vocabulary, confidence is in [0,1], and the " +
 					"proposed scopedTo matches the escalated candidate, so the proposal is stored review.state=pending " +
-					"(dispatchable) + its model-derived aspects. Emits orchestration.externalTaskCompleted so Loom unparks.",
+					"(dispatchable) + its model-derived aspects. Emits augur.proposalRecorded for the review lens (no Loom to unpark).",
 			},
 			{
 				Name: "RecordProposal — a scope-escaping proposal is stored invalid (auditable, never dispatchable)",
@@ -157,12 +159,12 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 	}
 }
 
-// augurproposalDDLScript handles the externalTask matched pair
-// CreateAugurReasoningClaim (instanceOp) + RecordProposal (replyOp). Known-key
-// reads only (kv.Read of the link endpoints / the claim's .gap aspect — the
-// bridge posts the reply with no ContextHint.Reads). The §5 record-time
-// deterministic-validation boundary decides pending vs invalid on the reply; the
-// proposal is always stored (auditability). No-orphan by construction.
+// augurproposalDDLScript handles the matched pair CreateAugurReasoningClaim
+// (the instanceOp Weaver submits as a directOp) + RecordProposal (the bridge
+// replyOp). Known-key reads only (kv.Read of the link endpoints / the claim's
+// .gap aspect — the bridge posts the reply with no ContextHint.Reads). The §5
+// record-time deterministic-validation boundary decides pending vs invalid on the
+// reply; the proposal is always stored (auditability). No-orphan by construction.
 const augurproposalDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -203,22 +205,6 @@ def required_bare_handle(p, name):
         if bad in v:
             fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
     return v
-
-def required_params(p):
-    if not hasattr(p, "params") or p.params == None:
-        fail("InvalidArgument: params: required object (the resolved externalTask gap context)")
-    v = p.params
-    if type(v) != type({}):
-        fail("InvalidArgument: params: required object")
-    return v
-
-def dict_required_string(d, name):
-    if name not in d:
-        fail("InvalidArgument: params." + name + ": required non-empty string")
-    v = d[name]
-    if v == None or type(v) != type("") or len(v.strip()) == 0:
-        fail("InvalidArgument: params." + name + ": required non-empty string")
-    return v.strip()
 
 def proposal_string(d, name):
     # A field of the decoded model proposal; absent / wrong-typed => "".
@@ -294,25 +280,28 @@ def execute(state, op):
     p = op.payload
 
     if ot == "CreateAugurReasoningClaim":
-        # The Loom externalTask instanceOp: mint the claim vertex write-ahead of
-        # the reasoning call, recording the TRUSTED escalation context.
+        # The reasoning instanceOp: mint the claim vertex write-ahead of the
+        # reasoning call, recording the TRUSTED escalation context. Dispatched by
+        # Weaver as a directOp (Option F) — every param arrives FLAT at the
+        # top-level payload (Weaver's directOp resolves a flat params map from the
+        # lens row); there is no nested params object.
         handle = required_bare_handle(p, "instanceKey")
         adapter = required_string(p, "adapter")
         reply_op = required_string(p, "replyOp")
-        gp = required_params(p)
-        target_key = dict_required_string(gp, "targetId")
-        entity_key = dict_required_string(gp, "entityId")
-        gap_column = dict_required_string(gp, "gapColumn")
-        trigger = dict_required_string(gp, "trigger")
+        target_key = required_string(p, "targetId")
+        entity_key = required_string(p, "entityId")
+        gap_column = required_string(p, "gapColumn")
+        trigger = required_string(p, "trigger")
 
-        parts_of(target_key, "params.targetId", "meta")
-        entity_type, entity_id = parts_of(entity_key, "params.entityId", "")
+        parts_of(target_key, "targetId", "meta")
+        entity_type, entity_id = parts_of(entity_key, "entityId", "")
         target_id = target_key.split(".")[2]
 
-        # No-orphan (FR29 / P4): both link endpoints MUST be alive. The instanceOp
-        # is dispatched by Loom's actuator (its hydrated read-set varies by wiring),
-        # so the alive checks use kv.Read (Contract #2 §2.5 known-key lazy read) —
-        # read-path-independent, matched to the bridge reply leg's no-Reads posture.
+        # No-orphan (FR29 / P4): both link endpoints MUST be alive. Weaver's
+        # directOp routes the candidate / target keys into the op's
+        # ContextHint.Reads, but the alive checks use kv.Read (Contract #2 §2.5
+        # known-key lazy read) — read-path-independent, matched to the bridge reply
+        # leg's no-Reads posture.
         if not alive(kv.Read(target_key)):
             fail("UnknownTarget: " + target_key)
         if not alive(kv.Read(entity_key)):
@@ -441,12 +430,13 @@ def execute(state, op):
                         {"state": review_state, "invalidReason": invalid_reason,
                          "reviewedAt": "", "dispatchedAt": ""}),
         ]
-        # ALWAYS emit the completion signal Loom correlates on (the BARE handle as
-        # externalRef — Loom parks on token.<handle>): without it the externalTask
-        # never completes, even on an invalid verdict / refusal.
+        # Augur dispatches as a Weaver directOp (Option F) — there is NO Loom
+        # instance to unpark, so no orchestration.externalTaskCompleted is emitted.
+        # The proposal record IS the terminal effect; the bridge already correlated
+        # its reply on instanceKey == <handle>. The proposalRecorded event is the
+        # audit/observability signal (the review lens consumes it), emitted on every
+        # verdict — pending, invalid, or refusal.
         events = [
-            {"class": "orchestration.externalTaskCompleted",
-             "data": {"externalRef": handle}},
             {"class": "augur.proposalRecorded",
              "data": {"proposalKey": proposal_key, "entityId": entity_key,
                       "action": action, "reviewState": review_state}},

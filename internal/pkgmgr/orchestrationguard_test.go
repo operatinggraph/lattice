@@ -398,20 +398,7 @@ func TestValidateOpMetas_DuplicateOperationType(t *testing.T) {
 	}
 }
 
-// augurExternalTaskPattern is a minimal valid §10.5 externalTask LoomPattern an
-// augur.pattern ref can resolve to in-package.
-func augurExternalTaskPattern(id string) LoomPatternSpec {
-	return LoomPatternSpec{
-		PatternID:   id,
-		SubjectType: "leaseapp",
-		Steps: []StepSpec{{
-			Kind: "externalTask", Adapter: "augur",
-			InstanceOp: "CreateAugurReasoningClaim", ReplyOp: "RecordProposal",
-		}},
-	}
-}
-
-func augurTargetDef(a *AugurSpec, patterns ...LoomPatternSpec) Definition {
+func augurTargetDef(a *AugurSpec) Definition {
 	return Definition{
 		WeaverTargets: []WeaverTargetSpec{{
 			TargetID: "leaseSigning",
@@ -421,7 +408,6 @@ func augurTargetDef(a *AugurSpec, patterns ...LoomPatternSpec) Definition {
 			},
 			Augur: a,
 		}},
-		LoomPatterns: patterns,
 	}
 }
 
@@ -432,16 +418,29 @@ func TestValidateWeaverTargets_AugurNilOK(t *testing.T) {
 }
 
 func TestValidateWeaverTargets_AugurValid(t *testing.T) {
+	// Option F: no loom pattern — Weaver dispatches the reasoning op directly as a
+	// directOp, so the block is just escalate + the optional op/adapter/replyOp
+	// overrides (defaulted at dispatch when omitted).
 	def := augurTargetDef(&AugurSpec{
 		Escalate: []string{"unplannable", "exhausted"},
-		Pattern:  "augurReasoning",
+		Op:       "CreateAugurReasoningClaim",
+		Adapter:  "augur",
+		ReplyOp:  "RecordProposal",
 		Model:    "claude-opus-4-8",
 		AutoApply: &AugurAutoApplySpec{
 			Actions: []string{"triggerLoom", "directOp"}, MinConfidence: 0.9,
 		},
-	}, augurExternalTaskPattern("augurReasoning"))
+	})
 	if err := def.validateWeaverTargets(); err != nil {
 		t.Fatalf("a fully-populated valid augur block must pass: %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AugurMinimalOK(t *testing.T) {
+	// The minimal block: one trigger, no overrides (op/adapter/replyOp default at
+	// dispatch). No pattern is required anymore (Option F).
+	if err := augurTargetDef(&AugurSpec{Escalate: []string{"unplannable"}}).validateWeaverTargets(); err != nil {
+		t.Fatalf("a minimal augur block (no overrides) must pass: %v", err)
 	}
 }
 
@@ -451,18 +450,17 @@ func TestValidateWeaverTargets_AugurRejections(t *testing.T) {
 		spec    *AugurSpec
 		wantSub string
 	}{
-		{"empty escalate", &AugurSpec{Pattern: "p"}, "escalate is empty"},
-		{"unknown trigger", &AugurSpec{Escalate: []string{"someday"}, Pattern: "p"}, "not a known trigger"},
-		{"missing pattern", &AugurSpec{Escalate: []string{"unplannable"}}, "pattern is required"},
-		{"bad autoApply action", &AugurSpec{Escalate: []string{"unplannable"}, Pattern: "p",
+		{"empty escalate", &AugurSpec{}, "escalate is empty"},
+		{"unknown trigger", &AugurSpec{Escalate: []string{"someday"}}, "not a known trigger"},
+		{"bad op token", &AugurSpec{Escalate: []string{"unplannable"}, Op: "bad.op"}, "single token"},
+		{"bad adapter token", &AugurSpec{Escalate: []string{"unplannable"}, Adapter: "a b"}, "single token"},
+		{"bad autoApply action", &AugurSpec{Escalate: []string{"unplannable"},
 			AutoApply: &AugurAutoApplySpec{Actions: []string{"DropTable"}}}, "not a known action"},
-		{"minConfidence too high", &AugurSpec{Escalate: []string{"unplannable"}, Pattern: "p",
+		{"minConfidence too high", &AugurSpec{Escalate: []string{"unplannable"},
 			AutoApply: &AugurAutoApplySpec{MinConfidence: 1.5}}, "out of range"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// No in-package pattern declared, so the pattern-is-externalTask check
-			// defers (cross-package) — these cases exercise the structural rules.
 			err := augurTargetDef(tc.spec).validateWeaverTargets()
 			if err == nil {
 				t.Fatalf("%s: must be rejected", tc.name)
@@ -471,29 +469,5 @@ func TestValidateWeaverTargets_AugurRejections(t *testing.T) {
 				t.Fatalf("%s: unexpected reason: %v", tc.name, err)
 			}
 		})
-	}
-}
-
-func TestValidateWeaverTargets_AugurPatternNotExternalTask(t *testing.T) {
-	// An in-package pattern that exists but carries no externalTask step is the
-	// one check only the installer can make.
-	systemOnly := LoomPatternSpec{
-		PatternID:   "augurReasoning",
-		SubjectType: "leaseapp",
-		Steps:       []StepSpec{{Kind: "systemOp", Operation: "DoThing"}},
-	}
-	def := augurTargetDef(&AugurSpec{Escalate: []string{"unplannable"}, Pattern: "augurReasoning"}, systemOnly)
-	err := def.validateWeaverTargets()
-	if err == nil || !strings.Contains(err.Error(), "no externalTask step") {
-		t.Fatalf("an augur.pattern resolving to a non-externalTask in-package pattern must be rejected, got %v", err)
-	}
-}
-
-func TestValidateWeaverTargets_AugurPatternCrossPackageDeferred(t *testing.T) {
-	// A pattern not declared in this package may live in an already-installed
-	// one — like a cross-package LensRef, resolution defers to the engine.
-	def := augurTargetDef(&AugurSpec{Escalate: []string{"unplannable"}, Pattern: "installedElsewhere"})
-	if err := def.validateWeaverTargets(); err != nil {
-		t.Fatalf("a cross-package augur.pattern must not be failed at install: %v", err)
 	}
 }

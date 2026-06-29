@@ -77,13 +77,19 @@ type Target struct {
 }
 
 // AugurPolicy is a target's parsed `augur` block (Contract #10 §10.8 "Augur
-// escalation"): which stuck-gap triggers escalate to AI reasoning, the
-// reasoning externalTask pattern to dispatch, and the optional adapter model
-// override. AutoApply is parsed and validated but NOT consumed — the autonomy
-// boundary stays human-in-the-loop until Andrew ratifies it (design Fire 3).
+// escalation"): which stuck-gap triggers escalate to AI reasoning, plus the
+// optional overrides naming the reasoning op / bridge adapter / replyOp Weaver
+// dispatches and the model. The reasoning episode is single-step, so Weaver
+// dispatches the reasoning op DIRECTLY as a directOp (Option F — no Loom wrapper);
+// Op/Adapter/ReplyOp default to CreateAugurReasoningClaim / augur / RecordProposal
+// at dispatch when omitted, so a minimal block is just `escalate`. AutoApply is
+// parsed and validated but NOT consumed — the autonomy boundary stays
+// human-in-the-loop until Andrew ratifies it (design Fire 3).
 type AugurPolicy struct {
 	Escalate  []string        `json:"escalate,omitempty"`
-	Pattern   string          `json:"pattern,omitempty"`
+	Op        string          `json:"op,omitempty"`
+	Adapter   string          `json:"adapter,omitempty"`
+	ReplyOp   string          `json:"replyOp,omitempty"`
 	Model     string          `json:"model,omitempty"`
 	AutoApply *AugurAutoApply `json:"autoApply,omitempty"`
 }
@@ -419,10 +425,12 @@ func validateTarget(t *Target) error {
 // on a target's optional augur block. A nil block is the default (the target
 // fails closed on an unplannable gap) and is always valid. When present, the
 // block must be actionable: at least one escalate trigger (each ∈ {unplannable,
-// exhausted}) and a non-empty pattern. The pattern's resolution to an installed
-// meta.loomPattern whose body is an externalTask is NOT checked here — the
-// pattern registry is CDC-async, so (exactly like triggerLoom's pattern ref)
-// resolution is deferred to dispatch time. The optional autoApply block is
+// exhausted}). The reasoning op / adapter / replyOp are optional overrides
+// (Op/Adapter/ReplyOp) — omitted, they default to CreateAugurReasoningClaim /
+// augur / RecordProposal at dispatch (Option F: Weaver dispatches the reasoning
+// op directly as a directOp, no Loom pattern to resolve), so a minimal block is
+// just `escalate`. When set, each must be a single token (a literal op /
+// adapter / op name, no key delimiters). The optional autoApply block is
 // validated fail-closed (its actions ⊆ the §10.8 action table, minConfidence ∈
 // [0,1]) even though no escalation path consumes it yet — the autonomy boundary
 // stays human-in-the-loop until ratified, but a malformed block must never load.
@@ -439,8 +447,10 @@ func validateAugurPolicy(a *AugurPolicy) error {
 				trig, escalateUnplannable, escalateExhausted)
 		}
 	}
-	if a.Pattern == "" {
-		return fmt.Errorf("augur block present but pattern is required (the reasoning externalTask pattern to dispatch)")
+	for field, v := range map[string]string{"op": a.Op, "adapter": a.Adapter, "replyOp": a.ReplyOp} {
+		if v != "" && !singleTokenPattern.MatchString(v) {
+			return fmt.Errorf("augur.%s value %q must be a single token matching %s", field, v, singleTokenPattern.String())
+		}
 	}
 	if a.AutoApply != nil {
 		for _, act := range a.AutoApply.Actions {

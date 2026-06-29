@@ -392,9 +392,10 @@ func weaverTargetSpecBody(t WeaverTargetSpec, lensRef string) map[string]any {
 
 // augurBody emits the optional §10.8 `augur` escalation block, including only
 // the fields the engine parses and omitting empty optionals so the emitted body
-// matches the engine's AugurPolicy shape. The pattern ref is shipped verbatim
-// (the engine resolves it live at dispatch). Emitted only when t.Augur != nil,
-// so a target without escalation round-trips to the frozen-contract shape.
+// matches the engine's AugurPolicy shape. Op/Adapter/ReplyOp are shipped verbatim
+// (the engine defaults them at dispatch when omitted). Emitted only when
+// t.Augur != nil, so a target without escalation round-trips to the
+// frozen-contract shape.
 func augurBody(a *AugurSpec) map[string]any {
 	body := map[string]any{}
 	if len(a.Escalate) > 0 {
@@ -404,8 +405,14 @@ func augurBody(a *AugurSpec) map[string]any {
 		}
 		body["escalate"] = escalate
 	}
-	if a.Pattern != "" {
-		body["pattern"] = a.Pattern
+	if a.Op != "" {
+		body["op"] = a.Op
+	}
+	if a.Adapter != "" {
+		body["adapter"] = a.Adapter
+	}
+	if a.ReplyOp != "" {
+		body["replyOp"] = a.ReplyOp
 	}
 	if a.Model != "" {
 		body["model"] = a.Model

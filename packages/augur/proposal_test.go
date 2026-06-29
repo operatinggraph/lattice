@@ -41,8 +41,8 @@ const (
 	apStaffCapKey   = "cap.identity." + apStaffActorID
 )
 
-// staffCapDoc grants the staff actor the Augur externalTask matched pair
-// (CreateAugurReasoningClaim + RecordProposal, scope any) — the Loom relay +
+// staffCapDoc grants the staff actor the Augur matched pair
+// (CreateAugurReasoningClaim + RecordProposal, scope any) — the Weaver directOp +
 // bridge replyOp authority, modeled here as an operator-equivalent staff actor.
 func staffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
@@ -127,20 +127,20 @@ func seedEscalation(t *testing.T, ctx context.Context, conn *substrate.Conn) (ta
 	return targetKey, entityKey
 }
 
-// createClaimEnv builds the Loom externalTask instanceOp that mints the claim
-// vertex write-ahead with the trusted gap context. The instanceOp validates its
-// link endpoints via kv.Read, so no ContextHint.Reads is needed.
+// createClaimEnv builds the reasoning instanceOp Weaver submits as a directOp,
+// which mints the claim vertex write-ahead with the trusted gap context. Weaver's
+// directOp resolves a FLAT params map from the lens row, so every field arrives at
+// the top-level payload (Option F — no nested params object). The instanceOp
+// validates its link endpoints via kv.Read, so no ContextHint.Reads is needed.
 func createClaimEnv(reqID, handle, targetKey, entityKey string) *processor.OperationEnvelope {
 	payload := map[string]any{
 		"instanceKey": handle,
 		"adapter":     "augur",
 		"replyOp":     "RecordProposal",
-		"params": map[string]any{
-			"targetId":  targetKey,
-			"entityId":  entityKey,
-			"gapColumn": "missing_approval",
-			"trigger":   "unplannable",
-		},
+		"targetId":    targetKey,
+		"entityId":    entityKey,
+		"gapColumn":   "missing_approval",
+		"trigger":     "unplannable",
 	}
 	b, _ := json.Marshal(payload)
 	return &processor.OperationEnvelope{
@@ -212,6 +212,7 @@ const (
 	hRefusal = "BBaugurRefuHJKMNPQRS"
 	hAbsent  = "BBaugurAbsnHJKMNPQRS"
 	hNoClaim = "BBaugurNoclHJKMNPQRS"
+	hNested  = "BBaugurNestHJKMNPQRS"
 )
 
 // driveClaimThenReply runs the full instanceOp → replyOp flow on one pipeline and
@@ -333,7 +334,7 @@ func TestAugur_ConfidenceOutOfRange_Invalid(t *testing.T) {
 
 // TestAugur_Refusal_Invalid: a modeled refusal (status=failed, no proposal) is a
 // definitive verdict — stored invalid (auditable, never dispatchable), NOT a
-// crash. The completion event still fires so the Loom token unparks.
+// crash. The proposal is still recorded (and augur.proposalRecorded emitted).
 func TestAugur_Refusal_Invalid(t *testing.T) {
 	ctx, conn := setupAugurEnv(t)
 	cp, cons := newProposalPipeline(t, ctx, conn, "ap-refusal")
@@ -375,5 +376,39 @@ func TestAugur_ReplyWithoutClaim_Rejected(t *testing.T) {
 	result := proposalResult("assignTask", 0.8, map[string]any{"scopedTo": "vtx.leaseapp.BBcandidateHJKMNPQRS"})
 	reply := recordReplyEnv(testutil.GenReqID("APNoClaim0001"), handle, "completed", result)
 	testutil.PublishOp(t, conn, reply)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestAugur_NestedParamsRejected pins the Option-F flat-payload contract: Weaver
+// dispatches CreateAugurReasoningClaim as a directOp with FLAT top-level params,
+// so the legacy nested {"params": {...}} shape (the Loom externalTask passed) is
+// no longer accepted — the op rejects with a missing-flat-field ScriptError
+// rather than silently reading the nested object. A regression that re-adds
+// nested handling would let this through.
+func TestAugur_NestedParamsRejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-nested")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	payload := map[string]any{
+		"instanceKey": hNested,
+		"adapter":     "augur",
+		"replyOp":     "RecordProposal",
+		"params": map[string]any{ // the legacy nested shape — must be rejected
+			"targetId": targetKey, "entityId": entityKey,
+			"gapColumn": "missing_approval", "trigger": "unplannable",
+		},
+	}
+	b, _ := json.Marshal(payload)
+	claim := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("APNested00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateAugurReasoningClaim",
+		Actor:         apStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "augurproposal",
+		Payload:       json.RawMessage(b),
+	}
+	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }

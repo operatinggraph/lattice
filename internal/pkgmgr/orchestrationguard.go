@@ -101,16 +101,13 @@ func (def Definition) validateWeaverTargets() error {
 }
 
 // validateAugurSpec runs the §10.8 "Augur escalation" install-time validations
-// on a target's optional augur block, mirroring the engine's
-// validateAugurPolicy plus the one check only the installer can make: that
-// `augur.pattern` resolves to a meta.loomPattern whose body is an externalTask.
+// on a target's optional augur block, mirroring the engine's validateAugurPolicy.
 // A nil block is the frozen-contract default (always valid). When present: at
-// least one escalate trigger (each ∈ {unplannable, exhausted}); a non-empty
-// pattern; autoApply.actions ⊆ the §10.8 action table; minConfidence ∈ [0,1].
-// The pattern-is-externalTask check is package-local: if the pattern is
-// declared in THIS package it must carry an externalTask step (the reasoning
-// call); a pattern not declared here may live in an already-installed package,
-// so — exactly like a cross-package LensRef — resolution is left to the engine.
+// least one escalate trigger (each ∈ {unplannable, exhausted}); the optional
+// Op/Adapter/ReplyOp overrides, when set, are single tokens (Option F — Weaver
+// dispatches the reasoning op directly as a directOp, so there is NO loom pattern
+// to resolve; the op / adapter / replyOp default at dispatch when omitted);
+// autoApply.actions ⊆ the §10.8 action table; minConfidence ∈ [0,1].
 func (def Definition) validateAugurSpec(targetIdx int, targetID string, a *AugurSpec) error {
 	if a == nil {
 		return nil
@@ -125,12 +122,11 @@ func (def Definition) validateAugurSpec(targetIdx int, targetID string, a *Augur
 				targetIdx, targetID, trig, escalateUnplannable, escalateExhausted)
 		}
 	}
-	if a.Pattern == "" {
-		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: augur block present but pattern is required (the reasoning externalTask pattern to dispatch)",
-			targetIdx, targetID)
-	}
-	if err := def.validateAugurPatternIsExternalTask(targetIdx, targetID, a.Pattern); err != nil {
-		return err
+	for field, v := range map[string]string{"op": a.Op, "adapter": a.Adapter, "replyOp": a.ReplyOp} {
+		if v != "" && !singleTokenPattern.MatchString(v) {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: augur.%s value %q must be a single token matching %s",
+				targetIdx, targetID, field, v, singleTokenPattern.String())
+		}
 	}
 	if a.AutoApply != nil {
 		for _, act := range a.AutoApply.Actions {
@@ -143,25 +139,6 @@ func (def Definition) validateAugurSpec(targetIdx int, targetID string, a *Augur
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: augur.autoApply.minConfidence %v is out of range (must be in [0,1])",
 				targetIdx, targetID, a.AutoApply.MinConfidence)
 		}
-	}
-	return nil
-}
-
-// validateAugurPatternIsExternalTask checks a package-local augur.pattern
-// carries an externalTask step. A pattern not declared in this package is
-// assumed cross-package (resolved at runtime), so it is not failed here.
-func (def Definition) validateAugurPatternIsExternalTask(targetIdx int, targetID, patternID string) error {
-	for _, p := range def.LoomPatterns {
-		if p.PatternID != patternID {
-			continue
-		}
-		for _, s := range p.Steps {
-			if s.Kind == stepKindExternalTask {
-				return nil
-			}
-		}
-		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: augur.pattern %q resolves to a meta.loomPattern with no externalTask step (the reasoning call must be an externalTask)",
-			targetIdx, targetID, patternID)
 	}
 	return nil
 }

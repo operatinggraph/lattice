@@ -192,12 +192,16 @@ type WeaverTargetSpec struct {
 
 // AugurSpec mirrors the engine's AugurPolicy (Contract #10 §10.8 "Augur
 // escalation") so the emitted body deserializes cleanly. Escalate lists the
-// stuck-gap triggers redirected to AI reasoning; Pattern is the reasoning
-// externalTask pattern ref (shipped verbatim, resolved live in the engine);
+// stuck-gap triggers redirected to AI reasoning; Op/Adapter/ReplyOp are optional
+// overrides naming the reasoning op / bridge adapter / replyOp Weaver dispatches
+// directly as a directOp (Option F — no Loom pattern; they default to
+// CreateAugurReasoningClaim / augur / RecordProposal at dispatch when omitted);
 // Model is an optional adapter override. AutoApply is DESIGNED, not enabled.
 type AugurSpec struct {
 	Escalate  []string
-	Pattern   string
+	Op        string
+	Adapter   string
+	ReplyOp   string
 	Model     string
 	AutoApply *AugurAutoApplySpec
 }

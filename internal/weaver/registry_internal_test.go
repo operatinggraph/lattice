@@ -256,19 +256,22 @@ func TestValidateTarget_AugurPolicy(t *testing.T) {
 		t.Fatalf("a target with no augur block must pass: %v", err)
 	}
 
-	// The minimal valid block: one known trigger + a pattern. autoApply absent.
+	// The minimal valid block: one known trigger, no overrides (Op/Adapter/ReplyOp
+	// default at dispatch). autoApply absent.
 	if err := validateTarget(withAugur(&AugurPolicy{
-		Escalate: []string{escalateUnplannable}, Pattern: "augurReasoning",
+		Escalate: []string{escalateUnplannable},
 	})); err != nil {
 		t.Fatalf("a minimal valid augur block must pass: %v", err)
 	}
 
-	// A fully-populated valid block: both triggers, a model override, and a
-	// well-formed autoApply allow-list (parsed + validated even though no
-	// escalation path consumes it yet).
+	// A fully-populated valid block: both triggers, the op/adapter/replyOp
+	// overrides, a model override, and a well-formed autoApply allow-list (parsed +
+	// validated even though no escalation path consumes it yet).
 	if err := validateTarget(withAugur(&AugurPolicy{
 		Escalate: []string{escalateUnplannable, escalateExhausted},
-		Pattern:  "augurReasoning",
+		Op:       "CreateAugurReasoningClaim",
+		Adapter:  "augur",
+		ReplyOp:  "RecordProposal",
 		Model:    "claude-opus-4-8",
 		AutoApply: &AugurAutoApply{
 			Actions: []string{actionTriggerLoom, actionDirectOp}, MinConfidence: 0.9,
@@ -282,14 +285,15 @@ func TestValidateTarget_AugurPolicy(t *testing.T) {
 		policy  *AugurPolicy
 		wantSub string
 	}{
-		{"empty escalate", &AugurPolicy{Pattern: "p"}, "escalate is empty"},
-		{"unknown trigger", &AugurPolicy{Escalate: []string{"someday"}, Pattern: "p"}, "not a known trigger"},
-		{"missing pattern", &AugurPolicy{Escalate: []string{escalateUnplannable}}, "pattern is required"},
-		{"bad autoApply action", &AugurPolicy{Escalate: []string{escalateUnplannable}, Pattern: "p",
+		{"empty escalate", &AugurPolicy{}, "escalate is empty"},
+		{"unknown trigger", &AugurPolicy{Escalate: []string{"someday"}}, "not a known trigger"},
+		{"bad op token", &AugurPolicy{Escalate: []string{escalateUnplannable}, Op: "bad.op"}, "single token"},
+		{"bad adapter token", &AugurPolicy{Escalate: []string{escalateUnplannable}, Adapter: "a b"}, "single token"},
+		{"bad autoApply action", &AugurPolicy{Escalate: []string{escalateUnplannable},
 			AutoApply: &AugurAutoApply{Actions: []string{"DropTable"}}}, "not a known action"},
-		{"minConfidence too high", &AugurPolicy{Escalate: []string{escalateUnplannable}, Pattern: "p",
+		{"minConfidence too high", &AugurPolicy{Escalate: []string{escalateUnplannable},
 			AutoApply: &AugurAutoApply{MinConfidence: 1.5}}, "out of range"},
-		{"minConfidence negative", &AugurPolicy{Escalate: []string{escalateUnplannable}, Pattern: "p",
+		{"minConfidence negative", &AugurPolicy{Escalate: []string{escalateUnplannable},
 			AutoApply: &AugurAutoApply{MinConfidence: -0.1}}, "out of range"},
 	}
 	for _, tc := range cases {
@@ -313,7 +317,9 @@ func TestRegistry_AugurBlockRoundTrips(t *testing.T) {
 	spec := targetSpecFixture("augurRoundTrip")
 	spec["augur"] = map[string]any{
 		"escalate":  []any{"unplannable"},
-		"pattern":   "augurReasoning",
+		"op":        "CreateAugurReasoningClaim",
+		"adapter":   "augur",
+		"replyOp":   "RecordProposal",
 		"model":     "claude-opus-4-8",
 		"autoApply": map[string]any{"actions": []any{"triggerLoom"}, "minConfidence": 0.8},
 	}
@@ -330,8 +336,9 @@ func TestRegistry_AugurBlockRoundTrips(t *testing.T) {
 	if len(tgt.Augur.Escalate) != 1 || tgt.Augur.Escalate[0] != escalateUnplannable {
 		t.Fatalf("escalate not round-tripped: %+v", tgt.Augur.Escalate)
 	}
-	if tgt.Augur.Pattern != "augurReasoning" || tgt.Augur.Model != "claude-opus-4-8" {
-		t.Fatalf("pattern/model not round-tripped: %+v", tgt.Augur)
+	if tgt.Augur.Op != "CreateAugurReasoningClaim" || tgt.Augur.Adapter != "augur" ||
+		tgt.Augur.ReplyOp != "RecordProposal" || tgt.Augur.Model != "claude-opus-4-8" {
+		t.Fatalf("op/adapter/replyOp/model not round-tripped: %+v", tgt.Augur)
 	}
 	if tgt.Augur.AutoApply == nil || tgt.Augur.AutoApply.MinConfidence != 0.8 {
 		t.Fatalf("autoApply not round-tripped: %+v", tgt.Augur.AutoApply)
