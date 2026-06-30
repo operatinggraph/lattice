@@ -231,7 +231,10 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"links + status untouched; an omitted reason clears it (the caller carries the existing reason). " +
 			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, checkedIn, completed, " +
 			"cancelled, noShow}, with an optional audit note (a cancel / no-show reason, stored on .status distinct " +
-			"from the .schedule visit reason). RecordEncounter upserts the .encounter aspect — the post-visit clinical " +
+			"from the .schedule visit reason). The terminal statuses {cancelled, completed, noShow} are FINAL: " +
+			"re-setting the same terminal value is idempotent, but changing a terminal status to a different one is " +
+			"rejected (TerminalStatus) so a finished / cancelled visit cannot silently revert; non-terminal statuses " +
+			"move freely. RecordEncounter upserts the .encounter aspect — the post-visit clinical " +
 			"record {summary, assessment?, plan?} (raw clinical content, captured plaintext-for-now under the trusted-tool " +
 			"posture, the .demographics discipline — the deferred Vault plane owns its at-rest encryption + display; NEVER " +
 			"projected into a read model) plus the OPERATIONAL, non-PHI signals {documentedAt (derived from op.submittedAt), " +
@@ -1594,6 +1597,23 @@ def execute(state, op):
         if cls != "appointment":
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
         status = required_status(p)
+        # Terminal-status lifecycle guard: cancelled / completed / noShow are FINAL.
+        # Re-setting the SAME terminal value is idempotent (re-run-safe under
+        # at-least-once, and lets a noteless re-set clear a prior note); changing a
+        # terminal status to a DIFFERENT one is rejected — a finished / cancelled visit
+        # must not silently revert (e.g. completed→scheduled, cancelled→completed). A
+        # non-terminal current status (scheduled / confirmed / checkedIn) still moves
+        # freely (including corrections). The current status is read lazily (kv.Read,
+        # §2.5 — the assert_no_overlap idiom), NOT a declared / OCC read: this op is
+        # already an unconditioned upsert with no cross-op serialization, so the guard
+        # matches its existing single-op semantics (it closes the single-op invalid
+        # transition; concurrent transitions race exactly as the upsert already did).
+        # Re-opening a terminal appointment is a future explicit op, not a status flip.
+        cur_status = kv.Read(appt_key + ".status")
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+            if cur_val in TERMINAL_STATUSES and status != cur_val:
+                fail("TerminalStatus: appointment " + appt_key + " is " + str(cur_val) + " (terminal); cannot transition to " + status + " — cancelled/completed/noShow are final")
         # Optional audit note (cancel / no-show reason for billing + records).
         # Stored on the .status aspect, distinct from the .schedule visit reason.
         # Omitted → the .status carries only {value} (an unconditioned upsert, so a

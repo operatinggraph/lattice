@@ -476,9 +476,10 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 
 // TestClinic_StatusCheckedInAndNote proves the day-of-visit extensions: the new
 // checkedIn status is accepted (an active, non-terminal state), and an optional
-// audit note is recorded on the .status aspect for a no-show / cancel. A later
-// noteless transition clears the note (the note belongs to the transition it was
-// recorded with).
+// audit note is recorded on the .status aspect. A later noteless transition clears
+// the note (the note belongs to the transition it was recorded with). The flow uses
+// only NON-terminal statuses so the note record/clear mechanism is exercised
+// independently of the terminal-status guard (see TestClinic_TerminalStatusGuard).
 func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "status-note")
@@ -502,13 +503,14 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 		t.Fatalf("a noteless transition must carry no note; got %v", st["note"])
 	}
 
-	// A no-show with an audit note records the note on .status.
-	clSubmit(t, ctx, conn, cp, cons, "setnoshow01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"noShow","note":"patient never arrived"}`, []string{apptKey}, processor.OutcomeAccepted)
+	// A transition with an audit note records the note on .status (a non-terminal
+	// state — the note mechanism is independent of the status value).
+	clSubmit(t, ctx, conn, cp, cons, "setconf0001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"confirmed","note":"rescheduled by phone"}`, []string{apptKey}, processor.OutcomeAccepted)
 	status = clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ = status["data"].(map[string]any)
-	if st["value"] != "noShow" || st["note"] != "patient never arrived" {
-		t.Fatalf("status = %v (want noShow + note), got note=%v", st["value"], st["note"])
+	if st["value"] != "confirmed" || st["note"] != "rescheduled by phone" {
+		t.Fatalf("status = %v (want confirmed + note), got note=%v", st["value"], st["note"])
 	}
 
 	// A later noteless transition clears the note (unconditioned upsert).
@@ -518,6 +520,52 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 	st, _ = status["data"].(map[string]any)
 	if _, hasNote := st["note"]; hasNote {
 		t.Fatalf("a noteless transition must clear the prior note; got %v", st["note"])
+	}
+}
+
+// TestClinic_TerminalStatusGuard proves the lifecycle guard: once an appointment
+// reaches a terminal status (cancelled / completed / noShow) it cannot transition
+// to a DIFFERENT status — a finished / cancelled visit must not silently revert.
+// Re-setting the SAME terminal value stays accepted (idempotent under at-least-once,
+// and clears a stale note). Non-terminal statuses are unaffected (covered above).
+func TestClinic_TerminalStatusGuard(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-terminal")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0010", "Term Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0010", "Dr. Term", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0010", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T09:00:00Z","endsAt":"2026-07-10T09:20:00Z"}`,
+		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// Move to a terminal status (the visit happened).
+	clSubmit(t, ctx, conn, cp, cons, "setcompl001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"completed"}`, []string{apptKey}, processor.OutcomeAccepted)
+
+	// completed→scheduled is REJECTED — a completed visit must not silently revert.
+	clSubmit(t, ctx, conn, cp, cons, "settrevrt01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"scheduled"}`, []string{apptKey}, processor.OutcomeRejected)
+
+	// completed→cancelled (terminal→terminal, different value) is also REJECTED.
+	clSubmit(t, ctx, conn, cp, cons, "settcancl01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"cancelled"}`, []string{apptKey}, processor.OutcomeRejected)
+
+	// The status is unchanged by the rejected attempts — still completed.
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ := status["data"].(map[string]any)
+	if st["value"] != "completed" {
+		t.Fatalf("after rejected transitions, status = %v, want completed (unchanged)", st["value"])
+	}
+
+	// completed→completed (same terminal value) stays accepted — idempotent re-set
+	// under at-least-once, and a noteless re-set clears any stale note.
+	clSubmit(t, ctx, conn, cp, cons, "settidemp01", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"completed"}`, []string{apptKey}, processor.OutcomeAccepted)
+	status = clReadDoc(t, ctx, conn, apptKey+".status")
+	st, _ = status["data"].(map[string]any)
+	if st["value"] != "completed" {
+		t.Fatalf("idempotent re-set: status = %v, want completed", st["value"])
 	}
 }
 
