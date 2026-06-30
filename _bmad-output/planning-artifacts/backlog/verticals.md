@@ -17,7 +17,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **First Postgres protected read-model + read boundary (D1.3) — Fires 2–3** | The loftspace consumer of the D1.3 RLS enabler: protected Postgres lease-apps lens + authenticated reader + the landlord/residence audience. | LoftSpace | pkg + FE | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/first-postgres-read-model-and-read-boundary-design.md) · Fires 2–3 + landlord Inc 1–3 shipped (RLS enforcement LIVE); remaining = the security e2e (revoked-by-tombstone ⇒ RLS denies — D1.3's acceptance test) |
 | Property / Unit / Listing domain + richer application | `loftspace-domain` owns `vtx.unit` (`.listing`/`.address`); lease-signing requires a live unit at create + walks `appliesToUnit` for display. | LoftSpace | pkg + FE | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/loftspace-property-domain-design.md) · Inc 1–2 shipped; Inc 3 in progress |
 | Recurring `@every` schedules — the clinic forcing function | `@every` has no consumer yet (everything uses `@at` one-shot). Clinic pulls it into existence: appointment reminders, recurring availability, follow-ups. | Clinic | platform + pkg | ★★★ | M | 📋 ready · 🚧 build-with lattice [`@every` schedules](lattice.md) (ratified, ready) |
 | Clinic — encounter / visit documentation | `RecordEncounter` captures the post-visit clinical record; raw content stays unprojected (Vault discipline). | Clinic | pkg + FE | ★★★ | M | 🏗️ building · Inc 1 (capture op) + Inc 2 (FE) shipped; raw-content encryption → Vault (deferred) |
@@ -38,6 +37,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-06-29 · `2a02df1` · D1.3 CLOSED — Postgres-RLS read boundary LIVE (revoked-by-tombstone⇒deny proven: `faa3aec` lens-retraction + adapter seam + RLS e2e); residual landlord-link freshness is the de-prioritized lattice Link-triggered-reprojection item, not a D1.3 gap
 - 2026-06-29 · `e1d540f` · service-domain + service-location: envelope-class discriminator migration
 - 2026-06-29 · `2a5087a` · Service-instance envelope-class migration — lease-signing consumer (Row 112)
 - 2026-06-29 · `2d5aeae` · Clinic encounter FE (Row 104 Increment 2)
