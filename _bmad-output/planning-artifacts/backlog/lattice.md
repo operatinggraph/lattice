@@ -43,6 +43,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Loupe] Static-UI serving (`go:embed web`) untested** | The embedded operator-UI mount has no coverage. | ★ | XS | 📋 |
 | **[Loupe] Operator UI (`app.js`, 1142 LOC) has no automated coverage** | No JS test harness in the repo — standing up one is an architectural call. | ★★ | L | 🔭 flag-for-Andrew |
+| **[Refractor] Retire the legacy `simple` engine (full-engine is universal)** | All 20 lenses (18 package + 2 primordial) declare `engine:"full"`; the `simple` recursive-descent parser (~2.8k LOC) + the registry empty-engine "simple-then-full" fallback + the `startPipeline` simple-compile branch are dead in prod. Catch: `simple` also owns the shared `EvalResult`/`QueryPlan`/`NodeEntry` types the full path + pipeline consume → **decouple-then-delete**, not a clean removal. No frozen-contract change (engine is a non-contract spec hint). | ★★ | M–L | 📋 needs design (type-decouple plan) · refs `ruleengine/simple/`, `ruleengine/ruleengine.go:166-201`, `cmd/refractor/main.go:286-302`, `pipeline.go` (`simple.*` types) |
+| **[Refractor/pipeline] Fan-out eval-error disposition + adjacency-watch edge branches uncovered** | `dispositionEvalErr` (0% — link/aspect fan-out eval-error → terminal-DLQ / infra-pause / transient-nak mapping) and `handleAdjUpdate` (13.5% — adjacency-watch reprojection: the not-found / tombstone / bad-key / unmarshal arms). Happy-path fan-out is e2e-covered; the error/edge arms are not. Mirror of the HealthSink coverage rows. | ★★ | XS–S | 📋 · refs `pipeline/pipeline.go:625,921`, `pipeline/evaluate.go` |
 
 ### Survey log (round-robin rotation)
 
@@ -50,6 +52,16 @@ Compact rotation memory only (survey *findings* become filed rows above + in the
 Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting feature backlog). Freshness via
 `git log -1 --format=%ct -- <path>`; survey the stalest, note a dated line, rotate.
 
+- **Surveyor fire 2026-06-30 (Refractor):** healthy overall — pkg coverage 70–100% (pipeline's 49.4% is a
+  measurement artifact: the link/aspect fan-out is 60–87% via the root-package e2e tests; the adapter
+  postgres/rls/read-path 0%s are `POSTGRES_TEST_DSN`-gated, covered out-of-band). Every "What's deferred"
+  item already filed (Personal Lens, multi-cell, cross-instance latency rollup, link-tombstone reproj,
+  NATS write-restriction). **Filed 2** (Component maintenance): (1) **retire the legacy `simple` engine** —
+  all 20 lenses are `engine:"full"`, the ~2.8k-LOC recursive-descent parser + the empty-engine fallback +
+  the `startPipeline` compile branch are dead in prod but entangled (owns the shared `EvalResult`/`QueryPlan`
+  types) → decouple-then-delete, designer-worthy, no contract change; (2) the fan-out eval-error disposition
+  (`dispositionEvalErr` 0%) + adjacency-watch edge-branch (`handleAdjUpdate` 13.5%) coverage gap. cypher_lexer
+  TODOs are generated ANTLR — skipped.
 - **Steward fire 2026-06-30 (@every Fire 2 — sweep cron-kill; protected-lens stand-down):** SELECT first
   reached for the ★★ protected-lens out-of-band, but its `steward-protected-lens-oob` worktree is owned by a
   CONCURRENT Lattice fire already further along (checkpoint `59d2f98`, 3-layer-reviewed + a CRITICAL
@@ -183,6 +195,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Negative / filter-retraction projection | True "emit-only-when-violating" (targets currently project one row per candidate with a `violating` flag). | ★→★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) · consolidation target for Link-triggered reprojection |
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | 📋 (no consumer yet) |
 | Link-tombstone re-projection · cross-instance latency rollup | Two projection edge-cases / observability gaps (current approaches work). | ★ | S each | 📋 |
+| **[Refractor/Loupe] Silent lens-projection stall is undetectable** | A stalled projection is invisible. Clinic-PO observed on a long-up dev stack: committed ops (Processor `green`, Core KV updated, `core-events` published) stopped reaching *every* clinic read model, while the Refractor self-reported `green` and each lens `active` with `freshness -`. Read models silently diverged from Core KV with no operator/Lamplighter signal. Refractor should emit per-lens projection lag (last-applied `core-events` seq vs head, or last-projected-at) into Health KV; Loupe should populate the lens `freshness` column (today always `-`). | ★★ | M | 📋 (clinic PO 2026-06-30) |
 
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
