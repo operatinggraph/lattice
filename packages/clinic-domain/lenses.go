@@ -78,6 +78,10 @@ func Lenses() []pkgmgr.LensSpec {
 // when the @at reminder fires): it is null until a reminder is sent, and null whenever
 // clinic-reminders is not installed — a soft read-model surfacing, never a build
 // dependency (the engine reads the aspect by key-shape; clinic-domain installs alone).
+// followUpReminderSentAt is the same null-safe soft read of the appointment's
+// .followUpReminder aspect (written by clinic-reminders when the at-the-date follow-up
+// @at reminder fires) — null until a follow-up reminder fires and null whenever
+// clinic-reminders is not installed.
 //
 // documentedAt / followUpRequested / followUpDate are the OPERATIONAL, non-PHI
 // signals of the appointment's .encounter aspect (the post-visit clinical record
@@ -104,6 +108,7 @@ RETURN
   pr.profile.data.fullName AS providerName,
   pr.profile.data.specialty AS providerSpecialty,
   a.reminder.data.sentAt AS reminderSentAt,
+  a.followUpReminder.data.sentAt AS followUpReminderSentAt,
   a.encounter.data.documentedAt AS documentedAt,
   a.encounter.data.followUpRequested AS followUpRequested,
   a.encounter.data.followUpDate AS followUpDate`

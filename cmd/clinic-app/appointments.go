@@ -28,6 +28,10 @@ type appointmentRow struct {
 	// (the clinic-reminders convergence, surfaced via the clinicAppointments lens).
 	// Empty until the reminder is sent (or when clinic-reminders is not installed).
 	ReminderSentAt string `json:"reminderSentAt,omitempty"`
+	// FollowUpReminderSentAt is the RFC3339 instant the at-the-date follow-up reminder
+	// fired (the clinic-reminders followUpReminders convergence). Empty until it fires
+	// (or when clinic-reminders is not installed).
+	FollowUpReminderSentAt string `json:"followUpReminderSentAt,omitempty"`
 	// DocumentedAt / FollowUpRequested / FollowUpDate are the OPERATIONAL, non-PHI
 	// encounter signals the clinicAppointments lens projects after RecordEncounter
 	// documents a completed visit. The RAW clinical content (summary / assessment /

@@ -1260,6 +1260,20 @@ def optional_bool(p, name):
         return False
     return v
 
+def normalize_follow_up_date(s):
+    # The clinic FE captures followUpDate as an HTML <input type=date> → a
+    # date-only "YYYY-MM-DD". A downstream follow-up reminder's @at timer needs a
+    # full RFC3339 instant (Weaver's temporal lane parses the lens freshUntil as
+    # RFC3339, and time.rfc3339_utc itself rejects a bare date), so a date-only
+    # value is anchored to 09:00:00Z — "the morning of" the follow-up date. A caller
+    # that already supplies a full RFC3339 instant is normalized to canonical UTC so
+    # the stored followUpDate is byte-stable for the remindedFor <> followUpDate
+    # convergence compare. Storing a full instant is backward-compatible: the FE
+    # slices followUpDate to its first 10 chars (the date) everywhere it renders it.
+    if "T" not in s and len(s) == 10:
+        s = s + "T09:00:00Z"
+    return time.rfc3339_utc(s)
+
 APPOINTMENT_STATUSES = ["scheduled", "confirmed", "checkedIn", "completed", "cancelled", "noShow"]
 TERMINAL_STATUSES = ["cancelled", "completed", "noShow"]
 
@@ -1633,7 +1647,9 @@ def execute(state, op):
             enc["plan"] = plan
         follow_date = optional_string(p, "followUpDate")
         if enc["followUpRequested"] and follow_date != None:
-            enc["followUpDate"] = follow_date
+            # Normalized to a full canonical-UTC RFC3339 instant so the optional
+            # clinic-reminders follow-up reminder can arm an @at timer at it.
+            enc["followUpDate"] = normalize_follow_up_date(follow_date)
         # Unconditioned upsert of the whole .encounter aspect (re-runnable — a
         # provider can correct the note). The .schedule / .status aspects + the
         # forPatient / withProvider links are untouched.

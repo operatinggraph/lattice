@@ -1,16 +1,18 @@
 # clinic-reminders
 
 The clinic vertical's **first orchestration** — a Capability Package that attaches one-shot `@at`
-appointment reminders ("remind ~24h before") to `clinic-domain`'s appointments. It owns the
-`.reminder` aspect, the `RecordAppointmentReminder` op, one convergence lens, and the §10.8 playbook
-that dispatches the reminder — the build-ready slice of the clinic's scheduling story (recurring
-availability genuinely needs `@every` and stays a separate, §10.4-amendment-gated item).
+reminders to `clinic-domain`'s appointments. Two convergences: the **appointment reminder** ("remind
+~24h before") and the **follow-up reminder** ("a documented visit's requested follow-up is due"), each a
+marker aspect + op + convergence lens + §10.8 playbook — the build-ready slices of the clinic's
+scheduling story (recurring availability genuinely needs `@every` and stays a separate,
+§10.4-amendment-gated item).
 
 It is the convergence **sibling** of the projection-only `clinic-domain`: clinic-domain owns the
-`appointment` vertex + its `.schedule`/`.status` aspects and precomputes `remindAt = startsAt − 24h`;
-clinic-reminders *attaches the reminder machinery* onto that vertex (the `loftspace-domain` idiom of
-one package adding an aspect onto another package's vertex type — the step-6 write gate keys on the
-**aspect** class, not the host vertex's owner).
+`appointment` vertex + its `.schedule`/`.status`/`.encounter` aspects (precomputing
+`remindAt = startsAt − 24h`, and normalizing a documented visit's `followUpDate` to a full RFC3339
+instant); clinic-reminders *attaches the reminder machinery* onto that vertex (the `loftspace-domain`
+idiom of one package adding an aspect onto another package's vertex type — the step-6 write gate keys on
+the **aspect** class, not the host vertex's owner). The follow-up half lives in `followups.go`.
 
 Install: `lattice-pkg install packages/clinic-reminders` (after `clinic-domain` + `orchestration-base`;
 or `make install-clinic` onto a running stack).
@@ -20,16 +22,31 @@ Design: [`_bmad-output/implementation-artifacts/clinic-reminders-design.md`](../
 
 | Kind | Canonical names |
 |---|---|
-| **DDLs** (2) | `appointmentReminderOp` (`meta.ddl.vertexType` — owns the script) · `appointmentReminder` (`meta.ddl.aspectType` — the `.reminder` write gate) |
-| **Operations** (1) | `RecordAppointmentReminder` |
-| **Convergence lens** (1) | `appointmentReminders` → `weaver-targets` (`nats-kv`, `full` engine) |
-| **Weaver target** (1) | `appointmentReminders` — gap `missing_reminder` → `directOp(RecordAppointmentReminder)` |
+| **DDLs** (4) | `appointmentReminderOp` · `appointmentReminder` (the `.reminder` write gate) · `followUpReminderOp` · `followUpReminder` (the `.followUpReminder` write gate) |
+| **Operations** (2) | `RecordAppointmentReminder` · `RecordFollowUpReminder` |
+| **Convergence lenses** (2) | `appointmentReminders` · `followUpReminders` → `weaver-targets` (`nats-kv`, `full` engine) |
+| **Weaver targets** (2) | `appointmentReminders` — `missing_reminder` → `directOp(RecordAppointmentReminder)` · `followUpReminders` — `missing_followup_reminder` → `directOp(RecordFollowUpReminder)` |
 
-`Depends`: `clinic-domain` (the appointment + `.schedule.remindAt`) + `orchestration-base` (`MarkExpired`
-/ the `freshnessExpiry` marker the `@at` firing writes). `RecordAppointmentReminder` is granted to the
-`operator` role at `scope: any` (`permissions.go`) — no new capability surface; Weaver's service actor
-dispatches the `directOp` under the standing operator grant (the `objects-base` GC `TombstoneObject`
-idiom).
+`Depends`: `clinic-domain` (the appointment + `.schedule.remindAt` / `.encounter.followUpDate`) +
+`orchestration-base` (`MarkExpired` / the `freshnessExpiry` marker the `@at` firing writes). Both ops are
+granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability surface; Weaver's
+service actor dispatches the `directOp` under the standing operator grant (the `objects-base` GC
+`TombstoneObject` idiom).
+
+## Follow-up reminders (`followups.go`)
+
+The **same mechanism** as the appointment reminder, keyed on the documented visit's
+`.encounter.followUpDate` instead of `.schedule.remindAt`, and firing **at** that date (no lead offset —
+the visit is already past and `followUpDate` is the provider's soft target). When `RecordEncounter`
+captures `followUpRequested` + a `followUpDate`, clinic-domain normalizes the date-only FE value to a
+full RFC3339 instant (`09:00:00Z` "the morning of") so Weaver's `@at` temporal lane can arm a timer at
+it. The four-term gate (`remindedFor <> followUpDate` AND `followUpRequested = true` AND
+`followUpDate <= $now` AND `status <> 'cancelled'`) opens once the date passes; the `directOp` stamps
+`.followUpReminder = {sentAt, remindedFor = followUpDate}` → converged. A re-documented visit that moves
+the `followUpDate` re-opens the gate and re-arms the reminder for the new date (the appointment
+reminder's reschedule re-arm). Surfaced via the `clinicAppointments` lens's null-safe
+`followUpReminderSentAt` soft read (the `reminderSentAt` precedent). Convergence pinned by
+`followups_cypher_test.go`; the op write-path by `TestRecordFollowUpReminder_*`.
 
 ## Key shapes (Contract #1)
 

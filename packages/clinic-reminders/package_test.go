@@ -23,42 +23,49 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the two DDLs: the appointmentReminderOp vertexType (owns
-// the RecordAppointmentReminder script) and the appointmentReminder aspectType
-// (the step-6 write gate). The aspect MUST be NON-sensitive (it carries only a
-// timestamp and attaches to an appointment, not an identity).
+// TestPackage_DDLs pins the four DDLs — the appointment-reminder pair
+// (appointmentReminderOp vertexType + appointmentReminder aspectType) and the
+// follow-up-reminder pair (followUpReminderOp + followUpReminder). Each op
+// vertexType owns its Record* script; each aspectType is the step-6 write gate and
+// MUST be NON-sensitive (a timestamp on an appointment, not an identity).
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 2 {
-		t.Fatalf("expected 2 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 4 {
+		t.Fatalf("expected 4 DDLs, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
 		byName[d.CanonicalName] = d
 	}
 
-	op, ok := byName["appointmentReminderOp"]
-	if !ok {
-		t.Fatal("missing appointmentReminderOp vertexType DDL")
+	pairs := []struct{ opName, aspName, cmd string }{
+		{"appointmentReminderOp", "appointmentReminder", "RecordAppointmentReminder"},
+		{"followUpReminderOp", "followUpReminder", "RecordFollowUpReminder"},
 	}
-	if op.Class != "meta.ddl.vertexType" {
-		t.Fatalf("appointmentReminderOp class = %q, want meta.ddl.vertexType", op.Class)
-	}
-	if len(op.PermittedCommands) != 1 || op.PermittedCommands[0] != "RecordAppointmentReminder" {
-		t.Fatalf("appointmentReminderOp permittedCommands = %v, want [RecordAppointmentReminder]", op.PermittedCommands)
-	}
+	for _, pr := range pairs {
+		op, ok := byName[pr.opName]
+		if !ok {
+			t.Fatalf("missing %s vertexType DDL", pr.opName)
+		}
+		if op.Class != "meta.ddl.vertexType" {
+			t.Fatalf("%s class = %q, want meta.ddl.vertexType", pr.opName, op.Class)
+		}
+		if len(op.PermittedCommands) != 1 || op.PermittedCommands[0] != pr.cmd {
+			t.Fatalf("%s permittedCommands = %v, want [%s]", pr.opName, op.PermittedCommands, pr.cmd)
+		}
 
-	asp, ok := byName["appointmentReminder"]
-	if !ok {
-		t.Fatal("missing appointmentReminder aspectType DDL")
-	}
-	if asp.Class != "meta.ddl.aspectType" {
-		t.Fatalf("appointmentReminder class = %q, want meta.ddl.aspectType", asp.Class)
-	}
-	if asp.Sensitive {
-		t.Fatal("appointmentReminder must NOT be sensitive (it attaches to a non-identity vertex; step-6 sensitiveAspectScope would reject it)")
-	}
-	if len(asp.PermittedCommands) != 1 || asp.PermittedCommands[0] != "RecordAppointmentReminder" {
-		t.Fatalf("appointmentReminder permittedCommands = %v, want [RecordAppointmentReminder]", asp.PermittedCommands)
+		asp, ok := byName[pr.aspName]
+		if !ok {
+			t.Fatalf("missing %s aspectType DDL", pr.aspName)
+		}
+		if asp.Class != "meta.ddl.aspectType" {
+			t.Fatalf("%s class = %q, want meta.ddl.aspectType", pr.aspName, asp.Class)
+		}
+		if asp.Sensitive {
+			t.Fatalf("%s must NOT be sensitive (it attaches to a non-identity vertex; step-6 sensitiveAspectScope would reject it)", pr.aspName)
+		}
+		if len(asp.PermittedCommands) != 1 || asp.PermittedCommands[0] != pr.cmd {
+			t.Fatalf("%s permittedCommands = %v, want [%s]", pr.aspName, asp.PermittedCommands, pr.cmd)
+		}
 	}
 }
 
@@ -83,63 +90,84 @@ func TestPackage_Depends(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the single op granted to operator (scope any).
+// TestPackage_Permissions pins the two ops granted to operator (scope any).
 func TestPackage_Permissions(t *testing.T) {
-	if len(Package.Permissions) != 1 {
-		t.Fatalf("expected 1 permission, got %d", len(Package.Permissions))
+	want := map[string]bool{"RecordAppointmentReminder": false, "RecordFollowUpReminder": false}
+	if len(Package.Permissions) != len(want) {
+		t.Fatalf("expected %d permissions, got %d", len(want), len(Package.Permissions))
 	}
-	p := Package.Permissions[0]
-	if p.OperationType != "RecordAppointmentReminder" || p.Scope != "any" ||
-		len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
-		t.Fatalf("unexpected permission: %+v", p)
+	for _, p := range Package.Permissions {
+		if _, ok := want[p.OperationType]; !ok {
+			t.Fatalf("unexpected permission op %q", p.OperationType)
+		}
+		if p.Scope != "any" || len(p.GrantsTo) != 1 || p.GrantsTo[0] != "operator" {
+			t.Fatalf("unexpected permission: %+v", p)
+		}
+		want[p.OperationType] = true
 	}
-}
-
-// TestPackage_NoScans mirrors the known-key discipline: the op script must use no
-// prefix scan.
-func TestPackage_NoScans(t *testing.T) {
-	for _, forbidden := range []string{"KVListKeys", "list_keys", "scan(", "keys_with_prefix"} {
-		if strings.Contains(recordReminderScript, forbidden) {
-			t.Errorf("clinic-reminders script must not reference prefix-scan helper %q", forbidden)
+	for op, seen := range want {
+		if !seen {
+			t.Fatalf("missing permission for %q", op)
 		}
 	}
 }
 
-// TestClinicReminders_PlaybookColumnsMatchLens guards the §10.2↔§10.8 column seam:
-// every row.<col> template the playbook names (the directOp Params + Reads) must be
-// a BodyColumn the appointmentReminders lens projects, and every gap KEY must be a
-// BodyColumn — otherwise Weaver dispatches against a column that does not exist.
-func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
-	if len(Package.Lenses) != 1 || Package.Lenses[0].Output == nil {
-		t.Fatalf("expected 1 lens with an Output descriptor")
-	}
-	cols := map[string]bool{}
-	for _, c := range Package.Lenses[0].Output.BodyColumns {
-		cols[c] = true
-	}
-	if len(Package.WeaverTargets) != 1 {
-		t.Fatalf("expected 1 weaverTarget, got %d", len(Package.WeaverTargets))
-	}
-	wt := Package.WeaverTargets[0]
-	if pat := Package.Lenses[0].Output.OutputKeyPattern; len(pat) < len(wt.TargetID) || pat[:len(wt.TargetID)] != wt.TargetID {
-		t.Fatalf("targetId %q must prefix the lens OutputKeyPattern %q", wt.TargetID, pat)
-	}
-	checkRowRef := func(where, v string) {
-		if rest, ok := strings.CutPrefix(v, "row."); ok {
-			if !cols[rest] {
-				t.Errorf("%s references row.%s but appointmentReminders projects no such BodyColumn (have %v)", where, rest, Package.Lenses[0].Output.BodyColumns)
+// TestPackage_NoScans mirrors the known-key discipline: neither op script may use a
+// prefix scan.
+func TestPackage_NoScans(t *testing.T) {
+	scripts := map[string]string{"recordReminderScript": recordReminderScript, "recordFollowUpReminderScript": recordFollowUpReminderScript}
+	for name, script := range scripts {
+		for _, forbidden := range []string{"KVListKeys", "list_keys", "scan(", "keys_with_prefix"} {
+			if strings.Contains(script, forbidden) {
+				t.Errorf("%s must not reference prefix-scan helper %q", name, forbidden)
 			}
 		}
 	}
-	for gapKey, ga := range wt.Gaps {
-		if !cols[gapKey] {
-			t.Errorf("gap key %q is not a lens BodyColumn (have %v)", gapKey, Package.Lenses[0].Output.BodyColumns)
+}
+
+// TestClinicReminders_PlaybookColumnsMatchLens guards the §10.2↔§10.8 column seam
+// for EVERY weaver target: each target's LensRef must resolve to a package lens with
+// an Output descriptor whose OutputKeyPattern the target's TargetID prefixes, every
+// gap KEY must be a BodyColumn, and every row.<col> the playbook names (the directOp
+// Params + Reads) must be a BodyColumn — otherwise Weaver dispatches against a column
+// that does not exist.
+func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
+	lensByName := map[string]pkgmgr.LensSpec{}
+	for _, l := range Package.Lenses {
+		lensByName[l.CanonicalName] = l
+	}
+	if len(Package.WeaverTargets) != 2 {
+		t.Fatalf("expected 2 weaverTargets, got %d", len(Package.WeaverTargets))
+	}
+	for _, wt := range Package.WeaverTargets {
+		lens, ok := lensByName[wt.LensRef]
+		if !ok || lens.Output == nil {
+			t.Fatalf("target %s: lensRef %q resolves to no lens with an Output descriptor", wt.TargetID, wt.LensRef)
 		}
-		for k, v := range ga.Params {
-			checkRowRef("gap "+gapKey+" param "+k, v)
+		cols := map[string]bool{}
+		for _, c := range lens.Output.BodyColumns {
+			cols[c] = true
 		}
-		for _, r := range ga.Reads {
-			checkRowRef("gap "+gapKey+" read", r)
+		if pat := lens.Output.OutputKeyPattern; len(pat) < len(wt.TargetID) || pat[:len(wt.TargetID)] != wt.TargetID {
+			t.Fatalf("targetId %q must prefix the %s lens OutputKeyPattern %q", wt.TargetID, wt.LensRef, pat)
+		}
+		checkRowRef := func(where, v string) {
+			if rest, ok := strings.CutPrefix(v, "row."); ok {
+				if !cols[rest] {
+					t.Errorf("%s references row.%s but %s projects no such BodyColumn (have %v)", where, rest, wt.LensRef, lens.Output.BodyColumns)
+				}
+			}
+		}
+		for gapKey, ga := range wt.Gaps {
+			if !cols[gapKey] {
+				t.Errorf("target %s gap key %q is not a %s BodyColumn (have %v)", wt.TargetID, gapKey, wt.LensRef, lens.Output.BodyColumns)
+			}
+			for k, v := range ga.Params {
+				checkRowRef("target "+wt.TargetID+" gap "+gapKey+" param "+k, v)
+			}
+			for _, r := range ga.Reads {
+				checkRowRef("target "+wt.TargetID+" gap "+gapKey+" read", r)
+			}
 		}
 	}
 }

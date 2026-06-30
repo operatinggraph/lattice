@@ -6,10 +6,12 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
 const AppointmentRemindersTarget = "appointmentReminders"
 
-// Lenses returns the package's single weaver-target convergence lens. It is the
-// inversion of lease-signing's freshness re-open: where lease projects freshUntil
-// to RE-OPEN a converged gap at a deadline, this projects freshUntil = remindAt to
-// OPEN the reminder gap at the deadline (see appointmentRemindersSpec).
+// Lenses returns the package's weaver-target convergence lenses: appointmentReminders
+// (the ~24h-ahead appointment reminder) and followUpReminders (the at-the-date
+// follow-up reminder, followups.go). Both invert lease-signing's freshness re-open —
+// where lease projects freshUntil to RE-OPEN a converged gap at a deadline, these
+// project freshUntil = the deadline to OPEN the reminder gap when it passes (see
+// appointmentRemindersSpec / followUpRemindersSpec).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -28,6 +30,7 @@ func Lenses() []pkgmgr.LensSpec {
 				KeyColumn:        "entityId",
 			},
 		},
+		followUpRemindersLens(),
 	}
 }
 

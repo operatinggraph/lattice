@@ -590,6 +590,20 @@ func TestClinic_RecordEncounter(t *testing.T) {
 		t.Fatalf("followUpDate must be dropped when followUpRequested is false; got %v", data["followUpDate"])
 	}
 
+	// A date-only followUpDate (the FE's <input type=date> value) is normalized to a
+	// full canonical-UTC RFC3339 instant anchored to 09:00:00Z, so the clinic-reminders
+	// follow-up reminder can arm an @at timer at it (Weaver's temporal lane needs a
+	// parseable RFC3339 freshUntil). The stored value stays date-prefixed, so the FE's
+	// .slice(0,10) renders the same day.
+	clSubmit(t, ctx, conn, cp, cons, "enc0004", "RecordEncounter", "appointment",
+		`{"appointmentKey":"`+apptKey+`","summary":"Follow-up by date.","followUpRequested":true,"followUpDate":"2027-03-20"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+	enc = clReadDoc(t, ctx, conn, apptKey+".encounter")
+	data, _ = enc["data"].(map[string]any)
+	if data["followUpDate"] != "2027-03-20T09:00:00Z" {
+		t.Fatalf("date-only followUpDate must normalize to 2027-03-20T09:00:00Z; got %v", data["followUpDate"])
+	}
+
 	// A non-appointment target key is rejected (the vtx.appointment.<id> key-shape
 	// guard fails closed before any write).
 	clSubmit(t, ctx, conn, cp, cons, "enc0003", "RecordEncounter", "appointment",

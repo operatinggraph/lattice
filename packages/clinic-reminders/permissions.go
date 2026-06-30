@@ -16,6 +16,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit RecordAppointmentReminder operations (orchestration-internal: the appointmentReminders directOp playbook, dispatched by Weaver's service actor).",
 			GrantsTo:      []string{"operator"},
 		},
+		followUpReminderPermission(),
 	}
 }
 
@@ -27,5 +28,6 @@ func Permissions() []pkgmgr.PermissionSpec {
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: reminderOp},
+		{OperationType: followUpReminderOp},
 	}
 }

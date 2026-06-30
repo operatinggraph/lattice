@@ -40,7 +40,7 @@ const (
 
 // crOps are the ops the staff actor needs: clinic-domain's create ops + the
 // clinic-reminders op.
-var crOps = []string{"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder"}
+var crOps = []string{"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder"}
 
 func crStaffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
@@ -210,5 +210,74 @@ func TestRecordAppointmentReminder_RejectsTombstonedAppointment(t *testing.T) {
 
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".reminder"); err == nil {
 		t.Fatalf("a reminder marker must NOT be written for a tombstoned appointment")
+	}
+}
+
+// TestRecordFollowUpReminder_WritesMarker mints a bookable appointment then drives
+// RecordFollowUpReminder, asserting the .followUpReminder.sentAt marker lands (class
+// followUpReminder) — the directOp write-path the followUpReminders playbook
+// dispatches. Then re-runs it to prove the unconditioned overwrite is idempotent in
+// effect (sentAt stays present). Mirrors the appointment-reminder write-path test.
+func TestRecordFollowUpReminder_WritesMarker(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "furem", Instance: "cr-furem"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crfupat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crfuprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+
+	apptID := crSubmit(t, ctx, conn, cp, cons, "crfuap001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`,
+		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// The directOp: RecordFollowUpReminder targets the appointment. Class LEFT EMPTY
+	// exactly as Weaver's actuator dispatches a directOp (the operationType→class
+	// reverse index resolves to the followUpReminderOp vertexType handler).
+	crSubmit(t, ctx, conn, cp, cons, "crfurm001", "RecordFollowUpReminder", "",
+		`{"appointmentKey":"`+apptKey+`","remindedFor":"2027-01-15T09:00:00Z"}`, []string{apptKey}, processor.OutcomeAccepted)
+
+	rem := crReadDoc(t, ctx, conn, apptKey+".followUpReminder")
+	if rem["class"] != "followUpReminder" {
+		t.Fatalf("followUpReminder class = %v, want followUpReminder", rem["class"])
+	}
+	rd, _ := rem["data"].(map[string]any)
+	if first, _ := rd["sentAt"].(string); first == "" {
+		t.Fatalf("followUpReminder sentAt not written: %v", rem["data"])
+	}
+	if rf, _ := rd["remindedFor"].(string); rf != "2027-01-15T09:00:00Z" {
+		t.Fatalf("followUpReminder remindedFor = %q, want 2027-01-15T09:00:00Z", rf)
+	}
+
+	// Idempotent in effect: a second RecordFollowUpReminder is ACCEPTED and the marker
+	// stays present (the unconditioned-overwrite discriminator).
+	crSubmit(t, ctx, conn, cp, cons, "crfurm002", "RecordFollowUpReminder", "",
+		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+	rem2 := crReadDoc(t, ctx, conn, apptKey+".followUpReminder")
+	rd2, _ := rem2["data"].(map[string]any)
+	if s, _ := rd2["sentAt"].(string); s == "" {
+		t.Fatalf("followUpReminder sentAt missing after re-run: %v", rem2["data"])
+	}
+}
+
+// TestRecordFollowUpReminder_RejectsTombstonedAppointment proves the liveness guard:
+// a TOMBSTONED appointment is Rejected and writes no dangling .followUpReminder marker.
+func TestRecordFollowUpReminder_RejectsTombstonedAppointment(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "furemdead", Instance: "cr-furemdead"})
+
+	dead := "vtx.appointment.CRdeadFUApptKMNPQRSTV"
+	doc := map[string]any{"class": "appointment", "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, dead, b); err != nil {
+		t.Fatalf("seed tombstoned appointment: %v", err)
+	}
+
+	crSubmit(t, ctx, conn, cp, cons, "crfurm003", "RecordFollowUpReminder", "",
+		`{"appointmentKey":"`+dead+`"}`, []string{dead}, processor.OutcomeRejected)
+
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".followUpReminder"); err == nil {
+		t.Fatalf("a follow-up reminder marker must NOT be written for a tombstoned appointment")
 	}
 }

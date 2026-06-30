@@ -1376,6 +1376,17 @@ function renderFollowupCard(f) {
     ad.textContent = "Later visit booked";
     badges.append(ad);
   }
+  // The at-the-date follow-up reminder, once the clinic-reminders followUpReminders
+  // orchestration has fired it (surfaced via the clinicAppointments lens's
+  // followUpReminderSentAt column). Absent until the @at fires / when clinic-reminders
+  // is not installed.
+  if (f.followUpReminderSentAt) {
+    const r = new Date(f.followUpReminderSentAt);
+    const rem = document.createElement("span");
+    rem.className = "badge reminder-sent";
+    rem.textContent = "🔔 Reminder sent" + (isNaN(r) ? "" : " · " + r.toLocaleDateString());
+    badges.append(rem);
+  }
   actions.append(badges);
 
   const btns = document.createElement("span");

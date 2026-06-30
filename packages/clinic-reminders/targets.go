@@ -22,16 +22,19 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // BodyColumns — the §10.2↔§10.8 column seam (cross-checked by
 // TestClinicReminders_PlaybookColumnsMatchLens).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
-	return []pkgmgr.WeaverTargetSpec{{
-		TargetID: AppointmentRemindersTarget,
-		LensRef:  "appointmentReminders",
-		Gaps: map[string]pkgmgr.GapActionSpec{
-			"missing_reminder": {
-				Action:    "directOp",
-				Operation: reminderOp,
-				Params:    map[string]string{"appointmentKey": "row.entityKey", "remindedFor": "row.startsAt"},
-				Reads:     []string{"row.entityKey"},
+	return []pkgmgr.WeaverTargetSpec{
+		{
+			TargetID: AppointmentRemindersTarget,
+			LensRef:  "appointmentReminders",
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_reminder": {
+					Action:    "directOp",
+					Operation: reminderOp,
+					Params:    map[string]string{"appointmentKey": "row.entityKey", "remindedFor": "row.startsAt"},
+					Reads:     []string{"row.entityKey"},
+				},
 			},
 		},
-	}}
+		followUpRemindersTarget(),
+	}
 }
