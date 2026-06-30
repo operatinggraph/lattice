@@ -37,7 +37,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-06-29 · `2a02df1` · D1.3 CLOSED — Postgres-RLS read boundary LIVE (revoked-by-tombstone⇒deny proven: `faa3aec` lens-retraction + adapter seam + RLS e2e); residual landlord-link freshness is the de-prioritized lattice Link-triggered-reprojection item, not a D1.3 gap
+- 2026-06-29 · `2a02df1` · D1.3 CLOSED — Postgres-RLS read boundary LIVE (revocation-denies proven)
 - 2026-06-29 · `e1d540f` · service-domain + service-location: envelope-class discriminator migration
 - 2026-06-29 · `2a5087a` · Service-instance envelope-class migration — lease-signing consumer (Row 112)
 - 2026-06-29 · `2d5aeae` · Clinic encounter FE (Row 104 Increment 2)
