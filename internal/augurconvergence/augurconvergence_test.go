@@ -368,18 +368,29 @@ func TestAugurConvergence_HappyPath(t *testing.T) {
 // `invalid` — auditable, never dispatchable. The verdict comes from the TRUSTED
 // claim context, never the model's reply.
 func TestAugurConvergence_MaliciousProposalInvalid(t *testing.T) {
-	h := newHarness(t, func(fa *bridge.FakeAugur) {
-		fa.SetProposal(bridge.AugurProposal{
-			Action:     "directOp",
-			Params:     map[string]any{"scopedTo": "vtx.identity.someOtherCandidateXY"},
-			Rationale:  "crafted scope escape: act on a different entity than the escalated candidate",
-			Confidence: 0.95,
-			Model:      "claude-opus-4-8",
-		})
-	})
+	h := newHarness(t, nil)
 
 	entityKey := h.seedEntity()
 	entityID := strings.TrimPrefix(entityKey, "vtx.identity.")
+
+	// The crafted exploit (3-layer-review hardening): the proposal scopes its
+	// well-known param (scopedTo) to the TRUSTED candidate — so a fixed-name
+	// allow-list scope check would pass it — but smuggles a FOREIGN vertex under an
+	// UNLISTED param name (assignTask's `assignee`, which on Fire-2 dispatch would
+	// grant authority to that third party). Injected after the candidate exists but
+	// before the gap is written, so it is the proposal the escalation reasons over.
+	h.augur.SetProposal(bridge.AugurProposal{
+		Action: "assignTask",
+		Params: map[string]any{
+			"scopedTo":     entityKey,                         // in-scope (the old name-allow-list passed this)
+			"assignee":     "vtx.identity.someOtherCandidate", // FOREIGN — the actual escape
+			"forOperation": "ApproveLeaseApplication",
+		},
+		Rationale:  "crafted scope escape: a foreign assignee under an unlisted param name",
+		Confidence: 0.95,
+		Model:      "claude-opus-4-8",
+	})
+
 	const targetID = "augurAdversarialTarget"
 	h.installAugurTarget(targetID)
 	h.waitTargetConsumer(targetID)

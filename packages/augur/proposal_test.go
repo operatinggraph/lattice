@@ -213,6 +213,9 @@ const (
 	hAbsent  = "BBaugurAbsnHJKMNPQRS"
 	hNoClaim = "BBaugurNoclHJKMNPQRS"
 	hNested  = "BBaugurNestHJKMNPQRS"
+	hForeign = "BBaugurFrgnHJKMNPQRS"
+	hNoScope = "BBaugurNscpHJKMNPQRS"
+	hMalform = "BBaugurMfrmHJKMNPQRS"
 )
 
 // driveClaimThenReply runs the full instanceOp → replyOp flow on one pipeline and
@@ -313,6 +316,70 @@ func TestAugur_ScopeEscape_Invalid(t *testing.T) {
 
 	if got := reviewState(t, ctx, conn, proposalKey); got != "invalid" {
 		t.Fatalf("review.state = %q, want invalid (scope escape)", got)
+	}
+}
+
+// TestAugur_ForeignParamUnderUnlistedKey_Invalid is the 3-layer-review hardening:
+// a proposal that scopes its WELL-KNOWN param (scopedTo) to the trusted candidate
+// — so the old fixed-allow-list scope check passed it — but smuggles a FOREIGN
+// vertex key under a different param name (assignTask's `assignee`, which grants
+// authority to that entity on Fire-2 dispatch). The default-deny scope check now
+// rejects ANY vtx-shaped value that isn't the escalated candidate, under any param
+// name, so this lands invalid (never dispatchable). Before the fix it was pending.
+func TestAugur_ForeignParamUnderUnlistedKey_Invalid(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-foreign")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	handle := hForeign
+	result := proposalResult("assignTask", 0.9, map[string]any{
+		"scopedTo":     entityKey,                          // in-scope (passes the old name-allow-list)
+		"assignee":     "vtx.identity.BBattackerHJKMNPQRS", // FOREIGN — grants authority to a third party
+		"forOperation": "ApproveLeaseApplication",
+	})
+	proposalKey := driveClaimThenReply(t, ctx, conn, cp, cons, "frgn", handle, targetKey, entityKey, "completed", result)
+
+	if got := reviewState(t, ctx, conn, proposalKey); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (foreign entity under an unlisted param name)", got)
+	}
+}
+
+// TestAugur_ScopelessProposal_Invalid: a structurally-valid action that carries NO
+// reference to the escalated candidate at all has no bounded target — it cannot be
+// made dispatchable, so the default-deny scope check stores it invalid (before the
+// fix an empty/scope-less params map coerced to {} and landed pending).
+func TestAugur_ScopelessProposal_Invalid(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-noscope")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	handle := hNoScope
+	result := proposalResult("assignTask", 0.8, map[string]any{"forOperation": "ApproveLeaseApplication"})
+	proposalKey := driveClaimThenReply(t, ctx, conn, cp, cons, "nscp", handle, targetKey, entityKey, "completed", result)
+
+	if got := reviewState(t, ctx, conn, proposalKey); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (proposal does not scope to the candidate)", got)
+	}
+}
+
+// TestAugur_MalformedCompletedResult_StoredInvalid is the "always stored"
+// invariant: a status=completed reply whose result is NOT a decodable JSON object
+// (an adapter-wiring fault or a malformed model output) is a definitive verdict —
+// the proposal is STILL recorded with review.state=invalid (the replyOp ACCEPTS,
+// it never fail()s). Before the fix this fail()ed the op, leaving the episode
+// wedged with no .review after the bridge had already Ack'd the external event.
+func TestAugur_MalformedCompletedResult_StoredInvalid(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-malform")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	handle := hMalform
+	// A completed reply carrying a non-JSON result (not the codec's well-formed output).
+	proposalKey := driveClaimThenReply(t, ctx, conn, cp, cons, "malf", handle, targetKey, entityKey,
+		"completed", "this is not json")
+
+	if got := reviewState(t, ctx, conn, proposalKey); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (malformed completed result stored, not op-rejected)", got)
 	}
 }
 

@@ -198,8 +198,9 @@ def optional_string_attr(p, name):
     return v
 
 def required_bare_handle(p, name):
-    # The bare instance handle Loom minted: type-free, must carry no key
-    # delimiters so "vtx.augurproposal." + handle is a single well-formed key.
+    # The bare instance handle Weaver mints for the escalation episode (Option F —
+    # a directOp, no Loom): type-free, must carry no key delimiters so
+    # "vtx.augurproposal." + handle is a single well-formed key.
     v = required_string(p, name)
     for bad in [".", "*", ">", " ", "\t", "\n"]:
         if bad in v:
@@ -254,26 +255,74 @@ def alive(doc):
 # ability to PROPOSE arranging the actions Weaver already has.
 ALLOWED_ACTIONS = ["triggerLoom", "assignTask", "directOp"]
 
-# The param keys that name an entity. A proposed action whose entity-naming param
-# references a candidate OTHER than the escalated one is a scope escape (design
-# §5): the model cannot propose acting on a different entity than the gap it was
-# asked to reason about. The escalated candidate is read from the TRUSTED claim
-# vertex, never the model's reply. The check compares against both the full vertex
-# key and the bare NanoID, since a param may carry either form.
-ENTITY_PARAM_KEYS = ["scopedTo", "subject", "subjectKey", "entity", "entityKey", "candidate"]
+def is_vtx_key(v):
+    # True if v is a string shaped vtx.<type>.<id> (a vertex key a proposal would
+    # ACT ON). Operation-type names, timestamps, booleans, and free text are not
+    # vertex keys and are not scope-checked.
+    if type(v) != type(""):
+        return False
+    parts = v.split(".")
+    return len(parts) >= 3 and parts[0] == "vtx" and parts[1] != "" and parts[2] != ""
 
-def scope_escape(params, entity_key, entity_id):
-    # Returns the offending param name (non-empty) on a scope escape, else "".
-    for k in ENTITY_PARAM_KEYS:
-        if k not in params:
-            continue
+# collect_param_strings flattens a proposal's params to the string values it
+# carries, WITHOUT recursion (this Starlark dialect forbids recursion / while) —
+# one pass over the top level plus the immediate children of any nested dict/list.
+# A model action's params are a flat string->string map (assignTask / directOp /
+# triggerLoom); a value nested deeper than that cannot be exhaustively scope-checked
+# in a non-recursive pass, so it sets too_deep and the proposal is conservatively
+# stored invalid (a false-positive over-reject is the contained failure — design
+# §5 — vs. a false-negative that would let a foreign reference through). Returns
+# (strings, too_deep).
+def collect_param_strings(params):
+    out = []
+    too_deep = False
+    for k in params:
         v = params[k]
-        if v == None or type(v) != type("") or len(v.strip()) == 0:
-            continue
-        v = v.strip()
-        if v != entity_key and v != entity_id:
-            return k
-    return ""
+        t = type(v)
+        if t == type(""):
+            out.append(v)
+        elif t == type({}):
+            for k2 in v:
+                v2 = v[k2]
+                if type(v2) == type(""):
+                    out.append(v2)
+                elif type(v2) == type({}) or type(v2) == type([]):
+                    too_deep = True
+        elif t == type([]):
+            for item in v:
+                if type(item) == type(""):
+                    out.append(item)
+                elif type(item) == type({}) or type(item) == type([]):
+                    too_deep = True
+    return out, too_deep
+
+# scope_verdict enforces the §5 scope containment as DEFAULT-DENY: EVERY
+# vtx-shaped value the proposal carries — under ANY param name, not a fixed
+# allow-list of names — MUST equal the TRUSTED escalated candidate, and the
+# proposal MUST reference that candidate at least once (a scope-less action has no
+# bounded target and cannot be made dispatchable). The candidate identity comes
+# from the claim vertex, never the model's reply. Returns (ok, reason): ok True =>
+# in scope; ok False => reason is the invalid explanation. Default-deny is what
+# makes the check sound against future ops introducing new entity params — an
+# unrecognized entity-naming param can no longer smuggle a foreign vertex through.
+def scope_verdict(params, entity_key, entity_id):
+    strings, too_deep = collect_param_strings(params)
+    if too_deep:
+        return False, "proposal params nested deeper than the flat action-param model can scope-check"
+    foreign = ""
+    references = False
+    for s in strings:
+        sv = s.strip()
+        if sv == entity_key or sv == entity_id:
+            references = True
+        elif is_vtx_key(sv):
+            foreign = sv
+            break
+    if foreign != "":
+        return False, "scope escape: param value '" + foreign + "' references an entity other than the escalated candidate " + entity_key
+    if not references:
+        return False, "proposal does not scope to the escalated candidate " + entity_key + " (no param references it)"
+    return True, ""
 
 def execute(state, op):
     ot = op.operationType
@@ -383,34 +432,47 @@ def execute(state, op):
             invalid_reason = "model declined to propose (refusal)"
             rationale = optional_string_attr(p, "result")
         elif status == "completed":
-            result_str = required_string(p, "result")
-            proposal = json.decode(result_str)
+            # Decode with a None default (never raise): an empty / non-JSON /
+            # non-object result on a completed reply is a definitive verdict (an
+            # adapter wiring fault or a malformed model output), NOT a crash. Store
+            # it invalid (auditable, never dispatchable) so the episode ALWAYS lands
+            # a .review — never fail() the op here: the bridge has already Ack'd the
+            # external event, so a reject would wedge the episode with no record.
+            # Mirrors the refusal branch's store-invalid posture.
+            result_str = optional_string_attr(p, "result")
+            proposal = None
+            if len(result_str.strip()) > 0:
+                proposal = json.decode(result_str, None)
             if type(proposal) != type({}):
-                fail("InvalidArgument: result: reasoning result is not a JSON object")
-            action = proposal_string(proposal, "action")
-            params = proposal_dict(proposal, "params")
-            rationale = proposal_string(proposal, "rationale")
-            confidence = proposal_number(proposal, "confidence")
-            model = proposal_string(proposal, "model")
-            prompt_hash = proposal_string(proposal, "promptHash")
-            catalog_hash = proposal_string(proposal, "catalogHash")
-            reasoned_at = proposal_string(proposal, "reasonedAt")
-
-            # --- §5 record-time deterministic validation (the safety core) ---
-            # The proposal is ALWAYS stored (auditability); the verdict decides only
-            # pending (dispatchable) vs invalid (never dispatchable). The scope check
-            # compares the model's params against the TRUSTED entity_key from the claim.
-            if action not in ALLOWED_ACTIONS:
                 review_state = "invalid"
-                invalid_reason = "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + action
-            elif confidence < 0.0 or confidence > 1.0:
-                review_state = "invalid"
-                invalid_reason = "confidence out of range [0,1]: " + str(confidence)
+                invalid_reason = "completed reply carried no decodable JSON-object reasoning result"
+                rationale = result_str
             else:
-                offending = scope_escape(params, entity_key, entity_id)
-                if offending != "":
+                action = proposal_string(proposal, "action")
+                params = proposal_dict(proposal, "params")
+                rationale = proposal_string(proposal, "rationale")
+                confidence = proposal_number(proposal, "confidence")
+                model = proposal_string(proposal, "model")
+                prompt_hash = proposal_string(proposal, "promptHash")
+                catalog_hash = proposal_string(proposal, "catalogHash")
+                reasoned_at = proposal_string(proposal, "reasonedAt")
+
+                # --- §5 record-time deterministic validation (the safety core) ---
+                # The proposal is ALWAYS stored (auditability); the verdict decides
+                # only pending (dispatchable) vs invalid (never dispatchable). The
+                # scope check is DEFAULT-DENY against the TRUSTED entity_key from the
+                # claim — never the model's reply.
+                if action not in ALLOWED_ACTIONS:
                     review_state = "invalid"
-                    invalid_reason = "scope escape: proposed param '" + offending + "' references an entity other than the escalated candidate " + entity_key
+                    invalid_reason = "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + action
+                elif confidence < 0.0 or confidence > 1.0:
+                    review_state = "invalid"
+                    invalid_reason = "confidence out of range [0,1]: " + str(confidence)
+                else:
+                    in_scope, scope_reason = scope_verdict(params, entity_key, entity_id)
+                    if not in_scope:
+                        review_state = "invalid"
+                        invalid_reason = scope_reason
         else:
             fail("InvalidArgument: status: must be one of completed, failed; got " + status)
 
