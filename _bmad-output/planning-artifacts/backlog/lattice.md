@@ -64,9 +64,10 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **`kv.Links`** (top priority) ·
-> **FR28 role-queue** · **`@every` schedules** · **protected-lens out-of-band provisioning** ·
+> 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **FR28 role-queue** ·
+> **`@every` schedules** · **protected-lens out-of-band provisioning** ·
 > **full-engine tombstone retraction** · the **instanceOf P7 lint gate** (residual).
+> (**`kv.Links`** Fire 1 — the primitive — shipped; now 🏗️ building, next = Fire 2 clinic consumer.)
 > *Dependency-sequenced ratified items*: **Vault** + **Personal Lens** behind D1; **Gateway** behind
 > NATS-write-restriction F2; **Object crypto-shred** behind Vault — build when their gate clears.
 > (**Control-plane-authz** rides D1.2, now shipped → buildable, deprioritized behind D1 rollout.)
@@ -130,7 +131,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · next: `loom`/`bridge` `t.Parallel()` |
 | **[CI/Refractor] Hello-Lattice NFR-P3 latency flake** | The `≤500ms` capability-projection probe fails-then-passes on the shared CI runner (~590ms infra floor) — the dominant re-run flake (~50%). Not Whetstone-maskable (loosen/retry both weaken the gate). | ★★ | M | 🔭 owner/Andrew decision (infra-bound; shave CDC lag / bigger runner / re-scope CI conformance) |
 | **Operation/permission discovery via `instanceOf` template** | Resolve a fine-grained-class vertex's governing DDL by walking `instanceOf` → type-authority, so one type DDL governs unbounded subtypes with zero new DDLs. Decouples discriminator class from type-authority DDL. | ★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/instanceof-template-op-discovery-design.md) · Fire 1 + Fire E + Verticals consumer shipped; residual = P7 lint gate (outliers retired e1d540f; can turn on) |
-| **Op-time bounded reverse-link / adjacency read (`kv.Links`)** | One sanctioned, bounded, fail-closed, paged op-time link-enumeration builtin (`kv.Links(hub, relation, direction, cursor, limit)`) — retires the key-list-in-aspect guard indexes. Relaxes the write-path no-scans invariant by exactly one primitive. | ★★★ | M–L | 🎯 ✅ ratified · [design](../../implementation-artifacts/op-time-bounded-link-enumeration-design.md) · 📋 **READY — top priority, no dependency, §2.5.1 committed**; also unblocks the Loom effect-guard Fire 2 |
+| **Op-time bounded reverse-link / adjacency read (`kv.Links`)** | One sanctioned, bounded, fail-closed, paged op-time link-enumeration builtin (`kv.Links(hub, relation, direction, cursor, limit)`) — retires the key-list-in-aspect guard indexes. Relaxes the write-path no-scans invariant by exactly one primitive. | ★★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/op-time-bounded-link-enumeration-design.md) · Fire 1 (primitive `kv.Links` + substrate `KVListKeysFilter`, cc2613f) shipped; next = Fire 2 clinic consumer (hasBooking links + bookingGuard epoch); also unblocks the Loom effect-guard Fire 2 |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Live Core-KV reads in scripts are the common root of the Loom-guard Processor-side redirect *and* the Edge A′-prediction partiality; declared+hydrated reads the norm, live reads classified (debt vs sanctioned config vs irreducible `kv.Links`), Loom guard read retired Processor-side. | ★★ | L | 📐 awaiting-Andrew · [design](../../implementation-artifacts/script-read-posture-design.md) · §2.5 `optionalReads` edit staged uncommitted; Fire 3 retires Loom `evalGuard` (G1 rec.) |
 | **FR28 — role-queue + fallback** (+ FR29 unrouted surfacing) | A `queuedFor.role` link + `ClaimTask` op + `CreateTask` routing (named → role-queue → loud `RoutingFailed`); grant/inbox fan out to role-holders; an empty queue is surfaced post-hoc by a new `unroutedTasks` Weaver target. | ★ | M | ✅ ratified · [design](../../implementation-artifacts/fr28-role-queue-fallback-design.md) · 📋 ready (3 fires; §10.1 committed) |
 | **`@every` recurring schedules** (op-vertex pruner #49 retired) | A `substrate.ScheduleEvery`/`CancelSchedule` seam + migrate the Weaver reconciler sweep (`time.Ticker` → durable `@every`). Op-vertex pruner retired (NATS per-key TTL + outbox tombstone cover it). | ★ | M | ✅ ratified · [design](../../implementation-artifacts/recurring-schedules-and-op-vertex-pruner-design.md) · 📋 ready (3 fires; §10.4 + §4.3 committed) |
@@ -153,6 +154,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-06-30 · `cc2613f` · [Core/substrate] kv.Links Fire 1 — bounded op-time link enumeration primitive (+ `KVListKeysFilter` paged subject-filter seam)
 - 2026-06-30 · `3dbd049` · [Augur] Fire 2a — `ReviewProposal` human-verdict op
 - 2026-06-30 · [CI] Flake-hunt: mined the re-run history (attempt-aware) — found the Hello-Lattice NFR-P3 flake
 - 2026-06-29 · `faa3aec` · [Refractor] GrantTable composite-keyed anchor-tombstone retraction

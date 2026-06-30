@@ -246,6 +246,16 @@ The §2.4 authoring rule — *an enumeration hub is authored as the link **sourc
 
 ## 10. Decomposition for the Lattice Steward (fire-by-fire, each independently shippable + green)
 
+> **Checkpoint — Fire 1 SHIPPED (`cc2613f`, 2026-06-30, CI green).** Per the ratification
+> revision, the built shape is the paged form: `kv.Links(hubKey, relation, direction, cursor, limit)
+> -> (page, nextCursor)` with both directions and a substrate `Conn.KVListKeysFilter` seam (the
+> superseded `MAX_LINK_ENUMERATION` total-cap was replaced by paging + a per-page clamp). Full
+> 3-layer adversarial review run; it caught two real substrate bugs in `KVListKeysFilter` — a silent
+> partial set on context-cancel (the keyLister has no error channel; now returns `ctx.Err()`) and a
+> missing de-dup against the pinned-NATS "may report duplicate keys under concurrent writes" warning
+> (a boundary duplicate would skip a distinct key across pages) — both fixed + unit-tested
+> (`pageFilteredKeys`, `TestKVListKeysFilter_CancelledContext`). **Next = Fire 2 (clinic consumer).**
+
 **Fire 1 — the platform primitive (`kv.Links`).** Add the builtin to `internal/processor/starlark_kv.go` (wrap `KVListKeysPrefix` + per-key `KVGet`, wall-budget context, the `MAX_LINK_ENUMERATION` fail-closed cap, the `lnk`-prefix scope guard, the link-doc struct return). Processor unit tests (§5). The §2.5.1 contract edit is committed by Andrew at ratification (staged uncommitted now). **No consumer yet in this fire, but Fire 2 lands in the same initiative — not dead scaffolding.** A *new write-path read capability that relaxes an invariant* ⇒ **full 3-layer adversarial review** (attack the bound, the fail-closed path, the determinism caveat, the scope guard, the no-snapshot-serialization claim). Green on its own (additive builtin, existing tests pass).
 
 **Fire 2 — the clinic-domain consumer.** Re-author the appointment guard per §4.1: `hasBooking` links + `bookingGuard` epoch, drop `.bookings` + the two aspectType DDLs, update `contextHint.reads`, eager link-tombstone on terminal transitions. Update `package_test.go` + `integration_test.go` (incl. the concurrency assertion). Bump the clinic package version. The existing double-book/reschedule/cancel suites are the regression proof. **Full review** (it's the security-of-correctness guard for double-booking) — but scoped to the package; the platform risk was discharged in Fire 1. Green: the clinic suites pass against the new mechanism.
