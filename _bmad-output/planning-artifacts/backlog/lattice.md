@@ -7,16 +7,28 @@ the **Whetstone** keeps CI fast cross-cutting. Written by the Lattice Steward + 
 
 ## How this board works (read before editing — the row discipline)
 
-**The board is an INDEX, not a journal.** One item = one row. The detail lives where the work lives.
+**The board is an INDEX, not a journal.** One item = one row; the detail lives where the work lives.
+A lint gate (`scripts/lint-board.go`, run in CI + before any board commit) enforces the budgets below —
+**a fire that bloats a row or section fails the gate.**
 
-- **A row is:** `Item · What it is (one line) · Imp · Size · State`. The **State** cell is a **state token**
-  + a **link to the design doc / commit** + (only if 🏗️) a **one-line next step**. Nothing else.
-- **Detail belongs in the linked design doc + git** — the design shape, the ratification record, adversarial
-  findings, the fire-by-fire build journal, commit SHAs, coverage %, review-depth notes. **Never narrate that
-  history in the row** (the CLAUDE.md no-changelog-comments rule, applied to the board). A multi-fire item's
-  checkpoint (worktree path · what's done · next) lives in its design doc; the row carries a one-line pointer.
-- **Shipped (✅ built) items leave the feature tables** and become a one-line **Done-log** entry
-  (`date · SHA · [tag] title`). When the Done log exceeds ~25 lines, the oldest roll to `archive/`.
+- **A row is** `Item · What it is (one line) · Imp · Size · State` — **aim ≤ 300 chars, hard cap 600.** The
+  **State** cell = a **token** + a **link to the design doc / commit** + (only if 🏗️) **one ≤10-word next
+  step**. Nothing else.
+- **The fire's narrative goes in the COMMIT MESSAGE + the design doc — NEVER the board** (the CLAUDE.md
+  no-changelog rule). Do **not** put in a cell: design rationale / fork-resolution / "why I chose this",
+  adversarial findings, the fire-by-fire journal, commit SHAs-with-prose, coverage %, review depth, "Was: …".
+  A multi-fire checkpoint (worktree · done · next) lives in the **design doc**; the row carries a one-line
+  pointer. **The four ways this regressed after the 2026-06-29 reform — refuse each by name:**
+  - ✗ **Design summary in State** (*"steward impl-ratified the fork → package rolling-@at … @every stays
+    reserved … Build: Inc 1 → Inc 2"*). ✓ `🏗️ building · [design](…) · next: Inc 1 series-state lens`.
+  - ✗ **Blocked-reasoning essay** (*"blocked-on Vault because .demographics are PHI, test-enforced, clinic is
+    the Vault forcing function, NOT ready as filed"*). ✓ `🚧 blocked-on Vault (PII projection) · [why](design)`.
+  - ✗ **Survey-log / PO-notes fire-journal** (a multi-line narrative of what the fire did). ✓ one dated line:
+    `2026-06-30 Refractor — healthy; filed 2 (simple-engine retire, fan-out cov)`. Narrative → the commit.
+  - ✗ **Multi-sentence Done-log entry.** ✓ exactly one line: `date · SHA · [tag] title`.
+- **Capped sections** (the lint enforces): **Survey-log / PO-notes ≤ 12 dated one-liners** — rotation memory
+  only (what was surveyed/exercised, what's next), never a per-fire log; **Done-log ≤ 25 one-liners**, older
+  roll to `archive/`. **Shipped (✅ built) items leave the feature tables** → a one-line Done-log entry.
 - **Scales.** Imp: ★ low · ★★ medium · ★★★ high. Size: XS · S · M · L · XL.
 - **State tokens.** 📋 ready · 🏗️ building (worktree) · 📐 awaiting-Andrew (design ratification) ·
   ✅ ratified (design signed off, not yet built) · 🚧 blocked (Andrew-gated, or `seq:`/`blocked-on:` another
@@ -52,6 +64,22 @@ Compact rotation memory only (survey *findings* become filed rows above + in the
 Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting feature backlog). Freshness via
 `git log -1 --format=%ct -- <path>`; survey the stalest, note a dated line, rotate.
 
+- **Steward fire 2026-06-30 (protected-lens OOB Fire 2 — out-of-band provisioner, checkpointed):** RESUMED the
+  ★★ 🏗️ protected-lens in-flight item (highest-importance resume; its `steward-protected-lens-oob` worktree was
+  now idle — head unchanged ~7h, no uncommitted changes — so the concurrent fire that owned it at the 17:00
+  stand-down had finished/abandoned it). Rebased the branch clean onto current `main` (no conflicts), then built
+  **Fire 2**: `lens.EmitReadPathDDL` (read-only Core-KV enumeration of installed protected/grant lens specs →
+  ordered `Build*DDL`, grant table first) + `lattice lens emit-ddl` CLI + `make provision-readpath` (idempotent,
+  wired into up-full + up-loftspace) + the soft-delete guard (reject `protected`+`deleteMode:soft` at spec load —
+  no `is_deleted` column, §6.14 policy doesn't filter it → would loop) + the refractor.md verify-and-pause
+  rewrite. **Validated against the LIVE shared stack** (emit-ddl enumerated the real loftspace protected tables,
+  grant table first; DDL == `Build*DDL`; applied DDL → `VerifyProtectedTable` passes on real Postgres; `psql -f -`
+  pipe confirmed). All gates green (build/vet/golangci ./.../STRICT-conventions/go test refractor+substrate+CLI
+  incl. POSTGRES_TEST_DSN). **Checkpointed not merged** (head `8f0cbd4`): the design's pre-merge gate "live-verify
+  up-loftspace serves rows" can't run unattended without disrupting the concurrent fire's shared stack (:7777/:5432);
+  CI doesn't cover the protected-pg read path, so flipping main's provisioning model without that one end-to-end
+  check is the hard-to-reverse action I held back. NEXT = Fire-2 3-layer (security plane) + up-loftspace live-verify
+  on a clean stack + ff-merge Fire 0+1+2.
 - **Surveyor fire 2026-06-30 (Refractor):** healthy overall — pkg coverage 70–100% (pipeline's 49.4% is a
   measurement artifact: the link/aspect fan-out is 60–87% via the root-package e2e tests; the adapter
   postgres/rls/read-path 0%s are `POSTGRES_TEST_DSN`-gated, covered out-of-band). Every "What's deferred"
@@ -136,8 +164,8 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **FR28 role-queue**.
-> (**protected-lens out-of-band** now 🏗️ — Fire 0+1 built+3-layer-reviewed on a worktree; next = co-ship the
-> `make provision-readpath` dev-provisioner + ff-merge. **`@every` schedules** Fire 1 + Fire 2 shipped
+> (**protected-lens out-of-band** now 🏗️ — Fire 0+1+2 built on a worktree (`8f0cbd4`); next = Fire-2 3-layer
+> review + live-verify up-loftspace on a clean stack + ff-merge. **`@every` schedules** Fire 1 + Fire 2 shipped
 > (`e04498e`); only the Andrew-gated Fire 3 §10.4 doc/contract remains.)
 > *Dependency-sequenced ratified items*: **Vault** + **Personal Lens** behind D1; **Gateway** behind
 > NATS-write-restriction F2; **Object crypto-shred** behind Vault — build when their gate clears.
@@ -149,7 +177,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped (base lens · JWT seam · protected-Postgres RLS · §5 Gate-3 read-bypass vectors + lint); next = D1.5 roll remaining read models onto the enforcement seam |
-| **Protected-lens provisioning: out-of-band + verify-and-pause** | Refractor runs the protected/grant Postgres table DDL today; move provisioning out-of-band + verify-and-pause fail-closed (retire the RLS DDL-ownership exception). | ★★ | M→L | 🏗️ building · [design](../../implementation-artifacts/protected-lens-out-of-band-provisioning-verify-and-pause-design.md) · Fire 0+1 built+3-layer-reviewed+hardened on worktree `steward-protected-lens-oob` (head `59d2f98`), all gates green; review caught a CRITICAL fail-open (FORCE-without-ENABLE = world-readable → now gates relrowsecurity AND relforcerowsecurity + policy posture). **next = co-ship the generic `make provision-readpath` (loftspace-app consumes `read_lease_applications`, so Fire 1 alone darks the vertical) + refractor.md + soft-delete guard, live-verify up-loftspace, ff-merge Fire 0+1+2 to main** (§8 BUILD CHECKPOINT) |
+| **Protected-lens provisioning: out-of-band + verify-and-pause** | Refractor runs the protected/grant Postgres table DDL today; move provisioning out-of-band + verify-and-pause fail-closed (retire the RLS DDL-ownership exception). | ★★ | M→L | 🏗️ building · [design](../../implementation-artifacts/protected-lens-out-of-band-provisioning-verify-and-pause-design.md) · Fire 0+1+2 built on worktree `steward-protected-lens-oob` (head `8f0cbd4`, rebased on main), all gates green incl. POSTGRES_TEST_DSN verify suite; Fire 2 = out-of-band provisioner (`lattice lens emit-ddl` + `make provision-readpath` wired into up-full/up-loftspace, validated against the LIVE stack) + soft-delete guard (reject protected+deleteMode:soft) + refractor.md verify-and-pause rewrite. **next = Fire-2 3-layer review (security plane) + live-verify up-loftspace serves rows on a clean stack (shared stack owned by a concurrent fire this fire) + ff-merge Fire 0+1+2 to main** (§8 BUILD CHECKPOINT) |
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · 🚧 seq behind NATS-write-restriction F2b |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1 (credential seam) shipped; F2 = live enforcement |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |

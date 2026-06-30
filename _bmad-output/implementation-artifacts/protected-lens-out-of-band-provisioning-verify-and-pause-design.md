@@ -298,11 +298,34 @@ shipped/in-flight). This is a **swap, not a rebuild**:
 >   unaffected (no go-test/CI target activates a protected pg lens — confirmed), so this is a *dev-stack*
 >   non-regression requirement, not a CI gate.
 >
-> **NEXT FIRE (completes + lands):** build the generic `make provision-readpath` (+ wire into `up-full`/
-> `up-loftspace` after the install steps; idempotent), update `docs/components/refractor.md` §68–119 to the
-> verify-and-pause model, add the soft-delete column guard (Edge Case #3: a `protected`+`deleteMode:soft`
-> lens has no `is_deleted` column → misclassified transient write-loop; reject or verify it at activation),
-> **live-verify `up-loftspace` serves rows**, then ff-merge Fire 0+1+2 to main together.
+> **🏗️ FIRE 2 BUILT (Steward fire 2026-06-30, head `8f0cbd4`).** The out-of-band provisioner + soft-delete
+> guard + docs are **built and all gates green** on the same branch (rebased clean onto current `main`):
+> - **`lens.EmitReadPathDDL`** (`internal/refractor/lens/emit_ddl.go`) enumerates installed protected/grant
+>   lens specs from Core KV (read-only) → ordered `Build*TableDDL` (grant table first, then each protected
+>   table). Reuses the in-package spec helpers + the verifier's own `Build*DDL` as the single source of truth,
+>   so an applied table passes `VerifyProtectedTable` by construction.
+> - **`lattice lens emit-ddl`** prints that DDL (operator runbook); **`make provision-readpath`** applies it to
+>   the dev Postgres (idempotent), wired into `up-full` + `up-loftspace` after install so the live vertical no
+>   longer darks.
+> - **Soft-delete guard (Edge Case #3)** — `translateSpec` rejects `protected`+`deleteMode:soft` at spec load
+>   (the RLS table has no `is_deleted` column and the §6.14 policy doesn't filter it → soft delete would loop).
+>   `public`+`soft` stays valid. (Rejected-at-load, not verify-at-activation: the combination is genuinely
+>   unsupported — `Build*DDL` can't even provision `is_deleted` — so a clear load-time error beats a
+>   permanently-paused lens.)
+> - **`refractor.md`** §protected-provisioning rewritten to the verify-and-pause model + the runbook.
+> - **Validated:** `emit-ddl` against the **LIVE** shared stack enumerated the real loftspace protected tables
+>   (`read_lease_applications` + `read_landlord_lease_applications`, grant table first); DDL == `Build*DDL`;
+>   applied `Build*DDL` → `VerifyProtectedTable` passes (`rls_verify_test.go`, real Postgres, 8/8); `psql -f -`
+>   pipe confirmed against the container. Gates: build, vet, `golangci-lint ./...` (0), STRICT lint-conventions
+>   (0), `go test` refractor+substrate+cmd/lattice incl. the `POSTGRES_TEST_DSN` verify suite — all green.
+>
+> **NEXT FIRE (lands it) — needs a clean/dedicated stack:** (1) **Fire-2 3-layer review** (security plane — it
+> generates the RLS DDL + a fail-closed config guard); (2) **live-verify `make up-loftspace` serves rows**
+> end-to-end (fresh stack: protected lens starts infra-paused → `provision-readpath` creates the table → probe
+> passes → lens resumes → loftspace-app serves) — **deferred this fire because the shared stack on :7777/:5432
+> is owned by a concurrent fire and `up-loftspace` would disrupt it**; (3) **ff-merge Fire 0+1+2 to main**. The
+> per-link evidence is strong (Fire-0 `InitialPause` pause-before-drain test + the verify suite + live emit-ddl
+> + the psql pipe all pass independently); only the one continuous `up-loftspace` flow is unrun.
 
 > **Re-decomposed 2026-06-30** after the §2.3 grounding correction: the fail-closed activation gate needs a
 > substrate seam that does not exist today, split out as **Fire 0**. Fire 0 + Fire 1 are the security-plane
