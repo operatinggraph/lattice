@@ -1,6 +1,6 @@
 # Multi-cell / sharding (horizontal scale-out via cells) — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-06-29).
+**Status: ✅ Andrew-ratified (2026-06-29)** — fork = C (cell = bucket; a cluster hosts 1+ cells) with the A-flavored intra-cluster default; secondaries as recommended (N:1 tenant default, Loom saga for cross-cell atomicity, cell-local lenses); Contract #2 §2.6 `CellMoved` ratified + committed; **whole build shelved** behind Gateway + HA-NATS + a real scale driver. **One correction folded in (see §3.6 + the new "Global-identity" extension flag): the "never 1:N" rule was an over-claim** — a hyperscale tenant (WeWork/Flow class) must span cells, which surfaces the global-identity problem; that handling (cross-cell *and* cross-region/residency) is a **named open extension**, not part of this core. See the *Ratified* block. Author: Winston (Designer fire, 2026-06-29).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Scale-out → Multi-cell / sharding* (★ now / ★★★ at
 scale, XL). Grounds in `lattice-architecture.md` (**P2** sole-writer / serialization, **P5** lens read-path,
 **P6**/NFR-SC2 cell-agnostic keys, the KV Bucket Taxonomy §69–95, Stream-8 Cells/Sharding §436–438, the
@@ -75,6 +75,37 @@ recommendation: **ratify the design + the §2.6 edit, and shelve the build behin
 scale/blast-radius driver** (like Vault/D1/HA were ratified-but-deferred), **except Fire 1** (the cell-addressing
 substrate seam — no-behavior-change at one cell, de-risks the whole stack) which passes the dead-scaffolding test
 on its own (§7).
+
+**Ratified (Andrew, 2026-06-29).** **Fork = C** (cell = bucket; a cluster hosts 1+ cells), **A-flavored
+intra-cluster default** (escalate a tenant to an isolated cross-cluster cell on demand). **Secondaries as
+recommended:** N:1 tenant default / 1:1 on demand, Loom saga + compensation for cross-cell atomicity, cell-local
+lenses. **Contract #2 §2.6 `CellMoved` ratified + committed.** **Build: ALL fires shelved** behind the two hard
+prerequisites (Gateway + HA-NATS — both ratified this session, neither built) + a real scale driver — full-shelve
+including the de-risking Fire 1 (consistent with HA; zero scale urgency at 10–100 ops/sec / ≤100K keys).
+
+**Correction Andrew surfaced — "never 1:N" over-claims; the GLOBAL-IDENTITY problem is a named open extension
+(two axes), NOT part of this core.** §3.6's "never split a tenant" only holds for a tenant that *fits* in a cell;
+the honest rule is **"never split an *atomically-related subgraph*."** A **hyperscale tenant** (WeWork — coworking
+real-estate, hundreds of properties; Flow — branded residential — both with **membership global across the
+tenant**) **must** span cells, making the tenant-global identity a high-fan-in cross-cell hub the anchor principle
+can't co-locate. Handled as a dedicated follow-on (standalone backlog item), two axes:
+- **Axis 1 — cross-cell (within a deployment).** Leading candidate **shadow vertices** (the Edge Lattice concept:
+  a read-only *anchor* for a remote entity) — canonical identity in a home cell, PII-light pseudonymous shadows
+  in the cells where the member acts, so common member ops stay cell-local atomic and the home cell isn't a read
+  hotspot. **The real content is the consistency contract, not the mechanism:** auth goes eventually-consistent
+  across cells (D1's accepted class, window widened); candidate split = capabilities lag per-cell, **revocations
+  on a global pseudonymous-keyed fast-path.** Not assumed correct (alternatives: dedicated identity tier;
+  shard-by-identity — both weaker; shadows ≈ "cache the identity tier into its consuming cells").
+- **Axis 2 — cross-region + data residency (going global).** Path forward **validated by this core**:
+  `cell-registry` gains `region/jurisdiction` → **cell = residency zone**; **NFR-SC2 makes residency relocation
+  key-free** (the migration dance to a different-region cell); **cell-local lenses are the residency-safe read
+  posture** (no implicit cross-region PII projection); the pseudonymous index is globally-replicable. **Residency
+  reshapes the shadow into a strictly PII-stripped anchor** (canonical PII stays home; never auto-replicate PII
+  across borders; cross-border PII access is explicit/consented/logged). **Placement fail-closed on residency**
+  (residency-tagged vertex → only a matching cell; absent tag → most-restrictive). **Hard edge — air-gapped
+  sovereign jurisdictions** (PIPL/Russia, where even pointers may not cross) = a **federation** case (model C
+  cross-cluster at its limit: per-jurisdiction federated identities, not global-identity-plus-shadow). Net: going
+  global **adds a residency dimension to placement + reshapes the shadow — it does not fork the core model.**
 
 ---
 
@@ -255,12 +286,18 @@ state between two roots in different cells (asset A→B, a lease re-assigned acr
 
 ### 3.6 Multi-tenant cell mapping (#124)
 
-- **Recommendation: N:1 default, 1:1 on demand, never 1:N.** Many tenants share a cell (good utilization) until a
-  tenant is large/sensitive/noisy enough to earn its **own** cell (the 1:1 isolation upgrade — a live migration
-  of that tenant's subgraph into a fresh cell, §3.7). **1:N (one tenant spread across cells) is forbidden** —
-  it would split a tenant's atomically-related subgraph across cells, breaking the anchor principle and forcing
-  cross-cell sagas for ordinary within-tenant operations. The **placement policy** (§3.1) keys on tenant: a new
-  root lands in its tenant's cell.
+- **Recommendation: N:1 default, 1:1 on demand.** Many tenants share a cell (good utilization) until a tenant is
+  large/sensitive/noisy enough to earn its **own** cell (the 1:1 isolation upgrade — a live migration of that
+  tenant's subgraph into a fresh cell, §3.7). The **placement policy** (§3.1) keys on tenant: a new root lands in
+  its tenant's cell.
+- **The precise rule is "never split an *atomically-related subgraph*," NOT "never split a tenant"** (correction,
+  Andrew 2026-06-29 — the earlier "never 1:N" was an over-claim). For a tenant that *fits* in a cell the two
+  coincide. But a **hyperscale tenant** (WeWork / Flow class — too big for one cell, with **identity global across
+  the tenant**) **must** span cells (1:N at the tenant level), which is sound **as long as each atomically-related
+  subgraph stays whole**. The hard part it surfaces is the **tenant-global identity** (a high-fan-in vertex
+  referenced from many cells, which the anchor principle cannot co-locate) — handled as a **named open extension,
+  two axes (cross-cell shadows + cross-region/residency), in a dedicated follow-on** (see the Ratified block + the
+  standalone backlog item), **not** in this core design.
 - This mapping is **cell-registry metadata** (`cell → tenant?`), operational state, not Core KV. It composes with
   the Gateway's per-tenant routing and (later) D1's per-tenant authz.
 
