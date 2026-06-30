@@ -1,6 +1,6 @@
 # HA NATS clustering (substrate + compute availability) — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-06-29).
+**Status: ✅ Andrew-ratified (2026-06-29)** — fork = A (Processor active/passive, leader-elected); R3 + NATS-KV-CAS lease; no frozen-contract change; **whole build shelved behind the first production-availability driver (including Fire 1 — full-shelve, zero urgency)**. See the *Ratified* block. Author: Winston (Designer fire, 2026-06-29).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Scale-out → HA NATS clustering* (★ now / ★★ prod, M–L).
 Grounds in `lattice-architecture.md` (**P2** sole-writer / serialization point, **P3** "NATS is sufficient…
 two capabilities require early validation against expected scale", **P6**/NFR-SC2 cell-agnostic keys, the
@@ -56,6 +56,15 @@ production-availability driver** — exactly as Vault / D1-Personal-Lens were ra
 exception that *is* worth building now is **Fire 1** (the parameterized replica seam + a clustered embedded-NATS
 test fixture): it is no-behavior-change at the R1 default, it *proves* R3 + atomic-batch-under-quorum works on
 our pin, and it de-risks everything downstream — so it passes the dead-scaffolding test on its own (§7).
+
+**Ratified (Andrew, 2026-06-29).** **Fork = A** (Processor active/passive, leader-elected) — OCC stays the
+correctness guarantee, the lease is liveness only. **R3 default** (parameterized to R5); **NATS-KV-CAS lease**
+(no new external dependency). **No frozen-contract change.** **Build: ALL fires shelved behind the first
+production-availability driver — including Fire 1.** Andrew chose full-shelve over the de-risking Fire-1-now,
+given NFR-R6 explicitly accepts single-server and there is **zero current urgency**. The design is ratified and
+ready; **nothing builds until a prod-HA driver exists.** **Pre-build obligation (Designer-lane):** the
+`bmad-party-mode` failover/split-brain pass (see the end of this doc) runs before **Fire 2** is build-ready —
+discharged when the driver triggers the build, not now.
 
 ---
 
@@ -280,9 +289,12 @@ sign-off.
 
 ## 7. Decomposition for the Steward (fire-by-fire)
 
-Each fire is independently shippable + green. **Honest sequencing:** per the dead-scaffolding test (§For-Andrew),
-**Fire 1 is buildable now** (no-behavior-change + de-risks); **Fires 2–4 sequence behind the first
-production-availability driver** — ratify the design, shelve the build, like Vault/D1.
+Each fire is independently shippable + green. **Honest sequencing (ratified, Andrew 2026-06-29): ALL fires —
+including Fire 1 — are shelved behind the first production-availability driver** (Andrew chose full-shelve given
+zero urgency / NFR-R6 accepts single-server). The design is ratified and ready; Fire 1 (the no-behavior-change
+replica seam + clustered fixture) is the **first fire to build when the driver arrives**, not a build-now
+de-risk. (The original "Fire 1 buildable now" recommendation is retained below as the design's reasoning, but the
+ratified decision is full-shelve.)
 
 - **Fire 1 — substrate replica seam + clustered test fixture (buildable now; de-risking; full review).**
   Thread `NATS_REPLICAS` (default 1) into every stream/KV/object creation (`primordial.go`, `stream.go`,
