@@ -60,6 +60,23 @@ Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting fe
   @every is a clean ratified primitive (kv.Links-Fire-1 precedent). **Reconciled TWO stale board rows** the SENSE pass
   caught: lane-authorization enforcement (Fire 2 shipped `d6530e9`, row said "next = enforcement") and the Weaver
   reclaim check-before-act probe (Option D backoff shipped `04c7689`, row said "📋 ready") — both moved to the Done log.
+- **Steward fire 2026-06-30 (protected-lens OOB Fire 0+1 — built+3-layer-reviewed, checkpointed):** picked the
+  highest-importance lattice-clean build-ready item (★★ protected-lens out-of-band, over the ★ @every-Fire-2 /
+  FR28 continuations; the ★★★ D1.5's remaining increments are verticals-lane read-model migrations, not a
+  lattice-clean increment). Built **Fire 0** (`substrate.ConsumerSpec.InitialPause` fail-closed activation seam +
+  the runPump seed + 2 substrate tests) **+ Fire 1** (`VerifyProtectedTable`/`VerifyGrantTable` read-only catalog
+  checks wired as the adapter `Probe`; `cmd/refractor` retires runtime DDL; protected/grant lenses register
+  `InitialPause:PauseInfra`). Kept `Provision*`/`Build*DDL` functional as the out-of-band/test/CLI seam (only the
+  runtime call sites removed) → zero verticals-lane churn (their RLS tests use `Build*DDL` directly). All gates
+  green; Postgres-gated verify tests pass. **Full 3-layer review run** (security plane): Blind Hunter caught a
+  **CRITICAL fail-open** — `relforcerowsecurity` alone is insufficient (FORCE-without-ENABLE = world-readable,
+  verified empirically); now gates `relrowsecurity` AND `relforcerowsecurity` + `relkind='r'` + exact `text[]` +
+  policy **posture** (named §6.14 membership policy, not mere presence); Acceptance Auditor ACCEPT; Edge Case
+  Hunter BLOCK (loftspace-app consumes `read_lease_applications` → Fire 1 alone darks the live vertical → must
+  co-ship the generic `make provision-readpath`). **Checkpointed** (not committed to main — committing alone
+  regresses `up-loftspace`): worktree branch `steward-protected-lens-oob` head `59d2f98`. NEXT FIRE: build the
+  generic provisioner (reuse `lens.CoreKVSource` + `Build*DDL`) + refractor.md + soft-delete guard, live-verify
+  up-loftspace, ff-merge Fire 0+1+2. CI unaffected (no go-test/CI target activates a protected pg lens).
 - **Steward fire 2026-06-30 (P7 lint gate):** shipped the instanceOf design's last DoD item — the
   `lint-conventions` P7 gate (discriminator-aspect shadowing the envelope class). Picked importance-first
   (★★ ratified-design residual) over the ★ build-ready FR28/@every; the other ★★ build-ready item
@@ -95,9 +112,9 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **FR28 role-queue** ·
-> **protected-lens out-of-band provisioning** (needs the §2.3-corrected `ConsumerSpec.InitialPause`
-> seam + a dedicated 3-layer budget). (**`@every` schedules** now 🏗️ — Fire 1 primitive shipped.)
+> 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **FR28 role-queue**.
+> (**protected-lens out-of-band** now 🏗️ — Fire 0+1 built+3-layer-reviewed on a worktree; next = co-ship the
+> `make provision-readpath` dev-provisioner + ff-merge. **`@every` schedules** 🏗️ — Fire 1 primitive shipped.)
 > *Dependency-sequenced ratified items*: **Vault** + **Personal Lens** behind D1; **Gateway** behind
 > NATS-write-restriction F2; **Object crypto-shred** behind Vault — build when their gate clears.
 > (**Control-plane-authz** rides D1.2, now shipped → buildable, deprioritized behind D1 rollout.)
@@ -108,7 +125,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped (base lens · JWT seam · protected-Postgres RLS · §5 Gate-3 read-bypass vectors + lint); next = D1.5 roll remaining read models onto the enforcement seam |
-| **Protected-lens provisioning: out-of-band + verify-and-pause** | Refractor runs the protected/grant Postgres table DDL today; move provisioning out-of-band + verify-and-pause fail-closed (retire the RLS DDL-ownership exception). | ★★ | M→L | ✅ ratified · [design](../../implementation-artifacts/protected-lens-out-of-band-provisioning-verify-and-pause-design.md) · 📋 ready · ⚠️ §2.3 grounding-corrected 2026-06-30: needs a NEW substrate `ConsumerSpec.InitialPause` seam (Fire 0) — pump can't start infra-paused at first activation today → naive build fail-OPENs; Fire 0+1 land together (1 fire, full 3-layer), + relocate D1.4 Gate-3 fixture provisioning to an out-of-band test helper |
+| **Protected-lens provisioning: out-of-band + verify-and-pause** | Refractor runs the protected/grant Postgres table DDL today; move provisioning out-of-band + verify-and-pause fail-closed (retire the RLS DDL-ownership exception). | ★★ | M→L | 🏗️ building · [design](../../implementation-artifacts/protected-lens-out-of-band-provisioning-verify-and-pause-design.md) · Fire 0+1 built+3-layer-reviewed+hardened on worktree `steward-protected-lens-oob` (head `59d2f98`), all gates green; review caught a CRITICAL fail-open (FORCE-without-ENABLE = world-readable → now gates relrowsecurity AND relforcerowsecurity + policy posture). **next = co-ship the generic `make provision-readpath` (loftspace-app consumes `read_lease_applications`, so Fire 1 alone darks the vertical) + refractor.md + soft-delete guard, live-verify up-loftspace, ff-merge Fire 0+1+2 to main** (§8 BUILD CHECKPOINT) |
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · 🚧 seq behind NATS-write-restriction F2b |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1 (credential seam) shipped; F2 = live enforcement |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |

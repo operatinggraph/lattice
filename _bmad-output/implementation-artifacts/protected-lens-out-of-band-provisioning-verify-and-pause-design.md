@@ -274,12 +274,44 @@ shipped/in-flight). This is a **swap, not a rebuild**:
 
 ## 8. Fire-by-fire decomposition (for the Lattice Steward)
 
+> **🏗️ BUILD CHECKPOINT (Steward fire 2026-06-30).** Fire 0 + Fire 1 are **built, full-3-layer-reviewed, and
+> hardened**, all gates green, on worktree branch `steward-protected-lens-oob`
+> (`.claude/worktrees/protected-lens-oob`, head `59d2f98`). **Not yet on main** — see the re-sequencing below.
+> The 3-layer review materially improved the security plane and corrected this decomposition:
+> - **Blind Hunter — CRITICAL fail-open caught + fixed:** `relforcerowsecurity` alone is **insufficient** —
+>   FORCE-without-ENABLE (`relrowsecurity=false`) leaves a table **world-readable** (verified empirically: a
+>   non-owner read returns rows past a deny-all policy). `VerifyProtectedTable` now gates **both**
+>   `relrowsecurity` AND `relforcerowsecurity`, plus `relkind='r'`, **exact `text[]`** (via
+>   `pg_attribute`/`format_type`, not `information_schema` `'ARRAY'` which any array type satisfies), and policy
+>   **posture not presence** (the deterministically-named §6.14 membership policy whose USING references
+>   `authz_anchors` + the grant table — a `USING(true)` policy is rejected). New fail-closed tests prove each
+>   (`EnableOff`, `ForceRLSOff`, `PermissivePolicy`, `NoPolicy`, `MissingColumn`, `Absent`).
+> - **Acceptance Auditor — ACCEPT** (Fire 0/1 fidelity, fail-closed crux, §6.14 conformance, the sound
+>   `Provision*`-stays-as-the-out-of-band/test/CLI-seam deviation: runtime issues no DDL; zero non-test
+>   callers; no fixture relocation needed — the verticals RLS tests use `Build*DDL` directly and stay green).
+> - **Edge Case Hunter — BLOCK (re-sequences the fires):** `cmd/loftspace-app/applications.go` already reads
+>   `read_lease_applications` from Postgres (D1.3 Fire 2, verticals), so the protected model is **live and
+>   consumed in the dev vertical** — the "not live in prod" premise below is true for *prod* but **false for
+>   `make up-loftspace`**. Retiring the runtime DDL **without** a provisioning path darks that working vertical.
+>   **∴ Fire 1 must co-ship the dev/operator provisioning** (Fire 2's `make provision-readpath`, built generic
+>   by reusing `lens.CoreKVSource` to enumerate installed protected/grant lenses + `Build*DDL`). CI is
+>   unaffected (no go-test/CI target activates a protected pg lens — confirmed), so this is a *dev-stack*
+>   non-regression requirement, not a CI gate.
+>
+> **NEXT FIRE (completes + lands):** build the generic `make provision-readpath` (+ wire into `up-full`/
+> `up-loftspace` after the install steps; idempotent), update `docs/components/refractor.md` §68–119 to the
+> verify-and-pause model, add the soft-delete column guard (Edge Case #3: a `protected`+`deleteMode:soft`
+> lens has no `is_deleted` column → misclassified transient write-loop; reject or verify it at activation),
+> **live-verify `up-loftspace` serves rows**, then ff-merge Fire 0+1+2 to main together.
+
 > **Re-decomposed 2026-06-30** after the §2.3 grounding correction: the fail-closed activation gate needs a
 > substrate seam that does not exist today, split out as **Fire 0**. Fire 0 + Fire 1 are the security-plane
 > core and **must land together** (Fire 0 alone is dead scaffolding — an unused `InitialPause` field — and
 > Fire 1 without it fail-opens); ship them as **one fire with an internal build order**, under one **full
 > 3-layer review**. The grant/protected adapters + `rls.go` already exist (D1.1–D1.4), so this is still a
-> swap, not a rebuild — just with the substrate seam added first.
+> swap, not a rebuild — just with the substrate seam added first. **(The 3-layer review then found Fire 1 also
+> needs Fire 2's dev provisioning to avoid darking the live LoftSpace vertical — see the BUILD CHECKPOINT
+> above; the three now land together.)**
 
 **Fire 0 — substrate `ConsumerSpec.InitialPause` seam (the missing fail-closed primitive).** Add
 `InitialPause PauseReason` to `ConsumerSpec` (zero-value = unpaused, every existing spec unchanged); in
