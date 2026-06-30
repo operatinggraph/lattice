@@ -40,6 +40,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Core] Processor per-lane consumers (ConsumerSupervisor adoption)** | Replace the single `processor-main` durable over all `ops.*` lanes (Phase-1 simplification) with per-lane consumers, per the architecture's design-of-record. | ★★ | M | 🏗️ building (per-lane fires shipped; see git) |
 | **[Weaver] Reclaim check-before-act probe** | On expired-lease reclaim the sweeper re-dispatches the gap action as a fresh episode; add a check-before-act probe to close the documented rare-double. | ★★ | S–M | ✅ ratified · 📋 ready |
 | **[Weaver] HealthSink pause-restore round-trip uncovered** | `consumerHealthSink.Load` paused-restore branch + `pauseReasonFromString` sit at 0% coverage. | ★★ | XS–S | 📋 |
+| **[Loom] HealthSink pause-restore round-trip uncovered** | `consumerHealthSink.Load` paused branch (`internal/loom/health_sink.go:75-81`) + `pauseReasonFromString` switch arms partly uncovered (pkg 81.5%); restart-pause-restore unexercised end-to-end. Mirror of the Weaver gap above. | ★★ | XS–S | 📋 |
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Loupe] Static-UI serving (`go:embed web`) untested** | The embedded operator-UI mount has no coverage. | ★ | XS | 📋 |
 | **[Loupe] Operator UI (`app.js`, 1142 LOC) has no automated coverage** | No JS test harness in the repo — standing up one is an architectural call. | ★★ | L | 🔭 flag-for-Andrew |
@@ -50,9 +51,11 @@ Compact rotation memory only (survey *findings* become filed rows above + in the
 Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting feature backlog). Freshness via
 `git log -1 --format=%ct -- <path>`; survey the stalest, note a dated line, rotate.
 
-- **Last surveyed:** 2026-06-29 Loupe (`cmd/loupe` + web). Prior rotation: Refractor → Core → Weaver →
-  Loom → Loupe → feature-backlog → Refractor → Core → Weaver → Loupe.
-- **Next:** the stalest by survey-date (Loom / the feature backlog were least-recently the dedicated focus).
+- **Last surveyed:** 2026-06-30 Loom (`internal/loom` + control). Healthy — 81.5% / 76.6% cov, no 0%
+  funcs, no TODO/FIXME; both deferred items (Starlark guards, durable `loom.*` read model) already filed.
+  Filed one maintenance gap: HealthSink pause-restore coverage (mirrors the Weaver row).
+  Prior rotation: Core → Weaver → Loupe → Loom.
+- **Next:** the **feature backlog** (least-recently the dedicated focus), then Refractor.
 
 ## Lattice feature backlog — the Phase-3 build queue
 
