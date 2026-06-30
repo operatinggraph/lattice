@@ -287,6 +287,40 @@
     </div>
   </div>
 
+  <div id="encounter-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="encounter-title">
+      <h2 id="encounter-title">Document visit</h2>
+      <p class="lead" id="encounter-context">Record the post-visit clinical note.</p>
+      <form id="encounter-form">
+        <div class="field">
+          <label for="enc-summary">Visit summary <span class="req">*</span></label>
+          <textarea id="enc-summary" rows="3" required></textarea>
+          <p class="hint">Clinical note for this visit (required).</p>
+        </div>
+        <div class="field">
+          <label for="enc-assessment">Assessment / diagnosis</label>
+          <textarea id="enc-assessment" rows="2"></textarea>
+        </div>
+        <div class="field">
+          <label for="enc-plan">Plan / orders</label>
+          <textarea id="enc-plan" rows="2"></textarea>
+        </div>
+        <div class="field">
+          <label class="check"><input type="checkbox" id="enc-followup" /> Follow-up needed</label>
+        </div>
+        <div class="field" id="enc-followup-date-field" hidden>
+          <label for="enc-followup-date">Suggested follow-up date</label>
+          <input type="date" id="enc-followup-date" />
+        </div>
+        <p class="hint enc-phi-note">Clinical content (summary / assessment / plan) is stored privately and never shown in read models — only “visit documented” and any follow-up date are surfaced.</p>
+        <div class="modal-actions">
+          <button type="button" id="encounter-cancel" class="ghost">Cancel</button>
+          <button type="submit" id="encounter-submit">Save documentation</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
 
   <script src="app.js"></script>

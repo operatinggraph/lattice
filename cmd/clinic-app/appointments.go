@@ -28,6 +28,16 @@ type appointmentRow struct {
 	// (the clinic-reminders convergence, surfaced via the clinicAppointments lens).
 	// Empty until the reminder is sent (or when clinic-reminders is not installed).
 	ReminderSentAt string `json:"reminderSentAt,omitempty"`
+	// DocumentedAt / FollowUpRequested / FollowUpDate are the OPERATIONAL, non-PHI
+	// encounter signals the clinicAppointments lens projects after RecordEncounter
+	// documents a completed visit. The RAW clinical content (summary / assessment /
+	// plan) is PHI and is NEVER projected (the deferred Vault plane owns its display),
+	// so it never reaches this DTO. DocumentedAt is the "visit documented" presence
+	// signal; FollowUpDate is set only when a follow-up was requested. All empty until
+	// the visit is documented.
+	DocumentedAt      string `json:"documentedAt,omitempty"`
+	FollowUpRequested bool   `json:"followUpRequested,omitempty"`
+	FollowUpDate      string `json:"followUpDate,omitempty"`
 }
 
 // computeAppointments assembles appointment rows from the `clinicAppointments`

@@ -16,6 +16,7 @@ const state = {
   view: "book",
   highlight: null,
   rescheduling: null, // the appointment row being rescheduled (modal context)
+  documenting: null, // { a, onDone } for the Document-visit (RecordEncounter) modal
   schedView: "week", // Schedule tab calendar mode: "week" | "day"
   schedAnchor: null, // a Date within the visible period (null → current week/day)
   schedSelected: null, // appointmentKey shown in the Schedule detail panel
@@ -1547,6 +1548,13 @@ function selectSchedAppt(a) {
     rem.textContent = "🔔 Reminder sent" + (isNaN(r) ? "" : " · " + r.toLocaleString());
     d.append(rem);
   }
+  const encSummary = encounterSummary(a);
+  if (encSummary) {
+    const enc = document.createElement("div");
+    enc.className = "sd-meta documented";
+    enc.textContent = encSummary;
+    d.append(enc);
+  }
   // Day-of-visit transitions on the desk view (the front-desk / provider operational
   // surface the PO flagged). loadSchedule re-fetches + closes this panel (it calls
   // hideSchedDetail first), and the block re-colours to the new status.
@@ -1559,6 +1567,15 @@ function selectSchedAppt(a) {
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => setStatus(a, "cancelled", loadSchedule));
     acts.append(cancel);
+    d.append(acts);
+  } else if ((a.status || "").toLowerCase() === "completed") {
+    const acts = document.createElement("div");
+    acts.className = "sd-actions";
+    const doc = document.createElement("button");
+    doc.className = "ghost";
+    doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
+    doc.addEventListener("click", () => openEncounter(a, loadSchedule));
+    acts.append(doc);
     d.append(acts);
   }
   d.hidden = false;
@@ -1661,6 +1678,13 @@ function renderApptCard(a, opts) {
     reminder.textContent = "🔔 Reminder sent" + (isNaN(r) ? "" : " · " + r.toLocaleString());
   }
 
+  // The "visit documented" presence signal + any requested follow-up (the
+  // clinicAppointments lens's operational encounter columns — the clinical content
+  // itself is PHI and never projected). Absent until the visit is documented.
+  const documented = document.createElement("div");
+  documented.className = "meta documented";
+  documented.textContent = encounterSummary(a);
+
   const actions = document.createElement("div");
   actions.className = "card-actions";
   const badge = document.createElement("span");
@@ -1689,14 +1713,43 @@ function renderApptCard(a, opts) {
     actions.append(btns);
   }
 
+  // A completed visit can be documented (or its documentation corrected — the op is
+  // a re-runnable upsert). The clinical note lives behind the modal; only the
+  // "documented" + follow-up signals show on the card.
+  if (opts.cancelable && (a.status || "").toLowerCase() === "completed") {
+    const btns = document.createElement("span");
+    btns.className = "card-btns";
+    const doc = document.createElement("button");
+    doc.className = "ghost";
+    doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
+    doc.addEventListener("click", () => openEncounter(a, loadAppts));
+    btns.append(doc);
+    actions.append(btns);
+  }
+
   card.append(title);
   if (sub.textContent) card.append(sub);
   card.append(when);
   if (reason.textContent) card.append(reason);
   if (statusNote.textContent) card.append(statusNote);
   if (reminder.textContent) card.append(reminder);
+  if (documented.textContent) card.append(documented);
   card.append(actions);
   return card;
+}
+
+// encounterSummary renders the operational encounter signals (the lens's
+// documentedAt / followUpRequested / followUpDate columns) for an appointment, or
+// "" when the visit has not been documented. The clinical content is PHI and is
+// never projected, so it is never shown here.
+function encounterSummary(a) {
+  if (!a.documentedAt) return "";
+  const d = new Date(a.documentedAt);
+  let t = "✓ Visit documented" + (isNaN(d) ? "" : " · " + d.toLocaleDateString());
+  if (a.followUpRequested) {
+    t += " · follow-up" + (a.followUpDate ? " " + a.followUpDate.slice(0, 10) : " requested");
+  }
+  return t;
 }
 
 function statusClass(status) {
@@ -1851,6 +1904,88 @@ async function submitReschedule(ev) {
   }
 }
 
+// ---- Document visit (RecordEncounter — the post-visit clinical record) ----
+//
+// RecordEncounter upserts the appointment's .encounter aspect. The RAW clinical
+// content (summary / assessment / plan) is PHI: it is captured but NEVER projected
+// (the deferred Vault plane owns its display), so the form cannot pre-fill it even
+// when correcting an existing note — only the operational follow-up signals are
+// projected and round-tripped. The op is a re-runnable upsert (re-saving replaces
+// the whole aspect).
+
+function openEncounter(a, onDone) {
+  state.documenting = { a, onDone };
+  const who = a.patientName || shortKey(a.patientKey);
+  $("#encounter-context").textContent = a.documentedAt
+    ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — re-documenting replaces the prior note`
+    : `${who} · ${fmtWhen(a.startsAt, a.endsAt)}`;
+  // Clinical content is never projected, so even an already-documented visit starts
+  // blank (an honest consequence of the PHI-not-projected discipline). The follow-up
+  // signals ARE projected, so they pre-fill.
+  $("#enc-summary").value = "";
+  $("#enc-assessment").value = "";
+  $("#enc-plan").value = "";
+  $("#enc-followup").checked = !!a.followUpRequested;
+  $("#enc-followup-date").value = a.followUpDate ? a.followUpDate.slice(0, 10) : "";
+  toggleFollowupDate();
+  $("#encounter-overlay").hidden = false;
+  $("#enc-summary").focus();
+}
+
+function closeEncounter() {
+  $("#encounter-overlay").hidden = true;
+  state.documenting = null;
+}
+
+function toggleFollowupDate() {
+  $("#enc-followup-date-field").hidden = !$("#enc-followup").checked;
+}
+
+async function submitEncounter(ev) {
+  ev.preventDefault();
+  const ctx = state.documenting;
+  if (!ctx) {
+    closeEncounter();
+    return;
+  }
+  const a = ctx.a;
+  const summary = $("#enc-summary").value.trim();
+  if (!summary) {
+    toast("A visit summary is required.", "err");
+    return;
+  }
+  const payload = { appointmentKey: a.appointmentKey, summary };
+  const assessment = $("#enc-assessment").value.trim();
+  if (assessment) payload.assessment = assessment;
+  const plan = $("#enc-plan").value.trim();
+  if (plan) payload.plan = plan;
+  const followUp = $("#enc-followup").checked;
+  payload.followUpRequested = followUp;
+  if (followUp) {
+    const fd = $("#enc-followup-date").value;
+    if (fd) payload.followUpDate = fd;
+  }
+
+  const submit = $("#encounter-submit");
+  submit.disabled = true;
+  try {
+    const reply = await submitOp("RecordEncounter", "appointment", payload, [a.appointmentKey]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not save documentation — " + msg, "err");
+      return;
+    }
+    state.highlight = a.appointmentKey;
+    closeEncounter();
+    toast("Visit documented.", "ok");
+    if (ctx.onDone) ctx.onDone();
+  } catch (e) {
+    toast("Could not save documentation: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 // ---- Tabs ----
 
 const VIEWS = ["book", "appts", "schedule", "availability"];
@@ -1903,6 +2038,13 @@ function init() {
     if (e.target === $("#reschedule-overlay")) closeReschedule();
   });
   $("#reschedule-form").addEventListener("submit", submitReschedule);
+
+  $("#encounter-cancel").addEventListener("click", closeEncounter);
+  $("#encounter-overlay").addEventListener("click", (e) => {
+    if (e.target === $("#encounter-overlay")) closeEncounter();
+  });
+  $("#encounter-form").addEventListener("submit", submitEncounter);
+  $("#enc-followup").addEventListener("change", toggleFollowupDate);
 
   $("#provider").addEventListener("change", () => {
     refreshBookEnabled();
