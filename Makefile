@@ -24,7 +24,7 @@ LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:543
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -548,6 +548,20 @@ test-lease-convergence:
 .PHONY: test-object-gc
 test-object-gc:
 	go test -tags objectgc ./internal/objectgc/... -run TestObjectGC -v -p 1 -count=1 -timeout 3m
+
+## test-augur-convergence — the Augur (Weaver L3 reasoning tier) escalation gate.
+## Self-contained: embedded NATS, boots Processor + outbox + Weaver + the live
+## bridge (with the deterministic FakeAugur reasoning adapter — no real model
+## call), installs rbac → identity → orchestration-base → augur, and drives an
+## UNPLANNABLE convergence gap through the full Option-F loop: Weaver escalates →
+## directOp(CreateAugurReasoningClaim) → external.augur → bridge FakeAugur →
+## RecordProposal. Proves a benign in-scope proposal lands `pending` (billed at
+## most once) AND a crafted scope-escaping proposal is caught by the §5 validator
+## and stored `invalid` (never dispatchable — the AI-surface DEFENDED assertion).
+## Compiled with -tags augurconvergence.
+.PHONY: test-augur-convergence
+test-augur-convergence:
+	go test -tags augurconvergence ./internal/augurconvergence/... -run TestAugurConvergence -v -p 1 -count=1 -timeout 5m
 
 ## vet — Run go vet on all packages except vendored ANTLR-generated parsers
 ## (which contain expected unreachable-code patterns from the generator).

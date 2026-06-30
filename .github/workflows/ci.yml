@@ -149,6 +149,15 @@ jobs:
         # directOp(TombstoneObject) → object.tombstoned → byte-reclaim chain.
         run: make test-object-gc
 
+      - name: Run Augur convergence e2e (L3 escalation)
+        # Boots Processor + outbox + Weaver + the live bridge (deterministic
+        # FakeAugur, no real model call) in-process; drives an unplannable gap
+        # through Weaver escalate → directOp(CreateAugurReasoningClaim) →
+        # external.augur → bridge → RecordProposal. Proves a benign proposal lands
+        # pending (billed once) AND a scope-escaping proposal is stored invalid
+        # (the §5 validator DEFENDED assertion for the AI surface).
+        run: make test-augur-convergence
+
   unit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
