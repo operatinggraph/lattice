@@ -1,10 +1,17 @@
 # Loom guardless-step recovery — the effect-guard (recovery-idempotency for guardless steps) — design
 
-**Status:** 📐 **awaiting-Andrew (ratification) — 2026-06-29.**
+**Status:** 🗄️ **BACKUP — shelved by Andrew (2026-06-29), NOT for build.** Andrew declined to widen Loom's
+Core-KV reads: *"I don't like Loom or any other non-Processor component reading from Core-KV. Guards are the only
+exception (waiting for a better architectural approach) … I don't like that we keep piling on to it. Keep this
+design as a backup but try to find a different way — even if we have to redesign Loom entirely (hopefully not).
+Not urgent, don't rush."* The effect-guard adds a **new** Loom Core-KV read (effect-probing) — a widening of the
+very guard-read exception he wants held/shrunk. **This design is retained as the fallback;** the active task is a
+**non-Loom-read approach (Processor-side, or a Loom redesign)** — see **§9**. The §10.5/§10.6 contract edit was
+**reverted from the working tree** (proposed text preserved in §3 + the For-Andrew block); not committed.
 **Component:** Loom (`internal/loom`) · **Stream:** Lattice (Stream 2) · **Size:** S–M (Fire 1 buildable now; Fire 2 behind the ratified `kv.Links` substrate seam).
 **Designer fire:** Winston, 2026-06-29 · **Builds on:** Contract #10 §10.5 (loom pattern step shape + the guard grammar) · §10.6 (Crash-safety invariant 2, "guardless steps complete only via their token") · the documented-bound doctrine (Contract #10 ~"documented rare-double") · the declarative guard evaluator (`internal/loom/guard.go` + `guard_eval.go`) · the §10.6 read-before-act probe precedent ("Loom reads Core KV, never writes it").
 **Sibling precedent:** [`weaver-reclaim-check-before-act-probe-design.md`](weaver-reclaim-check-before-act-probe-design.md) (the higher-stakes per-sweep sibling — its *grounding methodology* is mirrored here, but its conclusion is **inverted**, see §2.1).
-**Contract change:** **YES — Contract #10 §10.5 (additive optional `effectGuard` step field) + a §10.6 invariant-2 refinement.** The actual edit is staged **UNCOMMITTED** in `docs/contracts/10-orchestration-surfaces.md` (the diff is the proposal); the design builds against it.
+**Contract change (proposed, NOT applied):** Contract #10 §10.5 (additive optional `effectGuard` step field) + a §10.6 invariant-2 refinement. The proposed text is preserved in §3 + the For-Andrew block; the working-tree edit was **reverted** when the design was shelved (2026-06-29). A non-Loom-read redesign would likely need a *different* contract surface (or none).
 
 ---
 
@@ -212,3 +219,37 @@ Each fire independently shippable + green. **Build only after ✅ Andrew-ratifie
 - **Evaluated only on recovery, or always?** → always, on every guardless-step entry (§2.5; the engine can't detect recovery — invariant 2 — and "always" makes a false-positive catchable on the first run).
 - **Fail-open or fail-closed on enumeration uncertainty (Fire 2)?** → fail-closed = **absent ⇒ run** (§5/§7; never skip on uncertainty — a re-run is the bounded baseline, a wrong skip is the unbounded harm).
 - **Contract: new field or overload `guard`?** → a **distinct** `effectGuard` field (§2.2; same grammar, *opposite* skip semantics — overloading `guard` would make the skip direction ambiguous).
+
+---
+
+## 9. Shelved — the architectural redirection (Andrew, 2026-06-29)
+
+At ratification Andrew declined the effect-guard because it **adds a new Loom Core-KV read**. His standing
+position: *the Processor is the sole Core-KV reader/writer; Loom's **guard** evaluation is the one tolerated
+exception — and even that is provisional ("waiting for a better architectural approach"). Do not pile more engine
+Core-KV reads onto it.* The effect-guard, though it reuses `evalGuard`, answers a **new** question ("has this
+step already run?") via a **new** read — a widening of the exception, not a free pass.
+
+**Redirection (non-urgent — do not rush).** Find a recovery-idempotency mechanism for guardless steps that does
+**not** add a Loom Core-KV read. Leading candidate (the architect's reflex this design should have followed):
+**make the read Processor-side.**
+
+- **Processor-side idempotency.** Loom dispatches the guardless step's op *unchanged in shape* but declares the
+  step's **effect key(s)** in the op's `contextHint.reads`; the **Processor** JIT-hydrates them (as it already
+  does for every op) and the op's DDL/condition **no-ops when its own effect is already present** — so the
+  recovery re-run commits nothing. The Core-KV read lives in the Processor (P2-clean); Loom only *declares*,
+  exactly as the ratified externalTask-params shape does (Loom declares `contextHint.reads`, the Processor
+  hydrates, the instanceOp DDL resolves).
+- **The hard part is unchanged and must be solved in the redesign:** distinguishing a *recovery generation* from
+  a *legitimate new episode* of the same pattern on the same subject (§2.1 / §10.6 invariant 2). The effect-guard
+  pushed that onto the author's "test your own effect" contract; a Processor-side version needs the equivalent
+  discrimination expressed as an op condition — an episode-distinct, generation-independent **effect identity**
+  the Processor can dedup on, distinct from the generation-specific `requestId`. This is the open design problem
+  the next fire must crack; it is **not** dissolved by moving the read, only relocated to the correct layer.
+- **Stretch (only if needed):** the same "engine declares, Processor hydrates" move could eventually retire the
+  *guard* read exception too (the "better architectural approach" Andrew is waiting for) — guards evaluated
+  against Processor-hydrated state rather than a Loom Core-KV read. That is a larger Loom change ("redesign Loom
+  entirely (hopefully not)") and is out of scope unless the minimal recovery-idempotency redesign forces it.
+
+**This design (the effect-guard) is the backup** if the Processor-side path proves unworkable. It is sound and
+buildable; it is simply on the wrong side of the architectural line Andrew is holding.
