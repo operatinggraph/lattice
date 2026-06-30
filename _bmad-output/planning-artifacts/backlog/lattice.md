@@ -36,7 +36,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Health-KV] Orphaned dead-instance heartbeat keys never expire** | Each `health.<component>.<instanceID>` is written with no TTL, so a dead instance's key persists forever → permanent stale entries the Lamplighter must distinguish from live. | ★★ | S–M | 📋 |
+| **[Health-KV] Orphaned dead-instance heartbeat keys never expire** | Each `health.<component>.<instanceID>` is written with no TTL, so a dead instance's key persists forever → permanent stale entries the Lamplighter must distinguish from live. | ★★ | S–M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/health-kv-ttl-orphan-expiry-design.md) · restores Contract #5 §5.6 TTL conformance (no contract change); 3 fires |
 | **[Core] Processor per-lane consumers (ConsumerSupervisor adoption)** | Replace the single `processor-main` durable over all `ops.*` lanes (Phase-1 simplification) with per-lane consumers, per the architecture's design-of-record. | ★★ | M | 🏗️ building (per-lane fires shipped; see git) |
 | **[Weaver] Reclaim check-before-act probe** | On expired-lease reclaim the sweeper re-dispatches the gap action as a fresh episode; add a check-before-act probe to close the documented rare-double. | ★★ | S–M | ✅ ratified · 📋 ready |
 | **[Weaver] HealthSink pause-restore round-trip uncovered** | `consumerHealthSink.Load` paused-restore branch + `pauseReasonFromString` sit at 0% coverage. | ★★ | XS–S | 📋 |
