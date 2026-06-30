@@ -61,9 +61,9 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **`kv.Links`** (L335, top priority) ·
-> **FR28 role-queue** (L332) · **`@every` schedules** (L333) · **protected-lens out-of-band provisioning**
-> (L271) · **full-engine tombstone retraction** (L323) · the **instanceOf P7 lint gate** (L334 residual).
+> 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **`kv.Links`** (top priority) ·
+> **FR28 role-queue** · **`@every` schedules** · **protected-lens out-of-band provisioning** ·
+> **full-engine tombstone retraction** · the **instanceOf P7 lint gate** (residual).
 > *Dependency-sequenced ratified items* (Gateway, Vault, control-plane-authz, Personal Lens behind D1; Object
 > crypto-shred behind Vault) build when their gate clears. **Augur Fire 1** is in an unmerged worktree
 > (`augur-fire1`) — resume per its design doc before picking new AI-native work.
@@ -75,14 +75,14 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **Protected-lens provisioning: out-of-band + verify-and-pause** | Refractor runs the protected/grant Postgres table DDL today; move provisioning out-of-band + verify-and-pause fail-closed (retire the RLS DDL-ownership exception). | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/protected-lens-out-of-band-provisioning-verify-and-pause-design.md) · 📋 ready |
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · 🚧 seq behind NATS-write-restriction F2b |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1 (credential seam) shipped; F2 = live enforcement |
-| **Lane authorization enforcement (Contract #2 §2.3)** | Submitting to a lane is itself capability-controlled: `LaneUnauthorized` + the service-actor `system`-lane grant. | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/lane-authorization-enforcement-design.md) · F1 (grant converge, dark) shipped |
+| **Lane authorization enforcement (Contract #2 §2.3)** | Submitting to a lane is itself capability-controlled: `LaneUnauthorized` + the service-actor `system`-lane grant. | ★★ | M | 🏗️ building · ✅ ratified 2026-06-28 · [design](../../implementation-artifacts/lane-authorization-enforcement-design.md) · F1 (grants converge, dark) shipped; next = enforcement |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · 🚧 seq behind D1 |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · 🚧 seq behind D1 |
-| **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
+| **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -115,9 +115,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Core/bootstrap] Populate Postgres `actor_read_grants`** | The cap-read self-anchor GrantTable projection (D1.3 Fire-3 prerequisite). | ★★★ | S–M | 🏗️ building · [design](../../implementation-artifacts/d1-grant-population-and-sequencing-design.md) · Increment 1 shipped |
-| **[Refractor] GrantTable grant-retraction on anchor tombstone** | `actor_read_grants` accumulates monotonically; add the composite-keyed delete path so a tombstoned anchor's grant retracts. | ★★★ | S–M | 🏗️ building · [design](../../implementation-artifacts/grant-table-anchor-tombstone-retraction-design.md) · F1 shipped |
-| **[Refractor] Link-triggered reprojection (plain/GrantTable lenses)** | Eager relationship-grant freshness. **Downgraded ★, de-blocked — NOT a D1.3 blocker.** | ★ | M | 📐 ratified · [design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) · ⚠️ consolidate-decision vs L321 (Andrew) |
-| Negative / filter-retraction projection | True "emit-only-when-violating" (targets currently project one row per candidate with a `violating` flag). | ★→★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) · consolidation target for L319 |
+| **[Refractor] Link-triggered reprojection (plain/GrantTable lenses)** | Eager relationship-grant freshness. **Downgraded ★, de-blocked — NOT a D1.3 blocker.** | ★ | M | ✅ ratified · [design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) · ⚠️ consolidate-decision vs Negative/filter-retraction (Andrew) |
+| Negative / filter-retraction projection | True "emit-only-when-violating" (targets currently project one row per candidate with a `violating` flag). | ★→★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) · consolidation target for Link-triggered reprojection |
 | **Full-engine lens re-projects a tombstoned vertex when its keyed aspect survives** | A soft-deleted vertex keeps projecting into a full-engine lens when its keyed aspect survives (PO-routed, Clinic). | ★★ | S–M | ✅ ratified · [design](../../implementation-artifacts/refractor-full-engine-anchor-tombstone-retraction-design.md) · 📋 ready |
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | 📋 (no consumer yet) |
 | Link-tombstone re-projection · cross-instance latency rollup | Two projection edge-cases / observability gaps (current approaches work). | ★ | S each | 📋 |
