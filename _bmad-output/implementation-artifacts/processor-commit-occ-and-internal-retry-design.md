@@ -189,26 +189,32 @@ Weaver's `sweepReclaimsSuppressed`) so sustained hot-key contention is operator-
 
 ---
 
-## 5. Why my live-test setup hit it (honest, with what's unverified)
+## 5. Why my live-test setup hit it — fully root-caused (a red herring)
 
-The conflict was a **per-subject `create`-once collision**, never whole-stream. `CreateUnclaimedIdentity` mints
-deterministic email/phone **uniqueness-index** vertices, and the setup script **reused one phone + deterministic
-emails** across identities → the index `create` collided. **The determining fix was unique index values**:
-verified by falsification — with the orchestration tier **running**, a `CreateUnclaimedIdentity` with unique
-values commits cleanly, so orchestration state is **not** a factor. My earlier characterisation of this incident
-("loses the whole-stream `ExpectedLastSequence` CAS to continuous Weaver/Loom convergence ops, worked around by
-quiescing orchestration") was **wrong on all three counts** — wrong mechanism (per-subject), wrong cause
-(uniqueness collision, not convergence contention), wrong fix (unique values, not quiescing; the script still
-failed *after* I quiesced).
+**The triggering incident was NOT a concurrency bug or a lost-update — it was the identity uniqueness
+constraint working as designed**, and the design below is motivated by an *unrelated* code-verified gap (§1.1),
+not by this incident. Stated plainly so the record is exact.
 
-**Unverified residual (stated as such):** the very first attempt on a freshly-`make down`-ed stack (no persisted
-volume) failed with a slightly-shifting sequence (`586`→`584`) before any of the script's identities committed — so
-*something* real conflicted during warm-up, but I have **not** pinned the colliding key, and I am deliberately
-not substituting another unverified mechanism for it. **This incident is therefore NOT cited as evidence for (B)**
-— (B)'s justification stands on its own: once (A) conditions updates per §3.2, genuine concurrent same-key
-updates (a `directOp`/`replyOp` and a user op on the same aspect, across the concurrent lane pumps) **will**
-conflict, and (B) absorbs the benign ones. That is the real, code-grounded motivation, independent of this
-test-setup anecdote.
+Reproduced deterministically on a fresh stack and confirmed by fetching the colliding message from NATS:
+
+- `CreateUnclaimedIdentity` mints two deterministic **dedup-index** vertices —
+  `vtx.identityindex.<sha256NanoID("email:"+email)>` and `…("phone:"+phone)>` — as `create`-once
+  (`packages/identity-domain/ddls.go:382-424`). They are the email/phone **uniqueness** index.
+- My setup script **reused one phone (`+15550000000`) for every identity** (and deterministic emails). So the
+  *first* identity (Larry) committed its phone/email index; the *second* (Linda, same phone) hit
+  `create`-once on the **already-existing phone index** → `RevisionConflict`. The original "first run failed"
+  was actually the **second** identity in the run colliding on the shared phone — I misattributed it to op 1.
+- Smoking gun: `nats stream get KV_core-kv 584` → `vtx.identityindex.<…>` `{"contactType":"email",…}`; a
+  same-phone-different-email submit fails on `586` (the **phone** index); a unique-email-unique-phone submit
+  **commits**. `584`/`586` = the email/phone index sequences — exactly the original numbers. **Per-subject
+  create-once, never whole-stream; the uniqueness constraint, never convergence contention; fixed by unique
+  values, never by quiescing orchestration** (with orchestration *running*, unique values commit fine).
+
+**So (B) is NOT motivated by this incident** (it wasn't an update conflict at all — it was a create-once
+uniqueness reject, which (B) correctly **surfaces**, never retries). (B)'s justification is independent and
+code-grounded: once (A) conditions updates per §3.2, genuine concurrent same-key *updates* (a
+`directOp`/`replyOp` and a user op on the same aspect, across the concurrent lane pumps) **will** conflict, and
+(B) absorbs the benign ones. The investigation's value was surfacing that (A) gap, not the red-herring incident.
 
 ---
 
