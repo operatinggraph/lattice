@@ -24,16 +24,17 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | Clinic — follow-ups captured but not actionable (the forcing function) | A recorded encounter's `followUpRequested`/`followUpDate` only render as an inert card label — no "due follow-ups" worklist for staff and no follow-up reminder, so a requested follow-up silently falls through. | Clinic | pkg + FE | ★★★ | M | 🏗️ building · Inc 1 FE worklist shipped (b96dd3d); next = Inc 2 `@at` follow-up reminder on the clinic-reminders pattern (uses `@at`, NOT blocked on `@every`) |
 | Clinic — appointment status has no lifecycle guard | `SetAppointmentStatus` upserts any enum value over any current status (verified live: `completed→scheduled`, `cancelled→completed` both commit) — no state machine, so a finished/cancelled visit silently reverts. | Clinic | pkg | ★★ | S | 📋 ready (clinic-domain `SetAppointmentStatus`: validate from→to; treat `cancelled`/`completed`/`noShow` as terminal) |
 | Clinic — patient contact (email/phone) captured but never projected | `CreatePatient` stores `.demographics.{email,phone}` but the `clinicPatients` lens projects only `name` — staff can't see contact info, and a real reminder channel has no address to send to. | Clinic | pkg + FE | ★★ | S | 📋 ready (add email/phone to the `clinicPatients` lens for the operator view; prereq for the reminder notification channel) |
+| LoftSpace — `DecideLeaseApplication` has no decision guard | Verified live: a landlord can approve a never-qualified application (`profileSubmitted=false` → `status=approved`) and freely flip an already-decided one (approved→declined commits). The convergence lens blocks an unsafe lease, but the console shows a misleading "Approved — leasing" that can never converge, and a decision oscillates. | LoftSpace | pkg | ★★ | S | 📋 ready (guard: reject `approve` unless `applicantApproved`; treat a recorded decision as terminal / require explicit re-open — mirror of the Clinic status-guard row) |
+| LoftSpace — applicant contact (email/phone) captured but never projected to the landlord | `CreateUnclaimedIdentity` stores `.email`/`.phone`, but neither the `/api/identities` picker nor the landlord `unit-applications` disposition surfaces them — a landlord deciding on an applicant has no way to contact them. | LoftSpace | pkg + FE | ★★ | S | 📋 ready (project applicant email/phone into the landlord application read-model + render in the decision card; LoftSpace analog of the Clinic patient-contact row) |
 
 ## PO notes (dated — drives rotation)
 
 Compact rotation memory only — PO *findings* are filed as demand rows above + the Done log; the verbose
 dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from the Steward.
 
-- **Rotation to date:** LoftSpace ×6, Clinic ×4 (last: Clinic 4th run 2026-06-30, full booking→status→encounter flow).
-- **Method:** reuse the already-up shared stack (`make up-full` + `install-<vertical>`), exercise the live
-  app as the product owner, file scored items. Both apps exist + are exercisable live (`:7788` / `:7799`).
-- **Next:** the staler of the two by run-date (LoftSpace).
+- **Rotation to date:** LoftSpace ×7, Clinic ×4 (last: LoftSpace 7th run 2026-06-30, full post-listing→apply→profile→decide flow on a fresh shared stack; filed the decide-guard + applicant-contact gaps).
+- **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. Both apps exist + are exercisable live (`:7788` / `:7799`).
+- **Next:** the staler of the two by run-date (Clinic).
 
 ## Done log — verticals (newest first)
 
