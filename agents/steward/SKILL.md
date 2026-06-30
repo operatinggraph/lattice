@@ -265,6 +265,17 @@ running; the **browser tab** you do not.
   no-changelog rule). When you ship an item, **move it out of the feature table to a one-line Done-log entry**
   (`date · SHA · title`); past ~25 Done-log lines, roll the oldest to `backlog/archive/`. Owners hand you a
   one-line status + SHA, not a paragraph.
+- **On ship, reconcile the item's neighbors (write-time consistency — do this, not a per-pick re-verify).**
+  Staleness is *written* when an item ships: the shipped item gets a clean Done entry, but its **neighbors
+  silently drift** (their states still reference the old world). So the moment you mark an item ✅ done, check
+  its immediate board neighbors **in the same docs commit**: (a) any item `blocked-on:` / `behind` / waiting on
+  *this* one → now **unblocked**? (b) any **prerequisite** this item named → now **satisfied** (it usually must
+  be — a shipped thing's prerequisite can't still be unfinished)? (c) any row referencing this item by name or
+  SHA → now **stale**? Fix them now. This is bounded (a shipped item has few neighbors), fires only on ship,
+  and is aimed exactly where drift is born — it catches the lurks a *per-pick* check never sees (the stale
+  items are the **un-picked** ones; the picked item self-corrects during grounding anyway). *(Trialed
+  2026-06-30: shipping D1.3 left its prerequisite still marked 🏗️ building and a dependent's blocker stale —
+  both surfaced only by an after-the-fact sweep, which this step exists to pre-empt.)*
 
 ## 5. Replenish if idle
 
