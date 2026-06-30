@@ -51,6 +51,12 @@ Compact rotation memory only (survey *findings* become filed rows above + in the
 Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting feature backlog). Freshness via
 `git log -1 --format=%ct -- <path>`; survey the stalest, note a dated line, rotate.
 
+- **Steward fire 2026-06-30 (P7 lint gate):** shipped the instanceOf design's last DoD item — the
+  `lint-conventions` P7 gate (discriminator-aspect shadowing the envelope class). Picked importance-first
+  (★★ ratified-design residual) over the ★ build-ready FR28/@every; the other ★★ build-ready item
+  (protected-lens out-of-band) is the larger L security-plane fire a prior fire deferred for a dedicated
+  3-layer budget. Whole instanceOf item → Done log. Lead review (XS, build-ignored static lint, zero
+  production-code impact, synthetic-probe-verified). `0cd2695`.
 - **Steward fire 2026-06-30 (Refractor read-path):** reconciled a stale board row (full-engine
   anchor-tombstone retraction said 📋 ready but Fire 1 shipped `679fe25` — moved to Done log) and
   grounding-corrected the protected-lens out-of-band design before building: its §2.3 "no new pump
@@ -73,8 +79,7 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **FR28 role-queue** ·
-> **`@every` schedules** · **protected-lens out-of-band provisioning** ·
-> the **instanceOf P7 lint gate** (residual).
+> **`@every` schedules** · **protected-lens out-of-band provisioning**.
 > *Dependency-sequenced ratified items*: **Vault** + **Personal Lens** behind D1; **Gateway** behind
 > NATS-write-restriction F2; **Object crypto-shred** behind Vault — build when their gate clears.
 > (**Control-plane-authz** rides D1.2, now shipped → buildable, deprioritized behind D1 rollout.)
@@ -137,7 +142,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · next: `loom`/`bridge` `t.Parallel()` |
 | **[CI/Refractor] Hello-Lattice NFR-P3 latency flake** | The `≤500ms` capability-projection probe fails-then-passes on the shared CI runner (~590ms infra floor) — the dominant re-run flake (~50%). Not Whetstone-maskable (loosen/retry both weaken the gate). | ★★ | M | 🔭 owner/Andrew decision (infra-bound; shave CDC lag / bigger runner / re-scope CI conformance) |
-| **Operation/permission discovery via `instanceOf` template** | Resolve a fine-grained-class vertex's governing DDL by walking `instanceOf` → type-authority, so one type DDL governs unbounded subtypes with zero new DDLs. Decouples discriminator class from type-authority DDL. | ★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/instanceof-template-op-discovery-design.md) · Fire 1 + Fire E + Verticals consumer shipped; residual = P7 lint gate (outliers retired e1d540f; can turn on) |
 | **Op-time bounded reverse-link / adjacency read (`kv.Links`)** | One sanctioned, bounded, fail-closed, paged op-time link-enumeration builtin (`kv.Links(hub, relation, direction, cursor, limit)`) — retires the key-list-in-aspect guard indexes. Relaxes the write-path no-scans invariant by exactly one primitive. | ★★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/op-time-bounded-link-enumeration-design.md) · Fire 1 (primitive, cc2613f) + Fire 2 (clinic `hasBooking`+`bookingGuard` consumer) shipped; next = Fire 3 (optional ephemeral e2e + §8 hub-source lint); also unblocks the Loom effect-guard Fire 2 |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | The Starlark mutation vocab is `create`/`update`/`tombstone` (all soft PUTs); a soft-tombstoned key persists and is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL` marker via the existing `BatchOp.Delete` seam + step-8 + Contract #3) lets terminal `hasBooking` links (and other dead keys) leave the keyspace, bounding `kv.Links` **LIST** cost. Surfaced by kv.Links Fire 2. | ★ now / ★★ at scale | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · §3 contract edit staged UNCOMMITTED; `DEL`-not-`PURGE` (op-ledger untouched, KV history retained); `ProtectedKey` backstop extended; 2 fires (clinic `hasBooking` reclaim = consumer) |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Live Core-KV reads in scripts are the common root of the Loom-guard Processor-side redirect *and* the Edge A′-prediction partiality; declared+hydrated reads the norm, live reads classified (debt vs sanctioned config vs irreducible `kv.Links`), Loom guard read retired Processor-side. | ★★ | L | 📐 awaiting-Andrew · [design](../../implementation-artifacts/script-read-posture-design.md) · §2.5 `optionalReads` edit staged uncommitted; Fire 3 retires Loom `evalGuard` (G1 rec.) |
@@ -162,6 +166,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-06-30 · `0cd2695` · [lint/Core] instanceOf-template op-discovery — **DONE** (P7 lint gate, the design's last DoD item): `scripts/lint-conventions.go` P7 check flags a discriminator-shaped aspect (`.class`/`.family`/`.kind` localName) shadowing the envelope class; anchored on the Starlark aspect-emit helper (zero false positives vs CLI flag / string-slice / `cls` arg), skips tests. Green because the outliers were retired in e1d540f. Whole design complete (Fire 1 `cea0c3b` + Fire E `6eaabcc` + Verticals consumer `e1d540f`/`2a5087a` + Contracts #1 §1.5/§1.6 + #2 §2.1 + P7 in lattice-architecture.md).
 - 2026-06-27 · `679fe25` (+`faa3aec` GrantTable composite variant) · [Refractor] Full-engine plain-projection anchor-tombstone retraction — `Engine.AnchorDeleteResult` (AST-only) + the non-actor pipeline twin emit a Delete on a root-tombstone of the lens anchor; fixes every full-engine plain lens (clinic/loftspace/lease/objects-base); doc note in refractor.md. (Reconciled stale board row 2026-06-30: design banner said 📋 ready but Fire 1 had shipped; clinic ephemeral-stack e2e is verticals-lane convergence-suite work.)
 - 2026-06-30 · `44049ed` · [Core/bypass] D1.4 — Gate-3 read-path authorization adversarial vectors (§5.1–5.5: no-JWT · cross-actor · revoked · cross-anchor bleed · no-RLS-policy); Gate 3 now 13/13, gate sets `POSTGRES_TEST_DSN`
 - 2026-06-30 · `<pending>` · [clinic-domain] kv.Links Fire 2 — re-author the appointment double-book guard onto `hasBooking` links + scalar `bookingGuard` epoch (drop the `.bookings` key-list aspects + DDLs); pkg 0.8.0
