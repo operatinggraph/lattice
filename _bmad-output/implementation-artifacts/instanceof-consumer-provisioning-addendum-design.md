@@ -81,19 +81,29 @@ coarse class `leaseServiceInstance` / `service` exact-matches its DDL and `permi
 the naive refactor silently *removes* that enforcement. The terminal the resolver was built for is
 **unreachable** because no producer can mint the link.
 
-### 2.3 What the consumer actually needs (grounded, narrower than feared)
+### 2.3 What the consumer actually needs (grounded)
 
 - The lease instance vertex `vtx.service.<handle>` is written **only** by `CreateLeaseServiceInstance`
-  (`leaseServiceInstance` DDL, `permittedCommands:[CreateLeaseServiceInstance]`). Its `.outcome` / `.dispatch`
-  aspects have **their own aspectType DDLs** (`leaseServiceReply` → `RecordLeaseServiceOutcome`,
-  `leaseServiceDispatch` → `RecordServiceDispatch`) → those aspect writes resolve by **exact lookup on the
-  aspect class** and never touch the instanceOf chain.
-- Therefore the instance's **vertex-root** governing DDL need only admit the **create op** — i.e. the
-  instance's `instanceOf` target must resolve to *its own create-op's type DDL*. That DDL is **already the
-  script's own DDL** (`ddl[scriptClass]` in the execution context). So the producer needs nothing more than
-  *"the meta key of the DDL I'm already running under."*
+  (`leaseServiceInstance` DDL, `permittedCommands:[CreateLeaseServiceInstance]`). So the instance's
+  **vertex-root** governing DDL need only admit the create op — its `instanceOf` target resolves to *its own
+  create-op's type DDL*, which is **already the script's own DDL** (`ddl[scriptClass]` in the execution
+  context). So the producer needs nothing more than *"the meta key of the DDL I'm already running under."*
+  This is why **Mechanism A is the minimal, exact fix**: surface the key the script context already holds.
 
-This is why **Mechanism A is the minimal, exact fix**: surface the key the script context already holds.
+> **⚠️ CORRECTION (build fire, 2026-06-29) — this section originally claimed the `.outcome`/`.dispatch`
+> aspects "have their own aspectType DDLs → resolve by exact lookup and never touch the instanceOf chain."
+> That was WRONG, caught by grounding it in code during the build.** Those aspects are written with class
+> `outcome`/`dispatch` for which **no aspectType DDL existed** — today they pass via the §1.5 **permissive
+> default** (the instance was template-less, so an aspect-class miss walked to *no* instanceOf target). The
+> moment the instance gains its `instanceOf → meta` link, an aspect-class miss walks the parent's chain to
+> the `leaseServiceInstance` DDL (which permits only `CreateLeaseServiceInstance`) and **fails closed** — a
+> regression introduced by the fix. **The build therefore ALSO adds two declaration-only aspect-type DDLs**
+> (`leaseServiceOutcome` for `.outcome`, `leaseServiceDispatchMarker` for `.dispatch`) so each aspect write
+> resolves by **exact class match** to its own gate and never walks the chain. This is a *strengthening*
+> (those writes were ungated before). Lesson: the "aspects have their own DDLs" assumption must be **grounded
+> per package** — an aspect class is gated only if a registered aspectType DDL bears that exact canonical
+> name; otherwise it falls to the permissive default, and adding an instanceOf link to its parent changes
+> that. (Shipped: lease-signing `2a5087a`.)
 
 ## 3. Mechanisms evaluated
 
