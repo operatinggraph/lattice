@@ -23,6 +23,7 @@ import (
 //   - internal/processor/step3_auth_*.go — the Contract #6 `service`
 //     auth-scope path + test fixtures (vtx.service.probe / .someOther), which
 //     are the generic auth scope concept, not the service-domain vertex type.
+//
 // None of those reference the service-domain class strings, so this assertion
 // stays true while the package owns its type exclusively.
 func TestServiceType_AbsentFromCore(t *testing.T) {
@@ -54,6 +55,18 @@ func TestServiceType_AbsentFromCore(t *testing.T) {
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		// Invariant (a) guards ENGINE PRODUCTION code — the processor / refractor /
+		// loom / weaver / bootstrap must stay type-blind. Test harnesses that boot
+		// the real vertical (e.g. internal/leaseconvergence, the refractor scalar
+		// e2e) are legitimately type-AWARE: they install lease-signing and assert
+		// its projections, and since the type/subtype discriminator now lives on the
+		// vertex envelope class (P7 — service.<family>.instance, no .family shadow
+		// aspect), an e2e harness MUST reference that class to discriminate a family.
+		// So the scan excludes _test.go — the engines themselves still never name the
+		// type (the instanceOf-template resolver walks it generically).
+		if strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		b, readErr := os.ReadFile(path)

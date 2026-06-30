@@ -245,10 +245,12 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	}
 
 	writeVertex(idKey, "identity", map[string]any{"name": "applicant"})
-	writeVertex(substrate.VertexKey("service", bgID), "service", map[string]any{})
-	writeAspect(substrate.VertexKey("service", bgID), "family", "family", map[string]any{"value": "backgroundCheck"})
-	writeVertex(substrate.VertexKey("service", payID), "service", map[string]any{})
-	writeAspect(substrate.VertexKey("service", payID), "family", "family", map[string]any{"value": "payment"})
+	// The family discriminator is the vertex ENVELOPE class (P7 —
+	// service.<family>.instance), not a .family shadow aspect; the key-type stays
+	// `service` so the lens MATCH (inst:service) still binds, and the lens reads
+	// inst.class to bucket the family.
+	writeVertex(substrate.VertexKey("service", bgID), "service.backgroundCheck.instance", map[string]any{})
+	writeVertex(substrate.VertexKey("service", payID), "service.payment.instance", map[string]any{})
 	buildEdge("providedTo", "service", bgID, "identity", idID)
 	buildEdge("providedTo", "service", payID, "identity", idID)
 	buildEdge("applicationFor", "leaseapp", appID, "identity", idID)

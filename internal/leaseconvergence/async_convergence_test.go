@@ -96,8 +96,7 @@ func (h *harness) weaverSweepLastRun() time.Time {
 func (h *harness) countBgcheckInstances(applicantID string) int {
 	n := 0
 	for _, svcKey := range h.serviceOutcomes(applicantID) {
-		fam := h.aspectData(svcKey, "family")
-		if fam != nil && fam["value"] == "backgroundCheck" {
+		if h.isBgcheckInstance(svcKey) {
 			n++
 		}
 	}
@@ -109,8 +108,7 @@ func (h *harness) countBgcheckInstances(applicantID string) int {
 func (h *harness) failedBgcheckInstances(applicantID string) int {
 	n := 0
 	for _, svcKey := range h.serviceOutcomes(applicantID) {
-		fam := h.aspectData(svcKey, "family")
-		if fam == nil || fam["value"] != "backgroundCheck" {
+		if !h.isBgcheckInstance(svcKey) {
 			continue
 		}
 		if oc := h.aspectData(svcKey, "outcome"); oc != nil && oc["status"] == "failed" {

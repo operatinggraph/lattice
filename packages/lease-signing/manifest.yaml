@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.12.0
+version: 0.13.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -29,6 +29,10 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: leaseServiceDispatch
       class: meta.ddl.vertexType
+    - canonicalName: leaseServiceOutcome
+      class: meta.ddl.aspectType
+    - canonicalName: leaseServiceDispatchMarker
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: leaseApplicationComplete
       adapter: nats-kv

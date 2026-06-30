@@ -300,28 +300,47 @@ func TestLeaseServiceInstance_MintsClaimVertex_EmitsExternalEvent(t *testing.T) 
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	// (a) the claim vertex: key type `service` (so the lens anchors on it) but
-	// class leaseServiceInstance (package-owned, to avoid the service DDL's
-	// permittedCommands restriction); root data {} (D5).
+	// (a) the claim vertex: key type `service` (so the lens anchors on it) and the
+	// fine-grained ENVELOPE class service.<family>.instance (P7 — the discriminator
+	// is the class, with NO .class/.family shadow aspect); root data {} (D5).
 	instDoc := readDoc(t, ctx, conn, instKey)
-	if cls, _ := instDoc["class"].(string); cls != "leaseServiceInstance" {
-		t.Fatalf("claim vertex class = %q, want leaseServiceInstance", cls)
+	if cls, _ := instDoc["class"].(string); cls != "service.backgroundCheck.instance" {
+		t.Fatalf("claim vertex class = %q, want service.backgroundCheck.instance", cls)
 	}
 	data, _ := instDoc["data"].(map[string]any)
 	if len(data) != 0 {
 		t.Fatalf("claim vertex root data must be minimal ({}), got %v", data)
 	}
-	// .class aspect (14.1 shape).
-	cdoc := readDoc(t, ctx, conn, instKey+".class")
-	cdata, _ := cdoc["data"].(map[string]any)
-	if v, _ := cdata["value"].(string); v != "service.backgroundCheck.instance" {
-		t.Fatalf(".class aspect = %q, want service.backgroundCheck.instance", v)
+	allKeys, err := conn.KVListKeys(ctx, testutil.HarnessCoreBucket)
+	if err != nil {
+		t.Fatalf("KVListKeys: %v", err)
 	}
-	// .family aspect (the lens discriminator).
-	fdoc := readDoc(t, ctx, conn, instKey+".family")
-	fdata, _ := fdoc["data"].(map[string]any)
-	if v, _ := fdata["value"].(string); v != "backgroundCheck" {
-		t.Fatalf(".family aspect = %q, want backgroundCheck", v)
+	keySet := map[string]bool{}
+	for _, k := range allKeys {
+		keySet[k] = true
+	}
+	// No .class / .family shadow aspects (the discriminator is the envelope class).
+	if keySet[instKey+".class"] {
+		t.Fatalf("unexpected .class shadow aspect (the discriminator must be the envelope class, P7)")
+	}
+	if keySet[instKey+".family"] {
+		t.Fatalf("unexpected .family shadow aspect (the lens reads inst.class)")
+	}
+	// (a') the instanceOf link → the leaseServiceInstance type-authority meta: the
+	// step-6 write-gate resolver walks it to enforce the instance's permittedCommands
+	// (Contract #1 §1.5 instanceOf terminal). Without it the fine-grained class would
+	// miss the exact lookup and fall to the permissive default (no enforcement). The
+	// op COMMITTED above, which already proves CreateLeaseServiceInstance resolved
+	// through this chain and was permitted; this asserts the link is present + sole.
+	instOfPrefix := "lnk.service." + handle + ".instanceOf.meta."
+	instOfCount := 0
+	for _, k := range allKeys {
+		if strings.HasPrefix(k, instOfPrefix) {
+			instOfCount++
+		}
+	}
+	if instOfCount != 1 {
+		t.Fatalf("want exactly one instanceOf→meta link (prefix %q), got %d", instOfPrefix, instOfCount)
 	}
 	// providedTo link instance→identity.
 	ptLnk := "lnk.service." + handle + ".providedTo.identity." + applicantID

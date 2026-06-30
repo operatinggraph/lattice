@@ -42,8 +42,18 @@ func DDLs() []pkgmgr.DDLSpec {
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
+		leaseServiceOutcomeAspectDDL(),
+		leaseServiceDispatchAspectDDL(),
 	}
 }
+
+// aspectDeclarationOnlyScript is the Starlark for the aspect-type DDLs. The
+// aspects are written by the vertexType DDLs' op scripts; these aspect-type DDLs
+// are step-6 write gates only, never op handlers — they fail closed if dispatched.
+const aspectDeclarationOnlyScript = `
+def execute(state, op):
+    fail("aspect-type DDL: not an operation handler: " + op.operationType)
+`
 
 func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
@@ -207,30 +217,33 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName: "leaseServiceInstance",
 		Class:         "meta.ddl.vertexType",
-		// Only the instanceOp writes a leaseServiceInstance-class vertex (it mints
-		// it). The replyOp mutates only the outcome-class .outcome aspect, never
-		// this vertex, so the step-6 permittedCommands gate (keyed by the MUTATED
-		// vertex's class) never consults this list for the replyOp. The op's
-		// SCRIPT is still selected by the op envelope's own Class.
+		// CreateLeaseServiceInstance creates the instance vertex ROOT (class
+		// service.<family>.instance), which misses the exact class→DDL lookup, so the
+		// step-6 write-gate resolver walks the instance's instanceOf link to THIS
+		// DDL's meta-vertex (the type authority) and enforces this list. The .outcome
+		// / .dispatch aspect writes resolve by exact class match to their own
+		// aspect-type DDLs (leaseServiceOutcome / leaseServiceDispatchMarker) — so
+		// they never walk the instanceOf chain to this DDL. The op SCRIPT is selected
+		// by operationType (ClassForCommand).
 		PermittedCommands: []string{"CreateLeaseServiceInstance"},
 		Description: "ExternalTask instanceOp DDL (Contract #10 §10.5). The op Loom submits for an externalTask step: " +
 			"payload {instanceKey (the bare handle Loom minted), subjectKey (the applicant identity), adapter, replyOp, " +
 			"params:{family}}. It prepends the package-chosen claim-vertex type `service` → vtx.service.<handle> and mints " +
-			"the claim vertex exactly as a service instance: root data {} (D5), a .class aspect service.<family>.instance " +
-			"(14.1 shape fidelity), a .family aspect {value:<family>} (the lens's bgcheck/payment discriminator — read as " +
-			"a distinct aspect because the vertex envelope `class` field shadows the .class aspect on the projection read " +
-			"path), and the providedTo link to the applicant identity (the convergence link the lens walks). The instance " +
-			"is template-less (no instanceOf): the lens hops providedTo, not instanceOf, and buckets family via .family, so " +
-			"a template adds install-seeding for zero convergence value. It emits the external.<adapter> event via its own " +
-			"transactional outbox (body {instanceKey, adapter, replyOp, params, externalRef, idempotencyKey} — the shape " +
-			"the bridge's externalEvent reader consumes); the bridge selects its adapter and posts the replyOp.",
+			"the claim vertex as a service instance: root data {} (D5), the type/subtype discriminator on the vertex " +
+			"ENVELOPE class service.<family>.instance (P7 — no .class/.family shadow aspect), an instanceOf link to this " +
+			"DDL's own meta-vertex (the write-gate type authority — Contract #1 §1.5 instanceOf terminal, the meta key " +
+			"surfaced to the script as ddl[...].metaKey), and the providedTo link to the applicant identity (the " +
+			"convergence link the lens walks; the lens discriminates bgcheck/payment by reading inst.class directly). It " +
+			"emits the external.<adapter> event via its own transactional outbox (body {instanceKey, adapter, replyOp, " +
+			"params, externalRef, idempotencyKey} — the shape the bridge's externalEvent reader consumes); the bridge " +
+			"selects its adapter and posts the replyOp.",
 		Script: leaseServiceInstanceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"instanceKey":{"type":"string","description":"The BARE instance handle Loom minted (no dots / key segments / wildcards); the op prepends vtx.service. → vtx.service.<handle>. Required."},` +
 			`"subjectKey":{"type":"string","description":"vtx.identity.<NanoID> of the applicant the claim is for (the pattern subject); the providedTo link points at it. Required, validated alive."},` +
 			`"adapter":{"type":"string","description":"The external adapter name (e.g. backgroundCheck, stripe), carried into the external.<adapter> event. Required."},` +
 			`"replyOp":{"type":"string","description":"The result-op the bridge posts back (RecordLeaseServiceOutcome), carried into the external event. Required."},` +
-			`"params":{"type":"object","description":"Opaque pass-through adapter params from the Loom step; params.family (backgroundCheck|payment) sets the .class + .family aspects."}},` +
+			`"params":{"type":"object","description":"Opaque pass-through adapter params from the Loom step; params.family (backgroundCheck|payment) sets the instance's envelope class service.<family>.instance."}},` +
 			`"required":["instanceKey","subjectKey","adapter","replyOp"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.service.<handle> of the minted claim vertex (the operation's principal key)."}}}`,
@@ -239,7 +252,7 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 			"subjectKey":  "Full vtx.identity.<NanoID> key of the applicant the externalTask is for (the Loom pattern subject). CreateLeaseServiceInstance validates it is alive and writes the providedTo link (the convergence link the lens reads across). Required.",
 			"adapter":     "The registered bridge adapter name (e.g. backgroundCheck, stripe). Carried into the external.<adapter> event class + body so the bridge selects its adapter. Required.",
 			"replyOp":     "The result-op type the bridge posts back (RecordLeaseServiceOutcome). Carried into the external event body so the bridge knows which op to submit on success. Required.",
-			"params":      "Opaque adapter params passed through from the Loom step. params.family (backgroundCheck|payment) discriminates the claim vertex's .class (service.<family>.instance) and .family aspects.",
+			"params":      "Opaque adapter params passed through from the Loom step. params.family (backgroundCheck|payment) discriminates the claim vertex's envelope class (service.<family>.instance).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -251,9 +264,9 @@ func leaseServiceInstanceDDL() pkgmgr.DDLSpec {
 					"replyOp":     "RecordLeaseServiceOutcome",
 					"params":      map[string]any{"family": "backgroundCheck"},
 				},
-				ExpectedOutcome: "Validates the applicant identity (alive). Atomically commits vtx.service.<handle> (root data {} — D5) " +
-					"+ a .class aspect service.backgroundCheck.instance + a .family aspect {value: backgroundCheck} + the providedTo " +
-					"link (instance→identity). NO outcome aspect yet (absence = not-yet-complete). Emits the external.backgroundCheck " +
+				ExpectedOutcome: "Validates the applicant identity (alive). Atomically commits vtx.service.<handle> with envelope " +
+					"class service.backgroundCheck.instance (root data {} — D5) + the instanceOf link to the leaseServiceInstance " +
+					"type-authority meta + the providedTo link (instance→identity). NO outcome aspect yet (absence = not-yet-complete). Emits the external.backgroundCheck " +
 					"event (body {instanceKey, adapter, replyOp, params, externalRef, idempotencyKey}) off the op's outbox. " +
 					"Returns primaryKey (the claim-vertex key). Rejects with ScriptError if the applicant is absent or the handle is malformed.",
 			},
@@ -382,6 +395,86 @@ func leaseServiceDispatchDDL() pkgmgr.DDLSpec {
 					".outcome and emits NO orchestration.externalTaskCompleted (the task is not done — the token stays parked). Emits " +
 					"service.dispatchRecorded (provenance). Returns primaryKey. Rejects a second dispatch for the same handle (the " +
 					"create-only .dispatch once-only guard).",
+			},
+		},
+	}
+}
+
+// leaseServiceOutcomeAspectDDL declares the .outcome aspect (class
+// leaseServiceOutcome) — the step-6 write gate for RecordLeaseServiceOutcome.
+// Now that a service instance carries the fine-grained envelope class
+// service.<family>.instance (P7) + an instanceOf link to its type authority, an
+// aspect write that misses the exact class->DDL lookup would otherwise walk the
+// instance's instanceOf chain to the leaseServiceInstance DDL (which permits only
+// CreateLeaseServiceInstance) and fail closed. This aspect-type DDL makes the
+// .outcome write resolve by exact class match to its own gate instead — the
+// resolver never walks the instanceOf chain for it. Declaration-only: no op
+// handler (the leaseServiceReply vertexType DDL owns the writing script).
+func leaseServiceOutcomeAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "leaseServiceOutcome",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"RecordLeaseServiceOutcome"},
+		Description: "Lease service-instance outcome aspect. Stored as vtx.service.<handle>.outcome (class " +
+			"leaseServiceOutcome) = {status (completed|failed), completedAt, validUntil}. The terminal external-call " +
+			"verdict the convergence lens reads (by local name inst.outcome.data.*, unaffected by the class). Written " +
+			"ONLY by RecordLeaseServiceOutcome (whose leaseServiceReply vertexType DDL owns the script); this aspect-type " +
+			"DDL is the step-6 write gate (exact class match — the instance's fine-grained envelope class + instanceOf " +
+			"type authority would otherwise route the write to the instance DDL and reject it). Declaration-only.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"status":{"type":"string","enum":["completed","failed"]},"completedAt":{"type":"string"},"validUntil":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"status":      "The terminal verdict: completed | failed.",
+			"completedAt": "RFC3339 instant the external call completed (canonical UTC).",
+			"validUntil":  "RFC3339 freshness horizon (a completed outcome is fresh only while now < validUntil).",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "lease service outcome aspect",
+				Payload:         map[string]any{"status": "completed", "completedAt": "2026-01-01T00:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.service.<handle>.outcome; written by RecordLeaseServiceOutcome.",
+			},
+		},
+	}
+}
+
+// leaseServiceDispatchAspectDDL declares the .dispatch aspect (class
+// leaseServiceDispatch) — the step-6 write gate for RecordServiceDispatch. Same
+// rationale as leaseServiceOutcomeAspectDDL: an exact class match keeps the
+// pending-marker write off the instance's instanceOf chain. The vertexType DDL
+// leaseServiceDispatch (the op script) and the .dispatch aspect class share the
+// name leaseServiceDispatch; aspectType DDLs are excluded from the
+// operationType->class reverse index, so there is no script-selection ambiguity.
+// Declaration-only.
+func leaseServiceDispatchAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "leaseServiceDispatchMarker",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"RecordServiceDispatch"},
+		Description: "Lease service-instance pending-dispatch aspect. Stored as vtx.service.<handle>.dispatch (class " +
+			"leaseServiceDispatchMarker) = {vendorRef, adapter, replyOp, submittedAt, nextPollAt, deadline}. The async PENDING " +
+			"marker (an adapter that returned Pending). Written ONLY by RecordServiceDispatch (whose leaseServiceDispatch " +
+			"vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate (exact class match). " +
+			"Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"vendorRef":{"type":"string"},"adapter":{"type":"string"},"replyOp":{"type":"string"},"submittedAt":{"type":"string"},"nextPollAt":{"type":"string"},"deadline":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"vendorRef":   "The vendor's opaque pending reference.",
+			"adapter":     "The adapter to re-call on a poll.",
+			"replyOp":     "The result-op posted on resolve/timeout.",
+			"submittedAt": "RFC3339 instant the pending marker was recorded (canonical UTC).",
+			"nextPollAt":  "RFC3339 instant the next poll is due.",
+			"deadline":    "RFC3339 instant the call gives up.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "lease service dispatch (pending) aspect",
+				Payload:         map[string]any{"vendorRef": "vendor-123", "adapter": "backgroundCheck", "replyOp": "RecordLeaseServiceOutcome"},
+				ExpectedOutcome: "Stored as vtx.service.<handle>.dispatch; written by RecordServiceDispatch.",
 			},
 		},
 	}

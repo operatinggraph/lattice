@@ -584,6 +584,29 @@ func (h *harness) aspectData(ownerKey, local string) map[string]any {
 	return env.Data
 }
 
+// vertexClass returns the envelope class of the vertex at key (""  if absent).
+// A service instance's family is now discriminated by its envelope class
+// (service.<family>.instance, P7) rather than a .family shadow aspect.
+func (h *harness) vertexClass(key string) string {
+	entry, err := h.conn.KVGet(h.ctx, bootstrap.CoreKVBucket, key)
+	if err != nil {
+		return ""
+	}
+	var env struct {
+		Class string `json:"class"`
+	}
+	if json.Unmarshal(entry.Value, &env) != nil {
+		return ""
+	}
+	return env.Class
+}
+
+// isBgcheckInstance reports whether the service vertex at svcKey is a
+// background-check instance, by its envelope class.
+func (h *harness) isBgcheckInstance(svcKey string) bool {
+	return h.vertexClass(svcKey) == "service.backgroundCheck.instance"
+}
+
 // serviceHandlesFor returns the vtx.service.<handle> keys providedTo the
 // applicant, discriminated by family. It scans Core KV for the providedTo links.
 //
@@ -668,8 +691,7 @@ func (h *harness) awaitDispatchedTask(scopedToID string, deadline time.Duration)
 func (h *harness) countBgcheckOutcomes(applicantID string) int {
 	n := 0
 	for _, svcKey := range h.serviceOutcomes(applicantID) {
-		fam := h.aspectData(svcKey, "family")
-		if fam == nil || fam["value"] != "backgroundCheck" {
+		if !h.isBgcheckInstance(svcKey) {
 			continue
 		}
 		if h.aspectData(svcKey, "outcome") != nil {
@@ -686,8 +708,7 @@ func (h *harness) countBgcheckOutcomes(applicantID string) int {
 func (h *harness) totalBgcheckSideEffects(applicantID string) int {
 	total := 0
 	for _, svcKey := range h.serviceOutcomes(applicantID) {
-		fam := h.aspectData(svcKey, "family")
-		if fam == nil || fam["value"] != "backgroundCheck" {
+		if !h.isBgcheckInstance(svcKey) {
 			continue
 		}
 		total += h.bgFake.SideEffects(svcKey[len("vtx.service."):])
@@ -781,8 +802,7 @@ func (h *harness) freshnessMarker(appKey string) (expiredAt string, revision uin
 // the applicant (the service whose .family aspect value is backgroundCheck).
 func (h *harness) bgcheckHandle(applicantID string) string {
 	for _, svcKey := range h.serviceOutcomes(applicantID) {
-		fam := h.aspectData(svcKey, "family")
-		if fam != nil && fam["value"] == "backgroundCheck" {
+		if h.isBgcheckInstance(svcKey) {
 			return svcKey[len("vtx.service."):]
 		}
 	}

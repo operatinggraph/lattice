@@ -594,7 +594,18 @@ def execute(state, op):
         # Prepend the package-chosen claim-vertex type. The engine never names a
         # type; the replyOp re-prepends the SAME type — a matched pair.
         inst_key = "vtx.service." + handle
-        class_value_str = "service." + fam + ".instance"
+
+        # The type/subtype discriminator lives on the vertex ENVELOPE class (P7) —
+        # service.<family>.instance — NOT a .class/.family shadow aspect. That
+        # fine-grained class misses the exact class→DDL lookup, so the step-6
+        # write-gate resolver walks this instance's instanceOf link to its type
+        # authority (Contract #1 §1.5 instanceOf terminal): the leaseServiceInstance
+        # DDL's meta-vertex, surfaced to the script as ddl[...].metaKey. The lens
+        # discriminates bgcheck/payment by reading inst.class directly (no .family).
+        inst_class = "service." + fam + ".instance"
+        meta_key = ddl["leaseServiceInstance"].metaKey
+        _, meta_id = parts_of(meta_key, "typeAuthority", "meta")
+        instance_of_lnk = "lnk.service." + handle + ".instanceOf.meta." + meta_id
 
         # providedTo: the service instance (later-arriving) is the source, the
         # pre-existing identity is the target (Contract #1 §1.1). This is the
@@ -602,20 +613,13 @@ def execute(state, op):
         provided_to_lnk = "lnk.service." + handle + ".providedTo.identity." + subject_id
 
         # Root data minimal (D5): {} on root. The vertex KEY type is 'service'
-        # (vtx.service.<handle>) so the lens anchors via the key segment and reads
-        # the 14.1 .outcome aspect shape, but the vertex CLASS is the
-        # package-owned 'leaseServiceInstance' — NOT 'service', whose DDL
-        # (service-domain) restricts its class to that DDL's permittedCommands.
-        # The .class aspect still mirrors 14.1's instance discriminator
-        # (service.<family>.instance); the .family aspect is the lens's
-        # bgcheck/payment discriminator (read as a distinct aspect because the
-        # vertex envelope 'class' field shadows the .class aspect on the
-        # projection read path). NO outcome aspect yet — absence =
-        # not-yet-complete. Template-less.
+        # (vtx.service.<handle>) so the lens anchors via the key segment; the
+        # envelope CLASS carries the fine-grained discriminator. NO outcome aspect
+        # yet — absence = not-yet-complete. The instanceOf link is the source of the
+        # write-gate authority; providedTo is the convergence link.
         mutations = [
-            make_vtx(inst_key, "leaseServiceInstance", {}),
-            make_aspect(inst_key, "class", "class", {"value": class_value_str}),
-            make_aspect(inst_key, "family", "family", {"value": fam}),
+            make_vtx(inst_key, inst_class, {}),
+            make_link(instance_of_lnk, inst_key, meta_key, "instanceOf", "instanceOf", {}),
             make_link(provided_to_lnk, inst_key, subject_key, "providedTo", "providedTo", {}),
         ]
 
@@ -747,7 +751,7 @@ def execute(state, op):
         # requestId collapse). The instance root, already {data:{}}, is not
         # touched (D5).
         mutations = [
-            make_aspect(inst_key, "outcome", "outcome", {"status": status, "completedAt": completed_at, "validUntil": valid_until}),
+            make_aspect(inst_key, "outcome", "leaseServiceOutcome", {"status": status, "completedAt": completed_at, "validUntil": valid_until}),
         ]
 
         # Emit the completion signal Loom correlates on (the BARE handle as
@@ -863,7 +867,7 @@ def execute(state, op):
         # orchestration.externalTaskCompleted is emitted — the task is not done,
         # the token stays parked. The instance root, already {}, is untouched (D5).
         mutations = [
-            make_aspect(inst_key, "dispatch", "dispatch",
+            make_aspect(inst_key, "dispatch", "leaseServiceDispatchMarker",
                         {"vendorRef": vendor_ref, "adapter": adapter, "replyOp": reply_op,
                          "submittedAt": submitted_at, "nextPollAt": next_poll_at, "deadline": deadline}),
         ]

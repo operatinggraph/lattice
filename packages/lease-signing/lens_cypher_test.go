@@ -89,11 +89,20 @@ func newLensFixture(t *testing.T) *lensFixture {
 
 func (f *lensFixture) vtx(t *testing.T, name, typ string) string {
 	t.Helper()
+	return f.vtxWithClass(t, name, typ, typ)
+}
+
+// vtxWithClass creates a vertex whose KEY type (vtx.<keyType>.<id>) differs from
+// its envelope CLASS — the P7 shape: a service instance keys under `service`
+// (so a lens MATCH (inst:service) binds via the key-type) while its envelope
+// class carries the fine-grained discriminator service.<family>.instance.
+func (f *lensFixture) vtxWithClass(t *testing.T, name, keyType, class string) string {
+	t.Helper()
 	id := cNanoID(name)
 	f.ids[name] = id
-	f.types[id] = typ
-	key := "vtx." + typ + "." + id
-	body := map[string]any{"key": key, "class": typ, "isDeleted": false, "data": map[string]any{}}
+	f.types[id] = keyType
+	key := "vtx." + keyType + "." + id
+	body := map[string]any{"key": key, "class": class, "isDeleted": false, "data": map[string]any{}}
 	raw, _ := json.Marshal(body)
 	_, err := f.coreKV.Put(context.Background(), key, raw)
 	require.NoError(t, err)
@@ -166,10 +175,8 @@ func TestLeaseApplicationComplete_ProjectsOneRowPerAnchor(t *testing.T) {
 	idKey := f.vtx(t, "alice", "identity")
 	// TWO service instances providedTo alice (one bgcheck, one payment), no
 	// outcome yet — the multi-instance fan-out case.
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
@@ -203,12 +210,10 @@ func TestLeaseApplicationComplete_OutcomeFlipsGap_DirectWrite(t *testing.T) {
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"}) // onboarded
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	// A FRESH completed bgcheck: validUntil far in the future (time-independent).
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"}) // no outcome
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
@@ -238,11 +243,9 @@ func TestLeaseApplicationComplete_SignatureFlipsGap(t *testing.T) {
 	f.vtx(t, "alice", "identity")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	// Payment is ever-completed: it carries NO validUntil here, proving the lens
 	// does not apply the freshness gate to payment.
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
@@ -360,18 +363,18 @@ func TestLeaseApplicationComplete_ProjectsQualificationProfile(t *testing.T) {
 	// The .profile aspect as SetApplicantProfile writes it: raw fields + derived
 	// signals in one aspect. The lens reads ONLY the derived keys.
 	f.aspect(t, "app", "profile", "profile", map[string]any{
-		"annualIncome":       96000, // raw — must NOT appear in any projected column
-		"employmentStatus":   "employed",
-		"employerName":       "Acme Corp", // raw — must NOT appear
-		"references":         []any{"Prior landlord", "Manager"},
-		"incomeToRentMet":    true,
-		"employmentVerified": true,
-		"referenceCount":     2,
-		"hasCoApplicant":     false,
-		"hasGuarantor":       true,
-		"guarantorName":      "Pat Guarantor", // raw — must NOT appear
-		"guarantorAnnualIncome":    120000,    // raw — must NOT appear
-		"guarantorIncomeToRentMet": true,      // derived — projects
+		"annualIncome":             96000, // raw — must NOT appear in any projected column
+		"employmentStatus":         "employed",
+		"employerName":             "Acme Corp", // raw — must NOT appear
+		"references":               []any{"Prior landlord", "Manager"},
+		"incomeToRentMet":          true,
+		"employmentVerified":       true,
+		"referenceCount":           2,
+		"hasCoApplicant":           false,
+		"hasGuarantor":             true,
+		"guarantorName":            "Pat Guarantor", // raw — must NOT appear
+		"guarantorAnnualIncome":    120000,          // raw — must NOT appear
+		"guarantorIncomeToRentMet": true,            // derived — projects
 		"submittedAt":              "2026-06-27T10:00:00Z",
 	})
 
@@ -431,11 +434,9 @@ func approvedAppFixture(t *testing.T) *lensFixture {
 	f.vtx(t, "alice", "identity")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
@@ -584,8 +585,7 @@ func TestLeaseApplicationComplete_ListingLeasedGap_RequiresApplicantReadinessEve
 			if omit != "signature" {
 				f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 			}
-			f.vtx(t, "bg1", "service")
-			f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+			f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 			if omit == "bgcheck-stale" {
 				// A completed bgcheck that has gone STALE after approval: validUntil is
 				// already past $now, so the freshness predicate excludes it (the
@@ -594,8 +594,7 @@ func TestLeaseApplicationComplete_ListingLeasedGap_RequiresApplicantReadinessEve
 			} else {
 				f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
 			}
-			f.vtx(t, "pay1", "service")
-			f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+			f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 			if omit != "payment" {
 				f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 			}
@@ -664,13 +663,11 @@ func TestLeaseApplicationComplete_ListingLeasedGap_NotApprovedGatesEachGap(t *te
 			if omit != "signature" {
 				f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 			}
-			f.vtx(t, "bg1", "service")
-			f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+			f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 			if omit != "bgcheck" {
 				f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
 			}
-			f.vtx(t, "pay1", "service")
-			f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+			f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 			if omit != "payment" {
 				f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 			}
@@ -774,11 +771,9 @@ func bgFreshnessFixture(t *testing.T, f *lensFixture, bgValidUntil string) strin
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 	f.aspect(t, "app", "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-06-26T10:00:00Z"})
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": bgValidUntil})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
@@ -856,8 +851,7 @@ func TestLeaseApplicationComplete_DeclinedSupersededByFreshRetry(t *testing.T) {
 	// The fixture's bg1 cleared (completed + fresh); add a SECOND, earlier bgcheck
 	// instance that FAILED (a prior attempt) providedTo the same applicant (alice) —
 	// the retry (bg1) then cleared.
-	f.vtx(t, "bgFail", "service")
-	f.aspect(t, "bgFail", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bgFail", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bgFail", "outcome", "outcome", map[string]any{"status": "failed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": validUntil})
 	f.edge(t, "providedTo2", "bgFail", "alice")
 
@@ -950,11 +944,9 @@ func TestLeaseApplicationComplete_PaymentIgnoresValidUntil(t *testing.T) {
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 	f.aspect(t, "app", "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-06-26T10:00:00Z"})
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-17T00:00:00Z", "validUntil": "2026-06-18T00:05:00Z"})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	// Payment completed long ago with a PAST validUntil — the lens must ignore it.
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-01-01T00:00:00Z", "validUntil": "2026-01-01T00:05:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
@@ -981,10 +973,8 @@ func TestLeaseApplicationComplete_NoCompletedBgcheck(t *testing.T) {
 	f.vtx(t, "app", "leaseapp")
 	f.vtx(t, "alice", "identity")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"}) // no outcome yet
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
@@ -1018,8 +1008,7 @@ func TestLeaseApplicationComplete_PaymentInstanceNoBgcheck_NoDrop(t *testing.T) 
 	f.vtx(t, "alice", "identity")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	// Only a COMPLETED payment instance providedTo alice — NO bgcheck instance.
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
@@ -1084,14 +1073,11 @@ func TestLeaseApplicationComplete_MultipleFreshBgchecks(t *testing.T) {
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
 	f.aspect(t, "app", "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-06-26T10:00:00Z"})
 	// TWO completed-fresh bgchecks providedTo the same identity, distinct validUntil.
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": earlier})
-	f.vtx(t, "bg2", "service")
-	f.aspect(t, "bg2", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg2", "service", "service.backgroundCheck.instance")
 	f.aspect(t, "bg2", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z", "validUntil": later})
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
@@ -1162,8 +1148,7 @@ func inflightBgFixture(t *testing.T, f *lensFixture, withDispatch bool, outcomeS
 	f.vtx(t, "alice", "identity")
 	f.aspect(t, "alice", "ssn", "ssn", map[string]any{"value": "123456789"})
 	f.aspect(t, "app", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
-	f.vtx(t, "bg1", "service")
-	f.aspect(t, "bg1", "family", "family", map[string]any{"value": "backgroundCheck"})
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
 	if withDispatch {
 		f.aspect(t, "bg1", "dispatch", "dispatch", map[string]any{
 			"vendorRef": "vendor-ref-1", "adapter": "backgroundCheck", "replyOp": "RecordLeaseServiceOutcome",
@@ -1175,8 +1160,7 @@ func inflightBgFixture(t *testing.T, f *lensFixture, withDispatch bool, outcomeS
 	}
 	// A completed payment so missing_payment is not the only open gap — the row
 	// stays violating purely on the bgcheck dimension.
-	f.vtx(t, "pay1", "service")
-	f.aspect(t, "pay1", "family", "family", map[string]any{"value": "payment"})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
 	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
