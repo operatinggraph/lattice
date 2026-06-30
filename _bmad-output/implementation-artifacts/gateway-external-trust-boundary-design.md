@@ -1,6 +1,6 @@
 # Gateway — the external trust boundary (design)
 
-**Status:** 📐 **awaiting-Andrew (ratification)** · Designer fire (Winston, 2026-06-29) · Lattice lane (Security & trust boundary)
+**Status:** ✅ **Andrew-ratified (2026-06-29)** · Designer fire (Winston, 2026-06-29) · Lattice lane (Security & trust boundary)
 
 ---
 
@@ -38,6 +38,18 @@ new *Contract #11 (Gateway / actor-authN)* and **recommend deferring it** until 
 exists (the Edge node, or control-plane authz Fire 2); for now the format lives in the new
 `docs/components/gateway.md` (not frozen). If you want it frozen now, say so and I'll stage the §11 edit
 uncommitted.
+
+**Ratified (Andrew, 2026-06-29).** **F2 = A** (Gateway-stamp + transport-trust — no per-op crypto, no Contract #2
+change), **F3 = A** (external IdP + fail-closed dev signer), **F4 = A** (extend the one translator for reads),
+**F5 = A** (build Fire 1 now). **Contract #11 (JWT format) = deferred** (freeze when a 2nd consumer needs it; for
+now in `gateway.md`, not frozen) → **no frozen-contract change.** **Decomposition collapsed (fewer-larger-fires
+steer):** the whole buildable-now **write surface is ONE fire** (translator + dev signer + JWKS + claim-front +
+health + `gateway.md`); the **read-front is a 2nd fire behind D1.3** (Lattice consuming the Verticals D1.3
+protected read-model **one-way**); the prod reverse-proxy is **ops, not a Steward fire.** **Hard build gate:**
+the write-surface fire lands **with/after #75 NATS-write-restriction Fire 2b (the enforcement turn-on)** — which
+is **NOT yet live** (only #75 Fire 2 inc-1, the offline conformance artifact `2e10ba7`, shipped); until Fire 2b
+enforces "only the Gateway may publish `core-operations`," stamping is no better than self-assert. Sequence them
+as a pair.
 
 ---
 
@@ -314,7 +326,11 @@ Andrew prefers freezing now, I'll stage the §11 edit uncommitted on request.
 
 ## 8. Fire-by-fire decomposition (for the Lattice Steward)
 
-Each fire is independently shippable + green. **Build only after ✅ Andrew-ratified.**
+Each fire is independently shippable + green. **Build only after ✅ Andrew-ratified.** **Ratified collapse
+(Andrew, 2026-06-29, fewer-larger-fires):** Fires 1+2+4 below land as **one fire** (the whole buildable-now write
+surface — translator + dev signer + JWKS + claim-front + health + doc); Fire 3 (read-front) is the **2nd** fire,
+behind D1.3, **one-way** (Lattice consumes the Verticals D1.3 read-model); Fire 5 (reverse-proxy) is **ops**, not
+a Steward fire. **Hard gate: the write-surface fire lands with/after #75 Fire 2b (enforcement, not yet live).**
 
 1. **Fire 1 — write-path translator (the keystone; buildable now; full 3-layer security review).**
    `internal/gateway/gateway.go` + a `cmd/gateway` binary: HTTP `POST /v1/operations`, Bearer auth via the
