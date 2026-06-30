@@ -81,8 +81,9 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"per-(applicant, unit) guard link (tombstones it), verifying both the unit (appliesToUnit link) and the applicant " +
 			"(applicationFor link) — the complement to the duplicate-application guard so an applicant can back out + re-apply. " +
 			"DecideLeaseApplication{leaseAppKey, decision, reason?} records the landlord's leasing decision as a .decision aspect " +
-			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)} (UNCONDITIONED upsert — a later decision " +
-			"overrides an earlier one, so a landlord can reverse a decline to an approve). It is the human gate the " +
+			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)}. A recorded decision is " +
+			"TERMINAL: re-submitting the same decision is idempotent, but changing it to a different value is rejected (DecisionFinal) so a " +
+			"decision cannot silently flip / oscillate; an approve is rejected (NotReadyToApprove) unless the application has been signed. It is the human gate the " +
 			"listing-flip waits behind: the convergence lens reads .decision.value so an approval opens missing_listingLeased " +
 			"(the unit leases) while a decline is a terminal disposition — nothing auto-leases on applicant-readiness alone. " +
 			"SetApplicantProfile{leaseAppKey, unit, annualIncome, employmentStatus, employerName?, references?, hasCoApplicant?, " +
@@ -139,8 +140,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"guarantorAnnualIncome": "The guarantor's gross annual income (SetApplicantProfile; optional, captured only when hasGuarantor, > 0). RAW sensitive financial data — stored, NEVER projected. The op derives guarantorIncomeToRentMet (guarantor gross monthly ≥ 3× the unit's listing rent — the standard reason a guarantor backs a thin-income application) from it, and only that boolean reaches the read model.",
 			"coApplicantName":       "The co-applicant's name (SetApplicantProfile; optional, captured only when hasCoApplicant). RAW — stored, never projected (the Vault plane owns its display).",
 			"coApplicantContact":    "The co-applicant's contact — email or phone (SetApplicantProfile; optional, captured only when hasCoApplicant). RAW — stored, never projected.",
-			"decision":              "The landlord's leasing decision (DecideLeaseApplication; required): approved or declined. Written to the .decision aspect {value, decidedAt} (UNCONDITIONED upsert — a later decision overrides an earlier one). The convergence lens reads it: approved opens missing_listingLeased (the unit leases); declined folds into the lens's declined disposition (a terminal rejection).",
-			"reason":                "Optional free-text rationale the landlord supplies with a DecideLeaseApplication decline — applicant feedback plus a fair-housing record. Stored on the .decision aspect ({value, decidedAt, reason?}) only when supplied and projected as the declineReason lens column the applicant FE renders on the declined banner. A later decision's unconditioned upsert overwrites it (re-approving clears a prior decline reason); ignored on an approve.",
+			"decision":              "The landlord's leasing decision (DecideLeaseApplication; required): approved or declined. Written to the .decision aspect {value, decidedAt}. A recorded decision is TERMINAL — the same value re-submits idempotently, a different value is rejected (DecisionFinal); approve is rejected (NotReadyToApprove) unless the application is signed. The convergence lens reads it: approved opens missing_listingLeased (the unit leases); declined folds into the lens's declined disposition (a terminal rejection).",
+			"reason":                "Optional free-text rationale the landlord supplies with a DecideLeaseApplication decline — applicant feedback plus a fair-housing record. Stored on the .decision aspect ({value, decidedAt, reason?}) only when supplied and projected as the declineReason lens column the applicant FE renders on the declined banner. A same-value re-submission (idempotent) can attach / update it; ignored on an approve.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -174,17 +175,19 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 				Name:    "DecideLeaseApplication — landlord approves or declines an application",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "decision": "approved"},
 				ExpectedOutcome: "Validates the application is alive and the decision is approved|declined. Writes the .decision aspect " +
-					"{value: <decision>, decidedAt: <op.submittedAt, canonical UTC>} on the application (UNCONDITIONED upsert — a " +
-					"later decision overrides an earlier one, root stays {} — D5). approved opens the listing-leased convergence " +
-					"(the unit leases); declined is a terminal rejection. Emits leaseapp.applicationDecided{leaseAppKey, decision}. " +
-					"Returns primaryKey. Rejects a non-existent application (UnknownLeaseApplication) or an out-of-enum decision (BadDecision).",
+					"{value: <decision>, decidedAt: <op.submittedAt, canonical UTC>} on the application (root stays {} — D5). " +
+					"A recorded decision is terminal: the same value re-submits idempotently, a different value is rejected " +
+					"(DecisionFinal); approve is rejected (NotReadyToApprove) unless the application is signed. approved opens the " +
+					"listing-leased convergence (the unit leases); declined is a terminal rejection. Emits " +
+					"leaseapp.applicationDecided{leaseAppKey, decision}. Returns primaryKey. Rejects a non-existent application " +
+					"(UnknownLeaseApplication) or an out-of-enum decision (BadDecision).",
 			},
 			{
 				Name:    "DecideLeaseApplication — landlord declines with a reason",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "decision": "declined", "reason": "Income below the 3x-rent threshold."},
 				ExpectedOutcome: "As above, but the optional reason is stored on the .decision aspect ({value, decidedAt, reason}) and projected " +
-					"as the declineReason lens column the applicant FE renders on the declined banner. A later decision (e.g. a " +
-					"re-approve) overwrites the aspect and clears the reason. reason is ignored on an approve.",
+					"as the declineReason lens column the applicant FE renders on the declined banner. The decline is terminal — a " +
+					"different later decision is rejected (DecisionFinal); a same-value re-submission can update the reason. reason is ignored on an approve.",
 			},
 			{
 				Name: "SetApplicantProfile — applicant records their qualification profile",

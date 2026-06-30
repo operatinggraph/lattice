@@ -290,11 +290,9 @@ def execute(state, op):
 
     if ot == "DecideLeaseApplication":
         # The landlord's leasing decision — the human gate the listing-flip waits
-        # behind. Validates the application is a live leaseapp, validates the
-        # decision enum, and writes a .decision aspect {value, decidedAt} on the
-        # leaseapp. The write is an UNCONDITIONED upsert: a later decision overrides
-        # an earlier one, so a landlord can reverse a decline to an approve (no
-        # kv.Read of the prior decision needed). The convergence lens reads
+        # behind. Validates the application is a live leaseapp, validates the decision
+        # enum, enforces the decision lifecycle guards (below), and writes a .decision
+        # aspect {value, decidedAt} on the leaseapp. The convergence lens reads
         # app.decision.data.value: approved opens missing_listingLeased (→ the unit
         # leases); declined is a terminal disposition (declined OR'd in the lens).
         app_key = required_string(p, "leaseAppKey")
@@ -306,14 +304,47 @@ def execute(state, op):
         if decision != "approved" and decision != "declined":
             fail("BadDecision: " + decision)
 
+        # Terminal-decision guard: a recorded decision is FINAL. Re-submitting the SAME
+        # decision stays accepted (idempotent / re-run-safe under at-least-once);
+        # changing a recorded decision to a DIFFERENT value is rejected — an approved or
+        # declined application must not silently flip or oscillate (the verified live
+        # bug: approved→declined committed freely). The prior decision is read lazily
+        # (kv.Read, §2.5 — the link-check idiom already used in this script), matching
+        # the op's unconditioned single-op semantics. Reconsidering a recorded decision
+        # is a future explicit re-open op, not a silent overwrite.
+        prior = kv.Read(app_key + ".decision")
+        if prior != None and not prior.isDeleted:
+            prior_val = prior.data.get("value")
+            if prior_val != None and prior_val != decision:
+                fail("DecisionFinal: application " + app_key + " is already " + str(prior_val) + "; a recorded decision is terminal and cannot be changed to " + decision)
+
+        # Approve-readiness floor: a landlord must not APPROVE an application the
+        # applicant has not yet SIGNED (the verified live bug: a profileSubmitted=false
+        # application could be approved, producing a misleading "Approved" the
+        # convergence lens can never lease). Signing is the applicant's final
+        # commitment step; an unsigned application is not ready for an approval. This is
+        # a cheap, SOUND floor — deliberately NOT the full applicantApproved gate
+        # (.ssn + a fresh completed bgcheck + a completed payment + the signature),
+        # which is a lens-derived signal spanning the identity + its providedTo service
+        # instances with freshness windows; reproducing that cross-vertex computation in
+        # this write-path op would duplicate read-model logic and risk op↔lens
+        # divergence. The convergence lens still enforces the FULL gate before the unit
+        # actually leases (missing_listingLeased), so an approve here can never lease an
+        # unqualified applicant. A DECLINE carries no readiness floor — a landlord may
+        # decline at any point.
+        if decision == "approved":
+            sig = kv.Read(app_key + ".signature")
+            if sig == None or sig.isDeleted:
+                fail("NotReadyToApprove: application " + app_key + " has not been signed by the applicant; cannot approve an unsigned application")
+
         # decidedAt is the op's own timestamp, normalized to canonical UTC (read-free,
         # mirroring SignLease's signedAt) so a downstream lexical compare is sound.
         decided_at = time.rfc3339_utc(op.submittedAt)
         # reason is optional free-text the landlord supplies with a decline (applicant
         # feedback + a fair-housing record). It is stored on the .decision aspect only
-        # when supplied; an approve or a reasonless decline carries none, and a later
-        # decision's unconditioned upsert overwrites it (re-approving clears a prior
-        # decline reason). The convergence lens projects it as declineReason.
+        # when supplied; an approve or a reasonless decline carries none. A same-value
+        # re-submission (idempotent) can attach / update the reason on the already-
+        # recorded decision. The convergence lens projects it as declineReason.
         decision_data = {"value": decision, "decidedAt": decided_at}
         reason = optional_string(p, "reason")
         if reason != None:

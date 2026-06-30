@@ -1220,17 +1220,46 @@ func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *process
 	testutil.DriveOne(t, ctx, cp, cons, want)
 }
 
-// TestDecideLeaseApplication drives the landlord decision op: approved writes the
-// .decision{value:approved} aspect; declined writes {value:declined}; a second
-// decision OVERRIDES the first (decline → approve is reversible, unconditioned
-// upsert); a bad enum is rejected (BadDecision); a tombstoned application is
-// rejected (UnknownLeaseApplication). Root data stays {} throughout (D5).
+// signLease submits SignLease{leaseAppKey} so a test can satisfy the approve-
+// readiness floor (a landlord may approve only a signed application).
+func signLease(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, submittedAt string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestDecideLeaseApplication drives the landlord decision op and its lifecycle
+// guards: approving an UNSIGNED application is rejected (NotReadyToApprove); after
+// signing, approve writes .decision{value:approved}; the SAME decision re-submits
+// idempotently; a DIFFERENT later decision is rejected (DecisionFinal — a recorded
+// decision is terminal, no silent flip); a bad enum is rejected (BadDecision); a
+// tombstoned application is rejected (UnknownLeaseApplication). Root stays {} (D5).
 func TestDecideLeaseApplication(t *testing.T) {
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "decide")
 
 	applicantKey := seedApplicant(t, ctx, conn, "BBdecapp1cantHJKMNPQ")
 	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+
+	// Approve-readiness floor: approving an UNSIGNED application is rejected
+	// (NotReadyToApprove) — the verified premature-approval bug — and writes nothing.
+	decide(t, ctx, conn, cp, cons, "decideUnsign1", appKey, "approved", "2026-06-26T09:00:00Z", processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, appKey+".decision") {
+		t.Fatalf("a rejected premature approve must not write a .decision aspect")
+	}
+
+	// Sign the lease (the applicant's final commitment) so the approve floor is met.
+	signLease(t, ctx, conn, cp, cons, "decideSign001", appKey, "2026-06-26T09:30:00Z")
 
 	// Approve → .decision{value:approved, decidedAt} on the application; root {} (D5).
 	decide(t, ctx, conn, cp, cons, "decideApprov1", appKey, "approved", "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
@@ -1246,24 +1275,17 @@ func TestDecideLeaseApplication(t *testing.T) {
 		t.Fatalf("application root data must stay minimal ({}) after decide, got %v", d)
 	}
 
-	// Reverse: approve → decline overrides (unconditioned upsert; a landlord can
-	// change their mind). The .decision aspect now reads declined.
-	decide(t, ctx, conn, cp, cons, "decideRevers1", appKey, "declined", "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
-	ddoc = readDoc(t, ctx, conn, appKey+".decision")
-	ddata, _ = ddoc["data"].(map[string]any)
-	if got, _ := ddata["value"].(string); got != "declined" {
-		t.Fatalf("decision.value after reverse = %q, want declined (override)", got)
-	}
-	if got, _ := ddata["decidedAt"].(string); got != "2026-06-26T11:00:00Z" {
-		t.Fatalf("decision.decidedAt after reverse = %q, want 2026-06-26T11:00:00Z", got)
-	}
+	// Re-submitting the SAME decision is idempotent (re-run-safe under at-least-once).
+	decide(t, ctx, conn, cp, cons, "decideReappr1", appKey, "approved", "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
 
-	// And back again: decline → approve (the decline→approve reversal the doc names).
-	decide(t, ctx, conn, cp, cons, "decideReappr1", appKey, "approved", "2026-06-26T12:00:00Z", processor.OutcomeAccepted)
+	// Terminal-decision guard: changing a recorded decision to a DIFFERENT value is
+	// rejected (DecisionFinal) — an approved application must not silently flip — and
+	// the recorded decision is unchanged.
+	decide(t, ctx, conn, cp, cons, "decideFlip001", appKey, "declined", "2026-06-26T12:00:00Z", processor.OutcomeRejected)
 	ddoc = readDoc(t, ctx, conn, appKey+".decision")
 	ddata, _ = ddoc["data"].(map[string]any)
 	if got, _ := ddata["value"].(string); got != "approved" {
-		t.Fatalf("decision.value after second reverse = %q, want approved", got)
+		t.Fatalf("decision.value after rejected flip = %q, want approved (unchanged)", got)
 	}
 
 	// Bad enum → BadDecision (rejected).
@@ -1299,9 +1321,11 @@ func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 }
 
 // TestDecideLeaseApplication_Reason drives the optional decline reason: a decline
-// with a reason stores .decision.reason; re-approving (unconditioned upsert) clears
-// it; a reasonless decline carries no reason key. The reason is applicant feedback
-// + a fair-housing record, projected by the lens as declineReason.
+// with a reason stores .decision.reason (no signature needed — the readiness floor
+// applies only to approve); the decision is terminal, so a different later decision
+// is rejected and the reason is preserved; a same-value reasonless re-decline
+// (idempotent) clears the reason. The reason is applicant feedback + a fair-housing
+// record, projected by the lens as declineReason.
 func TestDecideLeaseApplication_Reason(t *testing.T) {
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "decidereason")
@@ -1309,7 +1333,8 @@ func TestDecideLeaseApplication_Reason(t *testing.T) {
 	applicantKey := seedApplicant(t, ctx, conn, "BBdecrsn1cantHJKMNPQ")
 	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
 
-	// Decline with a reason → .decision{value:declined, decidedAt, reason}.
+	// Decline with a reason → .decision{value:declined, decidedAt, reason}. A decline
+	// carries no approve-readiness floor, so an unsigned application can be declined.
 	const reason = "Income below the 3x-rent threshold."
 	decideReason(t, ctx, conn, cp, cons, "declineRsn1", appKey, "declined", reason, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
 	ddata, _ := readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
@@ -1320,21 +1345,23 @@ func TestDecideLeaseApplication_Reason(t *testing.T) {
 		t.Fatalf("decision.reason = %q, want %q", got, reason)
 	}
 
-	// Re-approve (no reason) → unconditioned upsert overwrites; reason is gone.
-	decide(t, ctx, conn, cp, cons, "reapprClear1", appKey, "approved", "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
+	// Terminal: a DIFFERENT later decision is rejected (DecisionFinal); the decision
+	// does not flip and the reason is preserved.
+	decide(t, ctx, conn, cp, cons, "reasonFlip01", appKey, "approved", "2026-06-26T11:00:00Z", processor.OutcomeRejected)
 	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
-	if got, _ := ddata["value"].(string); got != "approved" {
-		t.Fatalf("decision.value after re-approve = %q, want approved", got)
+	if got, _ := ddata["value"].(string); got != "declined" {
+		t.Fatalf("decision.value after rejected flip = %q, want declined (unchanged)", got)
 	}
-	if _, present := ddata["reason"]; present {
-		t.Fatalf("decision.reason should be cleared after a reasonless re-approve, got %v", ddata["reason"])
+	if got, _ := ddata["reason"].(string); got != reason {
+		t.Fatalf("decision.reason after rejected flip = %q, want preserved %q", got, reason)
 	}
 
-	// Decline again without a reason → no reason key written.
+	// A same-value reasonless re-decline (idempotent) clears the reason — the
+	// unconditioned upsert carries only what the caller supplies this time.
 	decide(t, ctx, conn, cp, cons, "declineNoRsn1", appKey, "declined", "2026-06-26T12:00:00Z", processor.OutcomeAccepted)
 	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
 	if _, present := ddata["reason"]; present {
-		t.Fatalf("a reasonless decline must not write a reason key, got %v", ddata["reason"])
+		t.Fatalf("a reasonless re-decline must clear the reason key, got %v", ddata["reason"])
 	}
 }
 
