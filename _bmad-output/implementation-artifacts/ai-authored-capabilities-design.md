@@ -1,6 +1,6 @@
 # AI-authored capabilities — a Lattice-aware agent proposes packages (lenses / grants / targets / patterns / DDL) through deterministic validation + human review + F-004 rollback — design
 
-**Status: 📐 awaiting-Andrew (ratification).**
+**Status: ✅ Andrew-ratified (2026-06-29)** — Decision 1 = A (human-in-the-loop always; B design-only), Decision 2 = phased (Starlark gated behind ⑥'s sandbox + a separate ratification); no frozen-contract change; build-sequenced behind the (shipped) Augur; first fire = the complete lens-kind loop. See the *Ratified* block.
 **Component:** cross-cutting — a new `capability-author` package + a new bridge adapter + the Processor's F-004 install/upgrade ops (apply) + Loupe (review) · reuses the **Augur** propose→validate→gate→apply skeleton
 **Backlog row:** Lattice lane → *AI-native → AI-authored capabilities* (★★–★★★, L) — the marquee AI vision; **the Augur (✅ ratified) is its bounded, de-risking first step**, and this is the tier above it.
 **Author:** Winston (Designer fire, 2026-06-29)
@@ -69,6 +69,16 @@ stays with the human operator who approves. No special actor class, no bypass.
 
 Everything else is resolved in the body. Nothing here blocks the **Lattice Steward** except your
 ratification + the two decisions above.
+
+**Ratified (Andrew, 2026-06-29).** **Decision 1 = Option A** — human-in-the-loop **always**, the standing posture;
+**Option B (auto-apply) stays design-only, not built.** **Decision 2 = phased by deterministic-validatability** —
+author **lens / grant / weaverTarget / loomPattern** first; **gate Starlark-bearing DDL** (`vertexType`/`opMeta`
+`.script`) behind **⑥'s verified-pure `internal/starlarksandbox` + a separate ratification.** **No frozen-contract
+change.** **Build-sequenced behind the Augur** (✅ ratified + SHIPPED — the precursor is in `main`).
+**Decomposition collapsed (fewer-larger-fires):** the **first fire is the COMPLETE lens-kind loop** — propose →
+validate → human-approve → operator-applies (F-004) → live + F-004-revertible — not a propose-only half-loop; the
+**grant** kind is the fast-follow. **⑥ linkage:** the gated Starlark fire is ⑥'s shared-sandbox **first
+consumer**, so the `internal/starlarksandbox` extraction lands *with* that fire.
 
 ---
 
@@ -439,6 +449,13 @@ boundary** before Fire 2 is also recommended.
 Sequenced by the §3.2 deterministic-validatability spine. **Build-sequenced behind the Augur** (which
 proves the propose→validate→gate→apply skeleton on the smaller op-arrangement surface first) — the design
 is ratifiable now and shelved like Vault/Personal-Lens were behind their drivers.
+
+**Ratified collapse (Andrew, 2026-06-29, fewer-larger-fires):** Fires 1+2 below combine into **one first fire =
+the COMPLETE lens-kind loop** (capture + validate + review + the operator-submitted F-004 apply + the `applied`
+flip), so the first unit delivers a *usable, revertible* capability rather than a propose-only half-loop; the
+**grant** kind is the fast-follow (its §5 scope-check + the party-mode pass still apply). Fires 3 (orchestration
+kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchanged; Fire 5 (auto-apply) stays
+**design-only, not built** (Decision 1 = A).
 
 - **Fire 1 — Authoring capture + lens kind (no apply).** The `capability-author` package (proposal type +
   `RequestCapabilityAuthoring` + `RecordCapabilityProposal` ops + the `capability-proposals` review lens +
