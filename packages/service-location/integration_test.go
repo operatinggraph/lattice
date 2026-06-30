@@ -139,24 +139,6 @@ func seedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, cl
 	}
 }
 
-// seedClassAspect writes a service .class aspect (the template/instance
-// discriminator the wire-op template guard reads).
-func seedClassAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, vtxKey, value string) {
-	t.Helper()
-	aspKey := vtxKey + ".class"
-	doc := map[string]any{
-		"class":     "class",
-		"isDeleted": false,
-		"vertexKey": vtxKey,
-		"localName": "class",
-		"data":      map[string]any{"value": value},
-	}
-	b, _ := json.Marshal(doc)
-	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, aspKey, b); err != nil {
-		t.Fatalf("seed class aspect %s: %v", aspKey, err)
-	}
-}
-
 func readDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) map[string]any {
 	t.Helper()
 	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
@@ -183,8 +165,9 @@ func seedLocation(t *testing.T, ctx context.Context, conn *substrate.Conn, locTy
 func seedServiceTemplate(t *testing.T, ctx context.Context, conn *substrate.Conn, id, family string) string {
 	t.Helper()
 	key := "vtx.service." + id
-	seedVertex(t, ctx, conn, key, "service", nil)
-	seedClassAspect(t, ctx, conn, key, "service."+family+".template")
+	// P7: the template/instance discriminator is the vertex ENVELOPE class
+	// (service.<family>.template), not a .class shadow aspect.
+	seedVertex(t, ctx, conn, key, "service."+family+".template", nil)
 	return key
 }
 
@@ -264,7 +247,7 @@ func TestSL_AvailableAt_Wire(t *testing.T) {
 	lnk := "lnk.service." + tplID + ".availableAt.building." + bldgID
 	submit(t, ctx, conn, cp, cons, "slAvail1", "WireAvailableAt",
 		map[string]any{"service": tplKey, "location": bldgKey},
-		[]string{tplKey, tplKey + ".class", bldgKey}, processor.OutcomeAccepted)
+		[]string{tplKey, bldgKey}, processor.OutcomeAccepted)
 
 	doc := readDoc(t, ctx, conn, lnk)
 	if doc["class"] != "availableAt" {
@@ -292,7 +275,7 @@ func TestSL_UnavailableAt_Wire(t *testing.T) {
 	lnk := "lnk.service." + tplID + ".unavailableAt.unit." + penthID
 	submit(t, ctx, conn, cp, cons, "slUnav1", "WireUnavailableAt",
 		map[string]any{"service": tplKey, "location": penthKey},
-		[]string{tplKey, tplKey + ".class", penthKey}, processor.OutcomeAccepted)
+		[]string{tplKey, penthKey}, processor.OutcomeAccepted)
 
 	doc := readDoc(t, ctx, conn, lnk)
 	if doc["class"] != "unavailableAt" {
@@ -331,7 +314,7 @@ func TestSL_PermitsOperation_Wire(t *testing.T) {
 }
 
 // TestSL_AvailableAt_RejectsInstance proves the template guard at the op: an
-// availableAt whose source is a service INSTANCE (.class aspect ends .instance)
+// availableAt whose source is a service INSTANCE (envelope class ends .instance)
 // is rejected — only templates carry availability assertions.
 func TestSL_AvailableAt_RejectsInstance(t *testing.T) {
 	ctx, conn := setupSLEnv(t)
@@ -339,14 +322,14 @@ func TestSL_AvailableAt_RejectsInstance(t *testing.T) {
 
 	instID := "SLinstanceQRHJKMNPQR"
 	instKey := "vtx.service." + instID
-	seedVertex(t, ctx, conn, instKey, "service", nil)
-	seedClassAspect(t, ctx, conn, instKey, "service.backgroundCheck.instance")
+	// P7: the instance carries its discriminator on the ENVELOPE class.
+	seedVertex(t, ctx, conn, instKey, "service.backgroundCheck.instance", nil)
 	bldgID := "SLinstbmdgQRHJKMNPQR"
 	bldgKey := seedLocation(t, ctx, conn, "building", bldgID)
 
 	submit(t, ctx, conn, cp, cons, "slAvailInst", "WireAvailableAt",
 		map[string]any{"service": instKey, "location": bldgKey},
-		[]string{instKey, instKey + ".class", bldgKey}, processor.OutcomeRejected)
+		[]string{instKey, bldgKey}, processor.OutcomeRejected)
 
 	lnk := "lnk.service." + instID + ".availableAt.building." + bldgID
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, lnk); err == nil {

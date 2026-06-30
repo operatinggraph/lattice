@@ -27,8 +27,11 @@ import (
 //     (a different residence is unaffected).
 //   - §6.10 item 2 (TRANSITIVE AVAILABILITY): a resident of a unit inside a
 //     building gets a service availableAt the building (the containedIn*0.. hop).
-//   - INSTANCE-NOT-SWEPT: a service instance (carries instanceOf, never
-//     availableAt) is never projected — the instanceOf-absence template guard.
+//   - INSTANCE-NOT-SWEPT: under the P7 envelope-class model BOTH templates and
+//     instances carry an instanceOf link (template→meta, instance→template), so
+//     the lens guard `NOT (svc)-[:instanceOf]->(svcTpl:service)` discriminates by
+//     the target's type: an instance points at a :service template (excluded), a
+//     template points at a vtx.meta.* DDL (admitted).
 
 // slServiceAccess runs the LITERAL capabilityServiceAccess lens spec for the
 // given actor and returns the serviceAccess[] entries (the per-service maps).
@@ -231,13 +234,21 @@ func TestServiceLocationLens_DirectAvailability(t *testing.T) {
 		"a service availableAt the actor's direct residence (containedIn*0.. depth-0) must be projected; got %v", got)
 }
 
-// TestServiceLocationLens_InstanceNotSwept proves the template guard: a service
-// INSTANCE (carries an instanceOf link, never an availableAt) is never
-// projected. Two instances are seeded:
-//   - one with NO availableAt (structurally unreachable) — must be absent.
-//   - one that ALSO carries an availableAt link to the actor's location (the
-//     adversarial case: a claim/instance vertex that somehow acquired an
-//     availability edge) — the instanceOf-absence guard MUST still exclude it.
+// TestServiceLocationLens_InstanceNotSwept proves the template guard under the
+// P7 envelope-class model: the discriminator is the vertex ENVELOPE class
+// (service.<x>.template / .instance) and the lens guard is
+// `NOT (svc)-[:instanceOf]->(svcTpl:service)`. Crucially, BOTH templates and
+// instances now carry an instanceOf link (a template → the service DDL meta, an
+// instance → its template), so bare instanceOf-ABSENCE no longer discriminates —
+// the `:service` label on the target is what restores it: an instance's
+// instanceOf points at a vtx.service.* template (matches :service → excluded),
+// while a template's instanceOf points at a vtx.meta.* DDL vertex (NOT :service
+// → admitted). Three services are seeded:
+//   - a template carrying instanceOf→meta (the real migrated shape) + availableAt
+//     — must project (the meta target must NOT trip the :service guard).
+//   - a bare instance (no availableAt) — structurally unreachable, absent.
+//   - an adversarial instance that ALSO carries an availableAt edge — the guard
+//     MUST still exclude it (its instanceOf points at a :service template).
 func TestServiceLocationLens_InstanceNotSwept(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -248,29 +259,35 @@ func TestServiceLocationLens_InstanceNotSwept(t *testing.T) {
 
 	actorKey := putRawVertex(t, reg, coreKV, "instResident", "identity", "identity", map[string]any{})
 	putRawVertex(t, reg, coreKV, "unit", "unit", "location", map[string]any{})
-	templateKey := putRawVertex(t, reg, coreKV, "tpl", "service", "service", map[string]any{})
-	slClassAspect(t, coreKV, templateKey, "service.cleaning.template")
-	// A bare instance (no availableAt).
-	instKey := putRawVertex(t, reg, coreKV, "inst", "service", "service", map[string]any{})
-	slClassAspect(t, coreKV, instKey, "service.cleaning.instance")
+	// The service DDL meta-vertex the template's instanceOf points at (vtx.meta.*,
+	// NOT :service — so it must not trip the template guard).
+	putRawVertex(t, reg, coreKV, "svcDDL", "meta", "meta.ddl.vertexType", map[string]any{})
+	// Template: fine-grained envelope class, carries instanceOf→meta (P7).
+	templateKey := putRawVertex(t, reg, coreKV, "tpl", "service", "service.cleaning.template", map[string]any{})
+	// A bare instance (no availableAt), envelope class service.cleaning.instance.
+	instKey := putRawVertex(t, reg, coreKV, "inst", "service", "service.cleaning.instance", map[string]any{})
 	// An adversarial instance that carries an availableAt edge to the unit.
-	badInstKey := putRawVertex(t, reg, coreKV, "badInst", "service", "service", map[string]any{})
-	slClassAspect(t, coreKV, badInstKey, "service.cleaning.instance")
+	badInstKey := putRawVertex(t, reg, coreKV, "badInst", "service", "service.cleaning.instance", map[string]any{})
 
 	putEdge(t, reg, adjKV, "residesIn", "instResident", "unit")
-	// The legit template is availableAt the unit → should project.
+	// The legit template is availableAt the unit AND links instanceOf→meta (the
+	// migrated type-authority chain) → must STILL project (the :service guard
+	// excludes the meta target, not the template).
 	putEdge(t, reg, adjKV, "availableAt", "tpl", "unit")
-	// The instances carry instanceOf (instance→template) — the structural marker.
+	putEdge(t, reg, adjKV, "instanceOf", "tpl", "svcDDL")
+	// The instances carry instanceOf→template (the :service target) — the
+	// structural marker the guard excludes on.
 	putEdge(t, reg, adjKV, "instanceOf", "inst", "tpl")
 	putEdge(t, reg, adjKV, "instanceOf", "badInst", "tpl")
 	// The adversarial instance ALSO carries an availableAt edge to the unit.
 	putEdge(t, reg, adjKV, "availableAt", "badInst", "unit")
 
 	got := serviceKeys(slServiceAccess(t, adjKV, coreKV, body, actorKey))
-	require.Containsf(t, got, templateKey, "the legit template must project; got %v", got)
+	require.Containsf(t, got, templateKey,
+		"a template carrying instanceOf→meta must STILL project (the :service guard excludes the meta target, not the template); got %v", got)
 	require.NotContainsf(t, got, instKey, "a bare instance (no availableAt) must never project; got %v", got)
 	require.NotContainsf(t, got, badInstKey,
-		"the template guard (instanceOf-absence) MUST exclude an instance even if it carries an availableAt edge; got %v", got)
+		"the template guard (instanceOf→:service) MUST exclude an instance even if it carries an availableAt edge; got %v", got)
 }
 
 // TestServiceLocationLens_MultiResidence_PartialExclusion proves the exclusion

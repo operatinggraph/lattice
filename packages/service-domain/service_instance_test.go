@@ -204,7 +204,7 @@ func TestServiceInstance_OutcomeInAspect_RootMinimal(t *testing.T) {
 		Class:         "service",
 		Payload: json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey +
 			`","providedTo":"` + applicantKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, instEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -228,16 +228,17 @@ func TestServiceInstance_OutcomeInAspect_RootMinimal(t *testing.T) {
 		// The .outcome aspect does not exist yet, so it is NOT listed in Reads
 		// (a not-yet-written key is a hydration miss). The CreateOnly write is
 		// the once-only guarantee.
-		ContextHint: &processor.ContextHint{Reads: []string{instKey, instKey + ".class"}},
+		ContextHint: &processor.ContextHint{Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, recEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	// (a) The committed instance ROOT data is minimal ({}). No status /
-	// completedAt / class on root.
+	// (a) The committed instance ROOT data is minimal ({}). The type/subtype
+	// discriminator is the ENVELOPE class (P7 — service.<x>.instance), not root
+	// data and not a .class shadow aspect.
 	instDoc := readDoc(t, ctx, conn, instKey)
-	if cls, _ := instDoc["class"].(string); cls != "service" {
-		t.Fatalf("instance root class = %q, want service", cls)
+	if cls, _ := instDoc["class"].(string); cls != "service.backgroundCheck.instance" {
+		t.Fatalf("instance root class = %q, want service.backgroundCheck.instance (P7 envelope class)", cls)
 	}
 	data, _ := instDoc["data"].(map[string]any)
 	if len(data) != 0 {
@@ -258,11 +259,10 @@ func TestServiceInstance_OutcomeInAspect_RootMinimal(t *testing.T) {
 		t.Fatalf("outcome aspect vertexKey = %q, want %q", vk, instKey)
 	}
 
-	// The class discriminator is on the .class aspect (instance), not root.
-	classDoc := readDoc(t, ctx, conn, instKey+".class")
-	cdata, _ := classDoc["data"].(map[string]any)
-	if got, _ := cdata["value"].(string); got != "service.backgroundCheck.instance" {
-		t.Fatalf("class aspect value = %q, want service.backgroundCheck.instance", got)
+	// P7: there is NO .class shadow aspect — the discriminator is the envelope
+	// class asserted above.
+	if keyExists(t, ctx, conn, instKey+".class") {
+		t.Fatalf("instance must carry NO .class shadow aspect (P7 — the envelope class is the discriminator)")
 	}
 }
 
@@ -293,7 +293,7 @@ func TestServiceInstance_LinksSentenceValid(t *testing.T) {
 		Class:         "service",
 		Payload: json.RawMessage(`{"family":"payment","template":"` + tplKey +
 			`","providedTo":"` + applicantKey + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -406,22 +406,21 @@ func TestServiceInstance_CallerSuppliedId(t *testing.T) {
 			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 			Class:         "service",
 			Payload:       payload,
-			ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+			ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 		}
 	}
 
 	testutil.PublishOp(t, conn, mkEnv())
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	// The instance vertex is keyed verbatim by the supplied bare NanoID.
+	// The instance vertex is keyed verbatim by the supplied bare NanoID; the
+	// discriminator is the ENVELOPE class (P7), with no .class shadow aspect.
 	instDoc := readDoc(t, ctx, conn, suppliedKey)
-	if cls, _ := instDoc["class"].(string); cls != "service" {
-		t.Fatalf("instance root class = %q, want service", cls)
+	if cls, _ := instDoc["class"].(string); cls != "service.backgroundCheck.instance" {
+		t.Fatalf("instance root class = %q, want service.backgroundCheck.instance (P7 envelope class)", cls)
 	}
-	classDoc := readDoc(t, ctx, conn, suppliedKey+".class")
-	cdata, _ := classDoc["data"].(map[string]any)
-	if got, _ := cdata["value"].(string); got != "service.backgroundCheck.instance" {
-		t.Fatalf("class aspect = %q, want service.backgroundCheck.instance", got)
+	if keyExists(t, ctx, conn, suppliedKey+".class") {
+		t.Fatalf("instance must carry NO .class shadow aspect (P7)")
 	}
 	rev1 := readDoc(t, ctx, conn, suppliedKey)["lastModifiedByOp"]
 
@@ -477,7 +476,7 @@ func TestRecordServiceOutcome_OnTemplate_Rejected(t *testing.T) {
 		// The template is alive + hydratable but its .class ends in .template,
 		// so the structured NotAnInstance guard fires. A template has no
 		// .outcome aspect, so it is not listed.
-		ContextHint: &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class"}},
+		ContextHint: &processor.ContextHint{Reads: []string{tplKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -507,7 +506,7 @@ func TestRecordServiceOutcome_AlreadyRecorded_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"payment","template":"` + tplKey + `","providedTo":"` + applicantKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, createEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -526,12 +525,12 @@ func TestRecordServiceOutcome_AlreadyRecorded_Rejected(t *testing.T) {
 	}
 
 	// First record succeeds (the .outcome aspect does not exist yet).
-	testutil.PublishOp(t, conn, mkRec("twiceRec00001", []string{instKey, instKey + ".class"}))
+	testutil.PublishOp(t, conn, mkRec("twiceRec00001", []string{instKey}))
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	// Second record (different requestId) lists the now-existing .outcome
 	// aspect, so the explicit OutcomeAlreadyRecorded guard fires and rejects.
-	testutil.PublishOp(t, conn, mkRec("twiceRec00002", []string{instKey, instKey + ".class", instKey + ".outcome"}))
+	testutil.PublishOp(t, conn, mkRec("twiceRec00002", []string{instKey, instKey + ".outcome"}))
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
@@ -559,7 +558,7 @@ func TestRecordServiceOutcome_StaleRevision_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + applicantKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, createEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -576,7 +575,7 @@ func TestRecordServiceOutcome_StaleRevision_Rejected(t *testing.T) {
 		Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z","expectedRevision":99}`),
 		// No .outcome yet; the stale expectedRevision=99 makes the OCC-guarded
 		// root touch conflict and reject.
-		ContextHint: &processor.ContextHint{Reads: []string{instKey, instKey + ".class"}},
+		ContextHint: &processor.ContextHint{Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, recEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -611,7 +610,7 @@ func TestCreateServiceInstance_InstanceOfInstance_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + applicantKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, createEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -626,7 +625,7 @@ func TestCreateServiceInstance_InstanceOfInstance_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + realInstKey + `","providedTo":"` + applicantKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{realInstKey, realInstKey + ".class", applicantKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{realInstKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, badEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -654,7 +653,7 @@ func TestCreateServiceInstance_DeletedApplicant_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + deadKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", deadKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, deadKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -711,7 +710,7 @@ func TestCreateServiceInstance_NonExistentApplicant_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + missingApplicant + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -733,7 +732,7 @@ func TestRecordServiceOutcome_StatusOutOfEnum_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"pending","completedAt":"2026-06-18T14:00:00Z"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey, instKey + ".class"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -776,7 +775,7 @@ func TestRecordServiceOutcome_CompletedAtMalformed_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"not-a-timestamp"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey, instKey + ".class"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -798,7 +797,7 @@ func TestRecordServiceOutcome_CompletedAtAbsent_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey, instKey + ".class"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -833,7 +832,7 @@ func TestCreateServiceInstance_IdCollision_DifferentRequestIds_Rejected(t *testi
 			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 			Class:         "service",
 			Payload:       payload,
-			ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+			ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 		}
 	}
 
@@ -930,7 +929,7 @@ func TestRecordServiceOutcome_ZeroExpectedRevision_Rejected(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z","expectedRevision":0}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{instKey, instKey + ".class"}},
+		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -957,7 +956,7 @@ func createLiveInstance(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
 		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + applicantKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, tplKey + ".class", applicantKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)

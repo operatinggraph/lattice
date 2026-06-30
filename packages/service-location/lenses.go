@@ -61,17 +61,19 @@ func Lenses() []pkgmgr.LensSpec {
 //
 // Two guards make the projection sound:
 //
-//   - TEMPLATE guard (§6.10 / §6.5): `NOT (svc)-[:instanceOf]->(svcTpl)` admits
-//     service TEMPLATES and excludes service INSTANCES (and any claim vertex).
-//     The template/instance discriminator lives in the service `.class` aspect
-//     (service-domain writes root class=service + a .class aspect value
-//     service.<x>.template / service.<x>.instance), and `svc.class` resolves to
-//     the bare root class `service` — it cannot reach the aspect, so a value
-//     compare on `svc.class` is inert. Instances structurally carry an outgoing
-//     instanceOf link (instance→template) while templates never do; the
-//     instanceOf-absence predicate is the engine-expressible template guard.
-//     Defense-in-depth: the WireAvailableAt op already restricts the
-//     availableAt source to templates.
+//   - TEMPLATE guard (§6.10 / §6.5): `NOT (svc)-[:instanceOf]->(svcTpl:service)`
+//     admits service TEMPLATES and excludes service INSTANCES (and any claim
+//     vertex). The template/instance discriminator is the vertex ENVELOPE class
+//     (P7 — service.<x>.template / service.<x>.instance; no `.class` shadow
+//     aspect). Both a template and an instance now carry an outgoing instanceOf
+//     link (the P7 type-authority chain: a template → the service DDL meta, an
+//     instance → its template), so bare instanceOf-absence no longer
+//     discriminates. The `:service` label on the target restores it: an
+//     instance's instanceOf points at a `vtx.service.*` template (matches
+//     `:service` by key-type → excluded), while a template's instanceOf points
+//     at a `vtx.meta.*` DDL vertex (NOT `:service` → admitted). Defense-in-depth:
+//     the WireAvailableAt op already restricts the availableAt source to
+//     templates (its envelope class ends in `.template`).
 //
 //   - MULTI-LEVEL EXCLUSION (§6.10 item 1), PER RESIDENCE CHAIN: the exclusion
 //     existential walks up from the bound loc0 — the SAME residence that granted
@@ -84,18 +86,18 @@ func Lenses() []pkgmgr.LensSpec {
 //     granting ancestor loc. A laundry availableAt a building but unavailableAt
 //     the actor's penthouse is excluded for the penthouse chain.
 //
-// `svc` carries the `:service` label (root class `service`) as a self-contained
-// guard — only service vertices project, even if a non-service vertex were ever
-// wired an availableAt edge. `allowedOperations` is the pattern-comprehension
-// over permitsOperation → op-meta, keeping only ops that carry an operationType.
-// The entry carries no serviceClass: the residence scheme has no use for it, and
-// the rich class discriminator lives in the `.class` aspect a cypher cannot reach
-// (the root `class` field shadows it); a structural denial reads that aspect by
-// key at denial time.
+// `svc` carries the `:service` label (matched by the `vtx.service.*` key-type)
+// as a self-contained guard — only service vertices project, even if a
+// non-service vertex were ever wired an availableAt edge. `allowedOperations` is
+// the pattern-comprehension over permitsOperation → op-meta, keeping only ops
+// that carry an operationType. The entry carries no serviceClass: the residence
+// scheme has no use for it; the rich class discriminator is now the vertex
+// envelope class (`svc.class` = service.<x>.template / .instance), which a
+// structural denial can read directly off the root.
 const capabilityServiceAccessSpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:residesIn]->(loc0)-[:containedIn*0..]->(loc)<-[:availableAt]-(svc:service)
-WHERE NOT (svc)-[:instanceOf]->(svcTpl)
+WHERE NOT (svc)-[:instanceOf]->(svcTpl:service)
   AND NOT (loc0)-[:containedIn*0..]->(exLoc)<-[:unavailableAt]-(svc)
 RETURN
   identity.key AS actorKey,

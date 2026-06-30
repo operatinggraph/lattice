@@ -1,5 +1,5 @@
 name: service-location
-version: 0.1.0
+version: 0.2.0
 description: |
   Residence-based service-access scheme — the cap.svc grant source. Composes
   location-domain (the place graph) and service-domain (the service catalog).

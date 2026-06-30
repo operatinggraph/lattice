@@ -6,14 +6,20 @@
 //
 //   - One DDL (`service`) defining the generic service vertex type + three
 //     lifecycle ops. A service vertex is either a TEMPLATE (an offering) or
-//     an INSTANCE (a run of an offering), discriminated by a `.class` aspect
-//     value (`service.<x>.template` / `service.<x>.instance`); the service
-//     family `<x>` ∈ {backgroundCheck, payment}. Root data is minimal ({});
-//     relationships are LINKS:
+//     an INSTANCE (a run of an offering), discriminated by the vertex ENVELOPE
+//     class (`service.<x>.template` / `service.<x>.instance` — P7, no `.class`
+//     shadow aspect); the service family `<x>` ∈ {backgroundCheck, payment}.
+//     Root data is minimal ({}); relationships are LINKS:
 //
 //     lnk.service.<tplId>.providedBy.<provType>.<provId>     # offering's provider
-//     lnk.service.<instId>.instanceOf.service.<tplId>        # run → its template
+//     lnk.service.<tplId>.instanceOf.meta.<serviceDDLId>     # template → the service DDL meta (write-gate type authority)
+//     lnk.service.<instId>.instanceOf.service.<tplId>        # run → its template (chains to the DDL meta)
 //     lnk.service.<instId>.providedTo.identity.<applicantId> # run → the applicant
+//
+//     The fine-grained envelope class misses the exact class→DDL lookup, so the
+//     step-6 write-gate resolver walks the instanceOf chain
+//     (instance → template → service DDL meta) to the type authority
+//     (Contract #1 §1.5; exactly one instanceOf per vertex keeps it unambiguous).
 //
 //     The availableAt availability assertion (template → location) is owned by
 //     the service-location package, not this DDL.
@@ -45,7 +51,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "service-domain",
-	Version:     "0.1.0",
+	Version:     "0.2.0",
 	Description: "Service template + instance vertex type (service DDL + lifecycle ops); the instance records its external-call outcome as aspects (D5). No read-path lens (Phase-3 deferred).",
 	Depends:     []string{"identity-domain", "orchestration-base"},
 	DDLs:        DDLs(),

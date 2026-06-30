@@ -15,7 +15,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     (the template + identity an instance links to, the optional location +
 //     provider a template links to) by reading each by the key the caller
 //     lists in ContextHint.Reads. RecordServiceOutcome reads the instance
-//     root + its .class / .outcome aspects by their known keys.
+//     root (its envelope class is the discriminator) + its .outcome aspect by
+//     their known keys.
 //   - No-orphan invariant (FR29 / P4): CreateServiceInstance REQUIRES a live
 //     template (instanceOf) and a live applicant identity (providedTo) and
 //     rejects (structured ScriptError) if either is absent. The optional
@@ -25,17 +26,22 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Service shape (Contract #1 §1.1 + D5 — root data minimal, business data in
 // aspects):
 //
-//	vtx.service.<id>            root data = {}   (the class discriminator is an aspect, not root)
-//	vtx.service.<id>.class      aspect: { value: "service.<x>.template" | "service.<x>.instance" }
+//	vtx.service.<id>            root data = {}; ENVELOPE class is the discriminator:
+//	                            "service.<x>.template" | "service.<x>.instance" (P7 — no .class aspect)
 //	vtx.service.<id>.outcome    aspect (INSTANCE only, written by RecordServiceOutcome):
 //	                            { status ("completed"|"failed"), completedAt (canonical-UTC RFC3339) }
 //	lnk.service.<tplId>.providedBy.<provType>.<provId>     # template providedBy a provider
-//	lnk.service.<instId>.instanceOf.service.<tplId>        # instance instanceOf its template
+//	lnk.service.<tplId>.instanceOf.meta.<serviceDDLId>     # template instanceOf the service DDL meta (type authority)
+//	lnk.service.<instId>.instanceOf.service.<tplId>        # instance instanceOf its template (chains to the DDL meta)
 //	lnk.service.<instId>.providedTo.identity.<applicantId> # instance providedTo the applicant
 //
-// All three links: the service vertex (template or instance) is the
-// later-arriving SOURCE, the other vertex pre-exists = the TARGET (Contract
-// #1 §1.1). The availableAt availability assertion (template→location) is owned
+// Every link: the service vertex (template or instance) is the later-arriving
+// SOURCE, the other vertex pre-exists = the TARGET (Contract #1 §1.1). The
+// instanceOf links carry the write-gate type authority: a fine-grained envelope
+// class misses the exact class->DDL lookup, so the step-6 resolver walks
+// instance -> template -> the service DDL meta (Contract #1 §1.5; each vertex
+// carries exactly one instanceOf, so the chain is unambiguous). The availableAt
+// availability assertion (template→location) is owned
 // by service-location. The instance→identity providedTo link is the convergence
 // link a downstream actorAggregate lens fans out across to read the instance's
 // outcome aspect.
@@ -49,8 +55,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //   - CreateServiceTemplate: any providedBy endpoint supplied.
 //   - CreateServiceInstance: the template (vtx.service.<tplId>) + the
 //     applicant (vtx.identity.<id>).
-//   - RecordServiceOutcome: the instance (vtx.service.<id>) + its
-//     vtx.service.<id>.class aspect. The vtx.service.<id>.outcome aspect is
+//   - RecordServiceOutcome: the instance (vtx.service.<id>) — its envelope
+//     class is the discriminator. The vtx.service.<id>.outcome aspect is
 //     listed ONLY when it already exists (a retry against an already-recorded
 //     instance) — listing a not-yet-written key is a hydration miss. The
 //     once-only guarantee does NOT depend on the caller listing it: the
@@ -79,27 +85,31 @@ func serviceDDL() pkgmgr.DDLSpec {
 		CanonicalName:     "service",
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{"CreateServiceTemplate", "CreateServiceInstance", "RecordServiceOutcome"},
-		Description: "Service domain DDL. Vertex shape: vtx.service.<NanoID>, class=service, root data = {} " +
+		Description: "Service domain DDL. Vertex shape: vtx.service.<NanoID>, root data = {} " +
 			"(minimal, D5). A service vertex is a TEMPLATE (an offering) or an INSTANCE (a run of an " +
-			"offering), discriminated by the .class aspect value (service.<x>.template / " +
-			"service.<x>.instance); the service family <x> is one of {backgroundCheck, payment}. " +
-			"Relationships are LINKS: providedBy (template→provider: who provides it), instanceOf " +
-			"(instance→template: the offering this run is of), providedTo (instance→identity: the applicant " +
-			"this run is for). All links: the service vertex is the later-arriving source, the other vertex " +
-			"is the pre-existing target (Contract #1 §1.1). The availableAt availability assertion " +
-			"(template→location) is owned by service-location, not this DDL. CreateServiceTemplate mints a " +
-			"template + its .class aspect and writes the providedBy link only when the endpoint is supplied " +
-			"(validated alive). " +
-			"CreateServiceInstance mints an instance + its .class aspect, requires + validates a live " +
-			"template (instanceOf) and a live applicant identity (providedTo), and accepts an optional " +
-			"caller-supplied bare-NanoID instanceId (a write-ahead seam: absent → minted). " +
+			"offering), discriminated by the vertex ENVELOPE class (service.<x>.template / " +
+			"service.<x>.instance — P7, no .class shadow aspect); the service family <x> is one of " +
+			"{backgroundCheck, payment}. Relationships are LINKS: providedBy (template→provider: who " +
+			"provides it), instanceOf (template→the service DDL meta, and instance→template: the " +
+			"write-gate type-authority chain + the offering this run is of), providedTo (instance→identity: " +
+			"the applicant this run is for). All links: the service vertex is the later-arriving source, the " +
+			"other vertex is the pre-existing target (Contract #1 §1.1). The fine-grained envelope class " +
+			"misses the exact class→DDL lookup, so the step-6 write-gate resolver walks the instanceOf chain " +
+			"(instance→template→meta) to this DDL (Contract #1 §1.5; one instanceOf per vertex). The " +
+			"availableAt availability assertion (template→location) is owned by service-location, not this " +
+			"DDL. CreateServiceTemplate mints a template (envelope class service.<x>.template) + its " +
+			"instanceOf→service-DDL-meta link, and writes the providedBy link only when the endpoint is " +
+			"supplied (validated alive). " +
+			"CreateServiceInstance mints an instance (envelope class service.<x>.instance), requires + " +
+			"validates a live template (instanceOf) and a live applicant identity (providedTo), and accepts " +
+			"an optional caller-supplied bare-NanoID instanceId (a write-ahead seam: absent → minted). " +
 			"RecordServiceOutcome records the external-call result as the .outcome aspect {status " +
 			"(completed|failed), completedAt (canonical-UTC RFC3339)} on the instance; the outcome lives " +
 			"in the aspect, never on root data (D5). It rejects a non-existent / template (not instance) / " +
 			"already-recorded target and asserts the instance root revision (OCC, Contract #2 §2.6).",
 		Script: serviceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"family":{"type":"string","enum":["backgroundCheck","payment"],"description":"The service family <x> (backgroundCheck|payment). Sets the .class aspect value service.<x>.template|instance."},` +
+			`{"family":{"type":"string","enum":["backgroundCheck","payment"],"description":"The service family <x> (backgroundCheck|payment). Sets the vertex envelope class service.<x>.template|instance."},` +
 			`"templateId":{"type":"string","description":"Optional bare NanoID for the template vertex (CreateServiceTemplate); absent → minted."},` +
 			`"providedBy":{"type":"string","description":"Optional vtx.<provType>.<NanoID> that provides the template; the providedBy link is written only when supplied (CreateServiceTemplate)."},` +
 			`"instanceId":{"type":"string","description":"Optional bare NanoID for the instance vertex (CreateServiceInstance); supplied by a caller that must know the key before commit (e.g. Loom's write-ahead handle). Absent → minted."},` +
@@ -113,11 +123,11 @@ func serviceDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.service.<NanoID> of the created/updated service vertex (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"family":           "The service family <x>, one of {backgroundCheck, payment}. Determines the .class aspect value (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
+			"family":           "The service family <x>, one of {backgroundCheck, payment}. Determines the vertex envelope class (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
 			"templateId":       "Optional bare NanoID (no dots / key segments) for the template vertex (vtx.service.<templateId>) created by CreateServiceTemplate. Absent → minted with nanoid.new().",
 			"providedBy":       "Optional full vtx.<provType>.<NanoID> key of the provider of the template offering. CreateServiceTemplate validates it is alive and writes the providedBy link only when supplied.",
 			"instanceId":       "Optional bare NanoID (no dots / key segments) for the instance vertex (vtx.service.<instanceId>) created by CreateServiceInstance. Supplied by a caller that must know the instance key before the op commits — e.g. a Loom externalTask step write-aheading its token.<instanceKey> handle. Absent → minted with nanoid.new(). A crash-retry with the same id collapses on the Contract #4 tracker.",
-			"template":         "Full vtx.service.<NanoID> key of the template this instance is a run of. CreateServiceInstance requires it, validates it is alive and is a template (its .class aspect ends in .template), and writes the instanceOf link.",
+			"template":         "Full vtx.service.<NanoID> key of the template this instance is a run of. CreateServiceInstance requires it, validates it is alive and is a template (its envelope class ends in .template), and writes the instanceOf link.",
 			"providedTo":       "Full vtx.identity.<NanoID> key of the applicant this instance is provided to. CreateServiceInstance requires it, validates the identity is alive, and writes the providedTo link (the convergence link a downstream lens reads across).",
 			"instanceKey":      "Full vtx.service.<NanoID> key of the instance to record an outcome for. RecordServiceOutcome validates it is alive, is an instance (not a template), and has no outcome yet.",
 			"status":           "The terminal outcome value: completed (the external call succeeded with a satisfying result) or failed (the call failed or returned a non-satisfying result). Stored on the .outcome aspect.",
@@ -130,7 +140,8 @@ func serviceDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{
 					"family": "backgroundCheck",
 				},
-				ExpectedOutcome: "Mints vtx.service.<NanoID> (root data {}) + a .class aspect = service.backgroundCheck.template. " +
+				ExpectedOutcome: "Mints vtx.service.<NanoID> (root data {}, envelope class service.backgroundCheck.template) + " +
+					"the instanceOf→service-DDL-meta link (the write-gate type authority). " +
 					"The providedBy link is written only when that endpoint is supplied (and validated alive); the availableAt " +
 					"availability assertion is owned by service-location. Returns primaryKey (the template key).",
 			},
@@ -142,7 +153,7 @@ func serviceDDL() pkgmgr.DDLSpec {
 					"providedTo": "vtx.identity.<applicantNanoID>",
 				},
 				ExpectedOutcome: "Validates the template (alive + a template) and the applicant identity (alive). Atomically commits " +
-					"vtx.service.<NanoID> (root data {}) + a .class aspect = service.backgroundCheck.instance + the instanceOf link " +
+					"vtx.service.<NanoID> (root data {}, envelope class service.backgroundCheck.instance) + the instanceOf link" +
 					"(instance→template) + the providedTo link (instance→identity). NO outcome aspect yet (absence = not-yet-complete). " +
 					"Accepts an optional caller-supplied bare-NanoID instanceId. Returns primaryKey (the instance key). " +
 					"Rejects with ScriptError if the template or applicant is absent.",
@@ -216,7 +227,7 @@ def optional_int(p, name):
 
 # The service families this package admits (<x> in the class string
 # service.<x>.template | service.<x>.instance). One service DDL handles all
-# families; the family is data in the .class aspect + an op payload field, not
+# families; the family is carried by the vertex envelope class + an op payload field, not
 # a DDL per family.
 SERVICE_FAMILIES = ["backgroundCheck", "payment"]
 
@@ -285,17 +296,16 @@ def vertex_alive(state, key):
 def aspect_alive(state, key):
     return vertex_alive(state, key)
 
-def class_value(state, vtx_key):
-    # The .class aspect's data.value, or None if the aspect is absent/dead.
-    ck = vtx_key + ".class"
-    if not aspect_alive(state, ck):
+def vertex_class(state, key):
+    # The vertex's ENVELOPE class (service.<x>.template / service.<x>.instance),
+    # or None if absent/dead. The type/subtype discriminator is the envelope
+    # class (P7) — there is no .class shadow aspect.
+    if not vertex_alive(state, key):
         return None
-    doc = state[ck]
-    if not hasattr(doc, "data") or doc.data == None:
+    doc = state[key]
+    if not hasattr(doc, "class"):
         return None
-    if "value" not in doc.data:
-        return None
-    return doc.data["value"]
+    return getattr(doc, "class")
 
 def execute(state, op):
     ot = op.operationType
@@ -305,11 +315,21 @@ def execute(state, op):
         fam = required_family(p)
         tpl_id = bare_nanoid_or_mint(p, "templateId")
         tpl_key = "vtx.service." + tpl_id
-        class_value_str = "service." + fam + ".template"
+        # The type/subtype discriminator is the vertex ENVELOPE class (P7) —
+        # service.<fam>.template — NOT a .class shadow aspect. That fine-grained
+        # class misses the exact class->DDL lookup, so the step-6 write-gate
+        # resolver walks this template's instanceOf link to its type authority
+        # (Contract #1 §1.5 terminal #1): the service DDL's own meta-vertex,
+        # surfaced to the script as ddl["service"].metaKey. The template is the
+        # chain terminal a downstream instance walks through.
+        tpl_class = "service." + fam + ".template"
+        meta_key = ddl["service"].metaKey
+        _, meta_id = parts_of(meta_key, "typeAuthority", "meta")
+        instance_of_lnk = "lnk.service." + tpl_id + ".instanceOf.meta." + meta_id
 
         mutations = [
-            make_vtx(tpl_key, "service", {}),
-            make_aspect(tpl_key, "class", "class", {"value": class_value_str}),
+            make_vtx(tpl_key, tpl_class, {}),
+            make_link(instance_of_lnk, tpl_key, meta_key, "instanceOf", "instanceOf", {}),
         ]
 
         # providedBy is the offering's provider link. The link is written only
@@ -342,7 +362,7 @@ def execute(state, op):
         # applicant is never committed.
         if not vertex_alive(state, template):
             fail("UnknownTemplate: " + template)
-        tpl_class = class_value(state, template)
+        tpl_class = vertex_class(state, template)
         if tpl_class == None or not tpl_class.endswith(".template"):
             fail("NotATemplate: " + template + " is not a service template")
         if not vertex_alive(state, provided_to):
@@ -357,16 +377,20 @@ def execute(state, op):
         # Contract #4 tracker — no duplicate instance.
         inst_id = bare_nanoid_or_mint(p, "instanceId")
         inst_key = "vtx.service." + inst_id
-        class_value_str = "service." + fam + ".instance"
+        # The discriminator is the vertex ENVELOPE class (P7) —
+        # service.<fam>.instance — NOT a .class shadow aspect. The instance keeps
+        # its single instanceOf -> template link (Contract #1 §1.1); the step-6
+        # write-gate resolver walks instance -> template -> the service DDL meta
+        # to reach the type authority (the template carries instanceOf -> meta).
+        inst_class = "service." + fam + ".instance"
 
         instance_of_lnk = "lnk.service." + inst_id + ".instanceOf.service." + tpl_id
         provided_to_lnk = "lnk.service." + inst_id + ".providedTo.identity." + applicant_id
 
-        # Root data minimal (D5): {} on root, the class discriminator on a
-        # .class aspect. NO outcome aspect yet — absence = not-yet-complete.
+        # Root data minimal (D5): {} on root, the discriminator on the envelope
+        # class. NO outcome aspect yet — absence = not-yet-complete.
         mutations = [
-            make_vtx(inst_key, "service", {}),
-            make_aspect(inst_key, "class", "class", {"value": class_value_str}),
+            make_vtx(inst_key, inst_class, {}),
             make_link(instance_of_lnk, inst_key, template, "instanceOf", "instanceOf", {}),
             make_link(provided_to_lnk, inst_key, provided_to, "providedTo", "providedTo", {}),
         ]
@@ -391,7 +415,7 @@ def execute(state, op):
             fail("UnknownInstance: " + inst_key)
         # It MUST be an instance, not a template (recording an outcome on a
         # template is a category error).
-        inst_class = class_value(state, inst_key)
+        inst_class = vertex_class(state, inst_key)
         if inst_class == None or not inst_class.endswith(".instance"):
             fail("NotAnInstance: " + inst_key + " is not a service instance")
         # The outcome is recorded once, guarded on two load-bearing paths:
@@ -430,12 +454,16 @@ def execute(state, op):
             fail("InvalidArgument: expectedRevision: must be a positive instance revision; omit it for no OCC guard; got " + str(expected_rev))
         if expected_rev == None:
             expected_rev = state[inst_key].revision
+        # Re-assert the instance root under the OCC guard, PRESERVING its
+        # fine-grained envelope class (P7) — re-stamping the bare "service" here
+        # would clobber the discriminator and break the write-gate instanceOf
+        # chain. data stays {} (D5); the outcome aspect is the new fact.
         mutations = [
             make_aspect(inst_key, "outcome", "outcome",
                         {"status": status, "completedAt": completed_at}),
             {"op": "update", "key": inst_key,
              "expectedRevision": expected_rev,
-             "document": {"class": "service", "isDeleted": False, "data": {}}},
+             "document": {"class": inst_class, "isDeleted": False, "data": {}}},
         ]
         events = [{"class": "service.outcomeRecorded",
                    "data": {"serviceKey": inst_key, "status": status,

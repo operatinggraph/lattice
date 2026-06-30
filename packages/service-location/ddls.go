@@ -20,7 +20,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     by reading each by the key the caller lists in ContextHint.Reads.
 //   - Endpoint-class validation is AT THE OP (not the lens's untyped match):
 //     residesIn target MUST be class=location; availableAt / unavailableAt
-//     source MUST be a service TEMPLATE (a service whose .class aspect value
+//     source MUST be a service TEMPLATE (a service whose ENVELOPE class
 //     ends in `.template`) and target MUST be class=location; permitsOperation
 //     source MUST be class=service and target MUST be an op-meta vertex
 //     (vtx.meta.<id> carrying a data.operationType). A dead or wrong-class
@@ -38,8 +38,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //
 // Caller's ContextHint.Reads MUST include:
 //   - WireResidesIn: BOTH endpoints (the identity + the location).
-//   - WireAvailableAt / WireUnavailableAt: the service template (+ its .class
-//     aspect, so the template guard can read the discriminator) + the location.
+//   - WireAvailableAt / WireUnavailableAt: the service template (its root
+//     envelope class is the discriminator the template guard reads) + the location.
 //   - WirePermitsOperation: the service + the op-meta vertex.
 //   - the Unwire* ops: the deterministic link key (computed from the endpoints
 //     by the caller — see the key shapes above).
@@ -65,14 +65,14 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 			"the source, the pre-existing one is the target (Contract #1 §1.1); the sentence reads 'identity " +
 			"residesIn location', 'service availableAt location'. Each Wire op validates its endpoint classes " +
 			"at the op (residesIn target=location; availableAt/unavailableAt source=a service template " +
-			"[its .class aspect ends in .template], target=location; permitsOperation source=service, " +
+			"[its envelope class ends in .template], target=location; permitsOperation source=service, " +
 			"target=an op-meta vertex). residesIn cardinality is multiple. Each Unwire op tombstones the link " +
 			"by its deterministic key.",
 		Script: serviceLocationDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"identity":{"type":"string","description":"vtx.identity.<NanoID> of the resident — the residesIn link source (WireResidesIn; required, validated alive)."},` +
 			`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the location (WireResidesIn target / WireAvailableAt target / WireUnavailableAt target; required, validated alive + class=location)."},` +
-			`"service":{"type":"string","description":"vtx.service.<NanoID> of the service — a template for WireAvailableAt/WireUnavailableAt (validated alive + a template), or any service for WirePermitsOperation (validated alive + class=service)."},` +
+			`"service":{"type":"string","description":"vtx.service.<NanoID> of the service — a template for WireAvailableAt/WireUnavailableAt (validated alive + a template, envelope class ends in .template), or any service for WirePermitsOperation (validated alive + a service.* envelope class)."},` +
 			`"operation":{"type":"string","description":"vtx.meta.<NanoID> of the op-meta vertex the service exposes — the permitsOperation link target (WirePermitsOperation; required, validated alive + carries data.operationType)."},` +
 			`"linkKey":{"type":"string","description":"The deterministic 6-segment link key of an existing link to tombstone (the Unwire ops; required, validated alive)."}},` +
 			`"required":[]}`,
@@ -81,7 +81,7 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"identity":  "Full vtx.identity.<NanoID> key of the resident. WireResidesIn validates it is alive and writes it as the residesIn link SOURCE (the identity is the later-arriving vertex, Contract #1 §1.1).",
 			"location":  "Full vtx.<locType>.<NanoID> key of the location. Validated alive + class=location; written as the link TARGET for residesIn / availableAt / unavailableAt.",
-			"service":   "Full vtx.service.<NanoID> key. For availableAt/unavailableAt it MUST be a service template (its .class aspect value ends in .template); for permitsOperation it MUST be class=service. Written as the link SOURCE.",
+			"service":   "Full vtx.service.<NanoID> key. For availableAt/unavailableAt it MUST be a service template (its envelope class ends in .template); for permitsOperation it MUST be a service.* envelope class. Written as the link SOURCE.",
 			"operation": "Full vtx.meta.<NanoID> key of the op-meta vertex the service exposes. WirePermitsOperation validates it is alive and carries a data.operationType, then writes it as the permitsOperation link TARGET.",
 			"linkKey":   "Full 6-segment link key of an existing link to tombstone (the Unwire ops).",
 		},
@@ -97,7 +97,7 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "WireAvailableAt — make a laundry service available at a building",
 				Payload: map[string]any{"service": "vtx.service.<laundryTplNanoID>", "location": "vtx.building.<buildingNanoID>"},
-				ExpectedOutcome: "Validates the service is alive + a template (its .class aspect ends in .template) and the " +
+				ExpectedOutcome: "Validates the service is alive + a template (its envelope class ends in .template) and the " +
 					"building is alive + class=location, then writes lnk.service.<laundryTplNanoID>.availableAt.building.<buildingNanoID> " +
 					"(class=availableAt, source=service, target=location). Returns primaryKey. Rejects with ScriptError if the " +
 					"service is not a template or the location is not class=location.",
@@ -206,22 +206,6 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
-def class_aspect_value(state, vtx_key):
-    # The service .class aspect's data.value (service.<x>.template /
-    # service.<x>.instance), or None if the aspect is absent/dead. The
-    # template/instance discriminator lives in the .class ASPECT (service-domain
-    # writes root class=service + a .class aspect); the root class is the bare
-    # discriminator 'service'.
-    ck = vtx_key + ".class"
-    if not vertex_alive(state, ck):
-        return None
-    doc = state[ck]
-    if not hasattr(doc, "data") or doc.data == None:
-        return None
-    if "value" not in doc.data:
-        return None
-    return doc.data["value"]
-
 def require_live_location(state, key, name):
     if not vertex_alive(state, key):
         fail("UnknownLocation: " + name + ": " + key + " is absent or tombstoned")
@@ -230,22 +214,25 @@ def require_live_location(state, key, name):
         fail("NotALocation: " + name + ": " + key + " has class " + str(cls) + ", required " + LOCATION_CLASS)
 
 def require_live_service_template(state, key, name):
-    # The service availableAt/unavailableAt source MUST be a TEMPLATE: alive,
-    # class=service, and its .class aspect value ends in .template. An instance
-    # (or any non-template) is never wired with an availability assertion.
+    # The service availableAt/unavailableAt source MUST be a TEMPLATE: alive and
+    # its ENVELOPE class ends in .template (P7 — the template/instance
+    # discriminator is the envelope class service.<x>.template / .instance; there
+    # is no .class shadow aspect). An instance (or any non-template) is never
+    # wired with an availability assertion.
     if not vertex_alive(state, key):
         fail("UnknownService: " + name + ": " + key + " is absent or tombstoned")
-    if class_of(state, key) != "service":
-        fail("NotAService: " + name + ": " + key + " has class " + str(class_of(state, key)) + ", required service")
-    cv = class_aspect_value(state, key)
-    if cv == None or not cv.endswith(".template"):
-        fail("NotATemplate: " + name + ": " + key + " is not a service template (.class aspect value " + str(cv) + ")")
+    cls = class_of(state, key)
+    if cls == None or not cls.startswith("service.") or not cls.endswith(".template"):
+        fail("NotATemplate: " + name + ": " + key + " is not a service template (envelope class " + str(cls) + ")")
 
 def require_live_service(state, key, name):
+    # Any service vertex (template or instance): alive + a service.* envelope
+    # class (P7 — a service root class is service.<x>.template / .instance).
     if not vertex_alive(state, key):
         fail("UnknownService: " + name + ": " + key + " is absent or tombstoned")
-    if class_of(state, key) != "service":
-        fail("NotAService: " + name + ": " + key + " has class " + str(class_of(state, key)) + ", required service")
+    cls = class_of(state, key)
+    if cls == None or not cls.startswith("service."):
+        fail("NotAService: " + name + ": " + key + " has class " + str(cls) + ", required a service.* envelope class")
 
 def require_live_opmeta(state, key, name):
     # The permitsOperation target MUST be an op-meta vertex: alive, vtx.meta.*,

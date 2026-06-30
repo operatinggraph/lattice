@@ -37,7 +37,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "service-location",
-	Version:     "0.1.0",
+	Version:     "0.2.0",
 	Description: "Residence-based service-access scheme: residesIn/availableAt/unavailableAt/permitsOperation links + the capabilityServiceAccess lens projecting cap.svc.<actor>.",
 	Depends:     []string{"location-domain", "service-domain"},
 	DDLs:        DDLs(),
