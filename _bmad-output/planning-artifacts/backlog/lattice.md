@@ -74,11 +74,19 @@ Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting fe
   (new `ConsumerSpec.InitialPause` substrate seam = Fire 0; Fire 0+1 land together under full 3-layer)
   + flagged the board row. No code committed (security-plane build deferred to a dedicated fire with
   budget for the 3-layer review + the D1.4 Gate-3 fixture relocation).
+- **Surveyor fire 2026-06-30 (feature backlog):** healthy + well-hydrated — ~25 scored items across 8
+  sections, build-ready picks (FR28 role-queue, protected-lens OOB) already flagged. Grounded the one open
+  PO-routed platform gap (Verticals "clinic provider/patient/appointment LINGER" → "full-engine tombstone
+  retraction"): **already served**, no new lattice gap. `AnchorDeleteResult` (`679fe25`) retracts plain
+  full-engine anchor root-tombstones — clinic list lenses anchor on the entity root, `Tombstone*` soft-deletes
+  the root → `isDeleted` CDC → `evaluate.go:105` emits the Delete; a secondary-node tombstone falls through to
+  re-execute (`evaluate.go:101-104`) so dependent rows refresh. The Verticals 🚧 `blocked-on-lattice` label is
+  **stale** (verify + close verticals-side). Filed nothing (no filler).
 - **Last surveyed:** 2026-06-30 Loom (`internal/loom` + control). Healthy — 81.5% / 76.6% cov, no 0%
   funcs, no TODO/FIXME; both deferred items (Starlark guards, durable `loom.*` read model) already filed.
   Filed one maintenance gap: HealthSink pause-restore coverage (mirrors the Weaver row).
-  Prior rotation: Core → Weaver → Loupe → Loom.
-- **Next:** the **feature backlog** (least-recently the dedicated focus), then Refractor.
+  Prior rotation: Core → Weaver → Loupe → Loom → feature-backlog.
+- **Next:** Refractor (`internal/refractor`), then Core.
 
 ## Lattice feature backlog — the Phase-3 build queue
 
