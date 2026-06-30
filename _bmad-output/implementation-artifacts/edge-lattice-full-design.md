@@ -1,7 +1,6 @@
 # Edge Lattice (full) — the sovereign per-user node — design
 
-**Status: 📐 awaiting-Andrew (ratification) — 2026-06-29.**
-Author: Winston (Designer fire, 2026-06-29).
+**Status: ✅ Andrew-ratified (2026-06-29)** — FORK-A resolves to **A′ (predictive read-only local execution, never commits; cloud Processor stays sole authority)**, FORK-B = A (Go node first), FORK-C = A (reconcile-by-revision); no frozen-contract change; EDGE.1+2 buildable now (co-built with Personal Lens PL.1/2). A′ needs an **edge Starlark sandbox** (⑥'s `internal/starlarksandbox` with a local-mirror-backed read-only `kv` binding). **`bmad-party-mode` pre-build pass RUN (2026-06-29)** — 8 findings folded in (see the *Ratified + party-mode findings* block + §3.4/§3.5/§3.6 + §8). One cross-cutting finding (F8 — "scripts reading Core KV is the smell") flagged separately for Andrew. Author: Winston (Designer fire, 2026-06-29).
 
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Edge & personal lenses → Edge Lattice (full)*
 (★★, XL). The **device-side capstone** that consumes the already-designed cloud seams: it is the concrete
@@ -85,6 +84,52 @@ So **EDGE.1 co-builds with Personal Lens PL.1/PL.2** as one initiative — PL.1 
 trusted-posture offline-first loop. This **also un-gates Personal Lens** (which was explicitly waiting on "D1 +
 a real consumer exists" — the Edge node is that consumer). Everything past EDGE.2 is gated on D1 / Vault /
 Gateway exactly as Personal Lens is. See §7.
+
+---
+
+## Ratified + party-mode findings (Andrew, 2026-06-29)
+
+**Decisions.** **FORK-A = A′** (predictive read-only local execution; the Edge runs the op's Starlark **locally to
+predict** the optimistic overlay but **never commits** — the cloud Processor stays sole authority; its
+streamed-back result replaces the prediction). **FORK-B = A** (Go reference node first). **FORK-C = A**
+(reconcile-by-revision LWW + re-audit, not CRDT). **No frozen-contract change.** **EDGE.1 + EDGE.2 buildable now**,
+co-built with Personal Lens PL.1/PL.2 (un-gates Personal Lens). A′ requires an **edge Starlark sandbox** — ⑥'s
+shared `internal/starlarksandbox` leaf with the impure `kv` builtin swapped for a **local-mirror-backed, read-only**
+binding (the Edge becomes the leaf's **third consumer**, after the Processor and the deferred Loom guard).
+
+**P2 verdict (the headline the party stress-tested):** A′ holds P2 inviolate — a prediction is never an
+authoritative write (the local store is P1 operational state; the cloud ledger is untouched), and no local commit
+escapes the cloud Processor. The review was adversarial, not a rubber-stamp; 8 findings folded in:
+
+- **F1 — speculation chain (§3.4/§3.5).** Predictions persist locally and chain (op #2 predicts off op #1's
+  *unconfirmed* result). Model pending predictions as a **DAG rooted at confirmed state** (`pendingDeps`); a
+  rejected intent **invalidates its whole downstream subtree** and re-audits it in order.
+- **F2 — predicted events are inert (§3.4).** The script emits `{mutations, events}`; a **predicted** event is
+  **local-UI-only** — never published, never triggers an external side-effect. Only the cloud's authoritative
+  commit emits real events.
+- **F3 — the A′ gating rule (§3.4, load-bearing).** Predict an op **iff its declared read-set
+  (`contextHint.reads`) ⊆ the local mirror; else degrade to a pending-state (pure-A) for that op.** This single
+  rule covers the missing-key case, the cross-slice-inference case, and (with F4) `kv.Links`.
+- **F4 — enumeration isn't locally predictable (§3.4).** `kv.Links` is an open enumeration; the mirror **cannot
+  know it holds *all* of a relation's links**, so a `kv.Links`-bearing op is **not** locally predictable unless
+  the relation is **provably user-private** (all its links in the slice by construction) — else pending.
+- **F5 — security holds, accuracy degrades (§3.4).** Predictive execution **cannot read beyond the slice** (the
+  partial mirror *is* the security boundary — an unauthorized key simply isn't present, returns absent); a
+  cross-slice read yields a **wrong-but-corrected prediction, not a leak**. So F3's degrade is about *prediction
+  accuracy*, never *safety*.
+- **F6 — ciphertext predictions are sensitive (§3.6).** An op over a decrypted aspect is **un-predictable
+  offline** (needs the transient session key); online, the predicted overlay is plaintext-derived → it is
+  **itself sensitive** (in-memory / encrypted-at-rest, never plaintext-persisted, TTL-discarded; shred composes).
+- **F7 — conflict re-present is a SET (§3.5/§7).** A conflict invalidates a **subtree** of dependent edits, so
+  "re-present the intent" is inherently a group. EDGE.2 needs a **conflict-presentation model** (resolve the
+  root conflict first, then re-evaluate dependents — some may then apply cleanly); auto-retry only the
+  provably-commutative class, which shrinks the subtree that ever reaches the user.
+- **F8 — "scripts read Core KV" is the root smell (CROSS-CUTTING — flagged for Andrew, not folded here).** Live
+  `kv.get`/`kv.Links` is the **common root** of *both* A′'s partiality *and* the #3 Loom-guard-read problem. If
+  scripts were **pure functions of (declared read-set, op)**, A′ would be exact and Loom guards wouldn't need
+  engine Core-KV reads. The clean platform posture: **declared+hydrated reads everywhere; live `kv.get`
+  deprecatable as debt; `kv.Links` (enumeration) the irreducible hard case.** This connects #3/#6/#9/#10 and is a
+  platform-direction call, not an Edge detail — see the board flag.
 
 ---
 
@@ -228,7 +273,18 @@ sets its cursor to the high-water, and **reverts to incremental**. The node also
 about — so the cloud streams only the relevant slice. (Pre-Personal-Lens, EDGE.1's trusted-posture variant
 hydrates via a one-time bounded read of the trusted stream — see §7 EDGE.1.)
 
-### 3.4 The Edge "Processor" (`overlay/`) — optimistic, advisory, **not** authoritative (FORK-A: A)
+### 3.4 The Edge "Processor" (`overlay/`) — optimistic, advisory, **not** authoritative (FORK-A: A′)
+
+> **Ratified refinement (Andrew, 2026-06-29): A′, not pure-A.** The overlay **predicts** the result via a
+> **read-only local Starlark run** in the **edge sandbox** (⑥'s `internal/starlarksandbox` leaf with a
+> local-mirror-backed, read-only `kv` binding), gated by the **F3 rule — predict iff the op's declared
+> `contextHint.reads ⊆ the local mirror`, else degrade to a pending-state** (F4: a `kv.Links`/enumeration op is
+> predictable only if its relation is provably user-private). Predicted **events are inert** (F2 — local-UI only,
+> never published); predictions **chain as a DAG** rooted at confirmed state and a rejected intent invalidates
+> its whole downstream subtree (F1); predictive execution **cannot read beyond the slice** — the partial mirror
+> *is* the security boundary, so a missed read costs *accuracy*, never *safety* (F5). See the *Ratified +
+> party-mode findings* block. The pure-A "render the payload directly" path below is the **degrade fallback** for
+> ops whose read-set isn't locally satisfiable.
 
 This is the P2-preserving core decision (For-Andrew fork 1). When the user triggers a mutation:
 
@@ -490,9 +546,13 @@ already accepted for Multi-cell, HA-NATS, and Personal Lens itself.
 
 ## 8. Adversarial review note
 
-This is a cross-cutting, security-plane capstone composing onto four upstream designs — it warrants a
-`bmad-party-mode` / adversarial pass **before EDGE.1** (the loop) and a re-review **before EDGE.3** (the
-security + Gateway turn-on). Highest-leverage things to attack: **(a)** the P2 boundary — is there *any* path,
+**✅ `bmad-party-mode` pre-build pass RUN (Andrew present, 2026-06-29)** — discharging the Designer-lane obligation
+before EDGE.1. Lenses: Winston (architect), Mary (root-cause), Amelia (impl), Quinn (QA/break-it), Sally (UX),
+Barry (lean). **8 findings folded in** (F1 speculation-DAG, F2 inert predicted-events, F3 the predict-iff-reads⊆mirror
+gate, F4 enumeration-not-predictable, F5 security-holds/accuracy-degrades, F6 ciphertext-prediction-is-sensitive,
+F7 conflict-re-present-as-a-set, F8 the cross-cutting "scripts-read-Core-KV smell" flagged for Andrew) — see the
+*Ratified + party-mode findings* block. **A re-review is still warranted before EDGE.3** (the security + Gateway
+turn-on). This is a cross-cutting, security-plane capstone composing onto four upstream designs. Highest-leverage things to attack: **(a)** the P2 boundary — is there *any* path,
 including the optimistic overlay + the intent queue + a conflict re-audit, where the Edge becomes an
 authoritative writer or a local commit escapes the cloud Processor? (the whole FORK-A rationale rests on "no");
 **(b)** reconcile-by-revision soundness — can a stale/reordered/duplicate delta or an OCC-conflicting offline
