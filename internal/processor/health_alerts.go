@@ -36,6 +36,96 @@ type noopClaimAttemptEmitter struct{}
 
 func (noopClaimAttemptEmitter) RecordClaimAttempt(_ context.Context, _ string) {}
 
+// CommitConflictInfo is the context the Processor surfaces about a same-key
+// commit conflict so it can be investigated as a lane-misassignment signal: two
+// writers raced the SAME Core KV key, which normally means the conflicting op
+// was published on the wrong lane (legitimate only occasionally, e.g. a
+// deliberate urgent-lane write). It feeds the forward Weaver/Loom lane-routing
+// improvement loop (the engines learn to co-route / serialise same-key writers).
+type CommitConflictInfo struct {
+	ConflictingKey string // the Core KV key whose revision condition failed
+	Lane           string // the lane this op was published on
+	OperationType  string // this op's operationType
+	Exhausted      bool   // true when retries were exhausted and the op surfaced RevisionConflict
+}
+
+// CommitConflictEmitter surfaces same-key update conflicts to Health KV at
+// health.processor.<instance>.commit-conflicts. Distinct from the security-alert
+// emitter (these are operational lane-misassignment signals, not security
+// alerts) and from the per-tick heartbeat counters (commit_retries_total /
+// commit_retry_exhausted_total) — this carries the actionable per-conflict
+// context (the racing key + lane + op-kind) the counters cannot.
+type CommitConflictEmitter interface {
+	RecordCommitConflict(ctx context.Context, info CommitConflictInfo)
+}
+
+// noopCommitConflictEmitter is a no-op for tests or modes that don't wire the
+// health KV.
+type noopCommitConflictEmitter struct{}
+
+func (noopCommitConflictEmitter) RecordCommitConflict(_ context.Context, _ CommitConflictInfo) {}
+
+// NewCommitConflictEmitter constructs a CommitConflictEmitter wired to Health
+// KV. Returns a noop when conn is nil or bucket/instance are empty.
+func NewCommitConflictEmitter(conn *substrate.Conn, bucket, instance string, logger *slog.Logger) CommitConflictEmitter {
+	if conn == nil || bucket == "" || instance == "" {
+		return noopCommitConflictEmitter{}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &HealthAlertEmitter{conn: conn, bucket: bucket, instance: instance, logger: logger}
+}
+
+// RecordCommitConflict implements CommitConflictEmitter. Writes a best-effort
+// rolling record to health.processor.<instance>.commit-conflicts with the
+// most-recent conflict context plus a cumulative count, so the condition is
+// operator-visible (Lamplighter-readable) rather than silent. The record is
+// "this is currently happening" (last writer wins), not an audit log — bounded
+// to a single key, never one-per-racing-key (that would be unbounded
+// cardinality). The `count` is a non-atomic read-modify-write (concurrent
+// recorders on the same instance can lose an increment — Phase-1 acceptable, the
+// same posture as claim-attempts); the AUTHORITATIVE totals are the atomic
+// heartbeat counters commit_retries_total / commit_retry_exhausted_total. This
+// marker carries the actionable context (which key, which lane) the counters
+// cannot.
+func (e *HealthAlertEmitter) RecordCommitConflict(ctx context.Context, info CommitConflictInfo) {
+	if e.instance == "" {
+		return
+	}
+	key := fmt.Sprintf("health.processor.%s.commit-conflicts", e.instance)
+
+	var currentCount int64
+	if entry, err := e.conn.KVGet(ctx, e.bucket, key); err == nil {
+		var existing map[string]any
+		if json.Unmarshal(entry.Value, &existing) == nil {
+			if c, ok := existing["count"].(float64); ok {
+				currentCount = int64(c)
+			}
+		}
+	}
+	currentCount++
+
+	body := map[string]any{
+		"key":            key,
+		"instance":       e.instance,
+		"count":          currentCount,
+		"conflictingKey": info.ConflictingKey,
+		"lane":           info.Lane,
+		"operationType":  info.OperationType,
+		"exhausted":      info.Exhausted,
+		"lastAt":         substrate.FormatTimestamp(time.Now()),
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		e.logger.Warn("commit-conflicts: marshal failed", "key", key, "error", err)
+		return
+	}
+	if _, err := e.conn.KVPut(ctx, e.bucket, key, raw); err != nil {
+		e.logger.Warn("commit-conflicts: KV write failed", "key", key, "error", err)
+	}
+}
+
 // HealthAlertEmitter writes Contract #5 alert entries to Health KV.
 type HealthAlertEmitter struct {
 	conn     *substrate.Conn

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -44,6 +45,17 @@ type Deps struct {
 	// health.processor.<instance>.claim-attempts.<outcome>. Nil safe: a nil
 	// ClaimEmitter silently skips emission.
 	ClaimEmitter ClaimAttemptEmitter
+	// ConflictEmitter surfaces same-key commit conflicts (the §3.2 OCC
+	// lane-misassignment signal) to Health KV. Nil → no-op (defaulted in
+	// NewCommitPath).
+	ConflictEmitter CommitConflictEmitter
+	// MaxCommitAttempts bounds the Processor-internal retry on a retryable
+	// revision conflict (re-hydrate → re-execute → re-commit). 0 → default (3).
+	MaxCommitAttempts int
+	// CommitRetryBackoff returns the pause before retry attempt n (1-based: n=1 is
+	// the first retry). Capped well under the lane deadline. Nil → a small
+	// linear default; tests set it to a zero function for determinism.
+	CommitRetryBackoff func(attempt int) time.Duration
 }
 
 // CommitPath drives steps 1-3 (and stubbed 4-10) for a single envelope.
@@ -78,7 +90,33 @@ func NewCommitPath(deps Deps) *CommitPath {
 	if deps.AckerFactory == nil {
 		deps.AckerFactory = DefaultAckerFactory
 	}
+	if deps.ConflictEmitter == nil {
+		deps.ConflictEmitter = noopCommitConflictEmitter{}
+	}
+	if deps.MaxCommitAttempts <= 0 {
+		deps.MaxCommitAttempts = defaultMaxCommitAttempts
+	}
+	if deps.CommitRetryBackoff == nil {
+		deps.CommitRetryBackoff = defaultCommitRetryBackoff
+	}
 	return &CommitPath{deps: deps}
+}
+
+// defaultMaxCommitAttempts bounds the §3.2-OCC internal retry: the first attempt
+// plus up to (default-1) re-hydrate/re-execute/re-commit retries. On exhaustion
+// the conflict surfaces honestly as RevisionConflict (a genuinely hot key).
+const defaultMaxCommitAttempts = 3
+
+// defaultCommitRetryBackoff is a small linear pause (5ms, 10ms, …) before each
+// retry — bounded well under the lane SLA the commit context already carries, so
+// the worst-case retry budget never approaches the lane deadline. A small
+// wall-clock-derived jitter (0–2ms) spreads successive retries; it is not a
+// strong decorrelator of two racers that sample within the same microsecond, but
+// the linear `base` already separates attempts and conflicts are rare.
+func defaultCommitRetryBackoff(attempt int) time.Duration {
+	base := time.Duration(attempt) * 5 * time.Millisecond
+	jitter := time.Duration(time.Now().UnixNano()%2_000_000) * time.Nanosecond
+	return base + jitter
 }
 
 // MessageOutcome is the branch the commit path took for a delivered operation.
@@ -223,67 +261,144 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 	// guards internally on traceAllowDecisions; nil emitter is a no-op.
 	cp.deps.TraceEmitter.Emit(env, decision)
 
-	// --- Steps 4-10: stubbed pipeline. ---
-	var state HydratedState
-	if cp.deps.Hydrator != nil {
-		state, err = cp.deps.Hydrator.Hydrate(ctx, env)
-		if err != nil {
-			return cp.handleStubFailure(ctx, msg, env, "hydrate", err)
-		}
-	}
-	var result ScriptResult
-	if cp.deps.Executor != nil {
-		result, err = cp.deps.Executor.Execute(ctx, env, state)
-		if err != nil {
-			return cp.handleStubFailure(ctx, msg, env, "execute", err)
-		}
-	}
-	if cp.deps.Validator != nil {
-		if err := cp.deps.Validator.Validate(ctx, env, result, state); err != nil {
-			// DDL violations terminate the commit path (no redelivery).
-			var ddlErr *DDLViolation
-			if errors.As(err, &ddlErr) {
-				cp.deps.Metrics.OpsRejected.Add(1)
-				cp.deps.Logger.Info("step 6: DDL violation; rejecting",
-					"requestId", env.RequestID,
-					"constraint", ddlErr.ViolatedConstraint,
-					"mutationKey", ddlErr.MutationKey,
-					"detail", ddlErr.Detail)
-				cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeDDLViolation,
-					ddlErr.Error(), map[string]any{
-						"constraint":  ddlErr.ViolatedConstraint,
-						"mutationKey": ddlErr.MutationKey,
-					}))
-				return OutcomeRejected, substrate.Term
+	// --- Steps 4-8: hydrate → execute → validate → commit, with a bounded
+	// internal retry on a §3.2-OCC revision conflict. ---
+	return cp.commitPipeline(ctx, msg, env, resolvedPermission)
+}
+
+// commitPipeline runs steps 4-8 for one authorized operation and publishes the
+// client reply, returning the (outcome, decision) the caller disposes. It wraps
+// hydrate → execute → validate → commit in a bounded retry loop: a same-key
+// revision conflict on a mutation the Processor conditioned by default (Contract
+// #3 §3.2 — "if omitted, use the revision read at step 4") is absorbed by
+// re-hydrating against the new state and re-executing the script (exactly what a
+// client resubmit does, minus the round-trip + re-auth), instead of bouncing
+// RevisionConflict to the client. Re-execution is safe because a failed atomic
+// batch commits NOTHING (no tracker, no outbox, no mutations) — Contract #4 §4.4.
+//
+// Auth (step 3) is NOT re-run on retry: it ran once in dispatch and is invariant
+// for a fixed envelope (it keys on operationType + actor + authContext, none of
+// which a retry changes), so re-running it would only double-emit traces. The
+// "retry cannot bypass auth" property holds because the retry re-executes the
+// SAME already-authorized op and step 6 re-validates permittedCommands each pass.
+//
+// Retry correctness rests on the Executor re-deriving a FRESH mutation set each
+// pass (no expectedRevision carried over from a prior attempt's defaulting), so
+// applyHydratedRevisions re-conditions against the re-hydrated revision. The real
+// Starlark executor re-runs the script from scratch, satisfying this.
+func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission) (MessageOutcome, substrate.Decision) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			// A lane deadline already hit before we even re-enter — surface
+			// rather than do wasted hydrate/execute work on a dead context.
+			if ctx.Err() != nil {
+				cp.deps.Logger.Warn("step 8: commit-retry abandoned; context done before retry",
+					"requestId", env.RequestID, "attempt", attempt)
+				return OutcomeRetryable, substrate.NakWithDelay
 			}
-			return cp.handleStubFailure(ctx, msg, env, "validate", err)
+			if d := cp.deps.CommitRetryBackoff(attempt); d > 0 {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					// Lane deadline hit mid-backoff — surface the last conflict
+					// honestly rather than spinning past the SLA.
+					cp.deps.Logger.Warn("step 8: commit-retry backoff aborted by context; redelivering",
+						"requestId", env.RequestID, "attempt", attempt)
+					return OutcomeRetryable, substrate.NakWithDelay
+				}
+			}
 		}
-	}
 
-	// Reply-constraint, enforced BEFORE commit: a script-named primaryKey must
-	// lie within the operation's write footprint (a mutation key, or the
-	// 3-segment vertex root of one). The write path is not a read channel — a
-	// script cannot surface a key it did not write. Rejecting here, ahead of the
-	// atomic batch, guarantees a contract violation never mutates Core KV or
-	// publishes events.
-	if result.PrimaryKey != "" && !primaryKeyInCommit(result.PrimaryKey, result.Mutations) {
-		cp.deps.Metrics.OpsRejected.Add(1)
-		cp.deps.Logger.Warn("reply-constraint violation: response.primaryKey is not within the write footprint; rejecting before commit",
-			"requestId", env.RequestID, "primaryKey", result.PrimaryKey)
-		cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeDDLViolation,
-			"response.primaryKey is not within the committed write footprint",
-			map[string]any{"primaryKey": result.PrimaryKey}))
-		return OutcomeRejected, substrate.Term
-	}
+		// --- Step 4: hydrate. ---
+		var state HydratedState
+		var err error
+		if cp.deps.Hydrator != nil {
+			state, err = cp.deps.Hydrator.Hydrate(ctx, env)
+			if err != nil {
+				return cp.handleStubFailure(ctx, msg, env, "hydrate", err)
+			}
+		}
+		// --- Step 5: execute. ---
+		var result ScriptResult
+		if cp.deps.Executor != nil {
+			result, err = cp.deps.Executor.Execute(ctx, env, state)
+			if err != nil {
+				return cp.handleStubFailure(ctx, msg, env, "execute", err)
+			}
+		}
+		// --- Step 6: validate. ---
+		if cp.deps.Validator != nil {
+			if err := cp.deps.Validator.Validate(ctx, env, result, state); err != nil {
+				// DDL violations terminate the commit path (no redelivery, no retry).
+				var ddlErr *DDLViolation
+				if errors.As(err, &ddlErr) {
+					cp.deps.Metrics.OpsRejected.Add(1)
+					cp.deps.Logger.Info("step 6: DDL violation; rejecting",
+						"requestId", env.RequestID,
+						"constraint", ddlErr.ViolatedConstraint,
+						"mutationKey", ddlErr.MutationKey,
+						"detail", ddlErr.Detail)
+					cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeDDLViolation,
+						ddlErr.Error(), map[string]any{
+							"constraint":  ddlErr.ViolatedConstraint,
+							"mutationKey": ddlErr.MutationKey,
+						}))
+					return OutcomeRejected, substrate.Term
+				}
+				return cp.handleStubFailure(ctx, msg, env, "validate", err)
+			}
+		}
 
-	now := cp.deps.Clock()
-	tracker := NewTracker(env, now)
-	commitAck, err := cp.commitWithTaskAutoComplete(ctx, env, result, tracker, resolvedPermission)
-	if err != nil {
-		// Authoritative protected-key guard (Story 1.5.5 P1): an update or
-		// tombstone targeting a data.protected root is rejected before the
-		// atomic batch. Terminate (no redelivery) — a redelivery cannot
-		// succeed since the world is unchanged.
+		// Reply-constraint, enforced BEFORE commit: a script-named primaryKey must
+		// lie within the operation's write footprint (a mutation key, or the
+		// 3-segment vertex root of one). The write path is not a read channel — a
+		// script cannot surface a key it did not write. Rejecting here, ahead of the
+		// atomic batch, guarantees a contract violation never mutates Core KV or
+		// publishes events.
+		if result.PrimaryKey != "" && !primaryKeyInCommit(result.PrimaryKey, result.Mutations) {
+			cp.deps.Metrics.OpsRejected.Add(1)
+			cp.deps.Logger.Warn("reply-constraint violation: response.primaryKey is not within the write footprint; rejecting before commit",
+				"requestId", env.RequestID, "primaryKey", result.PrimaryKey)
+			cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeDDLViolation,
+				"response.primaryKey is not within the committed write footprint",
+				map[string]any{"primaryKey": result.PrimaryKey}))
+			return OutcomeRejected, substrate.Term
+		}
+
+		// (A) Contract #3 §3.2: an update/tombstone with no explicit
+		// expectedRevision is conditioned on the revision read at step 4 (Hydrate),
+		// so two writers of the same key serialise instead of silently
+		// last-write-wins. `defaulted` is the set of keys whose condition WE
+		// supplied — only those are eligible for the (B) retry (an explicit-CAS op
+		// and a create-once uniqueness collision keep surfacing as today).
+		defaulted := applyHydratedRevisions(result.Mutations, state.Context.Hydrated)
+
+		// --- Step 8: commit (with §10.7 task auto-completion injection). ---
+		now := cp.deps.Clock()
+		tracker := NewTracker(env, now)
+		commitAck, err := cp.commitWithTaskAutoComplete(ctx, env, result, tracker, resolvedPermission)
+		if err == nil {
+			// Event publication is outbox-only: the faithful EventList was persisted
+			// in the step-8 atomic batch (vtx.op.<id>.events) and the durable outbox
+			// consumer publishes it to `core-events`. There is no in-commit publish.
+			cp.deps.Metrics.OpsCommitted.Add(1)
+			if env.OperationType == "ClaimIdentity" && cp.deps.ClaimEmitter != nil {
+				cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, "success")
+			}
+			cp.replyTo(msg, BuildAcceptedReplyWithRevisions(env.RequestID, now, result.PrimaryKey, commitAck.Revisions))
+			if attempt > 0 {
+				cp.deps.Logger.Info("step 8: committed after internal retry",
+					"requestId", env.RequestID, "attempts", attempt+1)
+			} else {
+				cp.deps.Logger.Info("step 8: committed", "requestId", env.RequestID)
+			}
+			return OutcomeAccepted, substrate.Ack
+		}
+
+		// Authoritative protected-key guard (Story 1.5.5 P1): an update or tombstone
+		// targeting a data.protected root is rejected before the atomic batch.
+		// Terminate (no redelivery, no retry) — a redelivery cannot succeed since
+		// the world is unchanged.
 		var protErr *ProtectedKeyError
 		if errors.As(err, &protErr) {
 			cp.deps.Metrics.OpsRejected.Add(1)
@@ -300,11 +415,11 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 				}))
 			return OutcomeRejected, substrate.Term
 		}
-		// If the commit failed because the tracker already exists, a
-		// previous redelivery committed and we're racing with our own
-		// idempotency: ack and emit a duplicate reply.
+
 		if errors.Is(err, substrate.ErrAtomicBatchRejected) {
-			// Re-probe the tracker to confirm it was the cause.
+			// If the commit failed because the tracker already exists, a previous
+			// redelivery committed and we're racing with our own idempotency: ack
+			// and emit a duplicate reply.
 			if probe, perr := CheckDedup(ctx, cp.deps.Conn, cp.deps.CoreBucket, env.RequestID); perr == nil && probe.Outcome == DedupDuplicate {
 				cp.deps.Metrics.OpsDuplicates.Add(1)
 				cp.deps.Logger.Info("commit: tracker already exists (concurrent redelivery); ack + duplicate reply",
@@ -312,23 +427,43 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 				cp.replyTo(msg, BuildDuplicateReply(env.RequestID, probe.Tracker))
 				return OutcomeDuplicate, substrate.Ack
 			}
-			// Tracker not present — genuine revision conflict on one of
-			// the business mutations. Surface as RevisionConflict
-			// (Contract #2 §2.6) and terminate (script's assertion of
-			// the world disagrees with reality).
+			// Tracker not present — a genuine revision conflict on one of the
+			// business mutations. Attribute it structurally (the key is not in the
+			// error): a non-empty `moved` means a key WE conditioned by default
+			// (§3.2) actually raced → the retry can fix it. An empty `moved` means a
+			// create-once uniqueness collision or an explicit-CAS — surface it.
 			var confErr *ConflictError
 			if errors.As(err, &confErr) {
+				moved := cp.movedDefaultedKeys(ctx, defaulted)
+				conflictKey := conflictKeyForSignal(confErr.ConflictingKey, moved)
+				if len(moved) > 0 && attempt+1 < cp.deps.MaxCommitAttempts {
+					// (B) Absorb the benign same-key race: re-hydrate (fresh
+					// revision) + re-execute against the new state, then re-commit.
+					cp.deps.Metrics.CommitRetries.Add(1)
+					cp.recordCommitConflict(ctx, env, conflictKey, false)
+					cp.deps.Logger.Info("step 8: revision conflict; re-hydrating + retrying in-process",
+						"requestId", env.RequestID,
+						"conflictingKey", conflictKey,
+						"attempt", attempt+1)
+					continue
+				}
+				if len(moved) > 0 {
+					// Retryable but the budget is exhausted — a genuinely hot key.
+					cp.deps.Metrics.CommitRetryExhausted.Add(1)
+					cp.recordCommitConflict(ctx, env, conflictKey, true)
+				}
 				cp.deps.Metrics.OpsRejected.Add(1)
 				cp.deps.Logger.Info("step 8: revision conflict; rejecting",
 					"requestId", env.RequestID,
-					"conflictingKey", confErr.ConflictingKey)
+					"conflictingKey", conflictKey)
 				cp.replyTo(msg, BuildRejectedReply(env.RequestID, ErrCodeRevisionConflict,
 					confErr.Error(), map[string]any{
-						"conflictingKey": confErr.ConflictingKey,
+						"conflictingKey": conflictKey,
 					}))
 				return OutcomeRejected, substrate.Term
 			}
 		}
+
 		// Genuine commit failure → redeliver on the backoff floor so JetStream
 		// retries without hot-looping a still-failing dependency. Because the
 		// tracker is only created on a successful atomic batch, a failed commit
@@ -338,25 +473,102 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 			"requestId", env.RequestID, "error", err)
 		return OutcomeRetryable, substrate.NakWithDelay
 	}
+}
 
-	// Event publication is outbox-only: the faithful EventList was persisted in
-	// the step-8 atomic batch (vtx.op.<id>.events) and the durable outbox
-	// consumer publishes it to `core-events`, acking only after a confirmed
-	// publish. There is no in-commit publish — this eliminates the double-publish
-	// race and guarantees redelivery republishes the REAL events, never a
-	// reconstruction.
-
-	cp.deps.Metrics.OpsCommitted.Add(1)
-	// Emit claim-attempt success for ClaimIdentity ops only.
-	if env.OperationType == "ClaimIdentity" && cp.deps.ClaimEmitter != nil {
-		cp.deps.ClaimEmitter.RecordClaimAttempt(ctx, "success")
+// applyHydratedRevisions implements Contract #3 §3.2's default update-revision
+// condition: for every update/tombstone mutation that carries NO explicit
+// expectedRevision, set it to the revision the key was read at during step 4
+// (Hydrate). Keys not in the hydrated set (e.g. a lazy kv.Read() not declared in
+// contextHint.reads, or a write to a never-read key) have no step-4 revision and
+// stay unconditioned — the honest limit of "the revision read at step 4". Returns
+// key → the conditioned revision for each key whose condition this defaulting
+// supplied, so the retry path can attribute a conflict structurally (NATS does
+// not surface the failing key) and scope itself to exactly the conflicts §3.2
+// introduces (leaving explicit-CAS and create-once conflicts to surface).
+func applyHydratedRevisions(mutations []MutationOp, hydrated map[string]VertexDoc) map[string]uint64 {
+	if len(hydrated) == 0 {
+		return nil
 	}
-	// Surface the validated principal primaryKey + per-key revisions in the
-	// success reply. PrimaryKey is empty for multi-key ops (clients read the
-	// committed key set from Revisions).
-	cp.replyTo(msg, BuildAcceptedReplyWithRevisions(env.RequestID, now, result.PrimaryKey, commitAck.Revisions))
-	cp.deps.Logger.Info("step 8: committed", "requestId", env.RequestID)
-	return OutcomeAccepted, substrate.Ack
+	var defaulted map[string]uint64
+	for i := range mutations {
+		m := &mutations[i]
+		if m.Op != "update" && m.Op != "tombstone" {
+			continue
+		}
+		if m.ExpectedRevision != nil {
+			continue // explicit caller assertion (compensating op) — never overridden
+		}
+		doc, ok := hydrated[m.Key]
+		if !ok {
+			continue // not read at step 4 → no revision to condition on
+		}
+		rev := doc.Revision
+		m.ExpectedRevision = &rev
+		if defaulted == nil {
+			defaulted = map[string]uint64{}
+		}
+		defaulted[m.Key] = rev
+	}
+	return defaulted
+}
+
+// movedDefaultedKeys structurally attributes an atomic-batch revision conflict.
+// NATS does NOT surface the failing subject in the rejection (it carries only
+// "wrong last sequence: N" — see substrate/batch.go), so the failing key cannot
+// be read off the error. Instead, re-read each key the Processor conditioned by
+// default (§3.2) and report those whose CURRENT Core-KV revision has moved off
+// the value we asserted — NATS revisions are monotonic, so a key that raced now
+// sits at a strictly higher sequence (or is gone). A non-empty result means a
+// benign same-key update race occurred → the retry can fix it by re-hydrating
+// against the new revision. An empty result means no defaulted key moved, so the
+// conflict was a create-once uniqueness collision or an explicit-CAS — retrying
+// cannot help, surface it. Bounded: one KVGet per defaulted key (typically one),
+// only on a conflict (rare). A transient read error is treated as "did not move"
+// (conservative — surface rather than spin); the lane-deadline / NakWithDelay
+// path covers a genuinely unreachable KV.
+func (cp *CommitPath) movedDefaultedKeys(ctx context.Context, defaulted map[string]uint64) []string {
+	if len(defaulted) == 0 {
+		return nil
+	}
+	var moved []string
+	for key, conditionedRev := range defaulted {
+		entry, err := cp.deps.Conn.KVGet(ctx, cp.deps.CoreBucket, key)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				// Hard-deleted under us → the revision we conditioned on is no
+				// longer valid; re-execution must re-derive against its absence.
+				moved = append(moved, key)
+			}
+			continue
+		}
+		if entry.Revision != conditionedRev {
+			moved = append(moved, key)
+		}
+	}
+	return moved
+}
+
+// conflictKeyForSignal picks the key to report for a conflict. The substrate
+// rarely names the failing key (the NATS rejection omits the subject), so prefer
+// the structurally-attributed `moved` set — the keys we proved raced — and fall
+// back to the substrate's best-effort guess only when attribution found nothing.
+func conflictKeyForSignal(guessed string, moved []string) string {
+	if len(moved) > 0 {
+		return strings.Join(moved, ",")
+	}
+	return guessed
+}
+
+// recordCommitConflict surfaces a same-key conflict to Health KV as the
+// lane-misassignment signal (Andrew, 2026-06-29): two writers raced the same
+// key, normally indicating one was published on the wrong lane. Best-effort.
+func (cp *CommitPath) recordCommitConflict(ctx context.Context, env *OperationEnvelope, conflictingKey string, exhausted bool) {
+	cp.deps.ConflictEmitter.RecordCommitConflict(ctx, CommitConflictInfo{
+		ConflictingKey: conflictingKey,
+		Lane:           string(env.Lane),
+		OperationType:  env.OperationType,
+		Exhausted:      exhausted,
+	})
 }
 
 // messageFromJetstream builds the substrate.Message view dispatch consumes from a
@@ -734,22 +946,26 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 	// Wire claim attempt emitter for ClaimIdentity Health KV signals.
 	claimEmitter := NewClaimAttemptEmitter(conn, healthBucket, instance, logger)
 
+	// Wire the commit-conflict emitter (the §3.2-OCC lane-misassignment signal).
+	conflictEmitter := NewCommitConflictEmitter(conn, healthBucket, instance, logger)
+
 	committer := NewCommitter(conn, coreBucket, ddls, logger, time.Now)
 	cp := NewCommitPath(Deps{
-		Conn:          conn,
-		CoreBucket:    coreBucket,
-		HealthKV:      healthBucket,
-		Authorizer:    authz,
-		Hydrator:      NewHydratorWithCache(conn, coreBucket, ddls, logger),
-		Executor:      NewExecutor(NewStarlarkRunner(0, 0), logger),
-		Validator:     NewValidator(ddls, conn, coreBucket, logger),
-		Committer:     committer,
-		Metrics:       metrics,
-		Heartbeater:   hb,
-		Logger:        logger,
-		DenialBuilder: denialBuilder,
-		TraceEmitter:  traceEmitter,
-		ClaimEmitter:  claimEmitter,
+		Conn:            conn,
+		CoreBucket:      coreBucket,
+		HealthKV:        healthBucket,
+		Authorizer:      authz,
+		Hydrator:        NewHydratorWithCache(conn, coreBucket, ddls, logger),
+		Executor:        NewExecutor(NewStarlarkRunner(0, 0), logger),
+		Validator:       NewValidator(ddls, conn, coreBucket, logger),
+		Committer:       committer,
+		Metrics:         metrics,
+		Heartbeater:     hb,
+		Logger:          logger,
+		DenialBuilder:   denialBuilder,
+		TraceEmitter:    traceEmitter,
+		ClaimEmitter:    claimEmitter,
+		ConflictEmitter: conflictEmitter,
 	})
 	return cp, hb, nil
 }

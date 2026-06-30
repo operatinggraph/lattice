@@ -157,10 +157,13 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 				op.HasRevision = true
 				op.Revision = *m.ExpectedRevision
 			}
-			// If no expectedRevision is supplied, the BatchOp goes
-			// through unconditioned. Contract #3 §3.2 says "if omitted,
-			// Processor uses the revision read during step 4" — this
-			// hardening is deferred; only explicit overrides are carried forward.
+			// Contract #3 §3.2: an update/tombstone is conditioned on the
+			// expectedRevision if supplied, else the revision read at step 4.
+			// The commit path (applyHydratedRevisions) defaults ExpectedRevision
+			// to the step-4 hydrated revision before Commit, so by here a default
+			// update arrives already conditioned; only a write to a key never read
+			// at step 4 reaches commit with ExpectedRevision nil (unconditioned —
+			// there is no step-4 revision to assert).
 		}
 		ops = append(ops, op)
 	}

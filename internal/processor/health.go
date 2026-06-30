@@ -36,6 +36,13 @@ type Metrics struct {
 	OpsRejected   atomic.Uint64
 	OpsDuplicates atomic.Uint64
 	OpsMalformed  atomic.Uint64
+	// CommitRetries counts same-key revision conflicts the Processor absorbed by
+	// re-hydrating + re-executing in-process (Contract #3 §3.2 OCC + the bounded
+	// internal retry). CommitRetryExhausted counts conflicts that survived the
+	// retry budget and surfaced RevisionConflict to the client — a genuinely hot
+	// key. Mirrors Weaver's sweepReclaims / sweepReclaimsSuppressed split.
+	CommitRetries        atomic.Uint64
+	CommitRetryExhausted atomic.Uint64
 }
 
 // healthIssue is one Contract #5 §5.5 issue record. since persists across
@@ -225,6 +232,11 @@ func (h *HealthHeartbeater) buildHealthDoc(ctx context.Context, lifecycle string
 		"ops_rejected_total":   h.metrics.OpsRejected.Load(),
 		"ops_duplicates_total": h.metrics.OpsDuplicates.Load(),
 		"ops_malformed_total":  h.metrics.OpsMalformed.Load(),
+		// §3.2 OCC commit-conflict absorption (Contract #5 §5.4): retries the
+		// Processor absorbed in-process vs. those that exhausted the budget and
+		// surfaced RevisionConflict (a genuinely hot key).
+		"commit_retries_total":         h.metrics.CommitRetries.Load(),
+		"commit_retry_exhausted_total": h.metrics.CommitRetryExhausted.Load(),
 	}
 
 	// Real per-lane consumer backlog (Contract #5 §5.4 lane_lag). Each lane has
