@@ -60,6 +60,32 @@ func TestTranslateSpec_ProtectedAndPublic_Rejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "both protected and public")
 }
 
+func TestTranslateSpec_ProtectedSoftDelete_Rejected(t *testing.T) {
+	// A protected RLS table has no is_deleted/deleted_at column and the §6.14
+	// policy does not filter it, so deleteMode "soft" would loop on every delete.
+	_, err := translateSpec(protectedSpec(t, map[string]any{"protected": true, "deleteMode": "soft"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deleteMode")
+	assert.Contains(t, err.Error(), "soft")
+}
+
+func TestTranslateSpec_ProtectedHardDelete_OK(t *testing.T) {
+	// The default (hard) delete is the supported posture for a protected model.
+	r, err := translateSpec(protectedSpec(t, map[string]any{"protected": true, "deleteMode": "hard"}))
+	require.NoError(t, err)
+	assert.True(t, r.Into.Protected)
+	assert.Equal(t, string(adapter.DeleteModeHard), r.Into.DeleteMode)
+}
+
+func TestTranslateSpec_PublicSoftDelete_OK(t *testing.T) {
+	// A non-protected (public) postgres lens may still use soft delete — only the
+	// protected RLS table lacks the is_deleted column.
+	r, err := translateSpec(protectedSpec(t, map[string]any{"public": true, "deleteMode": "soft"}))
+	require.NoError(t, err)
+	assert.False(t, r.Into.Protected)
+	assert.Equal(t, string(adapter.DeleteModeSoft), r.Into.DeleteMode)
+}
+
 func TestTranslateSpec_GrantTable_Defaults(t *testing.T) {
 	// A grant lens may omit table + key — both default from the platform.
 	spec := &LensSpec{

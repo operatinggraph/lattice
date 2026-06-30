@@ -24,7 +24,7 @@ LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:543
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-readpath reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 up:
@@ -241,6 +241,7 @@ up-full:
 	@$(MAKE) up
 	@$(MAKE) orchestration
 	@$(MAKE) install-packages
+	@$(MAKE) provision-readpath
 	@echo "==> Building loupe binary..."
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Killing any prior Loupe process..."
@@ -260,6 +261,7 @@ up-loftspace:
 	@$(MAKE) up-full
 	@$(MAKE) provision-loftspace-role
 	@$(MAKE) install-loftspace
+	@$(MAKE) provision-readpath
 	@echo "==> Building loftspace-app binary..."
 	go build -o bin/loftspace-app ./cmd/loftspace-app
 	@echo "==> Killing any prior loftspace-app process..."
@@ -290,6 +292,25 @@ provision-loftspace-role:
 		-c "GRANT USAGE ON SCHEMA public TO loftspace_app;" \
 		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO loftspace_app;" \
 		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO loftspace_app;"
+
+## provision-readpath — Provision the read-path authorization Postgres tables
+## OUT-OF-BAND for the dev stack: the shared actor_read_grants grant table +
+## every installed protected read-model table (with FORCE ROW LEVEL SECURITY +
+## the §6.14 set-membership policy). Refractor no longer issues this DDL at lens
+## activation — it VERIFIES the RLS posture and pauses the lens fail-closed
+## (Contract #6 §6.14, verify-and-pause) — so the dev stack provisions it here,
+## the exact DDL `lattice lens emit-ddl` prints for an operator to run against a
+## real read-model DB. The DDL is read from the installed lens specs in Core KV
+## (grant table first; protected tables next), so run this AFTER `make up` /
+## install-* so the specs exist. Idempotent (CREATE TABLE IF NOT EXISTS /
+## DROP-then-CREATE POLICY); a no-op when no protected/grant lens is installed.
+provision-readpath:
+	@echo "==> Building lattice CLI..."
+	@go build -o bin/lattice ./cmd/lattice
+	@echo "==> Provisioning read-path authorization tables out-of-band (Contract #6 §6.14)..."
+	@set -o pipefail; NATS_URL=$(NATS_URL) ./bin/lattice lens emit-ddl | \
+		docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -f -
+	@echo "==> Read-path tables provisioned (or none installed)."
 
 ## up-clinic — One-command Clinic vertical: up-full → install-clinic → build +
 ## start clinic-app (:7799) in the background alongside Loupe (:7777). The clinic

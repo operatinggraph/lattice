@@ -14,6 +14,7 @@ import (
 	"github.com/asolgan/lattice/cmd/lattice/output"
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/processor"
+	refractorlens "github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -27,7 +28,54 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd.AddCommand(newActivateCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newDeactivateCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newLagCommand(natsURL, outputFmt))
+	cmd.AddCommand(newEmitDDLCommand(natsURL, outputFmt))
 	return cmd
+}
+
+// newEmitDDLCommand prints the out-of-band provisioning DDL for every installed
+// protected/grant Postgres read-path lens (Contract #6 §6.14, verify-and-pause).
+// Refractor no longer issues this DDL at activation — it verifies the posture
+// and pauses fail-closed — so the operator (or `make provision-readpath`)
+// applies this script against the read-model database out-of-band. It is
+// read-only against Core KV and connects to no Postgres. The grant table is
+// emitted first (every protected policy references it).
+func newEmitDDLCommand(natsURL, outputFmt *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "emit-ddl",
+		Short: "Print the out-of-band DDL for installed protected/grant read-path lenses",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), output.DefaultTimeout)
+			defer cancel()
+
+			conn, err := output.Connect(ctx, *natsURL)
+			if err != nil {
+				if *outputFmt == "json" {
+					_ = output.PrintJSONError("ConnectionError", err.Error())
+					return nil
+				}
+				return err
+			}
+			defer conn.Close()
+
+			stmts, err := refractorlens.EmitReadPathDDL(ctx, conn, bootstrap.CoreKVBucket)
+			if err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("EmitError", err.Error())
+				}
+				return fmt.Errorf("emit read-path DDL: %w", err)
+			}
+
+			if *outputFmt == "json" {
+				return output.PrintJSON(stmts)
+			}
+			if len(stmts) == 0 {
+				fmt.Fprintln(os.Stderr, "-- no protected/grant read-path lenses installed; nothing to provision")
+				return nil
+			}
+			fmt.Print(refractorlens.ReadPathDDLScript(stmts))
+			return nil
+		},
+	}
 }
 
 // lensEntry is the display shape for a Lens meta-vertex.

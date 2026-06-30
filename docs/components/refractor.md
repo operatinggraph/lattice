@@ -67,32 +67,49 @@ Key sub-packages:
 
 ### Protected read-model provisioning (read-path authorization, D1.3)
 
-Ordinary SQL-target lenses (above) project into a table **provisioned out-of-band** — the
-adapter issues no DDL. A **protected** read model is different: it lives in Postgres under
-**row-level security** so a reader sees only the rows it is authorized for (Contract #6 §6.14).
-Refractor owns the provisioning so schema and policy cannot drift from the projection, and
-**FORCE RLS is structural** rather than a checklist item.
+A **protected** read model lives in Postgres under **row-level security** so a reader sees only
+the rows it is authorized for (Contract #6 §6.14). Like every other Postgres target, the table
+is **provisioned out-of-band** — Refractor issues **no DDL**. The difference from a plain table
+is the security plane: a missing/disabled RLS posture produces **no write error** (writes to an
+unlocked table succeed; the table is just world-readable on the *read* path), so the ordinary
+"pause on write error" net would fail-**open**. Refractor closes that gap by **actively
+verifying the RLS posture at activation and pausing the lens fail-closed** if it is absent —
+the **verify-and-pause** model. There is now **one** principle for all Postgres provisioning
+(out-of-band), and FORCE RLS stays structural by being *verified*, not *created*.
 
-The RLS-provisioning primitive lives in `adapter/rls.go`:
+The read-path primitives live in `adapter/rls.go`:
 
-- **`BuildProtectedTableDDL(table, keyCols, body)`** generates `CREATE TABLE IF NOT EXISTS`
-  with the caller's key + body columns plus two platform columns — `authz_anchors text[]`
-  (the §6.14 set of bare-NanoID match tokens) and `projection_seq bigint` — then
-  `ENABLE` **and** `FORCE ROW LEVEL SECURITY` and the **set-membership policy** (`FOR SELECT`):
-  a row is visible iff the current actor (`current_setting('lattice.actor_id', true)`, NULL-safe →
-  deny when unset) holds a **live** grant for **any** of the row's `authz_anchors`. Because
-  the table is FORCE-RLS'd, a table whose policy was never generated **denies all rows**
-  (a fail-closed outage, never a silent leak — §6.14 H3). The policy is `FOR SELECT` so it
-  governs the read path only and never acts as an INSERT `WITH CHECK` that would block the
-  trusted (no-actor) Refractor projector's writes.
-- **`PostgresGrantWriter`** provisions and maintains the shared **`actor_read_grants`** table
-  (the read-auth source of truth that every `cap-read.*` grant lens projects into). Its
-  `UpsertGrant` / `RevokeGrant` enforce the §6.14 **monotonic-seq guard** (a write takes
-  effect only when `projectionSeq` strictly exceeds the stored one, per
+- **`VerifyProtectedTable(pool, table, keyCols, body)`** is the read-only posture check (no DDL,
+  no writes — only system-catalog reads) that a protected lens runs as its `Probe` while
+  infra-paused at activation. It gates, in priority order: the table exists, is an ordinary
+  table, and has row-level security **both `ENABLE`d and `FORCE`d** — the security-critical bit
+  (FORCE *without* ENABLE leaves the table world-readable; with both on, a missing/wrong policy
+  **denies all rows** — §6.14 H3, fail-closed never leak); the expected columns are present with
+  the platform types (`authz_anchors` is exactly `text[]`, `projection_seq` is `bigint`, every
+  key + body column present); and the deterministically-named **`FOR SELECT` set-membership
+  policy** is present and intact (its `USING` references `authz_anchors` against the grant table
+  — a permissive `USING(true)` policy is rejected, not just any SELECT policy). Failures are
+  plain (recoverable) errors so the lens auto-resumes once the operator provisions the table.
+- **`VerifyGrantTable()`** (on `PostgresGrantWriter`) is the same read-only check for the shared
+  **`actor_read_grants`** table — it asserts the expected columns + types so the seq-guarded
+  writes and every protected policy's membership subquery have the shape they depend on. The
+  grant table is the read-auth source of truth, not a protected business table, so it is not
+  itself RLS-locked — only its shape is verified.
+- **`BuildProtectedTableDDL(table, keyCols, body)`** / **`BuildGrantTableDDL()`** generate the
+  exact DDL each table expects (key + body columns plus the platform `authz_anchors text[]` /
+  `projection_seq bigint`; `ENABLE` **and** `FORCE ROW LEVEL SECURITY`; the `FOR SELECT`
+  set-membership policy — a row is visible iff the current actor,
+  `current_setting('lattice.actor_id', true)`, NULL-safe → deny when unset, holds a **live**
+  grant for **any** of the row's `authz_anchors`). They are **no longer executed at activation**
+  — they are the single source of truth the verifier checks against *and* the operator runbook
+  (below) emits.
+- **`PostgresGrantWriter`** maintains the grant table's contents (it no longer provisions it).
+  `UpsertGrant` / `RevokeGrant` enforce the §6.14 **monotonic-seq guard** (a write takes effect
+  only when `projectionSeq` strictly exceeds the stored one, per
   `(actor_id, anchor_id, grant_source)`), so a stale CDC replay can neither downgrade a fresh
-  grant nor **resurrect a revoked one** (H4). `grant_source` (the contributing lens's
-  canonical name) keeps producers disjoint — a revoke from one package never wipes another's
-  coexisting grant. RLS then unions across all sources natively via the policy.
+  grant nor **resurrect a revoked one** (H4). `grant_source` (the contributing lens's canonical
+  name) keeps producers disjoint — a revoke from one package never wipes another's coexisting
+  grant. RLS then unions across all sources natively via the policy.
 
 > **Tombstone column (staged §6.14 clarification).** The grant table carries an `is_deleted`
 > boolean the contract's illustrative four-column schema omits. It is **required**: §6.14
@@ -105,27 +122,46 @@ The RLS-provisioning primitive lives in `adapter/rls.go`:
 **Activation wiring.** A postgres lens spec declares the read-path posture in its
 `targetConfig`:
 
-- **`protected: true`** + a `columns: [{name, type}]` list → at activation `buildAdapter`
-  (`cmd/refractor/main.go`) provisions the `actor_read_grants` table (the policy references
-  it) and then the RLS-locked business table from the spec, and wraps the Postgres adapter in
-  a **`ProtectedAdapter`** that encodes the `authz_anchors` (and any declared `text[]`) column
-  as a Postgres array — the full engine emits a list as `[]any`, which the base adapter would
-  otherwise coerce to JSONB.
+- **`protected: true`** + a `columns: [{name, type}]` list → the lens registers with
+  `InitialPause: PauseInfra` (the substrate seam that makes a consumer **probe before its first
+  drain**) and wraps the Postgres adapter in a **`ProtectedAdapter`** whose `Probe` is
+  `VerifyProtectedTable`. So the lens starts infra-paused, verifies the out-of-band posture, and
+  **projects nothing into a table that is not locked down**; once the operator provisions it the
+  next probe passes and the lens **auto-resumes** (no operator Resume, no Refractor restart). The
+  adapter also encodes the `authz_anchors` (and any declared `text[]`) column as a Postgres array
+  (the full engine emits a list as `[]any`, which the base adapter would otherwise coerce to
+  JSONB). A protected lens **may not** use `deleteMode: soft` — the RLS table has no `is_deleted`
+  column and the §6.14 policy does not filter it, so soft delete is rejected at spec load.
 - **`grantTable: true`** → the lens projects to `actor_read_grants` through the seq-guarded
   **`GrantWriterAdapter`** (table + composite key `actor_id, anchor_id, grant_source` default
-  from the platform; the lens need only RETURN those three). Its `Delete` path tombstones via
-  `RevokeGrant`; it intentionally does **not** support truncate (the table is shared across
-  every `grant_source`).
+  from the platform; the lens need only RETURN those three), and likewise starts infra-paused
+  behind `VerifyGrantTable`. Its `Delete` path tombstones via `RevokeGrant`; it intentionally
+  does **not** support truncate (the table is shared across every `grant_source`).
 - **`public: true`** → the auditable opt-out; no RLS, provisioned out-of-band like any plain
   SQL-target lens. A lens may not be both `protected` and `public`.
 
-**Status:** the provisioning primitive, grant writer, the two read-path adapters, and the
-activation wiring all ship (the H3 deny-all, H4 no-resurrect, and an end-to-end seam proof —
-a protected row written through `ProtectedAdapter` + a grant through `GrantWriterAdapter` →
-RLS shows it only to the granted actor — run against a real Postgres under `POSTGRES_TEST_DSN`).
-**No protected lens ships yet**, so the path is dormant; the first protected business read
-model (lease applications), its `cap-read.residence` grant lens, and the read boundary land in
-the following D1.3 increments (the Verticals stream).
+**Continuous re-verification.** Because the `Probe` is on the periodic supervisor heartbeat, a
+posture turned off *after* activation (e.g. `ALTER TABLE … NO FORCE ROW LEVEL SECURITY`)
+re-pauses the lens within a heartbeat — stronger than create-once provisioning, which never
+re-checks drift.
+
+**Operator runbook (out-of-band provisioning).** The DDL is emitted, never hand-written:
+
+- **`lattice lens emit-ddl`** prints the exact `Build*TableDDL` for every installed
+  protected/grant lens (read-only against Core KV; grant table first, then each protected
+  table), to apply against the read-model database as a migration.
+- **`make provision-readpath`** applies that same DDL to the dev Postgres (idempotent —
+  `CREATE TABLE IF NOT EXISTS` / `DROP`-then-`CREATE POLICY`); it is wired into `make up-full`
+  and `make up-loftspace` so the local stack is one command. Run it **after** install so the
+  lens specs exist in Core KV; a no-op when no protected/grant lens is installed.
+
+**Status:** verify-and-pause provisioning, the grant writer, the two read-path adapters, the
+`InitialPause` substrate seam, and the operator runbook all ship; the first protected business
+read model (`read_lease_applications` + `read_landlord_lease_applications`) and its
+`cap-read.*` grant lenses are live in the LoftSpace vertical (`make up-loftspace`), read through
+the non-superuser SELECT-only `loftspace_app` role so RLS is enforced. The H3 deny-all, H4
+no-resurrect, the verify-and-pause posture checks, and an end-to-end seam proof run against a
+real Postgres under `POSTGRES_TEST_DSN`.
 
 ---
 
