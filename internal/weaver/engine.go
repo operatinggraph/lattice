@@ -348,10 +348,20 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 	hb := newHeartbeater(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, e.cfg.HeartbeatEvery,
 		e.states, e.issues, e.source, e.marks, e.sweep, e.temporal, e.logger)
 	go hb.run(ctx)
-	go e.sweep.run(ctx)
+	// A startup warm sweep runs once so a cold start does not wait a full
+	// interval; the recurring cadence is the durable @every sweep schedule
+	// (armed below) picked up by the weaver-sweep durable, replacing the
+	// in-process ticker (§10.4 recurring temporal lane, brainstorm #47).
+	go e.sweep.warmPass(ctx)
 
 	if err := e.supervisor.Add(ctx, e.temporalSpec()); err != nil {
 		return fmt.Errorf("weaver: start temporal consumer: %w", err)
+	}
+	if err := e.supervisor.Add(ctx, e.sweepSpec()); err != nil {
+		return fmt.Errorf("weaver: start recurring-sweep consumer: %w", err)
+	}
+	if err := e.armSweepSchedule(ctx); err != nil {
+		return fmt.Errorf("weaver: %w", err)
 	}
 
 	e.source.setLoadCallback(func(*Target) { e.reconcileConsumers() })

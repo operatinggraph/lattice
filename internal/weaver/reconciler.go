@@ -117,22 +117,16 @@ func (s *sweeper) backoffInterval(count int) time.Duration {
 	return interval
 }
 
-// run blocks until ctx is cancelled, sweeping once immediately and then on
-// each tick. The single goroutine serializes passes — a pass that outlives the
-// interval simply absorbs the dropped ticks (time.Ticker coalesces), so passes
-// never overlap.
-func (s *sweeper) run(ctx context.Context) {
+// warmPass runs a single reconcile at engine start so a cold start does not wait
+// a full interval before the first sweep. The recurring cadence is driven by the
+// durable @every sweep schedule (Engine.armSweepSchedule + the weaver-sweep
+// durable), not an in-process ticker — so the cadence survives restart, is
+// operator-visible, and fires exactly once across replicas. The warm pass and a
+// fired pass are OCC-safe even if they overlap (the standing §10.3 invariant);
+// on a fresh arm the first occurrence fires a full interval later, so in
+// practice they do not.
+func (s *sweeper) warmPass(ctx context.Context) {
 	s.pass(ctx)
-	t := time.NewTicker(s.interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			s.pass(ctx)
-		}
-	}
 }
 
 // pass sweeps every current mark, then retires CorruptMark issues whose keys
