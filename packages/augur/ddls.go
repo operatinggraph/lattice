@@ -82,7 +82,7 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "augurproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAugurReasoningClaim", "RecordProposal"},
+		PermittedCommands: []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal"},
 		Description: "Augur proposal DDL — the externalTask matched pair for one reasoning episode. " +
 			"Vertex shape: vtx.augurproposal.<handle>, class=augurproposal, root data = {} (D5); business " +
 			"data in aspects: .gap {targetId, entityId, gapColumn, trigger} (the instanceOp's TRUSTED " +
@@ -101,7 +101,11 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"not escape the escalated candidate's scope; otherwise (and on a model refusal, status=failed) it " +
 			"is stored review.state=invalid with an auditable invalidReason. The proposal is always stored. " +
 			"The model NEVER supplies the entity it acts on (read from the claim); idempotent on a redelivered " +
-			"reply via the create-only .review aspect atop the bridge's deterministic reply requestId.",
+			"reply via the create-only .review aspect atop the bridge's deterministic reply requestId. " +
+			"ReviewProposal is the human verdict op (payload {externalRef, verdict ∈ approve|reject}): an operator " +
+			"flips a pending proposal to approved | rejected — the reviewer is the trusted submitting actor (op.actor) " +
+			"and the stamp is op.submittedAt; approve re-runs the §5 boundary against the stored proposal and " +
+			"fail-closes to invalid if it no longer validates. Only a pending proposal is reviewable.",
 		Script: augurproposalDDLScript,
 		InputSchema: `{"type":"object","description":"RecordProposal — the bridge replyOp. The bridge posts {externalRef, status, result}; gap context is reconstructed from the claim vertex, never this payload.","properties":` +
 			`{"externalRef":{"type":"string","description":"The bare instanceKey handle of the reasoning episode; the claim vertex is vtx.augurproposal.<externalRef>."},` +
@@ -114,6 +118,7 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"externalRef": "The bare instanceKey handle Weaver minted for the reasoning episode (no dots / key segments / whitespace); the claim vertex key is vtx.augurproposal.<externalRef>. RecordProposal rejects if no live claim vertex exists for it (the CreateAugurReasoningClaim instanceOp must commit write-ahead).",
 			"status":      "The adapter's terminal outcome verbatim: completed (the model returned a structured proposal in result) or failed (a modeled refusal — the proposal is stored invalid with the refusal as its rationale, never dispatchable). Any other value rejects the op.",
 			"result":      "The model's structured-output proposal as a JSON string {action, params, confidence, rationale, model, promptHash, catalogHash, reasonedAt}. The §5 validator decodes it and validates action ∈ {triggerLoom, assignTask, directOp}, confidence ∈ [0,1], and no scope escape (a params entity-key other than the escalated candidate, read from the trusted claim). Required when status=completed.",
+			"verdict":     "ReviewProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -154,6 +159,21 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "The proposed scopedTo names a DIFFERENT entity than the escalated candidate (read from the " +
 					"trusted claim, not the reply), so the §5 scope-escape check fails: the proposal is still stored " +
 					"(auditability) but with review.state=invalid + an invalidReason, never pending, never dispatchable.",
+			},
+			{
+				Name: "ReviewProposal — a human operator approves a pending proposal (the verdict op)",
+				Payload: map[string]any{
+					"externalRef": "augurEpisodeHJKMNPQRST",
+					"verdict":     "approve",
+				},
+				ExpectedOutcome: "The proposal must be review.state=pending (only a pending proposal is reviewable; any other " +
+					"state rejects InvalidReviewTransition). The reviewer is the TRUSTED submitting actor (op.actor, " +
+					"capability-authorized — never a payload field) and the stamp is op.submittedAt (the sandbox has no clock; a " +
+					"replay re-derives the identical timestamp). On approve the §5 record-time boundary is re-run against the " +
+					"STORED proposal (action vocabulary, confidence, scope vs the trusted claim entity) — fail-closing to invalid " +
+					"if it no longer validates. The .review aspect flips pending → approved (OCC-guarded on its revision), a " +
+					"reviewedBy link to the actor is created, and augur.proposalReviewed is emitted. verdict=reject flips to " +
+					"rejected with no re-validation.",
 			},
 		},
 	}
@@ -323,6 +343,45 @@ def scope_verdict(params, entity_key, entity_id):
     if not references:
         return False, "proposal does not scope to the escalated candidate " + entity_key + " (no param references it)"
     return True, ""
+
+# revalidate_for_approval re-runs the §5 record-time deterministic boundary
+# against the STORED proposal at approval time (design §3.2: "re-runs the
+# deterministic validator on approve"). It re-reads the proposal's .proposed /
+# .confidence aspects + the TRUSTED claim .gap (entity identity comes from HERE,
+# never any reply) and re-checks the DDL-determinable half — action vocabulary,
+# confidence range, scope containment. (The live-catalog drift re-check is the
+# dispatch-time leg, Weaver-side; this leg defends against a proposal that no
+# longer validates against the static boundary.) Known-key reads only. Returns
+# (ok, reason); ok False => the approval fail-closes to invalid.
+def revalidate_for_approval(proposal_key):
+    proposed_doc = kv.Read(proposal_key + ".proposed")
+    if not alive(proposed_doc) or proposed_doc.data == None:
+        return False, "proposal has no recorded .proposed aspect"
+    pdata = proposed_doc.data
+    action = ""
+    if "action" in pdata and type(pdata["action"]) == type(""):
+        action = pdata["action"]
+    params = {}
+    if "params" in pdata and type(pdata["params"]) == type({}):
+        params = pdata["params"]
+    if action not in ALLOWED_ACTIONS:
+        return False, "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + action
+
+    conf_doc = kv.Read(proposal_key + ".confidence")
+    score = -1.0
+    if alive(conf_doc) and conf_doc.data != None and "score" in conf_doc.data:
+        sv = conf_doc.data["score"]
+        if type(sv) == type(0) or type(sv) == type(0.0):
+            score = sv
+    if score < 0.0 or score > 1.0:
+        return False, "confidence out of range [0,1]: " + str(score)
+
+    gap_doc = kv.Read(proposal_key + ".gap")
+    if not alive(gap_doc) or gap_doc.data == None or "entityId" not in gap_doc.data:
+        return False, "claim .gap missing entityId"
+    entity_key = gap_doc.data["entityId"]
+    _, entity_id = parts_of(entity_key, "claim.gap.entityId", "")
+    return scope_verdict(params, entity_key, entity_id)
 
 def execute(state, op):
     ot = op.operationType
@@ -502,6 +561,79 @@ def execute(state, op):
             {"class": "augur.proposalRecorded",
              "data": {"proposalKey": proposal_key, "entityId": entity_key,
                       "action": action, "reviewState": review_state}},
+        ]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": proposal_key}}
+
+    if ot == "ReviewProposal":
+        # The human verdict (design §3.2): an operator flips a PENDING proposal to
+        # approved | rejected. The reviewer is the TRUSTED submitting actor
+        # (op.actor — capability-authorized, never a payload field — the same
+        # don't-trust-the-payload-for-identity discipline as RecordProposal's entity
+        # split); the stamp is the envelope's authoritative submit time
+        # (op.submittedAt; the sandbox has no clock, so a replay re-derives the
+        # identical timestamp). Only a pending proposal is reviewable — any other
+        # state rejects (terminal-state guard: an invalid / already-reviewed /
+        # dispatched proposal cannot be re-reviewed; a redelivered op is collapsed
+        # earlier by the Contract #4 requestId tracker).
+        handle = required_bare_handle(p, "externalRef")
+        proposal_key = "vtx.augurproposal." + handle
+        verdict = required_string(p, "verdict")
+        if verdict != "approve" and verdict != "reject":
+            fail("InvalidArgument: verdict: must be one of approve, reject; got " + verdict)
+
+        review_doc = kv.Read(proposal_key + ".review")
+        if not alive(review_doc):
+            fail("UnknownAugurProposal: no recorded proposal for " + proposal_key + " (RecordProposal must commit a verdict before review)")
+        rd = review_doc.data
+        cur_state = ""
+        if rd != None and "state" in rd:
+            cur_state = rd["state"]
+        if cur_state != "pending":
+            fail("InvalidReviewTransition: proposal " + proposal_key + " is '" + cur_state + "', only a pending proposal is reviewable")
+
+        reviewer = op.actor
+        if not is_vtx_key(reviewer):
+            fail("InvalidState: op.actor is not a vertex key: " + reviewer)
+        reviewer_type, reviewer_id = parts_of(reviewer, "actor", "")
+        reviewed_at = op.submittedAt
+
+        new_state = "approved"
+        invalid_reason = ""
+        if verdict == "reject":
+            # A reject is always permitted — no re-validation; the operator declines
+            # the proposal regardless of whether it would still dispatch.
+            new_state = "rejected"
+        else:
+            # Re-run the §5 boundary against the STORED proposal (design §3.2). A
+            # re-validation failure fail-closes to invalid: the operator reviewed,
+            # but the verdict is invalid, never approved / dispatchable.
+            in_scope, reason = revalidate_for_approval(proposal_key)
+            if not in_scope:
+                new_state = "invalid"
+                invalid_reason = "re-validation at approval failed: " + reason
+
+        # Flip the .review aspect (unconditioned update, preserving the aspect's
+        # full shape — D5; the reply leg carries no ContextHint.Reads, so the
+        # single-review guarantee rides the create-only reviewedBy link + the
+        # pending-only guard above, not a step-8 revision CAS). The reviewedBy link
+        # records WHO reviewed (create-only — a redelivery conflicts on it; a second
+        # genuine review by the same reviewer is already blocked by the pending-only
+        # guard once the first review lands).
+        reviewedby_lnk = "lnk.augurproposal." + handle + ".reviewedBy." + reviewer_type + "." + reviewer_id
+        mutations = [
+            {"op": "update", "key": proposal_key + ".review",
+             "document": {"class": "augur.review", "isDeleted": False,
+                          "vertexKey": proposal_key, "localName": "review",
+                          "data": {"state": new_state, "invalidReason": invalid_reason,
+                                   "reviewedAt": reviewed_at, "dispatchedAt": ""}}},
+            make_link(reviewedby_lnk, proposal_key, reviewer, "reviewedBy", "reviewedBy",
+                      {"reviewedAt": reviewed_at, "verdict": verdict}),
+        ]
+        events = [
+            {"class": "augur.proposalReviewed",
+             "data": {"proposalKey": proposal_key, "reviewState": new_state,
+                      "reviewer": reviewer, "verdict": verdict}},
         ]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": proposal_key}}

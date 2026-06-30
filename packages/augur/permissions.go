@@ -4,17 +4,19 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //
-// Both ops are operator-driven — Weaver (the directOp dispatcher) and the
-// bridge service actor are operator-equivalent (holdsRole → operator, exactly
-// like the orchestration-base service actors), so each op is granted to operator
-// at scope:any — the same operator-grant idiom orchestration-base / lease-signing
-// use for their instanceOp/replyOp pairs:
+// All three ops are operator-driven — Weaver (the directOp dispatcher), the
+// bridge service actor, and the human reviewer are operator-equivalent (holdsRole
+// → operator, exactly like the orchestration-base service actors), so each op is
+// granted to operator at scope:any — the same operator-grant idiom
+// orchestration-base / lease-signing use for their instanceOp/replyOp pairs:
 //
 //   - CreateAugurReasoningClaim — Weaver submits this directOp (Option F) when a
 //     gap escalates; it mints the claim vertex write-ahead of the reasoning call
 //     and emits external.augur for the bridge.
 //   - RecordProposal — the bridge's service actor submits the replyOp that
 //     records the proposal verdict.
+//   - ReviewProposal — a human operator submits the verdict that flips a pending
+//     proposal to approved | rejected (re-validated on approve).
 //
 // Both are target-less for auth (the directOp/replyOp posture, Contract #10
 // §10.4): auth keys on operationType + actor, so the operator grant authorizes
@@ -32,6 +34,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "RecordProposal",
 			Scope:         "any",
 			Note:          "Authorizes the bridge replyOp (identity:bridge, operator-equivalent) to record an Augur proposal vertex (design §3.2 / §5).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "ReviewProposal",
+			Scope:         "any",
+			Note:          "Authorizes a human operator to render the approve/reject verdict on a pending Augur proposal (design §3.2). The reviewer is the trusted submitting actor (op.actor); the verdict is recorded on the proposal's .review aspect + a reviewedBy link.",
 			GrantsTo:      []string{"operator"},
 		},
 	}

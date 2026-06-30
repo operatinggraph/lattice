@@ -41,9 +41,10 @@ const (
 	apStaffCapKey   = "cap.identity." + apStaffActorID
 )
 
-// staffCapDoc grants the staff actor the Augur matched pair
-// (CreateAugurReasoningClaim + RecordProposal, scope any) — the Weaver directOp +
-// bridge replyOp authority, modeled here as an operator-equivalent staff actor.
+// staffCapDoc grants the staff actor the full Augur op set
+// (CreateAugurReasoningClaim + RecordProposal + ReviewProposal, scope any) — the
+// Weaver directOp + bridge replyOp + human-reviewer authority, modeled here as an
+// operator-equivalent staff actor.
 func staffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -56,6 +57,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateAugurReasoningClaim", Scope: "any"},
 			{OperationType: "RecordProposal", Scope: "any"},
+			{OperationType: "ReviewProposal", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -478,4 +480,192 @@ func TestAugur_NestedParamsRejected(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, claim)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// --- ReviewProposal (the human verdict op — design §3.2) ---------------------
+
+// Per-scenario review-episode handles (valid 20-char NanoIDs).
+const (
+	hRvApprove = "BBaugurApprHJKMNPQRS"
+	hRvReject  = "BBaugurRjctHJKMNPQRS"
+	hRvNonPend = "BBaugurNpndHJKMNPQRS"
+	hRvUnknown = "BBaugurUnknHJKMNPQRS"
+	hRvDouble  = "BBaugurDoubHJKMNPQRS"
+	hRvRevalFC = "BBaugurRvfcHJKMNPQRS"
+)
+
+// reviewEnv builds the human-verdict op. The operator submits only {externalRef,
+// verdict}; the reviewer identity is the TRUSTED actor on the envelope (op.actor)
+// and the stamp is op.submittedAt — neither is a payload field (the same
+// don't-trust-the-payload-for-identity discipline as RecordProposal's entity split).
+func reviewEnv(reqID, handle, verdict string) *processor.OperationEnvelope {
+	payload := map[string]any{"externalRef": handle, "verdict": verdict}
+	b, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReviewProposal",
+		Actor:         apStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "augurproposal",
+		Payload:       json.RawMessage(b),
+	}
+}
+
+// driveReview submits a ReviewProposal and drives it to the wanted outcome.
+func driveReview(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, handle, verdict string, want processor.MessageOutcome) {
+	t.Helper()
+	rv := reviewEnv(testutil.GenReqID("APRev"+tag), handle, verdict)
+	testutil.PublishOp(t, conn, rv)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// reviewField reads a string field off vtx.augurproposal.<id>.review.data.
+func reviewField(t *testing.T, ctx context.Context, conn *substrate.Conn, proposalKey, field string) string {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, proposalKey+".review")
+	data, _ := doc["data"].(map[string]any)
+	v, _ := data[field].(string)
+	return v
+}
+
+// drivePending drives a claim → valid-pending reply and returns the proposal key.
+func drivePending(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, handle, targetKey, entityKey string) string {
+	t.Helper()
+	result := proposalResult("assignTask", 0.82,
+		map[string]any{"scopedTo": entityKey, "forOperation": "ApproveLeaseApplication"})
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, tag, handle, targetKey, entityKey, "completed", result)
+	if got := reviewState(t, ctx, conn, pk); got != "pending" {
+		t.Fatalf("precondition: review.state = %q, want pending", got)
+	}
+	return pk
+}
+
+// TestAugur_Review_Approve: an operator approves a pending proposal — the verdict
+// flips pending → approved, the reviewer (the trusted actor) + stamp are recorded
+// on .review, and a reviewedBy link to the actor is created (proposal is source).
+func TestAugur_Review_Approve(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-approve")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := drivePending(t, ctx, conn, cp, cons, "appr", hRvApprove, targetKey, entityKey)
+	driveReview(t, ctx, conn, cp, cons, "appr", hRvApprove, "approve", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "reviewedAt"); got == "" {
+		t.Fatalf("reviewedAt must be stamped on review")
+	}
+	if got := reviewField(t, ctx, conn, pk, "invalidReason"); got != "" {
+		t.Fatalf("invalidReason = %q, want empty on a clean approve", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got != "" {
+		t.Fatalf("dispatchedAt = %q, want empty (dispatch is Fire 2b)", got)
+	}
+	// reviewedBy link: proposal is the source, the trusted actor is the target.
+	lnk := "lnk.augurproposal." + hRvApprove + ".reviewedBy.identity." + apStaffActorID
+	link := readDoc(t, ctx, conn, lnk)
+	if got, _ := link["sourceVertex"].(string); got != pk {
+		t.Fatalf("reviewedBy sourceVertex = %q, want %q (proposal is source)", got, pk)
+	}
+	if got, _ := link["targetVertex"].(string); got != apStaffActorKey {
+		t.Fatalf("reviewedBy targetVertex = %q, want %q (the reviewing actor)", got, apStaffActorKey)
+	}
+	if ld, _ := link["data"].(map[string]any); ld["verdict"] != "approve" {
+		t.Fatalf("reviewedBy.data.verdict = %v, want approve", ld["verdict"])
+	}
+}
+
+// TestAugur_Review_Reject: an operator rejects a pending proposal — flips to
+// rejected with no re-validation (a reject is always permitted).
+func TestAugur_Review_Reject(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-reject")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := drivePending(t, ctx, conn, cp, cons, "rjct", hRvReject, targetKey, entityKey)
+	driveReview(t, ctx, conn, cp, cons, "rjct", hRvReject, "reject", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "rejected" {
+		t.Fatalf("review.state = %q, want rejected", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "reviewedAt"); got == "" {
+		t.Fatalf("reviewedAt must be stamped on reject")
+	}
+}
+
+// TestAugur_Review_NonPending_Rejected: only a pending proposal is reviewable.
+// Reviewing an invalid proposal is rejected (InvalidReviewTransition) and the
+// stored verdict is unchanged — the terminal-state guard.
+func TestAugur_Review_NonPending_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-nonpend")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	// A bad-action reply lands review.state=invalid.
+	result := proposalResult("DROP TABLE", 0.99, nil)
+	pk := driveClaimThenReply(t, ctx, conn, cp, cons, "npnd", hRvNonPend, targetKey, entityKey, "completed", result)
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("precondition: review.state = %q, want invalid", got)
+	}
+
+	driveReview(t, ctx, conn, cp, cons, "npnd", hRvNonPend, "approve", processor.OutcomeRejected)
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (unchanged — an invalid proposal cannot be reviewed)", got)
+	}
+}
+
+// TestAugur_Review_UnknownProposal_Rejected: reviewing a handle with no recorded
+// proposal is rejected (a verdict can never fabricate a proposal).
+func TestAugur_Review_UnknownProposal_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-unknown")
+	seedEscalation(t, ctx, conn)
+
+	driveReview(t, ctx, conn, cp, cons, "unkn", hRvUnknown, "approve", processor.OutcomeRejected)
+}
+
+// TestAugur_Review_DoubleReview_Rejected: a proposal is reviewed once. A second
+// genuine review (distinct requestId) finds the proposal already approved (not
+// pending) and is rejected — the pending-only guard prevents a re-review.
+func TestAugur_Review_DoubleReview_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-double")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := drivePending(t, ctx, conn, cp, cons, "dbl1", hRvDouble, targetKey, entityKey)
+	driveReview(t, ctx, conn, cp, cons, "dbl1", hRvDouble, "approve", processor.OutcomeAccepted)
+	driveReview(t, ctx, conn, cp, cons, "dbl2", hRvDouble, "reject", processor.OutcomeRejected)
+
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved (the second review must not overwrite)", got)
+	}
+}
+
+// TestAugur_Review_Approve_RevalidationFailCloses: the §3.2 approval re-validation
+// is defense-in-depth — if a pending proposal's stored .proposed no longer passes
+// the §5 boundary, approve fail-closes to invalid (never approved/dispatchable).
+// The adversarial precondition (a pending proposal carrying an out-of-vocabulary
+// action) cannot arise through the validated record path, so the test forces it by
+// overwriting the stored .proposed aspect before approval.
+func TestAugur_Review_Approve_RevalidationFailCloses(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-rv-revalfc")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := drivePending(t, ctx, conn, cp, cons, "rvfc", hRvRevalFC, targetKey, entityKey)
+	// Force the precondition: tamper the stored remediation to an out-of-vocabulary
+	// action while the verdict is still pending.
+	seedVertex(t, ctx, conn, pk+".proposed", "augur.proposed",
+		map[string]any{"action": "DROP TABLE", "params": map[string]any{}})
+
+	driveReview(t, ctx, conn, cp, cons, "rvfc", hRvRevalFC, "approve", processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid (approval re-validation must fail-close)", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "invalidReason"); got == "" {
+		t.Fatalf("invalidReason must explain the re-validation failure")
+	}
 }

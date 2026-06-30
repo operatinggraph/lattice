@@ -60,9 +60,19 @@
 //     review verdict. Read-model only (trusted-tool posture) — not protected,
 //     not a weaver-target convergence lens.
 //
-//   - Permissions granting CreateAugurReasoningClaim + RecordProposal to
-//     `operator` (Weaver — the directOp dispatcher — and the bridge service
-//     actor are both operator-equivalent via holdsRole → operator).
+//   - ReviewProposal — the human verdict op (design §3.2): an operator flips a
+//     pending proposal to `approved` | `rejected`. The reviewer is the trusted
+//     submitting actor (op.actor) and the stamp is the envelope's submit time;
+//     approve re-runs the §5 boundary against the stored proposal and fail-closes
+//     to `invalid` if it no longer validates. Only a pending proposal is
+//     reviewable; the verdict + reviewer are recorded on the .review aspect + a
+//     reviewedBy link. (The approved-proposal dispatch pickup is Fire 2b,
+//     Weaver-side.)
+//
+//   - Permissions granting CreateAugurReasoningClaim + RecordProposal +
+//     ReviewProposal to `operator` (Weaver — the directOp dispatcher — the bridge
+//     service actor, and the human reviewer are all operator-equivalent via
+//     holdsRole → operator).
 //
 // Install via the InstallPackage kernel op. See docs/components/_packages.md and
 // _bmad-output/implementation-artifacts/augur-design.md.
@@ -73,8 +83,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "augur",
-	Version:     "0.1.0",
-	Description: "Augur (Weaver L3 reasoning tier) data + safety foundation: the augurproposal vertex type + RecordProposal op with the record-time deterministic-validation boundary.",
+	Version:     "0.2.0",
+	Description: "Augur (Weaver L3 reasoning tier) data + safety foundation: the augurproposal vertex type + the CreateAugurReasoningClaim / RecordProposal capture pair (record-time deterministic-validation boundary) + the ReviewProposal human-verdict op (re-validated on approve).",
 	Depends:     []string{"orchestration-base"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

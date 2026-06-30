@@ -10,12 +10,14 @@
 //
 // Asserts:
 //
-//	1 DDL: augurproposal (meta.ddl.vertexType) — the externalTask matched pair —
-//	  with permittedCommands = exactly {CreateAugurReasoningClaim, RecordProposal}
-//	  and its standard self-description aspects.
-//	2 permission vertices: CreateAugurReasoningClaim + RecordProposal, each
-//	  scope=any, grantedBy operator (Weaver + the bridge service actor are both
-//	  operator-equivalent — design §3.2 / escalation-dispatch addendum §7).
+//	1 DDL: augurproposal (meta.ddl.vertexType) — the externalTask matched pair +
+//	  the human-verdict op — with permittedCommands = exactly
+//	  {CreateAugurReasoningClaim, RecordProposal, ReviewProposal} and its standard
+//	  self-description aspects.
+//	3 permission vertices: CreateAugurReasoningClaim + RecordProposal +
+//	  ReviewProposal, each scope=any, grantedBy operator (Weaver, the bridge
+//	  service actor, and the human reviewer are all operator-equivalent — design
+//	  §3.2 / escalation-dispatch addendum §7).
 //	1 meta.lens: augurProposals (the P5 read-model review surface Loupe reads).
 //	1 package vertex + manifest aspect (name=augur).
 //
@@ -42,9 +44,9 @@ const (
 	augDDLCanonical = "augurproposal"
 )
 
-// The two ops the augurproposal DDL owns — both in its permittedCommands and
-// each a permission vertex granted to operator.
-var augOps = []string{"CreateAugurReasoningClaim", "RecordProposal"}
+// The ops the augurproposal DDL owns — each in its permittedCommands and each a
+// permission vertex granted to operator.
+var augOps = []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal"}
 
 func main() {
 	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
