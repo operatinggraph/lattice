@@ -17,4 +17,13 @@ func TestScheduleHeaders_PinnedToServerConstants(t *testing.T) {
 	if ScheduleTargetHeader != natsserver.JSScheduleTarget {
 		t.Fatalf("ScheduleTargetHeader = %q, want the server's %q", ScheduleTargetHeader, natsserver.JSScheduleTarget)
 	}
+	if ScheduleTTLHeader != natsserver.JSScheduleTTL {
+		t.Fatalf("ScheduleTTLHeader = %q, want the server's %q", ScheduleTTLHeader, natsserver.JSScheduleTTL)
+	}
+	if SchedulerHeader != natsserver.JSScheduler {
+		t.Fatalf("SchedulerHeader = %q, want the server's %q", SchedulerHeader, natsserver.JSScheduler)
+	}
+	if ScheduleNextHeader != natsserver.JSScheduleNext {
+		t.Fatalf("ScheduleNextHeader = %q, want the server's %q", ScheduleNextHeader, natsserver.JSScheduleNext)
+	}
 }
