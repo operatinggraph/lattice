@@ -2,6 +2,15 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-06-29 · `d85450d` · [Refractor/Core] `nanoIdFromKey` auth-plane cypher fn (D1 prereq)
+- 2026-06-29 · `97afcd2` · [Core] Processor commit OCC §3.2 update-conditioning + bounded retry + Health signal
+- 2026-06-29 · `6eaabcc` · [Core] instanceOf Fire E — expose the op's own type-DDL meta key to Starlark
+- 2026-06-29 · `cea0c3b` · [Core] instanceOf Fire 1 — step-6 governing-DDL chain resolver
+- 2026-06-29 · `1443109` · [CI] Grounding fire: re-measured the pipeline
+- 2026-06-28 · `ce2086f` · [CI] Parallelize the lease-convergence e2e gate (t.Parallel)
+- 2026-06-28 · `07f3824` · [CI] Parallelize the weaver test package (t.Parallel)
+- 2026-06-27 · `1443109` · [CI] Serial pipeline → 4-job parallel matrix
+- 2026-06-28 · `7f98d83` · [Core/pkgmgr] F-004 Fire 3 — dev-loop refresh targets + upgrade docs
 - 2026-06-28 · `cd20ce8` · [Core/pkgmgr] F-004 Fire 1a — version-independent entity keys
 - 2026-06-28 · `75e9acc` · [Core/substrate] NATS write-restriction Fire 1 — credential seam (dark)
 - 2026-06-28 · `04c7689` · [Weaver] Pace collapse-only userTask reclaims with a state machine

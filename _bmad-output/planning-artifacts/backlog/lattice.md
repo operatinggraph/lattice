@@ -90,7 +90,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped; D1.5 rolling — clinic patient/provider/staff-wildcard done; next: loftspace remaining models |
+| Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped; D1.5 rolling — clinic + loftspace objects/documents done; next: any remaining unclassified read models |
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · 🚧 seq behind NATS-write-restriction F2b |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1 (credential seam) shipped; F2 = live enforcement |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |
@@ -166,6 +166,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-01 · `9191eed` · [loftspace-app] D1.5 — objects/documents read boundary (unit photos stay public; identity/leaseapp document bytes now authenticateRead+entitled-scoped; closed the unauthenticated document/PII-byte dump)
 - 2026-07-01 · `40f4d25` · [Core/clinic-app] D1.5 — staff wildcard read grant (WildcardAnchor RLS clause + capabilityReadWildcardGrants kernel lens; closed the unauthenticated clinic-wide appointments dump)
 - 2026-07-01 · `17ccd42` · [clinic-app/clinic-domain] D1.5 Increment 2 — provider-self protected schedule read model (RLS-closed the unauthenticated `?provider=` full-schedule leak; staff wildcard audiences flagged follow-up)
 - 2026-07-01 · `c46fbe2` · [clinic-app/clinic-domain] D1.5 — patient-self protected read model (RLS-closed the unauthenticated `?patient=` appointment-history leak; provider/staff audiences flagged follow-up)
@@ -191,13 +192,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-06-29 · `f04f331` · [Core/bootstrap] D1.3 Increment 1 — base `capabilityRead` self-anchor lens
 - 2026-06-29 · `c1a8901` · [Core/pkgmgr + Refractor] Package-declared protected/grant Postgres lenses
 - 2026-06-29 · `d772195` · [Refractor] Full-engine multi-column projection key (GrantTable producer)
-- 2026-06-29 · `d85450d` · [Refractor/Core] `nanoIdFromKey` auth-plane cypher fn (D1 prereq)
-- 2026-06-29 · `97afcd2` · [Core] Processor commit OCC §3.2 update-conditioning + bounded retry + Health signal
-- 2026-06-29 · `6eaabcc` · [Core] instanceOf Fire E — expose the op's own type-DDL meta key to Starlark
-- 2026-06-29 · `cea0c3b` · [Core] instanceOf Fire 1 — step-6 governing-DDL chain resolver
-- 2026-06-29 · `1443109` · [CI] Grounding fire: re-measured the pipeline
-- 2026-06-28 · `ce2086f` · [CI] Parallelize the lease-convergence e2e gate (t.Parallel)
-- 2026-06-28 · `07f3824` · [CI] Parallelize the weaver test package (t.Parallel)
-- 2026-06-27 · `1443109` · [CI] Serial pipeline → 4-job parallel matrix
-- 2026-06-28 · `7f98d83` · [Core/pkgmgr] F-004 Fire 3 — dev-loop refresh targets + upgrade docs
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*
