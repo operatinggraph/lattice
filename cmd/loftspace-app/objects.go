@@ -70,6 +70,56 @@ func objectLinkKey(oid, targetKey, linkName string) (string, error) {
 	return "lnk.object." + oid + "." + linkName + "." + parts[1] + "." + parts[2], nil
 }
 
+// vtxType returns the <type> segment of a vtx.<type>.<id> key, or "" if key
+// does not have that shape (including a blank type or id segment — a
+// malformed key must never resolve to a real type).
+func vtxType(key string) string {
+	parts := strings.Split(key, ".")
+	if len(parts) != 3 || parts[0] != "vtx" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	return parts[1]
+}
+
+// isPublicObjectOwner reports whether ownerKey is a unit — the ONLY owner type
+// the Documents/objects surface serves without authentication (D1.5). Unit-owned
+// objects are listing photos: publicly browsable, the same classification
+// `/api/listings` already carries (marketing content, never PII). Every other
+// owner type (identity, leaseapp) is applicant-scoped document content
+// (proof-of-income, ID scans, the signed lease) and requires authenticateRead +
+// entitlement below.
+func isPublicObjectOwner(ownerKey string) bool {
+	return vtxType(ownerKey) == "unit"
+}
+
+// entitledToObjectOwner reports whether actorID (a verified read-actor's bare
+// identity NanoID) is entitled to read objects owned by ownerKey — an identity
+// or leaseapp vtx key (isPublicObjectOwner has already cleared unit keys).
+//
+//   - identity owner: entitled iff ownerKey IS the actor's own identity (the
+//     actor reading their own ID scan / proof-of-income upload).
+//   - leaseapp owner: entitled iff the PROTECTED, RLS-scoped
+//     read_lease_applications model resolves ownerKey for this actor — the
+//     same applicant-only membership check handleApplications/
+//     handleLeaseDocumentGet already condition their reads on (D1.3 Fire 2).
+//
+// A nil pgPool (Postgres read boundary not configured) fails closed: a
+// leaseapp-owned object is simply not entitled, never silently allowed.
+func (s *server) entitledToObjectOwner(ctx context.Context, actorID, ownerKey string) bool {
+	switch vtxType(ownerKey) {
+	case "identity":
+		return ownerKey == "vtx.identity."+actorID
+	case "leaseapp":
+		if s.pgPool == nil {
+			return false
+		}
+		_, ok, err := queryApplicationByKey(ctx, s.pgPool, actorID, ownerKey)
+		return err == nil && ok
+	default:
+		return false
+	}
+}
+
 // handleObjects routes /api/objects:
 //
 //	POST   /api/objects                              → upload bytes + AttachObject
@@ -148,8 +198,19 @@ func computeDocuments(keys []string, get kvGetter, owners []string) []documentVi
 // applicant's leaseapp / identity (the Documents tab) OR a unit (listing photos).
 // `owner` may repeat (`?owner=a&owner=b`) to union an applicant's identity + every
 // application into one "all my documents" view. `applicant` is accepted as a
-// backward-compatible single-owner alias; omit both to list every object. The lens
-// projects objects by ownerKey, so the same list-and-filter path serves any owner.
+// backward-compatible single-owner alias.
+//
+// D1.5 — split by owner type (isPublicObjectOwner): a **unit** owner (listing
+// photos) is served unauthenticated, mirroring `/api/listings`'s deliberate public
+// classification. Every other owner (identity / leaseapp — applicant document
+// content: proof-of-income, ID scans, the signed lease) requires
+// authenticateRead + entitledToObjectOwner; a non-entitled or unauthenticated
+// request simply drops that owner from the result (the same "can't tell
+// not-mine from not-real" posture the RLS reads use), never erroring the whole
+// call just because ONE requested owner isn't the caller's. An owner-less
+// request ("list every object") is no longer served — the D1.5 shape closes
+// exactly that unauthenticated full-dump vector — the caller must scope by at
+// least one owner.
 func (s *server) handleObjectList(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -157,6 +218,33 @@ func (s *server) handleObjectList(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	var requested []string
+	for _, o := range r.URL.Query()["owner"] {
+		if o = strings.TrimSpace(o); o != "" {
+			requested = append(requested, o)
+		}
+	}
+	if len(requested) == 0 {
+		if a := strings.TrimSpace(r.URL.Query().Get("applicant")); a != "" {
+			requested = append(requested, a)
+		}
+	}
+
+	allowed, status, msg := s.resolveAllowedObjectOwners(ctx, r, requested)
+	if status != 0 {
+		s.writeError(w, status, msg)
+		return
+	}
+	if len(allowed) == 0 {
+		// computeDocuments treats an EMPTY scope as "no filter — list everything"
+		// (the wildcard shape the operator/manage-photos view relies on); every
+		// requested owner having been rejected must NOT fall through to that
+		// wildcard, or a caller could probe an unentitled protected owner and get
+		// every object in the system back. Short-circuit to an empty result.
+		s.writeJSON(w, http.StatusOK, map[string]any{"documents": []documentView{}, "count": 0})
+		return
+	}
 
 	bucket := bootstrap.WeaverTargetsBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
@@ -172,19 +260,45 @@ func (s *server) handleObjectList(w http.ResponseWriter, r *http.Request) {
 		}
 		return entry.Value, true
 	}
-	var owners []string
-	for _, o := range r.URL.Query()["owner"] {
-		if o = strings.TrimSpace(o); o != "" {
-			owners = append(owners, o)
-		}
-	}
-	if len(owners) == 0 {
-		if a := strings.TrimSpace(r.URL.Query().Get("applicant")); a != "" {
-			owners = append(owners, a)
-		}
-	}
-	docs := computeDocuments(keys, get, owners)
+	docs := computeDocuments(keys, get, allowed)
 	s.writeJSON(w, http.StatusOK, map[string]any{"documents": docs, "count": len(docs)})
+}
+
+// resolveAllowedObjectOwners applies D1.5 to a requested owner-key list (pure
+// decision logic, no NATS read — independently testable): requiring at least
+// one owner (closes the unauthenticated full-dump vector), splitting
+// public/protected via isPublicObjectOwner, and — only when a protected owner
+// was requested — authenticating the caller and keeping only the entitled
+// subset (entitledToObjectOwner). status != 0 means the caller should write
+// that status/msg and stop; status == 0 with an empty `allowed` means "return
+// an empty result", not "list everything" (see the call site's comment).
+func (s *server) resolveAllowedObjectOwners(ctx context.Context, r *http.Request, requested []string) (allowed []string, status int, msg string) {
+	if len(requested) == 0 {
+		return nil, http.StatusBadRequest, "at least one owner= (or applicant=) query param is required"
+	}
+
+	var publicOwners, protectedOwners []string
+	for _, o := range requested {
+		if isPublicObjectOwner(o) {
+			publicOwners = append(publicOwners, o)
+		} else {
+			protectedOwners = append(protectedOwners, o)
+		}
+	}
+
+	allowed = publicOwners
+	if len(protectedOwners) > 0 {
+		actor, err := s.authenticateRead(r)
+		if err != nil {
+			return nil, http.StatusUnauthorized, "authentication required: " + err.Error()
+		}
+		for _, o := range protectedOwners {
+			if s.entitledToObjectOwner(ctx, actor.Subject, o) {
+				allowed = append(allowed, o)
+			}
+		}
+	}
+	return allowed, 0, ""
 }
 
 // handleObjectUpload implements POST /api/objects. It streams the file part to
@@ -310,9 +424,13 @@ func (s *server) handleObjectGet(w http.ResponseWriter, r *http.Request, oid str
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	storeName, contentType, ok := s.resolveObject(ctx, conn, oid)
+	storeName, contentType, owners, ok := s.resolveObject(ctx, conn, oid)
 	if !ok {
 		s.writeError(w, http.StatusNotFound, "object not found in the read model")
+		return
+	}
+	if authOK, status, msg := s.authorizeObjectGet(ctx, r, owners); !authOK {
+		s.writeError(w, status, msg)
 		return
 	}
 
@@ -347,15 +465,16 @@ func (s *server) handleObjectGet(w http.ResponseWriter, r *http.Request, oid str
 	_, _ = io.Copy(w, rc)
 }
 
-// resolveObject finds an object's storeName + contentType in the
+// resolveObject finds an object's storeName + contentType + owners in the
 // `objectAttachments` read model by oid (NOT Core KV; P5). It lists the lens keys
 // and matches the row whose entityKey is vtx.object.<oid> — the same list-and-
-// filter pattern the other vertical-app readers use.
-func (s *server) resolveObject(ctx context.Context, conn *substrate.Conn, oid string) (storeName, contentType string, ok bool) {
+// filter pattern the other vertical-app readers use. owners is the raw
+// owner-key list off the row (may be empty for a degenerate zero-link object).
+func (s *server) resolveObject(ctx context.Context, conn *substrate.Conn, oid string) (storeName, contentType string, owners []string, ok bool) {
 	bucket := bootstrap.WeaverTargetsBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
 	if err != nil {
-		return "", "", false
+		return "", "", nil, false
 	}
 	want := "vtx.object." + oid
 	for _, k := range keys {
@@ -371,10 +490,52 @@ func (s *server) resolveObject(ctx context.Context, conn *substrate.Conn, oid st
 			continue
 		}
 		if row.EntityKey == want && row.StoreName != "" {
-			return row.StoreName, row.ContentType, true
+			for _, o := range row.Owners {
+				if o.OwnerKey != "" {
+					owners = append(owners, o.OwnerKey)
+				}
+			}
+			return row.StoreName, row.ContentType, owners, true
 		}
 	}
-	return "", "", false
+	return "", "", nil, false
+}
+
+// authorizeObjectGet enforces D1.5 on a resolved object's owners before its
+// bytes stream, mirroring resolveAllowedObjectOwners' per-owner-type logic
+// exactly rather than a single any-owner-is-public shortcut: an object is
+// public ONLY when it has ZERO protected (identity/leaseapp) owners — a unit
+// owner never grants access to a DIFFERENT, protected owner also linked to
+// the same object (a content-addressed object can carry more than one link;
+// the fix closes the case where a unit link would otherwise leak a co-owned
+// identity/leaseapp link with no auth at all). Otherwise it requires
+// authenticateRead + entitledToObjectOwner against at least one protected
+// owner. A missing/invalid token is 401 (nothing to hide — every protected
+// object requires SOME credential); an authenticated-but-not-entitled
+// request gets the same 404 a genuinely absent object would, so the caller
+// cannot tell "not yours" from "doesn't exist" (the posture
+// handleLeaseDocumentGet already established). No owners at all (the
+// degenerate zero-link case) is never public and can never be entitled.
+func (s *server) authorizeObjectGet(ctx context.Context, r *http.Request, owners []string) (ok bool, status int, msg string) {
+	var protectedOwners []string
+	for _, o := range owners {
+		if !isPublicObjectOwner(o) {
+			protectedOwners = append(protectedOwners, o)
+		}
+	}
+	if len(owners) > 0 && len(protectedOwners) == 0 {
+		return true, 0, ""
+	}
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		return false, http.StatusUnauthorized, "authentication required: " + err.Error()
+	}
+	for _, o := range protectedOwners {
+		if s.entitledToObjectOwner(ctx, actor.Subject, o) {
+			return true, 0, ""
+		}
+	}
+	return false, http.StatusNotFound, "object not found in the read model"
 }
 
 // handleObjectDetach implements DELETE /api/objects/<oid>?targetKey=&linkName=.

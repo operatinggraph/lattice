@@ -170,6 +170,35 @@ async function authedGet(path) {
   }
 }
 
+// openDocument fetches a D1.5-protected object's bytes with the Bearer token
+// (a plain <a href> navigation can't attach one) and opens them as a blob URL
+// in a new tab. The blob URL is revoked after a delay long enough for the new
+// tab to load the content, so it doesn't leak for the life of the page.
+async function openDocument(oid) {
+  let token;
+  try {
+    token = await readToken();
+  } catch (e) {
+    toast("Could not open document: " + e.message, "err");
+    return;
+  }
+  if (!token) {
+    toast("select an applicant identity to sign in", "err");
+    return;
+  }
+  const res = await fetch("/api/objects/" + encodeURIComponent(oid), {
+    headers: { Authorization: "Bearer " + token },
+  });
+  if (!res.ok) {
+    toast("Could not open document: HTTP " + res.status, "err");
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 function toast(msg, kind, extra) {
   const t = $("#toast");
   t.className = "toast " + (kind || "");
@@ -1582,7 +1611,10 @@ async function loadDocuments() {
     .map((o) => "owner=" + encodeURIComponent(o))
     .join("&");
   try {
-    const data = await api("/api/objects?" + query);
+    // Documents-tab owners are always identity/leaseapp keys (never a unit), so
+    // this list is D1.5-protected server-side — authedGet, mirroring
+    // loadLandlordRLS/handleApplications.
+    const data = await authedGet("/api/objects?" + query);
     state.docs = data.documents || [];
   } catch (e) {
     grid.innerHTML = "";
@@ -1644,12 +1676,13 @@ function renderDocCard(d) {
 
   const actions = document.createElement("div");
   actions.className = "card-actions";
-  const view = document.createElement("a");
+  // A document's bytes are D1.5-protected (identity/leaseapp owner), so a plain
+  // <a href> navigation (no Authorization header) would 404. Fetch it with the
+  // Bearer token and open the result as a blob URL instead.
+  const view = document.createElement("button");
   view.className = "ghost btn-link";
   view.textContent = "View";
-  view.href = "/api/objects/" + encodeURIComponent(d.oid);
-  view.target = "_blank";
-  view.rel = "noopener";
+  view.addEventListener("click", () => openDocument(d.oid));
   actions.append(view);
 
   // Detach is available for documents uploaded this session (the FE knows the
