@@ -34,7 +34,7 @@ The operation envelope is the message format a client publishes to `core-operati
 | `actor` | yes | string (full vertex key, e.g., `vtx.identity.<NanoID>`) | immutable | Identity vertex submitting the operation. Used for Capability KV auth lookup (commit step 3) and provenance fields on resulting documents. |
 | `submittedAt` | yes | string (ISO 8601) | immutable | Client-side submission timestamp. Useful for debugging and audit. **NOT** used by the Processor for ordering — JetStream sequence is authoritative. |
 | `payload` | yes | object | immutable | Operation-specific data. Shape varies by `operationType`. Schema validated by Starlark dispatch (not by envelope schema; envelope is type-agnostic). May be empty `{}` for parameterless operations. |
-| `contextHint` | optional | object with `reads: string[]` | immutable | JIT Hydration directive — declared read set. Lists Core KV keys the Starlark script will read. Processor pre-fetches these at commit step 4. If absent, Processor falls back to lazy on-demand reads (with latency penalty under load). See §2.5. |
+| `contextHint` | optional | object with `reads: string[]`, optional `optionalReads: string[]`, and optional `enumerations: {hub, relation, direction}[]` | immutable | JIT Hydration directive — declared read set. `reads` lists Core KV keys the script reads whose **absence is a correctness error** (a missing key faults `HydrationMiss`, fail-closed). `optionalReads` lists declared keys whose **absence is a legitimate branch** (read-before-create / dedup) — hydrated if present, recorded as the absent sentinel if missing (never `HydrationMiss`). `enumerations` declares `kv.Links` link-enumerations (§2.5.1) as **metadata** — bounded, paged, **not** hydrated — for the Edge mirror-coverage gate + static classification. Processor pre-fetches `reads`/`optionalReads` at commit step 4. If a read is absent from `contextHint`, the Processor falls back to lazy on-demand reads (latency penalty under load, and not Edge-predictable). See §2.5. |
 
 **`actor` form:** Full vertex key including the `vtx.` prefix. Short forms (`identity.<id>`) are reserved for HTTP headers in Phase 2 (Gateway translates to full key before envelope submission).
 
@@ -160,6 +160,22 @@ hash verbatim — the plaintext never enters Lattice and is never returned.
 
 ### 2.5 Context Hint Semantics
 
+#### Read posture (the declared-read norm)
+
+Write-path Starlark execution is, **to the extent its reads are declared, a pure function of `(op payload, declared+hydrated read-set)`**. That purity is what makes the cloud commit replay-stable, lets the Edge predict an op's result locally (an op is locally predictable iff all its reads are declared and ⊆ the local mirror), and keeps Core-KV reads inside the Processor (no engine reads Core-KV business state). **Declaring every *declarable* read is therefore the norm, not merely an optimization.** A write-path read falls into one of five classes:
+
+| Class | Description | Disposition |
+|---|---|---|
+| **(a) declared exact-key** | the key is known at submit time and declared in `reads`/`optionalReads`; `kv.Read` serves it from the step-4 hydrated cache | **the norm** — replay-stable, OCC-snapshotted, Edge-predictable |
+| **(b) declarable-but-undeclared** | a lazy on-demand `kv.Read` of a knowable key for no reason | **deprecated debt** — should move to (a); subject to a `lint-conventions` flag |
+| **(c) deliberately unsnapshotted** | a knowable key read live **on purpose** to keep it *out* of the OCC condition set (e.g. config the op must not falsely conflict on) | **sanctioned, but must be an explicit author choice** (annotated), not a slip |
+| **(d) read-before-create / dedup** | a knowable key whose absence is a legitimate branch | declare in **`optionalReads`** (folds into (a) — declared, snapshotted, Edge-predictable) |
+| **(e) enumeration + follow-up** | `kv.Links` (§2.5.1) and the data-dependent per-element `kv.Read`s keyed off its results — the key set is data-derived and **unbounded**, so never hydrated | **bounded paged live read, declared as *metadata*** (`contextHint.enumerations`) — the declaration gives the Edge a mirror-coverage gate + the lint a classification; it is **not** a hydration directive. Enumerate-then-write concurrency is best-effort (a companion serialization epoch, class-a); the invariant-enforcer is Weaver detect+recover. |
+
+A script reading only class-(a)/(d) keys is **replay-stable**. A script performing any (b)/(c)/(e) read is **not** replay-stable — it reads live state and may branch differently on replay; for those, the Processor (deterministic id + OCC + the `CreateOnly` backstop), not replay determinism, is the idempotency authority. The posture does not eliminate non-stable reads; it keeps them **few, named, and statically visible**.
+
+#### `reads` (fail-closed) vs `optionalReads` (absence-tolerant)
+
 The `contextHint.reads` array declares Core KV keys the Starlark script will read. At commit step 4 (Hydrate), the Processor pre-fetches these into the working set cache.
 
 **When provided:**
@@ -174,9 +190,15 @@ The `contextHint.reads` array declares Core KV keys the Starlark script will rea
 - Per-operation latency increases proportional to read count
 - At MVP scale (10–100 ops/sec) this is tolerable; under sustained load it becomes a bottleneck
 
-**Convention:** SDK tools and AI agent integrations SHOULD populate `contextHint` whenever the read set is determinable at submission time. The platform does not enforce its presence.
+**`optionalReads` (absence-tolerant declared reads — class (d)).** A key in `optionalReads` is hydrated exactly like a `reads` key, **except** a not-found is **not** a `HydrationMiss`: the key is recorded as *known-absent*, so `kv.Read(key)` returns `None` from the cache (no live GET). This lets the read-before-create / dedup pattern — "does this entity already exist? if not, create it" — be a **declared** read (replay-stable, OCC-snapshotted, Edge-predictable) rather than a lazy live one. The absent key resolves at the step-4 snapshot and is conditioned create-able; a concurrent create that wins between step 4 and step 8 is caught by the `CreateOnly` backstop (RevisionConflict → re-hydrate → now present → no-op).
 
-**Future evolution (post-Phase 1):** Static analysis of Starlark scripts may auto-derive read sets, eliminating the need for callers to populate `contextHint` explicitly. Not in scope for Phase 1.
+**Authoring rule (fail-closed discipline).** A key whose **absence is a correctness error** MUST go in `reads` (fail-closed `HydrationMiss`). `optionalReads` is **only** for a read whose absence is a *legitimate branch*. `optionalReads` must never be used to soften a read the operation's correctness depends on being present.
+
+**Convention:** SDK tools and AI agent integrations SHOULD populate `contextHint` whenever the read set is determinable at submission time, declaring class-(d) reads in `optionalReads`. Per the read posture above, declaring every *declarable* read (classes a/d) is the norm; an undeclared knowable read (class b) is deprecated debt, and a deliberately-unsnapshotted read (class c) must be an explicit author choice. Undeclared reads still execute (lazy on-demand), so presence is not hard-enforced at the envelope layer — but it is the expected posture and is `lint-conventions`-checkable.
+
+**Future evolution (post-Phase 1):** Static analysis of Starlark scripts can classify a script's reads (declared / declarable-undeclared / enumeration) — used to lint class-(b) debt and to derive the Edge per-op predictability flag. (Auto-derivation cannot replace declaration for class-(e) data-dependent keys, which are undeclarable by definition.) Not in scope for Phase 1.
+
+**`enumerations` (declared link-enumeration — class (e); metadata, not hydration).** An op that calls `kv.Links` (§2.5.1) declares each enumeration as `{ hub, relation, direction }` in `contextHint.enumerations`. This is **metadata, not a hydration directive** — a high-degree hub's link-set is *never* materialised (that would be unbounded); the enumeration still executes paged and live in the sandbox. The declaration buys (1) the **Edge mirror-coverage gate** — an op is Edge-predictable iff the declared relation is fully in the local mirror, else it degrades to pending — and (2) **static classification** for the read-posture lint. An enumerate-**then-write** should additionally declare a **companion serialization epoch** (a class-(a) scalar every mutator of the relation bumps) in `reads`: this is **best-effort contention reduction**, not a guarantee — the actual double-write invariant-enforcer is **Weaver detect + recover**, not a write-time lock.
 
 ### 2.5.1 Bounded Link Enumeration (`kv.Links`)
 

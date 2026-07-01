@@ -1,6 +1,6 @@
 # Design — Script-read posture: declared reads as the norm, bounded enumeration, and Processor-side guarded operations
 
-**Status: 📐 awaiting-Andrew (ratification). Revised 2026-07-01** (reshaped over a ratification working session + two `bmad-party-mode` adversarial rounds — see §0).
+**Status: ✅ Andrew-ratified 2026-07-01** (reshaped over a ratification working session + two `bmad-party-mode` adversarial rounds — see §0). **Fires 1–2 contract surface (Contract #2 `optionalReads` + `enumerations` + read-posture) committed; the guard surface (Contract #2 `guard`/`correlationToken`, #3 `operation.guardSkipped`, #10 §10.5/§10.6) is staged at Fire 3 (build-deferred, and #03 currently carries an unrelated uncommitted edit).**
 **Author: Winston (Designer fire).**
 **Backlog row:** `planning-artifacts/backlog/lattice.md` → *Refinements & ops* → "Script-read posture".
 **Origin:** the Edge Lattice party-mode finding **F8** ("scripts reading Core KV is the root smell").
