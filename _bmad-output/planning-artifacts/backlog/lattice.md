@@ -57,6 +57,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Loupe] Operator UI (`app.js`, 1142 LOC) has no automated coverage** | No JS test harness in the repo — standing up one is an architectural call. | ★★ | L | 🔭 flag-for-Andrew |
 | **[Refractor] Retire the legacy `simple` engine (full-engine is universal)** | All 20 lenses are `engine:"full"`; the ~2.8k-LOC `simple` parser + its registry fallback are dead in prod but own the shared `EvalResult`/`QueryPlan` types → decouple-then-delete. | ★★ | M–L | ✅ ratified · [design](../../implementation-artifacts/retire-simple-engine-design.md) · no contract change; D1 = delete dead invalidation-forest; 3 fires (B: move carriers → C: delete forest → A: delete engine) |
 | **[Refractor/pipeline] Fan-out eval-error disposition + adjacency-watch edge branches uncovered** | `dispositionEvalErr` (0% — link/aspect fan-out eval-error → terminal-DLQ / infra-pause / transient-nak mapping) and `handleAdjUpdate` (13.5% — adjacency-watch reprojection: the not-found / tombstone / bad-key / unmarshal arms). Happy-path fan-out is e2e-covered; the error/edge arms are not. Mirror of the HealthSink coverage rows. | ★★ | XS–S | 📋 · refs `pipeline/pipeline.go:625,921`, `pipeline/evaluate.go` |
+| **[Core] Atomic-batch size ceiling undocumented + unenforced** | A Starlark script's mutation set has no documented/enforced max size; a legitimate op that exceeds NATS's per-batch byte limit surfaces as a raw substrate/NATS error at step 8, not a typed Processor rejection — no bound, no clean failure mode. | ★★ | S | 📋 · refs `lattice-architecture.md:210` ("Atomic batch size ceiling"), `internal/substrate/batch.go` (`AtomicBatch`, no size check), `internal/processor/step8_commit.go` |
+| **[Core] UninstallPackage tombstones unconditionally (F-011 per-key OCC follow-up)** | `Installer.Uninstall` submits without per-key `expectedRevision` — a concurrent write to a declared key is silently overwritten. Fix: persist install-time `Revisions` into `.manifest`, read back at uninstall (script path already accepts it). | ★ | S–M | 📋 · refs `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md` §"UninstallPackage per-key OCC (F-011)" |
 
 ### Survey log (round-robin rotation)
 
@@ -64,9 +66,8 @@ Rotation memory only — findings are the filed rows; fire narratives live in co
 Components: Core · Weaver · Loom · Refractor · Loupe (+ the cross-cutting feature backlog). Survey the
 stalest (`git log -1 --format=%ct -- <path>`), note ONE dated line, rotate.
 
-- **Last surveyed:** 2026-06-30 Refractor (healthy; filed simple-engine-retire + fan-out-coverage) ·
-  feature-backlog (healthy, ~25 scored items).
-- **Next:** Core (`internal/processor` + `bootstrap` + `substrate`), then Weaver.
+- **Last surveyed:** 2026-07-01 Core (healthy; filed atomic-batch-size-ceiling + uninstall-per-key-OCC).
+- **Next:** Weaver, then Loom.
 
 ## Lattice feature backlog — the Phase-3 build queue
 
