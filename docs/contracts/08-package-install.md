@@ -122,16 +122,17 @@ The script tombstones each declared key and (when a key carries an integer
 protected-key check — a tombstone of a protected kernel key is rejected
 authoritatively by the Processor commit-time guard (§8.4), not by this script.
 
-> **Per-key OCC is deferred.** The script supports `expectedRevision`, but the
-> canonical per-subject sequence is only exposed in the committing op's
-> `OperationReply.Revisions` (the install reply), not via `KVGet`. Threading the
-> install-time committed revisions through to a later uninstall is heavier than
-> Story 1.5.5 warranted, so the client tombstones **unconditionally**. Window: a
-> concurrent Processor write to a declared key between the client's read and the
-> commit is silently overwritten by the tombstone; the batch is still atomic, so
-> no partial/mixed state results. See
-> `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md` (UninstallPackage per-key OCC) for
-> the proposed follow-up.
+> **Per-key OCC (read-time revision).** Before submitting, the client `KVGet`s each
+> declared key and passes the entry's revision as its `expectedRevision`. A Core-KV
+> key is its own JetStream subject, so `KVGet`'s revision **is** the per-subject
+> last-sequence the `Nats-Expected-Last-Subject-Sequence` precondition compares
+> against (the same read-time revision the Processor conditions its own §3.2
+> updates/tombstones on). If any declared key is concurrently modified between the
+> client's read and the commit, the whole atomic batch is rejected
+> (`RevisionConflict`) — because the batch is atomic, the package is left **fully
+> installed** (never half-uninstalled); re-run the uninstall (the re-read picks up
+> the new revision). Conditioning on the *read-time* revision (not the install-time
+> one) is what makes a legitimately-upgraded key not spuriously conflict.
 
 ---
 
@@ -232,17 +233,17 @@ Loom registries reload changed targets / patterns from their CDC sources.
 
 ### OCC
 
-`update` / `tombstone` are **unconditional** (no per-key `expectedRevision`), for the same
-reason §8.3 defers uninstall OCC: the canonical per-subject revision is exposed only in the
-committing op's `OperationReply.Revisions`, not via `KVGet`. The batch is atomic, so no
-partial/mixed state results; the only relaxed guarantee is lost-update on a key being upgraded
-concurrently with another Processor write — acceptable for an admin-driven upgrade.
+`update` / `tombstone` are conditioned on the **read-time revision**, the same as uninstall
+(§8.3): the diff already `KVGet`s each surviving key for the body comparison, and a removed key
+is read to capture its revision, so each mutation asserts the revision it was read at as its
+`expectedRevision`. A concurrent Processor write to a declared key between the diff read and the
+commit fails the whole atomic batch (`RevisionConflict`); the batch is atomic, so the package is
+left at its **pre-upgrade** version (never half-migrated) — re-run the upgrade to resolve.
 
 ---
 
 ## 8.7 Out of scope
 
-- **Per-key uninstall / upgrade OCC** (§8.3 / §8.6 window): deferred follow-up.
 - **In-flight-instance DDL-version pinning** (a breaking DDL change during an upgrade while a
   Loom instance is mid-pattern or a Weaver gap is open): warned/blocked by a future migration
   guard (brainstorm G6). The upgrade is atomic but does not today fence in-flight orchestration.
