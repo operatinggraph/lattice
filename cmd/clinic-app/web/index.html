@@ -21,6 +21,7 @@
     <button id="tab-appts" class="tab" role="tab" aria-selected="false" aria-controls="view-appts">My Appointments</button>
     <button id="tab-schedule" class="tab" role="tab" aria-selected="false" aria-controls="view-schedule">Schedule</button>
     <button id="tab-followups" class="tab" role="tab" aria-selected="false" aria-controls="view-followups">Follow-ups</button>
+    <button id="tab-series" class="tab" role="tab" aria-selected="false" aria-controls="view-series">Series</button>
     <button id="tab-availability" class="tab" role="tab" aria-selected="false" aria-controls="view-availability">Availability</button>
   </nav>
 
@@ -77,6 +78,36 @@
 
     <!-- My Appointments -->
     <section id="view-appts" role="tabpanel" aria-labelledby="tab-appts" hidden>
+      <div class="avail-editor" id="my-series">
+        <h3>🔁 Recurring visit series</h3>
+        <p class="hint">A standing cadence (e.g. every 30 days) that keeps a "next visit due" worklist gap rolling forward for this patient — no need to re-book each occurrence by hand.</p>
+        <div id="my-series-list" class="grid" aria-live="polite"></div>
+        <div id="my-series-empty" class="empty" hidden></div>
+        <details class="inline-add" id="start-series">
+          <summary>＋ Start a recurring series</summary>
+          <div class="field-row">
+            <div class="field">
+              <label for="series-provider">Provider</label>
+              <select id="series-provider" aria-label="Choose a provider for the recurring series"></select>
+            </div>
+            <div class="field">
+              <label for="series-interval">Every <span class="opt">(days)</span></label>
+              <input type="number" id="series-interval" min="1" value="30" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="series-start">First occurrence</label>
+              <input type="date" id="series-start" />
+            </div>
+            <div class="field">
+              <label for="series-end">Ends <span class="opt">(optional)</span></label>
+              <input type="date" id="series-end" />
+            </div>
+          </div>
+          <button type="button" id="series-start-submit">Start series</button>
+        </details>
+      </div>
       <div class="panel-controls">
         <button id="reload-appts" class="ghost">Refresh</button>
         <label for="appts-filter">Show</label>
@@ -130,6 +161,22 @@
       <p class="hint followups-lead">Every documented visit that requested a follow-up, clinic-wide. Overdue leads. “Book follow-up” drops you into the Book tab pre-filled with the patient and provider.</p>
       <div id="followups" class="grid" aria-live="polite"></div>
       <div id="followups-empty" class="empty" hidden></div>
+    </section>
+
+    <!-- Recurring visit series worklist (clinic-wide staff queue) -->
+    <section id="view-series" role="tabpanel" aria-labelledby="tab-series" hidden>
+      <div class="panel-controls">
+        <button id="reload-series" class="ghost">Refresh</button>
+        <label for="series-filter">Show</label>
+        <select id="series-filter" aria-label="Filter recurring visit series">
+          <option value="active">Active series</option>
+          <option value="all">All (incl. paused/ended)</option>
+        </select>
+        <span id="series-summary" class="summary"></span>
+      </div>
+      <p class="hint">Every recurring visit series, clinic-wide — grouped by how soon its next occurrence is due. A series rolls its own next-due date forward on its own each time it converges; “Book” drops you into the Book tab pre-filled with the patient and provider.</p>
+      <div id="series" class="grid" aria-live="polite"></div>
+      <div id="series-empty" class="empty" hidden></div>
     </section>
 
     <!-- Provider Availability (admin) -->

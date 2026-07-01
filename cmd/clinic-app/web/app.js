@@ -13,6 +13,7 @@ const state = {
   appts: [],
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
+  series: [], // every recurring visit series (the visitSeriesDue lens, clinic-wide worklist + the selected patient's own list)
   patient: null, // the selected patient key (the trusted-tool context)
   view: "book",
   highlight: null,
@@ -311,6 +312,7 @@ async function loadProviders() {
   populateProviderSelect("#provider");
   populateProviderSelect("#sched-provider", { includeAll: true });
   populateProviderSelect("#avail-provider");
+  populateProviderSelect("#series-provider");
   refreshBookEnabled();
   renderSlotCalendar();
   renderAvailEditors();
@@ -1486,6 +1488,297 @@ function bookFollowup(f) {
   toast("Booking a follow-up for " + (f.patientName || shortKey(f.patientKey)) + ". Pick a date & time.", "ok");
 }
 
+// ---- Recurring visit series (clinic-wide worklist + the patient's own list) ----
+//
+// A patient on a standing cadence (chronic-care monthly check-ins, weekly PT) can
+// have a recurring visit series started against a provider (StartVisitSeries).
+// The clinic-reminders visitSeriesDue lens (P5: read the lens read model, never
+// Core KV) rolls the series' own "next visit due" deadline forward every time it
+// converges — this section renders BOTH the clinic-wide "Series" tab worklist and
+// the selected patient's own series list + start/pause/resume controls on the My
+// Appointments tab, sharing one fetch (/api/visit-series → state.series).
+
+async function loadSeries() {
+  const grid = $("#series");
+  const empty = $("#series-empty");
+  if ($("#series-summary")) $("#series-summary").textContent = "loading…";
+  try {
+    const data = await api("/api/visit-series");
+    state.series = data.series || [];
+  } catch (e) {
+    grid.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Could not load recurring visit series: " + e.message;
+    $("#series-summary").textContent = "";
+    renderMySeries();
+    return;
+  }
+  renderSeries();
+  renderMySeries();
+}
+
+// seriesUrgency buckets a series by how soon its next occurrence is due, mirroring
+// followupUrgency: overdue (today or past), soon (within 14 days), later, or
+// inactive (paused, or past its activeUntil — the lens's "active" column already
+// folds both cases together, so the FE does not distinguish them).
+function seriesUrgency(s) {
+  if (!s.active) return "inactive";
+  const date = (s.nextDueAt || "").slice(0, 10);
+  if (!date) return "later";
+  if (date < localDateStr(0)) return "overdue";
+  if (date <= localDateStr(14)) return "soon";
+  return "later";
+}
+
+const SERIES_GROUPS = [
+  { key: "overdue", label: "Due now" },
+  { key: "soon", label: "Due soon (next 14 days)" },
+  { key: "later", label: "Upcoming" },
+  { key: "inactive", label: "Paused / ended" },
+];
+
+const SERIES_BADGE = { overdue: "Due now", soon: "Due soon", later: "Upcoming", inactive: "Inactive" };
+
+function renderSeries() {
+  const grid = $("#series");
+  const empty = $("#series-empty");
+  grid.innerHTML = "";
+
+  if (state.series.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No recurring visit series yet. Start one from a patient's My Appointments tab.";
+    $("#series-summary").textContent = "";
+    return;
+  }
+
+  const filter = ($("#series-filter") && $("#series-filter").value) || "active";
+  const rows = state.series.filter((s) => filter === "all" || s.active);
+  if (rows.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No active recurring visit series.";
+    $("#series-summary").textContent = `0 of ${state.series.length}`;
+    return;
+  }
+  empty.hidden = true;
+
+  const sorted = rows.slice().sort((a, b) => {
+    const da = a.nextDueAt || "9999";
+    const db = b.nextDueAt || "9999";
+    if (da !== db) return da < db ? -1 : 1;
+    return (a.patientName || a.patientKey) < (b.patientName || b.patientKey) ? -1 : 1;
+  });
+
+  for (const g of SERIES_GROUPS) {
+    const inGroup = sorted.filter((s) => seriesUrgency(s) === g.key);
+    if (inGroup.length === 0) continue;
+    const head = document.createElement("div");
+    head.className = "appts-section-head";
+    head.textContent = `${g.label} · ${inGroup.length}`;
+    grid.append(head);
+    for (const s of inGroup) grid.append(renderSeriesCard(s));
+  }
+
+  const n = rows.length;
+  const suffix = filter === "all" ? "" : ` of ${state.series.length}`;
+  $("#series-summary").textContent = `${n} series${suffix}`;
+}
+
+function renderSeriesCard(s) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const title = document.createElement("div");
+  title.className = "addr";
+  title.textContent = s.patientName || shortKey(s.patientKey);
+
+  const sub = document.createElement("div");
+  sub.className = "addr-sub";
+  if (s.providerName) sub.textContent = "with " + s.providerName + (s.providerSpecialty ? " · " + s.providerSpecialty : "");
+
+  const cadence = document.createElement("div");
+  cadence.className = "meta";
+  cadence.textContent = "Every " + s.intervalDays + " day" + (s.intervalDays === 1 ? "" : "s") + " · occurrence " + (s.occurrenceCount + 1);
+
+  const due = document.createElement("div");
+  due.className = "when";
+  due.textContent = s.active ? (s.nextDueAt ? "Next due " + s.nextDueAt.slice(0, 10) : "No upcoming occurrence") : "Paused or ended";
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+
+  const badges = document.createElement("span");
+  badges.className = "card-btns";
+  const urg = seriesUrgency(s);
+  const badge = document.createElement("span");
+  // Reuses the follow-ups badge palette (overdue/soon/later red-amber-neutral,
+  // "addressed" grey for the inactive bucket) rather than introducing new colors
+  // for the same urgency semantics.
+  badge.className = "badge followup-" + (urg === "inactive" ? "addressed" : urg);
+  badge.textContent = SERIES_BADGE[urg];
+  badges.append(badge);
+  actions.append(badges);
+
+  const btns = document.createElement("span");
+  btns.className = "card-btns";
+  const book = document.createElement("button");
+  book.className = "ghost";
+  book.textContent = "Book";
+  book.addEventListener("click", () => bookSeriesOccurrence(s));
+  btns.append(book);
+  actions.append(btns);
+
+  card.append(title);
+  if (sub.textContent) card.append(sub);
+  card.append(cadence);
+  card.append(due);
+  card.append(actions);
+  return card;
+}
+
+// bookSeriesOccurrence drops the user into the Book tab pre-filled with the
+// series' patient and provider (the bookFollowup precedent) — booking the actual
+// appointment is a separate, ordinary CreateAppointment; the series itself only
+// tracks when the next one is due.
+function bookSeriesOccurrence(s) {
+  const sel = $("#patient");
+  if (sel && [...sel.options].some((o) => o.value === s.patientKey)) sel.value = s.patientKey;
+  setPatient(s.patientKey);
+  const prov = $("#provider");
+  if (prov && [...prov.options].some((o) => o.value === s.providerKey)) {
+    prov.value = s.providerKey;
+    prov.dispatchEvent(new Event("change"));
+  }
+  showView("book");
+  toast("Booking the recurring visit for " + (s.patientName || shortKey(s.patientKey)) + ". Pick a date & time.", "ok");
+}
+
+// renderMySeries fills the My Appointments tab's "Recurring visit series" panel
+// with the selected patient's own series (client-side filtered from the same
+// state.series the clinic-wide tab uses).
+function renderMySeries() {
+  const list = $("#my-series-list");
+  const empty = $("#my-series-empty");
+  if (!list || !empty) return;
+  list.innerHTML = "";
+  if (!state.patient) {
+    empty.hidden = false;
+    empty.textContent = "Select a patient above to see or start a recurring visit series.";
+    return;
+  }
+  const mine = state.series.filter((s) => s.patientKey === state.patient);
+  if (mine.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No recurring visit series for this patient yet.";
+    return;
+  }
+  empty.hidden = true;
+  const sorted = mine.slice().sort((a, b) => ((a.nextDueAt || "9999") < (b.nextDueAt || "9999") ? -1 : 1));
+  for (const s of sorted) list.append(renderMySeriesCard(s));
+}
+
+function renderMySeriesCard(s) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const title = document.createElement("div");
+  title.className = "addr";
+  title.textContent = s.providerName ? "with " + s.providerName : "Recurring series";
+
+  const cadence = document.createElement("div");
+  cadence.className = "meta";
+  cadence.textContent = "Every " + s.intervalDays + " day" + (s.intervalDays === 1 ? "" : "s") + " · occurrence " + (s.occurrenceCount + 1);
+
+  const due = document.createElement("div");
+  due.className = "when";
+  due.textContent = s.active ? (s.nextDueAt ? "Next due " + s.nextDueAt.slice(0, 10) : "No upcoming occurrence") : "Paused";
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  const btns = document.createElement("span");
+  btns.className = "card-btns";
+  const toggle = document.createElement("button");
+  toggle.className = "ghost";
+  toggle.textContent = s.active ? "Pause" : "Resume";
+  toggle.addEventListener("click", () => toggleSeries(s));
+  btns.append(toggle);
+  actions.append(btns);
+
+  card.append(title);
+  card.append(cadence);
+  card.append(due);
+  card.append(actions);
+  return card;
+}
+
+// toggleSeries submits Pause/ResumeVisitSeries for one series and reloads. Resuming
+// a series whose activeUntil has already passed is a harmless no-op — the lens's
+// "active" column stays false because the term is (not paused) AND (within
+// activeUntil), and there is no FE affordance yet to distinguish that from a plain
+// pause (the design's noted, deferred skip-to-latest / re-arm case).
+async function toggleSeries(s) {
+  const op = s.active ? "PauseVisitSeries" : "ResumeVisitSeries";
+  try {
+    const reply = await submitOp(op, "", { seriesKey: s.entityKey }, [s.entityKey]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast(msg, "err");
+      return;
+    }
+    toast(s.active ? "Series paused." : "Series resumed.", "ok");
+    loadSeries();
+  } catch (e) {
+    toast("Could not update series: " + e.message, "err");
+  }
+}
+
+// submitStartSeries submits StartVisitSeries for the selected patient against the
+// chosen provider, then closes the inline form and reloads.
+async function submitStartSeries() {
+  if (!state.patient) {
+    toast("Select a patient first.", "err");
+    return;
+  }
+  const providerKey = $("#series-provider").value;
+  if (!providerKey) {
+    toast("Choose a provider.", "err");
+    return;
+  }
+  const intervalDays = parseInt($("#series-interval").value, 10);
+  if (!intervalDays || intervalDays <= 0) {
+    toast("Enter a positive interval in days.", "err");
+    return;
+  }
+  const startDate = $("#series-start").value;
+  if (!startDate) {
+    toast("Pick a first-occurrence date.", "err");
+    return;
+  }
+  const payload = { patientKey: state.patient, providerKey, intervalDays, startAt: startDate + "T09:00:00Z" };
+  const endDate = $("#series-end").value;
+  if (endDate) payload.activeUntil = endDate + "T09:00:00Z";
+
+  const submit = $("#series-start-submit");
+  submit.disabled = true;
+  try {
+    const reply = await submitOp("StartVisitSeries", "", payload, [state.patient, providerKey]);
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast(msg, "err");
+      return;
+    }
+    toast("Recurring visit series started.", "ok");
+    $("#series-interval").value = "30";
+    $("#series-start").value = "";
+    $("#series-end").value = "";
+    $("#start-series").open = false;
+    loadSeries();
+  } catch (e) {
+    toast("Could not start series: " + e.message, "err");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 // ---- Provider Schedule (read-only day/week calendar desk view) ----
 //
 // The Schedule tab is a positioned calendar grid: a time axis down the left, one
@@ -2258,7 +2551,7 @@ async function submitEncounter(ev) {
 
 // ---- Tabs ----
 
-const VIEWS = ["book", "appts", "schedule", "followups", "availability"];
+const VIEWS = ["book", "appts", "schedule", "followups", "series", "availability"];
 
 function showView(view) {
   state.view = view;
@@ -2269,9 +2562,13 @@ function showView(view) {
     tab.classList.toggle("active", isV);
     tab.setAttribute("aria-selected", String(isV));
   }
+  // "appts" (My Appointments) also hosts the selected patient's own recurring
+  // series panel, so it loads the same series data the clinic-wide "series" tab
+  // shows.
   if (view === "appts") loadAppts();
   if (view === "schedule") loadSchedule();
   if (view === "followups") loadFollowups();
+  if (view === "appts" || view === "series") loadSeries();
   if (view === "availability") renderAvailEditors();
 }
 
@@ -2342,6 +2639,7 @@ function init() {
   $("#tab-appts").addEventListener("click", () => showView("appts"));
   $("#tab-schedule").addEventListener("click", () => showView("schedule"));
   $("#tab-followups").addEventListener("click", () => showView("followups"));
+  $("#tab-series").addEventListener("click", () => showView("series"));
   $("#tab-availability").addEventListener("click", () => showView("availability"));
   // The Book form's pointer link jumps to the Availability tab, carrying the
   // provider the user was about to book so the editor opens on that provider.
@@ -2355,6 +2653,10 @@ function init() {
   $("#appts-filter").addEventListener("change", renderAppts);
   $("#reload-followups").addEventListener("click", loadFollowups);
   $("#followups-filter").addEventListener("change", renderFollowups);
+  $("#reload-series").addEventListener("click", loadSeries);
+  $("#series-filter").addEventListener("change", renderSeries);
+  $("#series-start-submit").addEventListener("click", submitStartSeries);
+  $("#series-start").min = localDateStr(0);
   $("#reload-schedule").addEventListener("click", loadSchedule);
   $("#sched-provider").addEventListener("change", loadSchedule);
   $("#sched-week").addEventListener("click", () => setSchedView("week"));
