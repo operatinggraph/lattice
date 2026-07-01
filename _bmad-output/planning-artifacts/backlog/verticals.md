@@ -22,7 +22,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | LoftSpace — applicant contact (email/phone) captured but never projected to the landlord | `CreateUnclaimedIdentity` stores `.email`/`.phone`, but neither the `/api/identities` picker nor the landlord `unit-applications` disposition surfaces them — a landlord deciding on an applicant has no way to contact them. | LoftSpace | pkg + FE | ★★ | S | 🚧 blocked-on Vault — `id.{email,phone}` are `sensitive=true` aspects; same display gate as the Clinic patient-contact row → lattice [Vault](lattice.md); not a vertical-steward call |
 | LoftSpace — tenant payment ledger (rent/fees/deposits) | No financial history exists: `SignLease`/`DecideLeaseApplication` create no payment record — no rent ledger, late-fee tracking, or deposit accounting for landlord or tenant. Add a ledger aspect + Debit/CreditAccount ops + a payment-history lens/FE. | LoftSpace | pkg + FE | ★★★ | L | 📋 ready — PO-flagged; foundation for lattice [bespoke-contracts clause billing](lattice.md) later |
 | Clinic — patient payment ledger (copays/invoices) | No financial history exists: appointments/encounters create no charge or payment record — staff can't see what a patient owes or has paid. Add a ledger aspect + Debit/CreditAccount ops + a billing-history lens/FE. | Clinic | pkg + FE | ★★★ | L | 📋 ready — PO-flagged; mirrors the LoftSpace ledger row above |
-| Clinic — dev-loop never wires the protected read model (all 3 D1.5 audiences 500) | `up-clinic` never sets `CLINIC_APP_PG_DSN` or provisions a Postgres role (unlike `up-loftspace`'s equivalent) — the shipped patient/provider/staff-wildcard protected reads all 500 "not configured" out of the box; verified live. | Clinic | pkg | ★★★ | S | 📋 ready — PO-flagged 2026-07-01; mirror `up-loftspace`'s DSN/role wiring |
 
 ## PO notes (dated — drives rotation)
 
@@ -38,6 +37,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-01 · `—` · Clinic dev-loop D1.5 read-boundary wiring CLOSED — `provision-clinic-role` + DSN/dev-auth wired into `up-clinic`/`refresh-clinic` (mirrors `up-loftspace`); verified live, no more 500s
 - 2026-07-01 · `—` · Clinic encounter/visit documentation CLOSED (stale 🏗️) — capture (`b81ffcd`) + FE (`2d5aeae`) done; encryption tracked under [Vault](lattice.md)
 - 2026-07-01 · `ec82fd8` · Steward continuous-improvement (doc sweep) — loftspace-domain package README (all demand rows blocked-on Vault/D1 this fire)
 - 2026-07-01 · `679fe25` · Clinic tombstone-linger row CLOSED (stale) — anchor-tombstone retraction already fixed this same-day as the PO filing
