@@ -4,8 +4,11 @@
 //
 // It is a vertical product app, distinct from Loupe (the operator tool). Like
 // Loupe it is a trusted single-identity tool: it connects to NATS as the
-// primordial admin actor and submits operations on the applicant's behalf —
-// there is NO per-user authN/authZ, Gateway, or read-path auth yet (Phase-3+).
+// primordial admin actor and submits operations on the applicant's behalf.
+// READS are mixed: several protected Postgres read models (D1.5) require a
+// JWT-authenticated actor — including /api/staff/identities, the picker the
+// user reads to select which identity they are, which uses the system-wide
+// staff/wildcard grant so it works before an applicant has been selected.
 // The view is applicant-centric: the user selects which identity they are and
 // the UI scopes its reads and writes to that applicant.
 //

@@ -211,6 +211,51 @@ func TestHandleDevToken_EmptySubject_400(t *testing.T) {
 	}
 }
 
+func TestHandleStaffDevToken_Disabled_404(t *testing.T) {
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // devSigner nil
+	rec := httptest.NewRecorder()
+	s.handleStaffDevToken(rec, httptest.NewRequest(http.MethodPost, "/api/staff/dev-token", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (staff dev-token disabled)", rec.Code)
+	}
+}
+
+func TestHandleStaffDevToken_NoAdminActor_502(t *testing.T) {
+	s := devAuthServer(t) // devSigner set, adminActor empty
+	rec := httptest.NewRecorder()
+	s.handleStaffDevToken(rec, httptest.NewRequest(http.MethodPost, "/api/staff/dev-token", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (no admin actor)", rec.Code)
+	}
+}
+
+func TestHandleStaffDevToken_Mint_RoundTrips(t *testing.T) {
+	s := devAuthServer(t)
+	s.adminActor = "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
+	rec := httptest.NewRecorder()
+	s.handleStaffDevToken(rec, httptest.NewRequest(http.MethodPost, "/api/staff/dev-token", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expiresAt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Token == "" || resp.ExpiresAt == "" {
+		t.Fatalf("empty token/expiresAt: %+v", resp)
+	}
+	actor, err := s.authn.Authenticate(t.Context(), resp.Token)
+	if err != nil {
+		t.Fatalf("authenticate minted token: %v", err)
+	}
+	if actor.Subject != "Hj4kPmRtw9nbCxz5vQ2y" {
+		t.Errorf("subject = %q, want the bare admin-actor NanoID", actor.Subject)
+	}
+}
+
 func TestDeriveLandlordFlags(t *testing.T) {
 	approved := "approved"
 	declined := "declined"

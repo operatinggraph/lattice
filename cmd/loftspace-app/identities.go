@@ -2,16 +2,16 @@ package main
 
 import (
 	"encoding/json"
-	"net/http"
 	"sort"
 	"strings"
-
-	loftspacedomain "github.com/asolgan/lattice/packages/loftspace-domain"
 )
 
 // identityRow is one projected `applicantRoster` row — a selectable identity with
-// its human-readable name. The applicant picker renders `name`, carrying `key` as
-// the value it scopes reads/writes to.
+// its human-readable name. computeIdentities is the shared reshaper the
+// trusted-tool console (unit_applications.go, lease_document.go) uses to resolve
+// a name for display from the unprotected NATS-KV bucket server-side; the
+// HTTP-facing picker itself reads the PROTECTED applicantRosterRead model
+// instead (staff_identities.go, D1.5) — see that file for why.
 type identityRow struct {
 	IdentityKey string `json:"identityKey"`
 	Name        string `json:"name"`
@@ -53,34 +53,4 @@ func computeIdentities(keys []string, get kvGetter) []identityView {
 		return out[i].Key < out[j].Key
 	})
 	return out
-}
-
-// handleIdentities implements GET /api/identities — the applicant picker, served
-// from the `applicantRoster` lens rows in the loftspace-identities read model (NOT
-// Core KV; P5). Returns every named identity so a person selects themselves by
-// name instead of typing a raw vtx.identity.<id> key.
-func (s *server) handleIdentities(w http.ResponseWriter, r *http.Request) {
-	conn, ok := s.requireConn(w)
-	if !ok {
-		return
-	}
-	ctx, cancel := s.reqContext(r)
-	defer cancel()
-
-	bucket := loftspacedomain.LoftspaceIdentitiesBucket
-	keys, err := conn.KVListKeys(ctx, bucket)
-	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+bucket+": "+err.Error()+" (is loftspace-domain installed and the Refractor projecting?)")
-		return
-	}
-	get := func(key string) ([]byte, bool) {
-		entry, err := conn.KVGet(ctx, bucket, key)
-		if err != nil {
-			return nil, false
-		}
-		return entry.Value, true
-	}
-	rows := computeIdentities(keys, get)
-	s.writeJSON(w, http.StatusOK, map[string]any{"identities": rows, "count": len(rows)})
 }

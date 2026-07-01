@@ -17,6 +17,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/asolgan/lattice/internal/gateway/auth"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // The read boundary (D1.3 Fire 3) — loftspace-app reads the protected
@@ -222,6 +223,44 @@ func (s *server) handleDevToken(w http.ResponseWriter, r *http.Request) {
 	subject := strings.TrimSpace(req.Subject)
 	if subject == "" {
 		s.writeError(w, http.StatusBadRequest, "subject (the bare identity id) is required")
+		return
+	}
+	token, exp, err := s.devSigner.mint(subject)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"token":     token,
+		"expiresAt": exp.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleStaffDevToken implements POST /api/staff/dev-token (no body) — the
+// demo-only login stand-in for the system-wide STAFF view (D1.5, the staff
+// wildcard increment). Unlike handleDevToken it mints for a FIXED subject
+// (the app's own admin actor, s.adminActor — the same root-equivalent
+// identity loftspace-app already connects to NATS as for writes), never a
+// caller-supplied one: the client never needs to know, or be trusted to
+// name, which identity holds the wildcard grant. Available ONLY when
+// dev-auth is enabled, mirroring handleDevToken; a production deployment
+// wires a real staff login instead (deferred Gateway, out of D1 scope).
+func (s *server) handleStaffDevToken(w http.ResponseWriter, r *http.Request) {
+	if s.devSigner == nil {
+		s.writeError(w, http.StatusNotFound, "dev-token minting is disabled (LOFTSPACE_APP_DEV_AUTH not set)")
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	if s.adminActor == "" {
+		s.writeError(w, http.StatusBadGateway, "admin actor not loaded (bootstrap file missing or unreadable)")
+		return
+	}
+	_, subject, ok := substrate.ParseVertexKey(s.adminActor)
+	if !ok {
+		s.writeError(w, http.StatusInternalServerError, "admin actor key is malformed")
 		return
 	}
 	token, exp, err := s.devSigner.mint(subject)

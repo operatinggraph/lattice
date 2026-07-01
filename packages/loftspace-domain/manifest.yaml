@@ -1,5 +1,5 @@
 name: loftspace-domain
-version: 0.4.0
+version: 0.5.0
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on
@@ -8,7 +8,13 @@ description: |
   address aspect-type DDLs are step-6 write gates. A second vertexType DDL,
   loftspaceOwnership, owns AssignUnitOwner / RemoveUnitOwner — the landlord→unit
   management link (cap-read.residence's ownership relationship, D1.3). Depends on
-  location-domain (which owns vtx.unit).
+  location-domain (which owns vtx.unit). Three projection lenses: availableListings
+  (listed units), applicantRoster (the unprotected NATS-KV roster the trusted-tool
+  console reads server-side), and applicantRosterRead — the PROTECTED Postgres
+  identity-picker roster (Contract #6 §6.14 RLS, D1.5, mirroring clinic-domain's
+  clinicPatientsRead) — cmd/loftspace-app's identity picker reads it as an
+  authenticated actor via the reserved WildcardAnchor grant instead of the
+  unprotected bucket.
 depends:
   - location-domain
 declares:
@@ -29,6 +35,9 @@ declares:
     - canonicalName: applicantRoster
       adapter: nats-kv
       bucket: loftspace-identities
+      engine: full
+    - canonicalName: applicantRosterRead
+      adapter: postgres
       engine: full
   permissions:
     - operationType: SetListing

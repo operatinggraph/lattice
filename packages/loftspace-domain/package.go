@@ -48,8 +48,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "loftspace-domain",
-	Version:     "0.4.0",
-	Description: "LoftSpace listing economics: the .listing + .address aspects on a location unit (SetListing / SetUnitAddress / SetListingStatus) + the landlord→unit management link (AssignUnitOwner / RemoveUnitOwner). Depends on location-domain; introduces no vertex type.",
+	Version:     "0.5.0",
+	Description: "LoftSpace listing economics: the .listing + .address aspects on a location unit (SetListing / SetUnitAddress / SetListingStatus) + the landlord→unit management link (AssignUnitOwner / RemoveUnitOwner). Depends on location-domain; introduces no vertex type. Three projection lenses (availableListings, applicantRoster, applicantRosterRead); applicantRosterRead is a PROTECTED Postgres identity-picker roster (Contract #6 §6.14 RLS, D1.5, staff-wildcard-only).",
 	Depends:     []string{"location-domain"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

@@ -2,7 +2,7 @@
 
 // LoftSpace applicant app — Browse & Apply (Increment A). Vanilla JS, no build
 // step. The Go server does all NATS I/O; this view reads /api/listings +
-// /api/identities and submits CreateLeaseApplication via /api/op.
+// /api/staff/identities and submits CreateLeaseApplication via /api/op.
 
 const APPLICANT_KEY = "loftspace.applicant";
 const MODE_KEY = "loftspace.mode";
@@ -170,6 +170,43 @@ async function authedGet(path) {
   }
 }
 
+// staffReadToken (D1.5, the staff wildcard increment) mints/caches a demo
+// token for the system-wide STAFF view via POST /api/staff/dev-token — unlike
+// readToken it carries no subject: the server mints for its own fixed admin
+// actor, so the FE never needs to know (or be trusted to name) which identity
+// holds the wildcard grant. Used to bootstrap the applicant-identity picker
+// itself, which must work before any applicant has been selected.
+let staffTokenCache = { token: null, exp: 0 };
+
+async function staffReadToken() {
+  const now = Date.now();
+  if (staffTokenCache.token && now < staffTokenCache.exp - 60000) {
+    return staffTokenCache.token;
+  }
+  const res = await fetch("/api/staff/dev-token", { method: "POST" });
+  if (!res.ok) {
+    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
+  }
+  const body = await res.json();
+  staffTokenCache = { token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
+  return body.token;
+}
+
+// authedGetAsStaff fetches a protected endpoint with the staff Bearer token,
+// retrying once on a 401 with a freshly minted token — the system-wide
+// sibling of authedGet.
+async function authedGetAsStaff(path) {
+  let token = await staffReadToken();
+  try {
+    return await api(path, { headers: { Authorization: "Bearer " + token } });
+  } catch (e) {
+    if (!/HTTP 401|authentication required/i.test(e.message)) throw e;
+    staffTokenCache = { token: null, exp: 0 };
+    token = await staffReadToken();
+    return api(path, { headers: { Authorization: "Bearer " + token } });
+  }
+}
+
 // openDocument fetches a D1.5-protected object's bytes with the Bearer token
 // (a plain <a href> navigation can't attach one) and opens them as a blob URL
 // in a new tab. The blob URL is revoked after a delay long enough for the new
@@ -217,15 +254,18 @@ function toast(msg, kind, extra) {
 
 // ---- Applicant identity (the trusted-tool switcher) ----
 //
-// No per-user auth yet (P5/trust model): the applicant picks who they are from a
-// human-readable roster (the applicantRoster lens read model, never Core KV). The
-// selected key is persisted in localStorage so a refresh keeps context.
+// The applicant picks who they are from a human-readable roster, read from the
+// PROTECTED applicantRosterRead Postgres model (D1.5) via authedGetAsStaff — the
+// picker used to read the unprotected /api/identities, letting ANY caller dump
+// every identity's full name with no authentication at all (a system-wide
+// membership-disclosure leak). The selected key is persisted in localStorage so
+// a refresh keeps context.
 
 // nameFor resolves an identity key to its human name from the loaded roster,
 // falling back to the short key when the roster has not loaded (or the key is an
 // application/unit, not a person).
 function nameFor(key) {
-  const m = state.identities.find((i) => i.key === key);
+  const m = state.identities.find((i) => i.identityKey === key);
   return m && m.name ? m.name : shortKey(key);
 }
 
@@ -234,11 +274,13 @@ function restoreApplicant() {
   state.applicant = saved || null;
 }
 
-// loadIdentities fetches the applicant roster (named identities) and rebuilds the
-// top-right picker. Non-fatal on error — the picker just shows the empty hint.
+// loadIdentities reads the protected, RLS-scoped applicant roster (D1.5, the
+// staff wildcard increment) and rebuilds the top-right picker. authedGetAsStaff
+// mints its own fixed-subject token, so this still works before an applicant
+// has been selected. Non-fatal on error — the picker just shows the empty hint.
 async function loadIdentities() {
   try {
-    const data = await api("/api/identities");
+    const data = await authedGetAsStaff("/api/staff/identities");
     state.identities = data.identities || [];
   } catch (_) {
     state.identities = [];
@@ -247,8 +289,8 @@ async function loadIdentities() {
 }
 
 // populateApplicantSelect rebuilds the #applicant <select>: a placeholder + one
-// option per named identity (label = name, value = key), selecting the persisted
-// applicant when it is in the roster.
+// option per named identity (label = name, value = identityKey), selecting the
+// persisted applicant when it is in the roster.
 function populateApplicantSelect() {
   const sel = $("#applicant");
   sel.innerHTML = "";
@@ -260,11 +302,11 @@ function populateApplicantSelect() {
   sel.append(placeholder);
   for (const id of state.identities) {
     const o = document.createElement("option");
-    o.value = id.key;
+    o.value = id.identityKey;
     o.textContent = id.name;
     sel.append(o);
   }
-  const values = state.identities.map((i) => i.key);
+  const values = state.identities.map((i) => i.identityKey);
   sel.value = state.applicant && values.includes(state.applicant) ? state.applicant : "";
 }
 

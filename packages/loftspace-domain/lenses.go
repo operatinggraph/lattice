@@ -20,13 +20,17 @@ const LoftspaceListingsBucket = "loftspace-listings"
 // identity-hygiene already projecting names into its duplicate-candidates lens.
 const LoftspaceIdentitiesBucket = "loftspace-identities"
 
-// Lenses returns the package's Lens declarations: the single `availableListings`
-// projection lens. It projects one row per LISTED unit — a location unit
-// carrying a `.listing` aspect — flattening the listing economics + street
-// address into a query-optimized read-model row. The lens does NOT filter on
-// status (it carries the status column), so a reader can show available units by
-// default and still surface pending / leased on request; the per-row key is the
-// unit key (the CreateLeaseApplication target the applicant FE submits).
+// Lenses returns the package's Lens declarations: `availableListings` (the
+// listed-unit projection), `applicantRoster` (the unprotected NATS-KV roster
+// the trusted-tool console reads server-side to resolve a name for display —
+// unit_applications.go, lease_document.go), and `applicantRosterRead` (the
+// protected Postgres roster D1.5's identity picker reads as an authenticated
+// actor). It projects one row per LISTED unit — a location unit carrying a
+// `.listing` aspect — flattening the listing economics + street address into a
+// query-optimized read-model row. The lens does NOT filter on status (it
+// carries the status column), so a reader can show available units by default
+// and still surface pending / leased on request; the per-row key is the unit
+// key (the CreateLeaseApplication target the applicant FE submits).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -44,6 +48,43 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        LoftspaceIdentitiesBucket,
 			Engine:        "full",
 			Spec:          applicantRosterSpec,
+		},
+		{
+			// applicantRosterRead — the protected Postgres read model for the
+			// applicant-identity picker (D1.5). cmd/loftspace-app's handleIdentities
+			// used to list the unprotected applicantRoster NATS-KV bucket and serve
+			// every named identity's full name to ANY caller with no authentication
+			// at all — a system-wide membership-disclosure leak (which applicants and
+			// landlords exist, by full name). handleStaffIdentities replaces that
+			// vector, reading THIS table as a JWT-authenticated actor, mirroring
+			// clinic-domain's clinicPatientsRead exactly.
+			//
+			// Like clinicPatientsRead there is no per-identity self-anchor to carve
+			// out — "the whole roster" has no single-row owner, so every row
+			// projects an EMPTY authz_anchors set: only an actor holding the reserved
+			// WildcardAnchor grant (D1 design §3.4 M5,
+			// internal/refractor/adapter.WildcardAnchor) ever matches a row. The
+			// picker still works before any applicant has selected who they are —
+			// the app mints its own fixed-subject staff token (s.adminActor, the same
+			// root-equivalent identity the app already connects to NATS as), so the
+			// client never needs a prior login to bootstrap identity selection.
+			//
+			// NAME + STATE ONLY, the same columns the unprotected applicantRoster
+			// projects — no additional PII.
+			CanonicalName: "applicantRosterRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_loftspace_identities",
+			Engine:        "full",
+			Spec:          applicantRosterReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"identity_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "identity_key", Type: "text"},
+				{Name: "name", Type: "text"},
+				{Name: "state", Type: "text"},
+			},
 		},
 	}
 }
@@ -91,3 +132,19 @@ RETURN
   i.key AS identityKey,
   i.name.data.value AS name,
   i.state.data.value AS state`
+
+// applicantRosterReadSpec is the PROTECTED Postgres twin of applicantRosterSpec
+// (D1.5): same WHERE guard (only named identities project), plus the
+// nanoIdFromKey(i.key) IntoKey column and an EMPTY authz_anchors set — the
+// roster has no per-row owner, so only the reserved WildcardAnchor grant ever
+// matches (mirrors clinic-domain's clinicPatientsReadSpec).
+const applicantRosterReadSpec = `MATCH (i:identity)
+WHERE i.name.data.value <> null
+RETURN
+  nanoIdFromKey(i.key)  AS identity_id,
+  i.key                 AS entity_key,
+  i.key                 AS identity_key,
+  i.name.data.value     AS name,
+  i.state.data.value    AS state,
+  []                    AS authz_anchors
+`

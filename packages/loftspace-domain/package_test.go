@@ -145,11 +145,13 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends [location-domain], got %v", Package.Depends)
 	}
 
-	// Two projection lenses (availableListings — the P5 read model for listed
-	// units; applicantRoster — the P5 read model for the human-readable identity
-	// picker); no role, weaver target, loom pattern, or op-meta.
-	if got := len(Package.Lenses); got != 2 {
-		t.Fatalf("expected 2 lenses, got %d", got)
+	// Three projection lenses (availableListings — the P5 read model for listed
+	// units; applicantRoster — the unprotected NATS-KV roster the trusted-tool
+	// console reads server-side; applicantRosterRead — the PROTECTED Postgres
+	// identity-picker roster, D1.5); no role, weaver target, loom pattern, or
+	// op-meta.
+	if got := len(Package.Lenses); got != 3 {
+		t.Fatalf("expected 3 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -162,6 +164,10 @@ func TestPackage_Permissions(t *testing.T) {
 	if l, ok := lensByName["applicantRoster"]; !ok ||
 		l.Adapter != "nats-kv" || l.Bucket != LoftspaceIdentitiesBucket {
 		t.Fatalf("unexpected applicantRoster shape: %+v", lensByName["applicantRoster"])
+	}
+	if l, ok := lensByName["applicantRosterRead"]; !ok ||
+		l.Adapter != "postgres" || l.Table != "read_loftspace_identities" || !l.Protected {
+		t.Fatalf("unexpected applicantRosterRead shape: %+v", lensByName["applicantRosterRead"])
 	}
 	if got := len(Package.WeaverTargets); got != 0 {
 		t.Fatalf("expected 0 weaverTargets, got %d", got)
