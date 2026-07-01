@@ -55,16 +55,22 @@
 //     clinical-note display are its validating flows). RecordEncounter captures the
 //     record now and projects ONLY the operational, non-PHI signals (documentation
 //     presence + follow-up scheduling) so the clinical display stays Vault-gated.
-//   - Recurring-availability / @every scheduling (Capability-KV §06 defers the
-//     recurring case). Op-time double-book rejection (CreateAppointment +
-//     RescheduleAppointment, by enumerating the hasBooking links serialized on the
-//     .bookingGuard epoch) and provider business-hours rejection (the opt-in .hours
-//     windows) ARE enforced here, via
-//     "the operation's own Starlark logic" (§06's sanctioned path).
-//   - Recurring @every reminders / availability (@every has no consumer; §10.4
-//     ships @at one-shot). One-shot @at appointment reminders ("remind 24h before")
-//     ARE built — in the sibling clinic-reminders package, which reads the .schedule
-//     remindAt this DDL precomputes. The recurring-availability case still needs @every.
+//   - @every scheduling — genuinely unneeded here. Recurring *availability* (a
+//     provider's weekly hours) is NOT a timer: .hours stores a static weekly
+//     template (windows: [{day, openSec, closeSec}]) enforced at op time
+//     (CreateAppointment / RescheduleAppointment), with no schedule to arm. A
+//     recurring *visit series* (a patient on a standing cadence) is a genuinely
+//     different, timer-like need — built as a package-level rolling-@at convergence
+//     series in the sibling clinic-reminders package (visitseries.go), NOT @every;
+//     see clinic-recurring-visit-series-design.md §3 for why @every (a per-entity
+//     substrate schedule) is the wrong tool for a per-series recurring deadline. Op-time
+//     double-book rejection (CreateAppointment + RescheduleAppointment, by enumerating
+//     the hasBooking links serialized on the .bookingGuard epoch) and provider
+//     business-hours rejection (the opt-in .hours windows) ARE enforced here, via "the
+//     operation's own Starlark logic" (§06's sanctioned path).
+//   - One-shot @at appointment reminders ("remind 24h before") ARE built — in the
+//     sibling clinic-reminders package, which reads the .schedule remindAt this DDL
+//     precomputes.
 //   - A Weaver convergence lens / orchestrated clinic workflow IN THIS PACKAGE
 //     (clinic-domain stays projection-only); the clinic-reminders sibling package
 //     owns the appointment-reminder convergence lens + its directOp playbook.

@@ -23,14 +23,16 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the four DDLs — the appointment-reminder pair
-// (appointmentReminderOp vertexType + appointmentReminder aspectType) and the
-// follow-up-reminder pair (followUpReminderOp + followUpReminder). Each op
-// vertexType owns its Record* script; each aspectType is the step-6 write gate and
-// MUST be NON-sensitive (a timestamp on an appointment, not an identity).
+// TestPackage_DDLs pins the eight DDLs — the appointment-reminder pair
+// (appointmentReminderOp vertexType + appointmentReminder aspectType), the
+// follow-up-reminder pair (followUpReminderOp + followUpReminder), and the
+// visit-series group (visitseries vertexType + its three aspectType gates). Each op
+// vertexType owns its Record*/Start*/Advance* script; each aspectType is the step-6
+// write gate and MUST be NON-sensitive (a timestamp / cadence on an
+// appointment/visitseries, not an identity).
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 4 {
-		t.Fatalf("expected 4 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 8 {
+		t.Fatalf("expected 8 DDLs, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -67,6 +69,56 @@ func TestPackage_DDLs(t *testing.T) {
 			t.Fatalf("%s permittedCommands = %v, want [%s]", pr.aspName, asp.PermittedCommands, pr.cmd)
 		}
 	}
+
+	series, ok := byName["visitseries"]
+	if !ok {
+		t.Fatalf("missing visitseries vertexType DDL")
+	}
+	if series.Class != "meta.ddl.vertexType" {
+		t.Fatalf("visitseries class = %q, want meta.ddl.vertexType", series.Class)
+	}
+	wantCmds := map[string]bool{"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false, "AdvanceVisitSeries": false}
+	if len(series.PermittedCommands) != len(wantCmds) {
+		t.Fatalf("visitseries permittedCommands = %v, want %d entries", series.PermittedCommands, len(wantCmds))
+	}
+	for _, c := range series.PermittedCommands {
+		if _, ok := wantCmds[c]; !ok {
+			t.Fatalf("visitseries: unexpected permittedCommand %q", c)
+		}
+		wantCmds[c] = true
+	}
+	for c, seen := range wantCmds {
+		if !seen {
+			t.Fatalf("visitseries: missing permittedCommand %q", c)
+		}
+	}
+
+	seriesAspects := []struct{ name, cmd string }{
+		{"visitSeriesDefinition", "StartVisitSeries"},
+		{"visitSeriesProgress", "StartVisitSeries"},
+		{"visitSeriesPaused", "PauseVisitSeries"},
+	}
+	for _, sa := range seriesAspects {
+		asp, ok := byName[sa.name]
+		if !ok {
+			t.Fatalf("missing %s aspectType DDL", sa.name)
+		}
+		if asp.Class != "meta.ddl.aspectType" {
+			t.Fatalf("%s class = %q, want meta.ddl.aspectType", sa.name, asp.Class)
+		}
+		if asp.Sensitive {
+			t.Fatalf("%s must NOT be sensitive", sa.name)
+		}
+		found := false
+		for _, c := range asp.PermittedCommands {
+			if c == sa.cmd {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s permittedCommands = %v, want to include %s", sa.name, asp.PermittedCommands, sa.cmd)
+		}
+	}
 }
 
 // TestPackage_Depends pins the dependency chain (clinic-domain for the appointment
@@ -90,9 +142,12 @@ func TestPackage_Depends(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the two ops granted to operator (scope any).
+// TestPackage_Permissions pins the six ops granted to operator (scope any).
 func TestPackage_Permissions(t *testing.T) {
-	want := map[string]bool{"RecordAppointmentReminder": false, "RecordFollowUpReminder": false}
+	want := map[string]bool{
+		"RecordAppointmentReminder": false, "RecordFollowUpReminder": false,
+		"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false, "AdvanceVisitSeries": false,
+	}
 	if len(Package.Permissions) != len(want) {
 		t.Fatalf("expected %d permissions, got %d", len(want), len(Package.Permissions))
 	}
@@ -115,7 +170,11 @@ func TestPackage_Permissions(t *testing.T) {
 // TestPackage_NoScans mirrors the known-key discipline: neither op script may use a
 // prefix scan.
 func TestPackage_NoScans(t *testing.T) {
-	scripts := map[string]string{"recordReminderScript": recordReminderScript, "recordFollowUpReminderScript": recordFollowUpReminderScript}
+	scripts := map[string]string{
+		"recordReminderScript":         recordReminderScript,
+		"recordFollowUpReminderScript": recordFollowUpReminderScript,
+		"visitSeriesScript":            visitSeriesScript,
+	}
 	for name, script := range scripts {
 		for _, forbidden := range []string{"KVListKeys", "list_keys", "scan(", "keys_with_prefix"} {
 			if strings.Contains(script, forbidden) {
@@ -136,8 +195,8 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 	for _, l := range Package.Lenses {
 		lensByName[l.CanonicalName] = l
 	}
-	if len(Package.WeaverTargets) != 2 {
-		t.Fatalf("expected 2 weaverTargets, got %d", len(Package.WeaverTargets))
+	if len(Package.WeaverTargets) != 3 {
+		t.Fatalf("expected 3 weaverTargets, got %d", len(Package.WeaverTargets))
 	}
 	for _, wt := range Package.WeaverTargets {
 		lens, ok := lensByName[wt.LensRef]

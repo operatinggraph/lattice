@@ -9,7 +9,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // permission. The role canonical name `operator` is resolved by cmd/lattice-pkg to
 // the seeded NanoID from lattice.bootstrap.json.
 func Permissions() []pkgmgr.PermissionSpec {
-	return []pkgmgr.PermissionSpec{
+	perms := []pkgmgr.PermissionSpec{
 		{
 			OperationType: reminderOp,
 			Scope:         "any",
@@ -18,16 +18,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 		},
 		followUpReminderPermission(),
 	}
+	return append(perms, visitSeriesPermissions()...)
 }
 
-// OpMetas makes RecordAppointmentReminder forOperation-resolvable for
-// discoverability (Loupe's op-submit forms, a future Loom binding). The op is
-// orchestration-internal (the appointmentReminders directOp dispatches it), so the
-// meta is not load-bearing for dispatch — directOp submits the literal
-// operationType — but is declared for parity with objects-base's GC op.
+// OpMetas makes RecordAppointmentReminder / RecordFollowUpReminder / the
+// visit-series ops forOperation-resolvable for discoverability (Loupe's op-submit
+// forms, a future Loom binding). The reminder ops are orchestration-internal (their
+// playbooks dispatch them directly), so their meta is not load-bearing for dispatch
+// — declared for parity with objects-base's GC op.
 func OpMetas() []pkgmgr.OpMetaSpec {
-	return []pkgmgr.OpMetaSpec{
+	metas := []pkgmgr.OpMetaSpec{
 		{OperationType: reminderOp},
 		{OperationType: followUpReminderOp},
 	}
+	return append(metas, visitSeriesOpMetas()...)
 }

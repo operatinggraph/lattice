@@ -36,5 +36,6 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			},
 		},
 		followUpRemindersTarget(),
+		visitSeriesDueTarget(),
 	}
 }

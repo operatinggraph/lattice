@@ -1,18 +1,23 @@
 name: clinic-reminders
-version: 0.1.0
+version: 0.2.0
 description: |
-  Clinic appointment & follow-up reminders — the clinic vertical's first
-  orchestration. Two one-shot @at convergences over clinic-domain's appointment:
-  (1) the ~24h-ahead appointment reminder — the .reminder aspect +
+  Clinic appointment & follow-up reminders + recurring visit series — the clinic
+  vertical's orchestration. Two one-shot @at convergences over clinic-domain's
+  appointment: (1) the ~24h-ahead appointment reminder — the .reminder aspect +
   RecordAppointmentReminder op, the appointmentReminders weaver-target lens
   (freshUntil = the .schedule.remindAt clinic-domain precomputes); and (2) the
   at-the-date follow-up reminder — the .followUpReminder aspect +
   RecordFollowUpReminder op, the followUpReminders weaver-target lens (freshUntil =
-  the .encounter.followUpDate a documented visit requested). Each gap dispatches a
-  directOp via the §10.8 playbook; both invert lease-signing's freshness re-open
+  the .encounter.followUpDate a documented visit requested). Plus (3) a rolling
+  recurring visit series over its own visitseries vertex type — StartVisitSeries /
+  PauseVisitSeries / ResumeVisitSeries / AdvanceVisitSeries ops, the visitSeriesDue
+  weaver-target lens (freshUntil = .progress.nextDueAt, re-armed forward on every
+  advance instead of clearing to a permanent close). Each gap dispatches a directOp
+  via the §10.8 playbook; all three invert lease-signing's freshness re-open
   (open-at-deadline instead of reopen-at-expiry). Depends on clinic-domain (the
-  appointment + .schedule.remindAt / .encounter.followUpDate) and orchestration-base
-  (MarkExpired re-touch at the @at firing).
+  appointment/patient/provider vertex types + .schedule.remindAt /
+  .encounter.followUpDate) and orchestration-base (MarkExpired re-touch at the @at
+  firing).
 depends:
   - clinic-domain
   - orchestration-base
@@ -26,12 +31,24 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: followUpReminder
       class: meta.ddl.aspectType
+    - canonicalName: visitseries
+      class: meta.ddl.vertexType
+    - canonicalName: visitSeriesDefinition
+      class: meta.ddl.aspectType
+    - canonicalName: visitSeriesProgress
+      class: meta.ddl.aspectType
+    - canonicalName: visitSeriesPaused
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: appointmentReminders
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
     - canonicalName: followUpReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: visitSeriesDue
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -42,11 +59,29 @@ declares:
     - operationType: RecordFollowUpReminder
       scope: any
       grantsTo: [operator]
+    - operationType: StartVisitSeries
+      scope: any
+      grantsTo: [operator]
+    - operationType: PauseVisitSeries
+      scope: any
+      grantsTo: [operator]
+    - operationType: ResumeVisitSeries
+      scope: any
+      grantsTo: [operator]
+    - operationType: AdvanceVisitSeries
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: appointmentReminders
       lensRef: appointmentReminders
     - targetId: followUpReminders
       lensRef: followUpReminders
+    - targetId: visitSeriesDue
+      lensRef: visitSeriesDue
   opMetas:
     - operationType: RecordAppointmentReminder
     - operationType: RecordFollowUpReminder
+    - operationType: StartVisitSeries
+    - operationType: PauseVisitSeries
+    - operationType: ResumeVisitSeries
+    - operationType: AdvanceVisitSeries

@@ -22,17 +22,20 @@ const (
 )
 
 // DDLs returns the package's DDL meta-vertices: the appointment-reminder op handler
-// (vertexType) + its .reminder aspect-type gate, and the follow-up-reminder pair
-// (followups.go). clinic-domain owns the appointment vertex + its .schedule/.status
-// /.encounter aspects; this package only ATTACHES the .reminder / .followUpReminder
-// marker aspects (the loftspace-domain idiom of a package adding an aspect onto
-// another package's vertex type — the step-6 gate keys on the aspect class, not the
-// host vertex's owner).
+// (vertexType) + its .reminder aspect-type gate, the follow-up-reminder pair
+// (followups.go), and the recurring visit-series vertex type + its three aspect
+// gates (visitseries.go). clinic-domain owns the appointment vertex + its
+// .schedule/.status/.encounter aspects; this package ATTACHES the .reminder /
+// .followUpReminder marker aspects onto it (the loftspace-domain idiom of a package
+// adding an aspect onto another package's vertex type) AND owns its own
+// self-contained visitseries vertex type (the clinic-domain patient/provider idiom)
+// for the recurring series.
 func DDLs() []pkgmgr.DDLSpec {
-	return append([]pkgmgr.DDLSpec{
+	ddls := append([]pkgmgr.DDLSpec{
 		recordReminderVertexTypeDDL(),
 		reminderAspectTypeDDL(),
 	}, followUpReminderDDLs()...)
+	return append(ddls, visitSeriesDDLs()...)
 }
 
 // recordReminderVertexTypeDDL owns the RecordAppointmentReminder script. The op is

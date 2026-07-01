@@ -39,8 +39,11 @@ const (
 )
 
 // crOps are the ops the staff actor needs: clinic-domain's create ops + the
-// clinic-reminders op.
-var crOps = []string{"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder"}
+// clinic-reminders ops (reminders + the recurring visit series).
+var crOps = []string{
+	"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder",
+	"StartVisitSeries", "PauseVisitSeries", "ResumeVisitSeries", "AdvanceVisitSeries",
+}
 
 func crStaffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
@@ -279,5 +282,159 @@ func TestRecordFollowUpReminder_RejectsTombstonedAppointment(t *testing.T) {
 
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".followUpReminder"); err == nil {
 		t.Fatalf("a follow-up reminder marker must NOT be written for a tombstoned appointment")
+	}
+}
+
+// TestStartVisitSeries_MintsSeriesAndLinks drives StartVisitSeries and asserts the
+// series vertex + its .series/.progress aspects + the forPatient/withProvider links
+// land, with .progress.nextDueAt seeded to startAt (the first occurrence anchors on
+// startAt, not an interval offset).
+func TestStartVisitSeries_MintsSeriesAndLinks(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vs", Instance: "cr-vs"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvspat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+
+	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvsstart1", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	seriesKey := "vtx.visitseries." + seriesID
+
+	series := crReadDoc(t, ctx, conn, seriesKey+".series")
+	if series["class"] != "visitSeriesDefinition" {
+		t.Fatalf("series class = %v, want visitSeriesDefinition", series["class"])
+	}
+	sd, _ := series["data"].(map[string]any)
+	if v, _ := sd["intervalDays"].(float64); v != 30 {
+		t.Fatalf("series intervalDays = %v, want 30", sd["intervalDays"])
+	}
+	if sd["startAt"] != "2026-08-01T09:00:00Z" {
+		t.Fatalf("series startAt = %v, want 2026-08-01T09:00:00Z", sd["startAt"])
+	}
+
+	progress := crReadDoc(t, ctx, conn, seriesKey+".progress")
+	pd, _ := progress["data"].(map[string]any)
+	if pd["nextDueAt"] != "2026-08-01T09:00:00Z" {
+		t.Fatalf("progress nextDueAt = %v, want seeded to startAt", pd["nextDueAt"])
+	}
+	if v, _ := pd["occurrenceCount"].(float64); v != 0 {
+		t.Fatalf("progress occurrenceCount = %v, want 0", pd["occurrenceCount"])
+	}
+
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "lnk.visitseries."+seriesID+".forPatient.patient."+patientID); err != nil {
+		t.Fatalf("forPatient link not written: %v", err)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "lnk.visitseries."+seriesID+".withProvider.provider."+providerID); err != nil {
+		t.Fatalf("withProvider link not written: %v", err)
+	}
+}
+
+// TestStartVisitSeries_RejectsUnknownPatient proves the endpoint-liveness guard: an
+// absent/wrong-class patientKey rejects, minting no series.
+func TestStartVisitSeries_RejectsUnknownPatient(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsbad", Instance: "cr-vsbad"})
+
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsbprv1", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+	unknown := "vtx.patient.CRunknownPatientMNPQRST"
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsbstart", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+unknown+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{unknown, providerKey}, processor.OutcomeRejected)
+}
+
+// TestAdvanceVisitSeries_RollsForward drives AdvanceVisitSeries directly (the
+// directOp shape Weaver dispatches — class left empty) and asserts .progress rolls:
+// lastOccurrenceAt = dueFor, nextDueAt = dueFor + intervalDays, occurrenceCount+1.
+// Then re-runs it to prove the unconditioned overwrite is idempotent in effect.
+func TestAdvanceVisitSeries_RollsForward(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsadv", Instance: "cr-vsadv"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsapat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsaprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvsastart", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	seriesKey := "vtx.visitseries." + seriesID
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsadv001", "AdvanceVisitSeries", "",
+		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
+		[]string{seriesKey}, processor.OutcomeAccepted)
+
+	progress := crReadDoc(t, ctx, conn, seriesKey+".progress")
+	pd, _ := progress["data"].(map[string]any)
+	if pd["lastOccurrenceAt"] != "2026-08-01T09:00:00Z" {
+		t.Fatalf("progress lastOccurrenceAt = %v, want 2026-08-01T09:00:00Z", pd["lastOccurrenceAt"])
+	}
+	if pd["nextDueAt"] != "2026-08-31T09:00:00Z" {
+		t.Fatalf("progress nextDueAt = %v, want 2026-08-31T09:00:00Z (rolled 30 days forward)", pd["nextDueAt"])
+	}
+	if v, _ := pd["occurrenceCount"].(float64); v != 1 {
+		t.Fatalf("progress occurrenceCount = %v, want 1", pd["occurrenceCount"])
+	}
+
+	// Idempotent in effect: a second AdvanceVisitSeries with the SAME dueFor is
+	// ACCEPTED (unconditioned overwrite, not a create-only insert).
+	crSubmit(t, ctx, conn, cp, cons, "crvsadv002", "AdvanceVisitSeries", "",
+		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
+		[]string{seriesKey}, processor.OutcomeAccepted)
+}
+
+// TestAdvanceVisitSeries_RejectsTombstonedSeries proves the liveness guard: a
+// TOMBSTONED series is Rejected and writes no dangling .progress advance.
+func TestAdvanceVisitSeries_RejectsTombstonedSeries(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsadvdead", Instance: "cr-vsadvdead"})
+
+	dead := "vtx.visitseries.CRdeadSeriesMNPQRSTVWX"
+	doc := map[string]any{"class": "visitseries", "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, dead, b); err != nil {
+		t.Fatalf("seed tombstoned series: %v", err)
+	}
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsadv003", "AdvanceVisitSeries", "",
+		`{"seriesKey":"`+dead+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30}`, []string{dead}, processor.OutcomeRejected)
+
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".progress"); err == nil {
+		t.Fatalf("a visit-series advance must NOT be written for a tombstoned series")
+	}
+}
+
+// TestPauseResumeVisitSeries_TogglesPaused drives Pause then Resume and asserts the
+// .paused aspect flips, re-running each to prove the unconditioned upsert is
+// idempotent in effect.
+func TestPauseResumeVisitSeries_TogglesPaused(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vspause", Instance: "cr-vspause"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsppat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvspprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+	seriesID := crSubmit(t, ctx, conn, cp, cons, "crvspstart", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	seriesKey := "vtx.visitseries." + seriesID
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsp0001", "PauseVisitSeries", "", `{"seriesKey":"`+seriesKey+`"}`, []string{seriesKey}, processor.OutcomeAccepted)
+	paused := crReadDoc(t, ctx, conn, seriesKey+".paused")
+	pd, _ := paused["data"].(map[string]any)
+	if v, _ := pd["value"].(bool); !v {
+		t.Fatalf("paused.value = %v, want true after PauseVisitSeries", pd["value"])
+	}
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsp0002", "ResumeVisitSeries", "", `{"seriesKey":"`+seriesKey+`"}`, []string{seriesKey}, processor.OutcomeAccepted)
+	resumed := crReadDoc(t, ctx, conn, seriesKey+".paused")
+	rd, _ := resumed["data"].(map[string]any)
+	if v, _ := rd["value"].(bool); v {
+		t.Fatalf("paused.value = %v, want false after ResumeVisitSeries", rd["value"])
 	}
 }
