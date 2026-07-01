@@ -1,143 +1,144 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
-	"sort"
-	"strings"
-
-	"github.com/asolgan/lattice/internal/bootstrap"
-	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
 )
 
-// visitSeriesKeyPrefix is the OutputKeyPattern prefix of the clinic-reminders
-// `visitSeriesDue` convergence lens (Contract #10 §10.2:
-// "visitSeriesDue.{actorSuffix}"). It is read out of the shared weaver-targets
-// read model — never Core KV (P5).
-const visitSeriesKeyPrefix = "visitSeriesDue."
-
-// visitSeriesRow is one projected `visitSeriesDue` row — the live rolling state
-// of a recurring visit series (packages/clinic-reminders/visitseries.go). The
-// JSON tags match the lens's BodyColumns verbatim (entityKey, nextDueAt,
-// intervalDays, occurrenceCount, active, missing_series_advance, patientKey,
-// providerKey) so decode needs no field renaming. PatientName / ProviderName /
-// ProviderSpecialty are NOT lens columns — they are joined in server-side from
-// the clinicPatients / clinicProviders lenses (the appointmentRow precedent).
-type visitSeriesRow struct {
-	EntityKey            string `json:"entityKey"`
-	PatientKey           string `json:"patientKey"`
-	PatientName          string `json:"patientName,omitempty"`
-	ProviderKey          string `json:"providerKey"`
-	ProviderName         string `json:"providerName,omitempty"`
-	ProviderSpecialty    string `json:"providerSpecialty,omitempty"`
-	IntervalDays         int    `json:"intervalDays"`
-	NextDueAt            string `json:"nextDueAt"`
-	OccurrenceCount      int    `json:"occurrenceCount"`
-	Active               bool   `json:"active"`
-	MissingSeriesAdvance bool   `json:"missing_series_advance"`
+// protectedVisitSeriesRow is one row of the visitSeriesRead protected Postgres
+// read model (D1.5) — the patient-anchored recurring-visit-series view.
+// PatientKey is non-nullable (the anchor walk is REQUIRED, fail-closed); every
+// other neighbour/display column is nullable (an OPTIONAL match or a value not
+// yet set).
+type protectedVisitSeriesRow struct {
+	EntityKey         string  `json:"entityKey"`
+	PatientKey        string  `json:"patientKey"`
+	PatientName       *string `json:"patientName,omitempty"`
+	ProviderKey       *string `json:"providerKey,omitempty"`
+	ProviderName      *string `json:"providerName,omitempty"`
+	ProviderSpecialty *string `json:"providerSpecialty,omitempty"`
+	IntervalDays      int     `json:"intervalDays"`
+	NextDueAt         string  `json:"nextDueAt"`
+	OccurrenceCount   int     `json:"occurrenceCount"`
+	Active            bool    `json:"active"`
 }
 
-// computeVisitSeries assembles visit-series rows from the `visitSeriesDue`
-// weaver-targets read model. It keeps only keys under the convergence prefix
-// (the bucket is shared with other packages' targets) and decodes each row. A
-// row that fails to decode or carries no entityKey (a tombstoned projection) is
-// skipped. Rows sort by nextDueAt (then entityKey) so the due-soonest floats up.
-func computeVisitSeries(keys []string, get kvGetter) []visitSeriesRow {
-	rows := make([]visitSeriesRow, 0)
-	for _, k := range keys {
-		if !strings.HasPrefix(k, visitSeriesKeyPrefix) {
-			continue
-		}
-		raw, ok := get(k)
-		if !ok {
-			continue
-		}
-		var row visitSeriesRow
-		if json.Unmarshal(raw, &row) != nil || row.EntityKey == "" {
-			continue
-		}
-		rows = append(rows, row)
+// selectMyVisitSeriesSQL reads the protected model. It carries NO auth WHERE —
+// the RLS policy (FORCE ROW LEVEL SECURITY + the set-membership policy)
+// injects the actor scope from the txn-local lattice.actor_id session
+// variable. Rows sort by next_due_at (then entity_key) so the due-soonest
+// floats up, mirroring computeVisitSeries' sort on the unprotected side.
+const selectMyVisitSeriesSQL = `
+SELECT entity_key, patient_key, patient_name, provider_key, provider_name, provider_specialty,
+       COALESCE(interval_days, 0), COALESCE(next_due_at, ''), COALESCE(occurrence_count, 0),
+       COALESCE(active, false)
+FROM read_visit_series
+ORDER BY next_due_at, entity_key`
+
+// queryMyVisitSeries runs the protected read inside a per-request transaction
+// with a txn-local actor session variable — the same pooling-safety discipline
+// as queryMyAppointments (SET LOCAL is discarded at COMMIT/ROLLBACK, so the
+// pooled connection inherits no actor across requests). The query itself
+// carries no auth filter; RLS is the scope.
+//
+// actorID must be the bare identity NanoID (VerifiedActor.Subject), matching
+// the patient_key anchor's nanoIdFromKey representation and the actor_id
+// column in actor_read_grants.
+func queryMyVisitSeries(ctx context.Context, pool pgxBeginner, actorID string) ([]protectedVisitSeriesRow, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].NextDueAt != rows[j].NextDueAt {
-			return rows[i].NextDueAt < rows[j].NextDueAt
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actorID); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, selectMyVisitSeriesSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]protectedVisitSeriesRow, 0)
+	for rows.Next() {
+		var row protectedVisitSeriesRow
+		if err := rows.Scan(
+			&row.EntityKey, &row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
+			&row.IntervalDays, &row.NextDueAt, &row.OccurrenceCount, &row.Active,
+		); err != nil {
+			return nil, err
 		}
-		return rows[i].EntityKey < rows[j].EntityKey
-	})
-	return rows
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// joinVisitSeriesNames decorates each row with its patient/provider display
-// name (and provider specialty), mirroring computeAppointments' neighbour-name
-// join. A row whose patient or provider key has no matching roster entry keeps
-// an empty name rather than failing the whole response.
-func joinVisitSeriesNames(rows []visitSeriesRow, patients []patientRow, providers []providerRow) []visitSeriesRow {
-	patientNames := make(map[string]string, len(patients))
-	for _, p := range patients {
-		patientNames[p.PatientKey] = p.Name
+// handleMyVisitSeries implements GET /api/my-visit-series — a patient's own
+// recurring visit series, served from the PROTECTED visitSeriesRead Postgres
+// read model as an AUTHENTICATED actor (D1.5, mirroring handleMyAppointments).
+// The actor comes ONLY from the verified JWT; RLS returns only that patient's
+// series rows.
+func (s *server) handleMyVisitSeries(w http.ResponseWriter, r *http.Request) {
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
+		return
 	}
-	providerByKey := make(map[string]providerRow, len(providers))
-	for _, p := range providers {
-		providerByKey[p.ProviderKey] = p
-	}
-	for i := range rows {
-		rows[i].PatientName = patientNames[rows[i].PatientKey]
-		if pr, ok := providerByKey[rows[i].ProviderKey]; ok {
-			rows[i].ProviderName = pr.Name
-			rows[i].ProviderSpecialty = pr.Specialty
-		}
-	}
-	return rows
-}
-
-// handleVisitSeries implements GET /api/visit-series — the clinic-wide "visit
-// series due" worklist plus the per-patient series list the patient view's
-// start/pause/resume controls read, served entirely from lens read models (P5:
-// never Core KV): the `visitSeriesDue` weaver-target for the rolling deadline
-// state, joined against `clinicPatients` / `clinicProviders` for display names.
-func (s *server) handleVisitSeries(w http.ResponseWriter, r *http.Request) {
-	conn, ok := s.requireConn(w)
-	if !ok {
+	if s.pgPool == nil {
+		s.writeError(w, http.StatusBadGateway,
+			"protected read model not configured (set CLINIC_APP_PG_DSN and ensure Postgres + the clinic-reminders protected lens are up)")
 		return
 	}
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	getter := func(bucket string) (kvGetter, []string, error) {
-		keys, err := conn.KVListKeys(ctx, bucket)
-		if err != nil {
-			return nil, nil, err
-		}
-		get := func(key string) ([]byte, bool) {
-			entry, err := conn.KVGet(ctx, bucket, key)
-			if err != nil {
-				return nil, false
-			}
-			return entry.Value, true
-		}
-		return get, keys, nil
+	rows, err := queryMyVisitSeries(ctx, s.pgPool, actor.Subject)
+	if err != nil {
+		s.logger.Error("read protected visit series", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected visit-series model")
+		return
 	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"series": rows, "count": len(rows), "scope": "rls"})
+}
 
-	seriesGet, seriesKeys, err := getter(bootstrap.WeaverTargetsBucket)
+// handleStaffVisitSeries implements GET /api/staff/visit-series — the
+// clinic-wide recurring-visit-series worklist, PROTECTED and RLS-scoped
+// (D1.5, mirroring handleStaffAppointments). It reuses queryMyVisitSeries
+// verbatim: the query itself carries no auth filter, so the SAME
+// read_visit_series query
+// that scopes an ordinary patient to their own rows returns EVERY row for an
+// actor holding the reserved WildcardAnchor ("*") grant (internal/refractor/
+// adapter.WildcardAnchor) — the bootstrap capabilityReadWildcardGrants lens
+// grants it to the kernel-seeded root-equivalent identities only (D1 design
+// §3.4 M5). This is still RLS, never a bypass: an all-access read is
+// attributable and revocable exactly like any other actor_read_grants row.
+func (s *server) handleStaffVisitSeries(w http.ResponseWriter, r *http.Request) {
+	actor, err := s.authenticateRead(r)
 	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+bootstrap.WeaverTargetsBucket+": "+err.Error()+" (is clinic-reminders installed and the Refractor projecting?)")
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
 		return
 	}
-	patientGet, patientKeys, err := getter(clinicdomain.ClinicPatientsBucket)
-	if err != nil {
+	if s.pgPool == nil {
 		s.writeError(w, http.StatusBadGateway,
-			"list "+clinicdomain.ClinicPatientsBucket+": "+err.Error()+" (is clinic-domain installed and the Refractor projecting?)")
+			"protected read model not configured (set CLINIC_APP_PG_DSN and ensure Postgres + the clinic-reminders protected lens are up)")
 		return
 	}
-	providerGet, providerKeys, err := getter(clinicdomain.ClinicProvidersBucket)
-	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+clinicdomain.ClinicProvidersBucket+": "+err.Error()+" (is clinic-domain installed and the Refractor projecting?)")
-		return
-	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
 
-	rows := computeVisitSeries(seriesKeys, seriesGet)
-	rows = joinVisitSeriesNames(rows, computePatients(patientKeys, patientGet), computeProviders(providerKeys, providerGet))
-	s.writeJSON(w, http.StatusOK, map[string]any{"series": rows, "count": len(rows)})
+	rows, err := queryMyVisitSeries(ctx, s.pgPool, actor.Subject)
+	if err != nil {
+		s.logger.Error("read protected visit series (staff)", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected visit-series model")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"series": rows, "count": len(rows), "scope": "rls"})
 }

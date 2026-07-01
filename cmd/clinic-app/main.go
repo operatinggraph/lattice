@@ -123,14 +123,14 @@ func run(logger *slog.Logger) error {
 		// the pool reconnects lazily if Postgres comes up later.
 		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := pool.Ping(pingCtx); err != nil {
-			logger.Warn("protected read model pool configured but unreachable at startup; /api/my-appointments will 502 until Postgres is reachable",
+			logger.Warn("protected read model pool configured but unreachable at startup; every protected endpoint (/api/my-appointments, /api/my-schedule, /api/staff/appointments, /api/my-visit-series, /api/staff/visit-series) will 502 until Postgres is reachable",
 				"error", err)
 		} else {
 			logger.Info("protected read model pool configured")
 		}
 		cancel()
 	} else {
-		logger.Warn("CLINIC_APP_PG_DSN / REFRACTOR_PG_DSN unset; /api/my-appointments will report the protected read model is unconfigured")
+		logger.Warn("CLINIC_APP_PG_DSN / REFRACTOR_PG_DSN unset; every protected endpoint will report the protected read model is unconfigured")
 	}
 
 	authn, signer, err := setupReadAuth(logger, isLoopbackHost(hostOf(addr)))

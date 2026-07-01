@@ -484,6 +484,69 @@ RETURN
   ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.progress.data.nextDueAt <= $now)) AS missing_series_advance,
   ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.progress.data.nextDueAt <= $now)) AS violating`
 
+// visitSeriesReadLens is the PATIENT-anchored protected Postgres read model for
+// the recurring-visit-series view (D1.5, mirroring clinic-domain's
+// clinicAppointmentsRead). cmd/clinic-app's handleMyVisitSeries reads it as the
+// patient's own view: RLS scopes the read to the verified JWT subject. The
+// clinic-wide STAFF worklist reads THIS SAME table via handleStaffVisitSeries,
+// under the reserved WildcardAnchor grant (no separate staff projection
+// needed — the same mechanism handleStaffAppointments uses against
+// clinicAppointmentsRead).
+//
+// forPatient is a REQUIRED match (the anchor walk) so a series with no
+// patient link projects NO row — fail-closed, mirroring
+// clinicAppointmentsReadSpec's REQUIRED forPatient walk. withProvider stays
+// OPTIONAL: a display-only neighbour, not the anchor. active / next_due_at /
+// interval_days / occurrence_count are the same display columns the
+// unprotected visitSeriesDue lens carries; the Weaver-dispatch machinery
+// columns (freshUntil, missing_series_advance, violating) are NOT projected
+// here — this is a read model, not a convergence target.
+func visitSeriesReadLens() pkgmgr.LensSpec {
+	return pkgmgr.LensSpec{
+		CanonicalName: "visitSeriesRead",
+		Class:         "meta.lens",
+		Adapter:       "postgres",
+		Table:         "read_visit_series",
+		Engine:        "full",
+		Spec:          visitSeriesReadSpec,
+		Protected:     true,
+		IntoKey:       []string{"series_id"},
+		Columns: []pkgmgr.PostgresColumn{
+			{Name: "entity_key", Type: "text"},
+			{Name: "patient_key", Type: "text"},
+			{Name: "patient_name", Type: "text"},
+			{Name: "provider_key", Type: "text"},
+			{Name: "provider_name", Type: "text"},
+			{Name: "provider_specialty", Type: "text"},
+			{Name: "interval_days", Type: "integer"},
+			{Name: "next_due_at", Type: "text"},
+			{Name: "occurrence_count", Type: "integer"},
+			{Name: "active", Type: "boolean"},
+		},
+	}
+}
+
+// visitSeriesReadSpec is the PATIENT-anchored protected Postgres read model's
+// cypher (D1.5). Same active/nextDueAt derivation as visitSeriesDueSpec, minus
+// the freshUntil/missing_series_advance/violating dispatch columns.
+const visitSeriesReadSpec = `MATCH (s:visitseries)
+MATCH (s)-[:forPatient]->(p:patient)
+OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
+RETURN
+  nanoIdFromKey(s.key)          AS series_id,
+  s.key                         AS entity_key,
+  p.key                         AS patient_key,
+  p.demographics.data.fullName  AS patient_name,
+  pr.key                        AS provider_key,
+  pr.profile.data.fullName      AS provider_name,
+  pr.profile.data.specialty     AS provider_specialty,
+  s.series.data.intervalDays    AS interval_days,
+  s.progress.data.nextDueAt     AS next_due_at,
+  s.progress.data.occurrenceCount AS occurrence_count,
+  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil))) AS active,
+  [nanoIdFromKey(p.key)]        AS authz_anchors
+`
+
 // visitSeriesDueTarget returns the §10.8 playbook: the single missing_series_advance gap →
 // directOp(AdvanceVisitSeries) over the series, supplying dueFor + intervalDays +
 // occurrenceCount from the row so the op needs no second read.

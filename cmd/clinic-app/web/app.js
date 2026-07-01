@@ -13,7 +13,8 @@ const state = {
   appts: [],
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
-  series: [], // every recurring visit series (the visitSeriesDue lens, clinic-wide worklist + the selected patient's own list)
+  series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
+  mySeries: [], // the selected patient's own recurring visit series (PROTECTED, patient-self RLS, D1.5)
   patient: null, // the selected patient key (the trusted-tool context)
   view: "book",
   highlight: null,
@@ -316,7 +317,10 @@ function setPatient(value) {
   // appointments (cross-provider double-book exclusion). Idempotent; bails if the
   // Book form has no provider/date yet.
   refreshSlots();
-  if (state.view === "appts") loadAppts();
+  if (state.view === "appts") {
+    loadAppts();
+    loadMySeries();
+  }
 }
 
 // syncBookPatient reflects the selected patient into the Book tab's read-only echo
@@ -1578,28 +1582,51 @@ function bookFollowup(f) {
 //
 // A patient on a standing cadence (chronic-care monthly check-ins, weekly PT) can
 // have a recurring visit series started against a provider (StartVisitSeries).
-// The clinic-reminders visitSeriesDue lens (P5: read the lens read model, never
-// Core KV) rolls the series' own "next visit due" deadline forward every time it
-// converges — this section renders BOTH the clinic-wide "Series" tab worklist and
-// the selected patient's own series list + start/pause/resume controls on the My
-// Appointments tab, sharing one fetch (/api/visit-series → state.series).
+// The clinic-reminders visitSeriesRead PROTECTED Postgres read model (D1.5) rolls
+// the series' own "next visit due" deadline forward every time it converges — this
+// section renders BOTH the clinic-wide "Series" tab worklist (the AUTHENTICATED
+// staff wildcard read, /api/staff/visit-series → state.series) and the selected
+// patient's own series list + start/pause/resume controls on the My Appointments
+// tab (the AUTHENTICATED patient-self RLS read, /api/my-visit-series →
+// state.mySeries).
 
 async function loadSeries() {
   const grid = $("#series");
   const empty = $("#series-empty");
   if ($("#series-summary")) $("#series-summary").textContent = "loading…";
   try {
-    const data = await api("/api/visit-series");
+    const data = await authedGetAsStaff("/api/staff/visit-series");
     state.series = data.series || [];
   } catch (e) {
     grid.innerHTML = "";
     empty.hidden = false;
     empty.textContent = "Could not load recurring visit series: " + e.message;
     $("#series-summary").textContent = "";
-    renderMySeries();
+    renderSeries();
+    loadMySeries();
     return;
   }
   renderSeries();
+  loadMySeries();
+}
+
+// loadMySeries fetches the selected patient's own recurring visit series from
+// the PROTECTED, RLS-scoped /api/my-visit-series (D1.5) — the sibling of
+// loadSeries' clinic-wide staff fetch.
+async function loadMySeries() {
+  if (!state.patient) {
+    state.mySeries = [];
+    renderMySeries();
+    return;
+  }
+  try {
+    const data = await authedGet("/api/my-visit-series");
+    state.mySeries = data.series || [];
+  } catch (e) {
+    state.mySeries = [];
+    renderMySeries();
+    return;
+  }
   renderMySeries();
 }
 
@@ -1739,8 +1766,9 @@ function bookSeriesOccurrence(s) {
 }
 
 // renderMySeries fills the My Appointments tab's "Recurring visit series" panel
-// with the selected patient's own series (client-side filtered from the same
-// state.series the clinic-wide tab uses).
+// with the selected patient's own series — state.mySeries, the PROTECTED,
+// RLS-scoped fetch (/api/my-visit-series), already scoped server-side to this
+// patient (no client-side filter needed).
 function renderMySeries() {
   const list = $("#my-series-list");
   const empty = $("#my-series-empty");
@@ -1751,7 +1779,7 @@ function renderMySeries() {
     empty.textContent = "Select a patient above to see or start a recurring visit series.";
     return;
   }
-  const mine = state.series.filter((s) => s.patientKey === state.patient);
+  const mine = state.mySeries;
   if (mine.length === 0) {
     empty.hidden = false;
     empty.textContent = "No recurring visit series for this patient yet.";
@@ -2656,8 +2684,8 @@ function showView(view) {
     tab.setAttribute("aria-selected", String(isV));
   }
   // "appts" (My Appointments) also hosts the selected patient's own recurring
-  // series panel, so it loads the same series data the clinic-wide "series" tab
-  // shows.
+  // series panel (state.mySeries, the PROTECTED patient-self RLS fetch) — a
+  // sibling of the clinic-wide "series" tab's staff fetch, not the same data.
   if (view === "appts") loadAppts();
   if (view === "schedule") loadSchedule();
   if (view === "followups") loadFollowups();

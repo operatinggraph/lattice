@@ -2,10 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
-	"strings"
 
+	"github.com/asolgan/lattice/internal/substrate"
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
@@ -53,41 +54,26 @@ type taskRow struct {
 	ExpiresAt            string `json:"expiresAt,omitempty"`
 }
 
-// computeTasks flattens the applicant's open tasks out of the `my-tasks` lens read
-// model. It keeps only the row for the selected applicant (matched on the row's
-// `assignee` — the actor the envelope stamps from the lens ActorField), then emits
-// one taskRow per open task. The lens collect can leave a degenerate {taskKey:null}
-// artifact when an identity has no open task; an entry without a taskKey is dropped.
-// When applicant is empty every identity's open tasks are returned (the operator-wide
-// view). Rows sort by soonest expiry, then taskKey, for a stable, actionable order.
-func computeTasks(keys []string, get kvGetter, applicant string) []taskRow {
-	rows := make([]taskRow, 0)
-	for _, k := range keys {
-		raw, ok := get(k)
-		if !ok {
+// tasksFromRow flattens ONE identity's open tasks out of a decoded `my-tasks`
+// lens row into the FE's taskRow shape. The lens collect can leave a degenerate
+// {taskKey:null} artifact when an identity has no open task; an entry without a
+// taskKey is dropped. Rows sort by soonest expiry, then taskKey, for a stable,
+// actionable order.
+func tasksFromRow(mt myTasksRow) []taskRow {
+	rows := make([]taskRow, 0, len(mt.OpenTasks))
+	for _, t := range mt.OpenTasks {
+		if t.TaskKey == "" {
 			continue
 		}
-		var mt myTasksRow
-		if json.Unmarshal(raw, &mt) != nil || mt.Assignee == "" {
-			continue
-		}
-		if applicant != "" && mt.Assignee != applicant {
-			continue
-		}
-		for _, t := range mt.OpenTasks {
-			if t.TaskKey == "" {
-				continue
-			}
-			rows = append(rows, taskRow{
-				TaskKey:              t.TaskKey,
-				Assignee:             t.Assignee,
-				Operation:            t.ForOperation,
-				OperationName:        t.OperationName,
-				OperationDescription: t.OperationDescription,
-				ScopedTo:             t.ScopedTo,
-				ExpiresAt:            t.ExpiresAt,
-			})
-		}
+		rows = append(rows, taskRow{
+			TaskKey:              t.TaskKey,
+			Assignee:             t.Assignee,
+			Operation:            t.ForOperation,
+			OperationName:        t.OperationName,
+			OperationDescription: t.OperationDescription,
+			ScopedTo:             t.ScopedTo,
+			ExpiresAt:            t.ExpiresAt,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].ExpiresAt != rows[j].ExpiresAt {
@@ -98,12 +84,18 @@ func computeTasks(keys []string, get kvGetter, applicant string) []taskRow {
 	return rows
 }
 
-// handleTasks implements GET /api/tasks?applicant= — the applicant task inbox,
-// served from the `my-tasks` lens read model (NOT Core KV; P5). applicant scopes
-// the rows to one applicant identity; omit it to list every open task. The tasks
-// are self-describing (op name + description aspect-hopped by the lens), so the FE
+// handleTasks implements GET /api/tasks — the AUTHENTICATED caller's own open-task
+// inbox, read from the `my-tasks` lens read model (NOT Core KV; P5) at its own
+// identity-keyed row (`my-tasks.identity.<subject>`). The actor comes ONLY from the
+// verified JWT; there is no client-supplied applicant filter. The tasks are
+// self-describing (op name + description aspect-hopped by the lens), so the FE
 // renders an actionable prompt and drives completion through POST /api/op.
 func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
+		return
+	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return
@@ -112,20 +104,21 @@ func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	bucket := orchestrationbase.MyTasksBucket
-	keys, err := conn.KVListKeys(ctx, bucket)
-	if err != nil {
-		s.writeError(w, http.StatusBadGateway,
-			"list "+bucket+": "+err.Error()+" (is orchestration-base installed and the Refractor projecting?)")
+	entry, err := conn.KVGet(ctx, bucket, bucket+".identity."+actor.Subject)
+	if errors.Is(err, substrate.ErrKeyNotFound) {
+		s.writeJSON(w, http.StatusOK, map[string]any{"tasks": []taskRow{}, "count": 0})
 		return
 	}
-	get := func(key string) ([]byte, bool) {
-		entry, err := conn.KVGet(ctx, bucket, key)
-		if err != nil {
-			return nil, false
-		}
-		return entry.Value, true
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"read "+bucket+": "+err.Error()+" (is orchestration-base installed and the Refractor projecting?)")
+		return
 	}
-	applicant := strings.TrimSpace(r.URL.Query().Get("applicant"))
-	rows := computeTasks(keys, get, applicant)
+	var mt myTasksRow
+	if json.Unmarshal(entry.Value, &mt) != nil {
+		s.writeJSON(w, http.StatusOK, map[string]any{"tasks": []taskRow{}, "count": 0})
+		return
+	}
+	rows := tasksFromRow(mt)
 	s.writeJSON(w, http.StatusOK, map[string]any{"tasks": rows, "count": len(rows)})
 }

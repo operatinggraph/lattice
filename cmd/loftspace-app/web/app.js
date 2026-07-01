@@ -1289,7 +1289,7 @@ async function loadTasks() {
   }
   $("#tasks-summary").textContent = "loading…";
   try {
-    const data = await api("/api/tasks?applicant=" + encodeURIComponent(state.applicant));
+    const data = await authedGet("/api/tasks");
     state.tasks = data.tasks || [];
   } catch (e) {
     grid.innerHTML = "";

@@ -35,6 +35,7 @@ func Lenses() []pkgmgr.LensSpec {
 		},
 		followUpRemindersLens(),
 		visitSeriesDueLens(),
+		visitSeriesReadLens(),
 	}
 }
 

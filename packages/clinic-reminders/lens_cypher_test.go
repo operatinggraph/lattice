@@ -123,6 +123,24 @@ func (f *remFixture) edge(t *testing.T, name, fromName, toName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
+// project runs an UNANCHORED spec (a full seed-scan, like clinic-domain's
+// clinicAppointmentsReadSpec) and returns every row — the shape a protected
+// Postgres read model uses, as opposed to projectAt's single-anchor
+// {key: $actorKey} convergence lenses.
+func (f *remFixture) project(t *testing.T, spec string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "clinic-reminders lens cypher must parse on the full engine")
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
 // projectAt runs the anchored appointmentReminders spec for one appointment with
 // an INJECTED $now (the same param executeFullForActor supplies live).
 func (f *remFixture) projectAt(t *testing.T, apptName, now string) []ruleengine.ProjectionResult {
