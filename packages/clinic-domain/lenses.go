@@ -58,6 +58,73 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          clinicPatientsSpec,
 		},
+		{
+			// clinicAppointmentsRead — the protected Postgres read model for the
+			// patient-facing "My Appointments" view (D1.5, mirroring D1.3 Fire 2's
+			// applicant-self milestone). Contract #6 §6.14: protected-by-default,
+			// one authz_anchors set of bare-NanoID match tokens per row, RLS
+			// returning only rows the reading actor is granted.
+			//
+			// This is the PATIENT-SELF audience only. cmd/clinic-app's
+			// handleAppointments today lists the unprotected clinicAppointments
+			// NATS-KV bucket and lets ANY caller pass `?patient=<any patient>` to
+			// read that patient's full appointment history — including the
+			// operational post-visit signals (documentedAt/followUpRequested) —
+			// with no authentication at all. handleMyAppointments (D1.5) replaces
+			// that vector for the patient's own view: RLS scopes the read to the
+			// verified JWT subject, so a caller cannot request another patient's
+			// rows. The PROVIDER audience (a provider's own schedule) and the
+			// clinic-wide staff views (follow-ups worklist, the "every provider"
+			// schedule aggregate) are NOT yet migrated — they stay on the
+			// existing unprotected handleAppointments path. Closing them needs
+			// either a provider-self anchor (a straightforward follow-up,
+			// mirroring landlordLeaseApplicationsRead's Increment 2) or a
+			// staff/admin wildcard grant (an Andrew posture call, per the D1
+			// design's M5 Loupe-all-access decision) — flagged on the board, not
+			// freelanced here.
+			//
+			// authz_anchors = [nanoIdFromKey(patient identity key)] — the
+			// patient-self anchor. The shipped base cap-read.<actor> self-anchor
+			// (D1.1) grants each patient their own NanoID, so RLS matches
+			// patient=P's rows for P's session and nobody else's.
+			//
+			// Adapter postgres + Protected: Refractor provisions the RLS table
+			// (FORCE ROW LEVEL SECURITY + the policy) from Columns at activation,
+			// mirroring lease-signing's leaseApplicationsRead exactly. DSN is
+			// left empty: Refractor resolves it from REFRACTOR_PG_DSN.
+			//
+			// forPatient is a REQUIRED match (the anchor walk) so an appointment
+			// with no patient link projects NO row — fail-closed, never a null
+			// authz_anchor. withProvider stays OPTIONAL (a display-only neighbour,
+			// like leaseApplicationsRead's unit walk), matching the existing
+			// clinicAppointments lens's null-safety for an incomplete appointment.
+			CanonicalName: "clinicAppointmentsRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_clinic_appointments",
+			Engine:        "full",
+			Spec:          clinicAppointmentsReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"appointment_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "starts_at", Type: "text"},
+				{Name: "ends_at", Type: "text"},
+				{Name: "reason", Type: "text"},
+				{Name: "status", Type: "text"},
+				{Name: "status_note", Type: "text"},
+				{Name: "patient_key", Type: "text"},
+				{Name: "patient_name", Type: "text"},
+				{Name: "provider_key", Type: "text"},
+				{Name: "provider_name", Type: "text"},
+				{Name: "provider_specialty", Type: "text"},
+				{Name: "reminder_sent_at", Type: "text"},
+				{Name: "follow_up_reminder_sent_at", Type: "text"},
+				{Name: "documented_at", Type: "text"},
+				{Name: "follow_up_requested", Type: "boolean"},
+				{Name: "follow_up_date", Type: "text"},
+			},
+		},
 	}
 }
 
@@ -163,3 +230,34 @@ RETURN
   p.key AS key,
   p.key AS patientKey,
   p.demographics.data.fullName AS name`
+
+// clinicAppointmentsReadSpec is the PATIENT-anchored protected Postgres read
+// model's cypher (D1.5). forPatient is REQUIRED (the anchor walk) — an
+// appointment with no patient link projects no row, fail-closed, never a null
+// authz_anchor (mirrors leaseApplicationsReadSpec's REQUIRED applicant walk).
+// withProvider stays OPTIONAL: it is a display-only neighbour, not the anchor.
+// Same column surface as clinicAppointmentsSpec (the unprotected lens) so the
+// migrated "My Appointments" view keeps full display parity.
+const clinicAppointmentsReadSpec = `MATCH (a:appointment)
+MATCH (a)-[:forPatient]->(p:patient)
+OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
+RETURN
+  nanoIdFromKey(a.key)               AS appointment_id,
+  a.key                              AS entity_key,
+  a.schedule.data.startsAt           AS starts_at,
+  a.schedule.data.endsAt             AS ends_at,
+  a.schedule.data.reason             AS reason,
+  a.status.data.value                AS status,
+  a.status.data.note                 AS status_note,
+  p.key                              AS patient_key,
+  p.demographics.data.fullName       AS patient_name,
+  pr.key                             AS provider_key,
+  pr.profile.data.fullName           AS provider_name,
+  pr.profile.data.specialty          AS provider_specialty,
+  a.reminder.data.sentAt             AS reminder_sent_at,
+  a.followUpReminder.data.sentAt     AS follow_up_reminder_sent_at,
+  a.encounter.data.documentedAt      AS documented_at,
+  a.encounter.data.followUpRequested AS follow_up_requested,
+  a.encounter.data.followUpDate      AS follow_up_date,
+  [nanoIdFromKey(p.key)]             AS authz_anchors
+`

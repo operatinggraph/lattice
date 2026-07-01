@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.8.0
+version: 0.9.0
 description: |
   Clinic bookable domain. Self-contained package owning three vertex types —
   patient, provider, appointment — with their aspects (.demographics, .profile,
@@ -8,9 +8,14 @@ description: |
   Create*/Reschedule/SetAppointmentStatus/RecordEncounter/Tombstone* ops.
   RecordEncounter captures the post-visit clinical record (.encounter — RAW PHI
   {summary, assessment, plan} never projected, plus operational documentation /
-  follow-up signals the lens does project). Three projection lenses
-  (clinicAppointments, clinicProviders, clinicPatients)
-  are the P5 read models a clinic FE reads. CreateAppointment + RescheduleAppointment
+  follow-up signals the lens does project). Four projection lenses
+  (clinicAppointments, clinicProviders, clinicPatients, clinicAppointmentsRead)
+  are the P5 read models a clinic FE reads. clinicAppointmentsRead is the
+  patient-self PROTECTED Postgres read model (Contract #6 §6.14 RLS, D1.5,
+  mirroring lease-signing's leaseApplicationsRead) — cmd/clinic-app's My
+  Appointments view reads it as an authenticated actor instead of the
+  unprotected clinicAppointments bucket; the provider/staff audiences are not
+  yet migrated (flagged follow-up). CreateAppointment + RescheduleAppointment
   reject a provider double-book (SlotConflict) AND a patient double-book across
   providers (PatientDoubleBook) by ENUMERATING the provider's / patient's hasBooking
   links (kv.Links, Contract #2 §2.5.1) serialized on a scalar .bookingGuard epoch, and
@@ -55,6 +60,9 @@ declares:
     - canonicalName: clinicPatients
       adapter: nats-kv
       bucket: clinic-patients
+      engine: full
+    - canonicalName: clinicAppointmentsRead
+      adapter: postgres
       engine: full
   permissions:
     - operationType: CreatePatient

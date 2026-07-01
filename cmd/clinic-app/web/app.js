@@ -58,6 +58,61 @@ async function api(path, opts) {
   return body;
 }
 
+// ---- Read-boundary token (D1.5) ----
+// My Appointments is served from the PROTECTED clinicAppointmentsRead Postgres
+// model as an authenticated actor: RLS returns only the signed-in patient's
+// rows, so the request must carry a verified JWT (there is no client-side
+// patient filter to forge — mirrors loftspace-app's D1.3 pattern). In the
+// trusted-tool DEMO posture the app mints a short-lived token for the selected
+// patient via POST /api/dev-token; a production deployment wires a real IdP and
+// the FE would present that token instead. The token is cached per subject
+// until shortly before expiry.
+let readTokenCache = { subject: null, token: null, exp: 0 };
+
+// bareId extracts the bare identity NanoID (the RLS principal / JWT subject)
+// from a full vtx.patient.<id> (or vtx.identity.<id>) key.
+function bareId(fullKey) {
+  const i = (fullKey || "").lastIndexOf(".");
+  return i >= 0 ? fullKey.slice(i + 1) : fullKey || "";
+}
+
+async function readToken() {
+  if (!state.patient) return null;
+  const subject = bareId(state.patient);
+  const now = Date.now();
+  if (readTokenCache.subject === subject && readTokenCache.token && now < readTokenCache.exp - 60000) {
+    return readTokenCache.token;
+  }
+  const res = await fetch("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) {
+    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
+  }
+  const body = await res.json();
+  readTokenCache = { subject, token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
+  return body.token;
+}
+
+// authedGet fetches a protected endpoint with the read-boundary Bearer token. On
+// a 401 (e.g. the app restarted with a fresh ephemeral dev-auth key, invalidating
+// a cached token) it clears the cache and retries once with a freshly minted token.
+async function authedGet(path) {
+  let token = await readToken();
+  if (!token) throw new Error("select a patient to sign in");
+  try {
+    return await api(path, { headers: { Authorization: "Bearer " + token } });
+  } catch (e) {
+    if (!/HTTP 401|authentication required/i.test(e.message)) throw e;
+    readTokenCache = { subject: null, token: null, exp: 0 };
+    token = await readToken();
+    if (!token) throw e;
+    return api(path, { headers: { Authorization: "Bearer " + token } });
+  }
+}
+
 function toast(msg, kind, extra) {
   const t = $("#toast");
   t.className = "toast " + (kind || "");
@@ -735,10 +790,15 @@ async function providerAppointments(provider) {
 // appointments across ALL providers — so the slot picker can exclude a time the
 // patient is already booked elsewhere, which the op rejects as a PatientDoubleBook.
 // Invalidated on a successful booking alongside the provider cache.
+//
+// D1.5: reads the PROTECTED /api/my-appointments endpoint (RLS, patient-self
+// anchor) instead of the old unauthenticated `?patient=` filter — patient is
+// always the signed-in state.patient (its only caller), so the authenticated
+// actor's own rows are exactly what this needs.
 async function patientAppointments(patient) {
   if (state.slotPatientApptCache[patient]) return state.slotPatientApptCache[patient];
   try {
-    const data = await api("/api/appointments?patient=" + encodeURIComponent(patient));
+    const data = await authedGet("/api/my-appointments");
     state.slotPatientApptCache[patient] = data.appointments || [];
   } catch (e) {
     state.slotPatientApptCache[patient] = [];
@@ -1155,7 +1215,11 @@ async function loadAppts() {
   }
   $("#appts-summary").textContent = "loading…";
   try {
-    const data = await api("/api/appointments?patient=" + encodeURIComponent(state.patient));
+    // D1.5: the PROTECTED, RLS-scoped, authenticated read (see
+    // patientAppointments' doc above the sibling slot-picker call) — replaces
+    // the old unauthenticated `?patient=` vector that let anyone impersonate any
+    // patient.
+    const data = await authedGet("/api/my-appointments");
     state.appts = data.appointments || [];
   } catch (e) {
     grid.innerHTML = "";

@@ -10,6 +10,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -24,6 +28,21 @@ type server struct {
 	adminActor  string
 	logger      *slog.Logger
 	natsTimeout time.Duration
+
+	// The read boundary (D1.5). pgPool is the protected clinicAppointmentsRead
+	// read-model pool; nil when CLINIC_APP_PG_DSN is unset → protected reads
+	// return a clean 502 rather than panicking. authn verifies the read actor's
+	// JWT; nil when no auth posture is configured → protected reads 401 (fail
+	// closed). devSigner mints demo tokens; nil unless CLINIC_APP_DEV_AUTH.
+	pgPool    *pgxpool.Pool
+	authn     *auth.Authenticator
+	devSigner *devSigner
+}
+
+// pgxBeginner is the subset of *pgxpool.Pool the protected read uses — a single
+// Begin so the query path can be unit-tested with a fake transaction.
+type pgxBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -38,7 +57,9 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/providers", s.handleProviders)
 	mux.HandleFunc("/api/patients", s.handlePatients)
 	mux.HandleFunc("/api/appointments", s.handleAppointments)
+	mux.HandleFunc("/api/my-appointments", s.handleMyAppointments)
 	mux.HandleFunc("/api/op", s.handleOp)
+	mux.HandleFunc("/api/dev-token", s.handleDevToken)
 }
 
 // writeJSON encodes v as JSON with the given status code.

@@ -165,8 +165,8 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected no Depends (self-contained), got %v", Package.Depends)
 	}
 
-	if got := len(Package.Lenses); got != 3 {
-		t.Fatalf("expected 3 lenses, got %d", got)
+	if got := len(Package.Lenses); got != 4 {
+		t.Fatalf("expected 4 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
