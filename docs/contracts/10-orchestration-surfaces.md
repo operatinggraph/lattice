@@ -954,6 +954,7 @@ Every action's params are resolved per row (templating below). The Actuator subm
 | `triggerLoom` | `{ pattern, subject }` | submit `StartLoomPattern{ patternRef: pattern, subjectKey: subject }` → Loom (§10.5). `subject` must resolve to a vertex of the pattern's `subjectType`. **Auth: see below.** Also the path for **external remediation** (since 2026-06-18, 13.1): `triggerLoom` a pattern whose body is an `externalTask` (§10.5) — this **replaces the retired `nudge` action**. |
 | `assignTask` | `{ operation, assignee, target }` | `CreateTask` (§10.1): `assignedTo`→`assignee`, `forOperation`→`operation`, `scopedTo`→`target`. |
 | `directOp` | `{ operation, target?, params?, reads? }` | submit `operation` directly as a remediation op. `reads?` is the dispatched op's `contextHint.reads` — bare vertex keys, each a literal or `row.<column>` — so an op that must hydrate its candidate vertex (e.g. `TombstoneObject` reading the object's `linkEpoch`) gets the key straight from the lens row. Additive + `omitempty`: a `directOp` that omits it dispatches read-free exactly as before. |
+| `proposedOp` | *(none — sourced from the row)* | **Additive, opt-in (Augur dispatch, Fire 2b).** Dispatch the **row-carried** `proposedAction` + `proposedParams` (materialised into a `GapAction`) after a **dispatch-time deterministic re-validation** (action ∈ the escalation catalog `{triggerLoom, assignTask, directOp}` · live-registry resolution via the existing `buildPlan` · **default-deny scope** to the row's TRUSTED candidate `candidateKey` · op ∈ Weaver's service-actor authority). Unlike the three static actions, the op + params are *data per row*, not playbook config; the proposed op carries a **proposal-scoped deterministic requestId** so a sweep re-dispatch collapses on the Contract #4 tracker (at-most-once). Used **only** by the `augur` package's primordial `augurDispatch` convergence target (see "Augur dispatch" below); wiring `proposedOp` to a row whose source is not a §5-validated approved proposal is a package bug. The `directOp`-must-be-literal guard stays intact for ordinary playbooks — `proposedOp` is the gated sibling for the one §5-validated dynamic-op surface. |
 
 > **`nudge` — RETIRED (Amended 2026-06-18 — 13.1, External I/O Bridge).** The `nudge` GapAction (and the
 > `operation` field added to it in Story 10.2) is removed: external I/O moves out of Weaver (convergence
@@ -995,6 +996,31 @@ Every action's params are resolved per row (templating below). The Actuator subm
 > is an `externalTask`; `augur.autoApply.actions` ⊆ `{triggerLoom, assignTask, directOp}`. **Affected
 > consumers:** the Weaver engine (the escalation branch) + package authors (the `augur` package).
 > The `gaps`/templating/action-table shapes below are **unchanged**.
+
+### Augur dispatch (Fire 2b — approved proposal → remediation)
+
+> The escalation above turns a stuck gap into a `vtx.augurproposal` vertex pending human review; **dispatch**
+> is how an `approved` proposal becomes a real remediation. The `augur` package ships a primordial
+> **`augurDispatch` convergence target** (a `meta.weaverTarget` + the `augurDispatchPending` lens) that
+> projects one §10.2 row per proposal into `weaver-targets` under the `augurDispatch.` prefix with
+> **`violating = (review.state == "approved")`** and the proposed action/params + the TRUSTED candidate as
+> param columns. So an approved proposal is picked up by Weaver's **existing lane-1 machinery** (watch / mark /
+> lease / sweep) — no new pickup path. Its single gap `missing_dispatch` maps to the **`proposedOp`** action
+> (action table above): Weaver materialises the row-carried `{action, params}` into the existing `buildPlan`
+> after the **dispatch-time deterministic re-validation** (the design §5 *third* leg — action vocabulary +
+> live-registry resolution + default-deny scope to the trusted candidate + Weaver-authority), then dispatches
+> a **two-op** episode: the proposed remediation op (carrying a **proposal-scoped deterministic requestId**, so
+> a sweep re-dispatch collapses on the Contract #4 tracker — at-most-once), and **`RecordProposalDispatch`**
+> (package op) flipping `review.state approved → dispatched | invalid` + stamping `dispatchedAt`. The flip
+> reprojects the row `violating = false` → the mark clears (level-reconciled) → no re-dispatch; because
+> correctness rests on the deterministic requestId, the flip is liveness (stop the churn), and a
+> genuinely-lost remediation leaves the **original** target violating → it re-escalates (a fresh proposal
+> supersedes). A proposal that fails dispatch-time re-validation flips `invalid` (auditable) and dispatches
+> nothing. Dispatch is **human-in-the-loop** (a proposal dispatches only after `ReviewProposal{approve}`);
+> the `autoApply` autonomy boundary (Fire 3) is unchanged. **Affected consumers:** the Weaver engine (the
+> `proposedOp` branch + the 2-op fire) + the `augur` package (the `augurDispatch` target/lens + the
+> `RecordProposalDispatch` op). Full design:
+> `_bmad-output/implementation-artifacts/augur-dispatch-pickup-design.md`.
 
 ### Templating
 

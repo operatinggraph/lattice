@@ -1,6 +1,6 @@
 # The Augur — Fire 2b: approved-proposal dispatch pickup (closing the loop) — design
 
-**Status: 📐 awaiting-Andrew (ratification).**
+**Status: ✅ Andrew-ratified (2026-06-30) — role-queue-only `assignTask` containment (§3.2) accepted; foreign-assignee widening deferred to a separate ratification.**
 **Component:** Weaver (convergence engine) + the `augur` capability package · builds on the ratified parent design `augur-design.md`
 **Backlog row:** Lattice lane → *AI-native → the Augur (L3 evaluator)* → **Fire 2b**
 **Author:** Winston (Designer fire, 2026-06-30)

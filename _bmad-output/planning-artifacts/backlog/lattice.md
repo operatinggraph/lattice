@@ -83,7 +83,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > *Dependency-sequenced ratified items*: **Vault** + **Personal Lens** behind D1; **Gateway** behind
 > NATS-write-restriction F2; **Object crypto-shred** behind Vault — build when their gate clears.
 > (**Control-plane-authz** rides D1.2, now shipped → buildable, deprioritized behind D1 rollout.)
-> **Augur** Fire 1 + 2a merged; Fire 2b+ is the next AI-native increment (§8).
+> **Augur** Fire 1 + 2a merged; Fire 2b (dispatch loop-closer) ✅ ratified → build-ready.
 > (**`kv.Links`** Fire 1 + Fire 2 (clinic consumer) shipped; only the optional Fire 3 e2e/lint remains.)
 
 ### Security & trust boundary
@@ -124,7 +124,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | AI-authored capabilities | A Lattice-aware agent proposes DDL/Starlark/lenses/workflows through human review + deterministic validation + rollback. | ★★–★★★ | L | ✅ ratified · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) |
-| **The Augur** (AI reasoning tier — L3 evaluator) | Weaver's AI-assisted reasoning tier for ambiguous/novel convergence gaps. The marquee AI-native feature. | ★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/augur-design.md) · Fire 1 (adaf7be) + 2a (3dbd049) shipped; Fire 2b (approved→dispatch loop-closer) 📐 awaiting-Andrew · [dispatch design](../../implementation-artifacts/augur-dispatch-pickup-design.md) (§10.8 edit staged uncommitted) |
+| **The Augur** (AI reasoning tier — L3 evaluator) | Weaver's AI-assisted reasoning tier for ambiguous/novel convergence gaps. The marquee AI-native feature. | ★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/augur-design.md) · Fire 1 (adaf7be) + 2a (3dbd049) shipped; Fire 2b ✅ ratified · [dispatch design](../../implementation-artifacts/augur-dispatch-pickup-design.md) — build-ready (role-queue-only assignTask) |
 | Starlark guards (Loom) | The reserved `{reads, starlark}` guard escape hatch needs a verified-pure sandbox. | ★ | M | ✅ ratified (split) · [design](../../implementation-artifacts/loom-starlark-guards-design.md) · 🚧 Loom-side held (ships with first consumer) |
 
 ### Read-model / projection maturity
