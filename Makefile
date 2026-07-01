@@ -20,11 +20,14 @@ BOOTSTRAP_JSON ?= $(abspath ./lattice.bootstrap.json)
 # Postgres RLS is enforced (the lattice superuser would bypass it). See
 # provision-loftspace-role.
 LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:5432/lattice?sslmode=disable
+# The clinic-app read-boundary DSN (D1.5), same NON-superuser SELECT-only posture
+# as LOFTSPACE_APP_PG_DSN. See provision-clinic-role.
+CLINIC_APP_PG_DSN ?= postgres://clinic_app:clinic_app_dev@localhost:5432/lattice?sslmode=disable
 
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-readpath reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -326,18 +329,42 @@ provision-readpath:
 ## up-clinic — One-command Clinic vertical: up-full → install-clinic → build +
 ## start clinic-app (:7799) in the background alongside Loupe (:7777). The clinic
 ## app is the demand-side patient/booking view; Loupe is the operator/inspector.
+## Provisions the clinic-app D1.5 read-boundary role (mirrors up-loftspace's D1.3
+## wiring) so the shipped protected reads (clinicPatientsRead / clinicAppointmentsRead
+## / staff-wildcard) serve instead of 500ing "not configured".
 ## Logs: clinic-app.log (+ the up-full logs).
 up-clinic:
 	@$(MAKE) up-full
+	@$(MAKE) provision-clinic-role
 	@$(MAKE) install-clinic
+	@$(MAKE) provision-readpath
 	@echo "==> Building clinic-app binary..."
 	go build -o bin/clinic-app ./cmd/clinic-app
 	@echo "==> Killing any prior clinic-app process..."
 	-pkill -f "bin/clinic-app" 2>/dev/null || true
-	@echo "==> Starting clinic-app in background..."
-	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/clinic-app >clinic-app.log 2>&1 </dev/null &
+	@echo "==> Starting clinic-app in background (D1.5 read boundary: non-superuser SELECT-only role + dev-auth)..."
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		CLINIC_APP_PG_DSN="$(CLINIC_APP_PG_DSN)" CLINIC_APP_DEV_AUTH=1 \
+		./bin/clinic-app >clinic-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Clinic ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · patient app: http://127.0.0.1:7799"
+
+## provision-clinic-role — Create the clinic-app's Postgres read role: a
+## NON-superuser, SELECT-only role (D1.5), mirroring provision-loftspace-role
+## (D1.3). The app MUST NOT read as the `lattice` superuser — superusers (and
+## BYPASSRLS roles) skip RLS entirely, so the protected patient/appointment read
+## models would leak every actor's rows. Idempotent.
+provision-clinic-role:
+	@echo "==> Provisioning clinic-app non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='clinic_app') THEN \
+		    CREATE ROLE clinic_app LOGIN PASSWORD 'clinic_app_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO clinic_app;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO clinic_app;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO clinic_app;"
 
 ## orchestration — Build + start the orchestration tier (Loom, Weaver, Bridge,
 ## object-store-manager) in the background. Requires a running deployment
@@ -447,11 +474,14 @@ refresh-clinic:
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-domain
 	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-reminders
+	@$(MAKE) provision-clinic-role
 	@echo "==> Rebuilding clinic-app binary..."
 	go build -o bin/clinic-app ./cmd/clinic-app
 	@echo "==> Restarting clinic-app..."
 	-pkill -f "bin/clinic-app" 2>/dev/null || true
-	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/clinic-app >clinic-app.log 2>&1 </dev/null &
+	NATS_URL=$(NATS_URL) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		CLINIC_APP_PG_DSN="$(CLINIC_APP_PG_DSN)" CLINIC_APP_DEV_AUTH=1 \
+		./bin/clinic-app >clinic-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Clinic refreshed (packages diff-applied + clinic-app restarted). Patient app: http://127.0.0.1:7799"
 
