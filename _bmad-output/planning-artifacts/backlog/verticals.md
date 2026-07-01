@@ -17,7 +17,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| Recurring visit series (the `@every` clinic consumer) | A genuinely-recurring clinic need: a patient on a standing cadence (chronic-care monthly check-ins / weekly PT) — keep a "next visit due" worklist gap rolling forward on its own. | Clinic | pkg + FE | ★★★ | M | ✅ ratified · [design](../../implementation-artifacts/clinic-recurring-visit-series-design.md) · package rolling-`@at` convergence series (no new primitive); Inc 1 (`visitSeriesDue` lens + `AdvanceVisitSeries`) → Inc 2 (FE worklist); no contract change |
+| Recurring visit series (the `@every` clinic consumer) | A genuinely-recurring clinic need: a patient on a standing cadence (chronic-care monthly check-ins / weekly PT) — keep a "next visit due" worklist gap rolling forward on its own. | Clinic | pkg + FE | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/clinic-recurring-visit-series-design.md) · Inc 1 (package) shipped; next: Inc 2 FE worklist |
 | Clinic — encounter / visit documentation | `RecordEncounter` captures the post-visit clinical record; raw content stays unprojected (Vault discipline). | Clinic | pkg + FE | ★★★ | M | 🏗️ building · Inc 1 (capture op) + Inc 2 (FE) shipped; raw-content encryption → Vault (deferred) |
 | LoftSpace — per-landlord RLS view as the rich decision surface (D1.5 landlord cutover) | The protected `/api/landlord/applications` RLS read shows only a scope-count banner; the rich decision view is still the trusted-all-units console (§10.2). Project signals into `landlordLeaseApplicationsRead`, retiring the console. | LoftSpace | pkg + FE | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/loftspace-d1.5-landlord-rls-decision-surface-design.md) · Rec C: ship the non-PII RLS view now; defer readiness-clone + console-retirement to Vault |
 | Clinic — tombstoned provider/patient/appointment LINGER in the FE | A soft-deleted clinic entity stays pickable/visible because the full-engine lens re-projects it while its keyed aspect survives. | Clinic | platform (Refractor) + FE | ★★ | S | 🚧 blocked-on lattice [full-engine tombstone retraction](lattice.md) (Read-model section) |
@@ -39,6 +39,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-01 · `5cf84e8` · Clinic recurring visit series Inc 1 — visitseries vertex + Start/Pause/Resume/AdvanceVisitSeries + rolling `visitSeriesDue` lens (Inc 2 FE worklist next)
 - 2026-06-30 · `f8240cd` · Clinic — `SetAppointmentStatus` terminal-status guard (cancelled/completed/noShow final → TerminalStatus; fixes completed→scheduled revert)
 - 2026-06-30 · `6674834` · LoftSpace — `DecideLeaseApplication` decision guards (recorded decision terminal → DecisionFinal; approve needs signed → NotReadyToApprove)
 - 2026-06-30 · `f70ab18` · Clinic follow-ups CLOSED — Inc 2 at-the-date `@at` follow-up reminder (`followUpReminders` + `RecordFollowUpReminder` + worklist badge)
