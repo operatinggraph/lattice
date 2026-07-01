@@ -13,13 +13,21 @@ const (
 	actionTriggerLoom = "triggerLoom"
 	actionAssignTask  = "assignTask"
 	actionDirectOp    = "directOp"
+	// actionProposedOp is the Fire 2b "Augur dispatch" action (Contract #10
+	// §10.8): unlike the three static actions, its op + params are sourced from
+	// the ROW — an approved Augur proposal's proposedAction/proposedParams (the
+	// augur package's augurDispatchPending lens) — materialised into a GapAction
+	// after a dispatch-time re-validation (buildProposedOpPlan). Reserved for the
+	// augur package's primordial augurDispatch target.
+	actionProposedOp = "proposedOp"
 )
 
 // Operation types the Actuator submits.
 const (
-	opStartLoomPattern = "StartLoomPattern"
-	opCreateTask       = "CreateTask"
-	opMarkExpired      = "MarkExpired"
+	opStartLoomPattern       = "StartLoomPattern"
+	opCreateTask             = "CreateTask"
+	opMarkExpired            = "MarkExpired"
+	opRecordProposalDispatch = "RecordProposalDispatch"
 )
 
 // assignTaskGrantTTL is the expiry horizon set on an assignTask grant. The
@@ -72,6 +80,23 @@ type plan struct {
 	// the op touches. Empty for read-free ops (StartLoomPattern, MarkExpired,
 	// most directOps). NO `.state` suffixes — the DDLs read bare keys.
 	reads []string
+	// requestID, when non-nil, overrides the ordinary episode-scoped
+	// deriveEpisodeRequestID derivation for this op (Fire 2b's proposedOp
+	// dispatch: the proposed remediation's requestId must be PROPOSAL-scoped,
+	// not episode/mark-scoped, so a sweep reclaim re-derives the identical id and
+	// collapses on the Contract #4 tracker instead of double-applying — design
+	// augur-dispatch-pickup §3.3). Nil for every ordinary gap (unchanged
+	// behavior).
+	requestID func(claimID string) string
+	// followUp, when non-nil, is fired immediately after this op succeeds, in
+	// the SAME dispatch (Fire 2b's two-op proposedOp dispatch: the proposed
+	// remediation, then RecordProposalDispatch). A followUp publish failure does
+	// NOT fail the primary dispatch — it only delays the flip, which self-heals
+	// on the next reconciler sweep (design §3.4); only the primary op's failure
+	// Naks for redelivery. followUp's own requestID/followUp fields are honored
+	// (nested one level deep is all Fire 2b needs); its reads/authTarget are used
+	// as normal.
+	followUp *plan
 }
 
 // buildPlan resolves one open gap against its playbook entry: templated params
@@ -211,6 +236,15 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 			payload:       func(string) map[string]any { return params },
 			reads:         reads,
 		}, nil
+
+	case actionProposedOp:
+		// Fire 2b: the augurDispatch target's only gap. The op + params are NOT
+		// playbook config (ga carries nothing) — they are sourced from the row
+		// itself (an approved Augur proposal, augurDispatchPending lens) and
+		// resolved through buildProposedOpPlan's own dispatch-time §5
+		// re-validation + materialisation, then a recursive buildPlan call for the
+		// resolved inner action (reusing this same live-registry resolution).
+		return buildProposedOpPlan(source, entityID, row, expectedRevision)
 
 	default:
 		return nil, &planError{kind: errConfig, msg: fmt.Sprintf("unknown action %q", ga.Action)}

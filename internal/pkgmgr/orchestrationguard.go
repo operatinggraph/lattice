@@ -43,6 +43,16 @@ const (
 	actionTriggerLoom = "triggerLoom"
 	actionAssignTask  = "assignTask"
 	actionDirectOp    = "directOp"
+	// actionProposedOp is the Fire 2b dynamic-op action (Contract #10 §10.8
+	// "Augur dispatch"): unlike the three static actions, its op + params come
+	// from the violation ROW (an approved Augur proposal's proposedAction /
+	// proposedParams), not playbook config, so it declares no static fields —
+	// install-time validation requires nothing beyond the action name itself
+	// (see validateGapAction). Reserved for the augur package's primordial
+	// augurDispatch target; a package wiring it to any other target's row is an
+	// authoring bug the engine's dispatch-time §5 re-validation does not exist
+	// to catch (that check trusts the row came from a §5-validated proposal).
+	actionProposedOp = "proposedOp"
 )
 
 // Augur escalation triggers (Contract #10 §10.8 "Augur escalation"). Re-stated
@@ -178,8 +188,12 @@ func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) er
 		if ga.Operation == "" {
 			return missing("Operation")
 		}
+	case actionProposedOp:
+		// Sourced entirely from the row (an approved Augur proposal) — no static
+		// field is required or meaningful; a package setting one anyway is
+		// harmless (buildProposedOpPlan never reads it) but not validated here.
 	default:
-		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q is not a known action (triggerLoom | assignTask | directOp)",
+		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q is not a known action (triggerLoom | assignTask | directOp | proposedOp)",
 			targetIdx, targetID, col, ga.Action)
 	}
 	return nil

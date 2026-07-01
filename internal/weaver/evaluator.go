@@ -300,14 +300,38 @@ func (e *Engine) bumpDispatchCount(ctx context.Context, targetID, entityID, col 
 // fire materializes one episode's op and fire-and-forget publishes it. A
 // publish failure Naks: the mark already exists, so the redelivery re-derives
 // the SAME requestId and re-publishes (idempotent at the Processor). The op's
-// requestId is episode-scoped (markRevision); claimId is the per-open-episode
-// token the payload folds into the STABLE userTask identity (§10.3).
+// requestId is episode-scoped (markRevision) UNLESS the plan overrides it
+// (pl.requestID — Fire 2b's proposal-scoped dispatch); claimId is the
+// per-open-episode token the payload folds into the STABLE userTask identity
+// (§10.3).
+//
+// pl.followUp (Fire 2b's two-op proposedOp dispatch) fires immediately after a
+// successful primary publish, in the SAME call: publish order is (a) the
+// primary op, (b) the followUp. A followUp publish failure does NOT Nak the
+// episode — only the primary op's failure does — because the followUp is a
+// dispatched-flip whose loss self-heals on the reconciler's next sweep
+// (design augur-dispatch-pickup §3.4); Nak-ing here would needlessly re-fire
+// the ALREADY-SUCCEEDED primary op's redelivery path for a purely cosmetic
+// flip delay.
 func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markRevision uint64, claimID string, pl *plan) substrate.Decision {
 	requestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
+	if pl.requestID != nil {
+		requestID = pl.requestID(claimID)
+	}
 	if err := e.act.submit(ctx, requestID, pl.operationType, pl.payload(claimID), pl.authTarget, pl.reads); err != nil {
 		e.logger.Error("weaver: op publish failed; nak for retry",
 			"targetId", targetID, "entityId", entityID, "gap", col, "requestId", requestID, "err", err)
 		return substrate.Nak
+	}
+	if fu := pl.followUp; fu != nil {
+		fuRequestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
+		if fu.requestID != nil {
+			fuRequestID = fu.requestID(claimID)
+		}
+		if err := e.act.submit(ctx, fuRequestID, fu.operationType, fu.payload(claimID), fu.authTarget, fu.reads); err != nil {
+			e.logger.Warn("weaver: follow-up op publish failed; will retry on next reconcile",
+				"targetId", targetID, "entityId", entityID, "gap", col, "requestId", fuRequestID, "err", err)
+		}
 	}
 	return substrate.Ack
 }

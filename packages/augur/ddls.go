@@ -82,7 +82,7 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "augurproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal"},
+		PermittedCommands: []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal", "RecordProposalDispatch"},
 		Description: "Augur proposal DDL — the externalTask matched pair for one reasoning episode. " +
 			"Vertex shape: vtx.augurproposal.<handle>, class=augurproposal, root data = {} (D5); business " +
 			"data in aspects: .gap {targetId, entityId, gapColumn, trigger} (the instanceOp's TRUSTED " +
@@ -105,7 +105,14 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"ReviewProposal is the human verdict op (payload {externalRef, verdict ∈ approve|reject}): an operator " +
 			"flips a pending proposal to approved | rejected — the reviewer is the trusted submitting actor (op.actor) " +
 			"and the stamp is op.submittedAt; approve re-runs the §5 boundary against the stored proposal and " +
-			"fail-closes to invalid if it no longer validates. Only a pending proposal is reviewable.",
+			"fail-closes to invalid if it no longer validates. Only a pending proposal is reviewable. " +
+			"RecordProposalDispatch is the Weaver-dispatched flip (design Fire 2b, §3.3): the second op of the " +
+			"two-op augurDispatch dispatch (payload {externalRef, outcome ∈ dispatched|invalid, reason?}) — flips " +
+			"an approved proposal to dispatched (the proposed remediation was fired) or invalid (the dispatch-time " +
+			"§5 re-validation failed, e.g. a stale operation reference); dispatchedAt is stamped only on dispatched. " +
+			"Only an approved proposal can be dispatched; a redelivery or a second flip is rejected " +
+			"(InvalidDispatchTransition) — in practice unreachable on a genuine redelivery, since the flip's own " +
+			"deterministic requestId already collapses on the Contract #4 tracker first.",
 		Script: augurproposalDDLScript,
 		InputSchema: `{"type":"object","description":"RecordProposal — the bridge replyOp. The bridge posts {externalRef, status, result}; gap context is reconstructed from the claim vertex, never this payload.","properties":` +
 			`{"externalRef":{"type":"string","description":"The bare instanceKey handle of the reasoning episode; the claim vertex is vtx.augurproposal.<externalRef>."},` +
@@ -119,6 +126,8 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 			"status":      "The adapter's terminal outcome verbatim: completed (the model returned a structured proposal in result) or failed (a modeled refusal — the proposal is stored invalid with the refusal as its rationale, never dispatchable). Any other value rejects the op.",
 			"result":      "The model's structured-output proposal as a JSON string {action, params, confidence, rationale, model, promptHash, catalogHash, reasonedAt}. The §5 validator decodes it and validates action ∈ {triggerLoom, assignTask, directOp}, confidence ∈ [0,1], and no scope escape (a params entity-key other than the escalated candidate, read from the trusted claim). Required when status=completed.",
 			"verdict":     "ReviewProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field.",
+			"outcome":     "RecordProposalDispatch only — the Weaver-computed dispatch-time verdict: 'dispatched' (the proposed remediation was fired; dispatchedAt is stamped) or 'invalid' (the dispatch-time §5 re-validation failed; reason is required). Only an approved proposal may transition.",
+			"reason":      "RecordProposalDispatch only — the auditable explanation for an 'invalid' outcome (e.g. a stale/uninstalled operation reference, a scope-escape caught at dispatch time). Ignored/omitted on a 'dispatched' outcome.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -174,6 +183,28 @@ func augurproposalDDL() pkgmgr.DDLSpec {
 					"if it no longer validates. The .review aspect flips pending → approved (OCC-guarded on its revision), a " +
 					"reviewedBy link to the actor is created, and augur.proposalReviewed is emitted. verdict=reject flips to " +
 					"rejected with no re-validation.",
+			},
+			{
+				Name: "RecordProposalDispatch — Weaver flips a dispatched proposal (the augurDispatch two-op fire, Fire 2b)",
+				Payload: map[string]any{
+					"externalRef": "augurEpisodeHJKMNPQRST",
+					"outcome":     "dispatched",
+				},
+				ExpectedOutcome: "The proposal must be review.state=approved (only an approved proposal can be dispatched; any " +
+					"other state rejects InvalidDispatchTransition). Flips .review.state to dispatched and stamps " +
+					"dispatchedAt=op.submittedAt. Submitted by Weaver as the second op of the two-op augurDispatch dispatch " +
+					"(the first being the materialised remediation itself), immediately after that op — design §3.3.",
+			},
+			{
+				Name: "RecordProposalDispatch — Weaver flips an approved proposal invalid (dispatch-time drift caught)",
+				Payload: map[string]any{
+					"externalRef": "augurEpisodeHJKMNPQRST",
+					"outcome":     "invalid",
+					"reason":      "operation \"ApproveLeaseApplication\" has no loaded op meta-vertex (forOperation unresolved)",
+				},
+				ExpectedOutcome: "The dispatch-time §5 re-validation (Weaver, augurDispatch target) found the proposed operation " +
+					"no longer resolves against the live registry — no remediation is fired. Flips .review.state to invalid with " +
+					"the given reason; dispatchedAt stays unset.",
 			},
 		},
 	}
@@ -634,6 +665,58 @@ def execute(state, op):
             {"class": "augur.proposalReviewed",
              "data": {"proposalKey": proposal_key, "reviewState": new_state,
                       "reviewer": reviewer, "verdict": verdict}},
+        ]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": proposal_key}}
+
+    if ot == "RecordProposalDispatch":
+        # The Weaver-dispatched flip (design Fire 2b §3.3): the second op of the
+        # augurDispatch target's two-op dispatch. Flips an APPROVED proposal to
+        # dispatched (the proposed remediation fired) or invalid (the dispatch-time
+        # §5 re-validation failed — e.g. a stale operation reference). Guard:
+        # transitions ONLY from review.state == "approved" (mirrors ReviewProposal's
+        # pending-only idiom) — a redelivery or a second flip from
+        # dispatched/invalid/rejected/pending rejects (InvalidDispatchTransition); in
+        # practice this is unreachable on a genuine redelivery, since the flip's own
+        # deterministic requestId already collapses at the Contract #4 tracker first
+        # (the guard here is the second, independent backstop).
+        handle = required_bare_handle(p, "externalRef")
+        proposal_key = "vtx.augurproposal." + handle
+        outcome = required_string(p, "outcome")
+        if outcome != "dispatched" and outcome != "invalid":
+            fail("InvalidArgument: outcome: must be one of dispatched, invalid; got " + outcome)
+        reason = optional_string_attr(p, "reason")
+        if outcome == "invalid" and len(reason.strip()) == 0:
+            fail("InvalidArgument: reason: required when outcome is invalid")
+
+        review_doc = kv.Read(proposal_key + ".review")
+        if not alive(review_doc):
+            fail("UnknownAugurProposal: no recorded proposal for " + proposal_key + " (RecordProposal must commit a verdict before dispatch)")
+        rd = review_doc.data
+        cur_state = ""
+        if rd != None and "state" in rd:
+            cur_state = rd["state"]
+        if cur_state != "approved":
+            fail("InvalidDispatchTransition: proposal " + proposal_key + " is '" + cur_state + "', only an approved proposal can be dispatched")
+
+        prior_reviewed_at = rd["reviewedAt"] if rd != None and "reviewedAt" in rd else ""
+        dispatched_at = op.submittedAt if outcome == "dispatched" else ""
+        new_invalid_reason = reason if outcome == "invalid" else ""
+
+        # Unconditioned update preserving the aspect's full shape (D5) — same
+        # posture as ReviewProposal's flip; the approved-only guard above is the
+        # single-transition guarantee (a genuine redelivery collapses earlier on
+        # the deterministic requestId, Contract #4).
+        mutations = [
+            {"op": "update", "key": proposal_key + ".review",
+             "document": {"class": "augur.review", "isDeleted": False,
+                          "vertexKey": proposal_key, "localName": "review",
+                          "data": {"state": outcome, "invalidReason": new_invalid_reason,
+                                   "reviewedAt": prior_reviewed_at, "dispatchedAt": dispatched_at}}},
+        ]
+        events = [
+            {"class": "augur.proposalDispatched",
+             "data": {"proposalKey": proposal_key, "outcome": outcome, "reason": new_invalid_reason}},
         ]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": proposal_key}}

@@ -598,6 +598,10 @@ test-object-gc:
 ## RecordProposal. Proves a benign in-scope proposal lands `pending` (billed at
 ## most once) AND a crafted scope-escaping proposal is caught by the §5 validator
 ## and stored `invalid` (never dispatchable — the AI-surface DEFENDED assertion).
+## Also drives Fire 2b's last hop: an approved directOp proposal dispatches
+## through Weaver's real two-op fire (the materialised remediation, then
+## RecordProposalDispatch) — the gap actually closes (the remediation commits
+## through the real Processor) and the proposal reaches `dispatched`.
 ## Compiled with -tags augurconvergence.
 .PHONY: test-augur-convergence
 test-augur-convergence:

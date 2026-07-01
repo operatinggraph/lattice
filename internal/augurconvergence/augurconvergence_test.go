@@ -181,14 +181,14 @@ func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 	return h
 }
 
-func (h *harness) submitOp(operationType, actor string, payload map[string]any) *processor.OperationReply {
+func (h *harness) submitOp(operationType, class, actor string, payload map[string]any) *processor.OperationReply {
 	h.t.Helper()
 	payloadBytes, _ := json.Marshal(payload)
 	reqID, err := substrate.NewNanoID()
 	require.NoError(h.t, err)
 	env := &processor.OperationEnvelope{
 		RequestID: reqID, Lane: processor.LaneDefault, OperationType: operationType,
-		Class: "identity", Actor: actor, SubmittedAt: time.Now().UTC().Format(time.RFC3339),
+		Class: class, Actor: actor, SubmittedAt: time.Now().UTC().Format(time.RFC3339),
 		Payload: json.RawMessage(payloadBytes),
 	}
 	envBytes, _ := json.Marshal(env)
@@ -209,7 +209,7 @@ func (h *harness) submitOp(operationType, actor string, payload map[string]any) 
 // gap's entity). Returns its vertex key.
 func (h *harness) seedEntity() string {
 	h.t.Helper()
-	r := h.submitOp("CreateUnclaimedIdentity", bootstrap.BootstrapIdentityKey, map[string]any{
+	r := h.submitOp("CreateUnclaimedIdentity", "identity", bootstrap.BootstrapIdentityKey, map[string]any{
 		"name": "Candidate", "email": mustNanoID(h.t) + "@augur.example",
 		"claimKeyHash": "0000000000000000000000000000000000000000000000000000000000000000",
 	})
@@ -409,4 +409,124 @@ func TestAugurConvergence_MaliciousProposalInvalid(t *testing.T) {
 	require.NotNil(t, claim, "the claim vertex's trusted .gap context must be retained (audit trail)")
 	require.Equal(t, entityKey, claim["entityId"],
 		"the verdict was decided against the TRUSTED claim entity, not the model's foreign param")
+}
+
+// approve submits the real ReviewProposal{verdict:approve} op through the
+// harness's Processor pipeline.
+func (h *harness) approve(handle string) *processor.OperationReply {
+	h.t.Helper()
+	return h.submitOp("ReviewProposal", "augurproposal", bootstrap.BootstrapIdentityKey, map[string]any{
+		"externalRef": handle, "verdict": "approve",
+	})
+}
+
+// putDispatchRow hand-writes an augurDispatch weaver-targets row — this
+// harness runs no live Refractor, so (mirroring putGapRow's established
+// convention for the escalation half) it simulates exactly what the real
+// augurDispatchPending lens projects from an approved proposal's TRUSTED .gap
+// + model-authored .proposed aspects (design Fire 2b §3.1).
+func (h *harness) putDispatchRow(handle, candidateKey, targetMetaKey, action string, params map[string]any) {
+	h.t.Helper()
+	row := map[string]any{
+		"entityKey":        "vtx.augurproposal." + handle,
+		"violating":        true,
+		"missing_dispatch": true,
+		"proposedAction":   action,
+		"proposedParams":   params,
+		"candidateKey":     candidateKey,
+		"targetMetaKey":    targetMetaKey,
+		"projectedAt":      substrate.FormatTimestamp(time.Now()),
+	}
+	body, err := json.Marshal(row)
+	require.NoError(h.t, err)
+	_, err = h.conn.KVPut(h.ctx, bootstrap.WeaverTargetsBucket, "augurDispatch."+handle, body)
+	require.NoError(h.t, err)
+}
+
+// awaitDispatchOutcome polls the proposal's .review aspect for a terminal
+// dispatch verdict (dispatched | invalid).
+func (h *harness) awaitDispatchOutcome(handle string, timeout time.Duration) (state, reason, dispatchedAt string) {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		review := readAspect(h, "vtx.augurproposal."+handle+".review")
+		if review != nil {
+			s, _ := review["state"].(string)
+			if s == "dispatched" || s == "invalid" {
+				r, _ := review["invalidReason"].(string)
+				d, _ := review["dispatchedAt"].(string)
+				return s, r, d
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return "", "", ""
+}
+
+// TestAugurConvergence_Fire2b_DispatchApprovedProposal drives the loop's last
+// hop end-to-end: an approved directOp(SetAvailability) proposal dispatches
+// through the real Weaver two-op fire (the materialised remediation, then
+// RecordProposalDispatch) — the ORIGINAL remediation actually commits through
+// the real Processor (proving the gap closes, not just that the flip lands)
+// and the proposal's review.state reaches `dispatched`.
+func TestAugurConvergence_Fire2b_DispatchApprovedProposal(t *testing.T) {
+	h := newHarness(t, nil)
+	entityKey := h.seedEntity()
+	entityID := strings.TrimPrefix(entityKey, "vtx.identity.")
+
+	// A benign, in-scope directOp(SetAvailability) proposal — exercises the
+	// directOp materialisation leg (assignTask is already covered by the happy
+	// path above).
+	h.augur.SetProposal(bridge.AugurProposal{
+		Action: "directOp",
+		Params: map[string]any{
+			"operation": "SetAvailability",
+			"target":    entityKey,
+			"params":    map[string]any{"identity": entityKey, "available": true},
+			"reads":     []any{entityKey},
+		},
+		Rationale:  "the candidate should be marked available",
+		Confidence: 0.9,
+		Model:      "claude-opus-4-8",
+	})
+
+	const targetID = "augurFire2bTarget"
+	h.installAugurTarget(targetID)
+	h.waitTargetConsumer(targetID)
+	h.putGapRow(targetID, entityID, entityKey, "missing_approval")
+
+	p := h.awaitProposal(45 * time.Second)
+	require.NotNil(t, p, "no augurproposal reached a terminal verdict — the escalation loop did not converge")
+	require.Equalf(t, "pending", p.state, "the benign directOp proposal must be pending; reason=%q", p.reason)
+
+	reply := h.approve(p.handle)
+	require.Equalf(t, processor.ReplyStatusAccepted, reply.Status, "ReviewProposal{approve}: %+v", reply.Error)
+	review := readAspect(h, "vtx.augurproposal."+p.handle+".review")
+	require.Equal(t, "approved", review["state"], "precondition: the proposal must be approved before dispatch")
+
+	// The real augurDispatch target is registered (package-declared WeaverTarget,
+	// installed for real above) — wait for its consumer, then hand-write the row
+	// the real augurDispatchPending lens would have projected from the NOW-
+	// approved proposal's TRUSTED .gap context.
+	h.waitTargetConsumer("augurDispatch")
+	claim := readAspect(h, "vtx.augurproposal."+p.handle+".gap")
+	require.NotNil(t, claim, "the claim's TRUSTED .gap context must be live")
+	targetMetaKey, _ := claim["targetId"].(string)
+	require.NotEmpty(t, targetMetaKey)
+	h.putDispatchRow(p.handle, entityKey, targetMetaKey, "directOp", map[string]any{
+		"operation": "SetAvailability",
+		"target":    entityKey,
+		"params":    map[string]any{"identity": entityKey, "available": true},
+		"reads":     []any{entityKey},
+	})
+
+	state, reason, dispatchedAt := h.awaitDispatchOutcome(p.handle, 45*time.Second)
+	require.Equalf(t, "dispatched", state, "dispatch must succeed; reason=%q", reason)
+	require.NotEmpty(t, dispatchedAt, "dispatchedAt must be stamped")
+
+	// The gap actually CLOSES: the real SetAvailability op committed through the
+	// real Processor, not just the flip.
+	avail := readAspect(h, entityKey+".availability")
+	require.NotNil(t, avail, "the materialised remediation must have actually run")
+	require.Equal(t, true, avail["available"])
 }

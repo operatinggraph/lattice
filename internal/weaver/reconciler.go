@@ -323,14 +323,22 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// Default per-key TTL backstop for the re-armed mark; widened below for a
 	// paced userTask reclaim.
 	markTTL := markTTLBackstopFactor * e.marks.lease
-	if rec.Action == actionAssignTask || rec.Action == actionTriggerLoom {
-		// Collapse-only userTask reclaim (assignTask/triggerLoom): pace repeat
-		// reclaims with an exponential backoff keyed on the mark's own ClaimedAt +
-		// dispatch-count — the consumer collapses any repeat re-dispatch anyway
-		// (§10.3), so re-firing every sweep is pure phantom churn (a no-op op + a
-		// fresh Contract #4 tracker). directOp/external never reaches here gated
-		// (action check). Best-effort: a count read or ClaimedAt parse failure
-		// falls through to a normal (unpaced) reclaim.
+	if rec.Action == actionAssignTask || rec.Action == actionTriggerLoom || rec.Action == actionProposedOp {
+		// Collapse-only reclaim: pace repeat reclaims with an exponential backoff
+		// keyed on the mark's own ClaimedAt + dispatch-count — the consumer
+		// collapses any repeat re-dispatch anyway, so re-firing every sweep is
+		// pure phantom churn (a no-op op + a fresh Contract #4 tracker). This
+		// covers TWO distinct collapse-only classes: the userTask actions
+		// (assignTask/triggerLoom, §10.3 — the claimId-seeded stable task/instance
+		// id) and the Augur's `proposedOp` (design augur-dispatch-pickup §3.3/§3.4
+		// — a PROPOSAL-scoped deterministic requestId, set regardless of which
+		// inner action {triggerLoom, assignTask, directOp} the proposal
+		// materialises to, since the mark's recorded Action is always the OUTER
+		// static playbook entry "proposedOp", never the inner one). An ordinary
+		// (non-Augur) directOp/external reclaim never reaches here (action check)
+		// — it is the intended bounded retry (§inflight_<g>/maxretries_<g>), never
+		// backed off. Best-effort: a count read or ClaimedAt parse failure falls
+		// through to a normal (unpaced) reclaim.
 		if count, err := e.marks.getDispatchCount(ctx, targetID, entityID, gapColumn); err != nil {
 			e.logger.Debug("weaver sweep: reclaim backoff dispatch-count read failed; not pacing",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn, "err", err)

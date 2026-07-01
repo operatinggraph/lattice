@@ -27,15 +27,15 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_AugurProposalsLens pins the read-model review surface: exactly one
-// lens, a FLAT (no ProjectionKind) nats-kv projection into the augur-proposals
-// bucket, and — the trusted-tool posture — NOT protected and NOT a weaver-target
-// convergence lens. (The lens cypher itself is exercised end-to-end by the
-// install path in the integration tests + the live verify-package-augur run.)
+// TestPackage_AugurProposalsLens pins the read-model review surface: a FLAT (no
+// ProjectionKind) nats-kv projection into the augur-proposals bucket, and — the
+// trusted-tool posture — NOT protected and NOT a weaver-target convergence lens.
+// (The lens cypher itself is exercised end-to-end by the install path in the
+// integration tests + the live verify-package-augur run.)
 func TestPackage_AugurProposalsLens(t *testing.T) {
 	lenses := augur.Lenses()
-	if len(lenses) != 1 {
-		t.Fatalf("want exactly 1 lens, got %d", len(lenses))
+	if len(lenses) != 2 {
+		t.Fatalf("want exactly 2 lenses (augurProposals + augurDispatchPending), got %d", len(lenses))
 	}
 	l := lenses[0]
 	if l.CanonicalName != "augurProposals" {
@@ -67,10 +67,77 @@ func TestPackage_AugurProposalsLens(t *testing.T) {
 	}
 
 	// The Package definition wires the lens.
-	if got := len(augur.Package.Lenses); got != 1 {
-		t.Fatalf("Package.Lenses count = %d, want 1", got)
+	if got := len(augur.Package.Lenses); got != 2 {
+		t.Fatalf("Package.Lenses count = %d, want 2", got)
 	}
 	if augur.Package.Lenses[0].CanonicalName != "augurProposals" {
 		t.Errorf("Package.Lenses[0] = %q, want augurProposals", augur.Package.Lenses[0].CanonicalName)
+	}
+}
+
+// TestPackage_AugurDispatchPendingLens pins the Fire 2b pickup transport: an
+// actorAggregate weaver-target convergence lens projecting into the shared
+// weaver-targets bucket under the augurDispatch. prefix (bare-NanoID KeyColumn),
+// and the augurDispatch meta.weaverTarget wiring its one gap to proposedOp.
+func TestPackage_AugurDispatchPendingLens(t *testing.T) {
+	lenses := augur.Lenses()
+	if len(lenses) != 2 {
+		t.Fatalf("want exactly 2 lenses, got %d", len(lenses))
+	}
+	l := lenses[1]
+	if l.CanonicalName != "augurDispatchPending" {
+		t.Fatalf("CanonicalName = %q, want augurDispatchPending", l.CanonicalName)
+	}
+	if l.Adapter != "nats-kv" || l.Bucket != "weaver-targets" || l.Engine != "full" {
+		t.Errorf("adapter/bucket/engine = %q/%q/%q, want nats-kv/weaver-targets/full", l.Adapter, l.Bucket, l.Engine)
+	}
+	if l.ProjectionKind != "actorAggregate" {
+		t.Fatalf("ProjectionKind = %q, want actorAggregate", l.ProjectionKind)
+	}
+	if l.Output == nil {
+		t.Fatal("actorAggregate lens requires an Output descriptor")
+	}
+	if l.Output.AnchorType != "augurproposal" {
+		t.Errorf("Output.AnchorType = %q, want augurproposal", l.Output.AnchorType)
+	}
+	if l.Output.OutputKeyPattern != "augurDispatch.{actorSuffix}" {
+		t.Errorf("Output.OutputKeyPattern = %q, want augurDispatch.{actorSuffix}", l.Output.OutputKeyPattern)
+	}
+	if l.Output.KeyColumn == "" {
+		t.Error("Output.KeyColumn must be set (bare-NanoID row key, §10.2 Option b)")
+	}
+	if l.Output.EmptyBehavior != "delete" {
+		t.Errorf("Output.EmptyBehavior = %q, want delete", l.Output.EmptyBehavior)
+	}
+	for _, want := range []string{"violating", "missing_dispatch", "entityKey", "proposedAction", "proposedParams", "candidateKey", "targetMetaKey"} {
+		found := false
+		for _, c := range l.Output.BodyColumns {
+			if c == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Output.BodyColumns missing %q: %v", want, l.Output.BodyColumns)
+		}
+	}
+
+	targets := augur.WeaverTargets()
+	if len(targets) != 1 {
+		t.Fatalf("want exactly 1 weaverTarget, got %d", len(targets))
+	}
+	tgt := targets[0]
+	if tgt.TargetID != "augurDispatch" {
+		t.Errorf("TargetID = %q, want augurDispatch", tgt.TargetID)
+	}
+	if tgt.LensRef != "augurDispatchPending" {
+		t.Errorf("LensRef = %q, want augurDispatchPending", tgt.LensRef)
+	}
+	ga, ok := tgt.Gaps["missing_dispatch"]
+	if !ok {
+		t.Fatal(`Gaps["missing_dispatch"] missing`)
+	}
+	if ga.Action != "proposedOp" {
+		t.Errorf("Gaps[missing_dispatch].Action = %q, want proposedOp", ga.Action)
 	}
 }

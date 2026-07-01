@@ -173,6 +173,55 @@ func TestSweep_ReclaimBackoff_DirectOpNeverSuppressed(t *testing.T) {
 	}
 }
 
+// TestSweep_ReclaimBackoff_ProposedOpSuppressed proves the Fire 2b fix (a
+// review-caught gap): the Augur's augurDispatch target's mark always records
+// the OUTER static playbook action ("proposedOp"), never the inner
+// materialised action (here directOp) — so the backoff gate must key on
+// "proposedOp" itself, not on the inner action, or a stuck dispatched-flip
+// would reclaim unpaced every mark-lease forever instead of backing off
+// (design augur-dispatch-pickup §3.4's explicit "paced by the existing
+// backoffInterval" claim).
+func TestSweep_ReclaimBackoff_ProposedOpSuppressed(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx, func(c *Config) { c.ReclaimBackoffBase = time.Hour })
+
+	const targetID = "augurDispatch"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_dispatch": {Action: actionProposedOp}},
+	})
+
+	handle := testNanoID(t)
+	key := markKey(targetID, handle, "missing_dispatch")
+	// The mark's recorded Action is the OUTER "proposedOp" literal — even
+	// though the row below materialises to an inner directOp.
+	m := fixtureMark(targetID, handle, "missing_dispatch", actionProposedOp, pastLease())
+	m.ClaimedAt = substrate.FormatTimestamp(time.Now()) // dispatched just now
+	rev := h.putMark(t, ctx, key, m)
+	h.putRow(t, ctx, targetID, handle, dispatchRow(dpCandidate, "vtx.meta.SomeTargetHJKMNPQRS1", "directOp", map[string]any{
+		"operation": "SetAvailability",
+		"target":    dpCandidate,
+		"params":    map[string]any{"identity": dpCandidate, "available": true},
+	}))
+
+	h.pass(ctx)
+
+	h.requireNoOp(t)
+	entry, err := h.conn.KVGet(ctx, "weaver-state", key)
+	if err != nil || entry.Revision != rev {
+		t.Fatalf("a backed-off proposedOp reclaim must leave the mark untouched (rev %d, err=%v)", rev, err)
+	}
+	reclaims, suppressed, _, _, _ := h.engine.sweep.metrics()
+	if reclaims != 0 || suppressed != 1 {
+		t.Fatalf("metrics: reclaims=%d suppressed=%d, want 0, 1 (proposedOp must back off like a userTask reclaim)", reclaims, suppressed)
+	}
+}
+
 // TestSweep_ReclaimBackoff_MarkTTLOutlastsBackoff proves the survival fix: when a
 // userTask reclaim paces the next attempt far past the default TTL backstop, the
 // re-armed mark's per-key TTL is widened to outlast that backoff window — so the

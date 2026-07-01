@@ -58,6 +58,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateAugurReasoningClaim", Scope: "any"},
 			{OperationType: "RecordProposal", Scope: "any"},
 			{OperationType: "ReviewProposal", Scope: "any"},
+			{OperationType: "RecordProposalDispatch", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -494,6 +495,16 @@ const (
 	hRvRevalFC = "BBaugurRvfcHJKMNPQRS"
 )
 
+// Per-scenario RecordProposalDispatch handles.
+const (
+	hDpDispatched  = "BBaugurDpokHJKMNPQRS"
+	hDpInvalid     = "BBaugurDpivHJKMNPQRS"
+	hDpNonApproved = "BBaugurDpnaHJKMNPQRS"
+	hDpUnknown     = "BBaugurDpukHJKMNPQRS"
+	hDpDouble      = "BBaugurDpdbHJKMNPQRS"
+	hDpNoReason    = "BBaugurDpnrHJKMNPQRS"
+)
+
 // reviewEnv builds the human-verdict op. The operator submits only {externalRef,
 // verdict}; the reviewer identity is the TRUSTED actor on the envelope (op.actor)
 // and the stamp is op.submittedAt — neither is a payload field (the same
@@ -667,5 +678,149 @@ func TestAugur_Review_Approve_RevalidationFailCloses(t *testing.T) {
 	}
 	if got := reviewField(t, ctx, conn, pk, "invalidReason"); got == "" {
 		t.Fatalf("invalidReason must explain the re-validation failure")
+	}
+}
+
+// --- RecordProposalDispatch (the Weaver-submitted flip — design Fire 2b §3.3) -
+
+// dispatchEnv builds the Weaver-submitted flip op. reason is omitted from the
+// payload when empty (the invalid-outcome-only field).
+func dispatchEnv(reqID, handle, outcome, reason string) *processor.OperationEnvelope {
+	payload := map[string]any{"externalRef": handle, "outcome": outcome}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	b, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordProposalDispatch",
+		Actor:         apStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "augurproposal",
+		Payload:       json.RawMessage(b),
+	}
+}
+
+// driveDispatch submits a RecordProposalDispatch and drives it to the wanted
+// outcome.
+func driveDispatch(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, handle, outcome, reason string, want processor.MessageOutcome) {
+	t.Helper()
+	dp := dispatchEnv(testutil.GenReqID("APDisp"+tag), handle, outcome, reason)
+	testutil.PublishOp(t, conn, dp)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// driveApproved drives a claim → pending reply → approve and returns the
+// proposal key, the precondition every dispatch test needs.
+func driveApproved(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, tag, handle, targetKey, entityKey string) string {
+	t.Helper()
+	pk := drivePending(t, ctx, conn, cp, cons, tag, handle, targetKey, entityKey)
+	driveReview(t, ctx, conn, cp, cons, tag, handle, "approve", processor.OutcomeAccepted)
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("precondition: review.state = %q, want approved", got)
+	}
+	return pk
+}
+
+// TestAugur_Dispatch_Dispatched: Weaver flips an approved proposal to
+// dispatched — dispatchedAt is stamped, invalidReason stays empty.
+func TestAugur_Dispatch_Dispatched(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-dp-ok")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := driveApproved(t, ctx, conn, cp, cons, "dpok", hDpDispatched, targetKey, entityKey)
+	driveDispatch(t, ctx, conn, cp, cons, "dpok", hDpDispatched, "dispatched", "", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "dispatched" {
+		t.Fatalf("review.state = %q, want dispatched", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got == "" {
+		t.Fatal("dispatchedAt must be stamped on a dispatched outcome")
+	}
+	if got := reviewField(t, ctx, conn, pk, "invalidReason"); got != "" {
+		t.Fatalf("invalidReason = %q, want empty on a clean dispatch", got)
+	}
+}
+
+// TestAugur_Dispatch_Invalid: Weaver flips an approved proposal to invalid
+// (the dispatch-time §5 re-validation failed) — invalidReason is recorded,
+// dispatchedAt stays empty (nothing fired).
+func TestAugur_Dispatch_Invalid(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-dp-inv")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := driveApproved(t, ctx, conn, cp, cons, "dpinv", hDpInvalid, targetKey, entityKey)
+	driveDispatch(t, ctx, conn, cp, cons, "dpinv", hDpInvalid, "invalid", "operation no longer resolves", processor.OutcomeAccepted)
+
+	if got := reviewState(t, ctx, conn, pk); got != "invalid" {
+		t.Fatalf("review.state = %q, want invalid", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "invalidReason"); got != "operation no longer resolves" {
+		t.Fatalf("invalidReason = %q, want the dispatch-time reason", got)
+	}
+	if got := reviewField(t, ctx, conn, pk, "dispatchedAt"); got != "" {
+		t.Fatalf("dispatchedAt = %q, want empty (nothing was dispatched)", got)
+	}
+}
+
+// TestAugur_Dispatch_NonApproved_Rejected: only an approved proposal can be
+// dispatched — a pending proposal rejects InvalidDispatchTransition.
+func TestAugur_Dispatch_NonApproved_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-dp-npnd")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := drivePending(t, ctx, conn, cp, cons, "dpnpnd", hDpNonApproved, targetKey, entityKey)
+	driveDispatch(t, ctx, conn, cp, cons, "dpnpnd", hDpNonApproved, "dispatched", "", processor.OutcomeRejected)
+
+	if got := reviewState(t, ctx, conn, pk); got != "pending" {
+		t.Fatalf("review.state = %q, want pending (unchanged — a pending proposal cannot be dispatched)", got)
+	}
+}
+
+// TestAugur_Dispatch_UnknownProposal_Rejected: dispatching a handle with no
+// recorded proposal is rejected (a flip can never fabricate a proposal).
+func TestAugur_Dispatch_UnknownProposal_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-dp-unk")
+	seedEscalation(t, ctx, conn)
+
+	driveDispatch(t, ctx, conn, cp, cons, "dpunk", hDpUnknown, "dispatched", "", processor.OutcomeRejected)
+}
+
+// TestAugur_Dispatch_DoubleDispatch_Rejected: a proposal is dispatched once. A
+// second genuine flip attempt (distinct requestId) finds the proposal already
+// dispatched (not approved) and is rejected — the approved-only guard prevents
+// a re-flip.
+func TestAugur_Dispatch_DoubleDispatch_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-dp-dbl")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := driveApproved(t, ctx, conn, cp, cons, "dpdbl", hDpDouble, targetKey, entityKey)
+	driveDispatch(t, ctx, conn, cp, cons, "dpdbl1", hDpDouble, "dispatched", "", processor.OutcomeAccepted)
+	driveDispatch(t, ctx, conn, cp, cons, "dpdbl2", hDpDouble, "invalid", "should never land", processor.OutcomeRejected)
+
+	if got := reviewState(t, ctx, conn, pk); got != "dispatched" {
+		t.Fatalf("review.state = %q, want dispatched (the second flip must not overwrite)", got)
+	}
+}
+
+// TestAugur_Dispatch_InvalidOutcomeRequiresReason_Rejected: an outcome=invalid
+// flip with no reason is rejected — the invalid verdict must always be
+// auditable.
+func TestAugur_Dispatch_InvalidOutcomeRequiresReason_Rejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-dp-noreason")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	pk := driveApproved(t, ctx, conn, cp, cons, "dpnr", hDpNoReason, targetKey, entityKey)
+	driveDispatch(t, ctx, conn, cp, cons, "dpnr", hDpNoReason, "invalid", "", processor.OutcomeRejected)
+
+	if got := reviewState(t, ctx, conn, pk); got != "approved" {
+		t.Fatalf("review.state = %q, want approved (unchanged — the malformed flip must not land)", got)
 	}
 }

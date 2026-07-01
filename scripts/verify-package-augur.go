@@ -11,14 +11,15 @@
 // Asserts:
 //
 //	1 DDL: augurproposal (meta.ddl.vertexType) — the externalTask matched pair +
-//	  the human-verdict op — with permittedCommands = exactly
-//	  {CreateAugurReasoningClaim, RecordProposal, ReviewProposal} and its standard
-//	  self-description aspects.
-//	3 permission vertices: CreateAugurReasoningClaim + RecordProposal +
-//	  ReviewProposal, each scope=any, grantedBy operator (Weaver, the bridge
-//	  service actor, and the human reviewer are all operator-equivalent — design
-//	  §3.2 / escalation-dispatch addendum §7).
-//	1 meta.lens: augurProposals (the P5 read-model review surface Loupe reads).
+//	  the human-verdict op + the Fire 2b dispatched-flip — with permittedCommands
+//	  = exactly {CreateAugurReasoningClaim, RecordProposal, ReviewProposal,
+//	  RecordProposalDispatch} and its standard self-description aspects.
+//	4 permission vertices: one per op above, each scope=any, grantedBy operator
+//	  (Weaver, the bridge service actor, and the human reviewer are all
+//	  operator-equivalent — design §3.2 / escalation-dispatch addendum §7).
+//	2 meta.lens: augurProposals (the P5 read-model review surface Loupe reads)
+//	  and augurDispatchPending (the Fire 2b augurDispatch weaver-target pickup).
+//	1 meta.weaverTarget: augurDispatch (targetId), wired to augurDispatchPending.
 //	1 package vertex + manifest aspect (name=augur).
 //
 // Run via: go run ./scripts/verify-package-augur.go
@@ -39,14 +40,15 @@ import (
 )
 
 const (
-	augPackageName  = "augur"
-	augCoreKVBucket = "core-kv"
-	augDDLCanonical = "augurproposal"
+	augPackageName    = "augur"
+	augCoreKVBucket   = "core-kv"
+	augDDLCanonical   = "augurproposal"
+	augDispatchTarget = "augurDispatch"
 )
 
 // The ops the augurproposal DDL owns — each in its permittedCommands and each a
 // permission vertex granted to operator.
-var augOps = []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal"}
+var augOps = []string{"CreateAugurReasoningClaim", "RecordProposal", "ReviewProposal", "RecordProposalDispatch"}
 
 func main() {
 	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
@@ -245,6 +247,44 @@ func main() {
 	}
 	if !foundLens {
 		fail("augurProposals meta.lens", "no meta.lens with canonicalName=augurProposals found")
+	}
+
+	// The augurDispatchPending weaver-target lens (Fire 2b pickup transport).
+	dispLensKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, "augurDispatchPending")
+	if err != nil || dispLensKey == "" {
+		fail("augurDispatchPending meta.lens", fmt.Sprintf("vtx.meta.*.canonicalName=%q not found: %v", "augurDispatchPending", err))
+	} else {
+		ok("augurDispatchPending meta.lens exists: " + dispLensKey)
+	}
+
+	// The augurDispatch meta.weaverTarget (the target the augurDispatchPending
+	// lens feeds; its .spec aspect carries targetId + lensRef + the
+	// missing_dispatch -> proposedOp gap).
+	foundTarget := false
+	for key := range allKeys {
+		if !strings.HasPrefix(key, "vtx.meta.") || !strings.HasSuffix(key, ".spec") {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+		if err != nil {
+			continue
+		}
+		data, _ := env["data"].(map[string]any)
+		if tid, _ := data["targetId"].(string); tid != augDispatchTarget {
+			continue
+		}
+		foundTarget = true
+		ok("augurDispatch meta.weaverTarget spec exists: " + key)
+		gaps, _ := data["gaps"].(map[string]any)
+		gap, _ := gaps["missing_dispatch"].(map[string]any)
+		if action, _ := gap["action"].(string); action != "proposedOp" {
+			fail(key+" gaps.missing_dispatch.action", fmt.Sprintf("got %q want proposedOp", action))
+		} else {
+			ok(key + " gaps.missing_dispatch.action=proposedOp")
+		}
+	}
+	if !foundTarget {
+		fail("augurDispatch meta.weaverTarget", "no meta.weaverTarget spec with targetId=augurDispatch found")
 	}
 
 	// Package manifest.

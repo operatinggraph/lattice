@@ -173,6 +173,27 @@ func deriveAugurHandle(targetID, entityID, gapColumn string) string {
 	return deriveID("augur:", targetID+"\x00"+entityID+"\x00"+gapColumn, 0)
 }
 
+// deriveProposalDispatchRequestID returns the deterministic requestId for the
+// Fire 2b augurDispatch target's proposed-remediation op — PROPOSAL-scoped
+// (keyed on the handle alone, no mark revision / claimId), so a sweep reclaim
+// of the same open dispatch re-derives the SAME requestId and collapses on the
+// Contract #4 tracker (at-most-one remediation effect) regardless of whether
+// the prior attempt's RecordProposalDispatch flip ever landed (design
+// augur-dispatch-pickup §3.3/§3.4). Namespaced disjoint from every other
+// derivation.
+func deriveProposalDispatchRequestID(proposalHandle string) string {
+	return deriveID("proposalDispatch:", proposalHandle, 0)
+}
+
+// deriveProposalDispatchFlipRequestID returns the deterministic requestId for
+// the RecordProposalDispatch flip that follows a Fire 2b dispatch — scoped to
+// the proposal handle AND the outcome, so a redelivery/reclaim's repeat flip
+// attempt (dispatched or invalid) collapses on the Contract #4 tracker too;
+// the DDL's approved-only guard is the independent second backstop.
+func deriveProposalDispatchFlipRequestID(proposalHandle, outcome string) string {
+	return deriveID("proposalDispatchFlip:", proposalHandle+"\x00"+outcome, 0)
+}
+
 // deriveTimerRequestID returns the deterministic requestId for one fired-timer
 // conversion (Contract #10 §10.4): derived from the schedule subject + the
 // fire instant, so an at-least-once redelivery of the SAME firing reuses the

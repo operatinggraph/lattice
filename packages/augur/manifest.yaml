@@ -1,15 +1,21 @@
 name: augur
-version: 0.2.0
+version: 0.3.0
 description: |
   Augur (Weaver L3 reasoning tier) data + safety foundation: the augurproposal
   vertex type + the CreateAugurReasoningClaim / RecordProposal capture pair + the
-  ReviewProposal human-verdict op. RecordProposal carries the record-time
-  deterministic-validation boundary (design §5) — a proposal is stored pending only
-  when its proposed action is in the allowed escalation vocabulary, its confidence
-  is a real 0..1 score, and it does not escape the escalated candidate's scope;
-  otherwise it is stored invalid (auditable), never dispatchable. ReviewProposal is
-  the human verdict (design §3.2): an operator flips a pending proposal to approved
-  | rejected, re-validated on approve. The AI proposes; the human decides; the
+  ReviewProposal human-verdict op + the augurDispatch meta.weaverTarget /
+  augurDispatchPending lens / RecordProposalDispatch flip (Fire 2b). RecordProposal
+  carries the record-time deterministic-validation boundary (design §5) — a
+  proposal is stored pending only when its proposed action is in the allowed
+  escalation vocabulary, its confidence is a real 0..1 score, and it does not
+  escape the escalated candidate's scope; otherwise it is stored invalid
+  (auditable), never dispatchable. ReviewProposal is the human verdict (design
+  §3.2): an operator flips a pending proposal to approved | rejected, re-validated
+  on approve. augurDispatch closes the loop: an approved proposal projects into
+  weaver-targets, Weaver's proposedOp action materialises + dispatch-time-
+  re-validates + fires the row-carried remediation with a proposal-scoped
+  deterministic requestId (collapse-only), and RecordProposalDispatch flips
+  approved → dispatched | invalid. The AI proposes; the human decides; the
   Processor stays sole writer.
 depends:
   - orchestration-base
@@ -22,6 +28,10 @@ declares:
       adapter: nats-kv
       bucket: augur-proposals
       engine: full
+    - canonicalName: augurDispatchPending
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: CreateAugurReasoningClaim
       scope: any
@@ -32,3 +42,9 @@ declares:
     - operationType: ReviewProposal
       scope: any
       grantsTo: [operator]
+    - operationType: RecordProposalDispatch
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: augurDispatch
+      lensRef: augurDispatchPending
