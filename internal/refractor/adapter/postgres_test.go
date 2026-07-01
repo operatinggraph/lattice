@@ -116,6 +116,7 @@ func TestBuildUpsertSQL_SingleKey(t *testing.T) {
 	sql, args, err := a.buildUpsertSQL(
 		map[string]any{"agreement_id": "abc"},
 		map[string]any{"party_name": "Acme"},
+		0,
 	)
 	require.NoError(t, err)
 	assert.Equal(t,
@@ -131,6 +132,7 @@ func TestBuildUpsertSQL_CompositeKey(t *testing.T) {
 	sql, args, err := a.buildUpsertSQL(
 		map[string]any{"team_id": "t1", "agreement_id": "abc"},
 		map[string]any{"party_name": "Acme"},
+		0,
 	)
 	require.NoError(t, err)
 	assert.Equal(t,
@@ -148,9 +150,9 @@ func TestBuildUpsertSQL_MultipleNonKeyColumns_Deterministic(t *testing.T) {
 	keys := map[string]any{"id": 1}
 	row := map[string]any{"zzz": "last", "aaa": "first", "mmm": "middle"}
 
-	sql1, args1, err := a.buildUpsertSQL(keys, row)
+	sql1, args1, err := a.buildUpsertSQL(keys, row, 0)
 	require.NoError(t, err)
-	sql2, args2, err := a.buildUpsertSQL(keys, row)
+	sql2, args2, err := a.buildUpsertSQL(keys, row, 0)
 	require.NoError(t, err)
 
 	assert.Equal(t, sql1, sql2, "SQL must be identical on repeated calls")
@@ -167,6 +169,7 @@ func TestBuildUpsertSQL_KeyOnlyRow_DoNothing(t *testing.T) {
 	sql, args, err := a.buildUpsertSQL(
 		map[string]any{"event_id": "e1"},
 		map[string]any{}, // no non-key columns
+		0,
 	)
 	require.NoError(t, err)
 	assert.Contains(t, sql, "DO NOTHING")
@@ -180,6 +183,7 @@ func TestBuildUpsertSQL_MissingKeyField(t *testing.T) {
 	_, _, err := a.buildUpsertSQL(
 		map[string]any{"id": 1}, // "tenant" absent
 		map[string]any{"name": "x"},
+		0,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tenant")
@@ -192,6 +196,7 @@ func TestBuildUpsertSQL_TableNameDoubleQuoted(t *testing.T) {
 	sql, _, err := a.buildUpsertSQL(
 		map[string]any{"id": 1},
 		map[string]any{"qty": 5},
+		0,
 	)
 	require.NoError(t, err)
 	assert.Contains(t, sql, `"order"`)
@@ -205,6 +210,7 @@ func TestBuildUpsertSQL_KeyRowOverlap_KeyColumnsFilteredFromRow(t *testing.T) {
 	sql, args, err := a.buildUpsertSQL(
 		map[string]any{"id": 42},
 		map[string]any{"id": 99, "name": "Alice"}, // "id" overlaps with keyOrder
+		0,
 	)
 	require.NoError(t, err)
 	// "id" must appear exactly once in the column list.
@@ -214,6 +220,76 @@ func TestBuildUpsertSQL_KeyRowOverlap_KeyColumnsFilteredFromRow(t *testing.T) {
 	)
 	// args must use the key-map value (42), not the row-map value (99).
 	assert.Equal(t, []any{42, "Alice"}, args)
+}
+
+// ── guarded-mode buildUpsertSQL unit tests ────────────────────────────────
+
+func TestBuildUpsertSQL_Guarded_AppendsProjectionSeqGuard(t *testing.T) {
+	a := newTestAdapter(t, "read_lease_applications", []string{"lease_id"})
+	a.SetGuarded(true)
+	require.True(t, a.Guarded())
+
+	sql, args, err := a.buildUpsertSQL(
+		map[string]any{"lease_id": "abc"},
+		map[string]any{"status": "submitted"},
+		42,
+	)
+	require.NoError(t, err)
+	assert.Equal(t,
+		`INSERT INTO "read_lease_applications" ("lease_id", "status", "projection_seq") VALUES ($1, $2, $3) ON CONFLICT ("lease_id") DO UPDATE SET "status" = EXCLUDED."status", "projection_seq" = EXCLUDED."projection_seq" WHERE EXCLUDED."projection_seq" > "read_lease_applications"."projection_seq"`,
+		sql,
+	)
+	assert.Equal(t, []any{"abc", "submitted", int64(42)}, args)
+}
+
+func TestBuildUpsertSQL_Guarded_KeyOnlyRow_StillGuardsNotDoNothing(t *testing.T) {
+	// Unguarded key-only rows use DO NOTHING (no non-key columns to guard);
+	// a guarded adapter must still attach the projection_seq guard even with
+	// no business columns, since DO NOTHING would silently drop the seq write.
+	a := newTestAdapter(t, "t", []string{"id"})
+	a.SetGuarded(true)
+
+	sql, args, err := a.buildUpsertSQL(
+		map[string]any{"id": "e1"},
+		map[string]any{},
+		7,
+	)
+	require.NoError(t, err)
+	assert.NotContains(t, sql, "DO NOTHING")
+	assert.Contains(t, sql, `DO UPDATE SET "projection_seq" = EXCLUDED."projection_seq" WHERE`)
+	assert.Equal(t, []any{"e1", int64(7)}, args)
+}
+
+func TestBuildUpsertSQL_Guarded_RowSuppliedProjectionSeqIgnored(t *testing.T) {
+	// projection_seq is platform-owned; a lens-declared "projection_seq" key in
+	// row must never collide with (or override) the guard's own column.
+	a := newTestAdapter(t, "t", []string{"id"})
+	a.SetGuarded(true)
+
+	sql, args, err := a.buildUpsertSQL(
+		map[string]any{"id": "e1"},
+		map[string]any{"projection_seq": int64(999), "name": "x"},
+		7,
+	)
+	require.NoError(t, err)
+	assert.Equal(t,
+		`INSERT INTO "t" ("id", "name", "projection_seq") VALUES ($1, $2, $3) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "projection_seq" = EXCLUDED."projection_seq" WHERE EXCLUDED."projection_seq" > "t"."projection_seq"`,
+		sql,
+	)
+	assert.Equal(t, []any{"e1", "x", int64(7)}, args)
+}
+
+func TestPostgresAdapter_Upsert_UnguardedIgnoresProjectionSeq(t *testing.T) {
+	// Regression: an ordinary (unguarded) adapter must keep Contract #6 §6.2's
+	// unconditional last-writer-wins behavior — no guard clause, no matter what
+	// projectionSeq the pipeline passes.
+	a := newTestAdapter(t, "t", []string{"id"})
+	require.False(t, a.Guarded())
+
+	sql, _, err := a.buildUpsertSQL(map[string]any{"id": "e1"}, map[string]any{"name": "x"}, 999)
+	require.NoError(t, err)
+	assert.NotContains(t, sql, "projection_seq")
+	assert.NotContains(t, sql, "WHERE")
 }
 
 func TestNewPostgresAdapter_DuplicateKeyOrder(t *testing.T) {

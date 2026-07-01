@@ -52,6 +52,17 @@ func EmitReadPathDDL(ctx context.Context, conn *substrate.Conn, coreKVBucket str
 		if err != nil {
 			continue
 		}
+		// KVGet returns a tombstoned spec normally (Core KV holds logically-
+		// deleted entries by design — substrate.Conn.KVGet's doc comment); this
+		// is exactly the "raw Core KV consumer" that must inspect isDeleted
+		// itself. TombstoneMetaVertex tombstones a lens's .spec aspect alongside
+		// its root (meta_ddl.go), so checking the spec envelope alone is enough.
+		var deletedProbe struct {
+			IsDeleted bool `json:"isDeleted"`
+		}
+		if err := json.Unmarshal(entry.Value, &deletedProbe); err == nil && deletedProbe.IsDeleted {
+			continue
+		}
 		specBody, err := unwrapSpecBody(entry.Value)
 		if err != nil {
 			continue
@@ -82,6 +93,13 @@ func EmitReadPathDDL(ctx context.Context, conn *substrate.Conn, coreKVBucket str
 		}
 		if _, dup := seenTables[table]; dup {
 			continue
+		}
+		dm, err := adapter.ParseDeleteMode(cfg.DeleteMode)
+		if err != nil {
+			return nil, fmt.Errorf("emit read-path DDL: lens %q: targetConfig.deleteMode: %w", spec.ID, err)
+		}
+		if err := validateProtectedDeleteMode(spec.ID, cfg.Protected, dm); err != nil {
+			return nil, fmt.Errorf("emit read-path DDL: %w", err)
 		}
 		cols, _, err := translatePostgresColumns(spec.ID, cfg)
 		if err != nil {

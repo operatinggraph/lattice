@@ -198,3 +198,57 @@ func TestReadPathSeam_Integration(t *testing.T) {
 	require.NoError(t, ProvisionProtectedTable(ctx, pool, tbl,
 		[]string{"id"}, []ColumnDef{{Name: "status", Type: "text"}}, 10*time.Second))
 }
+
+// TestProtectedAdapter_SeqGuard_Integration proves NewProtectedAdapter enables
+// the same monotonic projection_seq guard PostgresGrantWriter.UpsertGrant
+// applies to actor_read_grants (design doc "Fire 2 subsumed" / seq-guard): a
+// stale (lower-seq) replay must leave a fresher projected row untouched.
+func TestProtectedAdapter_SeqGuard_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	tbl := "rls_seqguard_" + sanitize(t.Name())
+	_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS "`+tbl+`"`)
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`) })
+	require.NoError(t, ProvisionProtectedTable(ctx, pool, tbl,
+		[]string{"id"}, []ColumnDef{{Name: "status", Type: "text"}}, 10*time.Second))
+
+	base, err := NewPostgresAdapter(pool, tbl, []string{"id"}, 10*time.Second, DeleteModeHard)
+	require.NoError(t, err)
+	pa, err := NewProtectedAdapter(base, []string{AuthzAnchorsColumn}, []ColumnDef{{Name: "status", Type: "text"}})
+	require.NoError(t, err)
+	require.True(t, pa.Guarded(), "NewProtectedAdapter must enable the seq guard")
+
+	readStatus := func() (status string, seq int64) {
+		require.NoError(t, pool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT status, projection_seq FROM "%s" WHERE id=$1`, tbl), "row1").Scan(&status, &seq))
+		return
+	}
+
+	// Fresh write at seq 5 → live.
+	require.NoError(t, pa.Upsert(ctx,
+		map[string]any{"id": "row1"},
+		map[string]any{"status": "submitted", "authz_anchors": []any{}}, 5))
+	status, seq := readStatus()
+	assert.Equal(t, "submitted", status)
+	assert.EqualValues(t, 5, seq)
+
+	// A stale (lower-seq) replay must not overwrite the fresher row.
+	require.NoError(t, pa.Upsert(ctx,
+		map[string]any{"id": "row1"},
+		map[string]any{"status": "STALE", "authz_anchors": []any{}}, 3))
+	status, seq = readStatus()
+	assert.Equal(t, "submitted", status, "stale upsert must not overwrite a fresher row")
+	assert.EqualValues(t, 5, seq, "stale upsert must not regress projection_seq")
+
+	// A strictly-newer write DOES apply (monotonic forward progress).
+	require.NoError(t, pa.Upsert(ctx,
+		map[string]any{"id": "row1"},
+		map[string]any{"status": "approved", "authz_anchors": []any{}}, 9))
+	status, seq = readStatus()
+	assert.Equal(t, "approved", status)
+	assert.EqualValues(t, 9, seq)
+}

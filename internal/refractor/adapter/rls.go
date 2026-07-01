@@ -21,6 +21,13 @@ const GrantTable = "actor_read_grants"
 // tokens the RLS policy unnests. It is always a text[] array column.
 const AuthzAnchorsColumn = "authz_anchors"
 
+// ProjectionSeqColumn is the platform-added monotonic-guard column every
+// protected read-model table carries (Contract #6 §6.14), mirroring
+// actor_read_grants.projection_seq. PostgresAdapter's guarded mode conditions
+// its upsert on this column so a stale (lower-seq) replay cannot overwrite a
+// fresher projected row.
+const ProjectionSeqColumn = "projection_seq"
+
 // GrantKeyColumns is the composite key a grant-projecting lens RETURNs, in
 // order — the primary key of actor_read_grants. A lens targeting the grant
 // table projects exactly these three columns.

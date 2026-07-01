@@ -481,17 +481,8 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		if err != nil {
 			return nil, fmt.Errorf("lens %q: targetConfig.deleteMode: %w", spec.ID, err)
 		}
-		// A protected business table is provisioned out-of-band from
-		// BuildProtectedTableDDL, which carries no is_deleted/deleted_at columns,
-		// and the §6.14 set-membership policy does not filter on is_deleted (only
-		// the grant table tombstones). A soft delete (UPDATE … SET is_deleted=true,
-		// deleted_at=NOW()) would therefore hit a missing column on every delete —
-		// a write error the pump misclassifies as transient and retries forever.
-		// Reject the unsupported combination at spec load (fail-closed, like the
-		// protected/public and protected/grantTable conflicts above) rather than
-		// activating into that loop.
-		if cfg.Protected && dm == adapter.DeleteModeSoft {
-			return nil, fmt.Errorf("lens %q: a protected read model cannot use deleteMode \"soft\" — the RLS table has no is_deleted column and the §6.14 policy does not filter it; use the default \"hard\" delete", spec.ID)
+		if err := validateProtectedDeleteMode(spec.ID, cfg.Protected, dm); err != nil {
+			return nil, err
 		}
 		r.Into = IntoConfig{
 			Target:          "postgres",
@@ -557,6 +548,23 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 	r.ResolvedEngine = attempted[len(attempted)-1]
 	r.CompiledRule = compiled
 	return r, nil
+}
+
+// validateProtectedDeleteMode rejects a protected lens declaring deleteMode
+// "soft": BuildProtectedTableDDL provisions no is_deleted/deleted_at columns,
+// and the §6.14 set-membership policy does not filter on is_deleted (only the
+// grant table tombstones), so a soft delete (UPDATE … SET is_deleted=true)
+// would hit a missing column on every delete — a write error the pump
+// misclassifies as transient and retries forever. Reused by translateSpec
+// (spec-load time, the live activation path) and EmitReadPathDDL (DDL-emission
+// time, the operator-facing CLI) so the two views of "is this lens spec
+// coherent" cannot silently diverge — a spec loadable is DDL-emittable and
+// vice versa.
+func validateProtectedDeleteMode(lensID string, protected bool, dm adapter.DeleteMode) error {
+	if protected && dm == adapter.DeleteModeSoft {
+		return fmt.Errorf("lens %q: a protected read model cannot use deleteMode \"soft\" — the RLS table has no is_deleted column and the §6.14 policy does not filter it; use the default \"hard\" delete", lensID)
+	}
+	return nil
 }
 
 // translatePostgresColumns converts a protected lens's declared columns into

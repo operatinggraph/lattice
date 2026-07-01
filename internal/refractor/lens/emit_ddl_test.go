@@ -165,6 +165,117 @@ func TestEmitReadPathDDL_NoReadPathLenses(t *testing.T) {
 	require.Empty(t, lens.ReadPathDDLScript(stmts))
 }
 
+// TestEmitReadPathDDL_TombstonedSpec_Skipped proves a tombstoned (isDeleted)
+// lens spec contributes no DDL — Core KV holds tombstoned entries as live KV
+// reads (substrate.Conn.KVGet's doc comment), so EmitReadPathDDL, a raw
+// consumer, must inspect the envelope's isDeleted field itself rather than
+// treating every enumerated spec as active.
+func TestEmitReadPathDDL_TombstonedSpec_Skipped(t *testing.T) {
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
+	s := test.RunServer(opts)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	defer nc.Close()
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-kv"})
+	require.NoError(t, err)
+
+	// A live grant lens keeps needGrantTable true so the test isolates the
+	// tombstoned protected lens's own exclusion.
+	seedSpec(ctx, t, kv, "GrantLensaaaaaaaaaaa", lens.LensSpec{
+		ID:            "GrantLensaaaaaaaaaaa",
+		CanonicalName: "lens.cap-read.lease",
+		TargetType:    "postgres",
+		CypherRule:    "MATCH (g:grant) RETURN g.actor AS actor_id, g.anchor AS anchor_id, g.src AS grant_source",
+		TargetConfig:  json.RawMessage(`{"grantTable":true}`),
+	})
+
+	// A protected lens whose spec aspect is tombstoned (TombstoneMetaVertex's
+	// shape: an envelope with isDeleted:true wrapping the spec under "data").
+	spec := lens.LensSpec{
+		ID:            "ProtLensbbbbbbbbbbbb",
+		CanonicalName: "lens.lease-applications",
+		TargetType:    "postgres",
+		CypherRule:    "MATCH (a:leaseApplication) RETURN a.id AS application_id",
+		TargetConfig: json.RawMessage(`{
+			"table":"read_lease_applications",
+			"key":["application_id"],
+			"protected":true,
+			"columns":[{"name":"status","type":"text"}]
+		}`),
+	}
+	vtxKey := "vtx.meta.ProtLensbbbbbbbbbbbb"
+	require.NoError(t, putJSON(ctx, kv, vtxKey, map[string]any{"id": spec.ID, "class": "meta.lens"}))
+	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", map[string]any{
+		"class": "meta.lens", "vertexKey": vtxKey, "localName": "spec", "isDeleted": true, "data": spec,
+	}))
+
+	stmts, err := lens.EmitReadPathDDL(ctx, conn, "core-kv")
+	require.NoError(t, err)
+	joined := strings.Join(stmts, "\n")
+	require.Contains(t, joined, adapter.GrantTable, "the live grant lens still contributes DDL")
+	require.NotContains(t, joined, "read_lease_applications", "a tombstoned protected lens must contribute no DDL")
+}
+
+// TestEmitReadPathDDL_ProtectedSoftDelete_Rejected proves EmitReadPathDDL
+// rejects the same protected+deleteMode:soft combination translateSpec
+// rejects at lens-activation time (validateProtectedDeleteMode, shared by
+// both) — the DDL emitter must not diverge from the loader's view of "is this
+// lens spec coherent" and silently provision a table for a lens that can never
+// activate.
+func TestEmitReadPathDDL_ProtectedSoftDelete_Rejected(t *testing.T) {
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
+	s := test.RunServer(opts)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	defer nc.Close()
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-kv"})
+	require.NoError(t, err)
+
+	seedSpec(ctx, t, kv, "ProtLensbbbbbbbbbbbb", lens.LensSpec{
+		ID:            "ProtLensbbbbbbbbbbbb",
+		CanonicalName: "lens.lease-applications",
+		TargetType:    "postgres",
+		CypherRule:    "MATCH (a:leaseApplication) RETURN a.id AS application_id",
+		TargetConfig: json.RawMessage(`{
+			"table":"read_lease_applications",
+			"key":["application_id"],
+			"protected":true,
+			"deleteMode":"soft",
+			"columns":[{"name":"status","type":"text"}]
+		}`),
+	})
+
+	_, err = lens.EmitReadPathDDL(ctx, conn, "core-kv")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "deleteMode \"soft\"")
+}
+
 // indexOfStmt returns the index of the first statement containing substr, or -1.
 func indexOfStmt(stmts []string, substr string) int {
 	for i, s := range stmts {

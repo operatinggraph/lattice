@@ -112,10 +112,16 @@ var (
 // columns to encode as Postgres arrays (text[]); a nil/empty set behaves like
 // the base adapter. body is the lens-declared body columns, used by Probe to
 // verify the out-of-band table's shape.
+//
+// Enables the inner adapter's monotonic projection_seq write guard (Contract
+// #6 §6.14): every protected table carries projection_seq (VerifyProtectedTable
+// requires it), so a stale replay must not overwrite a fresher projected row —
+// the same guard PostgresGrantWriter.UpsertGrant applies to actor_read_grants.
 func NewProtectedAdapter(inner *PostgresAdapter, arrayCols []string, body []ColumnDef) (*ProtectedAdapter, error) {
 	if inner == nil {
 		return nil, fmt.Errorf("protected adapter: inner must not be nil")
 	}
+	inner.SetGuarded(true)
 	set := make(map[string]struct{}, len(arrayCols))
 	for _, c := range arrayCols {
 		set[c] = struct{}{}
@@ -195,6 +201,12 @@ func (p *ProtectedAdapter) Probe(ctx context.Context) error {
 
 // Close delegates to the base adapter (a no-op — the pool is pool-managed).
 func (p *ProtectedAdapter) Close() error { return p.inner.Close() }
+
+// Guarded reports the inner adapter's guard state (always true — see
+// NewProtectedAdapter). The pipeline's adjacency-watch path checks this via
+// the `interface{ Guarded() bool }` assertion to skip a sentinel-seq (0) write
+// on a guarded adapter, the same protection the KV-guarded lenses already get.
+func (p *ProtectedAdapter) Guarded() bool { return p.inner.Guarded() }
 
 // Truncate delegates to the base adapter so a protected read model still
 // supports truncate-before-rebuild (FR29).
