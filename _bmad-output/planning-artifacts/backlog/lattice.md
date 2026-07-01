@@ -76,8 +76,7 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (✅ ratified / 📋 ready, no upstream gate): **FR28 role-queue**.
-> (**protected-lens out-of-band** now 🏗️ — Fire 0+1+2 built on a worktree (`8f0cbd4`); next = Fire-2 3-layer
-> review + live-verify up-loftspace on a clean stack + ff-merge. **`@every` schedules** Fire 1 + Fire 2 shipped
+> (**protected-lens out-of-band** ✅ SHIPPED — see Done log. **`@every` schedules** Fire 1 + Fire 2 shipped
 > (`e04498e`); only the Andrew-gated Fire 3 §10.4 doc/contract remains.)
 > *Dependency-sequenced ratified items*: **Vault** + **Personal Lens** behind D1; **Gateway** behind
 > NATS-write-restriction F2; **Object crypto-shred** behind Vault — build when their gate clears.
@@ -89,7 +88,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped (base lens · JWT seam · protected-Postgres RLS · §5 Gate-3 read-bypass vectors + lint); next = D1.5 roll remaining read models onto the enforcement seam |
-| **Protected-lens provisioning: out-of-band + verify-and-pause** | Refractor runs the protected/grant Postgres table DDL today; move provisioning out-of-band + verify-and-pause fail-closed (retire the RLS DDL-ownership exception). | ★★ | M→L | 🏗️ building · [design](../../implementation-artifacts/protected-lens-out-of-band-provisioning-verify-and-pause-design.md) · Fire 0+1+2 on worktree `steward-protected-lens-oob` (`8f0cbd4`); next = Fire-2 3-layer + live-verify up-loftspace + ff-merge |
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · 🚧 seq behind NATS-write-restriction F2b |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1 (credential seam) shipped; F2 = live enforcement |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |
@@ -165,6 +163,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-01 · `ef108b4` · [Refractor] Protected-lens out-of-band provisioning + verify-and-pause — Fire 0+1+2 (fail-closed activation gate, `Verify{Protected,Grant}Table`, `emit-ddl`/`provision-readpath`, seq-guard)
 - 2026-06-30 · `e04498e` · [Weaver] `@every` Fire 2 — reconciler sweep cron-kill (durable `@every` replaces the in-process ticker)
 - 2026-06-30 · `44b385a` · [Core/substrate] `@every` Fire 1 — `ScheduleEvery`/`CancelSchedule` recurring-schedule primitive
 - 2026-06-29 · `d6530e9` · [Core/processor+rbac] Lane authorization enforcement (§2.3) — step-3 lane gate + `LaneUnauthorized` + Gate-3 vector #8

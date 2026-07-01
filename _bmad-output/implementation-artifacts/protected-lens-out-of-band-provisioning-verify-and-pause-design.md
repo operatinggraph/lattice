@@ -326,6 +326,39 @@ shipped/in-flight). This is a **swap, not a rebuild**:
 > is owned by a concurrent fire and `up-loftspace` would disrupt it**; (3) **ff-merge Fire 0+1+2 to main**. The
 > per-link evidence is strong (Fire-0 `InitialPause` pause-before-drain test + the verify suite + live emit-ddl
 > + the psql pipe all pass independently); only the one continuous `up-loftspace` flow is unrun.
+>
+> **✅ LANDED (Steward fire 2026-06-30/07-01, `ef108b4` on `main`, CI green).** Rebased the worktree onto
+> current `main` (`8f0cbd4`→`213780b`, trivial `.PHONY` conflict) and ran the Fire-2 3-layer review. All three
+> layers found real gaps, all fixed before merge:
+> - **Blind Hunter + Edge Case Hunter — `EmitReadPathDDL` diverged from the loader's view of spec validity.**
+>   It (a) enumerated a **tombstoned** lens spec as live — contradicted its own doc comment; `KVGet` returns a
+>   tombstoned entry normally (documented raw-consumer trap) and the emitter never checked `isDeleted` — and
+>   (b) built column DDL directly (`translatePostgresColumns`) without routing through `translateSpec`'s
+>   `protected`+`deleteMode:soft` rejection, so a malformed spec could get a table provisioned for a lens that
+>   can never activate. Fixed: an `isDeleted` envelope probe skips tombstoned specs; the soft-delete check is
+>   now `validateProtectedDeleteMode`, a shared helper both `translateSpec` and `EmitReadPathDDL` call — the
+>   loader and the emitter can no longer disagree on "is this spec coherent."
+> - **Acceptance Auditor — the design's own Fire-2 seq-guard requirement ("F2 subsumed" / "closing the prior
+>   fire's F2") was absent.** `ProtectedAdapter.Upsert` delegated to `PostgresAdapter.Upsert`, which discards
+>   `projectionSeq` entirely — no guard existed. Fixed: `PostgresAdapter` gained a `guarded` mode
+>   (`SetGuarded`/`Guarded`, mirroring `NatsKVAdapter`) that appends `projection_seq` to the upsert and
+>   conditions `ON CONFLICT ... DO UPDATE ... WHERE EXCLUDED.projection_seq > "<table>".projection_seq` — the
+>   same clause `PostgresGrantWriter.UpsertGrant` already uses. `NewProtectedAdapter` enables it
+>   unconditionally; `ProtectedAdapter.Guarded()` also lets the pipeline's adjacency-watch sentinel-seq (0)
+>   skip apply to protected tables, the same protection KV-guarded lenses already had.
+> - New coverage: `TestProtectedAdapter_SeqGuard_Integration` (real Postgres — a stale-seq upsert leaves a
+>   fresher row untouched, a newer-seq upsert applies), `TestEmitReadPathDDL_TombstonedSpec_Skipped`,
+>   `TestEmitReadPathDDL_ProtectedSoftDelete_Rejected`, plus unit coverage for the guarded SQL shape
+>   (`TestBuildUpsertSQL_Guarded_*`). Gates: build, vet, `golangci-lint` (0), STRICT `lint-conventions` (0),
+>   `go test ./...` (all green), `POSTGRES_TEST_DSN` adapter/lens/`internal/bypass` `TestCapAdv_*` suites — all
+>   green. Fast-forwarded to `main` (`ef108b4`), CI green (run 28484303731).
+> - **Item (2), the continuous `make up-loftspace` live e2e, stays deferred** — the shared stack (`:7777`/
+>   `:5432`) was still live under concurrent fires (loftspace-app + clinic-app both running) at merge time, and
+>   tearing it down to run a fresh `up-loftspace` would have disrupted that work. The per-link evidence
+>   substitutes for it: `emit-ddl` was validated against the **live** shared stack's real protected tables
+>   (§ above) and `VerifyProtectedTable`/the new seq-guard test both pass against real Postgres. A follow-up
+>   fire can run the one remaining continuous flow on a dedicated/ephemeral stack if a regression is ever
+>   suspected; it is not required to consider Fire 0+1+2 done.
 
 > **Re-decomposed 2026-06-30** after the §2.3 grounding correction: the fail-closed activation gate needs a
 > substrate seam that does not exist today, split out as **Fire 0**. Fire 0 + Fire 1 are the security-plane
