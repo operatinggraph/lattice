@@ -157,6 +157,58 @@ func TestLandlordLeaseApplicationsRead_UnmanagedUnitProducesNoRow(t *testing.T) 
 	require.Equal(t, []string{f.ids["larry"]}, anchorStrings(t, rows[0].Values["authz_anchors"]))
 }
 
+// TestLandlordLeaseApplicationsRead_ProjectsProfileSignals — D1.5 Rec C: the
+// applicant qualification-profile signals (income/employment/references/
+// co-applicant/guarantor) project as informational scalars on the landlord row,
+// scalar hops off app.profile.data.* with no aggregation. An application whose
+// applicant never submitted a profile projects profile_submitted=false and every
+// signal null (unknown, not false) — asserted on the sibling app in
+// seedManagedApplication, which carries no .profile aspect.
+func TestLandlordLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
+	f.aspect(t, "app", "profile", "profile", map[string]any{
+		"annualIncome":             90000,
+		"employmentStatus":         "employed",
+		"references":               []any{"ref1", "ref2"},
+		"hasCoApplicant":           false,
+		"hasGuarantor":             true,
+		"employmentVerified":       true,
+		"referenceCount":           2,
+		"submittedAt":              "2026-07-01T00:00:00Z",
+		"incomeToRentMet":          true,
+		"guarantorIncomeToRentMet": false,
+	})
+	f.seedManagedApplication(t, "appNoProfile", "bob", "unit2", "larry")
+
+	rows := f.projectLandlordRead(t)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+
+	withProfile := byApp[f.ids["app"]]
+	require.Equal(t, true, withProfile["profile_submitted"])
+	require.Equal(t, true, withProfile["income_to_rent_met"])
+	require.Equal(t, true, withProfile["employment_verified"])
+	require.EqualValues(t, 2, withProfile["reference_count"])
+	require.Equal(t, false, withProfile["has_co_applicant"])
+	require.Equal(t, true, withProfile["has_guarantor"])
+	require.Equal(t, false, withProfile["guarantor_income_to_rent_met"])
+
+	noProfile := byApp[f.ids["appNoProfile"]]
+	require.Equal(t, false, noProfile["profile_submitted"], "no .profile aspect -> profile_submitted false, not null")
+	require.Nil(t, noProfile["income_to_rent_met"], "no profile -> unknown, not false")
+	require.Nil(t, noProfile["employment_verified"])
+	require.Nil(t, noProfile["reference_count"])
+	require.Nil(t, noProfile["has_co_applicant"])
+	require.Nil(t, noProfile["has_guarantor"])
+	require.Nil(t, noProfile["guarantor_income_to_rent_met"])
+}
+
 // TestLandlordLeaseApplicationsRead_CoManagedUnitFansToOneRowPerLandlord — a unit
 // managed by TWO landlords fans the application out to ONE row PER landlord, each
 // anchored to that one landlord, with a distinct composite (app_id, landlord_id)

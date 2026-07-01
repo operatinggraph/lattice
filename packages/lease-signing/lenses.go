@@ -170,6 +170,14 @@ func Lenses() []pkgmgr.LensSpec {
 			// leaseApplicationsRead's D1.5 addition above): no landlord-facing view
 			// reads this model for document rendering, so there is nothing pulling
 			// those columns in yet — add them here too if one starts.
+			//
+			// D1.5 Rec C (lease-signing/lenses.go loftspace-d1.5-landlord-rls-decision-
+			// surface-design.md §4/§5) added the 7 applicant qualification-profile
+			// signal columns below — pure `app.profile.data.*` scalar hops off the
+			// already-anchored leaseapp, informational only (no `qualified` /
+			// readiness column: that needs the service-instance freshness aggregation
+			// `leaseApplicationCompleteSpec` runs, deliberately NOT cloned here per §4
+			// — deferred to the Vault milestone alongside name/contact display).
 			CanonicalName: "landlordLeaseApplicationsRead",
 			Class:         "meta.lens",
 			Adapter:       "postgres",
@@ -195,6 +203,13 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "terms_move_in_date", Type: "text"},
 				{Name: "terms_lease_term_months", Type: "double precision"},
 				{Name: "terms_requested_rent", Type: "double precision"},
+				{Name: "profile_submitted", Type: "boolean"},
+				{Name: "income_to_rent_met", Type: "boolean"},
+				{Name: "employment_verified", Type: "boolean"},
+				{Name: "reference_count", Type: "double precision"},
+				{Name: "has_co_applicant", Type: "boolean"},
+				{Name: "has_guarantor", Type: "boolean"},
+				{Name: "guarantor_income_to_rent_met", Type: "boolean"},
 			},
 		},
 	}
@@ -622,6 +637,19 @@ RETURN
 //     NanoID, so the §6.14 set-membership RLS policy returns this row to the
 //     managing landlord and to nobody else. landlord_key keeps the full
 //     vtx.identity.<id> key as a display/scope body column.
+//   - profile_submitted / income_to_rent_met / employment_verified /
+//     reference_count / has_co_applicant / has_guarantor /
+//     guarantor_income_to_rent_met (D1.5 Rec C, decision-surface-design.md §4/§5)
+//     are pure scalar hops off app.profile.data.* — the SAME derived signals
+//     leaseApplicationCompleteSpec projects, minus the service-instance
+//     readiness aggregation (deliberately not cloned here; see the Lenses()
+//     doc comment above). No WITH / aggregation needed: the full engine's
+//     expression evaluator (executor.go applyReturn -> projectItems ->
+//     evalExpr) runs the same evalExpr on RETURN items as it does inside a
+//     WITH, so `(x <> null) AS ...` works directly in RETURN. A leaseapp with
+//     no .profile aspect yet projects profile_submitted=false and every other
+//     signal null (unknown, not false) — the FE's existing profileSubmitted
+//     gate (renderQualification) already treats an absent profile that way.
 //
 // '= null' / list literals + nanoIdFromKey in RETURN mirror leaseApplicationsRead.
 const landlordLeaseApplicationsReadSpec = `
@@ -648,5 +676,12 @@ RETURN
   app.terms.data.moveInDate      AS terms_move_in_date,
   app.terms.data.leaseTermMonths AS terms_lease_term_months,
   app.terms.data.requestedRent   AS terms_requested_rent,
+  (app.profile.data.submittedAt <> null)      AS profile_submitted,
+  app.profile.data.incomeToRentMet            AS income_to_rent_met,
+  app.profile.data.employmentVerified         AS employment_verified,
+  app.profile.data.referenceCount             AS reference_count,
+  app.profile.data.hasCoApplicant             AS has_co_applicant,
+  app.profile.data.hasGuarantor               AS has_guarantor,
+  app.profile.data.guarantorIncomeToRentMet   AS guarantor_income_to_rent_met,
   [nanoIdFromKey(landlord.key)]  AS authz_anchors
 `

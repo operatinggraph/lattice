@@ -74,6 +74,13 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "terms_move_in_date", Type: "text"},
 		{Name: "terms_lease_term_months", Type: "double precision"},
 		{Name: "terms_requested_rent", Type: "double precision"},
+		{Name: "profile_submitted", Type: "boolean"},
+		{Name: "income_to_rent_met", Type: "boolean"},
+		{Name: "employment_verified", Type: "boolean"},
+		{Name: "reference_count", Type: "double precision"},
+		{Name: "has_co_applicant", Type: "boolean"},
+		{Name: "has_guarantor", Type: "boolean"},
+		{Name: "guarantor_income_to_rent_met", Type: "boolean"},
 	}
 	// The COMPOSITE key — this is what lets a co-managed unit's application carry one
 	// row per landlord without a primary-key collision.

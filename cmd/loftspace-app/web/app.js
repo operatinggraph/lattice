@@ -1815,15 +1815,22 @@ async function loadLandlord() {
 // signed-in identity reads /api/landlord/applications as an AUTHENTICATED actor, and
 // Postgres RLS returns ONLY the applications to units that identity manages. Unlike
 // the operator console above (/api/unit-applications, the trusted-tool view that
-// sees every unit), this is the per-landlord enforced scope — a banner reports it so
-// the boundary is visible in the browser. Best-effort: a missing read boundary
-// (no Postgres / protected lens) or a non-landlord identity degrades to an
-// informational note, never blocking the operator console.
+// sees every unit), this is the per-landlord enforced scope. D1.5 Rec C
+// (decision-surface-design.md §5 Increment 3) upgrades the banner into the RICH
+// enforced-scope view: a read-only card list of the RLS-scoped units + their
+// applications' qualification-profile signals, reusing renderQualification against
+// the protected rows. It stays INFORMATIONAL — no Approve/Decline (per Rec C those
+// stay on the trusted console below; the readiness clone that would gate them here
+// is deferred to Vault). Best-effort: a missing read boundary (no Postgres /
+// protected lens) or a non-landlord identity degrades to an informational note,
+// never blocking the operator console.
 async function loadLandlordRLS() {
   const el = $("#landlord-rls");
+  const listEl = $("#landlord-rls-units");
   if (!el) return;
   if (!state.applicant) {
     el.hidden = true;
+    if (listEl) listEl.hidden = true;
     return;
   }
   try {
@@ -1835,16 +1842,114 @@ async function loadLandlordRLS() {
       // 0 can mean "manages nothing" OR "grant revoked" — both correctly return
       // empty (no oracle); state the scope, not a cause we cannot distinguish here.
       el.textContent = "🔒 RLS read boundary: Postgres scopes you to 0 units. (The list above is the trusted operator console, which sees all units.)";
+      if (listEl) { listEl.hidden = true; listEl.innerHTML = ""; }
       return;
     }
-    el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}). The operator console above sees all units; this is your enforced per-landlord scope.`;
+    el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}) — the enforced view below is sourced from this same RLS-scoped read. The operator console further down sees all units and is where you Approve/Decline.`;
+    renderLandlordRLSUnits(units);
   } catch (e) {
     // The boundary is not provisioned in every dev posture; do not break the view.
     // Show a fixed string (server wording is for the console/log, not the banner).
     console.warn("landlord RLS boundary unavailable:", e);
     el.hidden = false;
     el.textContent = "🔒 RLS read boundary unavailable in this dev posture.";
+    if (listEl) { listEl.hidden = true; listEl.innerHTML = ""; }
   }
+}
+
+// renderLandlordRLSUnits renders the RLS-scoped units + applications as a
+// read-only card list — the enforced-scope counterpart of renderUnitCard, minus
+// Approve/Decline (informational only, per D1.5 Rec C).
+function renderLandlordRLSUnits(units) {
+  const listEl = $("#landlord-rls-units");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+  listEl.hidden = false;
+  for (const u of units) listEl.append(renderRLSUnitCard(u));
+}
+
+function renderRLSUnitCard(u) {
+  const card = document.createElement("div");
+  card.className = "card unit-card rls-card";
+
+  const head = document.createElement("div");
+  head.className = "unit-head";
+  const addr = document.createElement("div");
+  addr.className = "addr";
+  addr.textContent = u.unitAddress || "Unit " + shortKey(u.unitKey);
+  const sub = document.createElement("div");
+  sub.className = "unit-sub";
+  const rent = document.createElement("span");
+  rent.textContent = u.unitRent != null ? moneyAmount(u.unitRent) + " / month" : "—";
+  const status = u.unitStatus || "—";
+  const badge = document.createElement("span");
+  badge.className = "badge " + status;
+  badge.textContent = status;
+  sub.append(rent, badge);
+  head.append(addr, sub);
+  card.append(head);
+
+  const list = document.createElement("div");
+  list.className = "applicants";
+  const apps = u.applications || [];
+  if (apps.length === 0) {
+    const none = document.createElement("div");
+    none.className = "applicant-none";
+    none.textContent = "No applications yet.";
+    list.append(none);
+  } else {
+    for (const a of apps) list.append(renderRLSApplicantRow(a));
+  }
+  card.append(list);
+  return card;
+}
+
+// renderRLSApplicantRow renders one RLS-scoped application: name falls back to a
+// short key (the applicant's name is a Vault-gated sensitive field this protected
+// lens does not carry, §3 of the design doc), the landlord's disposition, and the
+// SAME qualification-profile chips the trusted console shows (renderQualification —
+// D1.5 Rec C, informational, no aggregation/readiness gate). No Approve/Decline
+// here; that stays on the trusted console (unitLeased / a.qualified gating out of
+// scope for this informational read).
+function renderRLSApplicantRow(a) {
+  const row = document.createElement("div");
+  row.className = "applicant";
+
+  const info = document.createElement("div");
+  info.className = "applicant-info";
+  const name = document.createElement("span");
+  name.className = "applicant-name";
+  name.textContent = shortKey(a.applicant);
+  info.append(name);
+  if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
+  else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
+  else info.append(dispChip("Awaiting your decision", "review"));
+  if (a.signedAt) {
+    const signed = document.createElement("span");
+    signed.className = "signed";
+    signed.textContent = "✓ signed";
+    info.append(signed);
+  }
+  row.append(info);
+
+  row.append(renderQualification(a));
+
+  if (a.landlordDeclined && a.declineReason) {
+    const reason = document.createElement("div");
+    reason.className = "applicant-note";
+    reason.textContent = "Reason: " + a.declineReason;
+    row.append(reason);
+  }
+  return row;
+}
+
+// dispChip builds the small disposition badge renderRLSApplicantRow uses (the DISPOSITION-styled
+// class names so the existing CSS applies with no new rules).
+function dispChip(text, cls) {
+  const badge = document.createElement("span");
+  badge.className = "disp " + cls;
+  badge.textContent = text;
+  return badge;
 }
 
 function renderUnits() {

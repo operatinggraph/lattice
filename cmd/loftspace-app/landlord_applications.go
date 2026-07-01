@@ -31,26 +31,41 @@ import (
 // from the RLS-scoped read. RLS has already restricted the rows to the requesting
 // landlord, so there is no client-side filter. Nullable columns (the unit/terms/
 // signature/decision scalars) are pointers so an absent value stays absent.
+//
+// The 7 profile-signal fields (D1.5 Rec C, decision-surface-design.md §5 Increment
+// 2) are the SAME informational qualification signals the trusted console's
+// convergence lens projects — income/employment/references/co-applicant/guarantor
+// — carried here so the RLS view can render `renderQualification` against a
+// protected row too. ProfileSubmitted is a plain bool (the lens always projects it,
+// even false); the rest are pointers because "no profile yet" projects them null
+// (unknown), matching the console's null-vs-false distinction the FE already reads.
 type protectedLandlordRow struct {
-	EntityKey          string   `json:"entityKey"`
-	Applicant          string   `json:"applicant"`
-	LandlordKey        string   `json:"landlordKey"`
-	UnitKey            *string  `json:"unitKey"`
-	UnitAddress        *string  `json:"unitAddress"`
-	UnitCity           *string  `json:"unitCity"`
-	UnitRegion         *string  `json:"unitRegion"`
-	UnitRent           *float64 `json:"unitRent"`
-	UnitCurrency       *string  `json:"unitCurrency"`
-	UnitStatus         *string  `json:"unitStatus"`
-	SignedAt           *string  `json:"signedAt"`
-	LandlordDecision   *string  `json:"landlordDecision"`
-	LandlordApproved   bool     `json:"landlordApproved"`
-	LandlordDeclined   bool     `json:"landlordDeclined"`
-	Declined           bool     `json:"declined"`
-	DeclineReason      *string  `json:"declineReason"`
-	TermsMoveInDate    *string  `json:"termsMoveInDate"`
-	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
-	TermsRequestedRent *float64 `json:"termsRequestedRent"`
+	EntityKey                string   `json:"entityKey"`
+	Applicant                string   `json:"applicant"`
+	LandlordKey              string   `json:"landlordKey"`
+	UnitKey                  *string  `json:"unitKey"`
+	UnitAddress              *string  `json:"unitAddress"`
+	UnitCity                 *string  `json:"unitCity"`
+	UnitRegion               *string  `json:"unitRegion"`
+	UnitRent                 *float64 `json:"unitRent"`
+	UnitCurrency             *string  `json:"unitCurrency"`
+	UnitStatus               *string  `json:"unitStatus"`
+	SignedAt                 *string  `json:"signedAt"`
+	LandlordDecision         *string  `json:"landlordDecision"`
+	LandlordApproved         bool     `json:"landlordApproved"`
+	LandlordDeclined         bool     `json:"landlordDeclined"`
+	Declined                 bool     `json:"declined"`
+	DeclineReason            *string  `json:"declineReason"`
+	TermsMoveInDate          *string  `json:"termsMoveInDate"`
+	TermsLeaseTerm           *float64 `json:"termsLeaseTermMonths"`
+	TermsRequestedRent       *float64 `json:"termsRequestedRent"`
+	ProfileSubmitted         bool     `json:"profileSubmitted"`
+	IncomeToRentMet          *bool    `json:"incomeToRentMet"`
+	EmploymentVerified       *bool    `json:"employmentVerified"`
+	ReferenceCount           *float64 `json:"referenceCount"`
+	HasCoApplicant           *bool    `json:"hasCoApplicant"`
+	HasGuarantor             *bool    `json:"hasGuarantor"`
+	GuarantorIncomeToRentMet *bool    `json:"guarantorIncomeToRentMet"`
 }
 
 // landlordUnitGroup is the per-unit grouping the FE renders: a unit the signed-in
@@ -74,7 +89,10 @@ const selectLandlordApplicationsSQL = `
 SELECT entity_key, applicant, landlord_key, unit_key, unit_address, unit_city,
        unit_region, unit_rent, unit_currency, unit_status, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
-       terms_lease_term_months, terms_requested_rent
+       terms_lease_term_months, terms_requested_rent,
+       COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
+       reference_count, has_co_applicant, has_guarantor,
+       guarantor_income_to_rent_met
 FROM read_landlord_lease_applications
 ORDER BY unit_key, app_id`
 
@@ -110,6 +128,9 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 			&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
 			&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
 			&row.TermsRequestedRent,
+			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
+			&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
+			&row.GuarantorIncomeToRentMet,
 		); err != nil {
 			return nil, err
 		}
