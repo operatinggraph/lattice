@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,48 +76,43 @@ func TestComputePatients_NameOnlySortedSkips(t *testing.T) {
 	}
 }
 
-func TestComputeAppointments_ScopeByPatient(t *testing.T) {
+func TestComputeAvailability_ScopeByProvider(t *testing.T) {
 	keys, get := apptFixture()
-	rows := computeAppointments(keys, get, "vtx.patient.alice", "")
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 appointments for alice, got %d", len(rows))
-	}
-	// Sorted by startsAt: the 09:00 before the 15:00.
-	if rows[0].StartsAt != "2026-07-01T09:00:00Z" || rows[1].StartsAt != "2026-07-01T15:00:00Z" {
-		t.Fatalf("appointments not sorted by startsAt: %+v", rows)
-	}
-	if rows[1].ProviderName != "Dr. Sam Okafor" {
-		t.Fatalf("provider join lost: %+v", rows[1])
-	}
-}
-
-func TestComputeAppointments_ScopeByProvider(t *testing.T) {
-	keys, get := apptFixture()
-	rows := computeAppointments(keys, get, "", "vtx.provider.sam")
+	rows := computeAvailability(keys, get, "vtx.provider.sam")
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 appointments on Dr. Sam's schedule, got %d", len(rows))
 	}
+	// Sorted by startsAt: the 10:00 (bob) before the 15:00 (alice).
+	if rows[0].StartsAt != "2026-07-01T10:00:00Z" || rows[1].StartsAt != "2026-07-01T15:00:00Z" {
+		t.Fatalf("appointments not sorted by startsAt: %+v", rows)
+	}
 	for _, r := range rows {
-		if r.ProviderKey != "vtx.provider.sam" {
-			t.Fatalf("provider scope leaked a foreign row: %+v", r)
+		if r.AppointmentKey == "" {
+			t.Fatalf("expected an appointmentKey on every row: %+v", r)
 		}
 	}
 }
 
-func TestComputeAppointments_NoScopeReturnsAll(t *testing.T) {
+func TestComputeAvailability_OmitsPatientAndVisitFields(t *testing.T) {
 	keys, get := apptFixture()
-	rows := computeAppointments(keys, get, "", "")
-	if len(rows) != 3 {
-		t.Fatalf("expected all 3 appointments with no scope, got %d", len(rows))
+	rows := computeAvailability(keys, get, "vtx.provider.sam")
+	raw, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(raw)
+	for _, leak := range []string{"patientKey", "patientName", "providerKey", "providerName", "reason", "documentedAt", "followUpRequested", "followUpDate", "reminderSentAt"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("availabilityRow leaked %q into the unauthenticated response: %s", leak, body)
+		}
 	}
 }
 
-func TestComputeAppointments_BothScopesIntersect(t *testing.T) {
+func TestComputeAvailability_EmptyProviderMatchesNothing(t *testing.T) {
 	keys, get := apptFixture()
-	// alice + Dr. Lee: only the 09:00 bob/lee... no — alice sees sam(15:00) and lee(09:00).
-	rows := computeAppointments(keys, get, "vtx.patient.alice", "vtx.provider.lee")
-	if len(rows) != 1 || rows[0].ProviderKey != "vtx.provider.lee" || rows[0].PatientKey != "vtx.patient.alice" {
-		t.Fatalf("patient+provider intersection wrong: %+v", rows)
+	rows := computeAvailability(keys, get, "")
+	if len(rows) != 0 {
+		t.Fatalf("expected no rows for an empty provider scope, got %+v", rows)
 	}
 }
 

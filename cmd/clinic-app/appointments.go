@@ -10,66 +10,52 @@ import (
 	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
 )
 
-// appointmentRow is one row of the clinic-domain `clinicAppointments` lens read
-// model (P5: an application reads the lens projection, never Core KV). It is the
-// joined shape the FE renders in both "My Appointments" (scoped by patientKey) and
-// the provider "Schedule" (scoped by providerKey). Neighbour columns (patientName /
-// providerName / providerSpecialty) are empty when a link is absent.
-type appointmentRow struct {
-	AppointmentKey    string `json:"appointmentKey"`
-	StartsAt          string `json:"startsAt"`
-	EndsAt            string `json:"endsAt"`
-	Reason            string `json:"reason,omitempty"`
-	Status            string `json:"status"`
-	PatientKey        string `json:"patientKey"`
-	PatientName       string `json:"patientName,omitempty"`
-	ProviderKey       string `json:"providerKey"`
-	ProviderName      string `json:"providerName,omitempty"`
-	ProviderSpecialty string `json:"providerSpecialty,omitempty"`
-	// ReminderSentAt is the RFC3339 instant the ~24h appointment reminder fired
-	// (the clinic-reminders convergence, surfaced via the clinicAppointments lens).
-	// Empty until the reminder is sent (or when clinic-reminders is not installed).
-	ReminderSentAt string `json:"reminderSentAt,omitempty"`
-	// FollowUpReminderSentAt is the RFC3339 instant the at-the-date follow-up reminder
-	// fired (the clinic-reminders followUpReminders convergence). Empty until it fires
-	// (or when clinic-reminders is not installed).
-	FollowUpReminderSentAt string `json:"followUpReminderSentAt,omitempty"`
-	// DocumentedAt / FollowUpRequested / FollowUpDate are the OPERATIONAL, non-PHI
-	// encounter signals the clinicAppointments lens projects after RecordEncounter
-	// documents a completed visit. The RAW clinical content (summary / assessment /
-	// plan) is PHI and is NEVER projected (the deferred Vault plane owns its display),
-	// so it never reaches this DTO. DocumentedAt is the "visit documented" presence
-	// signal; FollowUpDate is set only when a follow-up was requested. All empty until
-	// the visit is documented.
-	DocumentedAt      string `json:"documentedAt,omitempty"`
-	FollowUpRequested bool   `json:"followUpRequested,omitempty"`
-	FollowUpDate      string `json:"followUpDate,omitempty"`
+// availabilityRow is the UNAUTHENTICATED provider-availability view (D1.5): the
+// booking slot-picker only needs a named provider's busy time windows to compute
+// open slots (see computeOpenSlots in app.js), never patient identity or visit
+// content — so this DTO carries nothing else.
+type availabilityRow struct {
+	AppointmentKey string `json:"appointmentKey"`
+	StartsAt       string `json:"startsAt"`
+	EndsAt         string `json:"endsAt"`
+	Status         string `json:"status"`
 }
 
-// computeAppointments assembles appointment rows from the `clinicAppointments`
-// lens read model, scoped to a patient and/or a provider. A non-empty patient
-// keeps only rows whose patientKey matches; a non-empty provider keeps only rows
-// whose providerKey matches (both empty returns every appointment). A row that
-// fails to decode or carries no appointmentKey (a tombstoned projection entry) is
-// skipped. Rows are sorted by startsAt (then key) so a list reads chronologically.
-func computeAppointments(keys []string, get kvGetter, patient, provider string) []appointmentRow {
-	rows := make([]appointmentRow, 0, len(keys))
+// computeAvailability assembles a single NAMED provider's busy windows from the
+// `clinicAppointments` lens read model. It decodes each row into a struct that
+// only carries appointmentKey/startsAt/endsAt/status/providerKey — patient
+// identity, visit reason, and encounter/documentation fields are never
+// unmarshaled at all, so this unauthenticated path can't leak them regardless of
+// what the lens projects. A row that fails to decode, carries no appointmentKey
+// (a tombstoned projection entry), or belongs to a different provider is
+// skipped. Rows are sorted by startsAt (then key) so a list reads
+// chronologically.
+func computeAvailability(keys []string, get kvGetter, provider string) []availabilityRow {
+	rows := make([]availabilityRow, 0, len(keys))
 	for _, k := range keys {
 		raw, ok := get(k)
 		if !ok {
 			continue
 		}
-		var a appointmentRow
+		var a struct {
+			AppointmentKey string `json:"appointmentKey"`
+			StartsAt       string `json:"startsAt"`
+			EndsAt         string `json:"endsAt"`
+			Status         string `json:"status"`
+			ProviderKey    string `json:"providerKey"`
+		}
 		if json.Unmarshal(raw, &a) != nil || a.AppointmentKey == "" {
 			continue
 		}
-		if patient != "" && a.PatientKey != patient {
+		if a.ProviderKey != provider {
 			continue
 		}
-		if provider != "" && a.ProviderKey != provider {
-			continue
-		}
-		rows = append(rows, a)
+		rows = append(rows, availabilityRow{
+			AppointmentKey: a.AppointmentKey,
+			StartsAt:       a.StartsAt,
+			EndsAt:         a.EndsAt,
+			Status:         a.Status,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].StartsAt != rows[j].StartsAt {
@@ -100,6 +86,14 @@ func computeAppointments(keys []string, get kvGetter, patient, provider string) 
 // A single named provider's own "My Schedule" view has similarly moved to
 // handleMyProviderSchedule (D1.5 Increment 2, the provider-self anchor); the FE
 // now calls that authenticated path whenever a specific provider is selected.
+//
+// The response rows are the minimal availabilityRow shape (D1.5, PHI
+// over-exposure fix): the caller supplied the provider key, so echoing it and
+// the provider's own name/specialty back is redundant, and every OTHER field
+// the lens projects (patient identity, reason, documentedAt/followUp*,
+// reminders) was pure PHI/PII an unauthenticated availability check never
+// needed. The FE's slot picker (providerAppointments → computeOpenSlots /
+// apptBlocks) only ever reads startsAt/endsAt/status.
 func (s *server) handleAppointments(w http.ResponseWriter, r *http.Request) {
 	// TrimSpace so a whitespace-only value (e.g. "?provider=%20") is treated as
 	// blank too — the guard exists to close the clinic-wide dump, so it must
@@ -131,7 +125,7 @@ func (s *server) handleAppointments(w http.ResponseWriter, r *http.Request) {
 		}
 		return entry.Value, true
 	}
-	rows := computeAppointments(keys, get, "", provider)
+	rows := computeAvailability(keys, get, provider)
 	s.writeJSON(w, http.StatusOK, map[string]any{"appointments": rows, "count": len(rows)})
 }
 
@@ -141,7 +135,7 @@ func (s *server) handleAppointments(w http.ResponseWriter, r *http.Request) {
 // there is no client-side filter. Nullable columns (the OPTIONAL provider walk,
 // and the optional reason/status-note/reminder/encounter fields) are pointers so
 // an absent value stays absent rather than rendering a misleading empty string.
-// JSON tags deliberately match appointmentRow's (appointmentKey, not entityKey)
+// JSON tags deliberately match availabilityRow's (appointmentKey, not entityKey)
 // so the FE's shared card renderer (renderApptCard et al.) needs no changes
 // between the unprotected and protected read paths.
 type protectedAppointmentRow struct {
@@ -167,12 +161,11 @@ type protectedAppointmentRow struct {
 // the RLS policy (FORCE ROW LEVEL SECURITY + the set-membership policy) injects
 // the actor scope from the txn-local lattice.actor_id session variable. Rows
 // sort by starts_at (then appointment_id) for a stable, chronological view,
-// mirroring computeAppointments' sort on the unprotected side.
+// mirroring computeAvailability's sort on the unprotected side.
 //
 // follow_up_requested, starts_at, and status are COALESCEd (to false / "" / "")
 // defensively: EntityKey/StartsAt/Status/PatientKey/FollowUpRequested are plain
-// (non-pointer) Go fields on protectedAppointmentRow, matching the unprotected
-// appointmentRow's zero-value convention, so a scan target must never see a
+// (non-pointer) Go fields on protectedAppointmentRow, so a scan target must never see a
 // NULL even for a column the write-path treats as always-populated (starts_at
 // and status are written atomically with the anchor forPatient link by
 // CreateAppointment) — a defensive backstop, not a documented possible state.
