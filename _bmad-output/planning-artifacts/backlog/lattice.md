@@ -92,7 +92,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped; D1.5 rolling; next: `handlePatients` clinic-wide unauthenticated roster dump (membership-disclosure PHI, mirror the staff-wildcard pattern) |
+| Read-path authorization (D1) | Reads from lens targets (Postgres/KV) bypass the write-path Capability boundary. Postgres RLS + a decomposed Capability-Read Lens; Gateway sets `lattice.actor_id`. Subsumes `cap.svc` read-auth. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/read-path-authorization-d1-design.md) · D1.1–D1.4 shipped; D1.5 rolling; clinic-app vectors closed; next: loftspace-app `handleIdentities` unauthenticated roster dump (same pattern) |
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | ✅ ratified · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · 🚧 seq behind NATS-write-restriction F2b |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1 (credential seam) shipped; F2 = live enforcement |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |
@@ -169,6 +169,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-01 · `40240dd` · [clinic-app] D1.5 — `handlePatients` clinic-wide unauth roster dump fix (new `clinicPatientsRead` wildcard-only protected lens; `handleStaffPatients` replaces it)
 - 2026-07-01 · `9129005` · [CI] Whetstone — `internal/loom` e2e sleeps → deterministic readiness polls (5 files, ~20 sites; package 55s→41s in CI, 3 restart tests de-flake-hardened via `joinEngine`)
 - 2026-07-01 · `b1c2eeb` · [clinic-app] D1.5 — `handleAppointments` provider-availability PHI over-exposure fix (minimal availabilityRow strips patient/visit fields from the unauthenticated slot-picker endpoint)
 - 2026-07-01 · `f509b84` · [loftspace-app/clinic-app] D1.5 — loftspace tasks (JWT-scoped) + clinic visit-series (new `visitSeriesRead` protected lens) read boundaries
