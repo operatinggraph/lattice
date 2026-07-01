@@ -17,7 +17,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| Clinic — encounter / visit documentation | `RecordEncounter` captures the post-visit clinical record; raw content stays unprojected (Vault discipline). | Clinic | pkg + FE | ★★★ | M | 🏗️ building · Inc 1 (capture op) + Inc 2 (FE) shipped; raw-content encryption → Vault (deferred) |
 | LoftSpace — per-landlord RLS view as the rich decision surface (D1.5 landlord cutover) | The protected `/api/landlord/applications` RLS read shows only a scope-count banner; the rich decision view is still the trusted-all-units console (§10.2). Project signals into `landlordLeaseApplicationsRead`, retiring the console. | LoftSpace | pkg + FE | ★★ | M | 🚧 blocked-on Vault · Rec C shipped ([design](../../implementation-artifacts/loftspace-d1.5-landlord-rls-decision-surface-design.md), `9b042f9`) · readiness/console/name-display deferred |
 | Clinic — patient contact (email/phone) captured but never projected | `CreatePatient` stores `.demographics.{email,phone}` but the `clinicPatients` lens projects only `name` — staff can't see contact info, and a real reminder channel has no address to send to. | Clinic | pkg + FE | ★★ | S | 🚧 blocked-on Vault — `.demographics.{email,phone}` are PHI; `clinicPatients` is name-only by test-enforced discipline (the display half of lattice [Vault](lattice.md)); not a vertical-steward call |
 | LoftSpace — applicant contact (email/phone) captured but never projected to the landlord | `CreateUnclaimedIdentity` stores `.email`/`.phone`, but neither the `/api/identities` picker nor the landlord `unit-applications` disposition surfaces them — a landlord deciding on an applicant has no way to contact them. | LoftSpace | pkg + FE | ★★ | S | 🚧 blocked-on Vault — `id.{email,phone}` are `sensitive=true` aspects; same display gate as the Clinic patient-contact row → lattice [Vault](lattice.md); not a vertical-steward call |
@@ -29,13 +28,14 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 - **Rotation to date:** LoftSpace ×8, Clinic ×5 (last: LoftSpace 8th run 2026-07-01, reused the up shared stack; write-path was blocked stack-wide — see live-stack note; filed the vertical-app Health-KV self-report gap).
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. Both apps exist + are exercisable live (`:7788` / `:7799`).
-- **Live-stack note (2026-07-01):** loftspace-app's and clinic-app's admin actor is **unloaded** — `lattice.bootstrap.json` is `version:"13"` but `checkVersion` (committed `40f4d25`) requires `"14"`, so every `/api/op` write 400s "admin actor not loaded" on both apps (reads work; KV holds no exercisable data). Needs `make down && make up` to regenerate — not a PO action, left for the Steward. Filed the underlying gap: [no vertical-app Health-KV self-report](lattice.md), so this class of failure stays invisible to Loupe next time.
+- **Live-stack note (2026-07-01):** loftspace-app's and clinic-app's admin actor is **unloaded** — `lattice.bootstrap.json` is `version:"13"` but `checkVersion` (committed `40f4d25`) requires `"14"`, so every `/api/op` write 400s "admin actor not loaded" on both apps (reads work; KV holds no exercisable data). Needs `make down && make up` to regenerate. Filed the underlying gap: [no vertical-app Health-KV self-report](lattice.md), so this class of failure stays invisible to Loupe next time. **Steward attempted the regen same-day (2026-07-01) and was denied** — the unattended sandbox's auto-mode classifier blocks `make down` outright as "interfere with workloads" (tears down the shared core stack), so this needs an attended `make down && make up` from Andrew's own session, or a policy exception for the Steward. Left 🔴 open.
 - **Next:** Clinic (once the stack is regenerated so writes work again).
 
 ## Done log — verticals (newest first)
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-01 · `—` · Clinic encounter/visit documentation CLOSED (stale 🏗️) — capture (`b81ffcd`) + FE (`2d5aeae`) done; encryption tracked under [Vault](lattice.md)
 - 2026-07-01 · `ec82fd8` · Steward continuous-improvement (doc sweep) — loftspace-domain package README (all demand rows blocked-on Vault/D1 this fire)
 - 2026-07-01 · `679fe25` · Clinic tombstone-linger row CLOSED (stale) — anchor-tombstone retraction already fixed this same-day as the PO filing
 - 2026-07-01 · `9b042f9` · LoftSpace D1.5 Rec C — landlord RLS view gains the rich qualification-signal decision surface

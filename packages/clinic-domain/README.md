@@ -18,10 +18,10 @@ Design: [`_bmad-output/implementation-artifacts/clinic-domain-design.md`](../../
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (3) | `patient`, `provider`, `appointment` |
-| **Aspect types** (8) | `patientDemographics`, `patientBookingGuard`, `providerProfile`, `providerBookingGuard`, `providerHours`, `providerTimeOff`, `appointmentSchedule`, `appointmentStatus` |
+| **Aspect types** (9) | `patientDemographics`, `patientBookingGuard`, `providerProfile`, `providerBookingGuard`, `providerHours`, `providerTimeOff`, `appointmentSchedule`, `appointmentStatus`, `appointmentEncounter` |
 | **Links** (2) | `forPatient` (appointment → patient), `withProvider` (appointment → provider) |
-| **Operations** (11) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `TombstoneAppointment` |
-| **Projection lenses** (3) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) |
+| **Operations** (12) | `CreatePatient` · `TombstonePatient` · `CreateProvider` · `TombstoneProvider` · `SetProviderProfile` · `SetProviderHours` · `SetProviderTimeOff` · `CreateAppointment` · `RescheduleAppointment` · `SetAppointmentStatus` · `RecordEncounter` · `TombstoneAppointment` |
+| **Projection lenses** (6) | `clinicAppointments` → `clinic-appointments` · `clinicProviders` → `clinic-providers` · `clinicPatients` → `clinic-patients` (all `nats-kv`, `full` engine) · `clinicAppointmentsRead` / `providerAppointmentsRead` / `clinicPatientsRead` (all `postgres`, `full` engine, **Protected** — Contract #6 §6.14 RLS, D1.5: patient-self / provider-self / staff-wildcard-only) |
 
 Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability
 surface; the trusted-tool operator already holds standing permission, identical to `loftspace-domain`.
@@ -37,6 +37,8 @@ vtx.provider.<id>     class=provider     root {}   .profile  {fullName, specialt
                                                    .timeOff  {ranges:[{from, to, reason?}]}                      (opt-in)
 vtx.appointment.<id>  class=appointment  root {}   .schedule {startsAt, endsAt, remindAt, reason?}
                                                    .status   {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?}
+                                                   .encounter {summary, assessment?, plan? (RAW PHI, never projected);
+                                                               documentedAt, followUpRequested, followUpDate? (operational, projected)}
 
 lnk.appointment.<id>.forPatient.patient.<id>      (appointment → patient — the later-arriving vertex is the source, §1.1)
 lnk.appointment.<id>.withProvider.provider.<id>   (appointment → provider)
@@ -102,6 +104,12 @@ half-open overlap tests and the convergence lens's `remindAt` compare rely on.
   `scheduled|confirmed|checkedIn|completed|cancelled|noShow`. `note` is an optional audit reason
   (cancel / no-show, for billing + records), distinct from the `.schedule` visit `reason`; an omitted
   note clears any prior one (the note belongs to the transition it was recorded with).
+- **`RecordEncounter`** — `{appointmentKey, summary, assessment?, plan?, followUpRequested?, followUpDate?}`.
+  Upserts `.encounter` — the post-visit clinical record. `summary`/`assessment`/`plan` are RAW PHI, captured
+  plaintext-for-now under the trusted-tool posture and **never projected** into a read model (the deferred
+  Vault plane owns clinical-content display). `documentedAt` (server-stamped) and the follow-up fields are
+  OPERATIONAL, non-PHI signals — `clinicAppointments` / `clinicAppointmentsRead` / `providerAppointmentsRead`
+  project them (documentation presence + follow-up scheduling), never the clinical content itself.
 - **`TombstoneAppointment`** — `{appointmentKey}`. Soft-deletes the appointment root only.
 
 ## Conflict detection & availability (Capability-KV §06 — "the operation's own Starlark logic")
@@ -132,8 +140,9 @@ mutation verb, a separate platform follow-on; live correctness does not depend o
 
 ## Projection lenses (P5 — the only application query surface)
 
-A clinic FE reads these projected NATS-KV read models, **never Core KV** (lattice-architecture.md P5).
-All three are flat (no `WITH`/aggregation) `full`-engine projections.
+A clinic FE reads these projected read models, **never Core KV** (lattice-architecture.md P5). All six
+are flat (no `WITH`/aggregation) `full`-engine projections. The first three are unprotected NATS-KV; the
+next three (below) are the RLS-protected Postgres equivalents a real deployment's FE should read instead.
 
 - **`clinicAppointments`** → `clinic-appointments`. One row per appointment (keyed by the appointment
   key), joined `OPTIONAL` to patient + provider — `0..1 × 0..1 = 1`, the §10.2 one-row-per-anchor
@@ -152,6 +161,24 @@ All three are flat (no `WITH`/aggregation) `full`-engine projections.
   **NAME ONLY**: DOB / email / phone are PHI the deferred Vault plane owns and are deliberately **not**
   projected into a read model.
 
+### Protected read models (D1.5, Contract #6 §6.14 RLS)
+
+Three more lenses project the SAME data through a **Postgres, RLS-enforced** read model instead of the
+unprotected NATS-KV buckets above — closing the "any caller can pass `?patient=<any patient>`" vector the
+unprotected lenses left open. Each row's `authz_anchors` set is a bare-NanoID match token; a reading actor's
+JWT-derived grants must intersect it or the row simply does not appear (fail-closed, RLS-enforced, not an
+app-layer filter).
+
+- **`clinicAppointmentsRead`** → `read_clinic_appointments`. **Patient-self** audience (`cmd/clinic-app`'s
+  `handleMyAppointments`) — `forPatient` is a REQUIRED anchor walk, so an appointment with no patient link
+  projects no row. Also read by clinic-wide staff views via the reserved wildcard grant (no separate staff
+  projection needed).
+- **`providerAppointmentsRead`** → `read_provider_appointments`. **Provider-self** audience ("My Schedule") —
+  `withProvider` is the REQUIRED anchor walk, mirroring `clinicAppointmentsRead`.
+- **`clinicPatientsRead`** → `read_clinic_patients`. Clinic-wide patient-context switcher, **staff-wildcard-only**
+  (no per-patient self-anchor — the whole roster has no single-row owner). NAME ONLY, same PHI discipline as
+  `clinicPatients`.
+
 ## Reminders, recurring schedules, and the sibling package
 
 `CreateAppointment` precomputes `remindAt = startsAt − 24h` on the `.schedule` aspect. The sibling
@@ -169,9 +196,10 @@ has no consumer; §10.4 ships `@at` one-shot) — that remains a deferred platfo
   trusted-tool posture (a `patient` is not an identity vertex, so step-6's `sensitiveAspectScope` would
   forbid a sensitive aspect on it anyway). Real PHI handling + right-to-be-forgotten is the deferred
   **Vault plane** — clinic is its forcing function (patient-record deletion is its validating flow).
-  This is why the lenses project patient **name only**, and why there is no encounter / clinical-note
-  aspect yet (the recording op is package-buildable, but projecting + displaying a clinical note is
-  gated on Vault).
+  This is why the lenses project patient **name only**, and why `RecordEncounter`'s `.encounter` aspect
+  captures the clinical record (summary/assessment/plan) but never projects it into any lens — only the
+  operational documentation/follow-up presence signals are projected; clinical-note **display** stays
+  gated on Vault.
 - **Cascade-on-tombstone.** `Tombstone{Patient,Provider,Appointment}` soft-deletes the named vertex
   **root only** — its aspects and incident links are left in place. The projection lenses anchor on the
   live root, so a tombstoned vertex drops from the read model and its orphaned aspects are not surfaced.
