@@ -92,6 +92,18 @@ stack) is safe too. Jitter (above) reduces how often the 3 locked roles collide 
 eliminate it — a long fire can still be running when the next locked slot arrives, and that's fine, the clean
 no-op-and-retry is the backstop, not a failure mode.
 
+### Commit attribution isn't automatic for scheduled fires
+
+An **interactive** Claude Code session's own system prompt tells it to end commits with a `Co-Authored-By:`
+trailer, so it happens without the skill saying anything. A **scheduled-task** fire does not get that same
+instruction — commits from one land author-only (no model credit at all) unless the prompt says so explicitly.
+Learned this the hard way: removing a hardcoded `Co-Authored-By: Claude Opus 4.8` line (to stop it lying once a
+different model ran the fire) silently dropped attribution entirely for every scheduled role, since nothing
+else was telling those fires to add one. Every scheduled prompt now carries an explicit **COMMIT ATTRIBUTION**
+instruction instead: name whichever model you actually are (check your own system prompt), never a hardcoded
+string. If you add a 7th scheduled role, give it the same instruction — don't assume the harness fills this in
+for you outside an interactive session.
+
 ### Chips need a push — an unattended fire has no one watching the session
 
 A `spawn_task` chip only surfaces if Andrew happens to open the exact session that filed it; for one of the 6

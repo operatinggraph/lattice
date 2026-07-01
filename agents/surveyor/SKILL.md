@@ -50,7 +50,9 @@ fails an over-budget board commit — **run it before you push.**
 
 **Docs in `main`, not a worktree** (isolation rule): `lattice.md` is a board doc — edit it **directly in
 `main`**. Commit **docs-only**, scoped: `git pull --rebase` → `git add _bmad-output/planning-artifacts/backlog/lattice.md`
-→ commit (`docs(backlog): Surveyor — <component/theme>`)
+→ commit (`docs(backlog): Surveyor — <component/theme>`, ending with a `Co-Authored-By:` trailer naming
+**whichever model you are** — check your own system prompt, never hardcode a specific model, a different one
+may run a future fire)
 → `git push`. Never `git add -A` (the tree is shared). If you see modified files you didn't touch, leave them.
 
 ## 4. Bounds

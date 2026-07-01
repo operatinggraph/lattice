@@ -300,7 +300,10 @@ binds the *design*, not the *ratification*: resolve the design's questions; flag
 **Docs in `main`, never a worktree.** Scoped commit: `git pull --rebase` →
 `git add _bmad-output/implementation-artifacts/<feature>-design.md _bmad-output/planning-artifacts/backlog/lattice.md`
 (+ the contract doc **only if** you decide to stage the uncommitted edit — *no*, leave contract edits
-**unstaged/uncommitted** for Andrew) → commit (`docs(design): Designer — <feature>`) → `git push`.
+**unstaged/uncommitted** for Andrew) → commit (`docs(design): Designer — <feature>`, ending with a
+`Co-Authored-By:` trailer naming **whichever model you are** — e.g. `Co-Authored-By: Claude Sonnet 5
+<noreply@anthropic.com>` if you're Sonnet 5; check your own system prompt, never hardcode a specific model
+here, a different one may run a future fire) → `git push`.
 **Never `git add -A`** — the tree is
 shared with Andrew + other fires; if you see files you didn't touch, leave them. **One design per fire, then
 exit** (bounded; the rate-limiter governs cadence). If genuinely nothing is left to design (every item is
