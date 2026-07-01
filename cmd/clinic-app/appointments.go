@@ -79,20 +79,29 @@ func computeAppointments(keys []string, get kvGetter, patient, provider string) 
 	return rows
 }
 
-// handleAppointments implements GET /api/appointments?provider= — a provider's
-// schedule, the clinic-wide follow-ups worklist (unscoped), and the booking
-// slot-picker's provider-availability check, served from the unprotected
-// `clinicAppointments` lens read model (NOT Core KV, but also not authenticated).
+// handleAppointments implements GET /api/appointments?provider= — the booking
+// slot-picker's provider-availability check, the clinic-wide follow-ups
+// worklist (unscoped), and the "All providers" schedule aggregate, served from
+// the unprotected `clinicAppointments` lens read model (NOT Core KV, but also
+// not authenticated).
 //
 // It NO LONGER accepts `?patient=` (D1.5): that vector let ANY caller read any
 // named patient's full appointment history — including the post-visit
 // documentedAt/followUpRequested signals — by supplying an arbitrary patient key,
 // with no authentication at all. The patient-self view moved to
-// handleMyAppointments, the PROTECTED, RLS-scoped, authenticated read. The
-// provider-scoped and unscoped reads here remain open: closing them needs a
-// provider-self anchor or a staff/admin wildcard grant (see
-// packages/clinic-domain/lenses.go's clinicAppointmentsRead doc), a flagged
-// follow-up, not freelanced in this fire.
+// handleMyAppointments, the PROTECTED, RLS-scoped, authenticated read.
+//
+// A single named provider's own "My Schedule" view has similarly moved to
+// handleMyProviderSchedule (D1.5 Increment 2, the provider-self anchor); the FE
+// now calls that authenticated path whenever a specific provider is selected.
+// `?provider=` stays HERE, unauthenticated, only for the slot-picker's
+// availability check (any caller — typically a patient mid-booking, not the
+// provider — checking a provider's busy times to compute open slots). The
+// unscoped reads (follow-ups worklist, "All providers" aggregate) remain open
+// too: neither has a per-actor anchor to scope by yet, and closing them needs a
+// staff/admin wildcard grant (see packages/clinic-domain/lenses.go's
+// providerAppointmentsRead doc, the D1 design's M5 Loupe-all-access posture
+// call) — flagged on the board, not freelanced here.
 func (s *server) handleAppointments(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -245,6 +254,102 @@ func (s *server) handleMyAppointments(w http.ResponseWriter, r *http.Request) {
 		// a generic message — never echo a raw DB error to the client.
 		s.logger.Error("read protected clinic appointments", "error", err)
 		s.writeError(w, http.StatusBadGateway, "could not read the protected appointments model")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})
+}
+
+// selectMyProviderScheduleSQL is selectMyAppointmentsSQL's provider-anchored
+// sibling (D1.5 Increment 2), reading the providerAppointmentsRead protected
+// model instead of the patient-anchored one. Same column surface
+// (protectedAppointmentRow is shared by both queries — the two tables project
+// identical columns, just anchored on a different actor), but patient_key
+// additionally needs COALESCE(..., ''): forPatient is OPTIONAL in
+// providerAppointmentsReadSpec (patient is the display neighbour here, not the
+// anchor — the reverse of clinicAppointmentsRead, where forPatient is
+// REQUIRED and patient_key is never null), so an appointment with no patient
+// link would otherwise scan a NULL into protectedAppointmentRow.PatientKey's
+// non-pointer string field.
+const selectMyProviderScheduleSQL = `
+SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''), status_note,
+       COALESCE(patient_key, ''), patient_name, provider_key, provider_name, provider_specialty,
+       reminder_sent_at, follow_up_reminder_sent_at, documented_at,
+       COALESCE(follow_up_requested, false), follow_up_date
+FROM read_provider_appointments
+ORDER BY starts_at, appointment_id`
+
+// queryMyProviderSchedule is queryMyAppointments' provider-anchored sibling —
+// identical txn-local actor + pooling-safety discipline, reading
+// read_provider_appointments instead of read_clinic_appointments. actorID must
+// be the bare provider identity NanoID (VerifiedActor.Subject), matching the
+// provider_key anchor's nanoIdFromKey representation.
+func queryMyProviderSchedule(ctx context.Context, pool pgxBeginner, actorID string) ([]protectedAppointmentRow, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actorID); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, selectMyProviderScheduleSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]protectedAppointmentRow, 0)
+	for rows.Next() {
+		var row protectedAppointmentRow
+		if err := rows.Scan(
+			&row.EntityKey, &row.StartsAt, &row.EndsAt, &row.Reason, &row.Status, &row.StatusNote,
+			&row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
+			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt,
+			&row.FollowUpRequested, &row.FollowUpDate,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// handleMyProviderSchedule implements GET /api/my-schedule — a provider's own
+// schedule, served from the PROTECTED providerAppointmentsRead Postgres read
+// model as an AUTHENTICATED actor (D1.5 Increment 2, mirroring
+// handleMyAppointments / loftspace-app's handleLandlordApplications). The
+// actor comes ONLY from the verified JWT; RLS returns only that provider's
+// rows, so there is no client-supplied provider filter (unlike the old
+// `/api/appointments?provider=` vector, which let anyone read any named
+// provider's full schedule).
+func (s *server) handleMyProviderSchedule(w http.ResponseWriter, r *http.Request) {
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
+		return
+	}
+	if s.pgPool == nil {
+		s.writeError(w, http.StatusBadGateway,
+			"protected read model not configured (set CLINIC_APP_PG_DSN and ensure Postgres + the clinic-domain protected lens are up)")
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	rows, err := queryMyProviderSchedule(ctx, s.pgPool, actor.Subject)
+	if err != nil {
+		// Log the detail (which can carry the failing SQL / schema names) and return
+		// a generic message — never echo a raw DB error to the client.
+		s.logger.Error("read protected provider schedule", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected provider schedule model")
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"appointments": rows, "count": len(rows), "scope": "rls"})

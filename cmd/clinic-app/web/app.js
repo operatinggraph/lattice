@@ -114,6 +114,51 @@ async function authedGet(path) {
   }
 }
 
+// providerReadToken is readToken's provider-anchored sibling (D1.5 Increment
+// 2), minting a demo token for a given provider key instead of the selected
+// patient. The Schedule tab's provider dropdown IS the "acting as" context here
+// (the same trusted-tool minting semantics as the patient switcher), not a
+// separate provider login flow — whichever provider is selected is who the
+// desk is viewing the schedule as, mirroring readToken's per-subject cache.
+let providerTokenCache = { subject: null, token: null, exp: 0 };
+
+async function providerReadToken(providerKey) {
+  const subject = bareId(providerKey);
+  if (!subject) return null;
+  const now = Date.now();
+  if (providerTokenCache.subject === subject && providerTokenCache.token && now < providerTokenCache.exp - 60000) {
+    return providerTokenCache.token;
+  }
+  const res = await fetch("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) {
+    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
+  }
+  const body = await res.json();
+  providerTokenCache = { subject, token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
+  return body.token;
+}
+
+// authedGetAsProvider is authedGet's provider-anchored sibling: fetches a
+// protected endpoint with a Bearer token minted for providerKey, retrying once
+// on a 401 with a freshly minted token.
+async function authedGetAsProvider(path, providerKey) {
+  let token = await providerReadToken(providerKey);
+  if (!token) throw new Error("select a provider to view their schedule");
+  try {
+    return await api(path, { headers: { Authorization: "Bearer " + token } });
+  } catch (e) {
+    if (!/HTTP 401|authentication required/i.test(e.message)) throw e;
+    providerTokenCache = { subject: null, token: null, exp: 0 };
+    token = await providerReadToken(providerKey);
+    if (!token) throw e;
+    return api(path, { headers: { Authorization: "Bearer " + token } });
+  }
+}
+
 function toast(msg, kind, extra) {
   const t = $("#toast");
   t.className = "toast " + (kind || "");
@@ -1783,10 +1828,15 @@ async function submitStartSeries() {
 //
 // The Schedule tab is a positioned calendar grid: a time axis down the left, one
 // column per day (7 in Week view, 1 in Day view), and each appointment rendered as
-// a block sized to its duration and coloured by status. /api/appointments?provider=
-// returns the provider's full history; the grid filters client-side to the visible
-// period (no date-range query needed). Clicking a block opens a read-only detail
-// panel — the desk view doesn't mutate (Cancel / Reschedule live on My Appointments).
+// a block sized to its duration and coloured by status. A single provider reads
+// the PROTECTED /api/my-schedule (RLS, provider-self anchor, D1.5 Increment 2) —
+// the dropdown selection IS the "acting as" context, minting a token for that
+// provider, mirroring the patient switcher's minting semantics. "All providers"
+// mode has no per-actor anchor to scope by yet, so it stays on the unprotected
+// /api/appointments (flagged — see handleAppointments' doc comment). Either way
+// the grid filters client-side to the visible period (no date-range query
+// needed). Clicking a block opens a read-only detail panel — the desk view
+// doesn't mutate (Cancel / Reschedule live on My Appointments).
 
 const PX_PER_HOUR = 44;
 
@@ -1811,11 +1861,13 @@ async function loadSchedule() {
   }
   $("#schedule-summary").textContent = "loading…";
   try {
-    // All-providers mode fetches the unfiltered read model (every appointment);
-    // a single provider scopes server-side. Either way the grid filters to the
-    // visible period client-side.
-    const q = provider === SCHED_ALL ? "" : "?provider=" + encodeURIComponent(provider);
-    const data = await api("/api/appointments" + q);
+    // All-providers mode fetches the unfiltered read model (every appointment,
+    // unprotected — flagged, no per-actor anchor to scope by yet); a single
+    // provider reads the PROTECTED, RLS-scoped model as that provider.
+    const data =
+      provider === SCHED_ALL
+        ? await api("/api/appointments")
+        : await authedGetAsProvider("/api/my-schedule", provider);
     state.schedule = data.appointments || [];
   } catch (e) {
     $("#schedule").innerHTML = "";

@@ -165,6 +165,103 @@ func TestClinicAppointmentsRead_NoProviderLinkStillProjects(t *testing.T) {
 	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]))
 }
 
+// TestProviderAppointmentsRead_ProjectsProviderSelfAnchor mirrors
+// TestClinicAppointmentsRead_ProjectsPatientSelfAnchor for the
+// providerAppointmentsReadSpec (D1.5 Increment 2): same display scalars, but
+// authz_anchors carries exactly the PROVIDER's bare NanoID.
+func TestProviderAppointmentsRead_ProjectsProviderSelfAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	apptKey := "vtx.appointment." + f.ids["appt"]
+	patientKey := "vtx.patient." + f.ids["alice"]
+	providerKey := "vtx.provider." + f.ids["drsam"]
+
+	rows := f.project(t, providerAppointmentsReadSpec)
+	require.Len(t, rows, 1, "exactly one read-model row per appointment")
+	v := rows[0].Values
+
+	require.Equal(t, f.ids["appt"], v["appointment_id"])
+	require.Equal(t, apptKey, v["entity_key"])
+	require.Equal(t, patientKey, v["patient_key"])
+	require.Equal(t, "Alice Rivera", v["patient_name"])
+	require.Equal(t, providerKey, v["provider_key"])
+	require.Equal(t, "Dr. Sam Okafor", v["provider_name"])
+
+	// The headline: authz_anchors is exactly [the provider's bare NanoID], NOT
+	// the patient's — the anchor axis flips relative to clinicAppointmentsRead.
+	require.Equal(t, []string{f.ids["drsam"]}, anchorStrings(t, v["authz_anchors"]),
+		"authz_anchors must carry exactly the provider's bare NanoID (the §6.14 self-anchor RLS matches)")
+}
+
+// TestProviderAppointmentsRead_AnchorScopesPerProvider mirrors
+// TestClinicAppointmentsRead_AnchorScopesPerPatient: two appointments with two
+// different providers each anchor to ONLY their own provider NanoID.
+func TestProviderAppointmentsRead_AnchorScopesPerProvider(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "apptA", "alice", "drsam")
+	f.seedAppointment(t, "apptB", "alice", "drpat")
+
+	rows := f.project(t, providerAppointmentsReadSpec)
+	require.Len(t, rows, 2)
+	byAppt := map[string][]string{}
+	for _, r := range rows {
+		byAppt[r.Values["appointment_id"].(string)] = anchorStrings(t, r.Values["authz_anchors"])
+	}
+	require.Equal(t, []string{f.ids["drsam"]}, byAppt[f.ids["apptA"]], "A's appointment anchors only to drsam")
+	require.Equal(t, []string{f.ids["drpat"]}, byAppt[f.ids["apptB"]], "B's appointment anchors only to drpat")
+	require.NotContains(t, byAppt[f.ids["apptA"]], f.ids["drpat"], "drsam's row must NOT carry drpat's anchor")
+	require.NotContains(t, byAppt[f.ids["apptB"]], f.ids["drsam"], "drpat's row must NOT carry drsam's anchor")
+}
+
+// TestProviderAppointmentsRead_NoProviderLinkProducesNoRow mirrors
+// TestClinicAppointmentsRead_NoPatientLinkProducesNoRow: withProvider is now
+// the REQUIRED anchor walk, so an appointment with no provider link projects
+// NO row — fail-closed, never a null anchor.
+func TestProviderAppointmentsRead_NoProviderLinkProducesNoRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "orphan", "appointment") // no withProvider link
+	f.seedAppointment(t, "appt", "alice", "drsam")
+
+	rows := f.project(t, providerAppointmentsReadSpec)
+	require.Len(t, rows, 1, "only the well-formed appointment projects; the no-provider shell is excluded")
+	require.Equal(t, f.ids["appt"], rows[0].Values["appointment_id"])
+	require.Equal(t, []string{f.ids["drsam"]}, anchorStrings(t, rows[0].Values["authz_anchors"]))
+}
+
+// TestProviderAppointmentsRead_NoPatientLinkStillProjects mirrors
+// TestClinicAppointmentsRead_NoProviderLinkStillProjects: forPatient is
+// OPTIONAL here (a display-only neighbour, not the anchor), so an appointment
+// missing its patient link still projects a row anchored to the provider, with
+// the patient columns null.
+func TestProviderAppointmentsRead_NoPatientLinkStillProjects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "drsam", "provider")
+	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
+	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z"})
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "scheduled"})
+	f.edge(t, "withProvider", "appt", "drsam")
+
+	rows := ruleengineFilterByKey(f.project(t, providerAppointmentsReadSpec), "appointment_id", f.ids["appt"])
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["patient_key"], "no forPatient link → null patient_key")
+	require.Nil(t, v["patient_name"], "no forPatient link → null patient_name")
+	require.Equal(t, []string{f.ids["drsam"]}, anchorStrings(t, v["authz_anchors"]))
+}
+
 func ruleengineFilterByKey(rows []ruleengine.ProjectionResult, col, id string) []ruleengine.ProjectionResult {
 	out := make([]ruleengine.ProjectionResult, 0, 1)
 	for _, r := range rows {

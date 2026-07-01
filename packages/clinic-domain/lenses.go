@@ -125,6 +125,58 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "follow_up_date", Type: "text"},
 			},
 		},
+		{
+			// providerAppointmentsRead — the protected Postgres read model for the
+			// provider-facing "My Schedule" view (D1.5, closing the provider vector
+			// cmd/clinic-app's handleAppointments doc-comment flagged: `?provider=`
+			// let ANY caller read a named provider's full schedule — including
+			// every patient's name and the post-visit documentedAt/followUpRequested
+			// signals — with no authentication at all). Mirrors
+			// landlordLeaseApplicationsRead's Increment 2 exactly: the same
+			// self-anchor trick (no extra cap-read grant lens needed — a provider is
+			// an identity, and the shipped base cap-read.<actor> self-anchor (D1.1)
+			// already grants every identity its own NanoID), just a different
+			// anchor-walk relation (withProvider instead of manages).
+			//
+			// The clinic-wide staff views (follow-ups worklist, the "All providers"
+			// schedule aggregate) still have no per-row anchor to scope by and stay
+			// on the existing unprotected handleAppointments path pending a
+			// staff/admin wildcard-grant posture call (the D1 design's M5
+			// Loupe-all-access decision) — flagged on the board, not freelanced here.
+			//
+			// authz_anchors = [nanoIdFromKey(provider identity key)].
+			//
+			// withProvider is a REQUIRED match (the anchor walk) so an appointment
+			// with no provider link projects NO row — fail-closed, mirroring
+			// clinicAppointmentsRead's REQUIRED forPatient walk. forPatient stays
+			// OPTIONAL: a display-only neighbour, not the anchor.
+			CanonicalName: "providerAppointmentsRead",
+			Class:         "meta.lens",
+			Adapter:       "postgres",
+			Table:         "read_provider_appointments",
+			Engine:        "full",
+			Spec:          providerAppointmentsReadSpec,
+			Protected:     true,
+			IntoKey:       []string{"appointment_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "entity_key", Type: "text"},
+				{Name: "starts_at", Type: "text"},
+				{Name: "ends_at", Type: "text"},
+				{Name: "reason", Type: "text"},
+				{Name: "status", Type: "text"},
+				{Name: "status_note", Type: "text"},
+				{Name: "patient_key", Type: "text"},
+				{Name: "patient_name", Type: "text"},
+				{Name: "provider_key", Type: "text"},
+				{Name: "provider_name", Type: "text"},
+				{Name: "provider_specialty", Type: "text"},
+				{Name: "reminder_sent_at", Type: "text"},
+				{Name: "follow_up_reminder_sent_at", Type: "text"},
+				{Name: "documented_at", Type: "text"},
+				{Name: "follow_up_requested", Type: "boolean"},
+				{Name: "follow_up_date", Type: "text"},
+			},
+		},
 	}
 }
 
@@ -260,4 +312,35 @@ RETURN
   a.encounter.data.followUpRequested AS follow_up_requested,
   a.encounter.data.followUpDate      AS follow_up_date,
   [nanoIdFromKey(p.key)]             AS authz_anchors
+`
+
+// providerAppointmentsReadSpec is the PROVIDER-anchored protected Postgres read
+// model's cypher (D1.5). withProvider is REQUIRED (the anchor walk) — an
+// appointment with no provider link projects no row, fail-closed, never a null
+// authz_anchor (mirrors clinicAppointmentsReadSpec's REQUIRED forPatient walk).
+// forPatient stays OPTIONAL: a display-only neighbour, not the anchor. Same
+// column surface as clinicAppointmentsReadSpec so the provider's "My Schedule"
+// view keeps full display parity with "My Appointments".
+const providerAppointmentsReadSpec = `MATCH (a:appointment)
+MATCH (a)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
+RETURN
+  nanoIdFromKey(a.key)               AS appointment_id,
+  a.key                              AS entity_key,
+  a.schedule.data.startsAt           AS starts_at,
+  a.schedule.data.endsAt             AS ends_at,
+  a.schedule.data.reason             AS reason,
+  a.status.data.value                AS status,
+  a.status.data.note                 AS status_note,
+  p.key                              AS patient_key,
+  p.demographics.data.fullName       AS patient_name,
+  pr.key                             AS provider_key,
+  pr.profile.data.fullName           AS provider_name,
+  pr.profile.data.specialty          AS provider_specialty,
+  a.reminder.data.sentAt             AS reminder_sent_at,
+  a.followUpReminder.data.sentAt     AS follow_up_reminder_sent_at,
+  a.encounter.data.documentedAt      AS documented_at,
+  a.encounter.data.followUpRequested AS follow_up_requested,
+  a.encounter.data.followUpDate      AS follow_up_date,
+  [nanoIdFromKey(pr.key)]            AS authz_anchors
 `

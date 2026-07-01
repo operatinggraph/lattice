@@ -164,6 +164,56 @@ func TestHandleMyAppointments_ValidToken_PoolUnconfigured_502(t *testing.T) {
 	}
 }
 
+// TestHandleMyProviderSchedule_* mirror TestHandleMyAppointments_* — the same
+// verify-then-RLS boundary, just the provider-anchored sibling endpoint
+// (D1.5 Increment 2).
+
+func TestHandleMyProviderSchedule_NoAuthConfigured_401(t *testing.T) {
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
+	rec := httptest.NewRecorder()
+	s.handleMyProviderSchedule(rec, httptest.NewRequest(http.MethodGet, "/api/my-schedule", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleMyProviderSchedule_NoToken_401(t *testing.T) {
+	s := devAuthServer(t)
+	rec := httptest.NewRecorder()
+	s.handleMyProviderSchedule(rec, httptest.NewRequest(http.MethodGet, "/api/my-schedule", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
+	}
+}
+
+func TestHandleMyProviderSchedule_ForgedToken_401(t *testing.T) {
+	s := devAuthServer(t)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/my-schedule", nil)
+	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
+	s.handleMyProviderSchedule(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
+	}
+}
+
+// TestHandleMyProviderSchedule_ValidToken_PoolUnconfigured_502: a verified
+// actor with no read-model pool gets a clean 502, never a nil-pointer panic.
+func TestHandleMyProviderSchedule_ValidToken_PoolUnconfigured_502(t *testing.T) {
+	s := devAuthServer(t) // authn set, pgPool nil
+	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/my-schedule", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	s.handleMyProviderSchedule(rec, r)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
+	}
+}
+
 func TestHandleDevToken_Disabled_404(t *testing.T) {
 	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // devSigner nil
 	rec := httptest.NewRecorder()
