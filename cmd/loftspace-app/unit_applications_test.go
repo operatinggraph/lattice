@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -232,5 +234,83 @@ func TestDecodeListingProjections_SkipsBadRows(t *testing.T) {
 	}
 	if got[0].RentAmount == nil || *got[0].RentAmount != 2200 || got[0].AddrLine1 != "5 Howard St" {
 		t.Errorf("flat facets must decode, got %+v", got[0])
+	}
+}
+
+// TestFilterUnitsToManaged proves the D1.5 scoping filter: only rows whose
+// UnitKey is in the RLS-authoritative managed set survive, order preserved,
+// and an empty/nil managed set drops everything rather than defaulting open.
+func TestFilterUnitsToManaged(t *testing.T) {
+	rows := []unitApplicationsRow{
+		{UnitKey: "vtx.unit.u1", Applications: []applicantSummary{}},
+		{UnitKey: "vtx.unit.u2", Applications: []applicantSummary{}},
+		{UnitKey: "vtx.unit.u3", Applications: []applicantSummary{}},
+	}
+	got := filterUnitsToManaged(rows, map[string]bool{"vtx.unit.u1": true, "vtx.unit.u3": true})
+	if len(got) != 2 || got[0].UnitKey != "vtx.unit.u1" || got[1].UnitKey != "vtx.unit.u3" {
+		t.Fatalf("want [u1, u3] in order, got %+v", got)
+	}
+
+	if got := filterUnitsToManaged(rows, nil); len(got) != 0 {
+		t.Fatalf("a nil managed set must drop everything (fail closed), got %+v", got)
+	}
+	if got := filterUnitsToManaged(nil, map[string]bool{"vtx.unit.u1": true}); got == nil || len(got) != 0 {
+		t.Fatalf("want a non-nil empty slice for no input rows, got %+v", got)
+	}
+}
+
+// D1.5: handleUnitApplications is now an AUTHENTICATED, RLS-scoped read (it used
+// to serve every landlord's units + every applicant's PII with no auth at all).
+// These mirror the handleApplications/handleLandlordApplications auth-gate
+// proofs in readauth_test.go. The scoping itself reuses queryLandlordApplications
+// verbatim, so its RLS enforcement is already proven by
+// landlord_applications_rls_test.go; TestFilterUnitsToManaged above covers the
+// new composition (managed-set → response filter) at the unit level.
+
+func TestHandleUnitApplications_NoAuthConfigured_401(t *testing.T) {
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
+	rec := httptest.NewRecorder()
+	s.handleUnitApplications(rec, httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleUnitApplications_NoToken_401(t *testing.T) {
+	s := devAuthServer(t)
+	rec := httptest.NewRecorder()
+	s.handleUnitApplications(rec, httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
+	}
+}
+
+func TestHandleUnitApplications_ForgedToken_401(t *testing.T) {
+	s := devAuthServer(t)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil)
+	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
+	s.handleUnitApplications(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
+	}
+}
+
+// TestHandleUnitApplications_ValidToken_PoolUnconfigured_502: a verified actor
+// with no read-model pool gets a clean 502 (the RLS-scoping source is
+// unavailable), never a nil-pointer panic and never a default-open fall
+// through to the unscoped read.
+func TestHandleUnitApplications_ValidToken_PoolUnconfigured_502(t *testing.T) {
+	s := devAuthServer(t) // authn set, pgPool nil
+	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	s.handleUnitApplications(rec, r)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
 	}
 }

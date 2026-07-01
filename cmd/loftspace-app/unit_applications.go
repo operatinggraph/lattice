@@ -179,20 +179,51 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 }
 
 // handleUnitApplications implements GET /api/unit-applications — the landlord /
-// property-manager view: every listed unit and the live applications against it,
-// each with the applicant's name and convergence disposition. It is assembled
-// entirely from existing lens read models (P5: never Core KV) — the
-// `leaseApplicationComplete` convergence rows in weaver-targets, the
-// `applicantRoster` identities, and the `availableListings` units — so it adds no
-// projection and no contract surface; the landlord sees their inventory and who
-// is in the pipeline per unit.
+// property-manager operator console: every unit the SIGNED-IN landlord manages
+// and the live applications against it, each with the applicant's name and full
+// convergence disposition (the Approve/Decline gap/qualification detail the
+// protected `read_landlord_lease_applications` model does not carry — see
+// landlord_applications.go). D1.5: this handler used to serve the entire
+// platform's applicant roster with NO authentication at all (every landlord's
+// units, every applicant's income/employment/reference signals, PII names) to
+// any caller. It is now an AUTHENTICATED read, scoped to the caller's own units:
+// the rich weaver-targets convergence rows are still assembled exactly as
+// before (P5: never Core KV), but the response is filtered down to the unit
+// keys the PROTECTED, RLS-enforced `read_landlord_lease_applications` model
+// (queryLandlordApplications, the same source handleLandlordApplications reads)
+// says this actor manages. Postgres RLS remains the single authorization source
+// — this handler adds no authorization logic of its own, only a filter keyed
+// off that authoritative set.
 func (s *server) handleUnitApplications(w http.ResponseWriter, r *http.Request) {
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
+		return
+	}
+	if s.pgPool == nil {
+		s.logger.Error("unit-applications operator console requested but pgPool is nil (set LOFTSPACE_APP_PG_DSN + ensure Postgres and the lease-signing protected lens are up)")
+		s.writeError(w, http.StatusBadGateway, "protected read model unavailable")
+		return
+	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return
 	}
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	managed, err := queryLandlordApplications(ctx, s.pgPool, actor.Subject)
+	if err != nil {
+		s.logger.Error("read protected landlord lease applications", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected landlord lease-applications model")
+		return
+	}
+	managedUnits := make(map[string]bool, len(managed))
+	for _, row := range managed {
+		if row.UnitKey != nil && *row.UnitKey != "" {
+			managedUnits[*row.UnitKey] = true
+		}
+	}
 
 	getter := func(bucket string) (kvGetter, []string, error) {
 		keys, err := conn.KVListKeys(ctx, bucket)
@@ -232,7 +263,21 @@ func (s *server) handleUnitApplications(w http.ResponseWriter, r *http.Request) 
 	identities := computeIdentities(idKeys, idGet)
 	listings := decodeListingProjections(listKeys, listGet)
 	rows := groupByUnit(apps, identities, listings)
-	s.writeJSON(w, http.StatusOK, map[string]any{"units": rows, "count": len(rows)})
+	scoped := filterUnitsToManaged(rows, managedUnits)
+	s.writeJSON(w, http.StatusOK, map[string]any{"units": scoped, "count": len(scoped)})
+}
+
+// filterUnitsToManaged keeps only the rows whose UnitKey is in managed — the
+// RLS-authoritative set of units the requesting actor manages
+// (queryLandlordApplications). Always returns a non-nil slice (renders as []).
+func filterUnitsToManaged(rows []unitApplicationsRow, managed map[string]bool) []unitApplicationsRow {
+	scoped := make([]unitApplicationsRow, 0, len(rows))
+	for _, row := range rows {
+		if managed[row.UnitKey] {
+			scoped = append(scoped, row)
+		}
+	}
+	return scoped
 }
 
 // decodeListingProjections reads the `availableListings` read model into the

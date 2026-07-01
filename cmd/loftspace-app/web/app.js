@@ -320,6 +320,7 @@ function setApplicant(value) {
   if (state.view === "apps") loadApplications(); // re-scope the tracker to the new applicant
   if (state.view === "tasks") loadTasks(); // re-scope the inbox to the new applicant
   if (state.view === "docs") loadDocsView(); // re-scope the documents to the new applicant
+  if (state.mode === "landlord") loadLandlord(); // re-scope the operator console to the new sign-in
 }
 
 // ---- New applicant modal ----
@@ -453,7 +454,11 @@ function applyMode() {
   $("#mode-landlord").classList.toggle("active", landlord);
   $("#mode-landlord").setAttribute("aria-selected", String(landlord));
   $("#applicant-tabs").hidden = landlord;
-  $("#applicant-who").hidden = landlord;
+  // The identity picker stays visible in landlord mode too (D1.5): the operator
+  // console now reads as this identity, RLS-scoped to the units it manages, so
+  // there is no "trusted, no sign-in" posture left to hide it for.
+  $("#applicant-who").hidden = false;
+  $("label[for='applicant']").textContent = landlord ? "Signed in as" : "Applicant";
   $("#brand-sub").textContent = landlord ? "manage your units" : "apply to lease";
   $("#view-landlord").hidden = !landlord;
   if (landlord) {
@@ -1868,12 +1873,25 @@ function moneyAmount(n) {
   return typeof n === "number" ? "$" + n.toLocaleString() : "—";
 }
 
+// loadLandlord reads the operator console from /api/unit-applications as the
+// SIGNED-IN identity (D1.5: this used to be an unauthenticated, system-wide read
+// — every landlord's units and every applicant's PII/qualification signals, to
+// any caller). The server now scopes the response to the units the RLS-enforced
+// read_landlord_lease_applications model says this actor manages, so the picker
+// selection IS the landlord sign-in, same as the applicant flows.
 async function loadLandlord() {
   const grid = $("#units");
   const empty = $("#units-empty");
+  if (!state.applicant) {
+    grid.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Select your identity above to sign in and see the units you manage.";
+    $("#units-summary").textContent = "";
+    return;
+  }
   $("#units-summary").textContent = "loading…";
   try {
-    const data = await api("/api/unit-applications");
+    const data = await authedGet("/api/unit-applications");
     state.units = data.units || [];
   } catch (e) {
     grid.innerHTML = "";
@@ -1888,17 +1906,13 @@ async function loadLandlord() {
 
 // loadLandlordRLS exercises the D1.3 Increment-3 PROTECTED read boundary: the
 // signed-in identity reads /api/landlord/applications as an AUTHENTICATED actor, and
-// Postgres RLS returns ONLY the applications to units that identity manages. Unlike
-// the operator console above (/api/unit-applications, the trusted-tool view that
-// sees every unit), this is the per-landlord enforced scope. D1.5 Rec C
-// (decision-surface-design.md §5 Increment 3) upgrades the banner into the RICH
-// enforced-scope view: a read-only card list of the RLS-scoped units + their
-// applications' qualification-profile signals, reusing renderQualification against
-// the protected rows. It stays INFORMATIONAL — no Approve/Decline (per Rec C those
-// stay on the trusted console below; the readiness clone that would gate them here
-// is deferred to Vault). Best-effort: a missing read boundary (no Postgres /
-// protected lens) or a non-landlord identity degrades to an informational note,
-// never blocking the operator console.
+// Postgres RLS returns ONLY the applications to units that identity manages —
+// the SAME scope the operator console above now enforces (D1.5). This adds the
+// RICH read-only card view (qualification-profile signals via renderQualification)
+// as a second rendering of that same RLS-scoped set; it stays INFORMATIONAL — no
+// Approve/Decline (those live on the operator console above). Best-effort: a
+// missing read boundary (no Postgres / protected lens) degrades to an
+// informational note, never blocking the operator console.
 async function loadLandlordRLS() {
   const el = $("#landlord-rls");
   const listEl = $("#landlord-rls-units");
@@ -1916,11 +1930,11 @@ async function loadLandlordRLS() {
     if (units.length === 0) {
       // 0 can mean "manages nothing" OR "grant revoked" — both correctly return
       // empty (no oracle); state the scope, not a cause we cannot distinguish here.
-      el.textContent = "🔒 RLS read boundary: Postgres scopes you to 0 units. (The list above is the trusted operator console, which sees all units.)";
+      el.textContent = "🔒 RLS read boundary: Postgres scopes you to 0 units.";
       if (listEl) { listEl.hidden = true; listEl.innerHTML = ""; }
       return;
     }
-    el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}) — the enforced view below is sourced from this same RLS-scoped read. The operator console further down sees all units and is where you Approve/Decline.`;
+    el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}) — the operator console above is sourced from this same RLS-scoped read and is where you Approve/Decline.`;
     renderLandlordRLSUnits(units);
   } catch (e) {
     // The boundary is not provisioned in every dev posture; do not break the view.
