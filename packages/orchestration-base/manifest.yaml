@@ -1,9 +1,10 @@
 name: orchestration-base
-version: 0.2.0
+version: 0.3.0
 description: |
-  Generic task substrate (task DDL + CreateTask/ClaimTask, FR28 role-queue +
-  fallback: assignee-or-queue routing, ClaimTask role-holder claim) plus the
-  package-owned capabilityEphemeral/myTasks lenses that re-source FR56
+  Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability,
+  FR28 role-queue + fallback: assignee-or-queue routing gated on the
+  assignee's availability aspect (Fire 2), ClaimTask role-holder claim) plus
+  the package-owned capabilityEphemeral/myTasks lenses that re-source FR56
   ephemeral task grants + the task inbox out of the bootstrap god-cypher,
   including the FR28 role-queue fan-out (Contract #6 §6.6 / Contract #10
   §10.1 / §10.7).
@@ -42,6 +43,9 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: CancelTask
+      scope: any
+      grantsTo: [operator]
+    - operationType: SetAvailability
       scope: any
       grantsTo: [operator]
     - operationType: StartLoomPattern

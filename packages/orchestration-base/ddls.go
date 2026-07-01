@@ -21,6 +21,12 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     RoutingFailed) if neither resolves to a live vertex — a task pointing
 //     at a non-existent identity/role is never committed. forOperation +
 //     scopedTo endpoints are validated likewise.
+//   - Fire 2 (Contract #10 §10.1): CreateTask's routing additionally gates
+//     on the assignee's `availability` aspect (a single on-demand known-key
+//     kv.Read — the aspect may legitimately never have been set, so it is
+//     NOT a ContextHint.Reads key; absent aspect == available, byte-
+//     compatible with pre-Fire-2 callers). A given+alive but unavailable
+//     assignee falls back to a given+alive queue instead of assignedTo.
 //
 // Task shape (Contract #10 §10.1 — scalars + links only, NO aspects):
 //
@@ -29,6 +35,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //	lnk.task.<id>.queuedFor.role.<roleId>            # FR28 role-queue pull assignment
 //	lnk.task.<id>.forOperation.meta.<opId>           # the op this task grants
 //	lnk.task.<id>.scopedTo.<type>.<targetId>         # the grant's target (often ≠ assignee)
+//	vtx.identity.<id>.availability   data = { available: bool }   # Fire 2 routing input (SetAvailability)
 //
 // Exactly ONE of assignedTo/queuedFor is present on an open task (FR28,
 // Contract #10 §10.1). All links: task = the later-arriving SOURCE, the
@@ -46,6 +53,11 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // via the sanctioned bounded kv.Links enumeration (Contract #2 §2.5.1, an
 // open task carries at most one), and the holdsRole / speculative
 // assignedTo checks are on-demand kv.Read (may legitimately be absent).
+//
+// SetAvailability needs only `identity` declared (the aspect it writes is
+// not itself a read). CreateTask's own availability check reads the
+// assignee's `.availability` aspect via on-demand kv.Read, NOT
+// ContextHint.Reads (§2.5) -- it may legitimately never have been set.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		taskDDL(),
@@ -59,7 +71,7 @@ func taskDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "task",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateTask", "ReAssignTask", "CompleteTask", "CancelTask", "ClaimTask"},
+		PermittedCommands: []string{"CreateTask", "ReAssignTask", "CompleteTask", "CancelTask", "ClaimTask", "SetAvailability"},
 		Description: "Orchestration task DDL. Vertex shape: vtx.task.<NanoID>, class=task, " +
 			"root data = scalars only {status (open|complete|cancelled), expiresAt}; NO aspects " +
 			"(the UI renders from the bound op's self-describing DDL via the forOperation link). " +
@@ -69,9 +81,12 @@ func taskDDL() pkgmgr.DDLSpec {
 			"(task→op-meta: the operation this task grants), scopedTo (task→target: the grant's " +
 			"target). All links: task is the later-arriving source, the other vertex is the " +
 			"pre-existing target (Contract #1 §1.1). CreateTask requires an assignee identity " +
-			"and/or a queue role: assignee given+alive wins (assignedTo, byte-compatible with " +
-			"pre-FR28 behavior); else queue given+alive queues (queuedFor); else rejects " +
-			"RoutingFailed (no-orphan invariant, FR29/P4). ClaimTask lets any holder of a queued " +
+			"and/or a queue role: assignee given+alive+available wins (assignedTo, byte-compatible " +
+			"with pre-Fire-2 behavior); if the assignee is given+alive but unavailable, or absent, " +
+			"a given+alive queue queues (queuedFor); else rejects RoutingFailed (no-orphan " +
+			"invariant, FR29/P4). SetAvailability(identity, available) writes the identity's " +
+			"availability aspect (Fire 2) that CreateTask's routing reads; an absent aspect " +
+			"means available. ClaimTask lets any holder of a queued " +
 			"task's role atomically swap queuedFor->assignedTo(claimant) -- the claimant is the " +
 			"trusted submitting actor (op.actor), never a payload field; a non-role-holder rejects " +
 			"NotAuthorizedToClaim, a re-claim by the same actor is an idempotent no-op, a claim of " +
@@ -87,7 +102,9 @@ func taskDDL() pkgmgr.DDLSpec {
 			`"forOperation":{"type":"string","description":"vtx.meta.<NanoID> — the operation meta-vertex this task grants the assignee permission to perform."},` +
 			`"scopedTo":{"type":"string","description":"vtx.<type>.<NanoID> — the specific target the granted operation is scoped to (often ≠ the assignee)."},` +
 			`"expiresAt":{"type":"string","description":"RFC3339 expiry timestamp; the grant is valid only while expiresAt > now."},` +
-			`"taskId":{"type":"string","description":"Optional bare NanoID for the task vertex; supplied by a caller that must know the task key before commit (e.g. Loom's write-ahead). Absent → minted internally."}},` +
+			`"taskId":{"type":"string","description":"Optional bare NanoID for the task vertex; supplied by a caller that must know the task key before commit (e.g. Loom's write-ahead). Absent → minted internally."},` +
+			`"identity":{"type":"string","description":"vtx.identity.<NanoID> -- the identity whose availability is being set (SetAvailability)."},` +
+			`"available":{"type":"boolean","description":"Whether the identity is available to receive direct task assignments (SetAvailability); read by CreateTask's routing."}},` +
 			`"required":["forOperation","scopedTo","expiresAt"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.task.<NanoID> of the created task (the operation's principal key)."}}}`,
@@ -98,6 +115,8 @@ func taskDDL() pkgmgr.DDLSpec {
 			"scopedTo":     "Full vtx.<type>.<NanoID> key of the specific entity the granted operation is scoped to (e.g. the lease application to approve).",
 			"expiresAt":    "RFC3339 timestamp after which the task no longer grants. Stored as a scalar on the task root data.",
 			"taskId":       "Optional bare NanoID (no dots / key segments) for the created task vertex (vtx.task.<taskId>). Supplied by a caller that must know the task key before the op commits, e.g. Loom write-aheading its token.<taskKey> pointer. Absent → minted with nanoid.new(). A crash-retry with the same id collapses on the Contract #4 tracker.",
+			"identity":     "Full vtx.identity.<NanoID> key of the identity whose availability is being set (SetAvailability). Must be alive; declared in ContextHint.Reads.",
+			"available":    "Whether the identity should be treated as available for direct task assignment (SetAvailability). CreateTask's routing reads this identity's availability aspect: unavailable falls back to a given queue instead of assignedTo.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -111,6 +130,16 @@ func taskDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Validates the assignee identity, forOperation op-meta, and scopedTo target all exist. " +
 					"Atomically commits vtx.task.<NanoID> (status=open, expiresAt) + the assignedTo/forOperation/scopedTo " +
 					"links in one batch. Returns primaryKey (the task key). Rejects with ScriptError if any endpoint is absent.",
+			},
+			{
+				Name: "SetAvailability — mark a manager unavailable so CreateTask falls back to a queue",
+				Payload: map[string]any{
+					"identity":  "vtx.identity.<managerNanoID>",
+					"available": false,
+				},
+				ExpectedOutcome: "Validates the identity is alive, then upserts vtx.identity.<managerNanoID>.availability " +
+					"(data.available=false). A subsequent CreateTask naming this identity as assignee falls back to " +
+					"its queue (if given) instead of assigning directly.",
 			},
 		},
 	}
@@ -144,6 +173,14 @@ def required_string(p, name):
     if v == None or type(v) != type("") or len(v.strip()) == 0:
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
+
+def required_bool(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type(True):
+        fail("InvalidArgument: " + name + ": required bool")
+    return v
 
 def optional_string(p, name):
     # Same shape validation as required_string, but an absent/empty value is
@@ -225,26 +262,44 @@ def execute(state, op):
         if not vertex_alive(state, scoped_to):
             fail("UnknownTarget: " + scoped_to)
 
-        # Routing (FR28, Contract #10 §10.1): an assignee given+alive wins
-        # (assignedTo, byte-identical to pre-FR28 behavior); else a queue
-        # given+alive role-queues the task (queuedFor); else neither endpoint
-        # resolves and the op is rejected -- no silent drop. The
-        # availability-gated fallback (assignee given but unavailable ->
-        # queue) is Fire 2; this is the presence-based routing Fire 1 ships.
-        # No-orphan invariant (FR29 / P4) either way: the resolved endpoint
-        # MUST exist and be alive, or no task is committed.
+        # Routing (FR28+Fire2, Contract #10 §10.1): an assignee given+alive+
+        # available wins (assignedTo, byte-identical to pre-Fire-2 behavior
+        # when no availability aspect was ever set). If the assignee is
+        # given+alive but marked UNavailable, fall back to a given+alive
+        # queue (queuedFor) instead. An unknown/dead assignee still fails
+        # immediately (UnknownAssignee) -- only "unavailable", never
+        # "invalid", triggers the queue fallback. Neither endpoint resolving
+        # rejects RoutingFailed -- no silent drop. No-orphan invariant
+        # (FR29 / P4) either way: the resolved endpoint MUST exist and be
+        # alive, or no task is committed.
         assignee_id = None
         role_id = None
+        routed_via_assignee = False
         if assignee != None:
             _, assignee_id = parts_of(assignee, "assignee", "identity")
             if not vertex_alive(state, assignee):
                 fail("UnknownAssignee: " + assignee)
-        elif queue != None:
-            _, role_id = parts_of(queue, "queue", "role")
-            if not vertex_alive(state, queue):
-                fail("UnknownQueue: " + queue)
-        else:
-            fail("RoutingFailed: CreateTask requires an assignee or a queue")
+            # Fire 2 availability gate: a single on-demand known-key kv.Read
+            # (not ContextHint.Reads -- the aspect may legitimately never
+            # have been set). Absent aspect == available, so a caller that
+            # never calls SetAvailability sees byte-identical Fire-1 routing.
+            availability_doc = kv.Read(assignee + ".availability")
+            is_available = True
+            if availability_doc != None and not availability_doc.isDeleted:
+                is_available = availability_doc.data.get("available", True)
+            if is_available:
+                routed_via_assignee = True
+
+        if not routed_via_assignee:
+            assignee_id = None
+            if queue != None:
+                _, role_id = parts_of(queue, "queue", "role")
+                if not vertex_alive(state, queue):
+                    fail("UnknownQueue: " + queue)
+            elif assignee != None:
+                fail("RoutingFailed: assignee " + assignee + " is unavailable and no queue was given")
+            else:
+                fail("RoutingFailed: CreateTask requires an assignee or a queue")
 
         # taskId is a caller-supplied write-ahead seam (Contract #10 §10.6): a
         # caller that must know the task key before the op commits (e.g. Loom
@@ -429,6 +484,32 @@ def execute(state, op):
 
     if ot == "CancelTask":
         return transition_task(state, p, "cancelled", "orchestration.taskCancelled")
+
+    if ot == "SetAvailability":
+        # Fire 2 (Contract #10 §10.1): writes the routing input CreateTask
+        # reads. identity MUST be declared in ContextHint.Reads (known-key,
+        # same discipline as every other endpoint this DDL validates).
+        identity = required_string(p, "identity")
+        parts_of(identity, "identity", "identity")
+        if not vertex_alive(state, identity):
+            fail("UnknownIdentity: " + identity)
+        available = required_bool(p, "available")
+
+        # Unconditioned update (create-if-absent / overwrite-if-present, the
+        # loftspace-domain make_aspect_upsert idiom): a caller flipping
+        # availability back and forth overwrites in place rather than
+        # conflicting on a stale expectedRevision.
+        aspect_key = identity + ".availability"
+        mutations = [
+            {"op": "update", "key": aspect_key,
+             "document": {"class": "availability", "isDeleted": False,
+                          "vertexKey": identity, "localName": "availability",
+                          "data": {"available": available}}},
+        ]
+        events = [{"class": "orchestration.availabilitySet",
+                   "data": {"identity": identity, "available": available}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": identity}}
 
     fail("task DDL: unknown operationType: " + ot)
 

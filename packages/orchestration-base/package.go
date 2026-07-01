@@ -45,8 +45,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "orchestration-base",
-	Version:     "0.2.0",
-	Description: "Generic task substrate (task DDL + CreateTask/ClaimTask, FR28 role-queue + fallback) + package-owned capabilityEphemeral/myTasks lenses (FR56 grant re-sourcing + role-queue fan-out).",
+	Version:     "0.3.0",
+	Description: "Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability, FR28 role-queue + fallback + Fire-2 availability routing) + package-owned capabilityEphemeral/myTasks lenses (FR56 grant re-sourcing + role-queue fan-out).",
 	Depends:     []string{"identity-domain"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

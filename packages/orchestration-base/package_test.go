@@ -51,8 +51,8 @@ func TestPackage_DDLsLensesPermissions(t *testing.T) {
 			t.Fatalf("missing lens %q (have %v)", want, lensNames)
 		}
 	}
-	if got := len(Package.Permissions); got != 9 {
-		t.Fatalf("expected 9 permissions, got %d", got)
+	if got := len(Package.Permissions); got != 10 {
+		t.Fatalf("expected 10 permissions, got %d", got)
 	}
 }
 
@@ -184,7 +184,7 @@ func TestPackage_LoomLifecycleOps(t *testing.T) {
 
 func TestPackage_TaskDDLLifecycleCommands(t *testing.T) {
 	cmds := Package.DDLs[0].PermittedCommands
-	want := map[string]bool{"CreateTask": false, "ReAssignTask": false, "CompleteTask": false, "CancelTask": false, "ClaimTask": false}
+	want := map[string]bool{"CreateTask": false, "ReAssignTask": false, "CompleteTask": false, "CancelTask": false, "ClaimTask": false, "SetAvailability": false}
 	for _, c := range cmds {
 		if _, ok := want[c]; !ok {
 			t.Fatalf("unexpected permittedCommand %q", c)

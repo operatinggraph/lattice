@@ -54,6 +54,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit CancelTask operations.",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "SetAvailability",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SetAvailability operations (Fire 2 routing input).",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 	perms = append(perms, LoomLifecyclePermissions()...)
 	return append(perms, MarkExpiredPermissions()...)

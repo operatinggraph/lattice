@@ -47,6 +47,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CompleteTask", Scope: "any"},
 			{OperationType: "CancelTask", Scope: "any"},
 			{OperationType: "MarkExpired", Scope: "any"},
+			{OperationType: "SetAvailability", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
