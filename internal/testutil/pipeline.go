@@ -85,10 +85,15 @@ func ProvisionHarness(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	// PackageInstalled from an InstallPackage commit) to events.<class>.
 	// Without it the outbox publish fails and naks for redelivery, replaying the
 	// committed op (a benign "duplicate" on the install path but a source
-	// of cross-test interference on the shared ops.meta lane).
+	// of cross-test interference on the shared ops.meta lane). AllowAtomicPublish
+	// mirrors production's primordial provisioning (internal/bootstrap/primordial.go)
+	// — Conn.PublishBatch requires it on the target stream, or every outbox
+	// publish fails closed with "atomic publish is disabled" and nak-loops
+	// forever.
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     HarnessEventsStream,
-		Subjects: []string{"events.>"},
+		Name:               HarnessEventsStream,
+		Subjects:           []string{"events.>"},
+		AllowAtomicPublish: true,
 	})
 	if err != nil {
 		t.Fatalf("create core-events stream: %v", err)
@@ -141,6 +146,13 @@ type PipelineConfig struct {
 	// Defaults to []string{"ops.default"} when empty. Use []string{"ops.meta"}
 	// for meta-lane pipelines (CreateMetaVertex / TombstoneMetaVertex).
 	FilterSubjects []string
+	// Vault overrides the pipeline's Vault backend. Defaults to a fresh
+	// TestVault(t) when nil. Set this when a test needs to observe Vault
+	// state a SEPARATE TestVault(t) call would not share — e.g. asserting
+	// Decrypt fails after a ShredKey call driven through the same instance
+	// (internal/vault/local.go's shredded-set + DEK cache are per-instance
+	// in-memory state, not derivable from the KEK alone).
+	Vault vault.Vault
 }
 
 // CapabilityPipeline builds a CommitPath wired with the real
@@ -172,7 +184,10 @@ func CapabilityPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	if err != nil {
 		t.Fatalf("SelectAuthorizerArgs: %v", err)
 	}
-	v := TestVault(t)
+	v := cfg.Vault
+	if v == nil {
+		v = TestVault(t)
+	}
 	hydrator := processor.NewHydratorWithCache(conn, HarnessCoreBucket, cache, logger)
 	hydrator.Vault = v
 	committer := processor.NewCommitter(conn, HarnessCoreBucket, cache, logger, time.Now)

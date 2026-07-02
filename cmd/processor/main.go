@@ -47,6 +47,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/asolgan/lattice/internal/privacyworker"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/processor/outbox"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -214,6 +215,26 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
+	// Start the privacy-worker: the async half of crypto-shredding (design
+	// §2.4, Fire 3) — a durable consumer on events.privacy.keyShredded that
+	// calls Vault.ShredKey. Shares `v`, the SAME Vault instance the commit
+	// path decrypts/encrypts through (internal/privacyworker's package doc:
+	// this is load-bearing, not just convenient — a separately-constructed
+	// instance would not observe the shred).
+	privacyWorker := privacyworker.New(privacyworker.Config{
+		Conn:         conn,
+		EventsStream: bootstrap.CoreEventsStreamName,
+		Vault:        v,
+		Logger:       logger,
+	})
+	privacyWorkerDone := make(chan struct{})
+	go func() {
+		defer close(privacyWorkerDone)
+		if perr := privacyWorker.Run(ctx); perr != nil && !errors.Is(perr, context.Canceled) {
+			logger.Error("privacy-worker exited with error", "error", perr)
+		}
+	}()
+
 	logger.Info("processor ready",
 		"instance", instance,
 		"healthKey", "health.processor."+instance,
@@ -233,6 +254,7 @@ func run(logger *slog.Logger) error {
 	cancel()
 	<-hbDone
 	<-outboxDone
+	<-privacyWorkerDone
 	logger.Info("processor exited cleanly", "instance", instance)
 	return nil
 }

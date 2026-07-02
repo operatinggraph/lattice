@@ -128,9 +128,24 @@ func GenerateMasterKEK() (string, error) {
 // not persist or cache anything by identityKey alone — the returned Envelope
 // is the caller's only handle on the new key until the caller supplies it
 // back to Encrypt/Decrypt.
+//
+// Refuses to mint for an identity already on the in-memory shredded deny-list
+// (ErrKeyShredded). This is defense-in-depth, not the durability guarantee —
+// within a single process the very next Encrypt call would reject a freshly
+// minted key anyway via checkAndDeriveDEK's own b.shredded check, so this
+// check exists to fail fast/obviously rather than mint a DEK that could never
+// be used, and to keep the "never mint for a shredded identity" invariant
+// true at every entry point, not just the one that happens to be reachable
+// today.
 func (b *LocalBackend) CreateIdentityKey(_ context.Context, identityKey string) (Envelope, error) {
 	if identityKey == "" {
 		return Envelope{}, fmt.Errorf("%w: empty identityKey", ErrInvalidEnvelope)
+	}
+	b.mu.Lock()
+	_, alreadyShredded := b.shredded[identityKey]
+	b.mu.Unlock()
+	if alreadyShredded {
+		return Envelope{}, ErrKeyShredded
 	}
 	dek := make([]byte, dekKeySize)
 	if _, err := rand.Read(dek); err != nil {
@@ -203,14 +218,20 @@ func (b *LocalBackend) ShredKey(_ context.Context, identityKey string) error {
 // copy, or a future rotated key — re-derives rather than silently reusing
 // the wrong DEK. Unwrapping is CPU-bound, in-memory AES-GCM (no I/O), so
 // holding the lock across it does not risk blocking on an external call.
+//
+// The shredded check runs BEFORE the WrappedDEK-empty check (not after): a
+// caller may present a durable placeholder envelope for an identity that was
+// shredded before it ever had a real key (empty WrappedDEK, Shredded=true —
+// packages/privacy-base's ShredIdentityKey DDL writes exactly this shape when
+// no piiKey existed yet, so the shred survives a process restart even though
+// b.shredded is in-memory-only). Such an envelope must report ErrKeyShredded,
+// not ErrInvalidEnvelope — the caller is asking "can I use this identity's
+// key," and the honest answer is "no, it was shredded," not "your envelope is
+// malformed."
 func (b *LocalBackend) checkAndDeriveDEK(identityKey string, envelope Envelope) ([]byte, error) {
 	if identityKey == "" {
 		return nil, fmt.Errorf("%w: empty identityKey", ErrInvalidEnvelope)
 	}
-	if len(envelope.WrappedDEK) == 0 {
-		return nil, fmt.Errorf("%w: empty WrappedDEK", ErrInvalidEnvelope)
-	}
-	wrappedHash := sha256.Sum256(envelope.WrappedDEK)
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -218,6 +239,12 @@ func (b *LocalBackend) checkAndDeriveDEK(identityKey string, envelope Envelope) 
 	if _, ok := b.shredded[identityKey]; ok || envelope.Shredded {
 		return nil, ErrKeyShredded
 	}
+
+	if len(envelope.WrappedDEK) == 0 {
+		return nil, fmt.Errorf("%w: empty WrappedDEK", ErrInvalidEnvelope)
+	}
+	wrappedHash := sha256.Sum256(envelope.WrappedDEK)
+
 	if cached, ok := b.dekCache[identityKey]; ok && cached.wrappedHash == wrappedHash && time.Now().Before(cached.expiresAt) {
 		return cached.plaintext, nil
 	}
