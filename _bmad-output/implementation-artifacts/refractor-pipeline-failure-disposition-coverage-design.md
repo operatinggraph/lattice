@@ -1,6 +1,9 @@
 # Refractor pipeline — fan-out eval-error disposition + adjacency-watch edge-arm coverage
 
-**Status: 📐 awaiting-Andrew (ratification)**
+**Status: ✅ Andrew-ratified (2026-07-02).** The §6 transient-eval-no-enqueue asymmetry is **pinned as
+intended** (the retry queue is a write-target replay mechanism; an eval error's redrive is NATS
+redelivery re-evaluating in full) — no follow-up code change. One fire as decomposed, `handleAdjNode`
+extraction included.
 
 ## For Andrew
 
