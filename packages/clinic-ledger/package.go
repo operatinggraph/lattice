@@ -5,11 +5,17 @@
 // It declares:
 //
 //   - The `clinicaccount` vertex type (DDL `clinicaccount`) — CreateAccount
-//     mints vtx.clinicaccount.<NanoID> (root data {} per D5) with a
-//     deterministic id equal to the patient's own bare NanoID (one account
-//     per patient), linked to the patient via heldFor. At most one account
-//     per patient (the deterministic key makes a second CreateAccount for the
-//     same patient conflict).
+//     mints vtx.clinicaccount.<NanoID> (root data {} per D5) with its OWN
+//     independently-minted NanoID (never reused from the patient — Core KV
+//     NanoIDs are unique platform-wide identifiers, not scoped per vertex
+//     type), linked to the patient via heldFor. "At most one account per
+//     patient" is enforced by the `clinicLedgerAccountGuard` aspect on the
+//     patient instead of a shared/derived key.
+//
+//   - The `clinicLedgerAccountGuard` aspect type (DDL
+//     `clinicLedgerAccountGuard`) — vtx.patient.<NanoID>.ledgerAccount =
+//     {accountKey}, written once by CreateAccount alongside the account it
+//     names; its deterministic, patient-anchored key is the uniqueness guard.
 //
 //   - The `clinictransaction` vertex type (DDL `clinictransaction`) —
 //     DebitAccount (a charge: a copay, an invoice line) and CreditAccount (a
@@ -23,10 +29,20 @@
 //   - The `clinicLedgerHistory` lens (one row per transaction) the
 //     billing-history FE reads (P5).
 //
+//   - The `clinicPatientAccounts` lens (one row per patient, accountKey null
+//     until one is opened) — the FE's only way to resolve a patient's account
+//     key, since it can no longer be derived from patientKey.
+//
 // Mirrors packages/loftspace-ledger, with the account held for a patient
 // instead of a lease — a patient may have many appointments/encounters, and
-// billing tracks a single running balance across all of them. Every
-// canonicalName is vertical-prefixed (clinicaccount/clinictransaction/
+// billing tracks a single running balance across all of them.
+// loftspace-ledger predates the independent-NanoID + guard-aspect design
+// here and still mints its account under the lease's own bare NanoID; that
+// is a defect there too (see
+// implementation-artifacts/adjacency-shared-nanoid-collision-design.md), not
+// a pattern to mirror going forward.
+//
+// Every canonicalName is vertical-prefixed (clinicaccount/clinictransaction/
 // clinicLedgerHistory, not loftspace-ledger's bare account/transaction/
 // ledgerHistory): a canonicalName is global across every installed package
 // (internal/pkgmgr/installer.go checkCanonicalNameCollision), so the two
@@ -41,10 +57,11 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
 	Version: "0.1.0",
-	Description: "Clinic patient payment ledger: the clinicaccount vertex type (CreateAccount, one per patient, " +
-		"deterministic id) + the clinictransaction vertex type (DebitAccount/CreditAccount, append-only entries " +
-		"linked to the account via postedTo) + the clinicLedgerHistory read-model lens (one row per transaction). " +
-		"Depends clinic-domain.",
+	Description: "Clinic patient payment ledger: the clinicaccount vertex type (CreateAccount, independently-minted " +
+		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
+		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo) + the " +
+		"clinicLedgerHistory read-model lens (one row per transaction) + the clinicPatientAccounts lens (patient -> " +
+		"account key lookup). Depends clinic-domain.",
 	Depends:     []string{"clinic-domain"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

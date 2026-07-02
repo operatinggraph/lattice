@@ -31,16 +31,21 @@ func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	}
 }
 
-func TestDeriveAccountKey(t *testing.T) {
-	cases := map[string]string{
-		"vtx.patient.abc123":  "vtx.clinicaccount.abc123",
-		"vtx.provider.abc123": "",
-		"":                    "",
-		"vtx.patient.":        "",
+func TestResolvePatientAccount_FindsMatchOrEmpty(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.patient.ppp":   map[string]any{"patientKey": "vtx.patient.ppp", "accountKey": "vtx.clinicaccount.xyz"},
+		"vtx.patient.other": map[string]any{"patientKey": "vtx.patient.other", "accountKey": ""},
+		// a tombstoned / undecodable projection entry — skipped
+		"vtx.patient.bad": map[string]any{},
+	})
+
+	if got := resolvePatientAccount(keys, get, "vtx.patient.ppp"); got != "vtx.clinicaccount.xyz" {
+		t.Errorf("resolvePatientAccount(ppp) = %q, want vtx.clinicaccount.xyz", got)
 	}
-	for in, want := range cases {
-		if got := deriveAccountKey(in); got != want {
-			t.Errorf("deriveAccountKey(%q) = %q, want %q", in, got, want)
-		}
+	if got := resolvePatientAccount(keys, get, "vtx.patient.other"); got != "" {
+		t.Errorf("resolvePatientAccount(other) = %q, want empty (no account opened yet)", got)
+	}
+	if got := resolvePatientAccount(keys, get, "vtx.patient.unprojected"); got != "" {
+		t.Errorf("resolvePatientAccount(unprojected) = %q, want empty (no row at all)", got)
 	}
 }

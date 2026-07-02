@@ -1642,11 +1642,11 @@ async function loadMySeries() {
 //
 // One row of the clinic-ledger `clinicLedgerHistory` lens per posted
 // transaction, read via GET /api/ledger?patientKey= (P5 — a lens read model,
-// never Core KV). The account key is deterministic (vtx.clinicaccount.<same
-// NanoID as the patient>) so the server derives it even before any
-// transaction — or the account itself — exists; the FE never guesses it
-// independently. Mirrors loftspace-app's payment ledger, keyed by patient
-// instead of lease.
+// never Core KV). The account key is independently minted (never derived
+// from the patient's own NanoID), so GET /api/ledger resolves it server-side
+// via the `clinicPatientAccounts` lens and returns "" when the patient hasn't
+// opened one yet — the FE never guesses it. Mirrors loftspace-app's payment
+// ledger, keyed by patient instead of lease.
 
 // moneyAmount formats a cents amount as a USD-style dollar figure.
 function moneyAmount(cents) {
@@ -1716,32 +1716,33 @@ function renderLedger(data) {
   }
 }
 
-// createLedgerAccount opens the patient's ledger account (CreateAccount). Only
-// called after a DebitAccount/CreditAccount has just failed to hydrate its
-// accountKey read (submitLedgerEntry below), so this is always the
-// first-ever call for this patient: reads declares patientKey only, never
-// the not-yet-existing account key. The Processor hard-rejects
-// (HydrationMiss) a contextHint.reads key that doesn't exist yet, so
-// declaring the account key here — before it exists — would make
-// account-opening impossible rather than idempotent.
-async function createLedgerAccount(patientKey) {
+// openLedgerAccount opens the patient's ledger account (CreateAccount) and
+// returns its freshly-minted key. The account carries its OWN independent
+// NanoID (never derived from the patient's — Core KV NanoIDs are unique
+// platform-wide, not reused across vertex types), so the ONLY reliable
+// source for it is the ACCEPTED reply's primaryKey. reads declares
+// patientKey only — the guard aspect that enforces one-account-per-patient
+// doesn't exist yet on this (first-ever) call, and the Processor hard-rejects
+// a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
+// here would make account-opening impossible rather than idempotent.
+async function openLedgerAccount(patientKey) {
   const reply = await submitOp("CreateAccount", "clinicaccount", { patientKey }, [patientKey]);
-  const msg = rejectionMessage(reply);
-  // AccountAlreadyExists means a concurrent request opened it first between our
-  // UnknownAccount read and this create — the account exists either way, so
-  // that race resolves as success, not an error.
-  if (msg && msg.indexOf("AccountAlreadyExists") === -1) {
-    throw new Error(msg);
+  if (reply && reply.status === "accepted" && reply.primaryKey) {
+    return reply.primaryKey;
   }
+  // A genuine race (two concurrent first-opens for the same patient) fails
+  // the loser's guard-aspect create-only write — re-fetch the ledger, which
+  // resolves the account key via the clinicPatientAccounts lens regardless of
+  // which side won.
+  const data = await api("/api/ledger?patientKey=" + encodeURIComponent(patientKey));
+  if (data.accountKey) return data.accountKey;
+  const msg = rejectionMessage(reply);
+  throw new Error(msg || "could not open the ledger account");
 }
 
 // submitLedgerEntry posts a DebitAccount/CreditAccount against the selected
-// patient's ledger account. Tries the post first — its reads:[accountKey]
-// declares the account key, so a not-yet-opened account surfaces as a
-// HydrationMiss rejection (not a clean domain "UnknownAccount" — the account
-// key was never hydrated in the first place, so the script never runs). Only
-// on that miss (this patient's first-ever charge or payment) does it open the
-// account and retry once.
+// patient's ledger account, opening the account first if this is its
+// first-ever charge or payment (state.ledger.accountKey empty).
 async function submitLedgerEntry(opType, what) {
   if (!state.patient) {
     toast("Select a patient first.", "err");
@@ -1755,20 +1756,19 @@ async function submitLedgerEntry(opType, what) {
     return;
   }
   const cents = Math.round(dollars * 100);
-  const accountKey = (state.ledger && state.ledger.accountKey) || deriveAccountKeyFE(state.patient);
   const chargeBtn = $("#ledger-charge");
   const paymentBtn = $("#ledger-payment");
   chargeBtn.disabled = paymentBtn.disabled = true;
   try {
-    const post = () =>
-      submitOp(opType, "clinictransaction", { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined }, [accountKey]);
-    let reply = await post();
-    let msg = rejectionMessage(reply);
-    if (msg && msg.indexOf("HydrationMiss") !== -1) {
-      await createLedgerAccount(state.patient);
-      reply = await post();
-      msg = rejectionMessage(reply);
-    }
+    let accountKey = state.ledger && state.ledger.accountKey;
+    if (!accountKey) accountKey = await openLedgerAccount(state.patient);
+    const reply = await submitOp(
+      opType,
+      "clinictransaction",
+      { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined },
+      [accountKey]
+    );
+    const msg = rejectionMessage(reply);
     if (msg) throw new Error(msg);
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
     amountInput.value = "";
@@ -1779,15 +1779,6 @@ async function submitLedgerEntry(opType, what) {
   } finally {
     chargeBtn.disabled = paymentBtn.disabled = false;
   }
-}
-
-// deriveAccountKeyFE mirrors the server's deriveAccountKey (cmd/clinic-app/ledger.go)
-// for the one case the FE needs it standalone: the very first load of a
-// patient with no ledger response yet (state.ledger is null).
-function deriveAccountKeyFE(patientKey) {
-  const prefix = "vtx.patient.";
-  if (!patientKey || patientKey.indexOf(prefix) !== 0 || patientKey === prefix) return "";
-  return "vtx.clinicaccount." + patientKey.slice(prefix.length);
 }
 
 // seriesUrgency buckets a series by how soon its next occurrence is due, mirroring

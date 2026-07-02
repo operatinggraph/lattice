@@ -80,24 +80,41 @@ func computeLedgerHistory(keys []string, get kvGetter, patientKey string) ([]led
 	return rows, balance
 }
 
-// deriveAccountKey computes a patient's ledger account key without a read:
-// CreateAccount mints the account under the SAME bare NanoID as the patient
-// (packages/clinic-ledger/scripts.go), so the FE can address the account — to
-// post its first charge — before the account necessarily exists yet. Returns
-// "" for a key that isn't a vtx.patient.<NanoID>.
-func deriveAccountKey(patientKey string) string {
-	const prefix = "vtx.patient."
-	if !strings.HasPrefix(patientKey, prefix) || patientKey == prefix {
-		return ""
+// patientAccountProjection is one row of the clinic-ledger
+// `clinicPatientAccounts` lens — one per patient, AccountKey empty until
+// CreateAccount has opened one. The account carries its OWN
+// independently-minted NanoID (never derived from the patient's — see
+// packages/clinic-ledger/scripts.go), so this lens read is the only way to
+// resolve it.
+type patientAccountProjection struct {
+	PatientKey string `json:"patientKey"`
+	AccountKey string `json:"accountKey"`
+}
+
+// resolvePatientAccount scans the clinicPatientAccounts lens rows for the
+// one matching patientKey, returning its account key ("" if the patient has
+// none yet, including when no row projected at all — a patient the Refractor
+// hasn't caught up to yet reads the same as one with no account).
+func resolvePatientAccount(keys []string, get kvGetter, patientKey string) string {
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p patientAccountProjection
+		if json.Unmarshal(raw, &p) != nil || p.PatientKey != patientKey {
+			continue
+		}
+		return p.AccountKey
 	}
-	return "vtx.clinicaccount." + strings.TrimPrefix(patientKey, prefix)
+	return ""
 }
 
 // handleLedger implements GET /api/ledger?patientKey= — the billing-history
-// view, served from the `ledgerHistory` lens read model (NOT Core KV, P5). It
-// returns the patient's transaction rows, the running balance, and the
-// (derived, possibly not-yet-created) ledger account key the FE needs to post
-// a new charge or payment.
+// view, served from the `clinicLedgerHistory` + `clinicPatientAccounts` lens
+// read models (NOT Core KV, P5). It returns the patient's transaction rows,
+// the running balance, and the account key (empty if the patient has not
+// opened a ledger account yet) the FE needs to post a new charge or payment.
 func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -108,14 +125,25 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "patientKey query param is required")
 		return
 	}
-	accountKey := deriveAccountKey(patientKey)
-	if accountKey == "" {
-		s.writeError(w, http.StatusBadRequest, "patientKey must be a vtx.patient.<NanoID> key")
-		return
-	}
 
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	acctBucket := clinicledger.PatientAccountsBucket
+	acctKeys, err := conn.KVListKeys(ctx, acctBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+acctBucket+": "+err.Error()+" (is clinic-ledger installed and the Refractor projecting?)")
+		return
+	}
+	acctGet := func(key string) ([]byte, bool) {
+		entry, err := conn.KVGet(ctx, acctBucket, key)
+		if err != nil {
+			return nil, false
+		}
+		return entry.Value, true
+	}
+	accountKey := resolvePatientAccount(acctKeys, acctGet, patientKey)
 
 	bucket := clinicledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)

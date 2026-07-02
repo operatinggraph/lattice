@@ -129,11 +129,14 @@ func createPatient(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 }
 
 // createAccount submits CreateAccount{patientKey} and returns the account key
-// derived deterministically from the patient's own bare NanoID.
+// — the account's own independently-minted NanoID, matching the deterministic
+// nanoid.new() seed the test harness uses for the transaction DDL (never
+// derived from the patient's own id).
 func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, patientKey string) string {
 	t.Helper()
+	reqID := testutil.GenReqID(label)
 	env := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID(label),
+		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateAccount",
 		Actor:         ledgerActorKey,
@@ -144,27 +147,30 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-	patientID := patientKey[len("vtx.patient."):]
-	return "vtx.clinicaccount." + patientID
+	return "vtx.clinicaccount." + nanoIDFromRequestID(reqID)
 }
 
 // TestCreateAccount_MintsAccountHeldForPatient (test 1). CreateAccount mints
-// vtx.clinicaccount.<sameId> (root {} — D5) + the heldFor link; a second call for the
-// same patient conflicts on the deterministic key (AccountAlreadyExists).
+// vtx.clinicaccount.<freshId> (root {} — D5, an id independent of the
+// patient's own) + the patient's .ledgerAccount guard aspect + the heldFor
+// link; a second call for the same patient that declares the guard aspect in
+// reads conflicts on it (AccountAlreadyExists).
 func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "create")
 
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0000000000001", "Alice Rivera")
 	patientID := patientKey[len("vtx.patient."):]
+	guardKey := patientKey + ".ledgerAccount"
 
-	if keyExists(t, ctx, conn, "vtx.clinicaccount."+patientID) {
-		t.Fatalf("account must not exist before CreateAccount")
+	if keyExists(t, ctx, conn, guardKey) {
+		t.Fatalf("guard aspect must not exist before CreateAccount")
 	}
 
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacct0000001", patientKey)
-	if acctKey != "vtx.clinicaccount."+patientID {
-		t.Fatalf("account key = %q, want vtx.clinicaccount.%s (deterministic, same id as the patient)", acctKey, patientID)
+	acctID := acctKey[len("vtx.clinicaccount."):]
+	if acctID == patientID {
+		t.Fatalf("account id must NOT equal the patient's own id (independently minted), got %q for both", acctID)
 	}
 
 	acctDoc := readDoc(t, ctx, conn, acctKey)
@@ -172,13 +178,20 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 		t.Fatalf("account root data must stay minimal ({}) after create, got %v", d)
 	}
 
-	heldForLnk := "lnk.clinicaccount." + patientID + ".heldFor.patient." + patientID
+	guardDoc := readDoc(t, ctx, conn, guardKey)
+	guardData, _ := guardDoc["data"].(map[string]any)
+	if got, _ := guardData["accountKey"].(string); got != acctKey {
+		t.Fatalf("guard aspect accountKey = %q, want %q", got, acctKey)
+	}
+
+	heldForLnk := "lnk.clinicaccount." + acctID + ".heldFor.patient." + patientID
 	if !keyExists(t, ctx, conn, heldForLnk) {
 		t.Fatalf("heldFor link must exist: %s", heldForLnk)
 	}
 
-	// A second CreateAccount for the SAME patient conflicts on the deterministic
-	// account key (AccountAlreadyExists — the create-only write is the guard).
+	// A second CreateAccount for the SAME patient, declaring the now-existing
+	// guard aspect in reads, conflicts on it (AccountAlreadyExists — the
+	// create-only write is the guard).
 	dup := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacct0000002"),
 		Lane:          processor.LaneDefault,
@@ -187,7 +200,7 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:05:00Z",
 		Class:         "clinicaccount",
 		Payload:       json.RawMessage(`{"patientKey":"` + patientKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, guardKey}},
 	}
 	testutil.PublishOp(t, conn, dup)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -223,7 +236,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatpost00000000001", "Bob Nguyen")
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctpost00001", patientKey)
-	patientID := patientKey[len("vtx.patient."):]
+	acctID := acctKey[len("vtx.clinicaccount."):]
 
 	debitReqID := testutil.GenReqID("debitcopay0000000001")
 	debitEnv := &processor.OperationEnvelope{
@@ -257,7 +270,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		t.Fatalf("transaction root data must stay minimal ({}) after post, got %v", d)
 	}
 
-	postedToLnk := "lnk.clinictransaction." + nanoIDFromRequestID(debitReqID) + ".postedTo.clinicaccount." + patientID
+	postedToLnk := "lnk.clinictransaction." + nanoIDFromRequestID(debitReqID) + ".postedTo.clinicaccount." + acctID
 	if !keyExists(t, ctx, conn, postedToLnk) {
 		t.Fatalf("postedTo link must exist: %s", postedToLnk)
 	}

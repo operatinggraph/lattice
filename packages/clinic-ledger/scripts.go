@@ -1,16 +1,29 @@
 package clinicledger
 
-// accountDDLScript handles CreateAccount. The account's id is DERIVED from the
-// patient's own bare NanoID (not minted) so at most one account can ever exist
-// per patient — a second CreateAccount for the same patient conflicts on the
-// already-existing deterministic key, the same "let the key shape be the
-// uniqueness guard" idiom the platform uses for pure existence-uniqueness
-// constraints. Root data stays {} on the account (D5): the balance is derived by
-// the ledgerHistory lens, never stored here.
+// accountDDLScript handles CreateAccount. The account gets its OWN
+// independently-minted NanoID — vertex NanoIDs are unique identifiers across
+// all of Core KV, never reused across vertex types, even deliberately (a
+// prior revision minted the account under the patient's own bare NanoID;
+// internal/refractor/adjacency keys strictly by bare NodeID with no type
+// qualifier, so that reuse silently merged the account's and the patient's
+// adjacency edges under one key and corrupted graph traversal for both — see
+// adjacency-shared-nanoid-collision-design.md). "One account per patient" is
+// instead enforced by a deterministic CREATE-ONLY guard aspect on the
+// PRE-EXISTING patient (patientKey + ".ledgerAccount") — a second
+// CreateAccount for the same patient conflicts on that already-existing
+// aspect key, the same "let the key shape be the uniqueness guard" idiom, just
+// anchored on the pre-existing parent instead of a freshly-minted sibling.
+// Root data stays {} on the account (D5): the balance is derived by the
+// ledgerHistory lens, never stored here.
 const accountDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
+
+def make_aspect(vtx_key, local_name, cls, data):
+    return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
@@ -58,24 +71,33 @@ def execute(state, op):
         if not vertex_alive(state, patient_key):
             fail("UnknownPatient: " + patient_key)
 
-        # One account per patient: the account id IS the patient's own bare
-        # NanoID (deterministic, not minted). A second CreateAccount for the
-        # same patient targets the same key, so it conflicts on the
-        # already-existing vertex (the create-only write is the uniqueness
-        # guard).
-        acct_key = "vtx.clinicaccount." + patient_id
-        if vertex_alive(state, acct_key):
-            fail("AccountAlreadyExists: " + acct_key)
+        # One account per patient, guarded by a deterministic aspect on the
+        # PATIENT (not the account — the account's own id is independent and
+        # unknown until minted below). Only meaningful when the caller declared
+        # the guard key in contextHint.reads (a repeat/racing caller checking
+        # before it retries); the FIRST CreateAccount for a patient declares
+        # only patientKey (the guard doesn't exist yet — declaring an
+        # as-yet-absent key in reads hard-fails hydration), so on that path the
+        # guard aspect's own create-only write is the actual uniqueness
+        # enforcement: a genuine race's loser hits a raw substrate conflict
+        # here rather than this clean rejection.
+        guard_key = patient_key + ".ledgerAccount"
+        if vertex_alive(state, guard_key):
+            fail("AccountAlreadyExists: " + patient_key)
+
+        acct_id = nanoid.new()
+        acct_key = "vtx.clinicaccount." + acct_id
 
         # heldFor: the account (later-arriving) is the source, the pre-existing
         # patient is the target (Contract #1 §1.1). Reads as "this account is
         # held for this patient."
-        held_for_lnk = "lnk.clinicaccount." + patient_id + ".heldFor.patient." + patient_id
+        held_for_lnk = "lnk.clinicaccount." + acct_id + ".heldFor.patient." + patient_id
 
         # Root data minimal (D5): {} on root. The balance is derived by the
         # ledgerHistory lens summing linked transactions, never stored here.
         mutations = [
             make_vtx(acct_key, "clinicaccount", {}),
+            make_aspect(patient_key, "ledgerAccount", "clinicLedgerAccountGuard", {"accountKey": acct_key}),
             make_link(held_for_lnk, acct_key, patient_key, "heldFor", "heldFor", {}),
         ]
         events = [{"class": "account.created",

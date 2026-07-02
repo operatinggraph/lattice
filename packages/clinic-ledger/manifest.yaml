@@ -2,22 +2,30 @@ name: clinic-ledger
 version: 0.1.0
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (CreateAccount,
-  one per patient, deterministic id) + the clinictransaction vertex type
-  (DebitAccount / CreditAccount, append-only entries linked to the account via
-  postedTo) + the clinicLedgerHistory read-model lens (one row per
-  transaction). Depends clinic-domain.
+  independently-minted id, one per patient via a .ledgerAccount guard aspect
+  on the patient) + the clinictransaction vertex type (DebitAccount /
+  CreditAccount, append-only entries linked to the account via postedTo) +
+  the clinicLedgerHistory read-model lens (one row per transaction) + the
+  clinicPatientAccounts lens (patient -> account key lookup). Depends
+  clinic-domain.
 depends:
   - clinic-domain
 declares:
   ddls:
     - canonicalName: clinicaccount
       class: meta.ddl.vertexType
+    - canonicalName: clinicLedgerAccountGuard
+      class: meta.ddl.aspectType
     - canonicalName: clinictransaction
       class: meta.ddl.vertexType
   lenses:
     - canonicalName: clinicLedgerHistory
       adapter: nats-kv
       bucket: clinic-ledger-history
+      engine: full
+    - canonicalName: clinicPatientAccounts
+      adapter: nats-kv
+      bucket: clinic-patient-accounts
       engine: full
   permissions:
     - operationType: CreateAccount
