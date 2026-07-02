@@ -1,6 +1,10 @@
 # Consumer HealthSink consolidation — one shared `internal/healthkv` pause-state sink
 
-**Status: 📐 awaiting-Andrew (ratification)**
+**Status: ✅ Andrew-ratified (2026-07-02) — Fire 3 (Bridge) INCLUDED.** Ratification Q&A folded into
+§2.1: the Refractor exclusion is semantic (the `rebuilding` third state + mid-rebuild arbitration +
+its own entry schema/key with existing readers), and the Processor has **no** sink at all today (lane
+specs omit `Health` — pause-persistence is an open posture the per-lane-consumers row must decide
+explicitly; if it decides yes, it adopts this shared `ConsumerSink` rather than minting copy #4).
 **Author:** Winston (Designer fire, 2026-07-01)
 **Backlog:** Stream-2 component maintenance — *[Weaver] HealthSink pause-restore round-trip uncovered* (★★, XS–S) + *[Loom] HealthSink pause-restore round-trip uncovered* (★★, XS–S). Both rows point here; a third, unfiled copy (Bridge) is folded in as a bonus.
 **Owning component:** a shared primitive in `internal/healthkv` (the health-KV-plane seam) + three consumers `internal/loom`, `internal/weaver`, `internal/bridge`.
@@ -69,8 +73,21 @@ Nothing here is greenfield; this is a *subtraction* (three copies → one) onto 
 
 Two other components implement `substrate.HealthSink` but with a **different** shape — they are correctly left alone:
 
-- **Processor** (`internal/processor/health.go`, `lanes.go`, `commit_path.go`) wires a `substrate.HealthSink`, but does **not** use the `consumerHealthEntry` shape (a repo-wide grep for `consumerHealthEntry`/`pauseReasonFromString` returns exactly the three files above — Processor is not among them). Its per-lane consumer work (🏗️ building, ConsumerSupervisor adoption) has its own sink. If it later adopts the `consumerHealthEntry` shape, it becomes a fourth, trivially-added consumer of the shared primitive — but that is not assumed here (no dead scaffolding for a consumer that doesn't exist).
-- **Refractor** (`internal/refractor/pipeline/supervisor_adapt.go`) adapts its Materializer-inherited `*health.Reporter` to `substrate.HealthSink` — a genuinely different implementation with its own rebuild-in-flight semantics. Out of scope; not a copy.
+- **Processor** — has **no per-consumer sink at all** (corrected at ratification, 2026-07-02): `LaneSpecs`
+  (`internal/processor/lanes.go:96-121`) builds the four per-lane `ConsumerSpec`s with the `Health` field
+  **omitted**, so a Processor lane pause does not survive a restart and no `.consumer.<name>` doc is
+  written; its `HealthHeartbeater` is the Contract-#5 heartbeat document (lane-backlog metrics + issues),
+  a different job. Defensible posture for the platform's heart (a *persistently* paused `ops.urgent` lane
+  could wedge emergency revocation; redelivery already retries) — but the per-lane-consumers row (🏗️)
+  must own that posture explicitly. If it decides lanes should persist pause state, it adopts this shared
+  `ConsumerSink` (one constructor call), never a fourth copy. Not assumed here (no dead scaffolding).
+- **Refractor** (`internal/refractor/pipeline/supervisor_adapt.go`) — excluded for a **semantic** reason,
+  not drift: its per-lens entry has a **third state, `rebuilding`**, and the adapter arbitrates the
+  collision (a pause recovering **mid-rebuild** re-persists `rebuilding`, never a premature `active` —
+  `supervisor_adapt.go:39-54`); the entry schema/bucket/key (the bare `ruleID`) differ and have existing
+  readers (Loupe's lens table, the failure tiers). Forcing it into the two-state `ConsumerSink` would
+  lose the rebuild arbitration or push rebuild-awareness into a primitive the other three don't need.
+  Out of scope; not a copy.
 
 Scope is therefore **exactly** the three byte-/near-identical copies. This is the bounded, honest set — not a speculative "unify every HealthSink."
 
