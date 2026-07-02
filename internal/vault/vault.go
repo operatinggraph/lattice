@@ -1,0 +1,103 @@
+// Package vault implements per-identity key custody for crypto-shredding
+// sensitive aspects (Contract #3 §3.10/§3.11): a Vault wraps/unwraps a
+// per-identity data-encryption key (DEK) and encrypts/decrypts data under
+// it. Key material never lands in Core KV — only the wrapped (ciphertext)
+// DEK does, as the identity's piiKey aspect. ShredKey makes that wrapped DEK
+// permanently unusable, rendering every ciphertext it protects — in live KV
+// and in JetStream history — unrecoverable.
+//
+// The interface is deliberately stateless with respect to key custody: the
+// caller (the Processor, at commit-path steps 4/6.5) supplies the Envelope
+// it already holds from the identity's piiKey aspect, and the Vault never
+// needs its own durable store of wrapped DEKs — Core KV's piiKey is the
+// single source of truth for that ciphertext. This keeps a Vault backend
+// swappable (local envelope encryption today, a production KMS later)
+// without introducing a second, potentially divergent, copy of the wrapped
+// key material.
+package vault
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// Envelope is the wrapped-DEK reference persisted in an identity's
+// vtx.identity.<id>.piiKey aspect (design §2.1, Contract #3 §3.10). WrappedDEK
+// is ciphertext — the DEK wrapped under the backend's master key (KEK) — never
+// plaintext key material.
+type Envelope struct {
+	WrappedDEK []byte    `json:"wrappedDEK"`
+	KeyID      string    `json:"keyId"`
+	KEKVersion string    `json:"kekVersion"`
+	Alg        string    `json:"alg"`
+	CreatedAt  time.Time `json:"createdAt"`
+	Shredded   bool      `json:"shredded"`
+}
+
+// Ciphertext is the encrypted form of a sensitive aspect's data, stored in
+// Core KV in place of the plaintext (Contract #3 §3.10).
+type Ciphertext struct {
+	CT    []byte `json:"ct"`
+	Nonce []byte `json:"nonce"`
+	KeyID string `json:"keyId"`
+}
+
+// Sentinel errors a Vault backend returns. Callers (the Processor's
+// commit-path hooks, the decrypt RPC responder) match on these with
+// errors.Is rather than backend-specific error values.
+var (
+	// ErrKeyShredded is returned by Encrypt/Decrypt once ShredKey has been
+	// called for the identity (or the caller-supplied Envelope already
+	// carries Shredded=true) — the crypto-shred guarantee: no further
+	// plaintext, in either direction, once shredded.
+	ErrKeyShredded = errors.New("vault: identity key shredded")
+	// ErrInvalidEnvelope is returned when a caller-supplied Envelope cannot
+	// have been produced by CreateIdentityKey (malformed WrappedDEK, unknown
+	// KEKVersion, …).
+	ErrInvalidEnvelope = errors.New("vault: invalid envelope")
+	// ErrDecryptFailed is returned when authenticated decryption fails (bad
+	// key, tampered ciphertext, or — for an AEAD — a wrong nonce/AAD).
+	ErrDecryptFailed = errors.New("vault: decrypt failed")
+)
+
+// Vault is the key-custody + crypto interface the Processor's commit-path
+// hooks and the trusted-tool decrypt RPC depend on. Implementations must
+// never expose plaintext DEK material outside the backend.
+type Vault interface {
+	// CreateIdentityKey mints a new per-identity DEK, wraps it under the
+	// backend's master key, and returns the wrapped-DEK Envelope for the
+	// caller to persist as the identity's piiKey aspect. Called lazily, once
+	// per identity, on its first sensitive-aspect write.
+	CreateIdentityKey(ctx context.Context, identityKey string) (Envelope, error)
+
+	// Encrypt seals plaintext under the DEK referenced by envelope,
+	// returning the ciphertext envelope stored in place of the aspect's
+	// plaintext data. identityKey is cryptographically bound into the
+	// operation (AEAD associated data) — envelope alone is not sufficient;
+	// a caller presenting the right Envelope under the wrong identityKey
+	// fails with ErrInvalidEnvelope rather than silently succeeding under
+	// the wrong identity. Fails with ErrKeyShredded if the identity's key
+	// has been shredded.
+	Encrypt(ctx context.Context, identityKey string, envelope Envelope, plaintext []byte) (Ciphertext, error)
+
+	// Decrypt opens ct under the DEK referenced by envelope, returning the
+	// original plaintext. Like Encrypt, identityKey must match the identity
+	// envelope was minted for (AEAD-bound) or the call fails with
+	// ErrInvalidEnvelope. Fails with ErrKeyShredded if the identity's key
+	// has been shredded, or ErrDecryptFailed on any authentication failure.
+	Decrypt(ctx context.Context, identityKey string, envelope Envelope, ct Ciphertext) ([]byte, error)
+
+	// ShredKey irreversibly revokes the backend's ability to decrypt under
+	// identityKey's DEK — the crypto-shred right-to-erasure primitive. After
+	// ShredKey returns, every subsequent Encrypt/Decrypt for identityKey
+	// fails with ErrKeyShredded, regardless of the Envelope supplied.
+	//
+	// For the local envelope-encryption backend this revokes the backend's
+	// own willingness to unwrap (a deny-list), since its master KEK is
+	// shared across identities; a production KMS backend additionally
+	// destroys the per-identity KMS key version, which is true cryptographic
+	// destruction. ShredKey is idempotent — shredding an already-shredded
+	// (or never-created) identity key is not an error.
+	ShredKey(ctx context.Context, identityKey string) error
+}
