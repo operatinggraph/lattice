@@ -525,6 +525,53 @@ counters (`vault_calls_total`, `keyshredded_handled_total`) + the Weaver shred-f
 lens (the crash-after-commit-before-destroy guarantee); `make test-crypto-shred` + the Gate-3 vector go
 green there.
 
+**Fire 4a CHECKPOINT (2026-07-02, Lattice Steward, `a55ad4e`).** Shipped: `internal/refractor/keyshredded` —
+a new durable consumer on `events.privacy.keyShredded` inside the Refractor process (§3's placement decision),
+independent of `internal/privacyworker` (Fire 3). For each explicitly-configured `NullifyTarget{RuleID,
+KeyField}` it calls a new `control.Service.NullifyRow` (→ a new `Pipeline.Delete` → the existing
+`adapter.Delete`) to remove the shredded identity's already-projected row. Targets are a Go-level allowlist,
+not auto-discovered — Refractor has no registry of lenses by source-vertex-type (a lens's `MATCH` is opaque
+compiled cypher, not a declared field), so inventing one would be a new primitive, not this fire's scope;
+production ships with an empty list (a harmless no-op sweep that still exercises the event/counters/failure
+path) until a real Phase-A consumer lens (`applicantRoster` and friends) opts in as a deferred follow-up.
+A real `Delete` failure raises the new `failure.CatPrivacyCritical` tier (`internal/refractor/failure`):
+the affected lens is paused via a new exported `control.Service.PauseRule` and the event is Acked, never
+retried — matching `refractor-failure-tiers.md`'s reserved "privacy-critical — crypto-shred failure" posture
+verbatim. Wired Contract #5 §5.4's `vaultCallsTotal` (Refractor heartbeat, Phase-1 stub `0` — Refractor makes
+no Vault calls until Fire 5's Secure Lens) and `keyshreddedHandledTotal` (real, incremented per handled event)
+into `LatticeHeartbeater`. Added Gate-3 vector #15 ("Read PII after crypto-shred," DEFENDED) and a new
+`make test-crypto-shred` e2e gate (`internal/cryptoshred`, mirrors `make test-object-gc`'s shape).
+
+3-layer adversarial review (Blind Hunter / Edge Case Hunter / Acceptance Auditor) found two real hardening
+gaps, both fixed pre-merge: a nil `control.Service` would panic the consumer goroutine mid-stream on the
+first event instead of failing fast at construction (fixed: `New` panics immediately on `Control == nil`,
+mirroring `control.Service`'s own nil-panic convention); and a permanently-misconfigured target (a typo'd or
+decommissioned `RuleID`) would nak-loop the same event forever with no escalation path (fixed: bounded to
+`maxNotRegisteredDeliveries` = 20 redeliveries, well above any real startup race, after which the listener
+gives up loudly instead of retrying indefinitely).
+
+**KNOWN LIMITATION (disclosed, not silently swept — documented in-code at
+`internal/refractor/keyshredded/manager.go`'s `handleKeyShredded`).** Nullification is best-effort/transient,
+not a permanent guarantee: empirically, against a live full-engine test harness, a row this listener deletes
+can be **re-upserted shortly after** by Refractor's own projection pipeline — the identity vertex stays alive
+(not tombstoned) after a shred, so a later CDC delivery for that vertex re-evaluates the lens's `MATCH`
+(which still matches a living vertex) and re-projects the row with a fresh, later `projectionSeq` that
+legitimately beats any watermark this listener stamps, guarded target or not. This is **consistent with**
+Phase A's "belt-and-suspenders" framing (rows hold only ciphertext, so a resurrected row is not a new leak)
+but means it is **not yet load-bearing** the way Phase B needs it to be. Closing this gap needs either a
+lens-side shredded-identity filter (mirroring the already-ratified negative/filter-retraction projection
+pattern) or Fire 5's Secure Lens — tracked as residual work, not re-filed as a fresh backlog item since it's
+scoped inside this same feature.
+
+Next: **Fire 4b** — the Weaver shred-finalization convergence lens (pure observability: a projected
+`{identityKey, shredded, vaultKeyDestroyed, projectionsNullified}` row so an operator/Loupe can see
+in-flight/stuck shreds). Crash-survival for both async steps (Vault key destruction, row nullification) is
+**already guaranteed today** by JetStream's own durable at-least-once redelivery on both consumers — Fire 4b
+adds visibility on top, it does not close a correctness gap. Requires `internal/privacyworker` and
+`internal/refractor/keyshredded` to gain op-submission capability (neither currently submits ops; Fire 3's
+privacy-worker only calls `Vault.ShredKey` directly) to record completion durably — a clean, separable
+increment. The re-upsert known-limitation above is a separate, harder problem Fire 4b does not resolve.
+
 **Considered and REJECTED — pre-Vault plaintext contact projection** into `clinicPatientsRead`
 (technically buildable, no test fails, outside M4's *letter* since `.demographics` cannot be
 `sensitive:true` on a non-identity vertex): it ships queryable plaintext PHI into Postgres that
