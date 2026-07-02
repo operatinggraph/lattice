@@ -681,8 +681,8 @@ fires inside `cmd/loupe/web`). Every fire leaves the console fully usable — no
 tab before its replacement exists (F2 retires Core KV, F3 retires Control, F4 retires Health — each in
 the same fire as its replacement).
 
-**Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` · F3 ✅ `5865e0e`
-(2026-07-02, all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
+**Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` · F3 ✅ `5865e0e` ·
+F4 ✅ `24768e8` (2026-07-02, all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
 `/api/vertices` carries type/q/offset/includeDeleted + facets/total and sorts keys so offset windows are
 stable), the linkifying renderer (`web/js/render.js`: `renderDoc` + `keyLinkEl` — reuse these for any
 rendered reply), the hood mode (`logic/hood.js` pure model + goja tests), the `#/corekv` → `#/graph` and
@@ -697,14 +697,21 @@ LWW overwrite. Drill routes carry `nav`/`crumbHref` route-table fields (componen
 tab). **Deferred, still owed:** hood neighbor chips don't dim tombstones — `/api/vertex` link rows carry
 no far-end `isDeleted` (add the field when a fire next touches that handler); the §7.2 "package page →"
 action ships with F8; the lens-page affordances (§1.2 aliases) ship with F5; `keyTarget` gains its
-component-id row when feed rows need it (F6). **F4 notes:** build per §2.1 + §3.1 + §4 — the global alert
-strip + topbar rollup pill, the map rail (`#sysmap-rail` with the reserved empty `#sysmap-console` first
-slot + gates panel), the `renderedState` derivation server-side (swap `/api/lenses`.`status` + map lens
-statuses onto it; the roster's `pending-readpath` group footer per §5 lands here too), and the Health tab
-retires with the §4.3 element-by-element destination checklist. F3 shipped the roster ◆ protected tag
-(spec join) already; F4 adds the state exclusion so pending-readpath stops yellowing the banner. An
-undeclared client reporter going stale DOES degrade the rollup (adjudicated with F3 — real heartbeat
-signal; only pending-readpath lenses are exempt).
+component-id row when feed rows need it (F6). **F4 shipped state:** `cmd/loupe/renderedstate.go` holds
+`lensRenderedState` (the §4.2 derivation — F5's lens page reuses it via `/api/lenses`) + `computeGates`;
+all three health-derived endpoints share one `healthReaders` path. Derivation decisions grounded during
+the 3-layer review: **fault requires `errorCount>0` AND a live `lastError`** (the reporter's errorCount
+is cumulative while `SetActive` nulls lastError — the conjunct un-latches a recovered lens);
+`lastError` surfaces as an issue line in every state; an unattributed/infra pause on a NON-protected
+lens renders `paused` (not `unknown`); a paused protected pg lens is `pending-readpath` regardless of
+`pauseReason` (the infra-pause probe loop IS the activation gate, `read_path_adapters.go` — a later PG
+outage parks in the same posture by design, auto-resumes, write errors escalate to fault). Alert
+severity + the bootstrap marker fold into `/api/systemmap`'s overall so the topbar pill and map banner
+never disagree on one screen (§2.1's "rides the map's /api/health poll" premise was wrong — the map
+polls /api/systemmap; the shell polls /api/health at 30s on ALL views instead). Gates read
+`timestamp` OR `completedAt` (gate4/5 stamp the latter); join is sorted/first-wins. An undeclared
+client reporter going stale DOES degrade the rollup (adjudicated with F3; only pending-readpath lenses
+are exempt).
 
 ---
 
