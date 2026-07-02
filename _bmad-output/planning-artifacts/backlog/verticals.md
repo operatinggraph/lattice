@@ -20,8 +20,8 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | LoftSpace — per-landlord RLS view as the rich decision surface (D1.5 landlord cutover) | The protected `/api/landlord/applications` RLS read shows only a scope-count banner; the rich decision view is still the trusted-all-units console (§10.2). Project signals into `landlordLeaseApplicationsRead`, retiring the console. | LoftSpace | pkg + FE | ★★ | M | 🚧 seq Vault Fire 5 (Vault 🎯 build-next in [lattice](lattice.md)) · Rec C shipped ([design](../../implementation-artifacts/loftspace-d1.5-landlord-rls-decision-surface-design.md)) · readiness clone = fallback if Vault stalls |
 | Clinic — patient contact (email/phone) captured but never projected | `CreatePatient` stores `.demographics.{email,phone}` but the `clinicPatients` lens projects only `name` — staff can't see contact info, and a real reminder channel has no address to send to. | Clinic | pkg + FE | ★★ | S→M | 📋 re-model half ready NOW (patient `identifiedBy` unclaimed identity; contact → sensitive identity aspects) · display half 🚧 seq Vault Fire 5 · [plan](../../implementation-artifacts/vault-crypto-shredding-design.md) |
 | LoftSpace — applicant contact (email/phone) captured but never projected to the landlord | `CreateUnclaimedIdentity` stores `.email`/`.phone`, but neither the `/api/identities` picker nor the landlord `unit-applications` disposition surfaces them — a landlord deciding on an applicant has no way to contact them. | LoftSpace | pkg + FE | ★★ | S | 🚧 seq Vault Fire 5 (Vault 🎯 build-next in [lattice](lattice.md)) — Fire-5 consumer: landlord protected lens gains contact columns ([plan](../../implementation-artifacts/vault-crypto-shredding-design.md)) |
-| Clinic — patient payment ledger (copays/invoices) | No financial history exists: appointments/encounters create no charge or payment record — staff can't see what a patient owes or has paid. Add a ledger aspect + Debit/CreditAccount ops + a billing-history lens/FE. | Clinic | pkg + FE | ★★★ | L | 🏗️ building · Inc 1 shipped (`d4e5af0`, account/transaction ops + ledgerHistory lens) · next: Inc 2 billing-history FE (mirrors loftspace-app/ledger.go) |
 | LoftSpace — Post-Listing never grants `manages`, so the landlord's own new listing is invisible | Live-verified 2026-07-02: post-listing (`CreateLocation→SetUnitAddress→SetListing`, app.js ~2620) never calls `AssignUnitOwner` — both operator views filter to `manages`-linked units, so a freshly posted unit shows 0 applications until an out-of-band grant. Wire the op into the chain. | LoftSpace | FE | ★★★ | S | 📋 ready |
+| LoftSpace — ledger account shares the lease's own NanoID (Contract #1 violation) | `loftspace-ledger`'s `CreateAccount` mints the account under the lease's bare NanoID (mirrors clinic-ledger's pre-fix defect) — corrupts Refractor adjacency, so `ledgerHistory` silently projects 0 rows on the first real charge. Mirror clinic-ledger's fix: independent NanoID + a guard aspect on the leaseapp + a lookup lens. | LoftSpace | pkg + FE | ★★★ | M | 📋 ready · [design](../../implementation-artifacts/adjacency-shared-nanoid-collision-design.md) |
 
 ## PO notes (dated — drives rotation)
 
@@ -37,6 +37,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-02 · `749d7c2` · Clinic patient payment ledger Inc 2 CLOSED — billing-history FE; fixed a shared-NanoID Contract #1 bug in CreateAccount ([design](../../implementation-artifacts/adjacency-shared-nanoid-collision-design.md))
 - 2026-07-01 · `9947f75` · LoftSpace tenant payment ledger Inc 2 CLOSED — payment-history FE (GET /api/ledger + Ledger panel + landlord record charge/payment)
 - 2026-07-01 · `12736df` · LoftSpace tenant payment ledger Inc 1 — account/transaction vertex types (CreateAccount/Debit/CreditAccount) + ledgerHistory lens, append-only (no stored balance)
 - 2026-07-01 · `—` · Clinic dev-loop D1.5 read-boundary wiring CLOSED — `provision-clinic-role` + DSN/dev-auth wired into `up-clinic`/`refresh-clinic` (mirrors `up-loftspace`); verified live, no more 500s
@@ -60,15 +61,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-06-29 · `2a02df1` · loftspace-app: D1.3 landlord/residence audience — Increment 3 (authenticated RLS reader)
 - 2026-06-29 · `e9a81fc` · lease-signing: D1.3 landlord/residence audience — Increment 2 (protected lens)
 - 2026-06-29 · `5b672b1` · loftspace-domain: D1.3 landlord/residence audience — Increment 1 (ownership link)
-- 2026-06-29 · `b81ffcd` · clinic-domain: `RecordEncounter` — capture the post-visit clinical record
-- 2026-06-29 · `d772195` · clinic-reminders: package README (doc-only)
-- 2026-06-29 · `ce57c10` · loftspace-app: D1.3 Fire 3 — authenticated RLS read boundary (applicant)
-- 2026-06-29 · `446567e` · loftspace/lease-signing: D1.3 Fire 2 — protected Postgres lease read-model
-- 2026-06-29 · `65e0eb3` · loftspace: aggregated "All my documents" view across an applicant's applications
-- 2026-06-28 · `6e5ed75` · loftspace: landlord edit listing + take a unit off-market
-- 2026-06-28 · `72cb63e` · loftspace-app: listing photos — landlord upload + applicant Browse gallery
-- 2026-06-28 · `9735415` · clinic-domain: `SetProviderProfile` op + Edit-provider in the Availability tab
-- 2026-06-28 · `2f9ce49` · clinic-app: move Add-provider into the Availability admin tab
-- 2026-06-28 · `f8b9130` · clinic-app: dedicated Availability admin tab — hours + time-off
-- 2026-06-28 · `25c0f1c` · clinic-app: seed the provider-hours editor from persisted `.hours`
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
