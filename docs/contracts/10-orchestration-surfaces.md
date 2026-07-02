@@ -953,7 +953,7 @@ Every action's params are resolved per row (templating below). The Actuator subm
 |----------|--------|--------|
 | `triggerLoom` | `{ pattern, subject }` | submit `StartLoomPattern{ patternRef: pattern, subjectKey: subject }` → Loom (§10.5). `subject` must resolve to a vertex of the pattern's `subjectType`. **Auth: see below.** Also the path for **external remediation** (since 2026-06-18, 13.1): `triggerLoom` a pattern whose body is an `externalTask` (§10.5) — this **replaces the retired `nudge` action**. |
 | `assignTask` | `{ operation, assignee, target }` | `CreateTask` (§10.1): `assignedTo`→`assignee`, `forOperation`→`operation`, `scopedTo`→`target`. |
-| `directOp` | `{ operation, target?, params?, reads? }` | submit `operation` directly as a remediation op. `reads?` is the dispatched op's `contextHint.reads` — bare vertex keys, each a literal or `row.<column>` — so an op that must hydrate its candidate vertex (e.g. `TombstoneObject` reading the object's `linkEpoch`) gets the key straight from the lens row. Additive + `omitempty`: a `directOp` that omits it dispatches read-free exactly as before. |
+| `directOp` | `{ operation, target?, params?, reads? }` | submit `operation` directly as a remediation op. `reads?` is the dispatched op's `contextHint.reads` — bare vertex keys, each a literal or `row.<column>` — so an op that must hydrate its candidate vertex (e.g. `TombstoneObject` reading the object's `linkEpoch`) gets the key straight from the lens row. Additive + `omitempty`: a `directOp` that omits it dispatches read-free exactly as before. A clause-billing target is a canonical consumer: `operation` is the literal `DebitAccount`, `target`/`params`/`reads` row-templated (the amount as a numeric param column; clause + account keys routed into `reads` for hydration). |
 | `proposedOp` | *(none — sourced from the row)* | **Additive, opt-in (Augur dispatch, Fire 2b).** Dispatch the **row-carried** `proposedAction` + `proposedParams` (materialised into a `GapAction`) after a **dispatch-time deterministic re-validation** (action ∈ the escalation catalog `{triggerLoom, assignTask, directOp}` · live-registry resolution via the existing `buildPlan` · **default-deny scope** to the row's TRUSTED candidate `candidateKey` · op ∈ Weaver's service-actor authority). Unlike the three static actions, the op + params are *data per row*, not playbook config; the proposed op carries a **proposal-scoped deterministic requestId** so a sweep re-dispatch collapses on the Contract #4 tracker (at-most-once). Used **only** by the `augur` package's primordial `augurDispatch` convergence target (see "Augur dispatch" below); wiring `proposedOp` to a row whose source is not a §5-validated approved proposal is a package bug. The `directOp`-must-be-literal guard stays intact for ordinary playbooks — `proposedOp` is the gated sibling for the one §5-validated dynamic-op surface. |
 
 > **`nudge` — RETIRED (Amended 2026-06-18 — 13.1, External I/O Bridge).** The `nudge` GapAction (and the
@@ -1028,7 +1028,9 @@ A param value is **either a literal** (`pattern: "onboarding"`) **or the token `
 (`subject: "row.applicant"`) — no expressions. The Strategist substitutes `row.<column>` with that
 column's value from the violation row. A `row.<column>` that resolves null/absent is a **data error**
 — surface, do not fire a malformed remediation. (This is why §10.2 requires the Lens to **project
-every column the playbook templates name**.)
+every column the playbook templates name**.) Substitution is **type-preserving**: a `row.<column>`
+resolving to a JSON number (e.g. a lens-computed `amountCents`) is passed to the op as a number, not
+stringified — `resolveParam` returns the row value verbatim. A monetary param is integer cents.
 
 ### `triggerLoom` authorization — `StartLoomPattern` + pattern-as-target
 

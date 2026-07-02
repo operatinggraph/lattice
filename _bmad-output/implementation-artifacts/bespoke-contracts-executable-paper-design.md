@@ -1,6 +1,28 @@
 # Bespoke Contracts / "Executable Paper" — semantic clauses as convergence targets
 
-**Status: 📐 awaiting-Andrew (ratification).** Designer (Winston) · 2026-07-01 · Lattice lane (Stream 2).
+**Status: ✅ Andrew-ratified (2026-07-02) — the SCOPING RE-CALL accepted: pattern + package, no platform
+engine.** Lattice = the §10.8/§10.2 clarification (committed with this ratification) + the rounding UDF on
+demand; the reference package (Fires V1–V3) routes to the Verticals board — its ledger dependency shipped
+2026-07-01/02, so it is buildable now.
+
+> **Ratification Q&A (2026-07-02) — the three-tier bespoke-ness model + an explicit VAULT DEVIATION.**
+> Andrew's question: how can clause DDL + Starlark be designed upfront for bespoke contracts? Answer —
+> **no bespoke Starlark per clause exists, deliberately deviating from the vault's letter** (*Anatomy of
+> a Clause* says "Predicate: a Starlark script that the Weaver evaluates" and imagines clause-carried
+> code). Bespoke-ness decomposes: **Tier 1 — bespoke VALUES = pure data** (a clause instance is
+> `vtx.clause` + a terms aspect + links; a new contract = ordinary ops, no DDL/script/install — the
+> overwhelming majority). **Tier 2 — bespoke SHAPES = new archetype convergence lenses** (declarative
+> cypher, reviewable, F-004 hot-installed; the Starlark stays the ledger's one generic `DebitAccount`
+> with a row-templated numeric param; the vault's proration example is archetype cypher arithmetic —
+> hence the on-demand rounding UDF). **Tier 3 — AI-AUTHORED archetypes** (the vault's real endgame):
+> prose → proposed lens/DDL via the ratified ai-authored-capabilities loop (human review, deterministic
+> validation, rollback) — bespoke-ness at AUTHORING time, never at runtime. The vault's clause-carried
+> Starlark is REJECTED on security grounds: code smuggled in as vertex data bypasses the package-review/
+> `permittedCommands` model (any clause-writer could inject money-moving execution) and makes Weaver a
+> script runtime against standing doctrine. Brainstorm #66's "AI judgment hook" = judgment clauses open
+> Tasks reviewed via the Augur loop.
+
+Designer (Winston) · 2026-07-01 · Lattice lane (Stream 2).
 Backlog row: *"Bespoke contracts / 'Executable Paper' — Starlark-backed semantic clauses"* —
 `_bmad-output/planning-artifacts/backlog/lattice.md` → Lattice feature backlog → AI-native.
 Vision source: Obsidian vault `Contract as Executable paper/{Semantic Contracts, Anatomy of a Clause}.md`;
