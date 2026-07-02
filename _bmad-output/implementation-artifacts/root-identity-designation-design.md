@@ -1,19 +1,35 @@
 # Root-identity designation — design
 
-**Status: 📐 awaiting-Andrew (ratification).** · Designer: Winston (architect) · 2026-07-02
-**Revised 2026-07-02 after Andrew's grounding challenge** ("the protected bit is not what gives it root
-— dive deeper"). The revision corrects the premise: the frozen contract designates root by
-`holdsRole → operator` **topology**, and the shipped core `protected`-bit anchor is an Epic-12
-implementation drift, not the contract's model. The recommendation changed accordingly (see §4). The
-superseded first-draft shape (invent a reserved `rootActor` field) is retired to §4 Option C with the
-reason it lost.
+**Status: ✅ Ratified 2026-07-02 (Andrew) — Fork A.** · Designer: Winston (architect) · 2026-07-02
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Arch-review intake* →
-"protected-flag-create-guard-vector". Source: `docs/reviews/arch-review-2026-07-02.md` ranked
+"root-designation-topology-reconverge". Source: `docs/reviews/arch-review-2026-07-02.md` ranked
 correction #1 + the Epic-12 carried obligation (`docs/decisions/projection-plane-decomposition.md`).
+
+**Ratification (2026-07-02, Andrew).**
+- **Fork A** — re-converge core on the **`holdsRole → operator` topology** and retire `data.protected`
+  as a capability designator (it keeps only its anti-brick meaning). Unforgeable by construction,
+  matches the frozen contract, invents no new state.
+- **Collapsed to ONE fire.** The design's Fire 1 (a `protected`-create-guard "interim floor") is
+  **dropped**: Fork A closes the escalation *by construction* (a forged `protected:true` identity
+  confers nothing after the predicate swap), so no interim floor is needed; its only residual value was
+  anti-brick griefing (a forged immutable vertex), which is moot pre-prod — *nothing is deployed to
+  brick*, and the real threat surface (untrusted `create`) does not exist until external actors write
+  through the Gateway (revive-then, §6, no board row now). The **one capadv acceptance vector** —
+  *forge a `protected:true` identity, assert it materializes neither a `cap.<actor>` write anchor nor a
+  `*` read grant* — is retained; it is the proof A closed the hole and the regression tripwire, and
+  belongs to A's fire (the create is *allowed* to succeed; the vertex just gets nothing).
+- **Contract site corrected — the frozen edit is Contract #6 §6.1, NOT §7.7.** Due diligence at
+  ratification found the draft had it backwards: **§7.7 is already correct** (pure topology; the code
+  drifted away from it — no §7.7 edit needed) and **§6.1** is the *only* place in either frozen contract
+  that enshrined the drift (`WHERE identity.data.protected = true`). §6.1 is edited to the `holdsRole →
+  operator` primordial-topology anchor (and its now-false "core names no rbac vocabulary" claim narrowed
+  to a package-*dependency* break), **committed with this ratification**. §6.1 and §7.7 previously
+  contradicted each other; the edit makes them agree. (An optional `systemRoot`→`operator` naming nit in
+  §7.2/§7.7 rides the broader docs-truth-sweep, not this fire.)
 
 ---
 
-## For Andrew (the one-look)
+## The finding (retained analysis — the decision is in the Ratification block above)
 
 **The finding (why the premise moved).** Root is designated **two different ways at once**, and they
 disagree:
@@ -37,22 +53,24 @@ topology, by contrast, is **self-protecting**: `AssignRole`/`GrantPermission`/`C
 only to `operator` at `scope:any`, so **you must already be root to grant root** — it cannot be
 bootstrapped from nothing.
 
-**The fork (§4) — my recommendation flipped to A.** **(A) Re-converge core on the topological model**
-the contract already mandates: designate root by a bounded `holdsRole → operator` existence check in the
-three core sites, and **retire `protected` as a capability designator** (it keeps only its unrelated
-anti-brick meaning). Closes both escalations *by construction*, uses the already-seeded self-protecting
-topology, invents nothing. **(B)** keep + harden the `protected` anchor (create-guard + a reserved
-field) and reconcile §7.7 to the bit. I recommend **A**: it is unforgeable-by-construction and matches
-the frozen contract; B doubles down on the data-derived mechanism you flagged.
+**The decision (§4) — Fork A, ratified.** **(A) Re-converge core on the topological model** the contract
+already mandates: designate root by a bounded `holdsRole → operator` existence check in the three core
+sites, and **retire `protected` as a capability designator** (it keeps only its unrelated anti-brick
+meaning). Closes both escalations *by construction*, uses the already-seeded self-protecting topology,
+invents nothing. (B) keep + harden the `protected` anchor and (C) invent a `rootActor` field were the
+alternatives — both double down on the data-derived mechanism Andrew flagged; see §4 for why they lost.
 
-**Frozen-contract change (either fork, flagged — staged uncommitted at build time):** **Contract #7
-§7.7 contradicts the shipped code today** and must change regardless. Under A it is *restored* (core
-re-adopts the topological anchor); under B it is *rewritten* to document the `protected` marker. This is
-the ratification crux.
+**Frozen-contract change (Fork A) — Contract #6 §6.1, committed with the ratification.** §6.1 was the
+*only* frozen text carrying the drift (`WHERE identity.data.protected = true`); it is edited to the
+`holdsRole → operator` primordial-topology anchor. **§7.7 needs no edit** — it already specifies the
+topology model, and the code re-converges onto it (the draft's "§7.7 is the crux" was corrected at
+ratification: §7.7 is the *correct* target, §6.1 is the drifted one). §6.1 and §7.7, previously in
+conflict, now agree.
 
-**Interim floor, valuable under both (Fire 1):** a Processor **create-guard** that no non-root op can
-mint a root-designating marker, + Gate-2/Gate-3 vectors. Discharges the Epic-12 obligation now, no
-contract change, ships alone.
+**Fire 1 (create-guard) — dropped at ratification.** Fork A closes the escalation by construction, so no
+interim create-guard floor is needed; its only residual (anti-brick griefing via a forged immutable
+vertex) is moot pre-prod and revives only when untrusted `create` exists (post-Gateway). The single
+capadv acceptance vector (forge-`protected` → gets-nothing) is retained under A's one fire.
 
 ---
 
@@ -150,20 +168,7 @@ path in the interim.
 
 ## 3. The shape
 
-### 3.1 Fire 1 — the create-guard floor (no contract change, ships alone, fork-independent)
-
-Extend step-8 to reject a **create** that mints a root-designating marker on an identity. Concretely,
-reject a `create` mutation that is identity-labelled (key-type `identity`, or `class`/`label ==
-"identity"` — the three ways the capability lens's `:identity` matches, `executor.go:352-372`) **and**
-carries `data.protected == true`. Surface as the existing `ProtectedKey` reply.
-
-- Breaks nothing: package install creates protected **meta** vertices (not identity-labelled);
-  `CreateIdentity` creates `data:{}` identities. No op legitimately mints a protected identity.
-- Unconditional — no actor-tier lookup in step 8.
-- Discharges the Epic-12 obligation immediately, under **either** fork, and independently of the read
-  wildcard (which Fire 2 addresses structurally).
-
-### 3.2 Fire 2 (Fork A — recommended) — re-converge core on the topology, retire `protected` as designator
+### 3.1 The one fire (Fork A, ratified) — re-converge core on the topology, retire `protected` as designator
 
 Replace the `protected` predicate with a bounded `holdsRole → operator` check in the three core sites:
 
@@ -175,45 +180,55 @@ Replace the `protected` predicate with a bounded `holdsRole → operator` check 
    grant now flows only to operator-holders. **This is the fix that closes the unconditional read
    escalation.**
 3. **`SystemActorKeys`** (`system_actors.go:60`) — discover the root set by the `holdsRole → operator`
-   topology instead of scanning `data.protected`. (Still a startup discovery; still core-owned and
-   package-independent because the topology is primordial.)
+   topology instead of scanning `data.protected` (the link keys
+   `lnk.identity.<id>.holdsRole.role.<operatorId>` are directly enumerable — no per-vertex `KVGet`).
+   **Kept, not replaced** — its job is unchanged (a startup snapshot that routes each actor at step-3 to
+   `cap.<actor>` vs `cap.roles.<actor>`); only its predicate moves with the other two sites, so routing
+   and projection never disagree on what confers root. Snapshot staleness stays benign under A: both docs
+   derive from the same topology, so a runtime-granted operator authorizes via `cap.roles.<actor>` until
+   the next restart re-snapshots — the write-path forgery window the bit had (restart pulls a forged
+   identity into the anchor set) is closed.
 
 `data.protected` is **retired as a capability designator** and keeps **only** its anti-brick meaning
-(the `rejectProtectedMutations` update/tombstone guard, unchanged). After Fire 2, forging `protected:true`
+(the `rejectProtectedMutations` update/tombstone guard, unchanged). After the swap, forging `protected:true`
 grants **nothing** — capability is conferred solely by operator-role topology, which is self-protecting.
 
-**Contract:** #7 §7.7 is *restored* (core re-adopts the topological anchor, scoped to the operator role);
-a §6.1 note records that core's anchor walks the **primordial** operator topology (not a package
-dependency). No new envelope field, no new vertex/aspect/link type, no new op.
+**Acceptance vector (retained from the dropped Fire 1).** A Gate-3 (capadv) DEFENDED vector: forge a
+`protected:true` identity as a non-root actor (the create is *allowed* to succeed) and assert it
+materializes **neither** a `cap.<actor>` write anchor **nor** a `*` read grant. This proves the swap
+closed the escalation and is the regression tripwire against any future protected-keyed predicate.
 
-### 3.3 Fire 2 (Fork B — alternative) — keep + harden the `protected` anchor
+**Contract:** **#6 §6.1** is edited to the `holdsRole → operator` primordial anchor (committed with the
+ratification — see the Ratification block). **#7 §7.7 needs no edit** — it already specifies the topology
+model; the code re-converges onto it. No new envelope field, no new vertex/aspect/link type, no new op.
 
-If Andrew prefers to preserve Epic-12's zero-rbac-vocabulary core: keep the `protected` anchor but make
-it unforgeable and reconcile the contract. Introduce a reserved **seed-only** marker distinct from the
-anti-brick bit (a top-level envelope field `rootActor`, or the bit itself under a generalized guard),
-and make the Processor reject any op that sets it (unconditional — nothing but the direct seed sets it).
-Migrate the three sites to the new marker; rewrite Contract #7 §7.7 to document the marker model
-(abandoning the topological text). This keeps the decoupling but keeps a data-derived designation and
-requires amending #1 §1.3 (new envelope field) + rewriting §7.7. See §4 for why A is preferred.
+### 3.2 Why not the create-guard, and why not Forks B/C
 
-### 3.4 Read/write paths, key shapes — unchanged
+The **create-guard** (draft Fire 1 — reject a `create` minting `data.protected:true` on an identity) is
+**dropped at ratification**: Fork A makes a forged `protected` identity confer nothing, so the guard's
+escalation job is subsumed; its only residual is anti-brick griefing (a forged *immutable* vertex), moot
+pre-prod (nothing deployed to brick) and gated on an untrusted-`create` surface that does not exist until
+external actors write through the Gateway — revive it then (no board row now; §6). **Forks B (harden the
+bit) / C (new `rootActor` field)** both keep a data-derived designation and force §7.7 to be rewritten
+*away* from the model it correctly specifies — see §4 for the full comparison and why A won.
 
-Under both forks the `cap.<actor>` / `cap-read.root` doc shapes are byte-identical; only the **gate
-predicate** changes. Step-3's hot path (one KVGet by actor class) is untouched — the gate is evaluated
-at projection time, not on the authz hot path.
+### 3.3 Read/write paths, key shapes — unchanged
+
+The `cap.<actor>` / `cap-read.root` doc shapes are byte-identical to today; only the **gate predicate**
+changes. Step-3's hot path (one KVGet by actor class) is untouched — the gate is evaluated at projection
+time, not on the authz hot path.
 
 ---
 
-## 4. The fork — topological re-convergence (A) vs. hardened marker (B)
+## 4. The fork — topological re-convergence (A ✅ ratified) vs. hardened marker (B) / new field (C)
 
-| | **A. Re-converge on `holdsRole → operator`** (rec.) | **B. Harden the `protected` marker** | **C. New `rootActor` field** (first draft — retired) |
+| | **A. Re-converge on `holdsRole → operator`** ✅ **ratified** | **B. Harden the `protected` marker** | **C. New `rootActor` field** (first draft — retired) |
 |---|---|---|---|
 | Designation | Link topology (contract §7.7) | Reserved seed-only bit/field | Reserved seed-only envelope field |
 | Forgeable? | **No — self-protecting** (grant-role is root-gated) | No, once guarded (but create-guard is the load-bearer) | No, once guarded |
 | Read escalation | Closed **by construction** | Closed by the guard | Closed by the guard |
 | Invents mechanism? | **No** — already seeded | A new marker | A new marker (a *third* one) |
-| Contract #7 §7.7 | **Restored** to as-built | **Rewritten** away from topology | Rewritten away from topology |
-| Other contracts | §6.1 note | #1 §1.3 (new field) + §6 | #1 §1.3 (new field) + §6 |
+| Frozen-contract edit | **#6 §6.1** (swap the anchor predicate); **§7.7 already correct — no edit** | **Rewrite §7.7** away from topology + amend #1 §1.3 | Rewrite §7.7 + amend #1 §1.3 |
 | Cost | Nominal rbac-*vocabulary* in core's cypher (primordial concepts; not a package dep) | Keeps a data-derived root-of-trust; two markers to keep coherent | Same as B, plus it ignores the contract's existing link model |
 
 **Recommendation: A.** It is **unforgeable by construction** (you cannot grant yourself operator without
@@ -241,10 +256,10 @@ surfaced it. Retained here only to record the rejection.
   dependency on rbac-domain and to keep an unbounded scan out of the hot path. §2 shows the operator
   topology is **primordial** (no package dep) and the check is a **bounded** one-key traversal (no scan),
   so A recovers the contract model without reincurring what Epic-12 was actually avoiding. What A does
-  reverse is the narrower "core's cypher names no rbac vocabulary" preference — which is the crux for
-  Andrew to ratify.
-- **"Are we adding state?"** Fork A adds **none** — it re-gates on topology that is already seeded. Fire
-  1 adds none. (Only Fork B/C would add a marker.)
+  reverse is the narrower "core's cypher names no rbac vocabulary" preference — which was the ratification
+  crux (ratified 2026-07-02: A).
+- **"Are we adding state?"** Fork A adds **none** — it re-gates on topology that is already seeded. (Only
+  the retired Forks B/C would add a marker.)
 - **Stale-`cap.<actor>` eviction** (the Epic-12 sibling obligation) is out of scope — a downgrade/realness
   concern, moot on the store-reset upgrade path, orthogonal to designation.
 - **Redundancy note.** Under A, the seeded actors' `cap.<actor>` (core anchor) and `cap.roles.<actor>`
@@ -257,77 +272,78 @@ surfaced it. Retained here only to record the rejection.
 
 ## 6. Decomposition for the Steward
 
-**Fire 1 — create-guard floor + adversarial vectors. Size S. No contract change. Fork-independent.**
-- Reject a create of a `data.protected:true` identity-labelled vertex (§3.1); typed `ProtectedKey` reply.
-- **Gate-2 (bypass) BLOCKED:** an ordinary actor's op emitting a `create` of `vtx.identity.<x>` (and a
-  `class:"identity"` non-`vtx.identity` key) with `data.protected:true` → rejected.
-- **Gate-3 (capadv) DEFENDED:** the full escalation — attempt the forged create as a non-root actor,
-  assert no `cap.<actor>` and **no `*` read grant** materialize. Add as the next capadv vector #.
-- Discharges the Epic-12 obligation. Ships regardless of the fork decision.
+**One fire (Fork A). Size S–M. Full 3-layer adversarial review (security plane).** The draft's two-fire
+split existed only to ship a create-guard floor ahead of an undecided fork; with A ratified and the
+create-guard dropped (§3.2), it collapses to a single fire.
 
-**Fire 2 — behind Andrew's fork choice.**
-- *If A:* swap the three core predicates to the `holdsRole → operator` check (§3.2); restore Contract #7
-  §7.7 + a §6.1 note (staged uncommitted). Tests: unit — the anchor + read wildcard project root iff the
-  identity holds operator (and **not** for a `protected:true`-only identity — the inverse of the old
-  test, proving the drift is closed); `SystemActorKeys` discovers by topology. e2e — the ephemeral stack
-  still authorizes the admin + service actors for their root ops after the swap (behavior-preserving);
-  a forged `protected:true` identity gets **neither** write nor read root. Re-point the Fire-1 Gate-2/3
-  vectors at the topological gate.
-- *If B:* introduce the reserved seed-only marker + generalized guard; migrate the three sites; rewrite
-  §7.7 + amend #1 §1.3 (staged uncommitted). Tests mirror A with the marker in place of the topology.
+- **Predicate swap.** Move the three core sites (`CapabilityLensDefinition` `lenses.go:124`,
+  `CapabilityReadWildcardGrantsLensDefinition` `lenses.go:342`, `SystemActorKeys` `system_actors.go:60`)
+  from `WHERE identity.data.protected = true` to the bounded `holdsRole → operator` check (§3.1). The
+  three move **together** — no window where one site reads topology while another reads the bit.
+- **Contract.** The **#6 §6.1** edit is **already committed** with this ratification (the anchor
+  predicate + the narrowed "no rbac vocabulary" claim); the Steward builds to it. **No §7.7 edit.**
+- **Unit tests.** The anchor + read wildcard project root **iff** the identity holds operator, and
+  **not** for a `protected:true`-only identity (the inverse of the drifted test — proving the drift is
+  closed); `SystemActorKeys` discovers the root set by topology.
+- **e2e.** The ephemeral stack still authorizes the admin + the service actors for their root ops after
+  the swap (behavior-preserving); a forged `protected:true` identity gets **neither** write nor read root.
+- **Gate-3 (capadv) DEFENDED — the retained acceptance vector.** Forge a `protected:true` identity as a
+  non-root actor (the create is *allowed* to succeed) → assert **no** `cap.<actor>` and **no** `*` read
+  grant materialize. Add as the next capadv vector #. (No Gate-2 BLOCKED vector — with the create-guard
+  dropped, the forged create is not rejected; the escalation is defended at projection, not at the mint.)
 
-Sequencing: Fire 1 is the urgent ★★★ floor with no contract dependency and ships immediately; Fire 2 is
-the contract-touching re-convergence gated on the fork ratification. Principled split (independent value
-+ distinct ratification gates), not size-padding.
+**Deferred (no board row):** the `protected`-create-guard revives only when an **untrusted `create`**
+surface exists (external actors writing through the Gateway) — filing it now would be scaffolding for a
+threat that cannot yet occur (§3.2).
 
 ---
 
 ## 7. Migration / compatibility
 
-- **Fire 1** is additive enforcement — no data migration; existing seeds already satisfy it.
-- **Fire 2 (A)** changes only lens **predicates** + the `SystemActorKeys` discovery query; the seed
+- **The fire (A)** changes only lens **predicates** + the `SystemActorKeys` discovery query; the seed
   already carries the operator topology, so **no re-seed is required for correctness** (the topology
   exists). A bootstrap-version bump is still the clean path if the seed drops the now-vestigial
   `protected:true` from the 7 identities — but note `protected` is **retained** on them for anti-brick,
   so the seed need not change at all; only the code predicates move. This makes A a notably low-risk
   migration (no store reset strictly required — a projection rebuild suffices, since the topology is
   already present).
-- **Contract review is the ratification gate** — the three predicate sites move together; there is no
-  window where one site reads topology while another reads the bit.
+- **The three predicate sites move together** — there is no window where one site reads topology while
+  another reads the bit.
 
 ---
 
 ## 8. Risks + alternatives considered
 
 - **Risk (A): a seeded actor lacks the `holdsRole → operator` link** → it loses root (fail-closed — a
-  denial, caught by the Fire-2 e2e that authorizes every seeded root actor). All 7 are seeded with it
+  denial, caught by the e2e that authorizes every seeded root actor). All 7 are seeded with it
   (`primordial.go:704-766`), so this is a regression guard, not a live gap.
 - **Risk (A): the operator role canonicalName resolution.** The check keys on the operator role; pin it
   by the seeded role NanoID or its `canonicalName` aspect (`role.canonicalName.data.value == "operator"`)
   — the same resolution rbac-domain's lens already uses — not a brittle string in the vertex root.
-- **Alternative — keep the bit, add only the create-guard (Fire 1 alone).** Closes the write-mint hole
-  but leaves the **unconditional read wildcard** open and does not answer "something other than the bit."
-  Fire 1 ships as the floor; Fire 2 (A) is the actual answer.
+- **Alternative — keep the bit, add only a create-guard.** Closes the write-mint hole but leaves the
+  **unconditional read wildcard** open and does not answer "something other than the bit." Rejected as a
+  standalone: A closes both by construction, so the create-guard is neither necessary nor sufficient (§3.2).
 - **Alternative — enumerated kernel set as a lens param.** Rejected: couples the lens to a
   bootstrap-injected list; buys nothing over the topology.
 - **Fork B / C** — §4.
 
 ---
 
-## 9. Open questions — resolved (except the one fork for Andrew)
+## 9. Open questions — all resolved (Fork A ratified 2026-07-02)
 
 - *Which mechanism actually confers root?* → Two, redundantly; the seeded actors authorize via the
   `protected` anchor at runtime, but the **contract designates the `holdsRole → operator` topology** and
   the `protected` anchor is an Epic-12 drift (§1.1).
 - *Is the bit really compromisable?* → **Yes, unconditionally on the read path** (wildcard grant),
   conditionally on writes (rbac-absent or post-restart) (§1.2).
-- *Shape?* → **Fork for Andrew** (§4). Recommendation: **A** (re-converge on the self-protecting
-  topology; retire `protected` as designator). B/C are the data-marker alternatives.
-- *Contract surface?* → Fire 1 none. Fire 2 changes **Contract #7 §7.7 either way** (restore under A,
-  rewrite under B) — the ratification crux; A also adds a §6.1 note, B also amends #1 §1.3.
-- *Migration?* → Fire 1 none; Fire 2 (A) is predicate-only, no re-seed required (topology already
-  seeded) — a projection rebuild suffices.
+- *Shape?* → **Fork A, ratified** (§4): re-converge on the self-protecting topology; retire `protected`
+  as designator. B/C (data-marker alternatives) rejected.
+- *Contract surface?* → **Contract #6 §6.1** (swap the anchor predicate) — committed with the
+  ratification. **§7.7 needs no edit** (it already specifies topology; the code re-converges onto it).
+  The draft's "§7.7 is the crux" was corrected at ratification (§6.1 is the drifted section).
+- *Migration?* → predicate-only, no re-seed required (topology already seeded) — a projection rebuild
+  suffices.
 
 **Pre-build gate:** none self-imposed — an S / S–M security-plane change; the build's standard full
-3-layer adversarial review is the gate (run at build time), given the create-guard + capability-anchor
+3-layer adversarial review is the gate (run at build time), given the capability-anchor + read-wildcard
 surface.

@@ -64,13 +64,20 @@ disjoint key with **no core edit**:
   the service matcher kind + key space stay registered-but-empty (absence = denial, §6.8) until a real
   service package projects into them — a pure package addition, no core edit.
 
-After the decomposition the bootstrap `capability` cypher is the **narrow primordial-identity anchor**
-(`WHERE identity.data.protected = true` → a literal set of the root-equivalent platform grants core
-must project even when no RBAC package is installed) — core references no rbac or service/location grant
-vocabulary, owning only the bucket, the key conventions, and the step-3 dispatcher. Step-3 preserves its
-single-GET hot path because it path-dispatches **before** the read: each path reads exactly one disjoint
-key by actor class (§2.8 amendment) — primordial identity → the core `cap.<actor>` anchor, ordinary
-actor → `cap.roles.<actor>`.
+After the decomposition the bootstrap `capability` cypher is the **narrow primordial-identity anchor**: it
+designates root by the **primordial `holdsRole → operator` topology** — a bounded single-link existence
+check (`MATCH (identity {key:$actorKey})-[:holdsRole]->(:role {canonicalName:'operator'})`) projecting the
+literal set of root-equivalent platform grants core must project even when no RBAC package is installed. The
+`operator` role, its permission vertices, and the seven system identities' `holdsRole` links are all
+**core-seeded** (Contract #7 §7.2/§7.7), so the anchor couples to the **primordial** operator topology, not
+to the rbac-domain **package** — core stays authorizable with rbac-domain absent — and it satisfies §7.7's
+rule that *root capability is established by graph topology, not by class-based special-casing*. (This
+re-admits `holdsRole`/`operator` vocabulary into core's cypher, narrowing Epic-12's "core names no rbac
+vocabulary" preference to a package-*dependency* break only.) `data.protected` is **not** a capability
+designator; it retains only its anti-brick meaning (the step-8 update/tombstone guard, Story 1.5.5). Step-3
+preserves its single-GET hot path because it path-dispatches **before** the read: each path reads exactly
+one disjoint key by actor class (§2.8 amendment) — primordial identity → the core `cap.<actor>` anchor,
+ordinary actor → `cap.roles.<actor>`.
 
 ### 6.2 Document Shape
 
