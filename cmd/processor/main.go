@@ -220,12 +220,22 @@ func run(logger *slog.Logger) error {
 	// calls Vault.ShredKey. Shares `v`, the SAME Vault instance the commit
 	// path decrypts/encrypts through (internal/privacyworker's package doc:
 	// this is load-bearing, not just convenient — a separately-constructed
-	// instance would not observe the shred).
+	// instance would not observe the shred). The privacy service actor
+	// (Fire 4b finalization recording) is graph-discovered like the system
+	// actors above — absent on a pre-v15 kernel, which disables recording
+	// without disabling the shred.
+	privacyCtx, privacyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	privacyActorKey, err := bootstrap.PrivacyActorKey(privacyCtx, conn)
+	privacyCancel()
+	if err != nil {
+		return fmt.Errorf("discover privacy service actor: %w", err)
+	}
 	privacyWorker := privacyworker.New(privacyworker.Config{
 		Conn:         conn,
 		EventsStream: bootstrap.CoreEventsStreamName,
 		Vault:        v,
 		Logger:       logger,
+		ActorKey:     privacyActorKey,
 	})
 	privacyWorkerDone := make(chan struct{})
 	go func() {

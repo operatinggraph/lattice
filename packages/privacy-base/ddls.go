@@ -6,8 +6,9 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //   - `piiKey` (meta.ddl.aspectType, NOT sensitive) — the wrapped-DEK
 //     envelope reference stored as vtx.identity.<NanoID>.piiKey
 //     (design §2.1). PermittedCommands admits ShredIdentityKey (design
-//     §2.2/§9 Fire 3) — the one OPERATION allowed to write piiKey directly
-//     (to flip shredded=true); step-6's resolveGoverningDDL keys on the
+//     §2.2/§9 Fire 3, flips shredded=true) and RecordShredFinalization
+//     (Fire 4b, flips the async-progress booleans) — the only OPERATIONS
+//     allowed to write piiKey directly; step-6's resolveGoverningDDL keys on the
 //     MUTATION's class, so this only gates that write, and does NOT make
 //     piiKeyDDLScript itself dispatchable (ClassForCommand indexes vertexType
 //     DDLs only, mirroring freshnessExpiry/MarkExpired). The Processor's
@@ -30,14 +31,16 @@ func DDLs() []pkgmgr.DDLSpec {
 			CanonicalName:     "piiKey",
 			Class:             "meta.ddl.aspectType",
 			Sensitive:         false,
-			PermittedCommands: []string{"ShredIdentityKey"},
+			PermittedCommands: []string{"ShredIdentityKey", "RecordShredFinalization"},
 			Description: "Per-identity PII key-custody envelope (vault-crypto-shredding-design.md §2.1, " +
 				"Contract #3 §3.10): stored as vtx.identity.<NanoID>.piiKey, holding only the wrapped " +
 				"(ciphertext) data-encryption key — never plaintext key material. Minted lazily by the " +
 				"Processor's commit-path step 6.5 on an identity's first sensitive-aspect write (an internal " +
 				"engine write, not a dispatched op — bypasses permittedCommands), and read internally by " +
-				"step 4 / kv.Read decrypt-on-read. ShredIdentityKey (design §2.2/§9 Fire 3) is the sole " +
-				"OPERATION permitted to write it directly, to flip shredded=true.",
+				"step 4 / kv.Read decrypt-on-read. ShredIdentityKey (design §2.2/§9 Fire 3) flips " +
+				"shredded=true; RecordShredFinalization (Fire 4b) flips the vaultKeyDestroyed / " +
+				"projectionsNullified progress booleans the shredStatus lens projects. No other operation " +
+				"may write it.",
 			Script: piiKeyDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"wrappedDEK":{"type":"string","description":"Base64 ciphertext of the per-identity DEK, wrapped under the Vault backend's master key."},` +
@@ -45,15 +48,25 @@ func DDLs() []pkgmgr.DDLSpec {
 				`"kekVersion":{"type":"string","description":"Label of the KEK that wrapped this DEK, for future rotation detection."},` +
 				`"alg":{"type":"string","description":"AEAD algorithm identifier (e.g. AES-256-GCM)."},` +
 				`"createdAt":{"type":"string","description":"Envelope creation timestamp."},` +
-				`"shredded":{"type":"boolean","description":"True once ShredIdentityKey has revoked this envelope."}}}`,
+				`"shredded":{"type":"boolean","description":"True once ShredIdentityKey has revoked this envelope."},` +
+				`"shreddedAt":{"type":"string","description":"Timestamp of the ShredIdentityKey commit."},` +
+				`"vaultKeyDestroyed":{"type":"boolean","description":"True once the privacy-worker's Vault.ShredKey destruction landed (RecordShredFinalization)."},` +
+				`"vaultKeyDestroyedAt":{"type":"string","description":"Timestamp of the vaultKeyDestroyed record."},` +
+				`"projectionsNullified":{"type":"boolean","description":"True once the Refractor keyshredded listener nullified every configured target row (RecordShredFinalization)."},` +
+				`"projectionsNullifiedAt":{"type":"string","description":"Timestamp of the projectionsNullified record."}}}`,
 			OutputSchema: `{"type":"object"}`,
 			FieldDescription: map[string]string{
-				"wrappedDEK": "Wrapped (ciphertext) data-encryption key — openable only by the Vault backend's master key, never plaintext.",
-				"keyId":      "The identity key this DEK was minted for (AEAD-bound).",
-				"kekVersion": "KEK label the wrap used, for detecting a future KEK rotation.",
-				"alg":        "AEAD algorithm identifier.",
-				"createdAt":  "Envelope creation timestamp.",
-				"shredded":   "True once the identity's key has been irreversibly shredded.",
+				"wrappedDEK":             "Wrapped (ciphertext) data-encryption key — openable only by the Vault backend's master key, never plaintext.",
+				"keyId":                  "The identity key this DEK was minted for (AEAD-bound).",
+				"kekVersion":             "KEK label the wrap used, for detecting a future KEK rotation.",
+				"alg":                    "AEAD algorithm identifier.",
+				"createdAt":              "Envelope creation timestamp.",
+				"shredded":               "True once the identity's key has been irreversibly shredded.",
+				"shreddedAt":             "When the ShredIdentityKey commit landed.",
+				"vaultKeyDestroyed":      "True once the Vault key destruction finalized (async, privacy-worker).",
+				"vaultKeyDestroyedAt":    "When the Vault key destruction was recorded.",
+				"projectionsNullified":   "True once projected-row nullification finalized (async, Refractor keyshredded listener).",
+				"projectionsNullifiedAt": "When the projection nullification was recorded.",
 			},
 			Examples: []pkgmgr.ExampleSpec{
 				{

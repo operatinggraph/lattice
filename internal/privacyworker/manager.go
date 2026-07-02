@@ -20,17 +20,23 @@
 // into a component the design deliberately keeps Vault-blind; the Processor
 // already holds the Vault, so this is the minimal-surface-area placement.
 //
-// Fire 3 scope ends at ShredKey (destroy the key + evict the cache — one
-// atomic call in the local backend). Row nullification of already-projected
-// ciphertext rows, the privacy-critical failure tier, health counters, and
-// the Weaver shred-finalization convergence marker (the crash-after-commit-
-// before-destroy guarantee) are Fire 4.
+// After a successful ShredKey the worker durably records the destruction by
+// submitting RecordShredFinalization{step: vaultKeyDestroyed} under the
+// identity.system.privacy service actor (Fire 4b) — the state the shredStatus
+// lens projects so an operator can see in-flight/stuck shreds. The submit is
+// one fire-and-forget publish to ops.<OpLane> with a deterministic requestId
+// (the objectmanager cascade idiom), published BEFORE the event is Acked so a
+// crash retries both halves; ShredKey is idempotent and the record op
+// collapses on the Contract #4 tracker. An empty ActorKey disables recording
+// (a pre-v15 kernel with no privacy actor) without disabling the shred.
 package privacyworker
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/asolgan/lattice/internal/substrate"
@@ -42,6 +48,14 @@ const (
 	KeyShreddedFilterSubject = "events.privacy.keyShredded"
 	// DefaultDurable is the privacy-worker's durable consumer name.
 	DefaultDurable = "privacy-worker"
+	// DefaultOpLane is the ops.<lane> RecordShredFinalization is submitted on
+	// (matches Weaver's + the objectmanager cascade's default; the Processor
+	// consumes ops.system).
+	DefaultOpLane = "system"
+
+	// StepVaultKeyDestroyed is the RecordShredFinalization step this worker
+	// records (packages/privacy-base shredIdentityKey DDL).
+	StepVaultKeyDestroyed = "vaultKeyDestroyed"
 
 	defaultRedeliveryDelay = 5 * time.Second
 )
@@ -57,6 +71,15 @@ type Config struct {
 	Durable      string
 	Vault        vault.Vault
 	Logger       *slog.Logger
+
+	// ActorKey is the identity.system.privacy service-actor vertex key the
+	// worker submits RecordShredFinalization under (Fire 4b). Empty disables
+	// the durable finalization record (with a startup warning) — the shred
+	// itself still runs.
+	ActorKey string
+	// OpLane is the ops.<lane> for the RecordShredFinalization submit.
+	// Defaults to DefaultOpLane.
+	OpLane string
 }
 
 // Manager runs the keyShredded consumer.
@@ -71,6 +94,12 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.Durable == "" {
 		cfg.Durable = DefaultDurable
+	}
+	if cfg.OpLane == "" {
+		cfg.OpLane = DefaultOpLane
+	}
+	if cfg.ActorKey == "" {
+		cfg.Logger.Warn("privacy-worker: no ActorKey configured; shred finalization recording disabled (shredStatus rows will stay in-flight)")
 	}
 	return &Manager{cfg: cfg}
 }
@@ -115,13 +144,78 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 	}
 	if err := m.cfg.Vault.ShredKey(ctx, ev.Payload.IdentityKey); err != nil {
 		// A shred must never be silently dropped — retry until the Vault
-		// backend (local or a future KMS) confirms destruction. Fire 4's
-		// Weaver convergence marker is the crash-survival backstop; this
-		// redelivery loop is the in-process one.
+		// backend (local or a future KMS) confirms destruction. JetStream's
+		// durable at-least-once redelivery is the crash-survival backstop;
+		// this redelivery loop is the in-process one.
 		m.cfg.Logger.Warn("privacy-worker: ShredKey failed; retrying",
 			"identityKey", ev.Payload.IdentityKey, "error", err)
 		return substrate.NakWithDelay
 	}
+	// Publish-then-ack (the cascade idiom): the durable finalization record is
+	// submitted before the event is Acked, so a crash between ShredKey and the
+	// submit redelivers the event — ShredKey re-runs idempotently and the
+	// deterministic requestId collapses a duplicate record on the Contract #4
+	// tracker.
+	if m.cfg.ActorKey != "" {
+		if err := m.submitFinalization(ctx, ev.Payload.IdentityKey, msg.Sequence); err != nil {
+			m.cfg.Logger.Warn("privacy-worker: RecordShredFinalization submit failed; retrying whole event",
+				"identityKey", ev.Payload.IdentityKey, "error", err)
+			return substrate.NakWithDelay
+		}
+	}
 	m.cfg.Logger.Info("privacy-worker: identity key shredded", "identityKey", ev.Payload.IdentityKey)
 	return substrate.Ack
+}
+
+// finalizationOpEnvelope is the Contract #2 §2.1 op wire format the worker
+// publishes to ops.<lane> — the same shape internal/processor reads; the
+// worker carries its own copy to keep the module boundary clean (the
+// weaver/objectmanager idiom — substrate-only, no internal/processor import).
+type finalizationOpEnvelope struct {
+	RequestID     string                  `json:"requestId"`
+	Lane          string                  `json:"lane"`
+	OperationType string                  `json:"operationType"`
+	Actor         string                  `json:"actor"`
+	SubmittedAt   string                  `json:"submittedAt"`
+	Payload       json.RawMessage         `json:"payload"`
+	ContextHint   *finalizationContextHint `json:"contextHint,omitempty"`
+}
+
+type finalizationContextHint struct {
+	Reads []string `json:"reads,omitempty"`
+}
+
+// submitFinalization publishes one RecordShredFinalization{vaultKeyDestroyed}
+// op. ContextHint.Reads declares the piiKey aspect so the record is
+// hydrated + OCC-conditioned (the sibling projectionsNullified record can
+// race this one on the system lane's concurrent workers; conditioning turns
+// a would-be lost-update into a transparent commit-path retry). Class-less
+// (the Processor's operationType→class reverse index resolves it to the
+// shredIdentityKey DDL). The requestId is keyed on the triggering event's
+// backing-stream sequence: a redelivery of the SAME event derives the same id
+// (tracker collapse); a genuinely new shred of the same identity is a new
+// event → a new id → a fresh (idempotent-by-value) record.
+func (m *Manager) submitFinalization(ctx context.Context, identityKey string, seq uint64) error {
+	payload, err := json.Marshal(map[string]any{
+		"identityKey": identityKey,
+		"step":        StepVaultKeyDestroyed,
+	})
+	if err != nil {
+		return fmt.Errorf("privacyworker: marshal payload: %w", err)
+	}
+	env := finalizationOpEnvelope{
+		RequestID: substrate.DeriveNanoID("shredfin:"+StepVaultKeyDestroyed+":",
+			identityKey+"\x00"+strconv.FormatUint(seq, 10)),
+		Lane:          m.cfg.OpLane,
+		OperationType: "RecordShredFinalization",
+		Actor:         m.cfg.ActorKey,
+		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
+		Payload:       payload,
+		ContextHint:   &finalizationContextHint{Reads: []string{identityKey + ".piiKey"}},
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("privacyworker: marshal op envelope: %w", err)
+	}
+	return m.cfg.Conn.Publish(ctx, "ops."+m.cfg.OpLane, data, nil)
 }

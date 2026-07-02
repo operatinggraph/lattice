@@ -27,4 +27,6 @@ var Package = pkgmgr.Definition{
 	Version:     "0.1.0",
 	Description: "Per-identity PII key-custody envelope (piiKey) backing crypto-shred.",
 	DDLs:        DDLs(),
+	Lenses:      Lenses(),
+	Permissions: Permissions(),
 }

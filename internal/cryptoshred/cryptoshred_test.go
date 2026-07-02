@@ -52,6 +52,10 @@ const (
 	csStaffActorID  = "CSshredStfHJKMNPQRST"
 	csStaffActorKey = "vtx.identity." + csStaffActorID
 	csStaffCapKey   = "cap.identity." + csStaffActorID
+
+	csPrivacyActorID  = "CSprivacyActKMNPQRST"
+	csPrivacyActorKey = "vtx.identity." + csPrivacyActorID
+	csPrivacyCapKey   = "cap.identity." + csPrivacyActorID
 )
 
 // csStaffCapDoc grants CreateUnclaimedIdentity/RecordIdentityPII (default
@@ -77,6 +81,27 @@ func csStaffCapDoc() *processor.CapabilityDoc {
 	}
 }
 
+// csPrivacyCapDoc grants RecordShredFinalization (system lane) — the grant
+// the identity.system.privacy service actor carries in production; the two
+// Fire-4b finalization listeners submit under it.
+func csPrivacyCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    csPrivacyCapKey,
+		Actor:                  csPrivacyActorKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{csPrivacyActorKey: 1},
+		Lanes:                  []string{"system"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "RecordShredFinalization", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
 type harness struct {
 	t          *testing.T
 	ctx        context.Context
@@ -85,6 +110,8 @@ type harness struct {
 	cons       jetstream.Consumer
 	urgentCP   *processor.CommitPath
 	urgentCons jetstream.Consumer
+	sysCP      *processor.CommitPath
+	sysCons    jetstream.Consumer
 	targetKV   *substrate.KV
 	keyShred   *keyshredded.Manager
 	v          vault.Vault
@@ -96,6 +123,7 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + privacy-base + identity + hygiene
 	testutil.SeedCapDoc(t, ctx, conn, csStaffCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, csPrivacyCapDoc())
 
 	v := testutil.TestVault(t)
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
@@ -104,6 +132,9 @@ func newHarness(t *testing.T) *harness {
 	urgentCP, urgentCons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
 		Durable: "cryptoshred-urgent", Instance: "cryptoshred-urgent", Vault: v, FilterSubjects: []string{"ops.urgent"},
 	})
+	sysCP, sysCons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "cryptoshred-system", Instance: "cryptoshred-system", Vault: v, FilterSubjects: []string{"ops.system"},
+	})
 
 	workerCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
@@ -111,10 +142,12 @@ func newHarness(t *testing.T) *harness {
 
 	worker := privacyworker.New(privacyworker.Config{
 		Conn: conn, EventsStream: testutil.HarnessEventsStream, Vault: v, Logger: testutil.TestLogger(),
+		ActorKey: csPrivacyActorKey,
 	})
 	go func() { _ = worker.Run(workerCtx) }()
 
-	h := &harness{t: t, ctx: ctx, conn: conn, cp: cp, cons: cons, urgentCP: urgentCP, urgentCons: urgentCons, v: v}
+	h := &harness{t: t, ctx: ctx, conn: conn, cp: cp, cons: cons,
+		urgentCP: urgentCP, urgentCons: urgentCons, sysCP: sysCP, sysCons: sysCons, v: v}
 	h.startRefractorAndKeyshredded(workerCtx)
 	return h
 }
@@ -189,6 +222,7 @@ into:
 		Control:      controlSvc,
 		Targets:      []keyshredded.NullifyTarget{{RuleID: rule.ID, KeyField: "identityKey"}},
 		Logger:       testutil.TestLogger(),
+		ActorKey:     csPrivacyActorKey,
 	})
 	go func() { _ = h.keyShred.Run(ctx) }()
 }
@@ -285,6 +319,26 @@ func TestCryptoShred_NullifiesProjectedRowAndDestroysKey(t *testing.T) {
 	h.eventually("keyshredded listener counted the event", 20*time.Second, func() bool {
 		return h.keyShred.HandledTotal() >= 1
 	})
+
+	// Fire 4b: both async listeners durably record their finalization by
+	// submitting RecordShredFinalization under the privacy actor. Drive the
+	// two class-less ops off ops.system through the REAL capability pipeline
+	// (order is nondeterministic — one from each listener) and assert the
+	// piiKey envelope carries both progress booleans.
+	testutil.DriveOne(h.t, h.ctx, h.sysCP, h.sysCons, processor.OutcomeAccepted)
+	testutil.DriveOne(h.t, h.ctx, h.sysCP, h.sysCons, processor.OutcomeAccepted)
+
+	entry, err := h.conn.KVGet(h.ctx, testutil.HarnessCoreBucket, identityKey+".piiKey")
+	require.NoError(t, err)
+	var piiDoc struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(entry.Value, &piiDoc))
+	require.Equal(t, true, piiDoc.Data["shredded"], "piiKey.shredded")
+	require.Equal(t, true, piiDoc.Data["vaultKeyDestroyed"], "piiKey.vaultKeyDestroyed (privacy-worker record)")
+	require.Equal(t, true, piiDoc.Data["projectionsNullified"], "piiKey.projectionsNullified (keyshredded record)")
+	require.NotEmpty(t, piiDoc.Data["vaultKeyDestroyedAt"], "vaultKeyDestroyedAt stamp")
+	require.NotEmpty(t, piiDoc.Data["projectionsNullifiedAt"], "projectionsNullifiedAt stamp")
 }
 
 // TestCryptoShred_NoTargetsConfigured_StillHandlesAndCounts proves an empty

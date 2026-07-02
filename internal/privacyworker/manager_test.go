@@ -2,6 +2,7 @@ package privacyworker_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -216,5 +217,92 @@ func TestManager_ShredKeyError_Retries(t *testing.T) {
 			t.Fatalf("Vault.ShredKey(%s) never succeeded despite retries", identityKey)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// opsStreamFor provisions a core-operations-shaped stream so the manager's
+// RecordShredFinalization publish (Fire 4b) has somewhere to land, and
+// returns a consumer over it for assertions.
+func opsStreamFor(t *testing.T, ctx context.Context, conn *substrate.Conn, name string) jetstream.Consumer {
+	t.Helper()
+	stream, err := conn.JetStream().CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     name,
+		Subjects: []string{"ops.>"},
+	})
+	if err != nil {
+		t.Fatalf("create %s stream: %v", name, err)
+	}
+	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{Durable: "ops-observer"})
+	if err != nil {
+		t.Fatalf("create ops observer consumer: %v", err)
+	}
+	return cons
+}
+
+// TestManager_RecordsFinalizationAfterShred proves Fire 4b's publish-then-ack:
+// with an ActorKey configured, a successful ShredKey is followed by exactly
+// one RecordShredFinalization{vaultKeyDestroyed} op on ops.system, carrying
+// the privacy actor and the shredded identityKey.
+func TestManager_RecordsFinalizationAfterShred(t *testing.T) {
+	conn, ctx := newTestConn(t)
+	opsCons := opsStreamFor(t, ctx, conn, "core-operations")
+	fv := &fakeVault{}
+	const actorKey = "vtx.identity.PrivacyActorKMNPQRST"
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() {
+		_ = privacyworker.New(privacyworker.Config{
+			Conn: conn, EventsStream: "core-events", Durable: "pw-record", Vault: fv,
+			ActorKey: actorKey,
+		}).Run(runCtx)
+	}()
+
+	const identityKey = "vtx.identity.ManagerRecordKMNPQRS"
+	publishKeyShredded(t, ctx, conn, `{"payload":{"identityKey":"`+identityKey+`"}}`)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for fv.shreddedCount(identityKey) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("Vault.ShredKey(%s) was not called within 5s", identityKey)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	msgs, err := opsCons.Fetch(1, jetstream.FetchMaxWait(4*time.Second))
+	if err != nil {
+		t.Fatalf("fetch from ops stream: %v", err)
+	}
+	var got jetstream.Msg
+	for m := range msgs.Messages() {
+		got = m
+		_ = m.Ack()
+	}
+	if got == nil {
+		t.Fatal("no RecordShredFinalization op published to ops.system")
+	}
+	if got.Subject() != "ops.system" {
+		t.Errorf("op published to %q, want ops.system", got.Subject())
+	}
+	var env struct {
+		RequestID     string `json:"requestId"`
+		Lane          string `json:"lane"`
+		OperationType string `json:"operationType"`
+		Actor         string `json:"actor"`
+		Payload       struct {
+			IdentityKey string `json:"identityKey"`
+			Step        string `json:"step"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(got.Data(), &env); err != nil {
+		t.Fatalf("unmarshal op envelope: %v", err)
+	}
+	if env.OperationType != "RecordShredFinalization" || env.Lane != "system" || env.Actor != actorKey {
+		t.Errorf("envelope = %+v, want RecordShredFinalization/system/%s", env, actorKey)
+	}
+	if env.Payload.IdentityKey != identityKey || env.Payload.Step != privacyworker.StepVaultKeyDestroyed {
+		t.Errorf("payload = %+v, want {%s %s}", env.Payload, identityKey, privacyworker.StepVaultKeyDestroyed)
+	}
+	if !substrate.IsValidNanoID(env.RequestID) {
+		t.Errorf("requestId %q is not a Contract #1 NanoID", env.RequestID)
 	}
 }

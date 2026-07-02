@@ -45,11 +45,28 @@ const keyShreddedEventDDL = "privacy.keyShredded"
 // absent contextHint key fails hydration fatally (HydrationMiss) and piiKey
 // may legitimately not exist yet. The script instead uses the kv.Read(key)
 // on-demand seam (§2.5), which tolerates absence (returns None).
+//
+// The DDL also admits RecordShredFinalization{identityKey, step} — the
+// Fire-4b durable progress record the two async shred listeners submit under
+// the identity.system.privacy service actor once their irreversible work
+// lands: internal/privacyworker records step "vaultKeyDestroyed" after
+// Vault.ShredKey succeeds; internal/refractor/keyshredded records step
+// "projectionsNullified" after every configured nullify target succeeded.
+// Each step flips one boolean on the piiKey envelope (+ an At stamp) — the
+// state the shredStatus lens projects so an operator can see in-flight/stuck
+// shreds. The submitters declare the piiKey in ContextHint.Reads, so the
+// update is hydrated + OCC-conditioned: the two sibling records racing on
+// the system lane's concurrent pump workers collapse to a transparent
+// commit-path RevisionConflict retry instead of a whole-document
+// last-writer-wins that would silently lose one flag. The script fail-closes
+// when the envelope is absent or not shredded (a finalization can only
+// follow a ShredIdentityKey commit, which always durably writes the
+// envelope).
 func ShredIdentityKeyDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     shredIdentityKeyDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"ShredIdentityKey"},
+		PermittedCommands: []string{"ShredIdentityKey", "RecordShredFinalization"},
 		Description: "Right-to-erasure trigger (vault-crypto-shredding-design.md §2.2/§2.4, Contract #3 " +
 			"§3.10/§3.11). ShredIdentityKey{identityKey} marks vtx.identity.<NanoID>.piiKey shredded=true " +
 			"(an unconditioned update; writes a durable empty-wrappedDEK placeholder when the identity never " +
@@ -57,15 +74,20 @@ func ShredIdentityKeyDDL() pkgmgr.DDLSpec {
 			"privacy.keyShredded{identityKey}. Recording intent only: the irreversible Vault.ShredKey key " +
 			"destruction happens asynchronously in the privacy-worker's event listener, never on this " +
 			"synchronous commit path. Requires identityKey in ContextHint.Reads (the target-existence guard); " +
-			"rejects an absent or tombstoned identity.",
+			"rejects an absent or tombstoned identity. Also admits " +
+			"RecordShredFinalization{identityKey, step: vaultKeyDestroyed|projectionsNullified} — the async " +
+			"listeners' durable progress record (Fire 4b): flips the named boolean (+ an At stamp) on the " +
+			"already-shredded piiKey envelope, the state the shredStatus lens projects for operators.",
 		Script: shredIdentityKeyDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — the identity whose PII key is being shredded."}},` +
+			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> — the identity whose PII key is being shredded (or whose shred progress is being recorded)."},` +
+			`"step":{"type":"string","enum":["vaultKeyDestroyed","projectionsNullified"],"description":"RecordShredFinalization only — which async finalization step completed."}},` +
 			`"required":["identityKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.identity.<NanoID> of the shredded identity."}}}`,
 		FieldDescription: map[string]string{
-			"identityKey": "Full vtx.identity.<NanoID> key of the identity to shred. Must exist and not be tombstoned; declared in ContextHint.Reads.",
+			"identityKey": "Full vtx.identity.<NanoID> key of the identity to shred. Must exist and not be tombstoned; declared in ContextHint.Reads (ShredIdentityKey only — RecordShredFinalization is read-free and checks the piiKey via kv.Read).",
+			"step":        "RecordShredFinalization only: vaultKeyDestroyed (privacy-worker, after Vault.ShredKey) or projectionsNullified (Refractor keyshredded listener, after all nullify targets succeeded).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -82,6 +104,13 @@ func ShredIdentityKeyDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "No piiKey aspect existed, so a durable placeholder is written (empty wrappedDEK, " +
 					"shredded=true) instead of a real envelope — pre-emptively and PERMANENTLY blocking any future " +
 					"sensitive write to this identity from ever encrypting successfully, even across a Processor restart.",
+			},
+			{
+				Name:    "RecordShredFinalization — the privacy-worker records key destruction",
+				Payload: map[string]any{"identityKey": "vtx.identity.<NanoID>", "step": "vaultKeyDestroyed"},
+				ExpectedOutcome: "Sets piiKey.vaultKeyDestroyed=true (+ vaultKeyDestroyedAt) on the already-shredded " +
+					"envelope. Rejected (FailedPrecondition) when the envelope is not shredded; rejected (NotFound) " +
+					"when no piiKey exists — a finalization can only follow a ShredIdentityKey commit.",
 			},
 		},
 	}
@@ -136,6 +165,13 @@ def execute(state, op):
         if existing != None and not existing.isDeleted:
             data = dict(existing.data)
             data["shredded"] = True
+            # A (re-)shred starts a NEW finalization cycle: clear any prior
+            # cycle's RecordShredFinalization progress so the shredStatus lens
+            # shows this shred as in-flight until its own async records land
+            # (the listeners re-drive off this commit's keyShredded event).
+            for stale in ["vaultKeyDestroyed", "vaultKeyDestroyedAt",
+                          "projectionsNullified", "projectionsNullifiedAt"]:
+                data.pop(stale, None)
         else:
             # No real key was ever minted -- an empty wrappedDEK placeholder,
             # durably shredded=true, so a future Encrypt/Decrypt attempt is
@@ -144,12 +180,49 @@ def execute(state, op):
             # the in-memory deny-list survived a restart.
             data = {"wrappedDEK": "", "keyId": identity_key, "kekVersion": "",
                     "alg": "", "createdAt": op.submittedAt, "shredded": True}
+        data["shreddedAt"] = op.submittedAt
 
         mutations = [{"op": "update", "key": pii_key_key,
             "document": {"class": "piiKey", "vertexKey": identity_key,
                          "localName": "piiKey", "isDeleted": False, "data": data}}]
         events = [{"class": "privacy.keyShredded", "data": {"identityKey": identity_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": identity_key}}
+
+    if ot == "RecordShredFinalization":
+        identity_key = required_string(p, "identityKey")
+        parts = identity_key.split(".")
+        if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "identity":
+            fail("InvalidArgument: identityKey: required vtx.identity.<NanoID> (exactly 3 segments); got " + identity_key)
+        step = required_string(p, "step")
+        if step != "vaultKeyDestroyed" and step != "projectionsNullified":
+            fail("InvalidArgument: step: required vaultKeyDestroyed or projectionsNullified; got " + step)
+
+        # The piiKey comes from the DECLARED read set (ContextHint.Reads --
+        # the submitters always declare it), NOT the lazy kv.Read seam:
+        # a hydrated read is OCC-conditioned by the commit path, so the two
+        # sibling records (vaultKeyDestroyed / projectionsNullified racing on
+        # the system lane's concurrent workers) collapse to a transparent
+        # RevisionConflict retry instead of a whole-document last-writer-wins
+        # that silently loses one flag. ShredIdentityKey ALWAYS durably writes
+        # an envelope before its keyShredded event exists, so a declared-but-
+        # absent piiKey fails hydration (HydrationMiss) -- the same "no shred
+        # to record" rejection the in-script guards express.
+        pii_key_key = identity_key + ".piiKey"
+        if pii_key_key not in state:
+            fail("NotFound: " + pii_key_key + " is absent -- RecordShredFinalization requires a prior ShredIdentityKey")
+        existing = state[pii_key_key]
+        if existing == None or (hasattr(existing, "isDeleted") and existing.isDeleted):
+            fail("NotFound: " + pii_key_key + " is tombstoned -- RecordShredFinalization requires a prior ShredIdentityKey")
+        data = dict(existing.data)
+        if not data.get("shredded", False):
+            fail("FailedPrecondition: " + pii_key_key + " is not shredded -- RecordShredFinalization requires a prior ShredIdentityKey")
+        data[step] = True
+        data[step + "At"] = op.submittedAt
+
+        mutations = [{"op": "update", "key": pii_key_key,
+            "document": {"class": "piiKey", "vertexKey": identity_key,
+                         "localName": "piiKey", "isDeleted": False, "data": data}}]
+        return {"mutations": mutations, "events": [], "response": {"primaryKey": identity_key}}
 
     fail("shredIdentityKey DDL: unknown operationType: " + ot)
 `

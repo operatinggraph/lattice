@@ -120,12 +120,22 @@ func main() {
 	// independent consumer of the same event. Targets is empty until a
 	// vertical's Phase-A lens opts in (see internal/refractor/keyshredded's
 	// package doc) — an empty list is a harmless no-op consumer that still
-	// exercises the event and the counters.
+	// exercises the event and the counters. The privacy service actor (Fire 4b
+	// finalization recording) is graph-discovered — absent on a pre-v15
+	// kernel, which disables recording without disabling nullification.
+	privacyCtx, privacyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	privacyActorKey, paErr := bootstrap.PrivacyActorKey(privacyCtx, conn)
+	privacyCancel()
+	if paErr != nil {
+		logger.Error("discover privacy service actor", "err", paErr)
+		os.Exit(1)
+	}
 	keyShredded := keyshredded.New(keyshredded.Config{
 		Conn:         conn,
 		EventsStream: bootstrap.CoreEventsStreamName,
 		Control:      controlSvc,
 		Logger:       logger,
+		ActorKey:     privacyActorKey,
 	})
 	hb.KeyShreddedHandledTotalProvider = keyShredded.HandledTotal
 	hb.VaultCallsTotalProvider = func() uint64 { return 0 } // Phase-1 stub — see field doc

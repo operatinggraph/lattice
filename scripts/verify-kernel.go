@@ -8,7 +8,7 @@
 //
 //	1 bootstrap op tracker
 //	1 admin identity vertex
-//	4 internal service-actor identity vertices (Loom + Weaver + Bridge + object-store-manager, arch §92)
+//	5 internal service-actor identity vertices (Loom + Weaver + Bridge + object-store-manager + privacy, arch §92)
 //	1 meta-meta-DDL vertex + 9 aspects
 //	  (canonicalName/permittedCommands/description/script +
 //	   inputSchema/outputSchema/fieldDescription/examples + compensation)
@@ -22,9 +22,9 @@
 //	3 meta-permission vertices
 //	3 grantedBy links (meta-perm → operator)
 //	1 admin → operator holdsRole link
-//	4 service-actor → operator holdsRole links (Loom + Weaver + Bridge + object-store-manager)
+//	5 service-actor → operator holdsRole links (Loom + Weaver + Bridge + object-store-manager + privacy)
 //
-// Total ≈ 69 OK lines.
+// Total ≈ 71 OK lines.
 //
 // Package gates (verify-package-rbac etc.) cover package-installed
 // DDLs / lenses / permissions / grants separately.

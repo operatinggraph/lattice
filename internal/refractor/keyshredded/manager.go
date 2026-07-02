@@ -36,8 +36,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +54,13 @@ const (
 	FilterSubject = "events.privacy.keyShredded"
 	// DefaultDurable is this listener's durable consumer name.
 	DefaultDurable = "refractor-keyshredded"
+	// DefaultOpLane is the ops.<lane> RecordShredFinalization is submitted on
+	// (the Processor consumes ops.system).
+	DefaultOpLane = "system"
+
+	// StepProjectionsNullified is the RecordShredFinalization step this
+	// listener records (packages/privacy-base shredIdentityKey DDL).
+	StepProjectionsNullified = "projectionsNullified"
 
 	defaultRedeliveryDelay = 5 * time.Second
 
@@ -85,6 +94,21 @@ type Config struct {
 	// Empty is valid (a no-op sweep) — see package doc.
 	Targets []NullifyTarget
 	Logger  *slog.Logger
+
+	// ActorKey is the identity.system.privacy service-actor vertex key this
+	// listener submits RecordShredFinalization{projectionsNullified} under
+	// once EVERY configured target nullified cleanly (Fire 4b). Empty disables
+	// the durable finalization record (with a startup warning) — nullification
+	// itself still runs. A privacy-critical halt or a given-up target skips
+	// the record, leaving the shredStatus row visibly stuck (the point); the
+	// event is Acked, so after repairing the target the operator clears the
+	// stuck row by re-submitting ShredIdentityKey — the re-shred resets the
+	// finalization cycle and its new keyShredded event re-drives both
+	// listeners end to end.
+	ActorKey string
+	// OpLane is the ops.<lane> for the RecordShredFinalization submit.
+	// Defaults to DefaultOpLane.
+	OpLane string
 }
 
 // Manager runs the keyShredded nullification consumer.
@@ -107,6 +131,12 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.Durable == "" {
 		cfg.Durable = DefaultDurable
+	}
+	if cfg.OpLane == "" {
+		cfg.OpLane = DefaultOpLane
+	}
+	if cfg.ActorKey == "" {
+		cfg.Logger.Warn("refractor keyshredded: no ActorKey configured; shred finalization recording disabled (shredStatus rows will stay in-flight)")
 	}
 	return &Manager{cfg: cfg}
 }
@@ -164,6 +194,7 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 	}
 
 	notRegistered := false
+	allClean := true
 	for _, target := range m.cfg.Targets {
 		keys := map[string]any{target.KeyField: ev.Payload.IdentityKey}
 		// projectionSeq: a GUARDED nats_kv target (adapter/natskv.go's H4
@@ -211,10 +242,12 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 			m.cfg.Logger.Error("refractor keyshredded: target lens still not registered after max redeliveries; giving up on this target",
 				"identityKey", ev.Payload.IdentityKey, "ruleId", target.RuleID, "error", err,
 				"numDelivered", msg.NumDelivered)
+			allClean = false
 			continue
 		}
 		// A real Delete failure: privacy-critical — halt this lens, alert, no retry
 		// (the remaining targets are still attempted below).
+		allClean = false
 		pcErr := failure.PrivacyCritical(err)
 		m.cfg.Logger.Error("refractor keyshredded: nullification failed; pausing lens (privacy-critical, no retry)",
 			"identityKey", ev.Payload.IdentityKey, "ruleId", target.RuleID, "error", pcErr)
@@ -227,8 +260,76 @@ func (m *Manager) handleKeyShredded(ctx context.Context, msg substrate.Message) 
 		return substrate.NakWithDelay
 	}
 
+	// Durably record the finalization ONLY when every configured target
+	// nullified cleanly this delivery (an empty Targets list is vacuously
+	// clean). A privacy-critical halt or a given-up target skips the record —
+	// the shredStatus row stays visibly stuck, which is the observability this
+	// exists for. Publish-then-ack: a failed submit naks the whole event;
+	// NullifyRow is idempotent, so the redelivery re-attempts targets and
+	// retries the submit with the same deterministic requestId (Contract #4
+	// tracker collapse).
+	if allClean && m.cfg.ActorKey != "" {
+		if err := m.submitFinalization(ctx, ev.Payload.IdentityKey, msg.Sequence); err != nil {
+			m.cfg.Logger.Warn("refractor keyshredded: RecordShredFinalization submit failed; retrying whole event",
+				"identityKey", ev.Payload.IdentityKey, "error", err)
+			return substrate.NakWithDelay
+		}
+	}
+
 	m.cfg.Logger.Info("refractor keyshredded: identity's projected rows nullified",
 		"identityKey", ev.Payload.IdentityKey, "targets", len(m.cfg.Targets))
 	m.handled.Add(1)
 	return substrate.Ack
+}
+
+// finalizationOpEnvelope is the Contract #2 §2.1 op wire format this listener
+// publishes to ops.<lane> — the same shape internal/processor reads; carried
+// as a private copy to keep the module boundary clean (the
+// weaver/objectmanager/privacyworker idiom).
+type finalizationOpEnvelope struct {
+	RequestID     string                  `json:"requestId"`
+	Lane          string                  `json:"lane"`
+	OperationType string                  `json:"operationType"`
+	Actor         string                  `json:"actor"`
+	SubmittedAt   string                  `json:"submittedAt"`
+	Payload       json.RawMessage         `json:"payload"`
+	ContextHint   *finalizationContextHint `json:"contextHint,omitempty"`
+}
+
+type finalizationContextHint struct {
+	Reads []string `json:"reads,omitempty"`
+}
+
+// submitFinalization publishes one RecordShredFinalization
+// {projectionsNullified} op. ContextHint.Reads declares the piiKey aspect so
+// the record is hydrated + OCC-conditioned (the sibling vaultKeyDestroyed
+// record can race this one on the system lane's concurrent workers;
+// conditioning turns a would-be lost-update into a transparent commit-path
+// retry). Class-less (the Processor's operationType→class reverse index
+// resolves it). The requestId is keyed on the triggering event's
+// backing-stream sequence, so a redelivery of the SAME event collapses on the
+// Contract #4 tracker while a new shred event derives a fresh id.
+func (m *Manager) submitFinalization(ctx context.Context, identityKey string, seq uint64) error {
+	payload, err := json.Marshal(map[string]any{
+		"identityKey": identityKey,
+		"step":        StepProjectionsNullified,
+	})
+	if err != nil {
+		return fmt.Errorf("keyshredded: marshal payload: %w", err)
+	}
+	env := finalizationOpEnvelope{
+		RequestID: substrate.DeriveNanoID("shredfin:"+StepProjectionsNullified+":",
+			identityKey+"\x00"+strconv.FormatUint(seq, 10)),
+		Lane:          m.cfg.OpLane,
+		OperationType: "RecordShredFinalization",
+		Actor:         m.cfg.ActorKey,
+		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
+		Payload:       payload,
+		ContextHint:   &finalizationContextHint{Reads: []string{identityKey + ".piiKey"}},
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("keyshredded: marshal op envelope: %w", err)
+	}
+	return m.cfg.Conn.Publish(ctx, "ops."+m.cfg.OpLane, data, nil)
 }

@@ -64,6 +64,7 @@ func TestServiceActorIdentities_Seeded(t *testing.T) {
 		{WeaverIdentityKey, "identity.system.weaver"},
 		{BridgeIdentityKey, "identity.system.bridge"},
 		{ObjmgrIdentityKey, "identity.system.object-store-manager"},
+		{PrivacyIdentityKey, "identity.system.privacy"},
 	}
 	for _, tc := range cases {
 		raw, ok := idx[tc.key]
@@ -89,7 +90,7 @@ func TestServiceActorIdentities_Seeded(t *testing.T) {
 	}
 }
 
-// TestServiceActorHoldsRoleLinks_Seeded asserts the three holdsRole links are
+// TestServiceActorHoldsRoleLinks_Seeded asserts the service-actor holdsRole links are
 // present with identity=source, operator role=target (Contract #1 §1.1
 // direction: later-arriving vertex is the source) and read as the sentence
 // "<service> holdsRole operator".
@@ -106,6 +107,7 @@ func TestServiceActorHoldsRoleLinks_Seeded(t *testing.T) {
 		{WeaverHoldsRoleLinkKey, "vtx.identity." + WeaverIdentityID},
 		{BridgeHoldsRoleLinkKey, "vtx.identity." + BridgeIdentityID},
 		{ObjmgrHoldsRoleLinkKey, "vtx.identity." + ObjmgrIdentityID},
+		{PrivacyHoldsRoleLinkKey, "vtx.identity." + PrivacyIdentityID},
 	}
 	for _, tc := range cases {
 		raw, ok := idx[tc.key]
@@ -130,7 +132,7 @@ func TestServiceActorHoldsRoleLinks_Seeded(t *testing.T) {
 
 // TestServiceActors_ReuseOperatorRole proves the AC #2 invariant: the service
 // actors add NO new role/permission/grantedBy entries. The only new keys
-// beyond the admin baseline are exactly the 4 identity vertices + 4 holdsRole
+// beyond the admin baseline are exactly the 5 identity vertices + 5 holdsRole
 // links; root-equivalence is established by reusing the existing operator
 // topology.
 func TestServiceActors_ReuseOperatorRole(t *testing.T) {
@@ -138,8 +140,8 @@ func TestServiceActors_ReuseOperatorRole(t *testing.T) {
 	idx := entriesByKey(t)
 
 	newKeys := []string{
-		LoomIdentityKey, WeaverIdentityKey, BridgeIdentityKey, ObjmgrIdentityKey,
-		LoomHoldsRoleLinkKey, WeaverHoldsRoleLinkKey, BridgeHoldsRoleLinkKey, ObjmgrHoldsRoleLinkKey,
+		LoomIdentityKey, WeaverIdentityKey, BridgeIdentityKey, ObjmgrIdentityKey, PrivacyIdentityKey,
+		LoomHoldsRoleLinkKey, WeaverHoldsRoleLinkKey, BridgeHoldsRoleLinkKey, ObjmgrHoldsRoleLinkKey, PrivacyHoldsRoleLinkKey,
 	}
 	for _, k := range newKeys {
 		if _, ok := idx[k]; !ok {
@@ -150,7 +152,7 @@ func TestServiceActors_ReuseOperatorRole(t *testing.T) {
 	// All links must target the SAME pre-existing operator role the admin
 	// holds — not a fresh "systemRoot"-style role.
 	roleTarget := "vtx.role." + RoleOperatorID
-	for _, k := range []string{LoomHoldsRoleLinkKey, WeaverHoldsRoleLinkKey, BridgeHoldsRoleLinkKey, ObjmgrHoldsRoleLinkKey} {
+	for _, k := range []string{LoomHoldsRoleLinkKey, WeaverHoldsRoleLinkKey, BridgeHoldsRoleLinkKey, ObjmgrHoldsRoleLinkKey, PrivacyHoldsRoleLinkKey} {
 		var l linkEnvelope
 		if err := json.Unmarshal(idx[k], &l); err != nil {
 			t.Fatalf("unmarshal %q: %v", k, err)
@@ -162,19 +164,21 @@ func TestServiceActors_ReuseOperatorRole(t *testing.T) {
 }
 
 // TestPrimordialVertexKeys_IncludesServiceActors asserts the kernel-
-// verification enumeration covers all eight service-actor keys (so verify-kernel
+// verification enumeration covers all ten service-actor keys (so verify-kernel
 // checks them).
 func TestPrimordialVertexKeys_IncludesServiceActors(t *testing.T) {
 	populateForTest(t)
 	want := map[string]bool{
-		LoomIdentityKey:        false,
-		WeaverIdentityKey:      false,
-		BridgeIdentityKey:      false,
-		ObjmgrIdentityKey:      false,
-		LoomHoldsRoleLinkKey:   false,
-		WeaverHoldsRoleLinkKey: false,
-		BridgeHoldsRoleLinkKey: false,
-		ObjmgrHoldsRoleLinkKey: false,
+		LoomIdentityKey:         false,
+		WeaverIdentityKey:       false,
+		BridgeIdentityKey:       false,
+		ObjmgrIdentityKey:       false,
+		PrivacyIdentityKey:      false,
+		LoomHoldsRoleLinkKey:    false,
+		WeaverHoldsRoleLinkKey:  false,
+		BridgeHoldsRoleLinkKey:  false,
+		ObjmgrHoldsRoleLinkKey:  false,
+		PrivacyHoldsRoleLinkKey: false,
 	}
 	for _, k := range PrimordialVertexKeys() {
 		if _, ok := want[k]; ok {
@@ -189,21 +193,23 @@ func TestPrimordialVertexKeys_IncludesServiceActors(t *testing.T) {
 }
 
 // TestServiceActors_KeyCountDelta asserts the primordial batch grew by exactly
-// 8 entries (4 vertices + 4 links) relative to a baseline computed by removing
+// 10 entries (5 vertices + 5 links) relative to a baseline computed by removing
 // the service-actor keys — guarding the verify-kernel count delta.
 func TestServiceActors_KeyCountDelta(t *testing.T) {
 	populateForTest(t)
 	idx := entriesByKey(t)
 
 	serviceKeys := map[string]bool{
-		LoomIdentityKey:        true,
-		WeaverIdentityKey:      true,
-		BridgeIdentityKey:      true,
-		ObjmgrIdentityKey:      true,
-		LoomHoldsRoleLinkKey:   true,
-		WeaverHoldsRoleLinkKey: true,
-		BridgeHoldsRoleLinkKey: true,
-		ObjmgrHoldsRoleLinkKey: true,
+		LoomIdentityKey:         true,
+		WeaverIdentityKey:       true,
+		BridgeIdentityKey:       true,
+		ObjmgrIdentityKey:       true,
+		PrivacyIdentityKey:      true,
+		LoomHoldsRoleLinkKey:    true,
+		WeaverHoldsRoleLinkKey:  true,
+		BridgeHoldsRoleLinkKey:  true,
+		ObjmgrHoldsRoleLinkKey:  true,
+		PrivacyHoldsRoleLinkKey: true,
 	}
 	count := 0
 	for k := range idx {
@@ -211,17 +217,17 @@ func TestServiceActors_KeyCountDelta(t *testing.T) {
 			count++
 		}
 	}
-	if count != 8 {
-		t.Fatalf("expected exactly 8 service-actor entries in batch, got %d", count)
+	if count != 10 {
+		t.Fatalf("expected exactly 10 service-actor entries in batch, got %d", count)
 	}
 }
 
 // TestPrimordialVertexKeyCount_AgreesWithEnumeration asserts the declared
-// count constant matches the enumerated slice length and is the expected 34
-// after the UpgradePackage DDL meta-vertex + its permission + grant link were
-// added (Contract #8 §8.6). This is the pure-Go mirror of the
-// scripts/verify-kernel.go len()==Count agreement check (the kernel-topology
-// lockstep guard).
+// count constant matches the enumerated slice length and is the expected 36
+// after the privacy service actor (identity vertex + holdsRole link,
+// vault-crypto-shredding-design.md Fire 4b) was added. This is the pure-Go
+// mirror of the scripts/verify-kernel.go len()==Count agreement check (the
+// kernel-topology lockstep guard).
 func TestPrimordialVertexKeyCount_AgreesWithEnumeration(t *testing.T) {
 	populateForTest(t)
 	keys := PrimordialVertexKeys()
@@ -229,8 +235,8 @@ func TestPrimordialVertexKeyCount_AgreesWithEnumeration(t *testing.T) {
 		t.Fatalf("PrimordialVertexKeys() enumerates %d but PrimordialVertexKeyCount is %d",
 			len(keys), PrimordialVertexKeyCount)
 	}
-	if PrimordialVertexKeyCount != 34 {
-		t.Fatalf("PrimordialVertexKeyCount = %d, want 34", PrimordialVertexKeyCount)
+	if PrimordialVertexKeyCount != 36 {
+		t.Fatalf("PrimordialVertexKeyCount = %d, want 36", PrimordialVertexKeyCount)
 	}
 }
 
@@ -289,16 +295,16 @@ func TestGeneratePopulateRoundTrip_Bridge(t *testing.T) {
 	}
 }
 
-// TestCheckVersion_RejectsStaleAcceptsCurrent proves the version-14 gate: a
-// version-14 file passes, and any other version (notably "13", which predates
-// the capabilityReadWildcardGrants primordial lens) is hard-rejected with the
-// make-down/make-up guidance so a stale file can never silently run against a
-// mismatched kernel topology (AC #2).
+// TestCheckVersion_RejectsStaleAcceptsCurrent proves the version-15 gate: a
+// version-15 file passes, and any other version (notably "14", which predates
+// the privacy service actor) is hard-rejected with the make-down/make-up
+// guidance so a stale file can never silently run against a mismatched kernel
+// topology (AC #2).
 func TestCheckVersion_RejectsStaleAcceptsCurrent(t *testing.T) {
-	if err := checkVersion(BootstrapFile{Version: "14"}); err != nil {
-		t.Errorf("checkVersion(version=14): unexpected error %v", err)
+	if err := checkVersion(BootstrapFile{Version: "15"}); err != nil {
+		t.Errorf("checkVersion(version=15): unexpected error %v", err)
 	}
-	for _, v := range []string{"13", "12", "11", "10", "9", "8", "7", "6", "5", ""} {
+	for _, v := range []string{"14", "13", "12", "11", "10", "9", "8", "7", "6", "5", ""} {
 		err := checkVersion(BootstrapFile{Version: v})
 		if err == nil {
 			t.Errorf("checkVersion(version=%q): expected rejection, got nil", v)

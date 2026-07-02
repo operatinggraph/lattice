@@ -403,6 +403,12 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	if err := add(ObjmgrIdentityKey, objmgrIDVal, objmgrIDErr); err != nil {
 		return nil, err
 	}
+	privacyIDVal, privacyIDErr := MakeVertexEnvelope(PrivacyIdentityKey, "identity.system.privacy",
+		map[string]any{"protected": true,
+			"note": "Internal privacy-plane service-actor identity (crypto-shred finalization). The privacyworker + Refractor keyshredded listeners submit RecordShredFinalization under it. Root-equivalent via holdsRole to the operator role."})
+	if err := add(PrivacyIdentityKey, privacyIDVal, privacyIDErr); err != nil {
+		return nil, err
+	}
 
 	// 3. Meta-meta root DDL meta-vertex — the kernel's sole DDL.
 	rootVal, rootErr := MakeVertexEnvelope(MetaRootKey, "meta.ddl.vertexType",
@@ -710,12 +716,14 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 
 	// 10a. Service-actor → operator holdsRole links. Identity is the source
 	// (later-arriving vertex per Contract #1 §1.1); the operator role is the
-	// target. Reads "loom holdsRole operator" / "weaver holdsRole operator" /
-	// "bridge holdsRole operator". This single edge is the sole source of each
-	// actor's root-equivalent capability: the Capability Lens walks holdsRole →
-	// operator → grantedBy → permission and projects the operator's scope:"any"
-	// permissions into `cap.identity.<id>.platformPermissions[]` — no new role,
-	// permission, grantedBy link, cypher branch, or step-3 code (Contract #7 §7.7).
+	// target. Reads as the sentence "<service> holdsRole operator". This edge
+	// establishes root-equivalence topologically (Contract #7 §7.7) — no new
+	// role, permission, grantedBy link, cypher branch, or step-3 code. The
+	// `cap.identity.<id>` doc itself is projected by the Capability Lens
+	// primordial-identity anchor, which grants the fixed kernel op set to
+	// every `data.protected = true` identity as a literal, NOT a graph walk
+	// (post-12.6 decomposition — see lenses.go CapabilityLensDefinition;
+	// role-derived package grants project to the disjoint cap.roles.<actor>).
 	loomHoldsVal, loomHoldsErr := MakeLinkEnvelope(
 		LoomHoldsRoleLinkKey,
 		"vtx.identity."+LoomIdentityID,
@@ -746,6 +754,14 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 		"vtx.role."+RoleOperatorID,
 		"holdsRole", "holdsRole", map[string]any{})
 	if err := add(ObjmgrHoldsRoleLinkKey, objmgrHoldsVal, objmgrHoldsErr); err != nil {
+		return nil, err
+	}
+	privacyHoldsVal, privacyHoldsErr := MakeLinkEnvelope(
+		PrivacyHoldsRoleLinkKey,
+		"vtx.identity."+PrivacyIdentityID,
+		"vtx.role."+RoleOperatorID,
+		"holdsRole", "holdsRole", map[string]any{})
+	if err := add(PrivacyHoldsRoleLinkKey, privacyHoldsVal, privacyHoldsErr); err != nil {
 		return nil, err
 	}
 
@@ -1198,6 +1214,7 @@ func WaitForBootstrapComplete(ctx context.Context, nc *nats.Conn, logger *slog.L
 		{"weaver", capabilityKeyForIdentity(WeaverIdentityID)},
 		{"bridge", capabilityKeyForIdentity(BridgeIdentityID)},
 		{"object-store-manager", capabilityKeyForIdentity(ObjmgrIdentityID)},
+		{"privacy", capabilityKeyForIdentity(PrivacyIdentityID)},
 	}
 
 	// checkAll classifies each key's Get error into three outcomes. A genuine

@@ -156,7 +156,8 @@ func seedPlatformEntry(platformKeyDerivation func(string) (string, error)) authE
 // anchor and every other (ordinary) actor to cap.roles.<actor>. It is the
 // single platform entry's class-aware derivation (Q1): one key chosen per
 // Authorize call by actor class, never a fan-out. systemActorKeys are the full
-// vtx.identity.<id> actor keys of the primordial admin + Loom + Weaver.
+// vtx.identity.<id> actor keys of the primordial admin + the kernel-seeded
+// service actors (graph-discovered by bootstrap.SystemActorKeys).
 func classAwarePlatformKey(systemActorKeys []string) func(string) (string, error) {
 	system := make(map[string]struct{}, len(systemActorKeys))
 	for _, k := range systemActorKeys {

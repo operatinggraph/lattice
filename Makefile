@@ -87,7 +87,7 @@ up:
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap -skip-ready-wait; \
 		echo "==> Starting refractor in background..."; \
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" ./bin/refractor >refractor.log 2>&1 </dev/null & \
-		echo "==> Running bootstrap (readiness gate — blocks until admin + Loom + Weaver + Bridge cap.* projections land)..."; \
+		echo "==> Running bootstrap (readiness gate — blocks until admin + Loom + Weaver + Bridge + objmgr + privacy cap.* projections land)..."; \
 		NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_BOOTSTRAP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/bootstrap; \
 		echo "==> Building processor binary..."; \
 		go build -o bin/processor ./cmd/processor; \

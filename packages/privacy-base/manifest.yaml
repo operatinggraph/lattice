@@ -15,3 +15,12 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: privacy.keyShredded
       class: meta.ddl.eventType
+  lenses:
+    - canonicalName: shredStatus
+      adapter: nats-kv
+      bucket: privacy-shreds
+      engine: full
+  permissions:
+    - operationType: RecordShredFinalization
+      scope: any
+      grantsTo: [operator]

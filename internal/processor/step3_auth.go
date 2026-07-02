@@ -149,7 +149,7 @@ type SelectAuthorizerOpts struct {
 	RbacRolesActive bool
 
 	// SystemActorKeys are the full vtx.identity.<id> keys of the kernel-seeded
-	// system actors (primordial admin + Loom + Weaver) that keep reading
+	// system actors (the primordial admin + the kernel-seeded service actors) that keep reading
 	// cap.<actor> when RbacRolesActive is true.
 	SystemActorKeys []string
 }

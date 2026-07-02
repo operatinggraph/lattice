@@ -83,6 +83,14 @@ var (
 	BridgeIdentityKey string
 	ObjmgrIdentityID  string
 	ObjmgrIdentityKey string
+	// PrivacyIdentity is the privacy-plane service actor (Contract #7 §7.2's
+	// "additional internal service actor" pattern): the crypto-shred
+	// finalization listeners — internal/privacyworker (Vault key destruction)
+	// and internal/refractor/keyshredded (projection nullification) — submit
+	// RecordShredFinalization ops under it so shred progress is durably
+	// recorded in Core KV (vault-crypto-shredding-design.md §2.4, Fire 4b).
+	PrivacyIdentityID  string
+	PrivacyIdentityKey string
 
 	MetaRootID        string
 	MetaRootKey       string
@@ -166,6 +174,7 @@ var (
 	WeaverHoldsRoleLinkKey    string
 	BridgeHoldsRoleLinkKey    string
 	ObjmgrHoldsRoleLinkKey    string
+	PrivacyHoldsRoleLinkKey   string
 )
 
 // PrimordialIDsRaw is the persisted form (matches lattice.bootstrap.json).
@@ -179,6 +188,7 @@ type PrimordialIDsRaw struct {
 	WeaverIdentity               string `json:"weaverIdentity"`
 	BridgeIdentity               string `json:"bridgeIdentity"`
 	ObjmgrIdentity               string `json:"objmgrIdentity"`
+	PrivacyIdentity              string `json:"privacyIdentity"`
 	MetaRoot                     string `json:"metaRoot"`
 	CapabilityLens               string `json:"capabilityLens"`
 	CapabilityReadLens           string `json:"capabilityReadLens"`
@@ -262,6 +272,12 @@ type PrimordialIDsRaw struct {
 //     readiness list, so PrimordialVertexKeyCount is unchanged (34). A stale
 //     file lacks the new NanoID field, so the version bump forces
 //     regeneration.
+//   - "15": privacy internal service-actor identity NanoID added (the
+//     crypto-shred finalization actor, vault-crypto-shredding-design.md Fire
+//     4b — internal/privacyworker + internal/refractor/keyshredded submit
+//     RecordShredFinalization under it, mirroring Loom/Weaver/Bridge/objmgr).
+//     Adds 2 Core-KV keys (the identity vertex + its holdsRole link), so
+//     PrimordialVertexKeyCount moves 34 → 36.
 type BootstrapFile struct {
 	Version       string           `json:"version"`
 	GeneratedAt   string           `json:"generatedAt"`
@@ -356,6 +372,7 @@ func currentRaw() PrimordialIDsRaw {
 		WeaverIdentity:               WeaverIdentityID,
 		BridgeIdentity:               BridgeIdentityID,
 		ObjmgrIdentity:               ObjmgrIdentityID,
+		PrivacyIdentity:              PrivacyIdentityID,
 		MetaRoot:                     MetaRootID,
 		CapabilityLens:               CapabilityLensID,
 		CapabilityReadLens:           CapabilityReadLensID,
@@ -399,18 +416,17 @@ func Load(path string) error {
 // checkVersion returns a clear error when the bootstrap file's version is
 // not one of the supported versions. This surfaces a meaningful message
 // instead of a confusing NanoID validation failure when an operator
-// upgrades Lattice without running `make down` first. Version 13 adds the
-// capabilityReadGrants primordial lens — the base read-grant PRODUCER that
-// populates the Postgres actor_read_grants table for RLS (Contract #6 §6.14,
-// D1.3); older files lack its NanoID field and must be regenerated so the
-// kernel topology matches.
+// upgrades Lattice without running `make down` first. Version 15 adds the
+// privacyIdentity service actor — the crypto-shred finalization actor
+// (vault-crypto-shredding-design.md Fire 4b); older files lack its NanoID
+// field and must be regenerated so the kernel topology matches.
 func checkVersion(f BootstrapFile) error {
 	switch f.Version {
-	case "14":
+	case "15":
 		return nil
 	default:
 		return fmt.Errorf(
-			"bootstrap file version mismatch: got %q, want \"14\" — run `make down && make up`",
+			"bootstrap file version mismatch: got %q, want \"15\" — run `make down && make up`",
 			f.Version,
 		)
 	}
@@ -425,6 +441,7 @@ func generate() (PrimordialIDsRaw, error) {
 		&raw.WeaverIdentity,
 		&raw.BridgeIdentity,
 		&raw.ObjmgrIdentity,
+		&raw.PrivacyIdentity,
 		&raw.MetaRoot,
 		&raw.CapabilityLens,
 		&raw.CapabilityReadLens,
@@ -468,6 +485,7 @@ func populate(raw PrimordialIDsRaw) error {
 		{"weaverIdentity", raw.WeaverIdentity},
 		{"bridgeIdentity", raw.BridgeIdentity},
 		{"objmgrIdentity", raw.ObjmgrIdentity},
+		{"privacyIdentity", raw.PrivacyIdentity},
 		{"metaRoot", raw.MetaRoot},
 		{"capabilityLens", raw.CapabilityLens},
 		{"capabilityReadLens", raw.CapabilityReadLens},
@@ -501,6 +519,7 @@ func populate(raw PrimordialIDsRaw) error {
 	WeaverIdentityID = raw.WeaverIdentity
 	BridgeIdentityID = raw.BridgeIdentity
 	ObjmgrIdentityID = raw.ObjmgrIdentity
+	PrivacyIdentityID = raw.PrivacyIdentity
 	MetaRootID = raw.MetaRoot
 	CapabilityLensID = raw.CapabilityLens
 	CapabilityReadLensID = raw.CapabilityReadLens
@@ -546,6 +565,7 @@ func populate(raw PrimordialIDsRaw) error {
 	WeaverIdentityKey = substrate.VertexKey("identity", WeaverIdentityID)
 	BridgeIdentityKey = substrate.VertexKey("identity", BridgeIdentityID)
 	ObjmgrIdentityKey = substrate.VertexKey("identity", ObjmgrIdentityID)
+	PrivacyIdentityKey = substrate.VertexKey("identity", PrivacyIdentityID)
 	MetaRootKey = substrate.VertexKey("meta", MetaRootID)
 	CapabilityLensKey = substrate.VertexKey("meta", CapabilityLensID)
 	CapabilityReadLensKey = substrate.VertexKey("meta", CapabilityReadLensID)
@@ -561,13 +581,14 @@ func populate(raw PrimordialIDsRaw) error {
 	WeaverHoldsRoleLinkKey = substrate.LinkKey("identity", WeaverIdentityID, "holdsRole", "role", RoleOperatorID)
 	BridgeHoldsRoleLinkKey = substrate.LinkKey("identity", BridgeIdentityID, "holdsRole", "role", RoleOperatorID)
 	ObjmgrHoldsRoleLinkKey = substrate.LinkKey("identity", ObjmgrIdentityID, "holdsRole", "role", RoleOperatorID)
+	PrivacyHoldsRoleLinkKey = substrate.LinkKey("identity", PrivacyIdentityID, "holdsRole", "role", RoleOperatorID)
 
 	return nil
 }
 
 func persistWithStatus(path string, raw PrimordialIDsRaw, status string) error {
 	f := BootstrapFile{
-		Version:       "14",
+		Version:       "15",
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		Status:        status,
 		PrimordialIDs: raw,
@@ -591,11 +612,13 @@ func PrimordialVertexKeys() []string {
 		BootstrapOpKey,
 		// admin identity
 		BootstrapIdentityKey,
-		// internal service-actor identities (Loom + Weaver + Bridge + objmgr, arch §92)
+		// internal service-actor identities (Loom + Weaver + Bridge + objmgr +
+		// privacy, arch §92)
 		LoomIdentityKey,
 		WeaverIdentityKey,
 		BridgeIdentityKey,
 		ObjmgrIdentityKey,
+		PrivacyIdentityKey,
 		// meta-meta DDL
 		MetaRootKey,
 		// InstallPackage / UninstallPackage / UpgradePackage primordial DDLs
@@ -621,11 +644,13 @@ func PrimordialVertexKeys() []string {
 		"lnk.permission." + PermUninstallPackageID + ".grantedBy.role." + RoleOperatorID,
 		"lnk.permission." + PermUpgradePackageID + ".grantedBy.role." + RoleOperatorID,
 		BootstrapHoldsRoleLinkKey,
-		// service-actor holdsRole links (Loom + Weaver + Bridge + objmgr → operator)
+		// service-actor holdsRole links (Loom + Weaver + Bridge + objmgr +
+		// privacy → operator)
 		LoomHoldsRoleLinkKey,
 		WeaverHoldsRoleLinkKey,
 		BridgeHoldsRoleLinkKey,
 		ObjmgrHoldsRoleLinkKey,
+		PrivacyHoldsRoleLinkKey,
 		// 5 aspect-type meta-vertices (self-description DDLs)
 		AspectTypeDescriptionKey,
 		AspectTypeInputSchemaKey,
@@ -638,9 +663,9 @@ func PrimordialVertexKeys() []string {
 // PrimordialVertexKeyCount is the count of TOP-LEVEL kernel keys (the
 // ones in PrimordialVertexKeys()). Used as a count-only readiness gate
 // where loading lattice.bootstrap.json would race startup. Current count
-// is 34 entries: 1 op + 1 admin + 4 service actors (Loom + Weaver +
-// Bridge + object-store-manager) + 1 meta-DDL + 3 install/uninstall/upgrade
-// DDLs + 1 lens (the capability primordial-identity anchor) + 1 role + 6 perms
-// (3 meta + 3 install/uninstall/upgrade) + 11 links (6 grantedBy + 5 holdsRole)
-// + 5 aspect-type meta-vertices.
-const PrimordialVertexKeyCount = 34
+// is 36 entries: 1 op + 1 admin + 5 service actors (Loom + Weaver +
+// Bridge + object-store-manager + privacy) + 1 meta-DDL + 3
+// install/uninstall/upgrade DDLs + 1 lens (the capability primordial-identity
+// anchor) + 1 role + 6 perms (3 meta + 3 install/uninstall/upgrade) + 12 links
+// (6 grantedBy + 6 holdsRole) + 5 aspect-type meta-vertices.
+const PrimordialVertexKeyCount = 36
