@@ -186,7 +186,7 @@ def vertex_alive(state, key):
         return False
     return True
 
-def post_entry(state, op, entry_type, event_class):
+def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
     _, acct_id = parts_of(acct_key, "accountKey", "account")
@@ -198,6 +198,20 @@ def post_entry(state, op, entry_type, event_class):
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
+
+    # clauseRef (DebitAccount only — the bespoke-contracts Executable Paper
+    # consumer, Contract #10 §10.8): the clause this charge is authorized by.
+    # A clause playbook dispatch always declares row.clauseKey in Reads, so
+    # the clause is hydrated here; a plain human-submitted DebitAccount omits
+    # it entirely (nothing below runs).
+    clause_key = None
+    clause_id = None
+    if allow_clause_ref:
+        clause_key = optional_string(p, "clauseRef")
+        if clause_key != None:
+            _, clause_id = parts_of(clause_key, "clauseRef", "clause")
+            if not vertex_alive(state, clause_key):
+                fail("UnknownClause: " + clause_key)
 
     tx_id = nanoid.new()
     tx_key = "vtx.transaction." + tx_id
@@ -221,6 +235,22 @@ def post_entry(state, op, entry_type, event_class):
     ]
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
+
+    if clause_key != None:
+        # authorizedBy: the transaction (later-arriving) is the source, the
+        # pre-existing clause is the target (Contract #1 §1.1) — the "why was
+        # I charged this?" chain of custody back to the authorizing clause.
+        authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
+        mutations.append(make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}))
+        # Fixed/one-time clause bookkeeping: mark it completed (audit/display
+        # only — the clauseSatisfaction lens's convergence gate is the
+        # authorizedBy link itself, not this status, so this write is
+        # UNCONDITIONED — see the design's R3).
+        mutations.append({"op": "update", "key": clause_key + ".status",
+                           "document": {"class": "clauseStatus", "isDeleted": False,
+                                        "vertexKey": clause_key, "localName": "status",
+                                        "data": {"state": "completed", "completedAt": posted_at}}})
+
     return {"mutations": mutations, "events": events,
             "response": {"primaryKey": tx_key}}
 
@@ -228,10 +258,10 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "DebitAccount":
-        return post_entry(state, op, "debit", "account.debited")
+        return post_entry(state, op, "debit", "account.debited", True)
 
     if ot == "CreditAccount":
-        return post_entry(state, op, "credit", "account.credited")
+        return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `

@@ -23,7 +23,10 @@
 //     .entry aspect {type, amountCents, memo?, postedAt}, linked to the account
 //     via postedTo. The ledger is append-only: a balance is derived by summing
 //     entries (the ledgerHistory lens), never stored as a mutable aspect — so
-//     concurrent debits/credits never race a read-modify-write.
+//     concurrent debits/credits never race a read-modify-write. DebitAccount's
+//     optional clauseRef additionally writes the authorizedBy link (transaction
+//     → clause) and marks the clause completed — the bespoke-contracts
+//     Executable Paper package's canonical directOp consumer.
 //
 //   - The `ledgerHistory` lens (§10.2-style read model, one row per
 //     transaction) the payment-history FE reads (P5).
@@ -32,9 +35,9 @@
 //     is opened) — the FE's only way to resolve a lease's account key, since
 //     it can no longer be derived from leaseAppKey.
 //
-// This is the ledger the parallel bespoke-contracts-executable-paper design
-// (Lattice lane) builds to: vtx.account.<id> + Debit/CreditAccount +ledger
-// entries linked back to their authorizing source.
+// This is the ledger the bespoke-contracts-executable-paper design builds to:
+// vtx.account.<id> + Debit/CreditAccount + ledger entries linked back to
+// their authorizing source (packages/bespoke-contracts, Fire V1).
 //
 // Mirrors packages/clinic-ledger, with the account held for a lease instead
 // of a patient (see implementation-artifacts/adjacency-shared-nanoid-collision-design.md
@@ -49,12 +52,13 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.1.0",
+	Version: "0.2.0",
 	Description: "Loftspace tenant payment ledger: the account vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
-		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo) + the " +
-		"ledgerHistory read-model lens (one row per transaction) + the leaseAccounts lens (lease -> account key " +
-		"lookup). Depends lease-signing.",
+		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
+		"optional clauseRef writes the authorizedBy audit link + marks the clause completed) + the ledgerHistory " +
+		"read-model lens (one row per transaction) + the leaseAccounts lens (lease -> account key lookup). " +
+		"Depends lease-signing.",
 	Depends:     []string{"lease-signing"},
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

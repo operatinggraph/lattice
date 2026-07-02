@@ -1,0 +1,36 @@
+name: bespoke-contracts
+version: 0.1.0
+description: |
+  LoftSpace "Executable Paper" reference package (Fire V1 — fixed/one-time
+  computational clause): the clause vertex type (CreateClause, .prose/.terms/
+  .status aspects, governs + chargesTo links) + the clauseSatisfaction
+  actorAggregate convergence lens (§10.2, missing_charge = no authorizedBy
+  transaction yet) + the §10.8 playbook dispatching directOp(DebitAccount) on
+  the gap. Depends lease-signing + loftspace-ledger.
+depends:
+  - lease-signing
+  - loftspace-ledger
+declares:
+  ddls:
+    - canonicalName: clause
+      class: meta.ddl.vertexType
+    - canonicalName: clauseProse
+      class: meta.ddl.aspectType
+    - canonicalName: clauseTerms
+      class: meta.ddl.aspectType
+    - canonicalName: clauseStatus
+      class: meta.ddl.aspectType
+  lenses:
+    - canonicalName: clauseSatisfaction
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+  permissions:
+    - operationType: CreateClause
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: clauseSatisfaction
+      lensRef: clauseSatisfaction
+  opMetas:
+    - operationType: CreateClause
