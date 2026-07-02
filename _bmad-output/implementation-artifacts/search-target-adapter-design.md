@@ -1,6 +1,13 @@
 # Search / Elasticsearch lens-target adapter — design
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer: Winston (architect) · 2026-07-01
+**Status: ✅ Andrew-ratified (2026-07-02) — SHELF design (build with the first real search consumer).**
+Decisions: **vendor pin = OpenSearch** (Apache-2.0 server + client; vendors.md row staged at build/pin
+time) · **Postgres-FTS blessed as the interim default** for the first small consumer (tsvector/pg_trgm on
+the existing protected read models — RLS-compatible, zero new infra), OpenSearch reserved for genuine
+global-scale faceted search · the public-only fail-closed guard stands (a search target rejects unless
+explicitly `public: true`; protected search = a separate future D1-for-search design). Andrew will have
+the Vertical PO file the first search demand.
+· Designer: Winston (architect) · 2026-07-01
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Read-model / projection maturity* →
 "Elasticsearch target adapter".
 
