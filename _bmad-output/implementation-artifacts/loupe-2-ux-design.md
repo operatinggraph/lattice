@@ -55,7 +55,7 @@ safe path segment. Query params after `?` inside the hash.
 | `#/graph?type=identity&q=smith&deleted=1` | filtered list state (URL-carried) | — |
 | `#/graph/<key>` | Entity detail — any Core KV key: vertex, meta, link, aspect, op tracker | Core KV detail pane |
 | `#/graph/<key>?view=hood` | Neighborhood (ego-graph) mode centered on `<key>` | — (new) |
-| `#/component/<id>` | Component page ×6: `processor · refractor · weaver · loom · bridge · object-store-manager` | Control columns + Health cards |
+| `#/component/<id>` | Component page: the six declared engines + any runtime-discovered heartbeat group (§5) | Control columns + Health cards |
 | `#/lens/<id>` | Lens page (id = lens NanoID = its `vtx.meta.<id>` = its Health-KV key) | Control→Refractor paste flow |
 | `#/packages` | Package list | Packages tab |
 | `#/package/<key>` | Package detail + lifecycle | — (new) |
@@ -289,8 +289,15 @@ unchanged.
 
 ## 5. Component pages (`#/component/<id>`) — L2
 
-One template, six instantiations. **Layout:** header · two-column body (`1fr 380px`): left = live state,
-right = the control surface (read-only info panel for the three control-less components).
+One template, **dynamically instantiated** — the six declared engines get curated map placement + the
+control surfaces below, and **any other `health.<comp>.<instance>` group discovered at runtime** (e.g.
+the vertical apps once `vertical-app-health-self-report-design.md` ships its reporters, 📐 lattice lane)
+auto-gets the same page: instances + status + freshness + issues + events, read-only control panel.
+On the map, undeclared heartbeat groups render as a compact **clients shelf** of chips (no skeleton
+edges; hover tip + click → their page) — nothing that heartbeats is ever invisible in the console (the
+Health tab, which F4 retires, is today the only surface that renders undeclared groups).
+**Layout:** header · two-column body (`1fr 380px`): left = live state,
+right = the control surface (read-only info panel for the control-less components).
 
 **Header:** component label + status pill (worst-of) · instance count · "on map" link back to `#/map`.
 
@@ -660,7 +667,7 @@ the `logic/` split, the strip-export convention, the goja dep (+ its `docs/vendo
 |---|---|---|---|
 | **F1 — Console shell: router + module split + linkify seed** | **M** | Hash router + route table (§1.1) with 1:1 routes for today's eight views (no view redesigned yet); ES-module decomposition of `app.js` with the `logic/` split + strip-export convention (§2.3) and goja tests for `logic/route.js`/`logic/keys.js`; `keyLink` resolver; Core-KV detail's link rows become far-end-clickable + provenance chips linkified (the §1.2 seed); breadcrumb bar. Health/Control tabs still present. | — |
 | **F2 — Graph explorer (L4)** | **L** | `#/graph` faceted/grouped/paged list (+`/api/vertices` extensions), full linkifying renderer (§7.3), detail view re-plumb (§7.2), tombstone dimming, tasks-tab links re-pointed, neighborhood ego-graph mode (§7.4, `logic/hood.js` + goja tests). Core KV tab retired (route alias `#/corekv` → `#/graph`). | F1 |
-| **F3 — Component pages + Control dissolution (L2)** | **L** | `#/component/<id>` ×6 (§5); `GET /api/component/<id>` + plural-instance fixes in `/api/systemmap` + `/api/health`; row-level control actions (loom/weaver); refractor roster (`GET /api/lenses`, links land on `#/graph/vtx.meta.<id>` until F5 ships the lens page); component-scoped health events section; map component click → page; **Control tab retired**. | F1 |
+| **F3 — Component pages + Control dissolution (L2)** | **L** | `#/component/<id>` — declared six + runtime-discovered heartbeat groups + the map clients shelf (§5); `GET /api/component/<id>` + plural-instance fixes in `/api/systemmap` + `/api/health`; row-level control actions (loom/weaver); refractor roster (`GET /api/lenses`, links land on `#/graph/vtx.meta.<id>` until F5 ships the lens page); component-scoped health events section; map component click → page; **Control tab retired**. | F1 |
 | **F4 — Health absorption + status vocabulary (L1 remainder)** | **M** | Global alert strip + topbar rollup pill (§2.1); gates panel in the map rail (creates `#sysmap-rail` with the preserved empty `#sysmap-console` first slot, §3.1); the §4.2 `renderedState` derivation server-side + visuals on map/rosters (`pending-readpath` stops yellowing the banner — the "7 degraded" fix); **Health tab retired** with the element-by-element destination checklist (§4.3). | F3 |
 | **F5 — Lens page (L3)** | **L** | `#/lens/<id>` four-panel page (§6): `GET /api/lens/<id>` + `/rows` (nats_kv path + the pg-pending state), inline validate/pause/resume/rebuild, **delete** behind typed confirm, owning-package resolution, freshness slot, map/roster lens links re-pointed here. | F1, F4 (vocabulary) |
 | **F6 — Live pulse (L5)** | **M** | `GET /api/events/stream` SSE + bounded consumer lifecycle; feed in the map rail below the console reservation (§8.2–8.3); map edge pulse animation (§3.3); topbar LED (§8.4); poll-diff derived rows. | F1 (map rail exists after F4 — if built before F4, F6 creates the rail with the same reserved-slot rule) |
