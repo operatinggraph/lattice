@@ -82,8 +82,8 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now**: **Vault Fires 2–5** (★★★ — Fire 1 shipped, see design doc; D1 gate cleared
-> 2026-07-02; see the design's build-start addendum; unblocks 3 Verticals rows).
+> 🎯 **Build-ready now**: **Vault Fire 5b** (★★★ — Fires 1–5a shipped, see the design's checkpoints;
+> 5b = consumer lens migrations + FE tails; unblocks 3 Verticals rows).
 > (**FR28 role-queue** Fire 1 + Fire 2 done — see Done log; Fire 3 unrouted surfacing next.
 > **protected-lens out-of-band** ✅ SHIPPED — see Done log. **`@every` schedules** ✅ CLOSED — see Done log.)
 > *Dependency-sequenced ratified items*: **Personal Lens** D1 gate cleared → buildable, deprioritized
@@ -104,7 +104,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · next: Fire 5 Secure Lens + named consumers |
+| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · next: Fire 5b consumer lens migration |
 | **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
 
 ### External-I/O maturity (bridge follow-ons)

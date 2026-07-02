@@ -607,6 +607,34 @@ a design. Residual: the Fire-4a re-upsert limitation stands (unchanged); Loupe s
 Next: **Fire 5** — the Secure Lens (decrypt-at-projection into RLS-protected read models) + the named
 Fire-5 consumers above; the ratified one-coherent-delivery posture applies.
 
+**Fire 5a CHECKPOINT (2026-07-02, Lattice Steward, `4bbc8f3`).** Fire 5 split into 5a (the platform
+primitive) + 5b (the consumer migrations); 5a shipped: **Secure-Lens decrypt-at-projection in the
+Refractor**. A lens spec declares `secureColumns: [{column, identityKeyColumn, field}]` — the cypher
+RETURNs the sensitive aspect's ciphertext envelope whole (`i.name.data`; aspect presence via
+`i.name.data.ct <> null`, since `data.value` no longer exists post-encryption) — and the pipeline
+decrypts each declared column under the owning identity's DEK (piiKey envelope read from Core KV,
+`vault.LocalBackend` from the same `LATTICE_VAULT_MASTER_KEK(_FILE)` the Processor uses, now provisioned
+before refractor in `make up`) before the row reaches the adapter. Fail-closed posture at every layer:
+protected-RLS-postgres-only (translateSpec + a pkgmgr install-time mirror; plain-projection lenses only;
+platform RLS columns + output-key columns rejected; RETURN aliases statically validated at activation),
+no-Vault ⇒ no activation, tampered/misdeclared/soft-deleted-or-malformed-piiKey inputs ⇒ Terminal (never
+fail-silent), shredded ⇒ the column projects **null**. **The Fire-4a re-upsert limitation is RESOLVED for
+Secure-Lens targets**: a piiKey aspect CDC event (every shred commits one) now triggers anchor
+reprojection on a secure lens, so an already-projected plaintext row is scrubbed to null-PII immediately —
+proven end-to-end through the stream handler against embedded NATS. Full 3-layer adversarial review;
+fixed pre-merge: that shred-scrub HIGH, a MatchChange hot-reload path that bypassed the secureColumns
+refusal, refused-update baseline poisoning (guards now compare against the running pipeline's activated
+set), and the validation gaps above. Known residuals: the retry queue is documented-unsafe for a secure
+lens (captures decrypted rows; unwired in production); hot-reload of a secure lens's secureColumns or
+table/DSN is refused (delete-and-re-create is the path); `vault_calls_total` now reports real decrypt
+counts.
+Next: **Fire 5b** — the consumer migrations per the build-start addendum: `applicantRoster` (retire or
+re-model — NATS-KV cannot be secure), `applicantRosterRead` + `duplicateCandidates` re-authored as secure
+lenses (WHERE keyed on `.ct`), `landlordLeaseApplicationsReadSpec` gains applicant_name/email/phone
+secure columns (D1.5 Rec-C bundle), clinic patient-contact display, and the loftspace/clinic FE tails;
+extend `make test-crypto-shred` to assert a secure-lens row scrubs on shred. Wear-the-other-hat package/FE
+work; stays in this lane.
+
 **Considered and REJECTED — pre-Vault plaintext contact projection** into `clinicPatientsRead`
 (technically buildable, no test fails, outside M4's *letter* since `.demographics` cannot be
 `sensitive:true` on a non-identity vertex): it ships queryable plaintext PHI into Postgres that
