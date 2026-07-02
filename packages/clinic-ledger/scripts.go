@@ -63,19 +63,19 @@ def execute(state, op):
         # same patient targets the same key, so it conflicts on the
         # already-existing vertex (the create-only write is the uniqueness
         # guard).
-        acct_key = "vtx.account." + patient_id
+        acct_key = "vtx.clinicaccount." + patient_id
         if vertex_alive(state, acct_key):
             fail("AccountAlreadyExists: " + acct_key)
 
         # heldFor: the account (later-arriving) is the source, the pre-existing
         # patient is the target (Contract #1 §1.1). Reads as "this account is
         # held for this patient."
-        held_for_lnk = "lnk.account." + patient_id + ".heldFor.patient." + patient_id
+        held_for_lnk = "lnk.clinicaccount." + patient_id + ".heldFor.patient." + patient_id
 
         # Root data minimal (D5): {} on root. The balance is derived by the
         # ledgerHistory lens summing linked transactions, never stored here.
         mutations = [
-            make_vtx(acct_key, "account", {}),
+            make_vtx(acct_key, "clinicaccount", {}),
             make_link(held_for_lnk, acct_key, patient_key, "heldFor", "heldFor", {}),
         ]
         events = [{"class": "account.created",
@@ -158,7 +158,7 @@ def vertex_alive(state, key):
 def post_entry(state, op, entry_type, event_class):
     p = op.payload
     acct_key = required_string(p, "accountKey")
-    _, acct_id = parts_of(acct_key, "accountKey", "account")
+    _, acct_id = parts_of(acct_key, "accountKey", "clinicaccount")
 
     if not vertex_alive(state, acct_key):
         fail("UnknownAccount: " + acct_key)
@@ -169,7 +169,7 @@ def post_entry(state, op, entry_type, event_class):
     memo = optional_string(p, "memo")
 
     tx_id = nanoid.new()
-    tx_key = "vtx.transaction." + tx_id
+    tx_key = "vtx.clinictransaction." + tx_id
     posted_at = time.rfc3339_utc(op.submittedAt)
 
     entry_data = {"type": entry_type, "amountCents": amount_cents, "postedAt": posted_at}
@@ -179,12 +179,12 @@ def post_entry(state, op, entry_type, event_class):
     # postedTo: the transaction (later-arriving) is the source, the
     # pre-existing account is the target (Contract #1 §1.1). Reads as
     # "this transaction posted to this account."
-    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
+    posted_to_lnk = "lnk.clinictransaction." + tx_id + ".postedTo.clinicaccount." + acct_id
 
     # Root data minimal (D5): {} on root. The charge/payment fact is the
     # .entry aspect; the account itself is untouched (append-only ledger).
     mutations = [
-        make_vtx(tx_key, "transaction", {}),
+        make_vtx(tx_key, "clinictransaction", {}),
         make_aspect(tx_key, "entry", "transactionEntry", entry_data),
         make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
     ]

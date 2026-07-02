@@ -108,6 +108,19 @@
           <button type="button" id="series-start-submit">Start series</button>
         </details>
       </div>
+      <div class="avail-editor" id="my-ledger">
+        <h3>💳 Billing</h3>
+        <p class="hint">Charges (copays, invoice lines) and payments for this patient, oldest first. The balance is derived from the full history — the ledger itself stores no running total.</p>
+        <div id="ledger-balance" class="ledger-balance"></div>
+        <ul id="ledger-list" class="ledger-list" aria-live="polite"></ul>
+        <div id="ledger-empty" class="empty" hidden>No charges or payments recorded yet.</div>
+        <div class="ledger-record-form">
+          <input type="number" id="ledger-amount" step="0.01" min="0.01" placeholder="Amount ($)" aria-label="Amount in dollars" />
+          <input type="text" id="ledger-memo" placeholder="Memo (optional)" aria-label="Memo" />
+          <button type="button" id="ledger-charge" class="ghost">+ Record charge</button>
+          <button type="button" id="ledger-payment" class="ghost">+ Record payment</button>
+        </div>
+      </div>
       <div class="panel-controls">
         <button id="reload-appts" class="ghost">Refresh</button>
         <label for="appts-filter">Show</label>

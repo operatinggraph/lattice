@@ -138,18 +138,18 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		OperationType: "CreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
-		Class:         "account",
+		Class:         "clinicaccount",
 		Payload:       json.RawMessage(`{"patientKey":"` + patientKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{patientKey}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 	patientID := patientKey[len("vtx.patient."):]
-	return "vtx.account." + patientID
+	return "vtx.clinicaccount." + patientID
 }
 
 // TestCreateAccount_MintsAccountHeldForPatient (test 1). CreateAccount mints
-// vtx.account.<sameId> (root {} — D5) + the heldFor link; a second call for the
+// vtx.clinicaccount.<sameId> (root {} — D5) + the heldFor link; a second call for the
 // same patient conflicts on the deterministic key (AccountAlreadyExists).
 func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
@@ -158,13 +158,13 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0000000000001", "Alice Rivera")
 	patientID := patientKey[len("vtx.patient."):]
 
-	if keyExists(t, ctx, conn, "vtx.account."+patientID) {
+	if keyExists(t, ctx, conn, "vtx.clinicaccount."+patientID) {
 		t.Fatalf("account must not exist before CreateAccount")
 	}
 
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacct0000001", patientKey)
-	if acctKey != "vtx.account."+patientID {
-		t.Fatalf("account key = %q, want vtx.account.%s (deterministic, same id as the patient)", acctKey, patientID)
+	if acctKey != "vtx.clinicaccount."+patientID {
+		t.Fatalf("account key = %q, want vtx.clinicaccount.%s (deterministic, same id as the patient)", acctKey, patientID)
 	}
 
 	acctDoc := readDoc(t, ctx, conn, acctKey)
@@ -172,7 +172,7 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 		t.Fatalf("account root data must stay minimal ({}) after create, got %v", d)
 	}
 
-	heldForLnk := "lnk.account." + patientID + ".heldFor.patient." + patientID
+	heldForLnk := "lnk.clinicaccount." + patientID + ".heldFor.patient." + patientID
 	if !keyExists(t, ctx, conn, heldForLnk) {
 		t.Fatalf("heldFor link must exist: %s", heldForLnk)
 	}
@@ -185,7 +185,7 @@ func TestCreateAccount_MintsAccountHeldForPatient(t *testing.T) {
 		OperationType: "CreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:05:00Z",
-		Class:         "account",
+		Class:         "clinicaccount",
 		Payload:       json.RawMessage(`{"patientKey":"` + patientKey + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, acctKey}},
 	}
@@ -205,7 +205,7 @@ func TestCreateAccount_UnknownPatient(t *testing.T) {
 		OperationType: "CreateAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T12:00:00Z",
-		Class:         "account",
+		Class:         "clinicaccount",
 		Payload:       json.RawMessage(`{"patientKey":"vtx.patient.CLABSENTPATNTHJKMNPQ"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.patient.CLABSENTPATNTHJKMNPQ"}},
 	}
@@ -232,14 +232,14 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		OperationType: "DebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
-		Class:         "transaction",
+		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Office visit copay"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
 	}
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	debitTxKey := "vtx.transaction." + nanoIDFromRequestID(debitReqID)
+	debitTxKey := "vtx.clinictransaction." + nanoIDFromRequestID(debitReqID)
 	entryDoc := readDoc(t, ctx, conn, debitTxKey+".entry")
 	entryData, _ := entryDoc["data"].(map[string]any)
 	if got, _ := entryData["type"].(string); got != "debit" {
@@ -257,7 +257,7 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		t.Fatalf("transaction root data must stay minimal ({}) after post, got %v", d)
 	}
 
-	postedToLnk := "lnk.transaction." + nanoIDFromRequestID(debitReqID) + ".postedTo.account." + patientID
+	postedToLnk := "lnk.clinictransaction." + nanoIDFromRequestID(debitReqID) + ".postedTo.clinicaccount." + patientID
 	if !keyExists(t, ctx, conn, postedToLnk) {
 		t.Fatalf("postedTo link must exist: %s", postedToLnk)
 	}
@@ -276,14 +276,14 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		OperationType: "CreditAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-05T09:00:00Z",
-		Class:         "transaction",
+		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"memo":"Insurance payment - claim #4471"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
 	}
 	testutil.PublishOp(t, conn, creditEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	creditTxKey := "vtx.transaction." + nanoIDFromRequestID(creditReqID)
+	creditTxKey := "vtx.clinictransaction." + nanoIDFromRequestID(creditReqID)
 	creditEntryDoc := readDoc(t, ctx, conn, creditTxKey+".entry")
 	creditEntryData, _ := creditEntryDoc["data"].(map[string]any)
 	if got, _ := creditEntryData["type"].(string); got != "credit" {
@@ -303,9 +303,9 @@ func TestDebitAccount_UnknownAccount(t *testing.T) {
 		OperationType: "DebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
-		Class:         "transaction",
-		Payload:       json.RawMessage(`{"accountKey":"vtx.account.CLABSENTACCTHJKMNPQR","amountCents":1000}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.account.CLABSENTACCTHJKMNPQR"}},
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"vtx.clinicaccount.CLABSENTACCTHJKMNPQR","amountCents":1000}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{"vtx.clinicaccount.CLABSENTACCTHJKMNPQR"}},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -326,7 +326,7 @@ func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
 		OperationType: "DebitAccount",
 		Actor:         ledgerActorKey,
 		SubmittedAt:   "2026-07-01T13:00:00Z",
-		Class:         "transaction",
+		Class:         "clinictransaction",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":0}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
 	}

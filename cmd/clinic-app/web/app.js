@@ -15,6 +15,7 @@ const state = {
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
   series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
   mySeries: [], // the selected patient's own recurring visit series (PROTECTED, patient-self RLS, D1.5)
+  ledger: null, // the selected patient's last-loaded /api/ledger response (billing history + balance)
   patient: null, // the selected patient key (the trusted-tool context)
   view: "book",
   highlight: null,
@@ -326,6 +327,7 @@ function setPatient(value) {
   if (state.view === "appts") {
     loadAppts();
     loadMySeries();
+    loadLedger();
   }
 }
 
@@ -1636,6 +1638,158 @@ async function loadMySeries() {
   renderMySeries();
 }
 
+// ---- Billing ledger (view + record charges/payments) ----
+//
+// One row of the clinic-ledger `clinicLedgerHistory` lens per posted
+// transaction, read via GET /api/ledger?patientKey= (P5 — a lens read model,
+// never Core KV). The account key is deterministic (vtx.clinicaccount.<same
+// NanoID as the patient>) so the server derives it even before any
+// transaction — or the account itself — exists; the FE never guesses it
+// independently. Mirrors loftspace-app's payment ledger, keyed by patient
+// instead of lease.
+
+// moneyAmount formats a cents amount as a USD-style dollar figure.
+function moneyAmount(cents) {
+  return typeof cents === "number" ? "$" + (cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
+}
+
+// loadLedger (re)loads and renders the selected patient's billing panel: the
+// running balance, the transaction list (oldest first). Bails to an empty
+// state with no patient selected.
+async function loadLedger() {
+  const balanceEl = $("#ledger-balance");
+  const list = $("#ledger-list");
+  const empty = $("#ledger-empty");
+  if (!state.patient) {
+    balanceEl.textContent = "";
+    list.innerHTML = "";
+    empty.hidden = false;
+    empty.textContent = "Select a patient above to see their billing history.";
+    state.ledger = null;
+    return;
+  }
+  balanceEl.textContent = "Loading…";
+  list.innerHTML = "";
+  empty.hidden = true;
+  let data;
+  try {
+    data = await api("/api/ledger?patientKey=" + encodeURIComponent(state.patient));
+  } catch (e) {
+    balanceEl.textContent = "";
+    empty.hidden = false;
+    empty.textContent = "Could not load billing history: " + e.message;
+    state.ledger = null;
+    return;
+  }
+  state.ledger = data;
+  renderLedger(data);
+}
+
+// renderLedger paints the balance + transaction list from the last loaded
+// /api/ledger response.
+function renderLedger(data) {
+  const balanceEl = $("#ledger-balance");
+  const list = $("#ledger-list");
+  const empty = $("#ledger-empty");
+
+  const owed = data.balanceCents || 0;
+  if (owed > 0) balanceEl.textContent = "Balance owed: " + moneyAmount(owed);
+  else if (owed < 0) balanceEl.textContent = "Credit balance: " + moneyAmount(-owed);
+  else balanceEl.textContent = "Balance: $0.00 (paid in full)";
+
+  const txs = data.transactions || [];
+  list.innerHTML = "";
+  if (txs.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No charges or payments recorded yet.";
+    return;
+  }
+  empty.hidden = true;
+  for (const t of txs) {
+    const li = document.createElement("li");
+    li.className = "ledger-entry " + t.type;
+    const sign = t.type === "debit" ? "+" : "−";
+    const d = new Date(t.postedAt);
+    const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    li.textContent = when + " · " + sign + moneyAmount(t.amountCents) + (t.memo ? " — " + t.memo : "");
+    list.append(li);
+  }
+}
+
+// createLedgerAccount opens the patient's ledger account (CreateAccount). Only
+// called after a DebitAccount/CreditAccount has just failed to hydrate its
+// accountKey read (submitLedgerEntry below), so this is always the
+// first-ever call for this patient: reads declares patientKey only, never
+// the not-yet-existing account key. The Processor hard-rejects
+// (HydrationMiss) a contextHint.reads key that doesn't exist yet, so
+// declaring the account key here — before it exists — would make
+// account-opening impossible rather than idempotent.
+async function createLedgerAccount(patientKey) {
+  const reply = await submitOp("CreateAccount", "clinicaccount", { patientKey }, [patientKey]);
+  const msg = rejectionMessage(reply);
+  // AccountAlreadyExists means a concurrent request opened it first between our
+  // UnknownAccount read and this create — the account exists either way, so
+  // that race resolves as success, not an error.
+  if (msg && msg.indexOf("AccountAlreadyExists") === -1) {
+    throw new Error(msg);
+  }
+}
+
+// submitLedgerEntry posts a DebitAccount/CreditAccount against the selected
+// patient's ledger account. Tries the post first — its reads:[accountKey]
+// declares the account key, so a not-yet-opened account surfaces as a
+// HydrationMiss rejection (not a clean domain "UnknownAccount" — the account
+// key was never hydrated in the first place, so the script never runs). Only
+// on that miss (this patient's first-ever charge or payment) does it open the
+// account and retry once.
+async function submitLedgerEntry(opType, what) {
+  if (!state.patient) {
+    toast("Select a patient first.", "err");
+    return;
+  }
+  const amountInput = $("#ledger-amount");
+  const memoInput = $("#ledger-memo");
+  const dollars = Number(amountInput.value);
+  if (!(dollars > 0)) {
+    toast("Enter an amount greater than zero.", "err");
+    return;
+  }
+  const cents = Math.round(dollars * 100);
+  const accountKey = (state.ledger && state.ledger.accountKey) || deriveAccountKeyFE(state.patient);
+  const chargeBtn = $("#ledger-charge");
+  const paymentBtn = $("#ledger-payment");
+  chargeBtn.disabled = paymentBtn.disabled = true;
+  try {
+    const post = () =>
+      submitOp(opType, "clinictransaction", { accountKey, amountCents: cents, memo: memoInput.value.trim() || undefined }, [accountKey]);
+    let reply = await post();
+    let msg = rejectionMessage(reply);
+    if (msg && msg.indexOf("HydrationMiss") !== -1) {
+      await createLedgerAccount(state.patient);
+      reply = await post();
+      msg = rejectionMessage(reply);
+    }
+    if (msg) throw new Error(msg);
+    toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
+    amountInput.value = "";
+    memoInput.value = "";
+    await loadLedger();
+  } catch (e) {
+    toast("Could not " + what + " — " + e.message, "err");
+  } finally {
+    chargeBtn.disabled = paymentBtn.disabled = false;
+  }
+}
+
+// deriveAccountKeyFE mirrors the server's deriveAccountKey (cmd/clinic-app/ledger.go)
+// for the one case the FE needs it standalone: the very first load of a
+// patient with no ledger response yet (state.ledger is null).
+function deriveAccountKeyFE(patientKey) {
+  const prefix = "vtx.patient.";
+  if (!patientKey || patientKey.indexOf(prefix) !== 0 || patientKey === prefix) return "";
+  return "vtx.clinicaccount." + patientKey.slice(prefix.length);
+}
+
 // seriesUrgency buckets a series by how soon its next occurrence is due, mirroring
 // followupUrgency: overdue (today or past), soon (within 14 days), later, or
 // inactive (paused, or past its activeUntil — the lens's "active" column already
@@ -2696,6 +2850,7 @@ function showView(view) {
   if (view === "schedule") loadSchedule();
   if (view === "followups") loadFollowups();
   if (view === "appts" || view === "series") loadSeries();
+  if (view === "appts") loadLedger();
   if (view === "availability") renderAvailEditors();
 }
 
@@ -2778,6 +2933,8 @@ function init() {
   });
   $("#reload-appts").addEventListener("click", loadAppts);
   $("#appts-filter").addEventListener("change", renderAppts);
+  $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("DebitAccount", "record the charge"));
+  $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("CreditAccount", "record the payment"));
   $("#reload-followups").addEventListener("click", loadFollowups);
   $("#followups-filter").addEventListener("change", renderFollowups);
   $("#reload-series").addEventListener("click", loadSeries);

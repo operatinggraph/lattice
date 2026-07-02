@@ -10,16 +10,19 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // The Refractor auto-creates the bucket on lens load.
 const LedgerHistoryBucket = "clinic-ledger-history"
 
-// Lenses returns the package's Lens declarations: ledgerHistory, one row per
-// posted transaction, flattening the .entry aspect + the account/patient it
+// Lenses returns the package's Lens declarations: clinicLedgerHistory, one row
+// per posted transaction, flattening the .entry aspect + the account/patient it
 // posted to into a query-optimized read-model row. The FE derives a running
 // balance client-side by summing amountCents (positive for debit, negative for
 // credit) over rows for a given patientKey/accountKey — the ledger itself
 // never stores a mutable running total (append-only, no read-modify-write).
+// Prefixed like the package's DDLs (ddls.go): a Lens canonicalName is global
+// across every installed package, and loftspace-ledger already owns the bare
+// `ledgerHistory` name.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
-			CanonicalName: "ledgerHistory",
+			CanonicalName: "clinicLedgerHistory",
 			Class:         "meta.lens",
 			Adapter:       "nats-kv",
 			Bucket:        LedgerHistoryBucket,
@@ -35,10 +38,10 @@ func Lenses() []pkgmgr.LensSpec {
 // projects a row only when it is genuinely posted to a live account held for a
 // live patient (the normal shape every DebitAccount/CreditAccount commit
 // produces). The per-row key is the transaction key (the IntoKey default), so
-// the read model is keyed by vtx.transaction.<id>; transactionKey repeats it in
-// the body for the reader.
-const ledgerHistorySpec = `MATCH (t:transaction)
-MATCH (t)-[:postedTo]->(a:account)
+// the read model is keyed by vtx.clinictransaction.<id>; transactionKey
+// repeats it in the body for the reader.
+const ledgerHistorySpec = `MATCH (t:clinictransaction)
+MATCH (t)-[:postedTo]->(a:clinicaccount)
 MATCH (a)-[:heldFor]->(pt:patient)
 RETURN
   t.key AS key,

@@ -507,4 +507,14 @@ button.ghost.danger:hover { background: var(--red, #d9534f); color: #fff; }
   border-color: var(--accent);
   color: var(--text);
 }
+
+/* Billing ledger panel */
+.ledger-balance { font-weight: 600; font-size: 13px; margin: 8px 0 4px; }
+.ledger-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ledger-entry { font-size: 12px; font-family: var(--mono, monospace); }
+.ledger-entry.debit { color: var(--red); }
+.ledger-entry.credit { color: var(--green); }
+.ledger-record-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ledger-record-form input { flex: 1; min-width: 100px; }
+.ledger-record-form button { padding: 5px 12px; font-size: 12px; white-space: nowrap; }
 .cal-mini .cal-empty { color: var(--text-dim); font-size: 13px; margin: 2px 0 0; }
