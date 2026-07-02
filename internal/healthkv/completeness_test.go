@@ -62,8 +62,10 @@ func TestHealthKV_Phase1Completeness(t *testing.T) {
 	defer cancel()
 
 	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
-		URL:  natsURL,
-		Name: "healthkv-completeness-test",
+		URL:          natsURL,
+		Name:         "healthkv-completeness-test",
+		NKeySeedFile: os.Getenv("NATS_NKEY"),
+		CredsFile:    os.Getenv("NATS_CREDS"),
 	})
 	if err != nil {
 		t.Fatalf("connect to NATS at %s: %v\n"+

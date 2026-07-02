@@ -138,8 +138,10 @@ func TestMain(m *testing.M) {
 	defer cancel()
 
 	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
-		URL:  natsURL,
-		Name: "hellolattice-test",
+		URL:          natsURL,
+		Name:         "hellolattice-test",
+		NKeySeedFile: os.Getenv("NATS_NKEY"),
+		CredsFile:    os.Getenv("NATS_CREDS"),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: connect to NATS at %s: %v\n"+

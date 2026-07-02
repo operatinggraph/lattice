@@ -24,6 +24,8 @@ import (
 	"strings"
 
 	"github.com/nats-io/nkeys"
+
+	"github.com/asolgan/lattice/internal/bootstrap"
 )
 
 // protectedStream lists the JetStream stream-admin verbs a non-owner connection
@@ -95,9 +97,14 @@ func denyProtected(kvSubjects []string, streams ...string) []string {
 // whereas the core-kv / capability-kv protection proved here is airtight.
 var matrix = []component{
 	{
-		name:     "processor",
-		desc:     "the sole Core-KV writer; runs the atomic-batch commit + event outbox",
-		pubAllow: []string{"$KV.core-kv.>", "core-events", "$KV.health-kv.>", "$JS.API.>"},
+		name: "processor",
+		desc: "the sole Core-KV writer; runs the atomic-batch commit + event outbox",
+		// _INBOX.> — op-submission replies. commit_path.go's replyTo does a plain
+		// nc.Publish to the caller's Lattice-Reply-Inbox header (or msg.ReplySubject),
+		// not the standard Msg.Reply request-reply protocol allow_responses covers —
+		// so the dynamic reply-authorization mechanism doesn't apply here and an
+		// explicit grant is required (verified against the live stack, Fire 2).
+		pubAllow: []string{"$KV.core-kv.>", bootstrap.EventsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>", "_INBOX.>"},
 		// Owns core-kv; denied the destructive verbs on the capability stream it
 		// does not own (Refractor is the sole capability-kv writer).
 		pubDeny: denyProtected([]string{"$KV.capability-kv.>"}, capabilityKVStream),
@@ -107,35 +114,37 @@ var matrix = []component{
 		desc: "the sole lens projector — writes every KV target EXCEPT Core KV (CDC-read-only on Core)",
 		// $KV.> covers capability-kv, every lens read-model target (including
 		// dynamically-named package buckets) and health-kv without enumeration.
-		pubAllow:       []string{"$KV.>", "$JS.API.>"},
+		// lattice.refractor.> covers the per-lens dlq/metrics/audit subjects
+		// (internal/refractor/subjects.go) — verified against the live stack, Fire 2.
+		pubAllow:       []string{"$KV.>", "$JS.API.>", "$JS.ACK.>", "lattice.refractor.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>"}, coreKVStream),
 		allowResponses: true, // control responder (lattice.ctrl.refractor.>)
 	},
 	{
 		name:           "loom",
 		desc:           "pattern engine; mutates Core state only by submitting ops (P2); owns loom-state",
-		pubAllow:       []string{"core-operations", "$KV.loom-state.>", "lattice.ctrl.loom.>", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow:       []string{bootstrap.OpsWildcardSubject, "$KV.loom-state.>", "lattice.ctrl.loom.>", "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 		allowResponses: true, // control responder (lattice.ctrl.loom.>)
 	},
 	{
 		name:           "weaver",
 		desc:           "reconciliation engine; owns weaver-state; targets are Refractor-written, Weaver-read",
-		pubAllow:       []string{"core-operations", "$KV.weaver-state.>", "lattice.ctrl.weaver.>", "core-schedules", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow:       []string{bootstrap.OpsWildcardSubject, "$KV.weaver-state.>", "lattice.ctrl.weaver.>", bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 		allowResponses: true, // control responder (lattice.ctrl.weaver.>)
 	},
 	{
 		name:           "bridge",
 		desc:           "external-I/O egress; replies via ops; owns its claim/schedule buckets",
-		pubAllow:       []string{"core-operations", "$KV.bridge-external.>", "$KV.bridge-schedule.>", "core-schedules", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow:       []string{bootstrap.OpsWildcardSubject, "$KV.bridge-external.>", "$KV.bridge-schedule.>", bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 		allowResponses: true, // may respond to requests
 	},
 	{
 		name:     "object-store-manager",
 		desc:     "object GC actor; writes the object store, mutates Core state via ops",
-		pubAllow: []string{"core-operations", "$OBJ.objects-base.>", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$OBJ.objects-base.>", "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{
@@ -143,36 +152,36 @@ var matrix = []component{
 		desc: "provisioning-time privileged user — the sanctioned non-Processor direct Core-KV writer; seeds the kernel before the Processor exists and creates streams/buckets",
 		// No denies: the provisioner seeds core-kv/capability-kv and creates
 		// every stream/bucket before any component connects.
-		pubAllow: []string{"$KV.>", "$OBJ.>", "$JS.API.>", "core-events", "core-operations"},
+		pubAllow: []string{"$KV.>", "$OBJ.>", "$JS.API.>", "$JS.ACK.>", bootstrap.EventsWildcardSubject, bootstrap.OpsWildcardSubject},
 	},
 	{
 		name:     "lattice-pkg",
 		desc:     "package installer — InstallPackage / UninstallPackage kernel ops",
-		pubAllow: []string{"core-operations", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{
 		name:     "loupe",
 		desc:     "trusted inspector — reads all KV (subscribe/get); writes state only via ops, even it gets no direct Core-KV write",
-		pubAllow: []string{"core-operations", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{
 		name:     "lattice",
 		desc:     "operator CLI + verify tools — submits ops, reads",
-		pubAllow: []string{"core-operations", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{
 		name:     "loftspace-app",
 		desc:     "vertical app (P5 reader); writes via ops",
-		pubAllow: []string{"core-operations", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{
 		name:     "clinic-app",
 		desc:     "vertical app (P5 reader); writes via ops",
-		pubAllow: []string{"core-operations", "$KV.health-kv.>", "$JS.API.>"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 }

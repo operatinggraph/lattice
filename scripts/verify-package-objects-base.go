@@ -51,7 +51,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := nats.Connect(natsURL)
+	var natsOpts []nats.Option
+	if seed := os.Getenv("NATS_NKEY"); seed != "" {
+		nkeyOpt, err := nats.NkeyOptionFromSeed(seed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: load NKey seed %q: %v\n", seed, err)
+			os.Exit(1)
+		}
+		natsOpts = append(natsOpts, nkeyOpt)
+	} else if creds := os.Getenv("NATS_CREDS"); creds != "" {
+		natsOpts = append(natsOpts, nats.UserCredentials(creds))
+	}
+	nc, err := nats.Connect(natsURL, natsOpts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: cannot connect to NATS at %s: %v\n", natsURL, err)
 		os.Exit(1)

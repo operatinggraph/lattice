@@ -185,7 +185,12 @@ func runApply(cmd, pkgPath, natsURL, bootstrapPath string, opts pkgmgr.ApplyOpti
 		return err
 	}
 
-	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{URL: natsURL, Name: "lattice-pkg"})
+	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
+		URL:          natsURL,
+		Name:         "lattice-pkg",
+		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
+		CredsFile:    envOrDefault("NATS_CREDS", ""),
+	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
 	}
@@ -258,7 +263,12 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 	if err != nil {
 		return err
 	}
-	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{URL: natsURL, Name: "lattice-pkg"})
+	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
+		URL:          natsURL,
+		Name:         "lattice-pkg",
+		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
+		CredsFile:    envOrDefault("NATS_CREDS", ""),
+	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
 	}
@@ -279,7 +289,12 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 
 func runList(natsURL, bootstrapPath string, logger *slog.Logger) error {
 	_ = bootstrapPath // not strictly required for list, kept for parity
-	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{URL: natsURL, Name: "lattice-pkg"})
+	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
+		URL:          natsURL,
+		Name:         "lattice-pkg",
+		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
+		CredsFile:    envOrDefault("NATS_CREDS", ""),
+	})
 	if err != nil {
 		return fmt.Errorf("substrate open: %w", err)
 	}

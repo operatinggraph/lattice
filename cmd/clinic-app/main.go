@@ -97,6 +97,8 @@ func run(logger *slog.Logger) error {
 		Name:          "clinic-app",
 		MaxReconnects: -1,
 		ReconnectWait: 2 * time.Second,
+		NKeySeedFile:  envOrDefault("NATS_NKEY", ""),
+		CredsFile:     envOrDefault("NATS_CREDS", ""),
 	})
 	if err != nil {
 		logger.Warn("NATS connect failed at startup; serving UI, /api/* will report errors until NATS is reachable",

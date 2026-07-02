@@ -175,14 +175,44 @@ func envIntOrDefault(key string, def int) int {
 	return def
 }
 
+// credentialOpts builds the transport-authorization nats.Option(s) from
+// NATS_NKEY / NATS_CREDS (at most one set; both empty ⇒ anonymous). Bootstrap
+// is the sanctioned provisioning-time writer (deploy/nats-server.conf's
+// "provisioner" user) — it seeds the kernel before the Processor exists, so it
+// authenticates the same way every other binary does rather than connecting
+// anonymously against an auth-enabled server.
+func credentialOpts() ([]nats.Option, error) {
+	nkeySeed := envOrDefault("NATS_NKEY", "")
+	credsFile := envOrDefault("NATS_CREDS", "")
+	if nkeySeed != "" && credsFile != "" {
+		return nil, fmt.Errorf("both NATS_NKEY and NATS_CREDS set; exactly one credential may be supplied")
+	}
+	if nkeySeed != "" {
+		nkeyOpt, err := nats.NkeyOptionFromSeed(nkeySeed)
+		if err != nil {
+			return nil, fmt.Errorf("load NKey seed %q: %w", nkeySeed, err)
+		}
+		return []nats.Option{nkeyOpt}, nil
+	}
+	if credsFile != "" {
+		return []nats.Option{nats.UserCredentials(credsFile)}, nil
+	}
+	return nil, nil
+}
+
 // connectNATSWithRetry retries NATS connection until maxAttempts or success.
 func connectNATSWithRetry(url string, maxAttempts int, delay time.Duration, logger *slog.Logger) (*nats.Conn, error) {
+	credOpts, err := credentialOpts()
+	if err != nil {
+		return nil, fmt.Errorf("credential options: %w", err)
+	}
 	var lastErr error
 	for i := 1; i <= maxAttempts; i++ {
-		nc, err := nats.Connect(url,
+		opts := append([]nats.Option{
 			nats.MaxReconnects(5),
-			nats.ReconnectWait(1*time.Second),
-		)
+			nats.ReconnectWait(1 * time.Second),
+		}, credOpts...)
+		nc, err := nats.Connect(url, opts...)
 		if err == nil {
 			return nc, nil
 		}

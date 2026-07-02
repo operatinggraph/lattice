@@ -64,7 +64,11 @@ func main() {
 	defer stop()
 
 	// Substrate is the integration boundary.
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: *natsURL})
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
+		URL:          *natsURL,
+		NKeySeedFile: envOr("NATS_NKEY", ""),
+		CredsFile:    envOr("NATS_CREDS", ""),
+	})
 	if err != nil {
 		logger.Error("nats connect", "err", err)
 		os.Exit(1)

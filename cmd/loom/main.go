@@ -82,6 +82,8 @@ func run(logger *slog.Logger) error {
 		Name:          "lattice-loom:" + instance,
 		MaxReconnects: -1,
 		ReconnectWait: 1 * time.Second,
+		NKeySeedFile:  envOrDefault("NATS_NKEY", ""),
+		CredsFile:     envOrDefault("NATS_CREDS", ""),
 	})
 	if err != nil {
 		return fmt.Errorf("substrate connect: %w", err)
