@@ -417,19 +417,26 @@ enforcement) shipped. Contract #3 **§3.10 and §3.11 are already ratified + com
 blob-shred follow-on included) — the closing note above ("stays uncommitted until build") is superseded;
 no contract work remains at build start.
 
-**Premise refresh — §5 "zero data migration" is STALE.** `identity-domain` now ships **seven**
-`sensitive: true` DDLs (name, email, phone, ssn, dob, claimKey, credentialBinding) and loftspace writes
-real values through them — plaintext in Core KV *and* JetStream history for every pre-Vault identity
-(un-shreddable retroactively; acceptable under the dev posture — a fresh bootstrap resets — but Fire 2
-must decide explicitly: migrate-encrypt existing values or require a fresh bootstrap, and say which).
+**Premise refresh — §5 "zero data migration" is STALE; reset ruling (Andrew, 2026-07-02): fresh stack,
+no migration path.** `identity-domain` now ships **seven** `sensitive: true` DDLs (name, email, phone,
+ssn, dob, claimKey, credentialBinding) and loftspace writes real values through them — plaintext in Core
+KV *and* JetStream history for every pre-Vault identity. **Ruling:** nothing runs in production, and both
+NATS and Postgres are ephemeral by design (`docker-compose.yml` — no named volumes; "data is lost on
+`make down`, which is intentional"), so the sanctioned Fire-2 posture is a **full-stack reset**
+(`make down && make up-full`) at the Vault delivery boundary: pre-Vault plaintext history is destroyed
+with the containers, every identity re-mints through encrypt-on-write, and **no migrate-encrypt path is
+built**. A migrate-encrypt tool becomes a prod-era follow-on only if a deployment ever adopts sensitivity
+*after* accumulating data — out of scope until one exists.
 
-**Unlisted Fire-5 migration dependency (FE finding).** Fire 2's encrypt-on-write turns three *live*
-name-projecting lenses to ciphertext for post-Fire-2 identities: `applicantRoster`,
-`applicantRosterRead` (loftspace-domain), and `duplicateCandidates` (identity-hygiene). They must
-migrate to the Secure Lens **in the same delivery** (sequence them inside Fire 5, or Fire 2 visibly
-degrades the loftspace picker/roster). Mechanical note: a protected Postgres table gaining columns needs
-an explicit `ALTER TABLE` or fresh bootstrap — the RLS adapter provisions `CREATE TABLE IF NOT EXISTS`
-only.
+**Unlisted Fire-5 migration dependency (FE finding) — NOT resolved by the reset ruling.** This is a
+*read-path/behavior* migration, not a data migration: Fire 2's encrypt-on-write turns three *live*
+name-projecting lenses to ciphertext — `applicantRoster`, `applicantRosterRead` (loftspace-domain), and
+`duplicateCandidates` (identity-hygiene). Under the reset posture the effect is *total*, not partial:
+post-reset **every** identity is post-Fire-2, so those views render ciphertext for **all** rows from the
+moment Fire 2 lands until the Secure-Lens migration ships. Consequence: **Fires 2–5 land as one delivery
+with the lens migration sequenced inside Fire 5** — the ratified one-coherent-delivery posture is
+load-bearing, not just preferred. (The reset also dissolves the table-reshape wrinkle: read-model tables
+re-provision out-of-band on a fresh stack; no `ALTER TABLE` path needed in dev.)
 
 **Named Fire-5 consumers (the verticals this unblocks — build the last two in parallel with Fires 1–4):**
 - **LoftSpace landlord contact + name display**: `landlordLeaseApplicationsReadSpec` gains
@@ -437,8 +444,9 @@ only.
   Rec-C deferral bundle (readiness clone + console retirement ship here — see the D1.5 design §4–§6).
 - **Clinic patient contact re-model** (pre-blessed by `clinic-domain-design.md` — "`vtx.identity` + an
   `identifiedBy` link — not a rework"): extend `CreatePatient` with optional `identityKey` +
-  `lnk.patient.<pid>.identifiedBy.identity.<iid>` + a `LinkPatientIdentity` backfill op; the FE does the
-  loftspace two-step (mint unclaimed identity carrying sensitive contact → create patient linked to it);
+  `lnk.patient.<pid>.identifiedBy.identity.<iid>` (no backfill op — the reset ruling covers pre-existing
+  patients); the FE does the loftspace two-step (mint unclaimed identity carrying sensitive contact →
+  create patient linked to it);
   `.demographics` keeps only the non-sensitive `fullName`. Display = a Secure-Lens staff-anchored
   protected model at Fire 5. The re-model half is **Vault-independent** and buildable now (Verticals lane).
 
