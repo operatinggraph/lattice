@@ -1,6 +1,38 @@
-# Durable orchestration history read model — the `eventStream` lens-source primitive
+# THE CHRONICLER — event-ledger materializer (durable orchestration history + ledger archival)
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-06-30 (Winston) · Lattice lane
+**Status: ✅ Andrew-ratified (2026-07-02) — Fork C: a NEW COMPONENT (neither Fork A/Refractor nor Fork B).**
+
+> ## RATIFICATION REWORK (2026-07-02) — supersedes the Fork-A/B framing below
+>
+> Every body mention of "extend Refractor / LensSpec / the pipeline" is **superseded**: the event→row
+> projection model, convergent-target semantics, package-owned definitions, and P5 read path all carry
+> over **verbatim** — only the HOST changes. Grounds:
+> - **The decisive fact:** Refractor's founding charter EXCLUDES event streams (*"Consumes … Core KV
+>   change feed via NATS KV watcher — NOT `lattice-events`"*, brainstorm Stream-2 boundary :573). Fork A
+>   would cross that line inside the auth-plane-critical binary — and everything it reused (adapter SPI,
+>   `ConsumerSupervisor`, the `healthkv.Reporter`) is importable libraries needing no co-residence.
+> - **The Chronicler:** Refractor projects convergent PRESENT STATE from Core-KV CDC; the Chronicler
+>   materializes APPEND-ONLY HISTORY from platform streams, never evaluated (no cypher, no adjacency).
+>   Two modes: **(1) PROJECT** an event stream into a convergent history read model; **(2) ARCHIVE** a
+>   ledger stream verbatim into unlimited storage — the object-store plane, sequenced segments + a
+>   manifest carrying first/last-seq + prev-segment chain, ack-only-after-durable-write. **No
+>   auto-trim** of the live stream in v1 (trimming behind the archived watermark is operator policy,
+>   separate from archiver correctness). Dev-posture honesty: ephemeral dev stacks wipe archives; the
+>   driver is the PRD durability/audit promise + FR51's substrate, and the mechanism being proven.
+> - **Fires (Andrew's ordering):** **F1** the component + mode 1 + `loomFlowHistory`
+>   (orchestration-base ships the definition — package data; small binary in the bridge/objmgr weight
+>   class assembled from `ConsumerSupervisor` + the adapter SPI + `healthkv.Reporter`) · **F2 Weaver
+>   history** (`events.weaver.>`) · **F3 archive mode** + the core-operations intent-ledger archive
+>   (the PRD "unlimited retention path", prd.md:387-391). Display rides **Loupe 2.0 F6** (its board
+>   already lists this design as the durable-history cross-feed) — no `cmd/loupe` work here.
+> - **Re-homing:** FR51's intent-ledger + committed-delta archives re-home to the Chronicler on revive
+>   (retiring its "dedicated lens adapter" contortion — the Chronicler tails the Core-KV stream as a
+>   raw sequential feed, touching none of Refractor's evaluate machinery); #68 op-trace is a future
+>   Chronicler definition; #37 backfill/replay stays Refractor's (CDC world).
+> - **No contract change** (§10.9 is permissive — "remains an option"; components are not
+>   contract-enumerated — the objmgr/gateway precedent).
+
+· Designer fire 2026-06-30 (Winston); reworked at ratification 2026-07-02 · Lattice lane
 **Backlog row:** "Loom / Weaver control-API surfacing" (`backlog/lattice.md` → Refinements & ops) — ★ · M
 
 ---
