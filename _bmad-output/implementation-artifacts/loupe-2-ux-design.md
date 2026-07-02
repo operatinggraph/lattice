@@ -681,15 +681,21 @@ fires inside `cmd/loupe/web`). Every fire leaves the console fully usable — no
 tab before its replacement exists (F2 retires Core KV, F3 retires Control, F4 retires Health — each in
 the same fire as its replacement).
 
-**Build checkpoint (for the next fire):** F1 ✅ shipped `e6a8a46` (2026-07-02, 3-layer-reviewed). The
-router grammar, `logic/` tier, goja harness (`cmd/loupe/web_logic_test.go` — its strip transform also
-*enforces* the §2.3 convention), key resolver, provenance chips, and breadcrumbs are live; the eight
-views are 1:1 (`#/map · #/corekv[/<key>] · #/health · #/tasks · #/control · #/packages · #/files ·
-#/op`; `?prefix=`/`?aspect=` are URL-carried on corekv). **F2 notes:** `keyTarget` (`logic/keys.js`)
-currently resolves vertex/meta/link keys to `#/corekv/…` — F2 re-points it to `#/graph/…` (+ the
-`TestKeyHelpersJS` target table), adds `#/corekv` → `#/graph` as the route alias, and keeps the resolver
-the single place keys become links. The resolver is named `keyTarget` (returns the href); `keyLink` in
-§1.2 refers to the same seam. `classifyKey` (Go + JS, shared case table) rejects empty-segment keys.
+**Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` (2026-07-02, both
+3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list — `/api/vertices` carries
+type/q/offset/includeDeleted + facets/total and sorts keys so offset windows are stable), the linkifying
+renderer (`web/js/render.js`: `renderDoc` + `keyLinkEl` — reuse these for any rendered reply), the hood
+mode (`logic/hood.js` pure model + goja tests), and the `#/corekv` → `#/graph` alias; `keyTarget`
+resolves to `#/graph/…`; tasks cards fully linkified; the map lens tip jumps to the lens meta-vertex.
+**Deferred, still owed:** hood neighbor chips don't dim tombstones — `/api/vertex` link rows carry no
+far-end `isDeleted` (add the field when a fire next touches that handler); the §7.2 "package page →"
+action ships with F8; the lens-page affordances (§1.2 aliases) ship with F5. **F3 notes:** build
+`#/component/<id>` per §5 — `GET /api/component/<id>`, plural-instance fixes in `/api/systemmap` +
+`/api/health` (the `beats[group] = b` LWW overwrite in `computeSystemMap`/`computeHealth` is the target),
+`GET /api/lenses` roster (links land on `#/graph/vtx.meta.<id>` until F5), row-level loom/weaver control
+actions POSTing the existing `/api/control/<comp>/<name>/<op>`, component events section, the map
+clients shelf for undeclared heartbeat groups, and the Control tab retires in the same fire. Render
+control replies through `renderDoc` so op-tracker keys in Weaver replies become links (§7.3).
 
 ---
 
