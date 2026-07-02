@@ -7,7 +7,7 @@
 
 import { $, el, api, setStatus } from "../api.js";
 import { replaceRoute } from "../router.js";
-import { issueClass } from "../logic/status.js";
+import { issueClass, lensStateDot, lensStateGlyph, pendingReadpathCopy } from "../logic/status.js";
 import { metricsLine, eventSummary, controlSurface } from "../logic/component.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 
@@ -255,7 +255,7 @@ async function runControlOp(comp, id, op, line, out, refresh) {
   reply.appendChild(el("div", "muted small", comp + " " + op + " " + id + ":"));
   reply.appendChild(renderDoc(body));
   showReply(out, reply);
-  btns.forEach((b) => { b.disabled = false; });
+  btns.forEach((b) => { if (b.dataset.inert !== "1") b.disabled = false; });
   const isRead = op === "inspect" || op === "health";
   if (!body.error && !isRead && refresh) refresh();
 }
@@ -274,23 +274,47 @@ async function loadRoster(rowsBox, out) {
   if (!lenses.length) { rowsBox.appendChild(el("div", "muted", "(no lenses projecting)")); return; }
   rowsBox.appendChild(el("div", "muted small", lenses.length + " lenses"));
   const refresh = () => loadRoster(rowsBox, out);
-  lenses.forEach((lens) => {
-    const row = el("div", "control-item comp-lensrow");
-    const dotCls = { active: "green", yellow: "yellow", paused: "yellow", rebuilding: "yellow" }[lens.status] || "dim";
-    row.appendChild(el("span", "sysmap-dot " + dotCls));
-    const label = keyLinkEl("vtx.meta." + lens.id, "cid");
-    label.textContent = lens.canonicalName || lens.id;
-    row.appendChild(label);
-    row.appendChild(el("span", "state-tag", lens.targetType === "postgres" ? "pg" : "kv"));
-    if (lens.protected || lens.grantTable) row.appendChild(el("span", "state-tag comp-protected", "◆ protected"));
-    row.appendChild(el("span", "muted small", lens.status));
-    ["health", "validate", "pause", "resume", "rebuild"].forEach((op) => {
-      const btn = el("button", "comp-ctlbtn", op === "health" ? "inspect" : op);
+  // pending-readpath rows collect under a group footer so the roster's health
+  // scan reads clean — they are expected fail-closed state, not degradation.
+  const pending = lenses.filter((l) => l.status === "pending-readpath");
+  lenses.filter((l) => l.status !== "pending-readpath")
+    .forEach((lens) => rowsBox.appendChild(rosterRow(lens, out, refresh)));
+  if (pending.length) {
+    rowsBox.appendChild(el("h4", "comp-subsection", "pending read path (" + pending.length + ")"));
+    rowsBox.appendChild(el("p", "muted small",
+      pendingReadpathCopy + " — excluded from the health rollup."));
+    pending.forEach((lens) => rowsBox.appendChild(rosterRow(lens, out, refresh)));
+  }
+}
+
+// rosterRow builds one lens row: renderedState dot · linked name · target
+// chip · ◆ protected (spec-side, every state) · state text · actions. rebuild
+// is disabled while pending-readpath (the protected table's activation is
+// out-of-band; a rebuild cannot help).
+function rosterRow(lens, out, refresh) {
+  const row = el("div", "control-item comp-lensrow");
+  row.appendChild(el("span", "sysmap-dot " + (lensStateDot[lens.status] || "dim")));
+  const label = keyLinkEl("vtx.meta." + lens.id, "cid");
+  label.textContent = lens.canonicalName || lens.id;
+  row.appendChild(label);
+  row.appendChild(el("span", "state-tag", lens.targetType === "postgres" ? "pg" : "kv"));
+  if (lens.protected || lens.grantTable) row.appendChild(el("span", "state-tag comp-protected", "◆ protected"));
+  const glyph = lensStateGlyph[lens.status];
+  row.appendChild(el("span", "muted small", (glyph ? glyph + " " : "") + lens.status));
+  ["health", "validate", "pause", "resume", "rebuild"].forEach((op) => {
+    const btn = el("button", "comp-ctlbtn", op === "health" ? "inspect" : op);
+    if (op === "rebuild" && lens.status === "pending-readpath") {
+      // Permanently inert on this row — runControlOp's blanket re-enable must
+      // not resurrect it as a dead button.
+      btn.disabled = true;
+      btn.dataset.inert = "1";
+      btn.title = pendingReadpathCopy;
+    } else {
       btn.addEventListener("click", () => runControlOp("refractor", lens.id, op, row, out, refresh));
-      row.appendChild(btn);
-    });
-    rowsBox.appendChild(row);
+    }
+    row.appendChild(btn);
   });
+  return row;
 }
 
 function init() {}

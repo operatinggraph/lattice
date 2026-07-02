@@ -37,13 +37,15 @@ func TestComputeLensesRoster(t *testing.T) {
 	if rows[0].CanonicalName != "applicantRoster" || rows[1].CanonicalName != "landlordContact" || rows[2].CanonicalName != "" {
 		t.Errorf("sort order = %q,%q,%q", rows[0].CanonicalName, rows[1].CanonicalName, rows[2].CanonicalName)
 	}
-	if rows[0].Status != "active" || rows[0].TargetType != "nats_kv" || rows[0].Protected {
-		t.Errorf("active kv row = %+v", rows[0])
+	if rows[0].Status != "projecting" || rows[0].TargetType != "nats_kv" || rows[0].Protected {
+		t.Errorf("projecting kv row = %+v", rows[0])
 	}
-	if rows[1].Status != "paused" || !rows[1].Protected || rows[1].TargetType != "postgres" {
-		t.Errorf("paused protected row = %+v", rows[1])
+	// A paused protected postgres lens is the fail-closed activation gate, not
+	// a degraded lens — it renders pending-readpath.
+	if rows[1].Status != "pending-readpath" || !rows[1].Protected || rows[1].TargetType != "postgres" {
+		t.Errorf("pending-readpath protected row = %+v", rows[1])
 	}
-	if rows[2].Status != "yellow" || !rows[2].GrantTable || len(rows[2].Issues) == 0 {
+	if rows[2].Status != "lagging" || !rows[2].GrantTable || len(rows[2].Issues) == 0 {
 		t.Errorf("lagging grant-table row = %+v", rows[2])
 	}
 }

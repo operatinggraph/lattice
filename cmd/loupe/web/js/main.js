@@ -6,9 +6,9 @@
 import { $, $all, el } from "./api.js";
 import { startRouter, replaceRoute } from "./router.js";
 import { classifyKey } from "./logic/keys.js";
+import * as shell from "./shell.js";
 import * as map from "./views/map.js";
 import * as graph from "./views/graph.js";
-import * as health from "./views/health.js";
 import * as tasks from "./views/tasks.js";
 import * as component from "./views/component.js";
 import * as packages from "./views/packages.js";
@@ -22,7 +22,6 @@ import * as op from "./views/op.js";
 const routes = {
   map:       { panel: "systemmap", view: map,       crumb: "System Map" },
   graph:     { panel: "graph",     view: graph,     crumb: "Graph" },
-  health:    { panel: "health",    view: health,    crumb: "Health" },
   tasks:     { panel: "tasks",     view: tasks,     crumb: "Tasks" },
   component: { panel: "component", view: component, crumb: "System Map", nav: "systemmap", crumbHref: "#/map" },
   packages:  { panel: "packages",  view: packages,  crumb: "Packages" },
@@ -48,6 +47,10 @@ function dispatch(route) {
   // Legacy #/control deep links land on the map — the Control tab dissolved
   // into the component pages (a map node click drills into its page).
   if (route.view === "control") { replaceRoute("/map"); return; }
+  // Legacy #/health deep links land on the map — the Health tab dissolved:
+  // alerts → the global strip, rollup → the topbar pill + map banner,
+  // component cards → the component pages, gates → the map rail.
+  if (route.view === "health") { replaceRoute("/map"); return; }
   const entry = routes[route.view];
   if (!entry) {
     toast("unknown route “#/" + route.view + "” — back to the map");
@@ -112,10 +115,11 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("visible"), 3500);
 }
 
-// Boot: wire each view's static DOM, then start routing.
+// Boot: wire the shell (topbar pill + alert strip) and each view's static
+// DOM, then start routing.
+shell.init();
 map.init();
 graph.init();
-health.init();
 tasks.init();
 component.init();
 packages.init();

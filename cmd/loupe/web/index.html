@@ -12,13 +12,16 @@
     <nav class="tabs" id="tabs">
       <a class="tab active" data-tab="systemmap" href="#/map">System Map</a>
       <a class="tab" data-tab="graph" href="#/graph">Graph</a>
-      <a class="tab" data-tab="health" href="#/health">Health</a>
       <a class="tab" data-tab="tasks" href="#/tasks">Tasks</a>
       <a class="tab" data-tab="packages" href="#/packages">Packages</a>
       <a class="tab" data-tab="files" href="#/files">Files</a>
       <a class="tab" data-tab="op" href="#/op">Submit Op</a>
     </nav>
+    <div class="topbar-status">
+      <a class="rollup" id="topbar-pill" href="#/map"></a>
+    </div>
   </header>
+  <div id="alertstrip"></div>
   <div id="breadcrumbs"></div>
 
   <main>
@@ -35,8 +38,14 @@
         <div id="sysmap-stage">
           <svg id="sysmap-edges" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
+        <aside id="sysmap-rail">
+          <!-- #sysmap-console is the reserved first slot: the agent-activity
+               console (loupe-system-map-ux.md §6) mounts here when it ships;
+               nothing else may claim it. Rendered empty until then. -->
+          <div id="sysmap-console"></div>
+          <section id="sysmap-gates"></section>
+        </aside>
       </div>
-      <!-- agent-activity console mounts in #sysmap-console — see loupe-system-map-ux.md §6 -->
     </section>
 
     <!-- Graph explorer -->
@@ -68,17 +77,6 @@
           <svg id="hood-edges" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
       </div>
-    </section>
-
-    <!-- Health -->
-    <section class="panel" id="panel-health">
-      <div class="panel-controls">
-        <button id="health-load">Refresh</button>
-        <span class="rollup" id="health-overall"></span>
-        <span class="muted" id="health-status"></span>
-      </div>
-      <div class="cards" id="health-cards"></div>
-      <div class="alerts" id="health-alerts"></div>
     </section>
 
     <!-- Tasks -->

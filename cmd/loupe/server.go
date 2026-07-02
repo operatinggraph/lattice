@@ -176,9 +176,54 @@ func (s *server) handleCoreKVEntry(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// healthReaders lists the health-kv bucket and builds the reader closures the
+// health-derived endpoints (health, systemmap, lenses) share: readEntry
+// decodes a Health KV doc; resolveLens surfaces a lens reporter's
+// canonicalName + description from its vtx.meta.<id>.* aspects (a lens's
+// Health KV key is its meta.lens vertex id, a bare NanoID); resolveSpec joins
+// the lens spec for the renderedState derivation.
+func (s *server) healthReaders(ctx context.Context, conn *substrate.Conn) (
+	keys []string,
+	readEntry func(string) (map[string]any, bool),
+	resolveLens func(id string) (name, desc string),
+	resolveSpec func(id string) lensSpecInfo,
+	err error,
+) {
+	keys, err = conn.KVListKeys(ctx, bootstrap.HealthKVBucket)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	readEntry = func(k string) (map[string]any, bool) {
+		entry, err := conn.KVGet(ctx, bootstrap.HealthKVBucket, k)
+		if err != nil {
+			return nil, false
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			return nil, false
+		}
+		return doc, true
+	}
+	coreGet := func(key string) ([]byte, bool) {
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+		if err != nil {
+			return nil, false
+		}
+		return entry.Value, true
+	}
+	resolveLens = func(id string) (name, desc string) {
+		metaKey := "vtx.meta." + id
+		name = dataString(metaData(coreGet, metaKey+".canonicalName"), "value", "name", "canonicalName")
+		desc = dataString(metaData(coreGet, metaKey+".description"), "value", "text", "description")
+		return name, desc
+	}
+	resolveSpec = func(id string) lensSpecInfo { return lensSpec(coreGet, id) }
+	return keys, readEntry, resolveLens, resolveSpec, nil
+}
+
 // handleHealth implements GET /api/health. It lists the health-kv bucket,
-// classifies + freshness-stamps each component entry, and returns a rollup the
-// UI renders as component cards.
+// classifies + freshness-stamps each component entry, and returns the rollup
+// behind the shell's topbar pill + alert strip (and the component cards).
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -187,47 +232,19 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	keys, err := conn.KVListKeys(ctx, bootstrap.HealthKVBucket)
+	keys, readEntry, resolveLens, resolveSpec, err := s.healthReaders(ctx, conn)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "list health-kv: "+err.Error())
 		return
 	}
-	readEntry := func(k string) (map[string]any, bool) {
-		entry, err := conn.KVGet(ctx, bootstrap.HealthKVBucket, k)
-		if err != nil {
-			return nil, false
-		}
-		var doc map[string]any
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			return nil, false
-		}
-		return doc, true
-	}
-	// A lens reporter's Health KV key is the lens's meta.lens vertex id (a bare
-	// NanoID), so its canonicalName + description live at vtx.meta.<id>.* in Core
-	// KV. resolveLens surfaces those for a readable card label instead of the id.
-	coreGet := func(key string) ([]byte, bool) {
-		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
-		if err != nil {
-			return nil, false
-		}
-		return entry.Value, true
-	}
-	resolveLens := func(id string) (name, desc string) {
-		metaKey := "vtx.meta." + id
-		name = dataString(metaData(coreGet, metaKey+".canonicalName"), "value", "name", "canonicalName")
-		desc = dataString(metaData(coreGet, metaKey+".description"), "value", "text", "description")
-		return name, desc
-	}
-	rollup := computeHealth(keys, readEntry, resolveLens, staleThreshold)
+	rollup := computeHealth(keys, readEntry, resolveLens, resolveSpec, staleThreshold)
 	s.writeJSON(w, http.StatusOK, rollup)
 }
 
 // handleSystemMap implements GET /api/systemmap. It overlays the live Health KV
 // state onto the canonical component topology and returns the self-truthing
-// node / edge graph the landing "system map" view renders. The Health KV reads
-// mirror handleHealth: component heartbeats plus the lens reporters, with lens
-// labels resolved from Core KV meta-vertices.
+// node / edge graph the landing "system map" view renders, plus the phase-gate
+// chips for the map rail.
 func (s *server) handleSystemMap(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -236,36 +253,12 @@ func (s *server) handleSystemMap(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	keys, err := conn.KVListKeys(ctx, bootstrap.HealthKVBucket)
+	keys, readEntry, resolveLens, resolveSpec, err := s.healthReaders(ctx, conn)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "list health-kv: "+err.Error())
 		return
 	}
-	readEntry := func(k string) (map[string]any, bool) {
-		entry, err := conn.KVGet(ctx, bootstrap.HealthKVBucket, k)
-		if err != nil {
-			return nil, false
-		}
-		var doc map[string]any
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			return nil, false
-		}
-		return doc, true
-	}
-	coreGet := func(key string) ([]byte, bool) {
-		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
-		if err != nil {
-			return nil, false
-		}
-		return entry.Value, true
-	}
-	resolveLens := func(id string) (name, desc string) {
-		metaKey := "vtx.meta." + id
-		name = dataString(metaData(coreGet, metaKey+".canonicalName"), "value", "name", "canonicalName")
-		desc = dataString(metaData(coreGet, metaKey+".description"), "value", "text", "description")
-		return name, desc
-	}
-	m := computeSystemMap(keys, readEntry, resolveLens, staleThreshold)
+	m := computeSystemMap(keys, readEntry, resolveLens, resolveSpec, staleThreshold)
 	s.writeJSON(w, http.StatusOK, m)
 }
 

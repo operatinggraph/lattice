@@ -11,11 +11,13 @@ import (
 // chip on the clients shelf, no skeleton edges), "lens" (a Refractor
 // projection), or "infra" (a core stream / KV store — the spine the components
 // hang off). Status carries the live overlay: a component/client is "green" /
-// "stale" / "absent"; a lens reuses the Health-tab vocabulary ("active" /
-// "yellow" / "paused" / "rebuilding" / "unknown"); infra is "present" (it
-// exists if Loupe could read Health KV). Component/client nodes carry every
-// live instance in Instances; the node-level Status is the worst instance's,
-// Freshness the freshest, Detail the worst instance's id.
+// "stale" / "absent"; a lens carries its §4.2 renderedState ("projecting" /
+// "lagging" / "paused" / "pending-readpath" / "rebuilding" / "fault" /
+// "unknown"); infra is "present" (it exists if Loupe could read Health KV).
+// Protected marks a read-path-authorized lens (spec-side truth — the ◆ tag
+// renders in every state). Component/client nodes carry every live instance
+// in Instances; the node-level Status is the worst instance's, Freshness the
+// freshest, Detail the worst instance's id.
 type mapNode struct {
 	ID        string        `json:"id"`
 	Label     string        `json:"label"`
@@ -24,6 +26,7 @@ type mapNode struct {
 	Detail    string        `json:"detail,omitempty"`
 	Freshness string        `json:"freshness,omitempty"`
 	Parent    string        `json:"parent,omitempty"`
+	Protected bool          `json:"protected,omitempty"`
 	Issues    []string      `json:"issues,omitempty"`
 	Instances []mapInstance `json:"instances,omitempty"`
 }
@@ -46,12 +49,14 @@ type mapEdge struct {
 
 // systemMap is the GET /api/systemmap response: the canonical component
 // topology (the deployed subset of architecture-overview.md) with the live
-// Health KV overlay applied, plus an overall rollup. It is self-truthing — the
-// skeleton is curated, but every component's presence / freshness and every
-// lens node is derived from Health KV at request time, never hardcoded.
+// Health KV overlay applied, plus the phase-gate chips and an overall rollup.
+// It is self-truthing — the skeleton is curated, but every component's
+// presence / freshness and every lens node is derived from Health KV at
+// request time, never hardcoded.
 type systemMap struct {
 	Nodes   []mapNode `json:"nodes"`
 	Edges   []mapEdge `json:"edges"`
+	Gates   []mapGate `json:"gates"`
 	Overall string    `json:"overall"`
 }
 
@@ -114,14 +119,18 @@ var skeletonEdges = []mapEdge{
 }
 
 // computeSystemMap overlays the live Health KV state onto the canonical
-// topology. readEntry / resolveLens / staleThreshold mirror computeHealth so the
-// assembler is unit-testable without NATS. A declared component with no Health
-// KV heartbeat renders "absent" (red); a stale heartbeat renders "stale"
-// (yellow); each live lens becomes a node parented to Refractor.
+// topology. readEntry / resolveLens / resolveSpec / staleThreshold mirror
+// computeHealth so the assembler is unit-testable without NATS. A declared
+// component with no Health KV heartbeat renders "absent" (red); a stale
+// heartbeat renders "stale" (yellow); each live lens becomes a node parented
+// to Refractor carrying its renderedState — a pending-readpath lens
+// contributes nothing to the rollup (it is expected fail-closed state, not
+// degradation).
 func computeSystemMap(
 	keys []string,
 	readEntry func(string) (map[string]any, bool),
 	resolveLens func(id string) (name, desc string),
+	resolveSpec func(id string) lensSpecInfo,
 	staleThreshold time.Duration,
 ) systemMap {
 	const (
@@ -137,13 +146,32 @@ func computeSystemMap(
 	}
 
 	// Index the live component heartbeats (all of them — a group may run
-	// several instances) and lens reporters by group.
+	// several instances) and lens reporters by group. Alert severity and the
+	// bootstrap marker fold into the overall too — the map banner and the
+	// topbar pill are the same rollup in two homes, and must never disagree
+	// on one screen.
 	beats := make(map[string][]instanceBeat)
 	lensNodes := make([]mapNode, 0)
+	bootstrapPresent := false
 
 	for _, k := range keys {
 		group, kind := classifyHealthKey(k)
 		switch kind {
+		case kindBootstrap:
+			bootstrapPresent = true
+
+		case kindAlert:
+			doc, ok := readEntry(k)
+			if !ok {
+				continue
+			}
+			switch severity, _ := doc["severity"].(string); severity {
+			case "error":
+				worse(red)
+			case "warning":
+				worse(yellow)
+			}
+
 		case kindComponent:
 			doc, ok := readEntry(k)
 			if !ok {
@@ -171,10 +199,14 @@ func computeSystemMap(
 					}
 				}
 			}
-			node.Status, node.Issues = lensStatus(doc)
-			if node.Status != "active" {
-				worse(yellow)
+			var spec lensSpecInfo
+			if resolveSpec != nil {
+				spec = resolveSpec(k)
 			}
+			var level int
+			node.Status, node.Issues, level = lensRenderedState(doc, spec)
+			node.Protected = spec.Protected || spec.GrantTable
+			worse(level)
 			lensNodes = append(lensNodes, node)
 		}
 	}
@@ -244,9 +276,14 @@ func computeSystemMap(
 		edges = append(edges, mapEdge{From: refractorID, To: ln.ID, Label: "project"})
 	}
 
+	if !bootstrapPresent {
+		worse(red)
+	}
+
 	return systemMap{
 		Nodes:   nodes,
 		Edges:   edges,
+		Gates:   computeGates(keys, readEntry),
 		Overall: [...]string{"green", "yellow", "red"}[overall],
 	}
 }
@@ -296,33 +333,4 @@ func applyBeats(node *mapNode, bs []instanceBeat) int {
 		})
 	}
 	return bs[wi].level
-}
-
-// lensStatus maps a lens reporter's Health KV doc to the map vocabulary,
-// mirroring computeHealth's lens branch: an active lens with consumer lag or a
-// nonzero error count is "yellow"; paused / rebuilding pass through; anything
-// else is "unknown".
-func lensStatus(doc map[string]any) (status string, issues []string) {
-	raw, _ := doc["status"].(string)
-	consumerLag, _ := doc["consumerLag"].(float64)
-	errorCount, _ := doc["errorCount"].(float64)
-	switch raw {
-	case "active":
-		status = "active"
-		if consumerLag > 0 {
-			status = "yellow"
-			issues = append(issues, "consumerLag")
-		}
-	case "paused", "rebuilding":
-		status = raw
-	default:
-		status = "unknown"
-	}
-	if errorCount > 0 {
-		if status == "active" {
-			status = "yellow"
-		}
-		issues = append(issues, "errorCount")
-	}
-	return status, issues
 }

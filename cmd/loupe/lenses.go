@@ -1,17 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"sort"
-
-	"github.com/asolgan/lattice/internal/bootstrap"
 )
 
-// lensRow is one lens in the GET /api/lenses roster. Status uses the existing
-// lens vocabulary (active/yellow/paused/rebuilding/unknown); TargetType +
-// Protected/GrantTable come from the lens spec join (vtx.meta.<id>.spec) — the
-// spec-side truth behind the ◆ protected tag, independent of reporter state.
+// lensRow is one lens in the GET /api/lenses roster. Status is the §4.2
+// renderedState (projecting/lagging/paused/pending-readpath/rebuilding/fault/
+// unknown); TargetType + Protected/GrantTable come from the lens spec join
+// (vtx.meta.<id>.spec) — the spec-side truth behind the ◆ protected tag,
+// independent of reporter state.
 type lensRow struct {
 	ID            string   `json:"id"`
 	CanonicalName string   `json:"canonicalName,omitempty"`
@@ -64,16 +62,17 @@ func computeLenses(
 			continue
 		}
 		row := lensRow{ID: k}
-		row.Status, row.Issues = lensStatus(doc)
 		if resolveLens != nil {
 			row.CanonicalName, row.Description = resolveLens(k)
 		}
+		var spec lensSpecInfo
 		if resolveSpec != nil {
-			spec := resolveSpec(k)
+			spec = resolveSpec(k)
 			row.TargetType = spec.TargetType
 			row.Protected = spec.Protected
 			row.GrantTable = spec.GrantTable
 		}
+		row.Status, row.Issues, _ = lensRenderedState(doc, spec)
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -99,37 +98,11 @@ func (s *server) handleLenses(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 
-	keys, err := conn.KVListKeys(ctx, bootstrap.HealthKVBucket)
+	keys, readEntry, resolveLens, resolveSpec, err := s.healthReaders(ctx, conn)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "list health-kv: "+err.Error())
 		return
 	}
-	readEntry := func(k string) (map[string]any, bool) {
-		entry, err := conn.KVGet(ctx, bootstrap.HealthKVBucket, k)
-		if err != nil {
-			return nil, false
-		}
-		var doc map[string]any
-		if err := json.Unmarshal(entry.Value, &doc); err != nil {
-			return nil, false
-		}
-		return doc, true
-	}
-	coreGet := func(key string) ([]byte, bool) {
-		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
-		if err != nil {
-			return nil, false
-		}
-		return entry.Value, true
-	}
-	resolveLens := func(id string) (name, desc string) {
-		metaKey := "vtx.meta." + id
-		name = dataString(metaData(coreGet, metaKey+".canonicalName"), "value", "name", "canonicalName")
-		desc = dataString(metaData(coreGet, metaKey+".description"), "value", "text", "description")
-		return name, desc
-	}
-	resolveSpec := func(id string) lensSpecInfo { return lensSpec(coreGet, id) }
-
 	rows := computeLenses(keys, readEntry, resolveLens, resolveSpec)
 	s.writeJSON(w, http.StatusOK, map[string]any{"lenses": rows, "count": len(rows)})
 }

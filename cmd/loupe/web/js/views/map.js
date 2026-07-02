@@ -6,7 +6,7 @@
 // data change, not new rendering logic.
 
 import { el, api, setStatus } from "../api.js";
-import { componentStatusClass, lensDotClass, lensGlyph, sysmapTier } from "../logic/status.js";
+import { componentStatusClass, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
 import { navigate } from "../router.js";
 
 const SYSMAP_TIER_Y = [40, 150, 270, 400, 530];
@@ -48,6 +48,7 @@ async function refreshSystemMap() {
     renderSysmapError(body.error);
     setStatus("sysmap-status", "error", true);
     setSysmapRollup(null);
+    renderGates(null);
     return;
   }
   sysmap.data = body;
@@ -97,24 +98,50 @@ function setSysmapRollup(data) {
   const overall = data.overall || "green";
   banner.textContent = overall.toUpperCase();
   banner.className = "rollup " + overall;
-  const nodes = data.nodes || [];
-  const healthy = new Set(["green", "active", "present"]);
+  // pending-readpath lenses are surfaced as their own count, never as
+  // degraded — a stack that simply hasn't run read-path provisioning is not
+  // crying wolf.
+  const counts = sysmapSummary(data.nodes || []);
+  const pendingSuffix = counts.pending
+    ? " · " + counts.pending + " pending read path" : "";
   if (overall === "red") {
-    const absent = nodes.filter((n) => n.status === "absent").length;
-    const unhealthy = nodes.filter((n) => n.status === "unhealthy").length;
     const parts = [];
-    if (absent) parts.push(absent + " absent");
-    if (unhealthy) parts.push(unhealthy + " unhealthy");
-    summary.textContent = (parts.length ? parts.join(", ") : "issues detected") + ".";
+    if (counts.absent) parts.push(counts.absent + " absent");
+    if (counts.unhealthy) parts.push(counts.unhealthy + " unhealthy");
+    summary.textContent = (parts.length ? parts.join(", ") : "issues detected") + "." + pendingSuffix;
     if (stage) stage.classList.add("sysmap-red");
   } else if (overall === "yellow") {
-    const degraded = nodes.filter((n) => !healthy.has(n.status)).length;
-    summary.textContent = degraded + " component(s)/lens(es) degraded.";
+    summary.textContent = counts.degraded + " component(s)/lens(es) degraded." + pendingSuffix;
     if (stage) stage.classList.remove("sysmap-red");
   } else {
-    summary.textContent = "All components healthy.";
+    summary.textContent = "All components healthy." + pendingSuffix;
     if (stage) stage.classList.remove("sysmap-red");
   }
+}
+
+// renderGates fills the rail's gates panel: one chip per phase gate, green ✓
+// when its Health-KV marker reports passed, dim "—" when absent. Absence is
+// informational — the markers are written by the proof-gate test suites, not
+// by deploys.
+function renderGates(gates) {
+  const panel = document.getElementById("sysmap-gates");
+  if (!panel) return;
+  panel.innerHTML = "";
+  if (!gates) return; // no data (fetch error) — the empty panel hides via CSS
+  panel.appendChild(el("div", "gates-head", "phase gates"));
+  panel.appendChild(el("div", "muted small gates-sub",
+    "markers written by the proof-gate suites — absence is informational"));
+  const chips = el("div", "gates-chips");
+  (gates || []).forEach((g) => {
+    const chip = el("span", "gate-chip" + (g.present && g.passed ? " pass" : ""),
+      g.gate + " " + (g.present ? (g.passed ? "✓" : "✗") : "—"));
+    chip.title = g.present
+      ? (g.passed ? "passed" : "not passed") +
+        (g.timestamp ? " · " + g.timestamp : "") + (g.commit ? " @ " + g.commit : "")
+      : "no marker in Health KV";
+    chips.appendChild(chip);
+  });
+  panel.appendChild(chips);
 }
 
 // renderSystemMap lays out the nodes (tiers 0-3 absolutely positioned, tier-4
@@ -123,6 +150,7 @@ function renderSystemMap(data) {
   const stage = sysmapStage();
   if (!stage) return;
   setSysmapRollup(data);
+  renderGates(data.gates);
   stage.innerHTML = "";
   sysmap.nodeEls = new Map();
 
@@ -249,11 +277,26 @@ function buildSysmapNode(n) {
     }
     if (n.freshness) node.appendChild(el("div", "sysmap-freshness", n.freshness));
   } else if (n.kind === "lens") {
-    const cls = lensDotClass[n.status] || "dim";
+    const cls = lensStateDot[n.status] || "dim";
+    if (n.status === "pending-readpath") node.classList.add("pending-readpath");
+    if (n.status === "fault") node.classList.add("fault");
     node.appendChild(el("span", "sysmap-dot " + cls));
-    const g = lensGlyph[n.status];
+    const g = lensStateGlyph[n.status];
     if (g) node.appendChild(el("span", "sysmap-glyph", g));
     node.appendChild(el("span", "sysmap-label", n.label));
+    // A lagging chip pairs its yellow dot with the "lag N" tag (color never
+    // stands alone) — N read from the consumerLag issue line.
+    if (n.status === "lagging") {
+      let lag = "lag";
+      (n.issues || []).forEach((i) => {
+        const m = /^consumerLag=(\d+)$/.exec(i);
+        if (m) lag = "lag " + m[1];
+      });
+      node.appendChild(el("span", "sysmap-tag warn", lag));
+    }
+    // The ◆ protected tag is spec-side truth — it renders in EVERY state, not
+    // just while pending (a verified protected lens keeps it).
+    if (n.protected) node.appendChild(el("span", "sysmap-tag protected", "◆"));
   } else if (n.kind === "client") {
     const cls = componentStatusClass[n.status] || "unknown";
     node.appendChild(el("span", "sysmap-dot " + cls));
@@ -295,6 +338,10 @@ function showSysmapTip(n, evt) {
   const line = (k, v) => { const r = el("div", "sysmap-tip-line"); r.appendChild(el("span", "sysmap-tip-k", k)); r.appendChild(el("span", null, v)); tip.appendChild(r); };
   line("kind", n.kind);
   line("status", n.status);
+  if (n.kind === "lens" && n.protected) line("protected", "◆ read-path-authorized");
+  if (n.status === "pending-readpath") {
+    tip.appendChild(el("div", "sysmap-issue", pendingReadpathCopy));
+  }
   if (n.detail) line("detail", n.detail);
   if (n.freshness) line("freshness", n.freshness);
   (n.issues || []).forEach((i) => tip.appendChild(el("div", /^\[error\]/.test(i) ? "sysmap-issue bad" : "sysmap-issue", i)));

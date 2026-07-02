@@ -21,11 +21,14 @@ type healthComponent struct {
 	Issues    []string `json:"issues,omitempty"`
 }
 
-// healthRollup is the GET /api/health response.
+// healthRollup is the GET /api/health response. Bootstrap reports whether the
+// health.bootstrap.* kernel-seed marker is present — the shell's alert strip
+// renders its absence as the red "bootstrap incomplete" line.
 type healthRollup struct {
 	Overall    string            `json:"overall"`
 	Components []healthComponent `json:"components"`
 	Alerts     []string          `json:"alerts"`
+	Bootstrap  bool              `json:"bootstrap"`
 }
 
 // How a Health KV key is rendered.
@@ -211,13 +214,15 @@ func componentLiveness(doc map[string]any, staleThreshold time.Duration) (status
 // computeHealth evaluates every Health KV entry into component cards plus an
 // overall rollup (green/yellow/red). readEntry returns the decoded JSON doc for
 // a key (and false to skip). resolveLens maps a lens reporter id to its
-// (canonicalName, description) for a readable card label (nil disables it, e.g.
-// in tests). staleThreshold is the heartbeat age past which a component is
+// (canonicalName, description) for a readable card label; resolveSpec joins the
+// lens spec for the renderedState derivation (either may be nil, e.g. in
+// tests). staleThreshold is the heartbeat age past which a component is
 // "stale" (yellow).
 func computeHealth(
 	keys []string,
 	readEntry func(string) (map[string]any, bool),
 	resolveLens func(id string) (name, desc string),
+	resolveSpec func(id string) lensSpecInfo,
 	staleThreshold time.Duration,
 ) healthRollup {
 	const (
@@ -266,29 +271,13 @@ func computeHealth(
 					}
 				}
 			}
-			status, _ := doc["status"].(string)
-			consumerLag, _ := doc["consumerLag"].(float64)
-			errorCount, _ := doc["errorCount"].(float64)
-			switch status {
-			case "active":
-				if consumerLag > 0 {
-					c.Status = "yellow"
-					c.Issues = append(c.Issues, fmt.Sprintf("consumerLag=%.0f", consumerLag))
-					worse(yellow)
-				} else {
-					c.Status = "active"
-				}
-			case "paused", "rebuilding":
-				c.Status = status
-				worse(yellow)
-			default:
-				c.Status = "unknown"
-				worse(yellow)
+			var spec lensSpecInfo
+			if resolveSpec != nil {
+				spec = resolveSpec(k)
 			}
-			if errorCount > 0 {
-				c.Issues = append(c.Issues, fmt.Sprintf("errorCount=%.0f", errorCount))
-				worse(yellow)
-			}
+			var level int
+			c.Status, c.Issues, level = lensRenderedState(doc, spec)
+			worse(level)
 			components = append(components, c)
 
 		case kindBootstrap:
@@ -330,5 +319,6 @@ func computeHealth(
 		Overall:    [...]string{"green", "yellow", "red"}[overall],
 		Components: components,
 		Alerts:     alerts,
+		Bootstrap:  bootstrapPresent,
 	}
 }

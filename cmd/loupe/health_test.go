@@ -53,7 +53,7 @@ func TestComputeHealthComponentAndLens(t *testing.T) {
 		return "", ""
 	}
 
-	got := computeHealth(keys, read, resolve, 60*time.Second)
+	got := computeHealth(keys, read, resolve, nil, 60*time.Second)
 
 	byName := map[string]healthComponent{}
 	for _, c := range got.Components {
@@ -79,8 +79,8 @@ func TestComputeHealthComponentAndLens(t *testing.T) {
 	if !ok {
 		t.Fatalf("resolved lens card missing; components: %+v", got.Components)
 	}
-	if lens.Group != "lens" || lens.Status != "active" || lens.Key != "uhBwnSgiVAtRTswWuhBw" {
-		t.Errorf("lens card = %+v, want group=lens status=active key=<id>", lens)
+	if lens.Group != "lens" || lens.Status != "projecting" || lens.Key != "uhBwnSgiVAtRTswWuhBw" {
+		t.Errorf("lens card = %+v, want group=lens status=projecting key=<id>", lens)
 	}
 	if lens.Detail != "lens · object→owner liveness" {
 		t.Errorf("lens detail = %q", lens.Detail)
@@ -89,6 +89,9 @@ func TestComputeHealthComponentAndLens(t *testing.T) {
 	// bootstrap present → not red; the warning alert → yellow rollup.
 	if got.Overall != "yellow" {
 		t.Errorf("overall = %q, want yellow (warning alert present)", got.Overall)
+	}
+	if !got.Bootstrap {
+		t.Error("bootstrap = false, want true (marker present)")
 	}
 	if len(got.Alerts) != 1 {
 		t.Errorf("alerts = %v, want 1", got.Alerts)
@@ -99,16 +102,19 @@ func TestComputeHealthLensFallsBackToID(t *testing.T) {
 	docs := map[string]map[string]any{"AbcLensId0000000000": {"status": "active"}}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
 	// resolve returns "" → card keeps the id as its name.
-	got := computeHealth([]string{"AbcLensId0000000000"}, read, func(string) (string, string) { return "", "" }, time.Minute)
+	got := computeHealth([]string{"AbcLensId0000000000"}, read, func(string) (string, string) { return "", "" }, nil, time.Minute)
 	if len(got.Components) != 1 || got.Components[0].Name != "AbcLensId0000000000" {
 		t.Errorf("expected id fallback name; got %+v", got.Components)
 	}
 }
 
 func TestComputeHealthMissingBootstrapIsRed(t *testing.T) {
-	got := computeHealth(nil, func(string) (map[string]any, bool) { return nil, false }, nil, time.Minute)
+	got := computeHealth(nil, func(string) (map[string]any, bool) { return nil, false }, nil, nil, time.Minute)
 	if got.Overall != "red" {
 		t.Errorf("overall = %q, want red (no bootstrap marker)", got.Overall)
+	}
+	if got.Bootstrap {
+		t.Error("bootstrap = true, want false (no marker)")
 	}
 }
 
@@ -219,7 +225,7 @@ func TestComputeHealthUnhealthyComponentRollsToRed(t *testing.T) {
 		keys = append(keys, k)
 	}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
-	got := computeHealth(keys, read, nil, time.Minute)
+	got := computeHealth(keys, read, nil, nil, time.Minute)
 	if got.Overall != "red" {
 		t.Errorf("overall = %q, want red (unhealthy component)", got.Overall)
 	}

@@ -36,7 +36,7 @@ func TestComputeSystemMapOverlay(t *testing.T) {
 		return "", ""
 	}
 
-	m := computeSystemMap(keys, read, resolve, 60*time.Second)
+	m := computeSystemMap(keys, read, resolve, nil, 60*time.Second)
 	byID := nodesByID(m)
 
 	// Infra spine is always present.
@@ -63,8 +63,8 @@ func TestComputeSystemMapOverlay(t *testing.T) {
 	}
 	// Lens node is parented to refractor with a resolved label.
 	lens := byID["AbcLensId0000000000"]
-	if lens.Kind != nodeLens || lens.Parent != refractorID || lens.Label != "objectLiveness" || lens.Status != "active" {
-		t.Errorf("lens = %+v, want lens/refractor/objectLiveness/active", lens)
+	if lens.Kind != nodeLens || lens.Parent != refractorID || lens.Label != "objectLiveness" || lens.Status != "projecting" {
+		t.Errorf("lens = %+v, want lens/refractor/objectLiveness/projecting", lens)
 	}
 
 	// A refractor→lens project edge exists.
@@ -90,13 +90,14 @@ func TestComputeSystemMapAllPresentGreen(t *testing.T) {
 	for _, dc := range declaredComponents {
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
 	}
+	docs["health.bootstrap.complete"] = map[string]any{}
 	keys := make([]string, 0, len(docs))
 	for k := range docs {
 		keys = append(keys, k)
 	}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
 
-	m := computeSystemMap(keys, read, nil, 60*time.Second)
+	m := computeSystemMap(keys, read, nil, nil, 60*time.Second)
 	if m.Overall != "green" {
 		t.Errorf("overall = %q, want green (every component fresh)", m.Overall)
 	}
@@ -115,6 +116,7 @@ func TestComputeSystemMapUnhealthyComponentRed(t *testing.T) {
 	for _, dc := range declaredComponents {
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
 	}
+	docs["health.bootstrap.complete"] = map[string]any{}
 	docs["health."+refractorID+".inst"] = map[string]any{
 		"component": refractorID, "instance": "inst", "heartbeatAt": now,
 		"status": "unhealthy",
@@ -126,7 +128,7 @@ func TestComputeSystemMapUnhealthyComponentRed(t *testing.T) {
 	}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
 
-	m := computeSystemMap(keys, read, nil, time.Minute)
+	m := computeSystemMap(keys, read, nil, nil, time.Minute)
 	if m.Overall != "red" {
 		t.Errorf("overall = %q, want red (unhealthy component)", m.Overall)
 	}
@@ -146,13 +148,14 @@ func TestComputeSystemMapStaleLensYellow(t *testing.T) {
 	for _, dc := range declaredComponents {
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
 	}
+	docs["health.bootstrap.complete"] = map[string]any{}
 	keys := make([]string, 0, len(docs))
 	for k := range docs {
 		keys = append(keys, k)
 	}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
 
-	m := computeSystemMap(keys, read, func(string) (string, string) { return "", "" }, time.Minute)
+	m := computeSystemMap(keys, read, func(string) (string, string) { return "", "" }, nil, time.Minute)
 	if m.Overall != "yellow" {
 		t.Errorf("overall = %q, want yellow (paused lens)", m.Overall)
 	}
@@ -172,6 +175,7 @@ func TestComputeSystemMapPluralInstances(t *testing.T) {
 	for _, dc := range declaredComponents {
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
 	}
+	docs["health.bootstrap.complete"] = map[string]any{}
 	docs["health.processor.proc-a"] = map[string]any{"component": "processor", "instance": "proc-a", "heartbeatAt": now}
 	docs["health.processor.proc-b"] = map[string]any{"component": "processor", "instance": "proc-b", "heartbeatAt": stale}
 	delete(docs, "health.processor.inst")
@@ -181,7 +185,7 @@ func TestComputeSystemMapPluralInstances(t *testing.T) {
 	}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
 
-	m := computeSystemMap(keys, read, nil, time.Minute)
+	m := computeSystemMap(keys, read, nil, nil, time.Minute)
 	proc := nodesByID(m)["processor"]
 	if len(proc.Instances) != 2 {
 		t.Fatalf("processor instances = %+v, want 2 (no LWW collapse)", proc.Instances)
@@ -211,6 +215,7 @@ func TestComputeSystemMapClientNodes(t *testing.T) {
 	for _, dc := range declaredComponents {
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
 	}
+	docs["health.bootstrap.complete"] = map[string]any{}
 	docs["health.loftspace-app.web-1"] = map[string]any{"component": "loftspace-app", "instance": "web-1", "heartbeatAt": now}
 	keys := make([]string, 0, len(docs))
 	for k := range docs {
@@ -218,7 +223,7 @@ func TestComputeSystemMapClientNodes(t *testing.T) {
 	}
 	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
 
-	m := computeSystemMap(keys, read, nil, time.Minute)
+	m := computeSystemMap(keys, read, nil, nil, time.Minute)
 	app := nodesByID(m)["loftspace-app"]
 	if app.Kind != nodeClient || app.Status != "green" || len(app.Instances) != 1 {
 		t.Errorf("client node = %+v, want kind=client green with 1 instance", app)

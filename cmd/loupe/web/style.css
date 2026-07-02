@@ -400,7 +400,7 @@ table.grid td { font-family: var(--mono); }
 .sysmap-auto { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
 .sysmap-auto input { width: auto; }
 
-#sysmap-main { display: grid; grid-template-columns: 1fr; gap: 14px; }
+#sysmap-main { display: grid; grid-template-columns: 1fr 320px; gap: 14px; align-items: start; }
 
 #sysmap-stage {
   position: relative;
@@ -762,3 +762,62 @@ a.tab { text-decoration: none; display: inline-block; }
 .hood-popover-open { color: var(--text-dim); font-size: 11px; text-decoration: none; flex-shrink: 0; }
 .hood-popover-open:hover { color: var(--accent); }
 .hood-popover-more, .hood-popover-close { padding: 3px 10px; font-size: 11px; margin-top: 8px; margin-right: 6px; }
+
+/* Shell: topbar status cluster + the global alert strip. */
+.topbar-status { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+#topbar-pill { text-decoration: none; }
+#topbar-pill:empty { display: none; }
+
+#alertstrip { display: none; }
+#alertstrip.visible {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  padding: 5px 18px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.alertstrip-line.bad { color: var(--red); }
+.alertstrip-line.warn { color: var(--yellow); }
+.alertstrip-more {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 1px 8px;
+  font-size: 11px;
+  border-radius: 10px;
+}
+.alertstrip-more:hover { color: var(--text); background: var(--bg-input); }
+
+/* Map rail: reserved console slot + gates panel. */
+#sysmap-rail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+#sysmap-console:empty { display: none; }
+#sysmap-gates:empty { display: none; }
+#sysmap-gates {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.gates-head { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+.gates-sub { margin-bottom: 8px; }
+.gates-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.gate-chip {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.gate-chip.pass { color: var(--green); border-color: var(--green); }
+@media (max-width: 900px) { #sysmap-main { grid-template-columns: 1fr; } }
+
+/* Lens renderedState visuals: pending-readpath is the accent (informational)
+   family — by design NOT yellow; fault carries the red left border. */
+.sysmap-dot.accent { background: var(--accent); }
+.sysmap-node.lens.pending-readpath { border: 1px solid var(--accent-dim); }
+.sysmap-node.lens.fault { border: 1px solid var(--red); border-left-width: 3px; }
+.sysmap-tag.protected { color: var(--accent); border-color: var(--accent-dim); }
