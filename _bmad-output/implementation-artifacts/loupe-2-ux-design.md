@@ -681,21 +681,30 @@ fires inside `cmd/loupe/web`). Every fire leaves the console fully usable — no
 tab before its replacement exists (F2 retires Core KV, F3 retires Control, F4 retires Health — each in
 the same fire as its replacement).
 
-**Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` (2026-07-02, both
-3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list — `/api/vertices` carries
-type/q/offset/includeDeleted + facets/total and sorts keys so offset windows are stable), the linkifying
-renderer (`web/js/render.js`: `renderDoc` + `keyLinkEl` — reuse these for any rendered reply), the hood
-mode (`logic/hood.js` pure model + goja tests), and the `#/corekv` → `#/graph` alias; `keyTarget`
-resolves to `#/graph/…`; tasks cards fully linkified; the map lens tip jumps to the lens meta-vertex.
-**Deferred, still owed:** hood neighbor chips don't dim tombstones — `/api/vertex` link rows carry no
-far-end `isDeleted` (add the field when a fire next touches that handler); the §7.2 "package page →"
-action ships with F8; the lens-page affordances (§1.2 aliases) ship with F5. **F3 notes:** build
-`#/component/<id>` per §5 — `GET /api/component/<id>`, plural-instance fixes in `/api/systemmap` +
-`/api/health` (the `beats[group] = b` LWW overwrite in `computeSystemMap`/`computeHealth` is the target),
-`GET /api/lenses` roster (links land on `#/graph/vtx.meta.<id>` until F5), row-level loom/weaver control
-actions POSTing the existing `/api/control/<comp>/<name>/<op>`, component events section, the map
-clients shelf for undeclared heartbeat groups, and the Control tab retires in the same fire. Render
-control replies through `renderDoc` so op-tracker keys in Weaver replies become links (§7.3).
+**Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` · F3 ✅ `5865e0e`
+(2026-07-02, all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
+`/api/vertices` carries type/q/offset/includeDeleted + facets/total and sorts keys so offset windows are
+stable), the linkifying renderer (`web/js/render.js`: `renderDoc` + `keyLinkEl` — reuse these for any
+rendered reply), the hood mode (`logic/hood.js` pure model + goja tests), the `#/corekv` → `#/graph` and
+`#/control` → `#/map` aliases; component pages (`#/component/<id>` — `computeComponent`, plural instance
+cards, events grouped by kind, row-level loom/weaver control + the refractor lens roster with per-row
+inspect/validate/pause/resume/rebuild and a persistent per-column reply box); `GET /api/lenses`
+(canonicalName + spec-join targetType/protected/grantTable — F4/F5 reuse this roster); `/api/systemmap`
+nodes carry `instances[]` (worst-of status, freshest freshness, ×N tags) and undeclared heartbeat groups
+render as client chips on a clients shelf (kind `"client"`, no skeleton edges, click → their page).
+`/api/health` needed no plural fix — `computeHealth` was already per-key; only `computeSystemMap` had the
+LWW overwrite. Drill routes carry `nav`/`crumbHref` route-table fields (component pages highlight the Map
+tab). **Deferred, still owed:** hood neighbor chips don't dim tombstones — `/api/vertex` link rows carry
+no far-end `isDeleted` (add the field when a fire next touches that handler); the §7.2 "package page →"
+action ships with F8; the lens-page affordances (§1.2 aliases) ship with F5; `keyTarget` gains its
+component-id row when feed rows need it (F6). **F4 notes:** build per §2.1 + §3.1 + §4 — the global alert
+strip + topbar rollup pill, the map rail (`#sysmap-rail` with the reserved empty `#sysmap-console` first
+slot + gates panel), the `renderedState` derivation server-side (swap `/api/lenses`.`status` + map lens
+statuses onto it; the roster's `pending-readpath` group footer per §5 lands here too), and the Health tab
+retires with the §4.3 element-by-element destination checklist. F3 shipped the roster ◆ protected tag
+(spec join) already; F4 adds the state exclusion so pending-readpath stops yellowing the banner. An
+undeclared client reporter going stale DOES degrade the rollup (adjudicated with F3 — real heartbeat
+signal; only pending-readpath lenses are exempt).
 
 ---
 

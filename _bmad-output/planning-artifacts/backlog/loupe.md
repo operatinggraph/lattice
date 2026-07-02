@@ -22,8 +22,8 @@ one FE fire at a time; each fire retires a tab only in the same fire as its repl
 |---|---|---|---|---|
 | **F1 — Console shell** | Hash router + route table, ES-module `logic/` split (strip-export convention), goja harness + dep + vendors row, `keyLink` resolver seed (link rows far-end-clickable + provenance chips), breadcrumbs. | ★★★ | M | ✅ shipped · checkpoint in [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
 | **F2 — Graph explorer** | Faceted/grouped/paged `#/graph` list, linkifying doc renderer, detail re-plumb, ego-graph hood mode; retires Core KV tab. | ★★★ | L | ✅ shipped · checkpoint in [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
-| **F3 — Component pages** | `#/component/<id>` ×6, plural instances (fixes LWW collapse), row-level control actions, refractor roster; retires Control tab. | ★★★ | L | 🎯 📋 ready · [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
-| **F4 — Health absorption + status vocabulary** | Global alert strip (verbatim `health.alerts.*` incl. stub-auth-active), gates panel + rail (preserves `#sysmap-console` slot), `renderedState` incl. `pending-readpath` (the "7 degraded" fix); retires Health tab. | ★★★ | M | 🚧 seq: F3 |
+| **F3 — Component pages** | `#/component/<id>` ×6, plural instances (fixes LWW collapse), row-level control actions, refractor roster; retires Control tab. | ★★★ | L | ✅ shipped · checkpoint in [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
+| **F4 — Health absorption + status vocabulary** | Global alert strip (verbatim `health.alerts.*` incl. stub-auth-active), gates panel + rail (preserves `#sysmap-console` slot), `renderedState` incl. `pending-readpath` (the "7 degraded" fix); retires Health tab. | ★★★ | M | 🎯 📋 ready · [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
 | **F5 — Lens page** | Four panels: definition (DDL) · state (+freshness slot) · control (delete behind typed confirm) · contents (nats_kv now, pg-pending state). | ★★★ | L | 🚧 seq: F4 |
 | **F6 — Live pulse** | SSE tail of core-events (deliver-new, bounded), rail feed, map edge pulse animation, topbar LED, degraded modes. | ★★ | M | 📋 ready (may float early; sequence prefers F2) |
 | **F7 — Submit-Op follow-through** | Structured accepted panel (committed keys linkified), `#/op?type=` prefill, session op log, ~12s requestId-filtered follow-through. | ★★ | S | 📋 ready (full value after F2+F6) |
@@ -49,12 +49,13 @@ one FE fire at a time; each fire retires a tab only in the same fire as its repl
   event history (beyond F6's live tail) ← lattice.md "Loom/Weaver control-API surfacing" (📐).
 - 2026-07-01 PO review (Andrew session) — filed the program; found+fixed the control-plane lockout.
 - 2026-07-02 UX design adjudicated (2 premises corrected against live stack — see design §15).
-- **Next:** Loupe Steward builds F3 (component pages).
+- **Next:** Loupe Steward builds F4 (health absorption + status vocabulary).
 
 ## Done log — loupe (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-02 · `5865e0e` · [Loupe/F3] Component pages + Control dissolution — `#/component/<id>` plural instances + row-level control + lens roster; Control tab retired
 - 2026-07-02 · `976a18f` · [Loupe/F2] Graph explorer — faceted/paged list + linkifying renderer + ego-graph hood mode; Core KV tab retired
 - 2026-07-02 · `e6a8a46` · [Loupe/F1] Console shell — hash router + ES-module split + goja logic tier (also closes: static-UI serving test, operator-UI coverage Fire 1)
 - 2026-07-02 · `4b8743f` · [Loupe/deploy] Control planes restored for operator surfaces — `lattice.ctrl.>` grant (write-restriction lockout) + natsperm positive round-trip pin
