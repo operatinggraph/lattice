@@ -1,23 +1,30 @@
 name: loftspace-ledger
 version: 0.1.0
 description: |
-  Loftspace tenant payment ledger: the account vertex type (CreateAccount, one
-  per lease, deterministic id) + the transaction vertex type (DebitAccount /
-  CreditAccount, append-only entries linked to the account via postedTo) + the
-  ledgerHistory read-model lens (one row per transaction). Depends
-  lease-signing.
+  Loftspace tenant payment ledger: the account vertex type (CreateAccount,
+  independently-minted id, one per lease via a .ledgerAccount guard aspect on
+  the leaseapp) + the transaction vertex type (DebitAccount / CreditAccount,
+  append-only entries linked to the account via postedTo) + the
+  ledgerHistory read-model lens (one row per transaction) + the
+  leaseAccounts lens (lease -> account key lookup). Depends lease-signing.
 depends:
   - lease-signing
 declares:
   ddls:
     - canonicalName: account
       class: meta.ddl.vertexType
+    - canonicalName: ledgerAccountGuard
+      class: meta.ddl.aspectType
     - canonicalName: transaction
       class: meta.ddl.vertexType
   lenses:
     - canonicalName: ledgerHistory
       adapter: nats-kv
       bucket: loftspace-ledger-history
+      engine: full
+    - canonicalName: leaseAccounts
+      adapter: nats-kv
+      bucket: loftspace-lease-accounts
       engine: full
   permissions:
     - operationType: CreateAccount

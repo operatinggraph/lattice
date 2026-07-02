@@ -80,24 +80,40 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 	return rows, balance
 }
 
-// deriveAccountKey computes a lease's ledger account key without a read:
-// CreateAccount mints the account under the SAME bare NanoID as the lease
-// (packages/loftspace-ledger/scripts.go), so the FE can address the account —
-// to post its first charge — before the account necessarily exists yet.
-// Returns "" for a key that isn't a vtx.leaseapp.<NanoID>.
-func deriveAccountKey(leaseAppKey string) string {
-	const prefix = "vtx.leaseapp."
-	if !strings.HasPrefix(leaseAppKey, prefix) || leaseAppKey == prefix {
-		return ""
+// leaseAccountProjection is one row of the loftspace-ledger `leaseAccounts`
+// lens — one per lease, AccountKey empty until CreateAccount has opened one.
+// The account carries its OWN independently-minted NanoID (never derived
+// from the lease's — see packages/loftspace-ledger/scripts.go), so this lens
+// read is the only way to resolve it.
+type leaseAccountProjection struct {
+	LeaseAppKey string `json:"leaseAppKey"`
+	AccountKey  string `json:"accountKey"`
+}
+
+// resolveLeaseAccount scans the leaseAccounts lens rows for the one matching
+// leaseAppKey, returning its account key ("" if the lease has none yet,
+// including when no row projected at all — a lease the Refractor hasn't
+// caught up to yet reads the same as one with no account).
+func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string {
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p leaseAccountProjection
+		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey != leaseAppKey {
+			continue
+		}
+		return p.AccountKey
 	}
-	return "vtx.account." + strings.TrimPrefix(leaseAppKey, prefix)
+	return ""
 }
 
 // handleLedger implements GET /api/ledger?leaseAppKey= — the payment-history
-// view, served from the `ledgerHistory` lens read model (NOT Core KV, P5). It
-// returns the lease's transaction rows, the running balance, and the
-// (derived, possibly not-yet-created) ledger account key the FE needs to post
-// a new charge or payment.
+// view, served from the `ledgerHistory` + `leaseAccounts` lens read models
+// (NOT Core KV, P5). It returns the lease's transaction rows, the running
+// balance, and the account key (empty if the lease has not opened a ledger
+// account yet) the FE needs to post a new charge or payment.
 func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -108,14 +124,25 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "leaseAppKey query param is required")
 		return
 	}
-	accountKey := deriveAccountKey(leaseAppKey)
-	if accountKey == "" {
-		s.writeError(w, http.StatusBadRequest, "leaseAppKey must be a vtx.leaseapp.<NanoID> key")
-		return
-	}
 
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	acctBucket := loftspaceledger.LeaseAccountsBucket
+	acctKeys, err := conn.KVListKeys(ctx, acctBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+acctBucket+": "+err.Error()+" (is loftspace-ledger installed and the Refractor projecting?)")
+		return
+	}
+	acctGet := func(key string) ([]byte, bool) {
+		entry, err := conn.KVGet(ctx, acctBucket, key)
+		if err != nil {
+			return nil, false
+		}
+		return entry.Value, true
+	}
+	accountKey := resolveLeaseAccount(acctKeys, acctGet, leaseAppKey)
 
 	bucket := loftspaceledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)

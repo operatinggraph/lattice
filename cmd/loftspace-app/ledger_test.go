@@ -32,16 +32,22 @@ func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	}
 }
 
-func TestDeriveAccountKey(t *testing.T) {
-	cases := map[string]string{
-		"vtx.leaseapp.abc123": "vtx.account.abc123",
-		"vtx.unit.abc123":     "",
-		"":                    "",
-		"vtx.leaseapp.":       "",
+func TestResolveLeaseAccount_FindsMatchOrEmpty(t *testing.T) {
+	entries := map[string]string{
+		"vtx.leaseapp.lll":   `{"leaseAppKey":"vtx.leaseapp.lll","accountKey":"vtx.account.xyz"}`,
+		"vtx.leaseapp.other": `{"leaseAppKey":"vtx.leaseapp.other","accountKey":""}`,
+		// a tombstoned / undecodable projection entry — skipped
+		"vtx.leaseapp.bad": `{}`,
 	}
-	for in, want := range cases {
-		if got := deriveAccountKey(in); got != want {
-			t.Errorf("deriveAccountKey(%q) = %q, want %q", in, got, want)
-		}
+	get := fakeKV(entries)
+
+	if got := resolveLeaseAccount(keysOf(entries), get, "vtx.leaseapp.lll"); got != "vtx.account.xyz" {
+		t.Errorf("resolveLeaseAccount(lll) = %q, want vtx.account.xyz", got)
+	}
+	if got := resolveLeaseAccount(keysOf(entries), get, "vtx.leaseapp.other"); got != "" {
+		t.Errorf("resolveLeaseAccount(other) = %q, want empty (no account opened yet)", got)
+	}
+	if got := resolveLeaseAccount(keysOf(entries), get, "vtx.leaseapp.unprojected"); got != "" {
+		t.Errorf("resolveLeaseAccount(unprojected) = %q, want empty (no row at all)", got)
 	}
 }

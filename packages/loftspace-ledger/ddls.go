@@ -3,10 +3,13 @@ package loftspaceledger
 import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `account`
-// (CreateAccount) and `transaction` (DebitAccount, CreditAccount).
+// (CreateAccount), `transaction` (DebitAccount, CreditAccount), and the
+// `ledgerAccountGuard` aspect-type declaration (the lease-anchored
+// uniqueness guard CreateAccount writes).
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		accountDDL(),
+		accountGuardAspectTypeDDL(),
 		transactionDDL(),
 	}
 }
@@ -18,28 +21,69 @@ func accountDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateAccount"},
 		Description: "Ledger account DDL. Vertex shape: vtx.account.<NanoID>, class=account, root data = {} " +
 			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). CreateAccount{leaseAppKey} " +
-			"mints exactly one account per lease: the account's NanoID is the SAME bare id as the leaseapp's own " +
-			"(a deterministic key, not minted), so a second CreateAccount for the same lease conflicts on the account's " +
-			"already-existing key (AccountAlreadyExists) rather than needing a separate guard link. Writes the heldFor " +
-			"link (account→leaseapp, the account is the later-arriving vertex so it is the source — Contract #1 §1.1). " +
-			"Requires the leaseAppKey be a live leaseapp (no orphan accounts).",
+			"mints the account under its OWN independently-generated NanoID (never reused from the lease — Core KV " +
+			"NanoIDs are unique identifiers across all of Core KV, not scoped per vertex type; reuse corrupts " +
+			"Refractor adjacency, which keys by bare NodeID with no type qualifier). \"One account per lease\" is " +
+			"enforced by a deterministic create-only guard aspect on the PRE-EXISTING leaseapp " +
+			"(leaseAppKey+\".ledgerAccount\", ledgerAccountGuard DDL) instead: a second CreateAccount for the same " +
+			"lease conflicts on that already-existing aspect key. Writes the heldFor link (account→leaseapp, the " +
+			"account is the later-arriving vertex so it is the source — Contract #1 §1.1). Requires the " +
+			"leaseAppKey be a live leaseapp (no orphan accounts).",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the lease this account is for (CreateAccount; required, validated alive). The account's own id is derived from this key's NanoID — one account per lease."}},` +
+			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the lease this account is for (CreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per lease) is enforced via the leaseapp's .ledgerAccount guard aspect, not the account's own id."}},` +
 			`"required":["leaseAppKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.account.<NanoID> of the created account (the operation's principal key)."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.account.<NanoID> of the created account (the operation's principal key) — the caller must read this from the ACCEPTED reply, since the id can no longer be derived from leaseAppKey."}}}`,
 		FieldDescription: map[string]string{
-			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the lease the account is opened for. CreateAccount validates it is alive, derives the account's id from the same NanoID (one account per lease — a second call for the same lease conflicts on the deterministic key), and writes the heldFor link (account→leaseapp).",
+			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the lease the account is opened for. CreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the leaseapp's .ledgerAccount guard aspect (one account per lease) and the heldFor link (account→leaseapp).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "CreateAccount — open the ledger account for a signed lease",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Validates the leaseapp is alive. Atomically commits vtx.account.<sameNanoID> (root data {} — D5) " +
-					"+ the heldFor link (account→leaseapp). Emits account.created{accountKey, leaseAppKey}. Returns primaryKey " +
-					"(the account key). Rejects with UnknownLeaseApplication if the lease is absent, or AccountAlreadyExists " +
-					"if an account already exists for this lease.",
+				ExpectedOutcome: "Validates the leaseapp is alive. Atomically commits vtx.account.<freshNanoID> (root data {} — D5) " +
+					"+ the leaseapp's .ledgerAccount guard aspect + the heldFor link (account→leaseapp). Emits " +
+					"account.created{accountKey, leaseAppKey}. Returns primaryKey (the new account key — the caller's only " +
+					"reliable source for it). Rejects with UnknownLeaseApplication if the lease is absent, or " +
+					"AccountAlreadyExists if the caller declared the guard aspect in reads and it already exists (a " +
+					"repeat/racing caller retrying after learning the account already exists) — a first-time caller who " +
+					"declared only leaseAppKey instead sees a raw substrate conflict on the guard aspect's create-only " +
+					"write if it loses a genuine race.",
+			},
+		},
+	}
+}
+
+// accountGuardAspectTypeDDL declares the .ledgerAccount aspect (class
+// ledgerAccountGuard) CreateAccount writes on the PRE-EXISTING leaseapp — the
+// deterministic create-only key that enforces "at most one ledger account per
+// lease" now that the account itself carries an independent NanoID (not the
+// lease's own). Declaration-only: the aspect is written by CreateAccount,
+// never has its own operationType.
+func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "ledgerAccountGuard",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateAccount"},
+		Description: "Per-lease ledger-account uniqueness guard aspect. Stored as vtx.leaseapp.<NanoID>.ledgerAccount " +
+			"(class ledgerAccountGuard) = {accountKey: <vtx.account.<NanoID>>}. Non-sensitive. Created exactly once by " +
+			"CreateAccount, atomically alongside the account vertex it names — a second CreateAccount for the same " +
+			"lease that declares this key in contextHint.reads sees the clean AccountAlreadyExists domain rejection; " +
+			"one that does not (the normal first-ever-call shape, since the key doesn't exist yet to declare) instead " +
+			"relies on this aspect's own create-only write to fail a genuine concurrent race. Declaration-only: no op " +
+			"handler of its own.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"accountKey":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"accountKey": "The vtx.account.<NanoID> this lease's (at most one) ledger account was minted as.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "lease ledger-account guard aspect",
+				Payload:         map[string]any{"accountKey": "vtx.account.<NanoID>"},
+				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.ledgerAccount; created once by CreateAccount alongside the account vertex it names.",
 			},
 		},
 	}

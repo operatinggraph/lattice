@@ -140,11 +140,14 @@ func seedLease(t *testing.T, ctx context.Context, conn *substrate.Conn, id strin
 }
 
 // createAccount submits CreateAccount{leaseAppKey} and returns the account key
-// derived deterministically from the lease's own bare NanoID.
+// — the account's own independently-minted NanoID, matching the deterministic
+// nanoid.new() seed the test harness uses for the transaction DDL (never
+// derived from the lease's own id).
 func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey string) string {
 	t.Helper()
+	reqID := testutil.GenReqID(label)
 	env := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID(label),
+		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "CreateAccount",
 		Actor:         ledgerActorKey,
@@ -155,27 +158,30 @@ func createAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-	leaseID := leaseAppKey[len("vtx.leaseapp."):]
-	return "vtx.account." + leaseID
+	return "vtx.account." + nanoIDFromRequestID(reqID)
 }
 
 // TestCreateAccount_MintsAccountHeldForLease (test 1). CreateAccount mints
-// vtx.account.<sameId> (root {} — D5) + the heldFor link; a second call for the
-// same lease conflicts on the deterministic key (AccountAlreadyExists).
+// vtx.account.<freshId> (root {} — D5, an id independent of the lease's own)
+// + the leaseapp's .ledgerAccount guard aspect + the heldFor link; a second
+// call for the same lease that declares the guard aspect in reads conflicts
+// on it (AccountAlreadyExists).
 func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "create")
 
 	leaseKey := seedLease(t, ctx, conn, "BBLEASEACCTHJKMNPQRS")
 	leaseID := "BBLEASEACCTHJKMNPQRS"
+	guardKey := leaseKey + ".ledgerAccount"
 
-	if keyExists(t, ctx, conn, "vtx.account."+leaseID) {
-		t.Fatalf("account must not exist before CreateAccount")
+	if keyExists(t, ctx, conn, guardKey) {
+		t.Fatalf("guard aspect must not exist before CreateAccount")
 	}
 
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacct0000001", leaseKey)
-	if acctKey != "vtx.account."+leaseID {
-		t.Fatalf("account key = %q, want vtx.account.%s (deterministic, same id as the lease)", acctKey, leaseID)
+	acctID := acctKey[len("vtx.account."):]
+	if acctID == leaseID {
+		t.Fatalf("account id must NOT equal the lease's own id (independently minted), got %q for both", acctID)
 	}
 
 	acctDoc := readDoc(t, ctx, conn, acctKey)
@@ -183,13 +189,20 @@ func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 		t.Fatalf("account root data must stay minimal ({}) after create, got %v", d)
 	}
 
-	heldForLnk := "lnk.account." + leaseID + ".heldFor.leaseapp." + leaseID
+	guardDoc := readDoc(t, ctx, conn, guardKey)
+	guardData, _ := guardDoc["data"].(map[string]any)
+	if got, _ := guardData["accountKey"].(string); got != acctKey {
+		t.Fatalf("guard aspect accountKey = %q, want %q", got, acctKey)
+	}
+
+	heldForLnk := "lnk.account." + acctID + ".heldFor.leaseapp." + leaseID
 	if !keyExists(t, ctx, conn, heldForLnk) {
 		t.Fatalf("heldFor link must exist: %s", heldForLnk)
 	}
 
-	// A second CreateAccount for the SAME lease conflicts on the deterministic
-	// account key (AccountAlreadyExists — the create-only write is the guard).
+	// A second CreateAccount for the SAME lease, declaring the now-existing
+	// guard aspect in reads, conflicts on it (AccountAlreadyExists — the
+	// create-only write is the guard).
 	dup := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("createacct0000002"),
 		Lane:          processor.LaneDefault,
@@ -198,7 +211,7 @@ func TestCreateAccount_MintsAccountHeldForLease(t *testing.T) {
 		SubmittedAt:   "2026-07-01T12:05:00Z",
 		Class:         "account",
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{leaseKey, acctKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{leaseKey, guardKey}},
 	}
 	testutil.PublishOp(t, conn, dup)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
@@ -267,8 +280,8 @@ func TestDebitCreditAccount_PostEntries(t *testing.T) {
 		t.Fatalf("transaction root data must stay minimal ({}) after post, got %v", d)
 	}
 
-	leaseID := "BBLEASEPSTXHJKMNPQRS"
-	postedToLnk := "lnk.transaction." + nanoIDFromRequestID(debitReqID) + ".postedTo.account." + leaseID
+	acctID := acctKey[len("vtx.account."):]
+	postedToLnk := "lnk.transaction." + nanoIDFromRequestID(debitReqID) + ".postedTo.account." + acctID
 	if !keyExists(t, ctx, conn, postedToLnk) {
 		t.Fatalf("postedTo link must exist: %s", postedToLnk)
 	}

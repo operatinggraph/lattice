@@ -1560,40 +1560,37 @@ async function ensureLeaseDocument(leaseAppKey) {
   }
 }
 
-// ensureLedgerAccount lazily opens the lease's ledger account (CreateAccount)
-// before the landlord posts its first charge or payment. Idempotent-safe: the
-// account's id is deterministic (one per lease), so a second call rejects
-// AccountAlreadyExists — treated as success, not an error, since the account
-// this call wanted already exists. BOTH leaseAppKey and the (already-derived)
-// accountKey must be in ContextHint.Reads: the account-already-exists check is
-// the script reading its OWN deterministic key, which the Processor only
-// hydrates for keys the caller declares (packages/loftspace-ledger/ledger_test.go
-// reads leaseKey+acctKey for this exact case) — reads:[leaseAppKey] alone
-// leaves the account vertex unhydrated, so the create-only write hits a raw
-// substrate CAS conflict instead of the clean domain rejection.
-async function ensureLedgerAccount(leaseAppKey, accountKey) {
-  if (!leaseAppKey) return;
-  try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "CreateAccount",
-        class: "account",
-        reads: [leaseAppKey, accountKey].filter(Boolean),
-        payload: { leaseAppKey },
-      }),
-    });
-    if (reply && reply.status === "rejected" && reply.error) {
-      const msg = reply.error.message || "";
-      if (!msg.includes("AccountAlreadyExists")) {
-        throw new Error(`${reply.error.code}: ${msg}`);
-      }
-    }
-  } catch (e) {
-    console.warn("ledger account not opened:", e.message);
-    throw e;
+// openLedgerAccount opens the lease's ledger account (CreateAccount) and
+// returns its freshly-minted key. The account carries its OWN independent
+// NanoID (never derived from the lease's — Core KV NanoIDs are unique
+// platform-wide, not reused across vertex types), so the ONLY reliable
+// source for it is the ACCEPTED reply's primaryKey. reads declares
+// leaseAppKey only — the guard aspect that enforces one-account-per-lease
+// doesn't exist yet on this (first-ever) call, and the Processor hard-rejects
+// a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
+// here would make account-opening impossible rather than idempotent.
+async function openLedgerAccount(leaseAppKey) {
+  const reply = await api("/api/op", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operationType: "CreateAccount",
+      class: "account",
+      reads: [leaseAppKey],
+      payload: { leaseAppKey },
+    }),
+  });
+  if (reply && reply.status === "accepted" && reply.primaryKey) {
+    return reply.primaryKey;
   }
+  // A genuine race (two concurrent first-opens for the same lease) fails
+  // the loser's guard-aspect create-only write — re-fetch the ledger, which
+  // resolves the account key via the leaseAccounts lens regardless of which
+  // side won.
+  const data = await api("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey));
+  if (data.accountKey) return data.accountKey;
+  const msg = reply && reply.error ? `${reply.error.code}: ${reply.error.message}` : "";
+  throw new Error(msg || "could not open the ledger account");
 }
 
 // ---- Payment ledger (view + record charges/payments) ----
@@ -1677,9 +1674,10 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
 
 // renderLedgerRecordForm builds the landlord's inline "record a charge or
 // payment" controls: an amount (dollars) + optional memo, posting
-// DebitAccount/CreditAccount against the lease's ledger account. The account
-// is lazily opened (ensureLedgerAccount) on first use so a landlord never has
-// to take a separate "set up the ledger" step.
+// DebitAccount/CreditAccount against the lease's ledger account, opening the
+// account first (openLedgerAccount) if this is its first-ever charge or
+// payment (accountKey empty) so a landlord never has to take a separate
+// "set up the ledger" step.
 function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
   const form = document.createElement("div");
   form.className = "ledger-record-form";
@@ -1708,7 +1706,7 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
     const cents = Math.round(dollars * 100);
     charge.disabled = payment.disabled = true;
     try {
-      await ensureLedgerAccount(leaseAppKey, accountKey);
+      if (!accountKey) accountKey = await openLedgerAccount(leaseAppKey);
       await opOrThrow(
         {
           operationType: opType,
