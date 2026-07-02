@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-06-28 · `2686369` · clinic-app: My Appointments upcoming/past split + status filter
 - 2026-06-28 · `7c20752` · clinic-app: clinic-wide All-providers schedule view
 - 2026-06-28 · `3704324` · lease-signing: replace the `unit.leaseApplications` key-list aspect with a guard LINK
 - 2026-06-28 · `e764206` · lease-signing: capture guarantor/co-applicant detail + derived signals
