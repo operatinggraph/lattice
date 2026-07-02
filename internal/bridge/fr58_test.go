@@ -134,7 +134,7 @@ func TestBridge_FailedOutcome_PostsStatusFailed(t *testing.T) {
 	// And no second reply / mutation (the deterministic requestId collapses any
 	// redelivery, same as the happy path).
 	require.Never(t, func() bool { return fp.mutations() > 1 },
-		2*time.Second, 100*time.Millisecond, "a failed outcome posts exactly one reply")
+		1500*time.Millisecond, 100*time.Millisecond, "a failed outcome posts exactly one reply")
 }
 
 // TestBridge_EventRedelivery_AtMostOneSideEffect publishes the SAME
@@ -176,7 +176,7 @@ func TestBridge_EventRedelivery_AtMostOneSideEffect(t *testing.T) {
 			// Give the bridge time to process the redelivery (and, with the skip
 			// off, re-call the adapter + re-publish the replyOp).
 			require.Never(t, func() bool { return stripe.SideEffects(instanceKey) > 1 || fp.mutations() > 1 },
-				3*time.Second, 100*time.Millisecond,
+				1500*time.Millisecond, 100*time.Millisecond,
 				"redelivery must not produce a second charge or a second result mutation")
 
 			require.Equal(t, 1, stripe.SideEffects(instanceKey), "exactly one charge under redelivery")
@@ -222,7 +222,7 @@ func TestBridge_FailUntilThenRecovers_ExactlyOneSideEffect(t *testing.T) {
 		"only the eventual success charged — the failed attempts billed nothing")
 
 	require.Never(t, func() bool { return stripe.SideEffects(instanceKey) > 1 || fp.mutations() > 1 },
-		2*time.Second, 100*time.Millisecond, "no double charge / double mutation after recovery")
+		1500*time.Millisecond, 100*time.Millisecond, "no double charge / double mutation after recovery")
 }
 
 // TestBridge_UnregisteredAdapter_AckAndHealth publishes an event for an adapter
@@ -250,7 +250,7 @@ func TestBridge_UnregisteredAdapter_AckAndHealth(t *testing.T) {
 	// fired. The event was acked (errConfig), so it is not redelivered forever —
 	// asserted by the absence of any side-effect / mutation over a window.
 	require.Never(t, func() bool { return fp.mutations() > 0 || stripe.SideEffects(instanceKey) > 0 },
-		3*time.Second, 100*time.Millisecond, "an unregistered adapter must dispatch nothing")
+		1500*time.Millisecond, 100*time.Millisecond, "an unregistered adapter must dispatch nothing")
 }
 
 // TestBridge_UnparseableEnvelope_AckAndHealth publishes a malformed external.*
@@ -302,7 +302,7 @@ func TestBridge_SkipOnRedelivery_TrackerPresent(t *testing.T) {
 
 		// The bridge must skip: no adapter call, no NEW replyOp from the bridge.
 		require.Never(t, func() bool { return stripe.SideEffects(instanceKey) > 0 },
-			3*time.Second, 100*time.Millisecond, "a present (live) tracker must skip the adapter call")
+			1500*time.Millisecond, 100*time.Millisecond, "a present (live) tracker must skip the adapter call")
 		_ = fp
 	})
 

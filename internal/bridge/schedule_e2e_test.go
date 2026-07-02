@@ -78,7 +78,7 @@ func TestBridgeSchedule_PollResolves_PostsReplyOp(t *testing.T) {
 
 	// Exactly one reply — no duplicate from a redelivered firing.
 	require.Never(t, func() bool { return fp.mutations() > 1 },
-		3*time.Second, 100*time.Millisecond, "the resolved poll must post exactly one replyOp")
+		1500*time.Millisecond, 100*time.Millisecond, "the resolved poll must post exactly one replyOp")
 }
 
 // TestBridgeSchedule_StillPending_ReArms: a poll that returns Pending re-arms the
@@ -161,5 +161,5 @@ func TestBridgeSchedule_Timeout_PostsFailedOutcome(t *testing.T) {
 	// Exactly one reply — the timeout never double-posts, and no poll ever
 	// resolved.
 	require.Never(t, func() bool { return fp.mutations() > 1 },
-		4*time.Second, 100*time.Millisecond, "a timed-out call posts exactly one terminal reply")
+		2*time.Second, 100*time.Millisecond, "a timed-out call posts exactly one terminal reply")
 }

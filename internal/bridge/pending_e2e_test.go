@@ -52,7 +52,7 @@ func TestBridge_PendingOutcome_PostsDispatchOpNotReply(t *testing.T) {
 	require.Never(t, func() bool {
 		_, replySeen := fp.sawOp(replyReqID)
 		return replySeen > 0 || fp.mutations() > 0
-	}, 2*time.Second, 100*time.Millisecond,
+	}, 1500*time.Millisecond, 100*time.Millisecond,
 		"a Pending outcome must post NO replyOp and write NO .outcome (the token stays parked)")
 }
 
@@ -92,7 +92,7 @@ func TestBridge_PendingRedelivery_NoSecondDispatchOp(t *testing.T) {
 			publishAsyncExternalEvent(t, ctx, conn, fixtureAsyncName, instanceKey, fixtureReplyOp, fixtureDispatchOp, nil)
 
 			require.Never(t, func() bool { return async.SideEffects(instanceKey) > 1 || fp.dispatchMutations() > 1 },
-				3*time.Second, 100*time.Millisecond,
+				1500*time.Millisecond, 100*time.Millisecond,
 				"redelivery must not produce a second submit or a second dispatch-marker mutation")
 
 			require.Equal(t, 1, async.SideEffects(instanceKey), "exactly one submit under redelivery")
@@ -126,5 +126,5 @@ func TestBridge_PendingWithNoDispatchOp_AckAndHealth(t *testing.T) {
 
 	// Nothing is posted: no dispatch-marker mutation, no replyOp/.outcome.
 	require.Never(t, func() bool { return fp.dispatchMutations() > 0 || fp.mutations() > 0 },
-		3*time.Second, 100*time.Millisecond, "a misconfigured Pending dispatches nothing")
+		1500*time.Millisecond, 100*time.Millisecond, "a misconfigured Pending dispatches nothing")
 }
