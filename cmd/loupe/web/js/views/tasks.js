@@ -1,11 +1,12 @@
 // Tasks view: the task inbox. Each row is link-sourced server-side
 // (GET /api/tasks): assignee / operation / target from the task's links, and
 // the operation's human label (name + description) resolved from its
-// forOperation meta-vertex.
+// forOperation meta-vertex. Every entity on a card is a keyLink into the
+// Graph explorer (design §1.2 — no dead ends).
 
 import { $, el, api, setStatus } from "../api.js";
-import { shortId } from "../logic/keys.js";
 import { navigate } from "../router.js";
+import { keyLinkEl } from "../render.js";
 import { prefillOp } from "./op.js";
 
 const state = { loaded: false };
@@ -35,15 +36,31 @@ async function loadTasks() {
   tasks.forEach((t) => {
     const op = t.operation || {};
     const card = el("div", "card task-card " + (t.status === "open" ? "green" : ""));
-    const title = el("div", "card-key", op.name || (op.key ? shortId(op.key) : "task"));
+    const title = el("div", "card-key");
+    if (op.name) title.appendChild(el("span", null, op.name));
+    else if (op.key) title.appendChild(keyLinkEl(op.key));
+    else title.appendChild(el("span", null, "task"));
     title.appendChild(el("span", "card-group", t.status));
     card.appendChild(title);
     if (op.description) card.appendChild(el("div", "card-sub", op.description));
+    if (t.key) {
+      const keyLine = el("div", "card-sub");
+      keyLine.appendChild(keyLinkEl(t.key));
+      card.appendChild(keyLine);
+    }
     const meta = el("div", "card-meta");
-    if (t.assignee) meta.appendChild(el("span", null, "assignee " + shortId(t.assignee)));
+    if (t.assignee) {
+      const a = el("span", null, "assignee ");
+      a.appendChild(keyLinkEl(t.assignee));
+      meta.appendChild(a);
+    }
     if (t.expiresAt) meta.appendChild(el("span", null, "expires " + t.expiresAt));
     card.appendChild(meta);
-    if (t.scopedTo) card.appendChild(el("div", "task-scoped small muted", "scoped to " + shortId(t.scopedTo)));
+    if (t.scopedTo) {
+      const sc = el("div", "task-scoped small muted", "scoped to ");
+      sc.appendChild(keyLinkEl(t.scopedTo));
+      card.appendChild(sc);
+    }
     if (t.status === "open" && op.name) {
       const btn = el("button", "task-complete", "Complete in Submit Op →");
       btn.addEventListener("click", () => startTaskOp(op.name));

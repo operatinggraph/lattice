@@ -281,11 +281,13 @@ function showSysmapTip(n, evt) {
   if (n.freshness) line("freshness", n.freshness);
   (n.issues || []).forEach((i) => tip.appendChild(el("div", /^\[error\]/.test(i) ? "sysmap-issue bad" : "sysmap-issue", i)));
   if (n.kind === "lens") {
-    const kv = el("a", "sysmap-tip-kv", "view in Core KV");
+    // A lens node's id is its meta-vertex NanoID — the tip jumps to that
+    // meta-vertex in the Graph explorer.
+    const kv = el("a", "sysmap-tip-kv", "meta-vertex in Graph");
     kv.addEventListener("click", (e) => {
       e.stopPropagation();
       hideSysmapTip();
-      navigate("#/corekv?prefix=" + encodeURIComponent(n.id));
+      navigate("#/graph/vtx.meta." + n.id);
     });
     tip.appendChild(kv);
   }

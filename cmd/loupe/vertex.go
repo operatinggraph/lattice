@@ -69,27 +69,67 @@ func dataLabel(data map[string]any) string {
 	return dataString(data, "name", "canonicalName", "title", "operationType")
 }
 
-// buildVertexList selects the vertex/meta roots in keys (filtered by prefix,
-// capped at limit) and resolves each one's label + isDeleted. The label comes
-// from the root document's data; for vertices that carry their name in a
-// .canonicalName aspect instead (role/meta/permission/lens), that aspect is read
-// only when the root yielded no label.
-func buildVertexList(keys []string, get kvGetter, prefix string, limit int) (rows []vertexRow, truncated bool) {
+// vertexQuery is the GET /api/vertices filter set: prefix is the raw-prefix
+// escape hatch, typ the facet filter (Contract #1 type segment), q a
+// case-insensitive substring over label + key. Tombstones are excluded unless
+// includeDeleted; offset/limit page the filtered rows.
+type vertexQuery struct {
+	Prefix         string
+	Type           string
+	Q              string
+	Offset         int
+	Limit          int
+	IncludeDeleted bool
+}
+
+// vertexList is the paged /api/vertices result. Facets counts rows per type
+// with every filter EXCEPT the type facet applied (so the chips stay honest
+// while one is selected); Total counts the fully-filtered rows, of which Rows
+// is the [offset, offset+limit) window.
+type vertexList struct {
+	Rows      []vertexRow
+	Facets    map[string]int
+	Total     int
+	Truncated bool
+}
+
+// matchQ reports whether a row matches the q substring filter
+// (case-insensitive over the key and the resolved label).
+func matchQ(row vertexRow, q string) bool {
+	if q == "" {
+		return true
+	}
+	q = strings.ToLower(q)
+	return strings.Contains(strings.ToLower(row.Key), q) ||
+		strings.Contains(strings.ToLower(row.Label), q)
+}
+
+// buildVertexList selects the vertex/meta roots in keys, resolves each one's
+// label + isDeleted, applies the query filters, and returns the facet counts
+// plus the requested page. The label comes from the root document's data; for
+// vertices that carry their name in a .canonicalName aspect instead (role/
+// meta/permission/lens), that aspect is read only when the root yielded no
+// label. Every candidate root is read once per request — facet + total
+// honesty needs the full pass, and the bucket magnitudes Loupe is designed
+// for (~5k roots) keep that bounded on a loopback connection.
+func buildVertexList(keys []string, get kvGetter, q vertexQuery) vertexList {
 	keyset := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		keyset[k] = struct{}{}
 	}
-	rows = make([]vertexRow, 0, limit)
-	for _, k := range keys {
+	// KVListKeys order is unspecified — sort so the [offset, offset+limit)
+	// window is stable across page requests and types group contiguously.
+	sorted := make([]string, len(keys))
+	copy(sorted, keys)
+	sort.Strings(sorted)
+	out := vertexList{Rows: []vertexRow{}, Facets: map[string]int{}}
+	matched := 0
+	for _, k := range sorted {
 		if cls := classifyKey(k); cls != classVertex && cls != classMeta {
 			continue
 		}
-		if prefix != "" && !strings.HasPrefix(k, prefix) {
+		if q.Prefix != "" && !strings.HasPrefix(k, q.Prefix) {
 			continue
-		}
-		if len(rows) >= limit {
-			truncated = true
-			break
 		}
 		row := vertexRow{Key: k, Type: vertexType(k)}
 		if raw, ok := get(k); ok {
@@ -107,9 +147,24 @@ func buildVertexList(keys []string, get kvGetter, prefix string, limit int) (row
 				row.Label = dataString(metaData(get, k+".canonicalName"), "value", "name", "canonicalName")
 			}
 		}
-		rows = append(rows, row)
+		if row.IsDeleted && !q.IncludeDeleted {
+			continue
+		}
+		if !matchQ(row, q.Q) {
+			continue
+		}
+		out.Facets[row.Type]++
+		if q.Type != "" && row.Type != q.Type {
+			continue
+		}
+		if matched >= q.Offset && len(out.Rows) < q.Limit {
+			out.Rows = append(out.Rows, row)
+		}
+		matched++
 	}
-	return rows, truncated
+	out.Total = matched
+	out.Truncated = q.Offset+len(out.Rows) < matched
+	return out
 }
 
 // linkForVertex parses a 6-segment link key and, when vtxKey is one of its
@@ -178,18 +233,30 @@ func buildVertexDetail(rootKey string, rootRaw []byte, revision uint64, allKeys 
 	return vd
 }
 
-// handleVertices implements GET /api/vertices?prefix=&limit= — the Core KV
-// vertex list (vertices + meta-vertices only, each with a type + label).
+// handleVertices implements GET /api/vertices?type=&q=&offset=&limit=
+// &includeDeleted=&prefix= — the paged, faceted Graph explorer list (vertices
+// + meta-vertices only, each with a type + label).
 func (s *server) handleVertices(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return
 	}
-	prefix := r.URL.Query().Get("prefix")
-	limit := defaultCoreKVLimit
-	if v := r.URL.Query().Get("limit"); v != "" {
+	qp := r.URL.Query()
+	q := vertexQuery{
+		Prefix:         qp.Get("prefix"),
+		Type:           qp.Get("type"),
+		Q:              qp.Get("q"),
+		Limit:          defaultCoreKVLimit,
+		IncludeDeleted: qp.Get("includeDeleted") == "1" || qp.Get("includeDeleted") == "true",
+	}
+	if v := qp.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
+			q.Limit = n
+		}
+	}
+	if v := qp.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			q.Offset = n
 		}
 	}
 	ctx, cancel := s.reqContext(r)
@@ -207,12 +274,15 @@ func (s *server) handleVertices(w http.ResponseWriter, r *http.Request) {
 		}
 		return entry.Value, true
 	}
-	rows, truncated := buildVertexList(keys, get, prefix, limit)
+	list := buildVertexList(keys, get, q)
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"vertices":  rows,
-		"count":     len(rows),
-		"truncated": truncated,
-		"limit":     limit,
+		"vertices":  list.Rows,
+		"count":     len(list.Rows),
+		"total":     list.Total,
+		"offset":    q.Offset,
+		"facets":    list.Facets,
+		"truncated": list.Truncated,
+		"limit":     q.Limit,
 	})
 }
 

@@ -61,16 +61,17 @@ func TestBuildVertexList(t *testing.T) {
 		"lnk.identity.I1.holdsRole.role.R1",
 	}
 
-	rows, truncated := buildVertexList(keys, get, "", 100)
-	if truncated {
+	all := vertexQuery{Limit: 100, IncludeDeleted: true}
+	list := buildVertexList(keys, get, all)
+	if list.Truncated {
 		t.Error("did not expect truncation")
 	}
 	byKey := map[string]vertexRow{}
-	for _, r := range rows {
+	for _, r := range list.Rows {
 		byKey[r.Key] = r
 	}
-	if len(rows) != 5 {
-		t.Fatalf("got %d vertices, want 5 (R1,P1,O1,I1,M1); %+v", len(rows), rows)
+	if len(list.Rows) != 5 || list.Total != 5 {
+		t.Fatalf("got %d vertices total %d, want 5 (R1,P1,O1,I1,M1); %+v", len(list.Rows), list.Total, list.Rows)
 	}
 	if byKey["vtx.role.R1"].Label != "operator" {
 		t.Errorf("role label = %q, want operator (from .canonicalName fallback)", byKey["vtx.role.R1"].Label)
@@ -88,18 +89,66 @@ func TestBuildVertexList(t *testing.T) {
 	if i1.Label != "" || !i1.IsDeleted {
 		t.Errorf("identity row = %+v, want empty label + isDeleted", i1)
 	}
+	wantFacets := map[string]int{"role": 1, "package": 1, "op": 1, "identity": 1, "meta": 1}
+	for typ, n := range wantFacets {
+		if list.Facets[typ] != n {
+			t.Errorf("facets[%s] = %d, want %d", typ, list.Facets[typ], n)
+		}
+	}
 
-	t.Run("prefix filters", func(t *testing.T) {
-		rows, _ := buildVertexList(keys, get, "vtx.role.", 100)
-		if len(rows) != 1 || rows[0].Key != "vtx.role.R1" {
-			t.Errorf("prefix filter = %+v", rows)
+	t.Run("deleted excluded by default", func(t *testing.T) {
+		list := buildVertexList(keys, get, vertexQuery{Limit: 100})
+		if list.Total != 4 {
+			t.Errorf("total = %d, want 4 (I1 tombstone hidden)", list.Total)
+		}
+		if _, ok := list.Facets["identity"]; ok {
+			t.Errorf("facets include identity = %v, want absent (only member deleted)", list.Facets)
 		}
 	})
 
-	t.Run("limit truncates", func(t *testing.T) {
-		rows, truncated := buildVertexList(keys, get, "", 1)
-		if len(rows) != 1 || !truncated {
-			t.Errorf("limit=1 → rows=%d truncated=%v", len(rows), truncated)
+	t.Run("type facet filters rows, not facet counts", func(t *testing.T) {
+		list := buildVertexList(keys, get, vertexQuery{Type: "role", Limit: 100, IncludeDeleted: true})
+		if len(list.Rows) != 1 || list.Rows[0].Key != "vtx.role.R1" || list.Total != 1 {
+			t.Errorf("type filter = %+v total %d", list.Rows, list.Total)
+		}
+		if list.Facets["package"] != 1 || list.Facets["meta"] != 1 {
+			t.Errorf("facets under type filter = %v, want all types counted", list.Facets)
+		}
+	})
+
+	t.Run("q matches label and key, case-insensitive", func(t *testing.T) {
+		list := buildVertexList(keys, get, vertexQuery{Q: "OPERATOR", Limit: 100})
+		if len(list.Rows) != 1 || list.Rows[0].Key != "vtx.role.R1" {
+			t.Errorf("q=OPERATOR = %+v, want the operator role (label match)", list.Rows)
+		}
+		list = buildVertexList(keys, get, vertexQuery{Q: "vtx.op.", Limit: 100})
+		if len(list.Rows) != 1 || list.Rows[0].Key != "vtx.op.O1" {
+			t.Errorf("q=vtx.op. = %+v, want the op tracker (key match)", list.Rows)
+		}
+	})
+
+	t.Run("prefix escape hatch filters", func(t *testing.T) {
+		list := buildVertexList(keys, get, vertexQuery{Prefix: "vtx.role.", Limit: 100})
+		if len(list.Rows) != 1 || list.Rows[0].Key != "vtx.role.R1" {
+			t.Errorf("prefix filter = %+v", list.Rows)
+		}
+	})
+
+	t.Run("offset pages and truncated is honest", func(t *testing.T) {
+		page1 := buildVertexList(keys, get, vertexQuery{Limit: 2, IncludeDeleted: true})
+		if len(page1.Rows) != 2 || !page1.Truncated || page1.Total != 5 {
+			t.Fatalf("page1 = %d rows truncated=%v total=%d", len(page1.Rows), page1.Truncated, page1.Total)
+		}
+		// Windows are lexicographically stable regardless of input key order.
+		if page1.Rows[0].Key != "vtx.identity.I1" || page1.Rows[1].Key != "vtx.meta.M1" {
+			t.Errorf("page1 = %+v, want sorted [vtx.identity.I1 vtx.meta.M1]", page1.Rows)
+		}
+		page3 := buildVertexList(keys, get, vertexQuery{Offset: 4, Limit: 2, IncludeDeleted: true})
+		if len(page3.Rows) != 1 || page3.Truncated {
+			t.Errorf("last page = %d rows truncated=%v, want 1 rows not truncated", len(page3.Rows), page3.Truncated)
+		}
+		if page1.Rows[0].Key == page3.Rows[0].Key {
+			t.Error("offset did not advance the window")
 		}
 	})
 }

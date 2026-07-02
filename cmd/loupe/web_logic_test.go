@@ -191,11 +191,11 @@ func TestKeyHelpersJS(t *testing.T) {
 		key  string
 		want any // nil for non-entities
 	}{
-		{"vtx.identity.a1", "#/corekv/vtx.identity.a1"},
-		{"vtx.meta.m1", "#/corekv/vtx.meta.m1"},
-		{"lnk.identity.a1.holdsRole.role.r1", "#/corekv/lnk.identity.a1.holdsRole.role.r1"},
-		{"vtx.identity.a1.profile", "#/corekv/vtx.identity.a1?aspect=profile"},
-		{"vtx.meta.m1.canonicalName", "#/corekv/vtx.meta.m1?aspect=canonicalName"},
+		{"vtx.identity.a1", "#/graph/vtx.identity.a1"},
+		{"vtx.meta.m1", "#/graph/vtx.meta.m1"},
+		{"lnk.identity.a1.holdsRole.role.r1", "#/graph/lnk.identity.a1.holdsRole.role.r1"},
+		{"vtx.identity.a1.profile", "#/graph/vtx.identity.a1?aspect=profile"},
+		{"vtx.meta.m1.canonicalName", "#/graph/vtx.meta.m1?aspect=canonicalName"},
 		{"lnk.too.short", nil},
 		{"random", nil},
 	}
@@ -299,6 +299,144 @@ func TestStatusLogicJS(t *testing.T) {
 	if got := call(t, vm, "issueClass", "[warning] meh"); got != "card-issue" {
 		t.Errorf("issueClass warning = %v", got)
 	}
+}
+
+// TestHoodLayoutJS pins the pure ego-graph layout math (logic/hood.js).
+func TestHoodLayoutJS(t *testing.T) {
+	vm := logicVM(t, "hood.js")
+
+	// adaptiveRadius: few chips keep the base; many chips grow it.
+	if got := call(t, vm, "adaptiveRadius", 4, 150, 190); got != int64(190) {
+		t.Errorf("adaptiveRadius(4) = %v, want base 190", got)
+	}
+	small := call(t, vm, "adaptiveRadius", 10, 150, 190)
+	large := call(t, vm, "adaptiveRadius", 40, 150, 190)
+	if toFloat(small) >= toFloat(large) {
+		t.Errorf("adaptiveRadius not monotonic: 10 chips %v vs 40 chips %v", small, large)
+	}
+
+	// ringPositions: n points on the circle, first at 12 o'clock.
+	pts, ok := call(t, vm, "ringPositions", 4, 100, 100, 50).([]any)
+	if !ok || len(pts) != 4 {
+		t.Fatalf("ringPositions returned %v", pts)
+	}
+	p0 := pts[0].(map[string]any)
+	if x, y := toFloat(p0["x"]), toFloat(p0["y"]); !near(x, 100) || !near(y, 50) {
+		t.Errorf("ring point 0 = (%v,%v), want (100,50) — 12 o'clock", x, y)
+	}
+	for _, p := range pts {
+		m := p.(map[string]any)
+		dx, dy := toFloat(m["x"])-100, toFloat(m["y"])-100
+		if r := dx*dx + dy*dy; !near(r, 2500) {
+			t.Errorf("ring point %v not on radius 50 (r²=%v)", m, r)
+		}
+	}
+
+	// sectorPositions: n=1 sits exactly on the anchor angle.
+	one, _ := call(t, vm, "sectorPositions", 1, 0, 0, 0.0, 100, 1.0).([]any)
+	if m := one[0].(map[string]any); !near(toFloat(m["x"]), 100) || !near(toFloat(m["y"]), 0) {
+		t.Errorf("sector n=1 = %v, want (100,0) on the anchor angle", m)
+	}
+	three, _ := call(t, vm, "sectorPositions", 3, 0, 0, 0.0, 100, 1.0).([]any)
+	first := three[0].(map[string]any)
+	last := three[2].(map[string]any)
+	if !near(toFloat(first["angle"]), -0.5) || !near(toFloat(last["angle"]), 0.5) {
+		t.Errorf("sector spread = %v..%v, want -0.5..0.5", first["angle"], last["angle"])
+	}
+}
+
+// TestGroupLinkItemsJS pins the same-relation grouping that keeps a
+// 30-identity role walkable.
+func TestGroupLinkItemsJS(t *testing.T) {
+	vm := logicVM(t, "hood.js")
+	links := make([]map[string]any, 0, 12)
+	for i := 0; i < 10; i++ {
+		links = append(links, map[string]any{
+			"key": "lnk.identity.i" + string(rune('a'+i)) + ".holdsRole.role.r1", "relation": "holdsRole",
+			"direction": "in", "otherKey": "vtx.identity.i" + string(rune('a'+i)), "otherType": "identity",
+		})
+	}
+	links = append(links, map[string]any{
+		"key": "lnk.permission.p1.grantedBy.role.r1", "relation": "grantedBy",
+		"direction": "in", "otherKey": "vtx.permission.p1", "otherType": "permission",
+	})
+	items, ok := call(t, vm, "groupLinkItems", links, 8).([]any)
+	if !ok {
+		t.Fatal("groupLinkItems did not return an array")
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2 (1 single + 1 group); %v", len(items), items)
+	}
+	single := items[0].(map[string]any)
+	if single["kind"] != "single" {
+		t.Errorf("item 0 kind = %v, want single (the permission link)", single["kind"])
+	}
+	group := items[1].(map[string]any)
+	if group["kind"] != "group" || group["relation"] != "holdsRole" || group["otherType"] != "identity" {
+		t.Errorf("group item = %v", group)
+	}
+	if members := group["links"].([]any); len(members) != 10 {
+		t.Errorf("group size = %d, want 10", len(members))
+	}
+
+	// At or under the threshold nothing groups.
+	items, _ = call(t, vm, "groupLinkItems", links[:8], 8).([]any)
+	for _, it := range items {
+		if it.(map[string]any)["kind"] != "single" {
+			t.Errorf("under-threshold bucket grouped: %v", it)
+		}
+	}
+}
+
+// TestEvictForBudgetJS pins the hairball guard: oldest unprotected batches go
+// first; batch 0 and protected batches never do.
+func TestEvictForBudgetJS(t *testing.T) {
+	vm := logicVM(t, "hood.js")
+
+	// Under budget: nothing evicted.
+	if got := call(t, vm, "evictForBudget", []int{10, 5}, []int{1}, 60).([]any); len(got) != 0 {
+		t.Errorf("under budget evicted %v", got)
+	}
+	// Over budget: batch 1 (oldest unprotected) goes; 0 and the protected 3 stay.
+	got := call(t, vm, "evictForBudget", []int{20, 20, 20, 20}, []int{3}, 60).([]any)
+	if len(got) != 1 || got[0] != int64(1) {
+		t.Errorf("evicted %v, want [1]", got)
+	}
+	// Everything protected: may exceed budget, evicts nothing else.
+	got = call(t, vm, "evictForBudget", []int{50, 30}, []int{1}, 60).([]any)
+	if len(got) != 0 {
+		t.Errorf("protected batch evicted: %v", got)
+	}
+}
+
+// TestHoodSentenceJS pins the Contract #1 §1.1 sentence rendering the edge
+// tips teach with: source <relation> target.
+func TestHoodSentenceJS(t *testing.T) {
+	vm := logicVM(t, "hood.js")
+	out := map[string]any{"relation": "holdsRole", "direction": "out"}
+	if got := call(t, vm, "hoodSentence", "identity · a1", out, "role · r1"); got != "identity · a1 holdsRole role · r1" {
+		t.Errorf("out sentence = %v", got)
+	}
+	in := map[string]any{"relation": "holdsRole", "direction": "in"}
+	if got := call(t, vm, "hoodSentence", "role · r1", in, "identity · a1"); got != "identity · a1 holdsRole role · r1" {
+		t.Errorf("in sentence = %v", got)
+	}
+}
+
+// toFloat widens goja's int64/float64 exports for numeric assertions.
+func toFloat(v any) float64 {
+	switch n := v.(type) {
+	case int64:
+		return float64(n)
+	case float64:
+		return n
+	}
+	return 0
+}
+
+func near(got, want float64) bool {
+	d := got - want
+	return d < 1e-6 && d > -1e-6
 }
 
 // TestStaticUIServed pins the go:embed static mount: the served index.html

@@ -11,7 +11,7 @@
     <div class="brand">Loupe <span class="brand-sub">· Lattice</span></div>
     <nav class="tabs" id="tabs">
       <a class="tab active" data-tab="systemmap" href="#/map">System Map</a>
-      <a class="tab" data-tab="corekv" href="#/corekv">Core KV</a>
+      <a class="tab" data-tab="graph" href="#/graph">Graph</a>
       <a class="tab" data-tab="health" href="#/health">Health</a>
       <a class="tab" data-tab="tasks" href="#/tasks">Tasks</a>
       <a class="tab" data-tab="control" href="#/control">Control</a>
@@ -40,19 +40,33 @@
       <!-- agent-activity console mounts in #sysmap-console — see loupe-system-map-ux.md §6 -->
     </section>
 
-    <!-- Core KV -->
-    <section class="panel" id="panel-corekv">
-      <div class="panel-controls">
-        <input type="text" id="corekv-prefix" placeholder="type filter (e.g. vtx.role.)">
-        <input type="number" id="corekv-limit" value="500" min="1" title="max vertices">
-        <button id="corekv-load">List vertices</button>
-        <span class="muted" id="corekv-status"></span>
+    <!-- Graph explorer -->
+    <section class="panel" id="panel-graph">
+      <div id="graph-list-mode">
+        <div class="panel-controls">
+          <input type="text" id="graph-q" placeholder="search label or key…">
+          <label class="graph-toggle"><input type="checkbox" id="graph-deleted"> show deleted</label>
+          <input type="text" id="graph-prefix" class="graph-prefix" placeholder="raw key prefix (escape hatch)">
+          <button id="graph-load">Search</button>
+          <span class="muted" id="graph-status"></span>
+        </div>
+        <div class="facet-row" id="graph-facets"></div>
+        <div class="trail-row" id="graph-trail"></div>
+        <div class="split graph-split">
+          <div class="keylist" id="graph-keys"></div>
+          <div class="valuepane">
+            <div class="valuepane-head" id="graph-valuehead">Select an entity</div>
+            <div class="vtx-detail" id="graph-detail"></div>
+          </div>
+        </div>
       </div>
-      <div class="split">
-        <div class="keylist" id="corekv-keys"></div>
-        <div class="valuepane">
-          <div class="valuepane-head" id="corekv-valuehead">Select a vertex</div>
-          <div class="vtx-detail" id="corekv-detail"></div>
+      <div id="graph-hood" style="display:none">
+        <div class="panel-controls">
+          <button id="hood-list-btn">list view</button>
+          <span class="muted" id="hood-status"></span>
+        </div>
+        <div id="hood-stage">
+          <svg id="hood-edges" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
       </div>
     </section>
