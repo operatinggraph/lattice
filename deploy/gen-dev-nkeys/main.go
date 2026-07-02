@@ -6,9 +6,15 @@
 // It is the single source of truth for the permission matrix: the Go `matrix`
 // below defines each component's publish allow/deny set, and this tool renders
 // both the seed files (deploy/nkeys/<component>.nk) and the server config that
-// references their public keys. Run it to rotate the dev credentials:
+// references their public keys. Run it after editing the matrix (e.g. adding a
+// component):
 //
 //	go run ./deploy/gen-dev-nkeys
+//
+// An existing seed file is REUSED, not rotated — the run is idempotent per
+// component, so adding one new entry does not churn every other component's
+// dev identity. Delete a component's deploy/nkeys/<name>.nk first to force a
+// deliberate rotation of just that seed.
 //
 // The seeds it writes are DEV-ONLY, committed like POSTGRES_PASSWORD: lattice_dev;
 // production injects real seeds via mounted secrets / Vault and never commits them.
@@ -18,6 +24,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -173,6 +180,12 @@ var matrix = []component{
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{
+		name:     "gateway",
+		desc:     "external write-path translator — verifies JWTs, stamps the verified actor, submits ops; mutates Core state only via ops (P2)",
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
+		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
+	},
+	{
 		name:     "loftspace-app",
 		desc:     "vertical app (P5 reader); writes via ops",
 		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
@@ -205,6 +218,27 @@ func run() error {
 
 	pubKeys := make(map[string]string, len(matrix))
 	for _, c := range matrix {
+		seedPath := filepath.Join(nkeysDir, c.name+".nk")
+
+		// Idempotent by component: an existing seed file is REUSED, not
+		// rotated. Minting a fresh keypair for every component on every run
+		// (the original behavior) rotates every OTHER component's dev
+		// identity as a side effect of adding one new component — a
+		// disruptive, unreviewable diff. Delete the seed file to force a
+		// deliberate rotation for that one component.
+		if existing, err := os.ReadFile(seedPath); err == nil {
+			kp, err := nkeys.FromSeed(bytes.TrimSpace(existing))
+			if err != nil {
+				return fmt.Errorf("parse existing seed %s: %w", seedPath, err)
+			}
+			pub, err := kp.PublicKey()
+			if err != nil {
+				return fmt.Errorf("public key for existing %s: %w", c.name, err)
+			}
+			pubKeys[c.name] = pub
+			continue
+		}
+
 		kp, err := nkeys.CreateUser()
 		if err != nil {
 			return fmt.Errorf("create nkey for %s: %w", c.name, err)
@@ -217,7 +251,6 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("public key for %s: %w", c.name, err)
 		}
-		seedPath := filepath.Join(nkeysDir, c.name+".nk")
 		if err := os.WriteFile(seedPath, append(seed, '\n'), 0o600); err != nil {
 			return fmt.Errorf("write seed %s: %w", seedPath, err)
 		}

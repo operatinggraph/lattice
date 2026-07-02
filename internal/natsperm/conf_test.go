@@ -120,7 +120,7 @@ func TestConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse config: %v", err)
 	}
-	if got, want := len(opts.Nkeys), 12; got != want {
+	if got, want := len(opts.Nkeys), 13; got != want {
 		t.Errorf("NKey users = %d, want %d", got, want)
 	}
 	// Every user must carry an explicit publish allow-list (default-deny on
@@ -150,7 +150,7 @@ func TestCoreKVWriteIsolation(t *testing.T) {
 		t.Fatalf("processor KVPut core-kv: want success, got %v", err)
 	}
 
-	assertDeniedPuts(t, url, "core-kv", []string{"refractor", "loom", "weaver", "bridge", "loupe", "lattice", "loftspace-app", "clinic-app", "object-store-manager"})
+	assertDeniedPuts(t, url, "core-kv", []string{"refractor", "loom", "weaver", "bridge", "loupe", "lattice", "gateway", "loftspace-app", "clinic-app", "object-store-manager"})
 }
 
 // TestCapabilityKVWriteIsolation: only refractor (and bootstrap) may write the
@@ -168,7 +168,7 @@ func TestCapabilityKVWriteIsolation(t *testing.T) {
 		t.Fatalf("refractor KVPut capability-kv: want success, got %v", err)
 	}
 
-	assertDeniedPuts(t, url, "capability-kv", []string{"processor", "loom", "weaver", "loupe", "lattice"})
+	assertDeniedPuts(t, url, "capability-kv", []string{"processor", "loom", "weaver", "loupe", "lattice", "gateway"})
 }
 
 // TestLensTargetWriteIsolation: refractor (the sole projector) may write a
@@ -186,7 +186,7 @@ func TestLensTargetWriteIsolation(t *testing.T) {
 		t.Fatalf("refractor KVPut weaver-targets: want success, got %v", err)
 	}
 
-	assertDeniedPuts(t, url, "weaver-targets", []string{"loom", "loupe", "lattice"})
+	assertDeniedPuts(t, url, "weaver-targets", []string{"loom", "loupe", "lattice", "gateway"})
 }
 
 // TestBackingStreamSideChannel: denying $KV.core-kv.> publish is not enough — a

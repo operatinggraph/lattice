@@ -149,6 +149,12 @@ func TestGate3_Report(t *testing.T) {
 			Result:      "DEFENDED",
 			Enforcement: "ENABLE + FORCE ROW LEVEL SECURITY (§6.14 H3): a protected table whose policy was never generated denies ALL rows even for a granted actor — a fail-closed outage, never a silent world-publish; a correctly-policied table serves the granted row (ReadV5)",
 		},
+		{
+			Num:         14,
+			Vector:      "Gateway write-path actor impersonation",
+			Result:      "DEFENDED",
+			Enforcement: "internal/gateway strip-and-stamp (design §3.1/§6): a POST /v1/operations body carrying a forged `actor` is unconditionally overwritten with the JWT-verified actor before env.Actor is built — the forged value never reaches core-operations; the NATS account-level write restriction (#75 Fire 2, live) makes the Gateway's NATS user the only publisher, so an actor stamped on that subject provably passed through this seam (internal/gateway TestHandleOperations_ForgedActorNeverWins)",
+		},
 	}
 
 	// total is the number of vectors in the report and the gate denominator.

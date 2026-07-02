@@ -44,11 +44,12 @@ NKEY_LOFTSPACE_APP ?= $(NKEY_DIR)/loftspace-app.nk
 NKEY_CLINIC_APP ?= $(NKEY_DIR)/clinic-app.nk
 NKEY_LATTICE_PKG ?= $(NKEY_DIR)/lattice-pkg.nk
 NKEY_LATTICE_CLI ?= $(NKEY_DIR)/lattice.nk
+NKEY_GATEWAY ?= $(NKEY_DIR)/gateway.nk
 
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -251,6 +252,7 @@ build:
 	go build -o bin/bridge ./cmd/bridge
 	go build -o bin/object-store-manager ./cmd/object-store-manager
 	go build -o bin/loupe ./cmd/loupe
+	go build -o bin/gateway ./cmd/gateway
 
 ## test-cli — Run the lattice CLI unit + E2E tests.
 test-cli:
@@ -547,6 +549,16 @@ run-loupe:
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Loupe on http://127.0.0.1:7777 (Ctrl-C to stop)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loupe
+
+## run-gateway — Build + run the Gateway (external write-path translator) in the
+## FOREGROUND, DEV MODE (trusts the checked-in dev JWT key — never for prod).
+## Listens on :8080. Mint a token: ./bin/gateway dev-token -sub <identityNanoID>.
+## Requires a running deployment (make up / up-full).
+run-gateway:
+	@echo "==> Building gateway binary..."
+	go build -o bin/gateway ./cmd/gateway
+	@echo "==> Gateway on :8080, GATEWAY_DEV_MODE=true (Ctrl-C to stop)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true ./bin/gateway
 
 ## run-loftspace-app — Build + run the LoftSpace applicant app in the FOREGROUND.
 ## Open http://127.0.0.1:7788. Requires a running deployment with the LoftSpace
