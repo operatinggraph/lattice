@@ -496,6 +496,35 @@ if that pattern is ever used for a sensitive aspect.
 Next: Fire 3 — `ShredIdentityKey` op + `KeyShredded` event + `Vault.ShredKey` + Processor cache eviction;
 `privacy-base` ships the op/event DDL.
 
+**Fire 3 CHECKPOINT (2026-07-02, Lattice Steward, `604342b`).** Shipped: `packages/privacy-base`'s
+`ShredIdentityKey` op DDL (marks `piiKey.shredded=true`, an unconditioned update) and the registered
+`privacy.keyShredded` event-type DDL (Contract #3 §3.4). `internal/privacyworker` is a new durable
+`events.privacy.keyShredded` consumer — co-located inside `cmd/processor` (not Refractor, as the body's §3
+sketch suggested) sharing the Processor's own `*vault.LocalBackend` instance, because that sharing is what
+makes a shred observable at all: `internal/vault/local.go`'s `shredded` deny-list and DEK cache are
+per-instance in-memory state, so a separately-constructed backend from the same KEK would never see it.
+The listener's sole job is `Vault.ShredKey(identityKey)` — destruction + cache eviction are one atomic call
+in the local backend, so "cache eviction" (design §2.4 point 2) needed no separate code path.
+3-layer adversarial review (Blind Hunter, Edge Case Hunter, Acceptance Auditor) found and fixed one real
+bug pre-merge: an identity that never received a sensitive write has no `piiKey` row, so the original build
+recorded its shred ONLY in the in-memory deny-list — a Processor restart forgot it, and a later sensitive
+write would silently mint a fresh, unshredded key and reopen the identity to PII. Fixed by having the DDL
+always write a durable placeholder (empty `wrappedDEK`, `shredded=true`) instead of skipping the mutation,
+and reordering `internal/vault/local.go`'s `checkAndDeriveDEK` to check `envelope.Shredded` BEFORE its
+`WrappedDEK`-empty validation (so a placeholder envelope reports `ErrKeyShredded`, not `ErrInvalidEnvelope`)
+— `CreateIdentityKey` also now refuses to mint for an already-shredded identity (defense in depth). A new
+e2e test (`TestShredIdentityKey_EndToEnd_VaultDecryptFails`) proves the full chain — op commit → outbox
+publish → privacy-worker consume → `Vault.ShredKey` — against a real embedded-NATS harness; a second test
+proves the placeholder survives a simulated restart (a fresh `LocalBackend` sharing only the KEK still
+denies). `internal/testutil/pipeline.go` gained an injectable `Vault` field (tests need the SAME instance
+across pipeline setup and assertion) and its `ProvisionHarness` now sets `AllowAtomicPublish` on
+`core-events`, fixing a harness gap (no external test package had driven the outbox against it before) that
+otherwise nak-loops every outbox publish forever.
+Next: Fire 4 — Refractor `KeyShredded` nullification handler + the privacy-critical failure tier + health
+counters (`vault_calls_total`, `keyshredded_handled_total`) + the Weaver shred-finalization convergence
+lens (the crash-after-commit-before-destroy guarantee); `make test-crypto-shred` + the Gate-3 vector go
+green there.
+
 **Considered and REJECTED — pre-Vault plaintext contact projection** into `clinicPatientsRead`
 (technically buildable, no test fails, outside M4's *letter* since `.demographics` cannot be
 `sensitive:true` on a non-identity vertex): it ships queryable plaintext PHI into Postgres that

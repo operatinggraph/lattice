@@ -103,7 +103,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · next: Fire 3 ShredIdentityKey + KeyShredded event |
+| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · next: Fire 4 Refractor nullification + failure tier + health counters + Weaver convergence lens |
 | **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
 
 ### External-I/O maturity (bridge follow-ons)
@@ -172,6 +172,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-02 · `604342b` · [Core/privacy] Vault Fire 3 — ShredIdentityKey op + keyShredded event + `internal/privacyworker` Vault destruction; durable-placeholder restart fix (3-layer review)
 - 2026-07-02 · `83b7976` · [Core/privacy] Vault Fire 2 — Processor encrypt-on-write/decrypt-on-read for sensitive aspects; `privacy-base` piiKey DDL
 - 2026-07-02 · `e04498e` · [Weaver/substrate] `@every` recurring schedules CLOSED — Fires 1–3 (§10.4+§4.3 ratified `d778b13`; weaver.md close-out; #49 pruner retired-superseded per #4 §4.3)
 - 2026-07-02 · `da8279f` · [Core/apps] Read-path authorization (D1) CLOSED — D1.1–D1.5 all shipped; Gateway read-front + Personal Lens are beyond-D1 rows (design §7)
