@@ -1,6 +1,8 @@
 # Consumer HealthSink consolidation — one shared `internal/healthkv` pause-state sink
 
-**Status: ✅ Andrew-ratified (2026-07-02) — Fire 3 (Bridge) INCLUDED.** Ratification Q&A folded into
+**Status: ✅ Andrew-ratified (2026-07-02) — Fire 3 (Bridge) INCLUDED; fires COLLAPSED to ONE
+(consolidate + rewire Loom/Weaver/Bridge together) per Andrew's fewer-larger-fires rule — §9's
+three-fire split is superseded.** Ratification Q&A folded into
 §2.1: the Refractor exclusion is semantic (the `rebuilding` third state + mid-rebuild arbitration +
 its own entry schema/key with existing readers), and the Processor has **no** sink at all today (lane
 specs omit `Health` — pause-persistence is an open posture the per-lane-consumers row must decide

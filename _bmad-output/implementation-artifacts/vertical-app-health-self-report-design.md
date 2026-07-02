@@ -1,7 +1,8 @@
 # Vertical-app Health-KV self-report — honest dependency-probing heartbeat
 
 **Status: ✅ Andrew-ratified (2026-07-02) — §5.6 TTL ON (the one judgment call: apps born
-TTL-conformant).** Loupe-2.0 reconciliation folded (2026-07-02): `cmd/loupe/**` is its own lane and
+TTL-conformant); Fires 1–2 COLLAPSED to ONE (reporter + BOTH apps together) per Andrew's
+fewer-larger-fires rule; the objmgr adoption stays the optional tail.** Loupe-2.0 reconciliation folded (2026-07-02): `cmd/loupe/**` is its own lane and
 F4 "Health absorption" retires the current Health tab, so this design's only interface to Loupe is
 the Contract #5 §5.2 document — the render test case moved out of Fire 1 to the Loupe lane (§7, §9).
 **Author:** Winston (Designer fire, 2026-07-01)

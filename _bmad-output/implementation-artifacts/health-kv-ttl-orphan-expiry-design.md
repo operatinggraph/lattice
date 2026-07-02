@@ -1,6 +1,11 @@
 # Health-KV TTL — dead-instance key expiry (orphan reclaim)
 
-**Status: 📐 awaiting-Andrew (ratification)**
+**Status: ✅ Andrew-ratified (2026-07-02) — Fire 3 = the consumer-state RE-KEY (the recommended
+depth), sequenced after the ratified HealthSink consolidation (one-place change in the shared
+`ConsumerSink`).** Fire decomposition COLLAPSED per Andrew's fewer-larger-fires rule: **Fire 1 =
+Categories A + B together** (all TTL wiring — heartbeats + diagnostic keys — one mechanical plane,
+one fire, incl. the optional `gc-stale` tail) · **Fire 2 = the Category-C re-key** (after the
+consolidation build). §8's three-fire split is superseded accordingly.
 **Author:** Winston (Designer fire, 2026-06-30)
 **Backlog:** Stream-2 Component maintenance — *[Health-KV] Orphaned dead-instance heartbeat keys never expire* (★★, S–M)
 **Owning component:** all heartbeat writers (Processor, Refractor, Weaver, Loom, bridge, object-store-manager) via the substrate; docs in `docs/observability/health-kv-schema.md`.
@@ -183,14 +188,25 @@ If, on review, you want §5.6 to *also* spell out the auxiliary-key (B/C) lifecy
 Each fire is independently shippable + green; Fire 1 carries the contract-mandated core and most of the value.
 
 - **Fire 1 — Category A heartbeat TTL (the core, build-to-contract).**
-  Switch all seven Category-A writes (`Processor` heartbeat + `step3-latency`, `Refractor`, `Weaver`, `Loom`, `bridge`, `object-store-manager`) from `KVPut` → `KVPutWithTTL(..., interval × multiplier)`. Add the per-component `ttlMultiplier` config (default 10; 0 disables) + a shared `health` default const. Tests per §6 Category A. *(Optional tail: the `lattice health gc-stale` one-shot cleanup, Decision 6 — can split to its own fire if it bloats.)*
+  Switch all seven Category-A writes (`Processor` heartbeat + `step3-latency`, `Refractor`, `Weaver`, `Loom`, `bridge`, `object-store-manager`) from `KVPut` → `KVPutWithTTL(..., interval × multiplier)`. Add the per-component `ttlMultiplier` config (default 10; 0 disables) + a shared `health` default const. Tests per §6 Category A. *(Optional tail: the `lattice health gc-stale` one-shot cleanup, Decision 6 — can split to its own fire if it bloats.)* **Coordination (2026-07-02):** the ratified *vertical-app self-report* design's optional Fire 3 has `object-store-manager` adopt the TTL'd `healthkv.Reporter` — whichever lands first covers objmgr's TTL; no conflict (this fire's direct `KVPutWithTTL` swap is superseded there if the Reporter adoption ships first). The two vertical apps are born TTL-on and need nothing here.
   → Restores Contract #5 §5.6 conformance; new orphans stop accruing; the Lamplighter's "absent = crashed" signal starts working.
 
 - **Fire 2 — Category B diagnostic TTL.**
   Give `malformed-operation.<requestId>`, `claim-attempts.<outcome>`, and `commit-conflicts` a fixed `diagnosticTTL` (default 1h, configurable), mirroring the shipped auth-trace constant. Bounds the unbounded `malformed-operation` keyspace; clears dead-instance breadcrumbs. Tests per §6 Category B.
 
 - **Fire 3 — Category C consumer-state re-key (durable, the subtle one).**
-  Re-key the three consumer-state sinks (`bridge`, `loom`, `weaver`) from `health.<comp>.<instance>.consumer.<name>` → `health.<comp>.consumer-state.<name>`; add the `delete`-on-Remove path to the **bridge** sink (Loom/Weaver already have it). No TTL. Tests per §6 Category C (incl. the restore-across-restart bug fix). *Carries a small HealthSink key-shape change — if you prefer not to touch it, this fire drops to "bridge graceful-delete parity + a long (e.g. 24h) safety-net TTL," accepting the long-downtime-pinned-restore edge as a documented limitation (see §9 / For-Andrew).*
+  Re-key the consumer-state sink from `health.<comp>.<instance>.consumer.<name>` →
+  `health.<comp>.consumer-state.<name>`. No TTL. Tests per §6 Category C (incl. the
+  restore-across-restart bug fix). **Reconciled 2026-07-02 (ratification session):** the *HealthSink
+  consolidation* design (✅ ratified same day) lifts the three sinks into one shared
+  `internal/healthkv.ConsumerSink` — so this fire **sequences after that consolidation** and becomes a
+  **one-place** key change in the shared sink + its test suite (not three parallel edits); the bridge
+  `Delete` parity comes with the shared sink for free. Loupe-classification checked: both the old and
+  the re-keyed shape classify as `kindEvent` in `classifyHealthKey` (a dotted second segment), so the
+  reader is untouched either way — and Loupe 2.0's F4 health absorption owns rendering regardless.
+  *The lighter fallback (graceful-delete parity + a long safety-net TTL) remains available, but its
+  rationale — "don't touch the HealthSink shape" — is weakened now that the shape lives in exactly one
+  tested place; see §9 / For-Andrew.*
 
 Sequence: Fire 1 → 2 → 3 (independent; 1 first as the contract-conformance core). Each leaves CI green on its own.
 
