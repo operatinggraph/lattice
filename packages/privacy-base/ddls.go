@@ -5,26 +5,39 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // DDLs returns the package's DDL meta-vertex declarations:
 //   - `piiKey` (meta.ddl.aspectType, NOT sensitive) — the wrapped-DEK
 //     envelope reference stored as vtx.identity.<NanoID>.piiKey
-//     (design §2.1). PermittedCommands is empty: no operation dispatches
-//     `piiKey` as its OWN class/handler, so the shared declaration-only
-//     script fails closed if that ever happens (mirrors the pattern
-//     identity-domain's sensitive aspect-type DDLs use). This registers the
-//     class for DDL-cache/tooling introspection; it does NOT guard against a
-//     script directly emitting a `.piiKey` mutation in its OWN
-//     ScriptResult — no aspect-type DDL in this codebase blocks that (the
-//     same trust model already governing every other reserved aspect:
+//     (design §2.1). PermittedCommands admits ShredIdentityKey (design
+//     §2.2/§9 Fire 3) — the one OPERATION allowed to write piiKey directly
+//     (to flip shredded=true); step-6's resolveGoverningDDL keys on the
+//     MUTATION's class, so this only gates that write, and does NOT make
+//     piiKeyDDLScript itself dispatchable (ClassForCommand indexes vertexType
+//     DDLs only, mirroring freshnessExpiry/MarkExpired). The Processor's
+//     commit-path step 6.5 still mints a NEW piiKey internally on an
+//     identity's first sensitive-aspect write — an engine write, not a
+//     dispatched op, so it bypasses this gate entirely as it always has.
+//     This registers the class for DDL-cache/tooling introspection; it does
+//     NOT guard against a script directly emitting a `.piiKey` mutation in
+//     its OWN ScriptResult — no aspect-type DDL in this codebase blocks that
+//     (the same trust model already governing every other reserved aspect:
 //     package scripts are reviewed code, not untrusted input).
+//   - `shredIdentityKey` (meta.ddl.vertexType) — the ShredIdentityKey op DDL
+//     (design §2.2/§2.4, Fire 3). See shred_identity_key.go.
+//   - `privacy.keyShredded` (meta.ddl.eventType) — the registered event-type
+//     DDL for the op's emitted event (Contract #3 §3.4). See
+//     shred_identity_key.go.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		{
-			CanonicalName: "piiKey",
-			Class:         "meta.ddl.aspectType",
-			Sensitive:     false,
+			CanonicalName:     "piiKey",
+			Class:             "meta.ddl.aspectType",
+			Sensitive:         false,
+			PermittedCommands: []string{"ShredIdentityKey"},
 			Description: "Per-identity PII key-custody envelope (vault-crypto-shredding-design.md §2.1, " +
 				"Contract #3 §3.10): stored as vtx.identity.<NanoID>.piiKey, holding only the wrapped " +
 				"(ciphertext) data-encryption key — never plaintext key material. Minted lazily by the " +
-				"Processor's commit-path step 6.5 on an identity's first sensitive-aspect write, and read " +
-				"internally by step 4 / kv.Read decrypt-on-read. No operation writes it directly.",
+				"Processor's commit-path step 6.5 on an identity's first sensitive-aspect write (an internal " +
+				"engine write, not a dispatched op — bypasses permittedCommands), and read internally by " +
+				"step 4 / kv.Read decrypt-on-read. ShredIdentityKey (design §2.2/§9 Fire 3) is the sole " +
+				"OPERATION permitted to write it directly, to flip shredded=true.",
 			Script: piiKeyDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"wrappedDEK":{"type":"string","description":"Base64 ciphertext of the per-identity DEK, wrapped under the Vault backend's master key."},` +
@@ -50,6 +63,8 @@ func DDLs() []pkgmgr.DDLSpec {
 				},
 			},
 		},
+		ShredIdentityKeyDDL(),
+		KeyShreddedEventDDL(),
 	}
 }
 
