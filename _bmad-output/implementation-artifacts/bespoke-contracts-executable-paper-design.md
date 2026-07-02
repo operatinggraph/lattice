@@ -471,6 +471,26 @@ package work. All sequenced **behind** the payment-ledger PO item (a hard predec
 Each fire independently shippable + green. The **whole marquee vision is realized by V1–V4 on existing
 platform machinery**, with L1 (+ optionally L2) as the only platform touches.
 
+> **🏗️ CHECKPOINT (Vertical Steward, 2026-07-02) — Fire V1 SHIPPED, `f47c78e`.** No persistent worktree
+> (finished in one fire; the branch was merged and deleted). Built exactly to spec: `packages/bespoke-contracts`
+> (clause DDL + clauseProse/clauseTerms/clauseStatus aspect DDLs, the `clauseSatisfaction` actorAggregate lens
+> anchored on `clause` — deliberately **no** `WHERE status='active'` filter, since that would depend on the
+> unbuilt filter-retraction primitive per R3; convergence is purely "does an `authorizedBy` transaction exist,"
+> which upserts safely — the playbook `missing_charge → directOp(DebitAccount)`), plus `loftspace-ledger`
+> `DebitAccount`'s new optional `clauseRef` param (writes the `authorizedBy` link + marks the clause completed;
+> a plain DebitAccount with no clauseRef is regression-tested unaffected). Registered in `lattice-pkg`'s
+> package registry + `install-loftspace`/`refresh-loftspace`. Full local gates green (build/vet/lint/
+> golangci-lint/full `go test ./...` short suite); `make verify-kernel`/`test-bypass`/`test-capability-
+> adversarial` were **not** run — they require `make down && make up` against the shared multi-fire stack,
+> which this fire does not own (no security/capability-plane surface touched here regardless). **Not yet
+> verified live in-browser** (a newly-added package needs a fresh bootstrap, not a hot F-004 refresh) — proven
+> instead via a self-contained Processor-pipeline integration test (`bespoke_contracts_test.go`, embedded NATS)
+> exercising CreateClause → DebitAccount{clauseRef} end-to-end, plus a `full`-engine cypher unit test of the
+> lens. **Fire L1** (the §10.8 doc clarification) was **not** done this fire — it's a Lattice-lane doc touch
+> and V1 didn't need it (the type-preserving templating behavior it documents was already load-bearing and
+> already true in code). **Next: Fire V2** (conditioned `pet` fee via `conditionedOn` + the judgment
+> `missing_inspection → assignTask` gap) — a fresh `git worktree add` per the fresh-worktree-per-fire rule.
+
 ---
 
 ## 11. Self-adversarial pass (Designer, folded in — the L/XL gate, discharged)
