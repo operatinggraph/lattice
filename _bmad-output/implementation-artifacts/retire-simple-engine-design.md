@@ -151,6 +151,19 @@ The `lens.Rule.RuleEngine` YAML field is **kept** (accepts `"full"`/absent) for 
 
 Each fire is independently shippable and green. Order is dependency-forced: B before C before A.
 
+> **Checkpoint — Fire 1 SHIPPED (`970585f`).** Fire 2 SHIPPED 2026-07-01: deleted
+> `ruleengine/simple/invalidation_{coverage,plan}.go` (+ their tests) and
+> `projection/oracle_test.go`; trimmed `plan.go` (`ProjectionPlan.Invalidation`,
+> `InvalidationPlan`, `CompileError`, `Logger` all removed — `Compile` now just
+> validates the descriptor + classifies auth-plane); `driver.go`'s
+> `InstallActorAggregate` simplified to match (no more `errors.As(*CompileError)`
+> branch — always BFS, as it already effectively was). Added
+> `TestCompile_AuthPlaneUncoveredMatch_StillRegisters` pinning that an auth-plane
+> lens with a previously-"uncovered" MATCH still compiles (the §8 adversarial
+> finding: the gate was already inert, BFS always won). Full `go test ./...`,
+> `go vet`, `golangci-lint`, `lint-conventions` green; grep-clean for the deleted
+> symbols. Next: Fire 3 (delete the simple engine itself).
+
 ### Fire 1 — Lift the neutral carrier types into `ruleengine`
 - Add `EvalResult` + `NodeEntry` to `ruleengine` (package `ruleengine`), verbatim from `simple/evaluator.go`.
 - Re-point the simple engine's own `Evaluate`/`deleteResult`/`invalidation_*` at `ruleengine.EvalResult`/`ruleengine.NodeEntry` (keep simple compiling).
