@@ -274,8 +274,9 @@ pre {
 .comp-event { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
 .comp-event summary { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .comp-event .cid { font-family: var(--mono); word-break: break-all; }
-.comp-ctlrow .control-item { flex-wrap: wrap; justify-content: flex-start; align-items: center; }
-.comp-ctlrow .cid { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.comp-ctlrows { overflow-x: hidden; }
+.comp-ctlrows .control-item { flex-wrap: wrap; justify-content: flex-start; align-items: center; }
+.comp-ctlrows .cid { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .comp-ctlbtn { padding: 2px 8px; font-size: 11px; }
 .comp-ctlout { margin: 4px 0 8px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px; max-height: 240px; overflow-y: auto; }
 .comp-ctlout:empty { display: none; }
