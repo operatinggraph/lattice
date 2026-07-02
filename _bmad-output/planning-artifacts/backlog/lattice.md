@@ -113,10 +113,8 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now**: **Negative/filter-retraction Fire 3** (target-diff retraction — F1+F2 shipped
-> `5624392`; the Vault-5b manages-unassign stale row is neighbor-keyed, which F2 falls through on BY
-> DESIGN, so Fire 3 is what GATES 5b close and its build condition — a live consumer — is now met).
-> Then **Vault Fire 5b** (★★★ — next 5b-ii-b Rec-C remainder, 5b-iii clinic contact + FE tails;
+> 🎯 **Build-ready now**: **Vault Fire 5b** (★★★ — Negative/filter-retraction is now CLOSED, `5901bc4`,
+> so 5b's Fire-3 gate is cleared; next 5b-ii-b Rec-C remainder, 5b-iii clinic contact + FE tails;
 > unblocks 3 Verticals rows). *Dependency-sequenced ratified items*: **Personal Lens** (buildable,
 > deprioritized behind Vault) · **Object crypto-shred** (behind Vault). Current fire/park state for
 > Gateway · FR28 · Augur · Control-plane-authz · `kv.Links` lives on their rows below.
@@ -167,7 +165,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Negative / filter-retraction projection | True "emit-only-when-violating" (targets currently project one row per candidate with a `violating` flag) + the plain-lens aspect/link freshness bug underneath it. | ★★ | M | 🏗️ F1+F2 shipped · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) · next: Fire 3 target-diff (consumer arrived: Vault 5b manages-unassign; GATES 5b close) |
 | **[Refractor] Convergence-lens filtering-WHERE activation guard** | Filter-retraction relies on convergence (`violating`) lenses never carrying a filtering WHERE (a retracted row reads to Weaver as entity deletion) — true for every live lens but unenforced at activation. | ★ | XS–S | 📋 review carry-out · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) §Fires-1+2-checkpoint |
 | **[Refractor] Protected/plain Postgres adapter is unguarded last-writer-wins** | The plain/protected `PostgresAdapter` ignores `projectionSeq` (unconditional LWW) — a stale replay can transiently reorder a security-relevant row. Posture accepted 2026-07-02 (the D1 M3 CDC-lag analog); this row is the follow-up hardening: extend the seq-guard to protected targets. | ★ | S–M | 📋 |
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — first consumer (LoftSpace FTS unified search) filed on verticals; the OpenSearch adapter builds only on search-engine-scale demand |
@@ -202,6 +199,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-02 · `5901bc4` · [Refractor] Negative/filter-retraction Fire 3 — target-diff retraction (DiffRetraction opt-in + activation-time unanchored-query guard; 3-layer review; CLOSES the epic, unblocks Vault 5b close)
 - 2026-07-02 · `5624392` · [Refractor] Negative/filter-retraction F1+F2 — plain-lens aspect/link reprojection + anchor-self retraction (3-layer review; Fire 3 target-diff next, gates Vault 5b)
 - 2026-07-02 · `a710c7a` · [lease-signing/loftspace-app] Vault Fire 5b-ii — landlord applicant contact Secure-Lens columns (name/email/phone; retraction fire now gates 5b close)
 - 2026-07-02 · `603fd1f` · [loftspace/vault] Fire 5b-i — applicant roster onto the Secure Lens (applicantRoster retired, applicantRosterRead secure, app reads rewired; duplicateCandidates → Designer)
