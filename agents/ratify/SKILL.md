@@ -40,11 +40,19 @@ The designs may have been authored by a different model/session. Re-verify, don'
   fail-closed defaults on any new boundary.
 - **Fold corrections INTO the doc before presenting** — the diff Andrew ratifies must already be true.
 
-## 2. Present (one at a time)
+## 2. Present (one at a time) — in the session output as PROSE, never a popup
 
-Headline = **clickable design-doc link**. Then: two-line what-it-does · DD verdict (what you verified,
-what you corrected — with file:line) · the decision(s)/fork(s) crisply with your recommendation · fire
-plan after standing-rule collapse. If a block/product question needs another lens, run **vertical-po /
+**Present the assessment + decision as prose in the session output and WAIT for Andrew's chat reply.
+NEVER use an `AskUserQuestion` popup for a fork/ratification decision** — a bare multiple-choice popup
+strips the context that is the whole point (Andrew, 2026-07-02: *"Giving me the popup like this is not
+helpful. I have no context to give you the answer about forks."*). The value of this channel is the
+spelled-out assessment he can read and reason about, then answer in his own words (ratify / hold /
+redirect / probe). `AskUserQuestion` is acceptable only for a genuinely orthogonal logistics choice
+(e.g. "which board?") — never for the design decision itself.
+
+Headline = **clickable design-doc link** (so he never has to dig in the repo). Then: two-line
+what-it-does · DD verdict (what you verified, what you corrected — with file:line) · the
+decision(s)/fork(s) crisply with your recommendation · fire plan after standing-rule collapse. If a block/product question needs another lens, run **vertical-po /
 fe-engineer / owner as READ-ONLY analysis sub-agents** (no builds, no commits, no filing) and fold their
 findings. Answer Andrew's probes by GROUNDING (read the code/vault), never by defending the draft —
 when he pushes back, re-derive from "what does it need".
