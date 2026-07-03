@@ -6,13 +6,16 @@
 // data change, not new rendering logic.
 
 import { el, api, setStatus } from "../api.js";
-import { componentStatusClass, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
+import { componentStatusClass, designAheadCopy, designAheadPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
 import { deriveTransitions, ledClass } from "../logic/feed.js";
 import { keyTarget } from "../logic/keys.js";
 import { navigate } from "../router.js";
 import * as pulse from "../pulse.js";
 
-const SYSMAP_TIER_Y = [40, 150, 270, 400, 530];
+// Tier rows 0-4, with the ingress band (tier -1: the external-actors marker +
+// the Gateway — the door) above them.
+const SYSMAP_INGRESS_Y = 40;
+const SYSMAP_TIER_Y = [130, 240, 360, 490, 620];
 const SYSMAP_NODE_H = 58;
 const SVG_NS = "http://www.w3.org/2000/svg";
 const refractorId = "refractor"; // the sole lens parent (see systemmap.go)
@@ -127,8 +130,13 @@ function setSysmapRollup(data) {
   // degraded — a stack that simply hasn't run read-path provisioning is not
   // crying wolf.
   const counts = sysmapSummary(data.nodes || []);
-  const pendingSuffix = counts.pending
+  let pendingSuffix = counts.pending
     ? " · " + counts.pending + " pending read path" : "";
+  // design-ahead components are the roadmap, not degradation — their count
+  // rides the informational suffix beside pending-readpath.
+  if (counts.designAhead) {
+    pendingSuffix += " · " + counts.designAhead + " design-ahead (not yet deployed)";
+  }
   if (overall === "red") {
     const parts = [];
     if (counts.absent) parts.push(counts.absent + " absent");
@@ -162,23 +170,43 @@ function renderSystemMap(data) {
   const width = stage.clientWidth || 1100;
 
   // Tiers 0-3: absolutely positioned, evenly spaced across the stage width.
-  // Lenses and runtime-discovered clients render on shelves, not tiers.
+  // The ingress band (tier -1) sits above tier 0; a lateral component (Vault)
+  // is placed beside its Core-KV anchor after the rows are laid out; tier-4
+  // infra (the object store) joins the shelf. Lenses and runtime-discovered
+  // clients render on shelves, not tiers.
   const tierMembers = [[], [], [], []];
+  const ingressMembers = [];
+  const lateralMembers = [];
   const lenses = [];
+  const shelfInfra = [];
   const clients = [];
   nodes.forEach((n) => {
     if (n.kind === "client") { clients.push(n); return; }
+    if (n.lateral) { lateralMembers.push(n); return; }
     const t = sysmapTier(n);
-    if (t === 4) { lenses.push(n); return; }
+    if (t === -1) { ingressMembers.push(n); return; }
+    if (t === 4) { (n.kind === "infra" ? shelfInfra : lenses).push(n); return; }
     tierMembers[t].push(n);
   });
 
   // Refractor is the left-most tier-3 slot so its project edges drop cleanly
-  // into the shelf without crossing the other engines' return paths.
+  // into the shelf without crossing the other engines' return paths;
+  // Chronicler is right-most — the history mirror opposite Refractor.
   tierMembers[3].sort((a, b) => {
     if (a.id === refractorId) return -1;
     if (b.id === refractorId) return 1;
+    if (a.id === "chronicler") return 1;
+    if (b.id === "chronicler") return -1;
     return 0;
+  });
+
+  ingressMembers.forEach((n, i) => {
+    const node = buildSysmapNode(n);
+    node.style.left = ((i + 1) / (ingressMembers.length + 1) * width) + "px";
+    node.style.top = SYSMAP_INGRESS_Y + "px";
+    node.style.transform = "translateX(-50%)";
+    stage.appendChild(node);
+    sysmap.nodeEls.set(n.id, node);
   });
 
   for (let t = 0; t < 4; t++) {
@@ -193,7 +221,28 @@ function renderSystemMap(data) {
     });
   }
 
+  // Lateral components sit beside their anchor (Vault to the right of
+  // Core KV), not in a tier row. Edges are box-measured after layout, so no
+  // edge-code change is needed wherever the node lands.
+  lateralMembers.forEach((n) => {
+    const node = buildSysmapNode(n);
+    const anchor = sysmap.nodeEls.get("core-kv");
+    if (anchor) {
+      node.style.left = (anchor.offsetLeft + anchor.offsetWidth / 2 + 28) + "px";
+      node.style.top = SYSMAP_TIER_Y[2] + "px";
+    } else {
+      // No anchor (empty stack) — fall back to the tier-3 row's right edge.
+      node.style.left = (width - 60) + "px";
+      node.style.top = SYSMAP_TIER_Y[3] + "px";
+      node.style.transform = "translateX(-50%)";
+    }
+    stage.appendChild(node);
+    sysmap.nodeEls.set(n.id, node);
+  });
+
   // Tier 4: the lens shelf — flex-wrap chips, not per-node absolute placement.
+  // Tier-4 infra (the object-store archive sink) chips onto the same shelf,
+  // after the lenses, so the chronicler → object-store edge drops cleanly.
   const shelf = el("div", "sysmap-shelf");
   shelf.style.top = SYSMAP_TIER_Y[4] + "px";
   if (!lenses.length) {
@@ -205,6 +254,11 @@ function renderSystemMap(data) {
       sysmap.nodeEls.set(n.id, chip);
     });
   }
+  shelfInfra.forEach((n) => {
+    const chip = buildSysmapNode(n);
+    shelf.appendChild(chip);
+    sysmap.nodeEls.set(n.id, chip);
+  });
   stage.appendChild(shelf);
 
   // The clients shelf: undeclared heartbeat groups (vertical apps etc.) —
@@ -220,9 +274,10 @@ function renderSystemMap(data) {
     stage.appendChild(cshelf);
   }
 
-  // Empty / no-health hint: every component absent and zero lenses.
+  // Empty / no-health hint: every component absent (or design-ahead — also
+  // heartbeatless) and zero lenses.
   const components = nodes.filter((n) => n.kind === "component");
-  if (components.length && components.every((n) => n.status === "absent") && !lenses.length) {
+  if (components.length && components.every((n) => n.status === "absent" || n.status === "design-ahead") && !lenses.length) {
     const hint = el("div", "muted sysmap-hint",
       "No live components reporting — is the stack running? (make up-full)");
     stage.appendChild(hint);
@@ -259,6 +314,7 @@ function buildSysmapNode(n) {
     const cls = componentStatusClass[n.status] || "unknown";
     if (cls === "absent") node.classList.add("absent");
     if (cls === "stale") node.classList.add("stale");
+    if (cls === "designahead") node.classList.add("designahead");
     if (n.status === "degraded") node.classList.add("degraded");
     if (n.status === "unhealthy") node.classList.add("unhealthy");
     const head = el("div", "sysmap-node-head");
@@ -267,6 +323,7 @@ function buildSysmapNode(n) {
     if (n.status === "stale") head.appendChild(el("span", "sysmap-tag", "stale"));
     if (n.status === "degraded") head.appendChild(el("span", "sysmap-tag warn", "degraded"));
     if (n.status === "unhealthy") head.appendChild(el("span", "sysmap-tag bad", "unhealthy"));
+    if (n.status === "design-ahead") head.appendChild(el("span", "sysmap-tag ahead", "◇ design-ahead"));
     if (n.instances && n.instances.length > 1) head.appendChild(el("span", "sysmap-tag", "×" + n.instances.length));
     if (n.issues && n.issues.length) head.appendChild(el("span", "sysmap-tag warn", "⚠ " + n.issues.length));
     node.appendChild(head);
@@ -301,7 +358,7 @@ function buildSysmapNode(n) {
     node.appendChild(el("span", "sysmap-dot " + cls));
     node.appendChild(el("span", "sysmap-label", n.label));
     if (n.instances && n.instances.length > 1) node.appendChild(el("span", "sysmap-tag", "×" + n.instances.length));
-  } else { // infra
+  } else { // infra / ingress — a plain labelled chip, no dot, non-interactive
     node.appendChild(el("span", "sysmap-label", n.label));
   }
 
@@ -339,6 +396,12 @@ function showSysmapTip(n, evt) {
   if (n.kind === "lens" && n.protected) line("protected", "◆ read-path-authorized");
   if (n.status === "pending-readpath") {
     tip.appendChild(el("div", "sysmap-issue", pendingReadpathCopy));
+  }
+  if (n.status === "design-ahead") {
+    tip.appendChild(el("div", "sysmap-tip-ahead", designAheadCopy));
+    if (designAheadPointer[n.id]) {
+      tip.appendChild(el("div", "sysmap-tip-ahead", designAheadPointer[n.id]));
+    }
   }
   if (n.detail) line("detail", n.detail);
   if (n.freshness) line("freshness", n.freshness);

@@ -9,14 +9,19 @@ import (
 // engine that heartbeats to Health KV), "client" (an undeclared heartbeat
 // group discovered at runtime — e.g. a vertical app's reporter; rendered as a
 // chip on the clients shelf, no skeleton edges), "lens" (a Refractor
-// projection), or "infra" (a core stream / KV store — the spine the components
-// hang off). Status carries the live overlay: a component/client is "green" /
-// "stale" / "absent"; a lens carries its §4.2 renderedState ("projecting" /
-// "lagging" / "paused" / "pending-readpath" / "rebuilding" / "fault" /
-// "unknown"); infra is "present" (it exists if Loupe could read Health KV).
-// Protected marks a read-path-authorized lens (spec-side truth — the ◆ tag
-// renders in every state). Component/client nodes carry every live instance
-// in Instances; the node-level Status is the worst instance's, Freshness the
+// projection), "infra" (a core stream / KV store — the spine the components
+// hang off), or "ingress" (the external-actors marker above the Gateway — a
+// plain non-interactive chip, no heartbeat). Status carries the live overlay:
+// a component/client is "green" / "stale" / "absent" — or "design-ahead" for a
+// declared-but-not-yet-deployed component (surface built, backend pending;
+// informational, never degrades the rollup); a lens carries its §4.2
+// renderedState ("projecting" / "lagging" / "paused" / "pending-readpath" /
+// "rebuilding" / "fault" / "unknown"); infra/ingress is "present" (it exists
+// if Loupe could read Health KV). Protected marks a read-path-authorized lens
+// (spec-side truth — the ◆ tag renders in every state). Lateral marks a
+// component the map places beside its anchor (Vault beside Core KV) instead of
+// in its tier row. Component/client nodes carry every live instance in
+// Instances; the node-level Status is the worst instance's, Freshness the
 // freshest, Detail the worst instance's id.
 type mapNode struct {
 	ID        string        `json:"id"`
@@ -27,6 +32,7 @@ type mapNode struct {
 	Freshness string        `json:"freshness,omitempty"`
 	Parent    string        `json:"parent,omitempty"`
 	Protected bool          `json:"protected,omitempty"`
+	Lateral   bool          `json:"lateral,omitempty"`
 	Issues    []string      `json:"issues,omitempty"`
 	Instances []mapInstance `json:"instances,omitempty"`
 	// ActiveSequence is a lens node's reporter activeSequence — the NATS
@@ -71,33 +77,54 @@ const (
 	nodeClient    = "client"
 	nodeLens      = "lens"
 	nodeInfra     = "infra"
+	nodeIngress   = "ingress"
 )
 
 const refractorID = "refractor"
 
 // declaredComponent is an engine the deployment is expected to run. Its id is
 // the Health KV group name (classifyHealthKey) so the overlay matches by id.
+// designAhead suppresses the absent-red for a component whose Loupe surface is
+// built but whose backend is not yet deployed: with no heartbeat it renders the
+// informational "design-ahead" state and contributes nothing to the rollup
+// (the pending-readpath precedent). The instant it heartbeats it takes its
+// normal live status, so the flag is moot for a running component.
 type declaredComponent struct {
-	id    string
-	label string
+	id          string
+	label       string
+	designAhead bool
 }
 
 // declaredComponents is the engine set that heartbeats to Health KV
 // (architecture-overview.md, "heartbeat" edges). Order is the render order.
+// Gateway is designAhead until `make up-full` starts it; Vault and Chronicler
+// until their builds deploy (loupe-platform-edges-ux.md §1.4).
 var declaredComponents = []declaredComponent{
-	{"processor", "Processor"},
-	{refractorID, "Refractor"},
-	{"weaver", "Weaver"},
-	{"loom", "Loom"},
-	{"bridge", "Bridge"},
-	{"object-store-manager", "Object Store Mgr"},
+	{id: "processor", label: "Processor"},
+	{id: refractorID, label: "Refractor"},
+	{id: "weaver", label: "Weaver"},
+	{id: "loom", label: "Loom"},
+	{id: "bridge", label: "Bridge"},
+	{id: "object-store-manager", label: "Object Store Mgr"},
+	{id: "gateway", label: "Gateway", designAhead: true},
+	{id: "vault", label: "Vault", designAhead: true},
+	{id: "chronicler", label: "Chronicler", designAhead: true},
 }
 
 // infraNodes is the core stream / store spine the components flow through.
+// object-store is the archive plane (objects-base) — distinct from the
+// object-store-manager component that manages it.
 var infraNodes = []mapNode{
 	{ID: "core-operations", Label: "core-operations", Kind: nodeInfra, Status: "present"},
 	{ID: "core-events", Label: "core-events", Kind: nodeInfra, Status: "present"},
 	{ID: "core-kv", Label: "Core KV", Kind: nodeInfra, Status: "present"},
+	{ID: "object-store", Label: "Object Store", Kind: nodeInfra, Status: "present"},
+}
+
+// ingressNodes marks where external traffic enters: the non-interactive
+// external-actors chip above the Gateway (tier -1, the door band).
+var ingressNodes = []mapNode{
+	{ID: "external", Label: "external actors · Bearer JWT", Kind: nodeIngress, Status: "present"},
 }
 
 // skeletonEdges is the canonical data flow (architecture-overview.md §"data
@@ -121,16 +148,29 @@ var skeletonEdges = []mapEdge{
 	{From: "object-store-manager", To: "core-operations", Label: "submit ops"},
 	{From: "core-kv", To: refractorID, Label: "CDC"},
 	{From: "loom", To: "bridge", Label: "externalTask"},
+	// Gateway — the external door (write-path only).
+	{From: "external", To: "gateway", Label: ""},
+	{From: "gateway", To: "core-operations", Label: "stamp + publish"},
+	// Vault — key custody, lateral to Core KV (Processor encrypts on commit,
+	// decrypts on read).
+	{From: "processor", To: "vault", Label: "encrypt / decrypt"},
+	// Chronicler — the mirror materializer: inbound from every stream,
+	// outbound to its history read-models + (archive mode) the object store.
+	{From: "core-operations", To: "chronicler", Label: "archive"},
+	{From: "core-events", To: "chronicler", Label: "history"},
+	{From: "core-kv", To: "chronicler", Label: "CDC"},
+	{From: "chronicler", To: "object-store", Label: "archive segments"},
 }
 
 // computeSystemMap overlays the live Health KV state onto the canonical
 // topology. readEntry / resolveLens / resolveSpec / staleThreshold mirror
 // computeHealth so the assembler is unit-testable without NATS. A declared
-// component with no Health KV heartbeat renders "absent" (red); a stale
-// heartbeat renders "stale" (yellow); each live lens becomes a node parented
-// to Refractor carrying its renderedState — a pending-readpath lens
-// contributes nothing to the rollup (it is expected fail-closed state, not
-// degradation).
+// component with no Health KV heartbeat renders "absent" (red) — or
+// "design-ahead" (informational, no rollup contribution) when it is declared
+// designAhead; a stale heartbeat renders "stale" (yellow); each live lens
+// becomes a node parented to Refractor carrying its renderedState — a
+// pending-readpath lens contributes nothing to the rollup (it is expected
+// fail-closed state, not degradation).
 func computeSystemMap(
 	keys []string,
 	readEntry func(string) (map[string]any, bool),
@@ -219,20 +259,28 @@ func computeSystemMap(
 		}
 	}
 
-	nodes := make([]mapNode, 0, len(declaredComponents)+len(infraNodes)+len(lensNodes))
+	nodes := make([]mapNode, 0, len(declaredComponents)+len(infraNodes)+len(ingressNodes)+len(lensNodes))
 	nodes = append(nodes, infraNodes...)
+	nodes = append(nodes, ingressNodes...)
 
 	declared := make(map[string]bool, len(declaredComponents))
-	taken := make(map[string]bool, len(declaredComponents)+len(infraNodes)+len(lensNodes))
+	taken := make(map[string]bool, len(declaredComponents)+len(infraNodes)+len(ingressNodes)+len(lensNodes))
 	for _, in := range infraNodes {
+		taken[in.ID] = true
+	}
+	for _, in := range ingressNodes {
 		taken[in.ID] = true
 	}
 	for _, dc := range declaredComponents {
 		declared[dc.id] = true
 		taken[dc.id] = true
-		node := mapNode{ID: dc.id, Label: dc.label, Kind: nodeComponent}
+		node := mapNode{ID: dc.id, Label: dc.label, Kind: nodeComponent, Lateral: dc.id == "vault"}
 		if bs, ok := beats[dc.id]; ok {
 			worse(applyBeats(&node, bs))
+		} else if dc.designAhead {
+			node.Status = "design-ahead"
+			node.Detail = "not yet deployed"
+			node.Freshness = "-"
 		} else {
 			node.Status = "absent"
 			node.Freshness = "-"

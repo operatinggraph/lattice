@@ -4,10 +4,21 @@
 // to visuals. No DOM, no fetch.
 
 // componentStatusClass maps a component/client status to the CSS class that
-// drives its color. Unknown statuses fall back to a neutral dot.
+// drives its color. Unknown statuses fall back to a neutral dot. design-ahead
+// (surface built, backend not yet deployed) uses the accent (informational)
+// family — the component analog of a pending-readpath lens, never red.
 var componentStatusClass = {
   green: "green", stale: "stale", absent: "absent", unknown: "unknown",
-  degraded: "yellow", unhealthy: "red",
+  degraded: "yellow", unhealthy: "red", "design-ahead": "designahead",
+};
+
+// The operator copy for a design-ahead node's hover tip, plus the per-component
+// pointer that tells the roadmap instead of alarming about it.
+var designAheadCopy = "design-ahead — surface built, backend not yet deployed";
+var designAheadPointer = {
+  gateway: "Gateway: the external write-path door — behind the up-full deploy (lattice lane)",
+  vault: "Vault: crypto-shred key custody — behind the Lattice-lane Vault build",
+  chronicler: "Chronicler: append-only history — behind the Lattice-lane Chronicler build",
 };
 
 // lensStateDot / lensStateGlyph render a lens's renderedState. pending-readpath
@@ -58,15 +69,17 @@ function shapeAlertLines(health) {
 
 // sysmapSummary counts the map banner's plain-English rollup. healthy covers
 // every green-family status; a pending-readpath lens is counted separately
-// and NEVER as degraded (the "7 degraded" fix); absent/unhealthy also count
+// and NEVER as degraded (the "7 degraded" fix); a design-ahead component
+// likewise gets its own informational bucket; absent/unhealthy also count
 // into degraded so the yellow line's total matches what the eye finds.
 function sysmapSummary(nodes) {
   var healthy = { green: 1, present: 1, projecting: 1 };
-  var out = { absent: 0, unhealthy: 0, degraded: 0, pending: 0 };
+  var out = { absent: 0, unhealthy: 0, degraded: 0, pending: 0, designAhead: 0 };
   var list = nodes || [];
   for (var i = 0; i < list.length; i++) {
     var st = list[i].status || "";
     if (st === "pending-readpath") { out.pending++; continue; }
+    if (st === "design-ahead") { out.designAhead++; continue; }
     if (st === "absent") out.absent++;
     if (st === "unhealthy") out.unhealthy++;
     if (!healthy[st]) out.degraded++;
@@ -74,15 +87,22 @@ function sysmapSummary(nodes) {
   return out;
 }
 
-// sysmapTier derives a node's tier (0..4) from its kind + id, never hardcoded
-// x/y — so the layout survives backend node-set changes.
+// sysmapTier derives a node's tier (-1..4) from its kind + id, never hardcoded
+// x/y — so the layout survives backend node-set changes. Tier -1 is the
+// ingress band (the door): the external-actors marker + the Gateway, above
+// core-operations. object-store is the archive sink, bottom band with the
+// read-models.
 function sysmapTier(node) {
+  if (node.kind === "ingress") return -1;
+  if (node.id === "gateway") return -1;
   if (node.kind === "lens") return 4;
   if (node.kind === "infra") {
+    if (node.id === "object-store") return 4;
     return node.id === "core-operations" ? 0 : 2; // core-kv / core-events = spine
   }
-  // component
+  // component (vault falls through to 3 by dependency depth — its lateral
+  // beside-Core-KV placement is a render-layer concern, not a tier)
   return node.id === "processor" ? 1 : 3;
 }
 
-export { componentStatusClass, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier };
+export { componentStatusClass, designAheadCopy, designAheadPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier };

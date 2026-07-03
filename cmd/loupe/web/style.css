@@ -254,6 +254,7 @@ pre {
 .comp-pill.green { color: var(--green); border-color: var(--green); }
 .comp-pill.stale, .comp-pill.degraded, .comp-pill.unknown { color: var(--yellow); border-color: var(--yellow); }
 .comp-pill.unhealthy, .comp-pill.absent { color: var(--red); border-color: var(--red); }
+.comp-pill.design-ahead { color: var(--accent-dim); border-color: var(--accent-dim); }
 .comp-onmap { color: var(--accent); text-decoration: none; font-size: 12px; }
 .comp-onmap:hover { text-decoration: underline; }
 .comp-body { display: grid; grid-template-columns: 1fr 380px; gap: 14px; align-items: start; }
@@ -468,6 +469,26 @@ table.grid td { font-family: var(--mono); }
 }
 .sysmap-node.component[data-status="unknown"] { border-left-color: var(--yellow); }
 .sysmap-node.component.absent .sysmap-label { text-decoration: line-through; color: var(--text-dim); }
+/* design-ahead: surface built, backend not yet deployed — the informational
+   accent family (dashed accent border, dimmed label), never absent-red. */
+.sysmap-node.component.designahead {
+  border: 1px dashed var(--accent-dim);
+  border-left-width: 3px;
+  opacity: 0.75;
+}
+.sysmap-node.component.designahead .sysmap-label { color: var(--text-dim); }
+
+/* The ingress marker (external actors · Bearer JWT): a deliberately-plain
+   non-interactive chip above the Gateway. */
+.sysmap-node.ingress {
+  border-radius: 999px;
+  border-style: dashed;
+  padding: 7px 14px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.sysmap-node.ingress .sysmap-label { font-weight: 400; font-size: 11px; }
 
 .sysmap-node-head { display: flex; align-items: center; gap: 7px; }
 .sysmap-label { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -501,6 +522,8 @@ table.grid td { font-family: var(--mono); }
 .sysmap-tag { font-size: 10px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-dim); flex-shrink: 0; }
 .sysmap-tag.warn { color: var(--yellow); border-color: var(--yellow); }
 .sysmap-tag.bad { color: var(--red); border-color: var(--red); }
+.sysmap-tag.ahead { color: var(--accent-dim); border-color: var(--accent-dim); }
+.sysmap-dot.designahead { background: transparent; border: 1px solid var(--accent-dim); }
 
 .sysmap-shelf {
   position: absolute;
@@ -514,6 +537,7 @@ table.grid td { font-family: var(--mono); }
   overflow-y: auto;
 }
 .sysmap-shelf .sysmap-node.lens { position: static; }
+.sysmap-shelf .sysmap-node.infra { position: static; }
 
 .sysmap-hint { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); }
 
@@ -535,6 +559,7 @@ table.grid td { font-family: var(--mono); }
 .sysmap-tip-k { color: var(--text-dim); min-width: 64px; }
 .sysmap-issue { color: var(--yellow); margin-top: 2px; word-break: break-word; }
 .sysmap-issue.bad { color: var(--red); }
+.sysmap-tip-ahead { color: var(--accent-dim); margin-top: 2px; word-break: break-word; }
 .sysmap-tip-kv { display: inline-block; margin-top: 6px; color: var(--accent); cursor: pointer; }
 
 /* Tasks inbox — reuses the .card family; just spacing + the complete action. */

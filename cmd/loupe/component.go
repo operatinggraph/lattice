@@ -81,6 +81,12 @@ func computeComponent(
 		if dc.id == id {
 			page.Label = dc.label
 			page.Declared = true
+			// A designAhead component with no heartbeat is "design-ahead"
+			// (surface built, backend not yet deployed), matching its map
+			// node; any live instance overwrites this with the worst-of.
+			if dc.designAhead {
+				page.Status = "design-ahead"
+			}
 		}
 	}
 

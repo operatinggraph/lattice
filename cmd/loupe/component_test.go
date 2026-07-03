@@ -76,3 +76,25 @@ func TestComputeComponentAbsentAndUndeclared(t *testing.T) {
 		t.Errorf("undeclared client page = %+v, want undeclared green with 1 instance", page)
 	}
 }
+
+// A designAhead declared component's page agrees with its map node: with no
+// heartbeat the header pill reads "design-ahead" (informational), and a live
+// instance overwrites it with the normal worst-of status.
+func TestComputeComponentDesignAhead(t *testing.T) {
+	page := computeComponent("vault", nil, func(string) (map[string]any, bool) { return nil, false }, time.Minute)
+	if !page.Declared || page.Status != "design-ahead" {
+		t.Errorf("vault page = declared=%v status=%q, want declared/design-ahead", page.Declared, page.Status)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	read := func(k string) (map[string]any, bool) {
+		if k == "health.vault.v1" {
+			return map[string]any{"component": "vault", "instance": "v1", "heartbeatAt": now}, true
+		}
+		return nil, false
+	}
+	page = computeComponent("vault", []string{"health.vault.v1"}, read, time.Minute)
+	if page.Status != "green" {
+		t.Errorf("heartbeating vault page status = %q, want green (designAhead moot once live)", page.Status)
+	}
+}

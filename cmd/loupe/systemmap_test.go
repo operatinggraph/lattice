@@ -242,3 +242,77 @@ func TestComputeSystemMapClientNodes(t *testing.T) {
 		t.Errorf("overall = %q, want green (client is healthy)", m.Overall)
 	}
 }
+
+// A designAhead declared component with no heartbeat renders the informational
+// "design-ahead" state (loupe-platform-edges-ux.md §1.4) — never absent-red,
+// never a rollup contribution; the instant it heartbeats it goes live like any
+// component. The F10 topology nodes (ingress marker, object-store plane,
+// Vault's lateral flag) and edges ride the same map.
+func TestComputeSystemMapDesignAhead(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	docs := map[string]map[string]any{"health.bootstrap.complete": {}}
+	for _, dc := range declaredComponents {
+		if dc.designAhead {
+			continue // gateway / vault / chronicler: no heartbeat yet
+		}
+		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
+	}
+	keys := make([]string, 0, len(docs))
+	for k := range docs {
+		keys = append(keys, k)
+	}
+	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+
+	m := computeSystemMap(keys, read, nil, nil, time.Minute)
+	byID := nodesByID(m)
+
+	if m.Overall != "green" {
+		t.Errorf("overall = %q, want green (design-ahead never degrades the rollup)", m.Overall)
+	}
+	for _, id := range []string{"gateway", "vault", "chronicler"} {
+		n := byID[id]
+		if n.Kind != nodeComponent || n.Status != "design-ahead" || n.Detail != "not yet deployed" {
+			t.Errorf("%s = %+v, want component/design-ahead/not yet deployed", id, n)
+		}
+	}
+	if !byID["vault"].Lateral {
+		t.Errorf("vault node not marked lateral (beside-Core-KV placement)")
+	}
+	if byID["gateway"].Lateral || byID["chronicler"].Lateral {
+		t.Errorf("lateral must mark vault only")
+	}
+	if n := byID["external"]; n.Kind != nodeIngress || n.Status != "present" {
+		t.Errorf("external ingress marker = %+v, want kind=ingress status=present", n)
+	}
+	if n := byID["object-store"]; n.Kind != nodeInfra || n.Status != "present" {
+		t.Errorf("object-store plane = %+v, want kind=infra status=present", n)
+	}
+	wantEdges := []mapEdge{
+		{From: "external", To: "gateway"},
+		{From: "gateway", To: "core-operations"},
+		{From: "processor", To: "vault"},
+		{From: "core-operations", To: "chronicler"},
+		{From: "core-events", To: "chronicler"},
+		{From: "core-kv", To: "chronicler"},
+		{From: "chronicler", To: "object-store"},
+	}
+	for _, want := range wantEdges {
+		found := false
+		for _, e := range m.Edges {
+			if e.From == want.From && e.To == want.To {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing skeleton edge %s → %s", want.From, want.To)
+		}
+	}
+
+	// First heartbeat moots the flag — the component goes live normally.
+	docs["health.gateway.gw-1"] = map[string]any{"component": "gateway", "instance": "gw-1", "heartbeatAt": now}
+	keys = append(keys, "health.gateway.gw-1")
+	m = computeSystemMap(keys, read, nil, nil, time.Minute)
+	if gw := nodesByID(m)["gateway"]; gw.Status != "green" || gw.Detail != "gw-1" {
+		t.Errorf("heartbeating gateway = %+v, want green/gw-1 (designAhead moot once live)", gw)
+	}
+}

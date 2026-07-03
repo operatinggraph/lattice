@@ -87,16 +87,71 @@ func TestSysmapSummaryJS(t *testing.T) {
 		map[string]any{"status": "lagging"},
 		map[string]any{"status": "absent"},
 		map[string]any{"status": "unhealthy"},
+		map[string]any{"status": "design-ahead"},
 	}
 	got, ok := call(t, vm, "sysmapSummary", nodes).(map[string]any)
 	if !ok {
 		t.Fatal("sysmapSummary did not return an object")
 	}
-	// goja exports JS numbers as int64 when integral.
-	want := map[string]int64{"pending": 2, "degraded": 3, "absent": 1, "unhealthy": 1}
+	// goja exports JS numbers as int64 when integral. A design-ahead component
+	// gets its own informational bucket — never degraded (§1.4).
+	want := map[string]int64{"pending": 2, "degraded": 3, "absent": 1, "unhealthy": 1, "designAhead": 1}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("summary[%q] = %v, want %d", k, got[k], v)
+		}
+	}
+}
+
+// The F10 tier placements: the ingress band (tier -1) holds the external
+// marker + the Gateway; the object-store plane sits on the tier-4 band with
+// the read-models; everything else keeps its 2.0 tier.
+func TestSysmapTierJS(t *testing.T) {
+	vm := logicVM(t, "status.js")
+	cases := []struct {
+		node map[string]any
+		want int64
+	}{
+		{map[string]any{"kind": "ingress", "id": "external"}, -1},
+		{map[string]any{"kind": "component", "id": "gateway"}, -1},
+		{map[string]any{"kind": "infra", "id": "core-operations"}, 0},
+		{map[string]any{"kind": "component", "id": "processor"}, 1},
+		{map[string]any{"kind": "infra", "id": "core-kv"}, 2},
+		{map[string]any{"kind": "infra", "id": "core-events"}, 2},
+		{map[string]any{"kind": "component", "id": "weaver"}, 3},
+		{map[string]any{"kind": "component", "id": "vault"}, 3},
+		{map[string]any{"kind": "component", "id": "chronicler"}, 3},
+		{map[string]any{"kind": "lens", "id": "SomeLensId"}, 4},
+		{map[string]any{"kind": "infra", "id": "object-store"}, 4},
+	}
+	for _, c := range cases {
+		if got := call(t, vm, "sysmapTier", c.node); got != c.want {
+			t.Errorf("sysmapTier(%v) = %v, want %d", c.node, got, c.want)
+		}
+	}
+}
+
+// design-ahead maps to the accent-family class, and the hover copy + pointers
+// exist for every designAhead component the server declares.
+func TestDesignAheadRenderTablesJS(t *testing.T) {
+	vm := logicVM(t, "status.js")
+	cls, ok := vm.Get("componentStatusClass").Export().(map[string]any)
+	if !ok {
+		t.Fatal("componentStatusClass is not an object")
+	}
+	if cls["design-ahead"] != "designahead" {
+		t.Errorf(`componentStatusClass["design-ahead"] = %v, want "designahead"`, cls["design-ahead"])
+	}
+	ptr, ok := vm.Get("designAheadPointer").Export().(map[string]any)
+	if !ok {
+		t.Fatal("designAheadPointer is not an object")
+	}
+	for _, dc := range declaredComponents {
+		if !dc.designAhead {
+			continue
+		}
+		if s, _ := ptr[dc.id].(string); s == "" {
+			t.Errorf("designAheadPointer[%q] missing — every design-ahead node teaches its roadmap", dc.id)
 		}
 	}
 }
