@@ -19,6 +19,7 @@ package leasesigning
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/asolgan/lattice/internal/vault"
 )
 
 // projectLandlordRead runs the landlordLeaseApplicationsRead lens over every
@@ -361,4 +363,49 @@ func TestLandlordLeaseApplicationsRead_QualifiedRequiresFreshBgcheck(t *testing.
 	rows := f.projectLandlordRead(t)
 	require.Len(t, rows, 1)
 	require.Equal(t, false, rows[0].Values["qualified"], "a stale bgcheck must not count toward qualified")
+}
+
+// TestLandlordLeaseApplicationsRead_QualifiedWithRealVaultCiphertext seeds
+// .ssn with the ACTUAL shape the Processor's step 6.5 commits for a
+// sensitive aspect — a vault.Ciphertext envelope ({ct, nonce, keyId}), not
+// every other test's fixture-only plaintext {value: "..."}. readinessWithItems
+// used to read id.ssn.data.value, which is always null on a real ciphertext
+// envelope (it carries no "value" key) — so a real, correctly-encrypted ssn
+// could never satisfy `ssnVal <> null`, and qualified/applicantApproved
+// could never turn true for any real (non-test) applicant. This pins the
+// fix (id.ssn.data — the whole aspect body — is the presence test) against
+// the shape that actually ships.
+func TestLandlordLeaseApplicationsRead_QualifiedWithRealVaultCiphertext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
+
+	v, err := vault.NewLocalBackend([]byte("0123456789abcdef0123456789abcdef"), "test-v1")
+	require.NoError(t, err)
+	aliceKey := "vtx.identity." + f.ids["alice"]
+	env, err := v.CreateIdentityKey(context.Background(), aliceKey)
+	require.NoError(t, err)
+	plaintext, err := json.Marshal(map[string]any{"value": "123456789"})
+	require.NoError(t, err)
+	ct, err := v.Encrypt(context.Background(), aliceKey, env, plaintext)
+	require.NoError(t, err)
+	ctBytes, err := json.Marshal(ct)
+	require.NoError(t, err)
+	var ciphertextEnvelope map[string]any
+	require.NoError(t, json.Unmarshal(ctBytes, &ciphertextEnvelope))
+	require.NotContains(t, ciphertextEnvelope, "value", "sanity: the real committed shape carries no plaintext value key")
+
+	f.aspect(t, "alice", "ssn", "ssn", ciphertextEnvelope)
+	f.vtxWithClass(t, "bg1", "service", "service.backgroundCheck.instance")
+	f.aspect(t, "bg1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-01T00:00:00Z", "validUntil": farFutureValidUntil})
+	f.vtxWithClass(t, "pay1", "service", "service.payment.instance")
+	f.aspect(t, "pay1", "outcome", "outcome", map[string]any{"status": "completed", "completedAt": "2026-06-02T00:00:00Z"})
+	f.edge(t, "providedTo", "bg1", "alice")
+	f.edge(t, "providedTo", "pay1", "alice")
+
+	rows := f.projectLandlordRead(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["qualified"], "a real Vault-ciphertext ssn + fresh bgcheck + payment must satisfy qualified")
 }

@@ -512,7 +512,14 @@ func Lenses() []pkgmgr.LensSpec {
 // readinessOptionalMatch + readinessWithItems are the SHARED cypher pieces
 // deriving applicant readiness — ssn-on-file (a presence test only; the ONE
 // sanctioned sensitive read, never projected as a value), a fresh-completed
-// background check, and a completed payment. Both leaseApplicationCompleteSpec
+// background check, and a completed payment. ssnVal reads id.ssn.data (the
+// WHOLE aspect body), never .data.value: step 6.5 replaces a sensitive
+// aspect's entire `data` field with its ciphertext envelope ({ct, nonce,
+// keyId}, no `value` key), so a .value hop resolves null for every real
+// (encrypted) ssn and would silently strand every real application at
+// missing_onboarding forever — only the fixture-only plaintext {value: ...}
+// shape used by these lenses' own tests happened to mask it. `.data <> null`
+// is presence-correct under both shapes. Both leaseApplicationCompleteSpec
 // (the trusted convergence lens, source of truth) and
 // landlordLeaseApplicationsReadSpec (the RLS-protected landlord lens, D1.5 Rec-C
 // readiness clone) splice these in verbatim via fmt.Sprintf, so a readiness-rule
@@ -524,7 +531,7 @@ func Lenses() []pkgmgr.LensSpec {
 // per lens; that AND term is intentionally NOT folded into the shared fragment.
 const readinessOptionalMatch = `OPTIONAL MATCH (id)<-[:providedTo]-(inst:service)`
 
-const readinessWithItems = `id.ssn.data.value AS ssnVal,
+const readinessWithItems = `id.ssn.data AS ssnVal,
   count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.key ELSE null END) AS freshBgComplete,
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'completed' THEN inst.key ELSE null END) AS payComplete`
 
