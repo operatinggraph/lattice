@@ -536,3 +536,101 @@ func TestComponentLogicJS(t *testing.T) {
 		}
 	}
 }
+
+// TestLensLogicJS pins the lens page's pure decision logic (logic/lens.js):
+// the §6.3 control enablement table, the typed-delete confirm rules, and the
+// heartbeat latency formatting.
+func TestLensLogicJS(t *testing.T) {
+	vm := logicVM(t, "lens.js")
+
+	// Enablement by renderedState: resume only when paused; pause only while
+	// projecting/lagging; rebuild disabled while pending-readpath; validate
+	// always on. Confirm rides rebuild only on a protected lens.
+	cases := []struct {
+		status      string
+		isProtected bool
+		enabled     map[string]bool
+		confirm     map[string]bool
+	}{
+		{"projecting", false,
+			map[string]bool{"validate": true, "pause": true, "resume": false, "rebuild": true},
+			map[string]bool{"rebuild": false}},
+		{"lagging", false,
+			map[string]bool{"validate": true, "pause": true, "resume": false, "rebuild": true},
+			map[string]bool{}},
+		{"paused", false,
+			map[string]bool{"validate": true, "pause": false, "resume": true, "rebuild": true},
+			map[string]bool{}},
+		{"pending-readpath", true,
+			map[string]bool{"validate": true, "pause": false, "resume": false, "rebuild": false},
+			map[string]bool{"rebuild": false}},
+		{"fault", true,
+			map[string]bool{"validate": true, "pause": false, "resume": false, "rebuild": true},
+			map[string]bool{"rebuild": true}},
+		{"rebuilding", false,
+			map[string]bool{"pause": false, "resume": false, "rebuild": true},
+			map[string]bool{}},
+	}
+	for _, tc := range cases {
+		rows, ok := call(t, vm, "lensControls", tc.status, tc.isProtected).([]any)
+		if !ok || len(rows) != 4 {
+			t.Fatalf("lensControls(%q) = %v, want 4 rows", tc.status, rows)
+		}
+		byOp := map[string]map[string]any{}
+		for _, r := range rows {
+			m := r.(map[string]any)
+			byOp[m["op"].(string)] = m
+		}
+		for op, want := range tc.enabled {
+			if got := byOp[op]["enabled"]; got != want {
+				t.Errorf("%s/%s enabled = %v, want %v", tc.status, op, got, want)
+			}
+		}
+		for op, want := range tc.confirm {
+			if got := byOp[op]["confirm"]; got != want {
+				t.Errorf("%s/%s confirm = %v, want %v", tc.status, op, got, want)
+			}
+		}
+		// A disabled row always explains itself.
+		for op, m := range byOp {
+			if m["enabled"] == false && m["note"] == "" {
+				t.Errorf("%s/%s disabled without a note", tc.status, op)
+			}
+		}
+	}
+
+	// Typed-delete confirm: exact match on canonicalName, id fallback, never
+	// an empty token.
+	if got := call(t, vm, "deleteConfirmToken", "applicantRoster", "L1"); got != "applicantRoster" {
+		t.Errorf("token = %v", got)
+	}
+	if got := call(t, vm, "deleteConfirmToken", "", "L1"); got != "L1" {
+		t.Errorf("fallback token = %v", got)
+	}
+	if got := call(t, vm, "deleteConfirmReady", "applicantRoster", "applicantRoster"); got != true {
+		t.Error("exact match not ready")
+	}
+	for _, bad := range []string{"applicantroster", " applicantRoster", "applicantRoster ", ""} {
+		if got := call(t, vm, "deleteConfirmReady", bad, "applicantRoster"); got != false {
+			t.Errorf("deleteConfirmReady(%q) = %v, want false", bad, got)
+		}
+	}
+	if got := call(t, vm, "deleteConfirmReady", "", ""); got != false {
+		t.Error("empty token must never be ready")
+	}
+
+	// Latency line: ns → ms with sub-10ms keeping one decimal; empty for a
+	// missing/zero-count entry.
+	line := call(t, vm, "latencyLine", map[string]any{
+		"count": 4, "meanNs": 1.5e6, "p95Ns": 12e6, "p99Ns": 30e6,
+	})
+	if line != "count 4 · mean 1.5ms · p95 12ms · p99 30ms" {
+		t.Errorf("latencyLine = %q", line)
+	}
+	if got := call(t, vm, "latencyLine", nil); got != "" {
+		t.Errorf("nil latency = %q", got)
+	}
+	if got := call(t, vm, "latencyLine", map[string]any{"count": 0}); got != "" {
+		t.Errorf("zero-count latency = %q", got)
+	}
+}

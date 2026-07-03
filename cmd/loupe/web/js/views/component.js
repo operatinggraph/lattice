@@ -170,7 +170,7 @@ function renderControl(col, page) {
 
   if (surface === "refractor") {
     col.insertBefore(el("p", "muted small",
-      "The lens roster — every live lens. Names link to the lens meta-vertex in Graph."), rowsBox);
+      "The lens roster — every live lens. Names link to the lens page."), rowsBox);
     const refresh = () => loadRoster(rowsBox, out);
     refresh();
     return;
@@ -261,9 +261,8 @@ async function runControlOp(comp, id, op, line, out, refresh) {
 }
 
 // loadRoster fetches + renders the refractor lens roster into rowsBox — the
-// directory of every live lens with its per-row control actions (the lens
-// page absorbs these in a later fire; names link to the lens meta-vertex
-// until then).
+// directory of every live lens with quick per-row control actions; each name
+// links to the lens page (#/lens/<id>), the full four-panel surface.
 async function loadRoster(rowsBox, out) {
   rowsBox.innerHTML = "";
   rowsBox.appendChild(el("div", "muted small", "loading roster…"));
@@ -287,15 +286,15 @@ async function loadRoster(rowsBox, out) {
   }
 }
 
-// rosterRow builds one lens row: renderedState dot · linked name · target
-// chip · ◆ protected (spec-side, every state) · state text · actions. rebuild
-// is disabled while pending-readpath (the protected table's activation is
-// out-of-band; a rebuild cannot help).
+// rosterRow builds one lens row: renderedState dot · name linked to the lens
+// page · target chip · ◆ protected (spec-side, every state) · state text ·
+// actions. rebuild is disabled while pending-readpath (the protected table's
+// activation is out-of-band; a rebuild cannot help).
 function rosterRow(lens, out, refresh) {
   const row = el("div", "control-item comp-lensrow");
   row.appendChild(el("span", "sysmap-dot " + (lensStateDot[lens.status] || "dim")));
-  const label = keyLinkEl("vtx.meta." + lens.id, "cid");
-  label.textContent = lens.canonicalName || lens.id;
+  const label = el("a", "cid key-link", lens.canonicalName || lens.id);
+  label.href = "#/lens/" + lens.id;
   row.appendChild(label);
   row.appendChild(el("span", "state-tag", lens.targetType === "postgres" ? "pg" : "kv"));
   if (lens.protected || lens.grantTable) row.appendChild(el("span", "state-tag comp-protected", "◆ protected"));

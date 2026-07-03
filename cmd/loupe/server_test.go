@@ -48,6 +48,8 @@ func TestHandlers_NilConn_ReturnsBadGateway(t *testing.T) {
 		{"packages", http.MethodGet, "/api/packages", ""},
 		{"ops", http.MethodGet, "/api/ops", ""},
 		{"op submit", http.MethodPost, "/api/op", `{"operationType":"X","class":"y"}`},
+		{"lens detail", http.MethodGet, "/api/lens/L1", ""},
+		{"lens rows", http.MethodGet, "/api/lens/L1/rows", ""},
 		{"control read", http.MethodGet, "/api/control/loom", ""},
 		{"control mutate", http.MethodPost, "/api/control/loom/main/pause", ""},
 		{"object upload", http.MethodPost, "/api/objects", ""},

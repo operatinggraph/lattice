@@ -260,6 +260,11 @@ async function loadVertexDetail(key, openAspect) {
     t.href = "#/tasks";
     actions.appendChild(t);
   }
+  if (body.class === "meta.lens") {
+    const lp = el("a", "detail-action-link", "lens page →");
+    lp.href = "#/lens/" + shortId(key);
+    actions.appendChild(lp);
+  }
   detail.appendChild(actions);
 
   // Provenance chips: who/what created + last modified this entity, every id

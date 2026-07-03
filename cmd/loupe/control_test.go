@@ -4,12 +4,12 @@ import "testing"
 
 func TestMutateSubject(t *testing.T) {
 	tests := []struct {
-		name     string
-		comp     string
-		ctlName  string
-		op       string
-		want     string
-		wantErr  bool
+		name    string
+		comp    string
+		ctlName string
+		op      string
+		want    string
+		wantErr bool
 	}{
 		{name: "loom pause", comp: "loom", ctlName: "loom-widget", op: "pause", want: "lattice.ctrl.loom.loom-widget.pause"},
 		{name: "loom inspect", comp: "loom", ctlName: "abc123", op: "inspect", want: "lattice.ctrl.loom.abc123.inspect"},
@@ -17,6 +17,7 @@ func TestMutateSubject(t *testing.T) {
 		{name: "weaver revoke", comp: "weaver", ctlName: "t1", op: "revoke", want: "lattice.ctrl.weaver.t1.revoke"},
 		{name: "refractor rebuild", comp: "refractor", ctlName: "lensA", op: "rebuild", want: "lattice.ctrl.refractor.lensA.rebuild"},
 		{name: "refractor validate", comp: "refractor", ctlName: "lensA", op: "validate", want: "lattice.ctrl.refractor.lensA.validate"},
+		{name: "refractor delete (the lens page's typed-confirm surface)", comp: "refractor", ctlName: "lensA", op: "delete", want: "lattice.ctrl.refractor.lensA.delete"},
 
 		{name: "unknown component", comp: "bridge", ctlName: "x", op: "pause", wantErr: true},
 		{name: "empty name", comp: "loom", ctlName: "", op: "pause", wantErr: true},

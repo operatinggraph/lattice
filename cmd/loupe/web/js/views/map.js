@@ -315,12 +315,11 @@ function buildSysmapNode(n) {
 }
 
 // drillSysmapNode routes a node click to the owning view: a component/client
-// drills into its page; a lens jumps to its meta-vertex in the Graph explorer
-// (the lens page absorbs this in a later fire).
+// drills into its page; a lens lands on its lens page.
 function drillSysmapNode(n) {
   hideSysmapTip();
   if (n.kind === "lens") {
-    navigate("#/graph/vtx.meta." + n.id);
+    navigate("#/lens/" + n.id);
     return;
   }
   navigate("#/component/" + n.id);
@@ -346,8 +345,15 @@ function showSysmapTip(n, evt) {
   if (n.freshness) line("freshness", n.freshness);
   (n.issues || []).forEach((i) => tip.appendChild(el("div", /^\[error\]/.test(i) ? "sysmap-issue bad" : "sysmap-issue", i)));
   if (n.kind === "lens") {
-    // A lens node's id is its meta-vertex NanoID — the tip jumps to that
-    // meta-vertex in the Graph explorer.
+    // Primary jump: the lens page. The meta-vertex stays one hop away for the
+    // full envelope/provenance view (§1.2 cross-link both ways).
+    const page = el("a", "sysmap-tip-kv", "lens page");
+    page.addEventListener("click", (e) => {
+      e.stopPropagation();
+      hideSysmapTip();
+      navigate("#/lens/" + n.id);
+    });
+    tip.appendChild(page);
     const kv = el("a", "sysmap-tip-kv", "meta-vertex in Graph");
     kv.addEventListener("click", (e) => {
       e.stopPropagation();

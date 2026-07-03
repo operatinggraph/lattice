@@ -3,7 +3,7 @@
 // NATS I/O and this renders its JSON. Every view is URL-addressable via the
 // hash router (native back/forward, shareable deep links).
 
-import { $, $all, el } from "./api.js";
+import { $, $all, el, toast } from "./api.js";
 import { startRouter, replaceRoute } from "./router.js";
 import { classifyKey } from "./logic/keys.js";
 import * as shell from "./shell.js";
@@ -14,6 +14,7 @@ import * as component from "./views/component.js";
 import * as packages from "./views/packages.js";
 import * as files from "./views/files.js";
 import * as op from "./views/op.js";
+import * as lens from "./views/lens.js";
 
 // The route table: view name (the first hash segment) → panel + module. The
 // nav anchors carry the same hashes, so a tab click is just a hash change.
@@ -24,6 +25,7 @@ const routes = {
   graph:     { panel: "graph",     view: graph,     crumb: "Graph" },
   tasks:     { panel: "tasks",     view: tasks,     crumb: "Tasks" },
   component: { panel: "component", view: component, crumb: "System Map", nav: "systemmap", crumbHref: "#/map" },
+  lens:      { panel: "lens",      view: lens,      crumb: "Refractor", nav: "systemmap", crumbHref: "#/component/refractor" },
   packages:  { panel: "packages",  view: packages,  crumb: "Packages" },
   files:     { panel: "files",     view: files,     crumb: "Files" },
   op:        { panel: "op",        view: op,        crumb: "Submit Op" },
@@ -100,21 +102,6 @@ function renderCrumbs(route, entry) {
   bar.appendChild(keyBox);
 }
 
-// toast shows a small transient notice (unknown routes, copy feedback).
-let toastTimer = null;
-function toast(msg) {
-  let t = $("#toast");
-  if (!t) {
-    t = el("div", null, "");
-    t.id = "toast";
-    document.body.appendChild(t);
-  }
-  t.textContent = msg;
-  t.classList.add("visible");
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove("visible"), 3500);
-}
-
 // Boot: wire the shell (topbar pill + alert strip) and each view's static
 // DOM, then start routing.
 shell.init();
@@ -122,6 +109,7 @@ map.init();
 graph.init();
 tasks.init();
 component.init();
+lens.init();
 packages.init();
 files.init();
 op.init();

@@ -33,6 +33,22 @@ async function api(path, opts) {
   }
 }
 
+// toast shows a small transient notice (unknown routes, copy feedback,
+// cross-view status notes like "lens deleted").
+let toastTimer = null;
+function toast(msg) {
+  let t = $("#toast");
+  if (!t) {
+    t = el("div", null, "");
+    t.id = "toast";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.classList.add("visible");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("visible"), 3500);
+}
+
 function setStatus(id, msg, isError) {
   const e = document.getElementById(id);
   if (!e) return;
@@ -40,4 +56,4 @@ function setStatus(id, msg, isError) {
   e.className = "muted" + (isError ? " error-text" : "");
 }
 
-export { $, $all, el, pretty, api, setStatus };
+export { $, $all, el, pretty, api, setStatus, toast };

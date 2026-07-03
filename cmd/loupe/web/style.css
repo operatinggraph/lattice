@@ -821,3 +821,52 @@ a.tab { text-decoration: none; display: inline-block; }
 .sysmap-node.lens.pending-readpath { border: 1px solid var(--accent-dim); }
 .sysmap-node.lens.fault { border: 1px solid var(--red); border-left-width: 3px; }
 .sysmap-tag.protected { color: var(--accent); border-color: var(--accent-dim); }
+
+/* Lens page (#/lens/<id>): four stacked panels. */
+.lens-panels { display: flex; flex-direction: column; gap: 14px; max-width: 980px; }
+.lens-panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.lens-panel .comp-section { margin-top: 0; }
+.lens-id { font-family: var(--mono); font-size: 11px; }
+.lens-kvrow { display: flex; gap: 10px; margin: 4px 0; align-items: baseline; }
+.lens-k { color: var(--text-dim); font-size: 12px; min-width: 150px; flex-shrink: 0; }
+.lens-target { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.lens-lasterr { word-break: break-all; }
+.lens-ctlrow { display: flex; gap: 8px; flex-wrap: wrap; }
+.lens-delrow { display: flex; gap: 10px; align-items: center; margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.lens-rows { display: flex; flex-direction: column; gap: 4px; }
+.lens-row summary { cursor: pointer; font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.lens-row[open] { background: var(--bg); border-radius: 6px; padding: 4px 6px; }
+
+/* Destructive action + typed-confirm modal (the .file-detach red-outline family). */
+.danger-btn {
+  background: none;
+  border: 1px solid var(--red-dim, #7f1d1d);
+  color: var(--red);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.danger-btn:hover:not(:disabled) { border-color: var(--red); }
+.danger-btn:disabled { opacity: 0.4; cursor: default; }
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 40;
+}
+.modal {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  min-width: 340px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.modal h3 { margin: 0; }
+.modal input { width: 100%; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
