@@ -325,7 +325,17 @@ data-driven registry**. The model (party-review-pinned):
   the read (as today), and each path maps to **exactly one** disjoint key — so exactly one GET per
   `Authorize` call. **Two packages contributing the same path is a config error** (or requires upstream
   merge); the dispatcher never fans a single path into N reads. The denial-path `actorRoles` second
-  read stays off the hot path.
+  read stays off the hot path. **The one bounded exception is the system-actor platform path:** a
+  kernel-seeded system actor's platform read (an identity holding the primordial `operator` role via
+  `holdsRole` — the Contract #7 §7.7 root topology) unions **two** disjoint core keys — the
+  rbac-independent anchor `cap.<actor>` (privileged lanes + bootstrap ops) and the rbac-derived
+  `cap.roles.<actor>` (operator-granted package ops) — because a system actor legitimately spans both
+  planes and they cannot merge into one key without re-coupling the floor to the operator graph
+  (Contract #6 §6.1). This exception is **core-internal to the platform path** (not a package-contributed
+  fan-out — the config-error guard on *package* paths is unchanged), **deny-closed** (grant iff some
+  slice grants; both absent → deny), and **bounded to the kernel-seeded root-actor set** on
+  engine/background ops. The **ordinary-actor** platform path and every scoped path remain strictly one-key — the user hot
+  path is untouched.
 
 The precedence order (task → service → platform) and the forgery-resistance property below are
 unchanged. The dispatch pseudocode above describes the Phase-1 single-document form; the Phase-2 form

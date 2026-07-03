@@ -1,8 +1,24 @@
 # System-actor package-op grants under capability auth — design
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer (Winston) · 2026-07-02
+**Status: ✅ Ratified 2026-07-03 (Andrew) — Option C, the union read.** · Designer (Winston) · 2026-07-02
 
-## For Andrew (one-look ratification)
+**Ratification (2026-07-03, Andrew).**
+- **Option C ratified as staged**: the system-actor platform path reads `cap.<actor>` ∪
+  `cap.roles.<actor>` (concat `platformPermissions`, union `lanes`, both-absent → deny); the
+  ordinary-actor platform path and every scoped path stay single-key. Options A/B stay rejected as
+  analyzed (§7.1).
+- **Designator vocabulary re-grounded at ratification DD**: the draft (and both contract hunks)
+  described the system-actor set by the retired `data.protected` designator; the root-designation
+  reconverge (Fork A, ratified 2026-07-02) had landed — `bootstrap.SystemActorKeys` and the anchor
+  lens both designate by **`holdsRole → operator` topology** (Contract #7 §7.7). Folded throughout;
+  the correction strengthens the design (routing set ≡ anchor projection set via the shared predicate).
+- **Contract edits committed with this ratification**: Contract #2 §2.8 (bounded carve-out to
+  one-key-per-path, core-internal; the package config-error guard unchanged) + Contract #6 §6.1 (the
+  union description), both in §7.7 topology language.
+- **2 fires stand as decomposed** (§8): Fire 1 the union read + unit matrix; Fire 2 stub-off e2e over
+  the four engine paths + the dev-posture decision.
+
+## What was ratified (one-look)
 
 **What it does (two lines).** Under real capability auth (`LATTICE_AUTH_MODE=capability`), a kernel
 system actor (Loom/Weaver/Bridge/objmgr/privacy) submitting an engine op — `MarkExpired`, `CreateTask`,
@@ -21,14 +37,15 @@ forces a core edit for every new engine op. Routing system actors to `cap.roles`
 rejected: `cap.roles` grants only the `default` lane, but engine ops ride the **`system`** lane
 (`DetachObject`/`RecordShredFinalization`) and admin DDL rides **`meta`** — those privileged lanes are
 reserved to the anchor, so a roles-only read is lane-denied. **Recommendation (Option C): a union read
-for the bounded protected-actor set** — the anchor is the *rbac-independent kernel floor* (privileged
+for the bounded system-actor set** (root `holdsRole → operator` topology, Contract #7 §7.7) — the
+anchor is the *rbac-independent kernel floor* (privileged
 lanes + the 6 bootstrap ops) and `cap.roles` is the *rbac-derived extension* (package ops → operator);
 a system actor legitimately spans both, and they cannot be merged into one key without breaking the
 §6.1 decomposition. Trade-off: **one extra KV GET, only for the ~5–7 fixed kernel actors, only on the
 platform path** — the user hot path (ordinary actors → single `cap.roles` GET) is untouched.
 
-**Frozen-contract change (staged UNCOMMITTED for you).** The union relaxes the "one-key-per-path"
-invariant for exactly this one bounded path. I have edited, uncommitted in `main`:
+**Frozen-contract change (committed with the ratification).** The union relaxes the "one-key-per-path"
+invariant for exactly this one bounded path:
 - **Contract #6 §6.1** — the "primordial identity → single `cap.<actor>` anchor" sentence, to describe
   the system-actor platform path as `cap.<actor>` **∪** `cap.roles.<actor>`.
 - **Contract #2 §2.8** — the "one-key-per-path … never fans a single path into N reads" amendment, to
@@ -63,8 +80,9 @@ Grounded in the arch-review intake (2026-07-02) and the seven system identities 
 ### 2.1 The anchor projects a fixed 6-op set + the 4 privileged lanes
 
 `internal/bootstrap/lenses.go` `CapabilityLensDefinition` — the core `capability` lens — projects
-`cap.<actor>` for every `data.protected = true` identity with a **literal** grant set (not a graph
-walk, so core names no rbac/package vocabulary):
+`cap.<actor>` for every identity holding the primordial `operator` role via `holdsRole` (the Contract
+#7 §7.7 root topology — the root-designation reconverge, ratified 2026-07-02 and landed; `data.protected`
+is retired as a capability designator) with a **literal** grant set:
 
 ```
 CreateMetaVertex · UpdateMetaVertex · TombstoneMetaVertex     (meta DDL)
@@ -140,7 +158,7 @@ the floor.
 The **system-actor platform path** reads an **ordered key list** and merges the docs:
 
 ```
-system actor (protected):   [ cap.<actor>  ,  cap.roles.<actor> ]     ← union (this design)
+system actor (root topology): [ cap.<actor>  ,  cap.roles.<actor> ]   ← union (this design)
 ordinary actor:             [ cap.roles.<actor> ]                     ← single GET (unchanged)
 rbac-domain absent:         [ cap.<actor> ]                           ← floor only (unchanged)
 ```
@@ -150,7 +168,7 @@ rbac-domain absent:         [ cap.<actor> ]                           ← floor 
 - `platformPermissions` = **concatenation** of every present doc's `platformPermissions`. The existing
   op matcher then scans the merged slice — an op is granted iff *some* slice grants it.
 - `Lanes` = **union** of every present doc's `Lanes`. Because the anchor is the *only* source of the
-  privileged lanes and is always present for a protected actor, the privileged-lane authority is
+  privileged lanes and is always present for a system actor, the privileged-lane authority is
   **unchanged**; `cap.roles` only ever adds `default`.
 - **Absence handling** — a `KeyNotFound` on *one* member is treated as an **empty slice (skip)**, not a
   hard deny: a system actor with an anchor but no `cap.roles` (rbac-domain mid-install) is still validly
@@ -187,11 +205,11 @@ the **existing platform-entry key-derivation seam** rather than inventing a para
   path, not a package-contributed fan-out).
 
 This keeps the model "path selection before the read, matcher after" intact; only the platform path's
-read cardinality changes, and only for the protected set.
+read cardinality changes, and only for the system-actor set.
 
 ## 4. Contract surface
 
-Two frozen edits, **staged uncommitted in `main`** (the diff is the proposal):
+Two frozen edits, **committed with the ratification** (2026-07-03):
 
 - **Contract #6 §6.1** (`docs/contracts/06-capability-kv.md`) — the decomposition paragraph's closing
   sentence ("*Step-3 preserves its single-GET hot path … each path reads exactly one disjoint key by
@@ -263,8 +281,8 @@ step-3 assertion that a system actor's merged platform grants include a package 
   ride the **`system`** lane and admin DDL rides **`meta`**, so a roles-only read is `LaneUnauthorized`
   even though the op is present. Moving the privileged-lane grant into rbac-domain's descriptor (to fix
   that) would push a *core* security concern (privileged-lane grants) into a *package* — wrong owner, and
-  the descriptor `Lanes` is a static baseline that can't be conditioned on `protected` without a cypher
-  change. The floor's lanes must stay anchor-owned; hence the union.
+  the descriptor `Lanes` is a static baseline that can't be conditioned on the actor's root topology
+  without a cypher change. The floor's lanes must stay anchor-owned; hence the union.
 - **Could a variant of A or B beat the union?** A "merge on the producer side" variant — have a lens
   project a *combined* `cap.<system-actor>` carrying both floor lanes and package ops — was considered:
   it would restore single-GET. Rejected because it re-couples the rbac-independent floor to the
@@ -282,12 +300,15 @@ deferring a gate:
   omission (both absent) denies. A forgotten `cap.roles` projection degrades to the floor (fewer grants),
   never to more. There is no absence-grants-access path.
 - **Can an attacker force the union to over-grant?** The union is entered **only** when the actor key is
-  in `SystemActorKeys` — a graph-discovered set of `data.protected = true` kernel identities
-  (`bootstrap.SystemActorKeys`), which an external actor cannot become (creating a `protected` identity
-  is itself gated, Story 1.5.5; the Gateway strips/stamps the actor so the key is unforgeable). An
+  in `SystemActorKeys` — discovered from the graph by the **same predicate the anchor lens projects
+  for**: a live `holdsRole → operator` link (Contract #7 §7.7 topology; tombstoned grants excluded —
+  `internal/bootstrap/system_actors.go`). An external actor enters the set only by actually being
+  granted the primordial operator role — root by definition, not an escalation — and a forged
+  `protected:true` identity confers nothing (the designator is retired; the root-identity-designation
+  Fork A capadv vector pins that). The Gateway strips/stamps the actor so the key is unforgeable. An
   ordinary actor never enters the union; it reads its single `cap.roles` key exactly as today.
 - **Lane escalation?** No. The merged `Lanes` is `anchor.Lanes ∪ roles.Lanes`. `roles.Lanes` is the
-  static `["default"]`; the only privileged-lane source is the anchor, which a non-protected actor never
+  static `["default"]`; the only privileged-lane source is the anchor, which a non-system actor never
   reads. So no actor gains a privileged lane it couldn't already claim from an anchor it is entitled to.
 - **`projectionSeq` / stale-replay resurrection?** Unchanged. The guard is per-key on the *producer*
   side (§6.2); reading two guarded keys does not weaken either's monotonic guard. A revoked package grant
@@ -309,17 +330,19 @@ is **run and clean** — this design is build-ready on ratification (no deferred
   (Weaver re-fires, the GC cascade re-sweeps). Documented, not blocking. (The floor ops — Install/meta —
   are unaffected, so the install sequence itself never wedges.)
 - **`RbacRolesActive` is a startup probe** (`cmd/processor/main.go`), so a running Processor decides
-  routing once at boot. Acceptable: rbac-domain is installed once early; a long-running Processor sees a
-  stable state. Making it dynamic is out of scope (a separate hot-reload concern, not this gap).
+  routing once at boot — and `SystemActorKeys` is likewise boot-discovered: an identity granted
+  `operator` *after* boot routes as ordinary until restart (its ops still authorize via `cap.roles`;
+  only the privileged lanes wait — deny-safe). Acceptable: rbac-domain is installed once early; a
+  long-running Processor sees a stable state. Making it dynamic is out of scope (a separate hot-reload
+  concern, not this gap).
 
 ## 8. Decomposition for the Steward (2 fires, each shippable + green)
 
 - **Fire 1 — the union read (the mechanism).** Generalize the platform-entry key derivation to a key
   *list* (system → `[anchor, roles]`, ordinary → `[roles]`, rbac-absent → `[anchor]`); add the
   merge-then-match in `step3_auth_capability.go` (concat perms, union lanes, both-absent → deny). Unit
-  tests §6.1–6. Ordinary-actor path asserted unchanged (single GET). Andrew commits the §6.1 + §2.8
-  edits on ratification. **Independently valuable:** system-actor package ops authorize under capability
-  auth.
+  tests §6.1–6. Ordinary-actor path asserted unchanged (single GET). The §6.1 + §2.8 edits are
+  committed. **Independently valuable:** system-actor package ops authorize under capability auth.
 - **Fire 2 — prove it with the stub off (the readiness win).** Add ephemeral-stack e2e coverage running
   the four engine paths (Weaver `MarkExpired`, Loom `CreateTask`, objmgr `DetachObject`, privacyworker
   `RecordShredFinalization`) under `LATTICE_AUTH_MODE=capability`; assert each commits. Decide + document

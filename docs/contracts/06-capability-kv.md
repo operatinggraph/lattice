@@ -75,9 +75,21 @@ rule that *root capability is established by graph topology, not by class-based 
 re-admits `holdsRole`/`operator` vocabulary into core's cypher, narrowing Epic-12's "core names no rbac
 vocabulary" preference to a package-*dependency* break only.) `data.protected` is **not** a capability
 designator; it retains only its anti-brick meaning (the step-8 update/tombstone guard, Story 1.5.5). Step-3
-preserves its single-GET hot path because it path-dispatches **before** the read: each path reads exactly
-one disjoint key by actor class (§2.8 amendment) — primordial identity → the core `cap.<actor>` anchor,
-ordinary actor → `cap.roles.<actor>`.
+path-dispatches **before** the read: the **ordinary-actor** platform path and every scoped (task/service)
+path read **exactly one** disjoint key (§2.8 amendment) — ordinary actor → `cap.roles.<actor>` —
+preserving the single-GET **user hot path**. The **system-actor** (kernel-seeded root-topology
+identity — the same `holdsRole → operator` predicate) platform path is the one bounded exception: it reads the core `cap.<actor>` anchor **∪**
+`cap.roles.<actor>` and **unions** them (concat `platformPermissions`, union `lanes`). The two keys carry
+architecturally-distinct slices a system actor legitimately spans — the anchor is the **rbac-independent
+kernel floor** (the privileged `meta`/`urgent`/`system` lanes + the 6 bootstrap meta/install ops,
+projectable before any package exists so a fresh kernel can `InstallPackage`), while `cap.roles.<actor>`
+is the **rbac-derived extension** (the package ops the operator role carries — e.g.
+`MarkExpired`/`DetachObject`/`RecordShredFinalization` — projected by rbac-domain's `capabilityRoles`
+walk of `holdsRole→operator←grantedBy←permission`). They cannot be merged into one key without
+re-coupling the floor to the operator graph. The union is **deny-closed** (a grant appears iff some slice
+grants it; both keys absent → `AuthDenied`, §6.8) and bounded to the ~5–7 kernel-seeded root actors on
+their engine/background ops — never the user hot path. Absent rbac-domain, the derivation degrades to
+`cap.<actor>` for all actors (floor only; ordinary actors deny by absence).
 
 ### 6.2 Document Shape
 
