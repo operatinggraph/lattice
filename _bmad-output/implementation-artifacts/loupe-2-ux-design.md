@@ -686,7 +686,8 @@ tab before its replacement exists (F2 retires Core KV, F3 retires Control, F4 re
 the same fire as its replacement).
 
 **Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` · F3 ✅ `5865e0e` ·
-F4 ✅ `24768e8` · F5 ✅ `7f724c5` (2026-07-02) · F6 ✅ `0821a36` (2026-07-03; all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
+F4 ✅ `24768e8` · F5 ✅ `7f724c5` (2026-07-02) · F6 ✅ `0821a36` · F8 ✅ `73a3146`+`e1af145`
+(2026-07-03; all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
 `/api/vertices` carries type/q/offset/includeDeleted + facets/total and sorts keys so offset windows are
 stable), the linkifying renderer (`web/js/render.js`: `renderDoc` + `keyLinkEl` — reuse these for any
 rendered reply), the hood mode (`logic/hood.js` pure model + goja tests), the `#/corekv` → `#/graph` and
@@ -699,9 +700,7 @@ render as client chips on a clients shelf (kind `"client"`, no skeleton edges, c
 `/api/health` needed no plural fix — `computeHealth` was already per-key; only `computeSystemMap` had the
 LWW overwrite. Drill routes carry `nav`/`crumbHref` route-table fields (component pages highlight the Map
 tab). **Deferred, still owed:** hood neighbor chips don't dim tombstones — `/api/vertex` link rows carry
-no far-end `isDeleted` (add the field when a fire next touches that handler); the §7.2 "package page →"
-action ships with F8, which also re-points the lens page's "owned by" link (it lands on the package
-vertex in Graph until `#/package` exists — a spec'd-destination-would-404 interim); `keyTarget` gains its
+no far-end `isDeleted` (add the field when a fire next touches that handler); `keyTarget` gains its
 component-id row when feed rows need it (F6). **F4 shipped state:** `cmd/loupe/renderedstate.go` holds
 `lensRenderedState` (the §4.2 derivation — F5's lens page reuses it via `/api/lenses`) + `computeGates`;
 all three health-derived endpoints share one `healthReaders` path. Derivation decisions grounded during
@@ -747,6 +746,30 @@ correction note). Terminal stream failures manual-reconnect (streamError 15s / f
 8s — EventSource retries neither natively). Feed rebuilds are rAF-coalesced (also defers hidden-tab
 work) and preserve scroll; the systemmap derive base survives an error poll (`lastNodes`, not the
 nulled `data`). F7 hookup: subscribe via `pulse.subscribe`, filter rows by `opKey`.
+
+**F8 shipped state:** `cmd/loupe/pkg.go` — `GET /api/package?key=` (pure `computePackage` classifies the
+manifest aspect's `declaredKeys` into entities/aspects/operations/lenses/orchestration/roles/permissions/
+grants; aspects fold into their parent's count; unresolved keys stay visible; the page's own package
+vertex — which the install batch declares — is filtered; a transport read failure 502s rather than
+rendering "not found" rows, since that state feeds the uninstall confirm) +
+`POST /api/packages/{install,upgrade,uninstall}` wrapping `pkgmgr.Apply`/`Uninstall` with the compiled
+package registry (mirror of `cmd/lattice-pkg`'s, drift-pinned by a test that scans
+`packages/*/manifest.yaml`), `MaxBytesReader` + a reject-don't-truncate manifest cap, and
+`crossOriginBlocked` (Origin-vs-Host gate on the mutating endpoints — the console-wide rollout to
+`/api/op`//`api/control`//`api/objects` is a filed XS maintenance row). **Corrected premises:** §9.3's
+"DDL YAMLs + archives" and §15 Q5's archive-only answer both fell to the same grounding — packages are
+compiled-in Go Definitions, so the upload IS `manifest.yaml` (multi-select multipart picks it by name;
+archives add nothing). **Adjudicated deviations:** the mandatory dry-run Preview (Apply stays disarmed
+until one succeeds; file/force changes disarm it again) is the §9.3 confirm — it shows the exact
+create/update/tombstone delta linkified, which the post-apply reply cannot (pkgmgr populates key lists
+only on dry-run; the applied reply shows counts); the upgrade modal has no force checkbox
+(`RequireInstalled` makes same-version diff-apply unconditional); the uninstall confirm states the real
+tombstone scope (declared − unresolved + manifest + vertex) and the success reply renders the tombstoned
+keys linkified in-modal. FE: `logic/pkg.js` (manifest pick / summary lines, goja-tested),
+`views/package.js` (detail page + the shared `openApplyModal` the list's Install button reuses; modals
+are route-lifecycle-bound in BOTH views — packages.js gained `leave()`), `keyTarget` routes
+`vtx.package.*` roots to `#/package/` (lens owned-by chip re-pointed for free; package aspects stay on
+Graph; goja-pinned). Lifecycle actions disable on a tombstoned or name-less package.
 
 ---
 

@@ -32,7 +32,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 | **F5 — Lens page** | Four panels: definition (DDL) · state (+freshness slot) · control (delete behind typed confirm) · contents (nats_kv now, pg-pending state). | ★★★ | L | ✅ shipped · checkpoint in [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
 | **F6 — Live pulse** | SSE tail of core-events (deliver-new, bounded), rail feed, map edge pulse animation, topbar LED, degraded modes. | ★★ | M | ✅ shipped · checkpoint in [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
 | **F7 — Submit-Op follow-through** | Structured accepted panel (committed keys linkified), `#/op?type=` prefill, session op log, ~12s requestId-filtered follow-through riding the F6 feed. | ★★ | S | 📋 ready |
-| **F8 — Packages first-class** | `#/package/<key>` graph-resolved contents + install/upgrade/uninstall behind typed confirms (F-004 mechanics). | ★★ | M | 📋 ready |
+| **F8 — Packages first-class** | `#/package/<key>` graph-resolved contents + install/upgrade/uninstall behind typed confirms (F-004 mechanics). | ★★ | M | ✅ shipped · checkpoint in [design §14](../../implementation-artifacts/loupe-2-ux-design.md) |
 | **F9 — Postgres read seam (lens contents)** | Read-only PG connector (`LOUPE_PG_DSN`, SELECT-only role) lighting up the §6.4 panel for protected lenses + grant tables. Adjudicated in principle (design §15 Q6); role provisioning files to lattice lane if deploy/bootstrap-touching. | ★★ | M | 📋 ready |
 | **F10 — Curated topology + Gateway node** | `declaredComponents`/`skeletonEdges`/`sysmapTier` for all three (Gateway top-of-map external door · Vault side of Core-KV · Chronicler mirror of Refractor); Vault/Chronicler render honest absent/pending until live. | ★★★ | M | 📋 ready · [UX §1](../../implementation-artifacts/loupe-platform-edges-ux.md) · needs Gateway→up-full (lattice) |
 | **F11 — Gateway security console** | `#/component/gateway` page (auth metrics + JWKS key set) + the token-revoke surface (arch-review gap). | ★★ | M | 🚧 seq: F10 · blocked-on revoke-mechanism (Designer) + Gateway jwks (lattice) · [UX §2](../../implementation-artifacts/loupe-platform-edges-ux.md) |
@@ -43,6 +43,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
+| **[Loupe] Same-origin gate console-wide** | Extend F8's `crossOriginBlocked` to the pre-existing mutating endpoints (`/api/op`, `/api/control/*`, `/api/objects`) — the loopback console's cheap CSRF gate, applied uniformly. | ★★ | XS | 📋 ready |
 | **[Loupe] Static-UI serving (`go:embed web`) untested** | The embedded operator-UI mount has no coverage. | ★ | XS | ✅ done (shipped with F1) |
 | **[Loupe] Operator UI has no automated coverage** | goja logic-tier harness for the pure `logic/*.js` seam. Fire 2 (chromedp browser e2e) stays 🗄️ designed-shelved. | ★★ | S | ✅ done (shipped with F1) · [design](../../implementation-artifacts/loupe-fe-test-strategy-design.md) |
 
@@ -61,12 +62,13 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 - 2026-07-02 PO review (Andrew session) — **extended 2.0** with platform-edges fires F10–F13 (Gateway/Vault/Chronicler onto the curated map + the Time Machine); map stays curated, agent-console stays shelved, design-ahead all three.
 - 2026-07-02 — F10–F13 UX **adjudicated** (Winston): [platform-edges-ux](../../implementation-artifacts/loupe-platform-edges-ux.md); Andrew grants `ShredIdentityKey`+`RevokeActor`, map shows design-ahead, revoke = op→event→Gateway-internal-KV (refined lattice revocation row → Designer). Cross-lane asks filed to lattice (Gateway up-full+jwks, Vault→Loupe enablers).
 - 2026-07-02 — removed the phase-gates chips from the map (Andrew): the security proofs (bypass g2 / capability g3) become a new Lattice component (human-named, periodic + "check now", isolated runner) — [security-proof-watchdog](../../implementation-artifacts/security-proof-watchdog-brief.md), filed Designer on lattice.
-- **Next:** Steward builds F8, then F7 (small closer, rides the F6 feed), then F9; F10 (platform-edges) buildable once Gateway→`up-full` lands (lattice).
+- **Next:** Steward builds F7 (small closer, rides the F6 feed), then F9; F10 (platform-edges) buildable once Gateway→`up-full` lands (lattice).
 
 ## Done log — loupe (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `73a3146` · [Loupe/F8] Packages first-class — `#/package/<key>` graph-resolved contents + install/upgrade/uninstall wrapping pkgmgr (dry-run delta as the confirm, typed uninstall, same-origin gate); keyTarget owns package vertices
 - 2026-07-03 · `0821a36` · [Loupe/F6] Live pulse — SSE tail of core-events + map rail feed w/ poll-diff derived rows + edge pulse animation + topbar LED; §8.2 activeSequence premise corrected
 - 2026-07-02 · `23a994e` · [Loupe] Phase-gates panel removed from the System Map — gate chips retired ahead of the security-proof-watchdog component (lattice); server computeGates left dormant
 - 2026-07-02 · `7f724c5` · [Loupe/F5] Lens page — `#/lens/<id>` four panels + `/api/lens` detail/rows (pg-pending state); typed-confirm delete; map/roster/graph lens links re-pointed
