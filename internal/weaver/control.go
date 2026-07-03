@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/asolgan/lattice/internal/healthkv"
 )
 
 // TargetSummary is the operator-facing snapshot of one registered target
@@ -194,8 +196,8 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 	delete(e.targets, targetID)
 	e.mu.Unlock()
 
-	sink := newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, name, e.states)
-	if err := sink.delete(ctx); err != nil {
+	sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", e.cfg.Instance, name, e.states)
+	if err := sink.Delete(ctx); err != nil {
 		e.logger.Error("weaver: revoke: consumer health-state cleanup failed", "targetId", targetID, "err", err)
 	}
 

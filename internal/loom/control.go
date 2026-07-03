@@ -109,7 +109,7 @@ func (e *Engine) ListInstances(ctx context.Context) ([]InstanceSummary, error) {
 // when the cache has no entry yet. Results are sorted by name. Read-only.
 func (e *Engine) ListConsumers(_ context.Context) ([]ConsumerStatus, error) {
 	names := e.supervisor.ManagedNames()
-	states := e.states.snapshot()
+	states := e.states.Snapshot()
 	out := make([]ConsumerStatus, 0, len(names))
 	for _, name := range names {
 		state, ok := states[name]

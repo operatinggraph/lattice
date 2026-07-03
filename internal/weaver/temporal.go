@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -77,7 +78,7 @@ func (e *Engine) temporalSpec() substrate.ConsumerSpec {
 		FilterSubject: firedSubjectPrefix + ">",
 		DeliverPolicy: substrate.DeliverAll,
 		Handler:       supervisedHandler(e.handleFiredTimer),
-		Health:        newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, temporalConsumerName, e.states),
+		Health:        healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", e.cfg.Instance, temporalConsumerName, e.states),
 		Logger:        e.logger,
 	}
 }

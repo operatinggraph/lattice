@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -39,60 +39,6 @@ type healthIssue struct {
 	Severity string `json:"severity"`
 	Code     string `json:"code"`
 	Message  string `json:"message"`
-}
-
-// consumerStateCache holds the last-known pause/active state of every managed
-// consumer, fed from the per-consumer HealthSink writes the supervisor drives.
-// The supervisor persists state through the caller's sink but exposes no
-// read-back accessor, so Loom caches each transition and the heartbeater reads
-// this cache to populate metrics.consumers (no supervisor re-query, no
-// per-message KV scan).
-type consumerStateCache struct {
-	mu     sync.Mutex
-	states map[string]string
-}
-
-func newConsumerStateCache() *consumerStateCache {
-	return &consumerStateCache{states: make(map[string]string)}
-}
-
-func (c *consumerStateCache) set(name, state string) {
-	c.mu.Lock()
-	c.states[name] = state
-	c.mu.Unlock()
-}
-
-func (c *consumerStateCache) delete(name string) {
-	c.mu.Lock()
-	delete(c.states, name)
-	c.mu.Unlock()
-}
-
-func (c *consumerStateCache) snapshot() map[string]string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make(map[string]string, len(c.states))
-	for k, v := range c.states {
-		out[k] = v
-	}
-	return out
-}
-
-// consumerState renders a pause reason to the metrics.consumers state string.
-func consumerState(paused bool, reason substrate.PauseReason) string {
-	if !paused {
-		return "running"
-	}
-	switch reason {
-	case substrate.PauseManual:
-		return "pausedManual"
-	case substrate.PauseStructural:
-		return "pausedStructural"
-	case substrate.PauseInfra:
-		return "pausedInfra"
-	default:
-		return "paused"
-	}
 }
 
 // runningInstanceCounter reports how many loom-state instance.<id> entries are
@@ -138,12 +84,12 @@ type heartbeater struct {
 	instance  string
 	startedAt time.Time
 	interval  time.Duration
-	states    *consumerStateCache
+	states    *healthkv.ConsumerStateCache
 	counter   *runningInstanceCounter
 	logger    *slog.Logger
 }
 
-func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance string, every time.Duration, states *consumerStateCache, logger *slog.Logger) *heartbeater {
+func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance string, every time.Duration, states *healthkv.ConsumerStateCache, logger *slog.Logger) *heartbeater {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -183,7 +129,7 @@ func (h *heartbeater) run(ctx context.Context) {
 
 func (h *heartbeater) emit(ctx context.Context, status string) {
 	now := time.Now()
-	states := h.states.snapshot()
+	states := h.states.Snapshot()
 
 	metrics := map[string]any{
 		"consumers": states,

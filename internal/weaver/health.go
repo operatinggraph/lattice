@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -82,60 +83,6 @@ func (c *issueCache) snapshot() []healthIssue {
 	return out
 }
 
-// consumerStateCache holds the last-known pause/active state of every managed
-// consumer, fed from the per-consumer HealthSink writes the supervisor drives.
-// The supervisor persists state through the caller's sink but exposes no
-// read-back accessor, so the engine caches each transition and the heartbeater
-// reads this cache to populate metrics.consumers (no supervisor re-query, no
-// per-message KV scan).
-type consumerStateCache struct {
-	mu     sync.Mutex
-	states map[string]string
-}
-
-func newConsumerStateCache() *consumerStateCache {
-	return &consumerStateCache{states: make(map[string]string)}
-}
-
-func (c *consumerStateCache) set(name, state string) {
-	c.mu.Lock()
-	c.states[name] = state
-	c.mu.Unlock()
-}
-
-func (c *consumerStateCache) delete(name string) {
-	c.mu.Lock()
-	delete(c.states, name)
-	c.mu.Unlock()
-}
-
-func (c *consumerStateCache) snapshot() map[string]string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make(map[string]string, len(c.states))
-	for k, v := range c.states {
-		out[k] = v
-	}
-	return out
-}
-
-// consumerState renders a pause reason to the metrics.consumers state string.
-func consumerState(paused bool, reason substrate.PauseReason) string {
-	if !paused {
-		return "running"
-	}
-	switch reason {
-	case substrate.PauseManual:
-		return "pausedManual"
-	case substrate.PauseStructural:
-		return "pausedStructural"
-	case substrate.PauseInfra:
-		return "pausedInfra"
-	default:
-		return "paused"
-	}
-}
-
 // heartbeater writes the Contract #5 health.weaver.<instance> document on a
 // ticker. Metrics carry the per-consumer state map, the registered-target
 // count, the in-flight mark count (a heartbeat-cadence weaver-state scan,
@@ -148,7 +95,7 @@ type heartbeater struct {
 	instance  string
 	startedAt time.Time
 	interval  time.Duration
-	states    *consumerStateCache
+	states    *healthkv.ConsumerStateCache
 	issues    *issueCache
 	source    *targetSource
 	marks     *markStore
@@ -158,7 +105,7 @@ type heartbeater struct {
 }
 
 func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every time.Duration,
-	states *consumerStateCache, issues *issueCache, source *targetSource, marks *markStore,
+	states *healthkv.ConsumerStateCache, issues *issueCache, source *targetSource, marks *markStore,
 	sweep *sweeper, temporal *temporalStats, logger *slog.Logger) *heartbeater {
 	if logger == nil {
 		logger = slog.Default()
@@ -207,7 +154,7 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 	// aspect stuck waiting for its parent vertex's class past the bound is an
 	// orphaned spec (config error) and must surface, never sit silent.
 	h.source.flagOrphanedSpecs()
-	states := h.states.snapshot()
+	states := h.states.Snapshot()
 
 	metrics := map[string]any{
 		"consumers": states,

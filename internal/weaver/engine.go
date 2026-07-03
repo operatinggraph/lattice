@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -211,7 +212,7 @@ type Engine struct {
 	temporal         *temporalStats
 	act              *actuator
 	supervisor       *substrate.ConsumerSupervisor
-	states           *consumerStateCache
+	states           *healthkv.ConsumerStateCache
 	issues           *issueCache
 	rowSubjectPrefix string
 	disabled         *disabledTargetSet
@@ -230,7 +231,7 @@ type Engine struct {
 // (handleRow, scheduleFreshness, handleFiredTimer) read this set rather than
 // KV-Get the `<targetId>.__control` marker on every message — the same
 // "in-memory cache rebuilt from durable backing" line the registry source and
-// consumerStateCache already draw. The `<targetId>.__control` weaver-state
+// healthkv.ConsumerStateCache already draw. The `<targetId>.__control` weaver-state
 // marker is the durable truth (it is what survives a restart, seeding this
 // set at Start via seedDisabledTargets); Disable/Enable/Revoke update both the
 // marker and this set synchronously so the two never disagree mid-process.
@@ -299,7 +300,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		temporal:         &temporalStats{},
 		act:              newActuator(conn, cfg.Lane, cfg.ActorKey, cfg.Logger),
 		supervisor:       substrate.NewConsumerSupervisor(conn),
-		states:           newConsumerStateCache(),
+		states:           healthkv.NewConsumerStateCache(),
 		issues:           issues,
 		rowSubjectPrefix: "$KV." + cfg.WeaverTargetsBucket + ".",
 		disabled:         newDisabledTargetSet(),
@@ -401,7 +402,7 @@ func (e *Engine) targetSpec(targetID string) substrate.ConsumerSpec {
 		FilterSubject: e.rowSubjectPrefix + targetID + ".>",
 		DeliverPolicy: substrate.DeliverLastPerSubject,
 		Handler:       supervisedHandler(e.handleRow),
-		Health:        newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, name, e.states),
+		Health:        healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", e.cfg.Instance, name, e.states),
 		Logger:        e.logger,
 	}
 }
@@ -485,8 +486,8 @@ func (e *Engine) reconcileConsumers() {
 		}
 		e.issues.clear(issueKeyConsumer(id))
 		delete(e.targets, id)
-		sink := newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, name, e.states)
-		if err := sink.delete(e.ctx); err != nil {
+		sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", e.cfg.Instance, name, e.states)
+		if err := sink.Delete(e.ctx); err != nil {
 			e.logger.Error("weaver target consumer health-state cleanup failed", "targetId", id, "durable", name, "err", err)
 		}
 		// A target leaving the registry is a genuine uninstall — delete its

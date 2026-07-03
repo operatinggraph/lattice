@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -177,7 +178,7 @@ type Engine struct {
 	state      *stateStore
 	relay      *relay
 	supervisor *substrate.ConsumerSupervisor
-	states     *consumerStateCache
+	states     *healthkv.ConsumerStateCache
 
 	mu sync.Mutex
 	// domains is the last-applied desired per-domain consumer set, diffed on
@@ -220,7 +221,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		state:      newStateStore(conn, cfg.LoomStateBucket),
 		relay:      newRelay(conn, cfg.LoomStateBucket, cfg.Logger),
 		supervisor: substrate.NewConsumerSupervisor(conn),
-		states:     newConsumerStateCache(),
+		states:     healthkv.NewConsumerStateCache(),
 		domains:    make(map[string]specFingerprint),
 	}
 	e.source = newPatternSource(conn, cfg.CoreKVBucket, cfg.Instance, cfg.Logger)
@@ -290,7 +291,7 @@ func supervisedHandler(h func(context.Context, substrate.Message) substrate.Deci
 // healthSinkFor builds a per-consumer HealthSink that persists pause-state to
 // health-kv and feeds the engine's consumer-state cache.
 func (e *Engine) healthSinkFor(name string) substrate.HealthSink {
-	return newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, name, e.states)
+	return healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "loom", e.cfg.Instance, name, e.states)
 }
 
 // triggerSpec describes the fixed trigger consumer (loom-trigger) on
@@ -617,8 +618,8 @@ func (e *Engine) reconcileConsumers() {
 			continue
 		}
 		delete(e.domains, d)
-		sink := newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, name, e.states)
-		if err := sink.delete(e.ctx); err != nil {
+		sink := healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "loom", e.cfg.Instance, name, e.states)
+		if err := sink.Delete(e.ctx); err != nil {
 			e.logger.Error("loom domain consumer health-state cleanup failed", "domain", d, "durable", name, "err", err)
 		}
 		e.logger.Info("loom domain consumer removed", "domain", d, "durable", name)

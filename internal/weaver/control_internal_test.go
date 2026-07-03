@@ -133,7 +133,7 @@ func testNanoIDStatic(s string) string {
 }
 
 func (h *controlHarness) consumerState(name string) (string, bool) {
-	snap := h.engine.states.snapshot()
+	snap := h.engine.states.Snapshot()
 	state, ok := snap[name]
 	return state, ok
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -163,7 +164,7 @@ type Engine struct {
 	registry   *Registry
 	act        *actuator
 	supervisor *substrate.ConsumerSupervisor
-	states     *consumerStateCache
+	states     *healthkv.ConsumerStateCache
 	issues     *issueCache
 	metrics    *dispatchMetrics
 }
@@ -178,7 +179,7 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 		registry:   NewRegistry(),
 		act:        newActuator(conn, cfg.Lane, cfg.ActorKey),
 		supervisor: substrate.NewConsumerSupervisor(conn),
-		states:     newConsumerStateCache(),
+		states:     healthkv.NewConsumerStateCache(),
 		issues:     newIssueCache(),
 		metrics:    newDispatchMetrics(),
 	}
@@ -266,5 +267,5 @@ func supervisedHandler(h func(context.Context, substrate.Message) substrate.Deci
 // healthSinkFor builds a per-consumer HealthSink that persists pause-state to
 // health-kv and feeds the engine's consumer-state cache.
 func (e *Engine) healthSinkFor(name string) substrate.HealthSink {
-	return newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, name, e.states)
+	return healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "bridge", e.cfg.Instance, name, e.states)
 }

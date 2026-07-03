@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -47,7 +48,7 @@ func (e *Engine) sweepSpec() substrate.ConsumerSpec {
 		DeliverPolicy: substrate.DeliverAll,
 		MaxAckPending: 1,
 		Handler:       supervisedHandler(e.handleSweepFired),
-		Health:        newConsumerHealthSink(e.conn, e.cfg.HealthKVBucket, e.cfg.Instance, sweepConsumerName, e.states),
+		Health:        healthkv.NewConsumerSink(e.conn, e.cfg.HealthKVBucket, "weaver", e.cfg.Instance, sweepConsumerName, e.states),
 		Logger:        e.logger,
 	}
 }
