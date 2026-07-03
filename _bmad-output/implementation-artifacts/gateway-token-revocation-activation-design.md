@@ -55,10 +55,12 @@ actor → 403"):
 - **The bucket is provisioned nowhere.** `revocation.BucketName = "token-revocation"` is not in
   bootstrap's primordial set (`internal/bootstrap/primordial.go`), so on a real stack the bucket-open
   fails.
-- **A failed bucket-open silently disables the whole kill-switch** (`cmd/gateway/main.go:181-190`): the
+- **A failed bucket-open downgrades to verification-only auth** (`cmd/gateway/main.go:186-218`): the
   checker is left `nil` "best-effort," and `auth.Authenticator` skips the revocation step entirely — a
-  **default-open** failure mode (the exact fail-open reflex the design skill warns against). An operator
-  who thinks revocation is on gets no error and no protection.
+  **default-open** failure mode. The downgrade is no longer *silent* (a warning log + a
+  `GatewayRevocationDisabled` Health-KV issue ship today), but the Gateway still **serves external
+  writes with the kill-switch off** — visibility is not enforcement. §2.4 replaces the downgrade with
+  refuse-to-start.
 
 **Intent:** arm the kill-switch — a populated, auditable, fail-closed revocation set — with the smallest
 Lattice-native shape, using the mechanism Andrew steered.
@@ -151,7 +153,7 @@ the durable stream — exactly how Weaver's registry and Loom's pattern-source r
 sources. The startup sequence (§2.4) makes this a **precondition of serving**, closing the cold-start
 gap.
 
-### 2.4 Fail-closed startup (fixes the silent-downgrade bug)
+### 2.4 Fail-closed startup (fixes the default-open downgrade)
 
 Replace the "best-effort `nil` checker → disabled" path with a **required, fail-closed** bring-up
 (mirroring the Gateway's own fail-closed JWT key loading — "no IdP ⇒ no external writes"):
