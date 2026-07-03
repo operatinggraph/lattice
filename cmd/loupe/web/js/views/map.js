@@ -48,7 +48,6 @@ async function refreshSystemMap() {
     renderSysmapError(body.error);
     setStatus("sysmap-status", "error", true);
     setSysmapRollup(null);
-    renderGates(null);
     return;
   }
   sysmap.data = body;
@@ -119,38 +118,12 @@ function setSysmapRollup(data) {
   }
 }
 
-// renderGates fills the rail's gates panel: one chip per phase gate, green ✓
-// when its Health-KV marker reports passed, dim "—" when absent. Absence is
-// informational — the markers are written by the proof-gate test suites, not
-// by deploys.
-function renderGates(gates) {
-  const panel = document.getElementById("sysmap-gates");
-  if (!panel) return;
-  panel.innerHTML = "";
-  if (!gates) return; // no data (fetch error) — the empty panel hides via CSS
-  panel.appendChild(el("div", "gates-head", "phase gates"));
-  panel.appendChild(el("div", "muted small gates-sub",
-    "markers written by the proof-gate suites — absence is informational"));
-  const chips = el("div", "gates-chips");
-  (gates || []).forEach((g) => {
-    const chip = el("span", "gate-chip" + (g.present && g.passed ? " pass" : ""),
-      g.gate + " " + (g.present ? (g.passed ? "✓" : "✗") : "—"));
-    chip.title = g.present
-      ? (g.passed ? "passed" : "not passed") +
-        (g.timestamp ? " · " + g.timestamp : "") + (g.commit ? " @ " + g.commit : "")
-      : "no marker in Health KV";
-    chips.appendChild(chip);
-  });
-  panel.appendChild(chips);
-}
-
 // renderSystemMap lays out the nodes (tiers 0-3 absolutely positioned, tier-4
 // lenses in a flex-wrap shelf), then schedules an edge pass after layout.
 function renderSystemMap(data) {
   const stage = sysmapStage();
   if (!stage) return;
   setSysmapRollup(data);
-  renderGates(data.gates);
   stage.innerHTML = "";
   sysmap.nodeEls = new Map();
 

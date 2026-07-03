@@ -791,28 +791,9 @@ a.tab { text-decoration: none; display: inline-block; }
 }
 .alertstrip-more:hover { color: var(--text); background: var(--bg-input); }
 
-/* Map rail: reserved console slot + gates panel. */
+/* Map rail: reserved console slot. */
 #sysmap-rail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 #sysmap-console:empty { display: none; }
-#sysmap-gates:empty { display: none; }
-#sysmap-gates {
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-}
-.gates-head { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
-.gates-sub { margin-bottom: 8px; }
-.gates-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.gate-chip {
-  font-size: 11px;
-  font-family: ui-monospace, monospace;
-  padding: 2px 8px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-}
-.gate-chip.pass { color: var(--green); border-color: var(--green); }
 @media (max-width: 900px) { #sysmap-main { grid-template-columns: 1fr; } }
 
 /* Lens renderedState visuals: pending-readpath is the accent (informational)
