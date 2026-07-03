@@ -448,6 +448,17 @@ if A, confirm NKey).
   primitive once it exists (it becomes a no-op there — the `lattice.ctrl.>` restriction is already in
   the matrix).*
 
+### Fire 3 status (2026-07-03 steward fire)
+
+Fire 3's goal — flip the soft bypass gates to a hard-denial conformance proof — landed as a side
+effect of the separate `retire(security)` fire (`df75ee9`): `bypass_direct_kv_test.go` was promoted
+into `internal/natsperm/conf_test.go`, which spins up an embedded JetStream server from the real
+committed `deploy/nats-server.conf` and asserts every non-owner NKey's write is denied
+(`TestCoreKVWriteIsolation`, `TestCapabilityKVWriteIsolation`, `TestLensTargetWriteIsolation`, etc.) —
+a hard failure, not a soft warning, running under the normal `go test ./...` `unit` CI job. This
+satisfies "Gate 2 all BLOCKED / Gate 3 all DEFENDED / new conformance green" without a separate
+`verify-nats-permissions` script or CI job. Only Fire 4 (deferred, optional, prod-posture) remains.
+
 ### 🏗️ CHECKPOINT (Fire 2b, 2026-07-01)
 
 **Worktree:** `/Users/andrewsolgan/Documents/GitHub/lattice-wt-nats-write-restriction-f2b`
