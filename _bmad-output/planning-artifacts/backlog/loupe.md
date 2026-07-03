@@ -19,8 +19,9 @@ PO review 2026-07-01 (Andrew session); UX design **adjudicated 2026-07-02** (Win
 one FE fire at a time; each fire retires a tab only in the same fire as its replacement.
 **Extended 2026-07-02** with the platform-edges fires F10–F13 (Gateway/Vault/Chronicler onto the curated map +
 the Chronicler Time Machine) — brief:
-[loupe-platform-edges.md](../../implementation-artifacts/loupe-platform-edges.md); Sally extends the UX design
-(§14+) for them.
+[loupe-platform-edges.md](../../implementation-artifacts/loupe-platform-edges.md); UX **adjudicated 2026-07-02**
+(Winston): [loupe-platform-edges-ux.md](../../implementation-artifacts/loupe-platform-edges-ux.md) — F10
+buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
@@ -33,10 +34,10 @@ the Chronicler Time Machine) — brief:
 | **F7 — Submit-Op follow-through** | Structured accepted panel (committed keys linkified), `#/op?type=` prefill, session op log, ~12s requestId-filtered follow-through. | ★★ | S | 📋 ready (full value after F2+F6) |
 | **F8 — Packages first-class** | `#/package/<key>` graph-resolved contents + install/upgrade/uninstall behind typed confirms (F-004 mechanics). | ★★ | M | 📋 ready |
 | **F9 — Postgres read seam (lens contents)** | Read-only PG connector (`LOUPE_PG_DSN`, SELECT-only role) lighting up the §6.4 panel for protected lenses + grant tables. Adjudicated in principle (design §15 Q6); role provisioning files to lattice lane if deploy/bootstrap-touching. | ★★ | M | 📋 ready |
-| **F10 — Curated topology + Gateway node** | `declaredComponents`/`skeletonEdges`/`sysmapTier` for all three (Gateway top-of-map external door · Vault side of Core-KV · Chronicler mirror of Refractor); Vault/Chronicler render honest absent/pending until live. | ★★★ | M | 📋 ready · needs Gateway→`up-full` (lattice) |
-| **F11 — Gateway security console** | `#/component/gateway` page (auth metrics + JWKS key set) + the token-revoke surface (arch-review gap). | ★★ | M | 🚧 seq: F10 |
-| **F12 — Vault surface + crypto-shred proof** | Node + page + Reveal (decrypt RPC on `sensitive` aspects) + `ShredIdentityKey` before/after proof. | ★★★ | L | 🚧 blocked-on: D1 + Vault build (lattice) |
-| **F13 — Chronicler Time Machine** | Flow-history browser + map scrubber + ledger browser (platform-edges brief §4 L1–L3); overrides the Chronicler design's "rides F6" display note (Loupe scope). | ★★★ | L | 🚧 blocked-on: Chronicler build (lattice) |
+| **F10 — Curated topology + Gateway node** | `declaredComponents`/`skeletonEdges`/`sysmapTier` for all three (Gateway top-of-map external door · Vault side of Core-KV · Chronicler mirror of Refractor); Vault/Chronicler render honest absent/pending until live. | ★★★ | M | 📋 ready · [UX §1](../../implementation-artifacts/loupe-platform-edges-ux.md) · needs Gateway→up-full (lattice) |
+| **F11 — Gateway security console** | `#/component/gateway` page (auth metrics + JWKS key set) + the token-revoke surface (arch-review gap). | ★★ | M | 🚧 seq: F10 · blocked-on revoke-mechanism (Designer) + Gateway jwks (lattice) · [UX §2](../../implementation-artifacts/loupe-platform-edges-ux.md) |
+| **F12 — Vault surface + crypto-shred proof** | Node + page + Reveal (decrypt RPC on `sensitive` aspects) + `ShredIdentityKey` before/after proof. | ★★★ | L | 🚧 blocked-on: Vault→Loupe enablers (lattice) · [UX §3](../../implementation-artifacts/loupe-platform-edges-ux.md) |
+| **F13 — Chronicler Time Machine** | Flow-history browser + map scrubber + ledger browser (platform-edges brief §4 L1–L3); overrides the Chronicler design's "rides F6" display note (Loupe scope). | ★★★ | L | 🚧 blocked-on: Chronicler build (lattice) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
 
 ## Component maintenance
 
@@ -58,7 +59,8 @@ the Chronicler Time Machine) — brief:
 - 2026-07-01 PO review (Andrew session) — filed the program; found+fixed the control-plane lockout.
 - 2026-07-02 UX design adjudicated (2 premises corrected against live stack — see design §15).
 - 2026-07-02 PO review (Andrew session) — **extended 2.0** with platform-edges fires F10–F13 (Gateway/Vault/Chronicler onto the curated map + the Time Machine); map stays curated, agent-console stays shelved, design-ahead all three.
-- **Next:** Steward builds F6 ∥ F8 (then F7, F9); Sally extends the UX design (§14+) for F10–F13 (start F10/F11, buildable-first).
+- 2026-07-02 — F10–F13 UX **adjudicated** (Winston): [platform-edges-ux](../../implementation-artifacts/loupe-platform-edges-ux.md); Andrew grants `ShredIdentityKey`+`RevokeActor`, map shows design-ahead, revoke = op→event→Gateway-internal-KV (refined lattice revocation row → Designer). Cross-lane asks filed to lattice (Gateway up-full+jwks, Vault→Loupe enablers).
+- **Next:** Steward builds F6 ∥ F8 (then F7, F9); F10 (platform-edges) buildable once Gateway→`up-full` lands (lattice).
 
 ## Done log — loupe (newest first)
 

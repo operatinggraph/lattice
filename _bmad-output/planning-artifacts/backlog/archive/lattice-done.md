@@ -2,6 +2,10 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-02 · `e8ade0c` · [Core/pkgmgr] privacy-base `manifest.yaml` + missing `lattice-pkg` registry entry — `make up-full`/`up-loftspace`/`up-clinic` verified green end to end
+- 2026-07-02 · `604342b` · [Core/privacy] Vault Fire 3 — ShredIdentityKey op + keyShredded event + `internal/privacyworker` Vault destruction; durable-placeholder restart fix (3-layer review)
+- 2026-07-02 · `83b7976` · [Core/privacy] Vault Fire 2 — Processor encrypt-on-write/decrypt-on-read for sensitive aspects; `privacy-base` piiKey DDL
+- 2026-07-02 · `e04498e` · [Weaver/substrate] `@every` recurring schedules CLOSED — Fires 1–3 (§10.4+§4.3 ratified `d778b13`; weaver.md close-out; #49 pruner retired-superseded per #4 §4.3)
 - 2026-07-02 · `51ba38e` · [Gateway] Fire 2 remainder — live JWKS polling (stdlib RFC7517/7518 parser, hot-swap `Verifier.SetKeys`, https-unless-dev gate, fail-safe last-good-on-poll-failure)
 - 2026-07-02 · `00b098d` · [Gateway] Fire 1 — external write-path translator (`POST /v1/operations` JWT strip-and-stamp, `internal/gateway` + `cmd/gateway`, fail-closed dev key gate, `gateway` NATS user, Gate-3 vector #14)
 - 2026-07-02 · `f8e017d` · [CI] Whetstone — `internal/bridge` require.Never proof windows (2-4s) trimmed to their actual 5-6x margin over the 300ms redelivery floor (package 44.5s→27.6s local; unit job 129s→119s in CI)
