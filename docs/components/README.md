@@ -53,9 +53,9 @@ choices live HERE. Per-package capability definitions live under
 
 **Edge & security**
 
-- [Gateway](./gateway.md) — the external write-path trust boundary: verifies an external actor's
-  IdP-signed JWT and stamps the verified identity onto the operation envelope, closing actor
-  impersonation at the edge (read-path enforcement follows D1's read-path authorization).
+- [Gateway](./gateway.md) — the edge trust boundary: verifies an external actor's IdP-signed JWT,
+  stamps the verified identity onto every operation, and bounds each actor's read view to the
+  sub-graph its ReBAC links permit — closing actor impersonation at the edge.
 
 **Experience layer**
 

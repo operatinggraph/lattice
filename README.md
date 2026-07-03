@@ -207,7 +207,7 @@ Lattice is a small set of cooperating components, each with a living reference p
 | [Weaver](docs/components/weaver.md) | The convergence engine — drives a declared target state toward convergence (the "visionary") |
 | [Bridge](docs/components/bridge.md) | The external-I/O egress — the one component that makes outbound calls to external systems, idempotently, via a durable `events.external.>` consumer and a pluggable adapter registry |
 | [Object-store-manager](docs/components/object-store-manager.md) | The byte-janitor of the off-graph blob plane — reclaims object-store bytes when their vertex is tombstoned or crash-orphaned, and cascades owner-tombstones to detach dangling object links |
-| [Gateway](docs/components/gateway.md) | The external write-path translator — verifies an external actor's IdP-signed JWT and stamps the verified identity onto the operation envelope, closing actor impersonation at the edge (read-path enforcement follows D1) |
+| [Gateway](docs/components/gateway.md) | The edge trust boundary — verifies an external actor's IdP-signed JWT, stamps the verified identity onto every operation, and bounds each actor's read view to the sub-graph its ReBAC links permit, closing actor impersonation at the edge |
 | [Loupe](docs/components/loupe.md) | The internal operator console — browse Core KV, drive the engines' control planes, submit DDL-driven ops, install packages, upload blobs; a trusted single-identity, loopback-bound inspector (the one app allowed to read Core KV directly) |
 
 The exact wire shapes, key patterns, and behavioral rules are pinned in the data contracts under
@@ -215,8 +215,7 @@ The exact wire shapes, key patterns, and behavioral rules are pinned in the data
 
 ### The wider platform
 
-The same primitives extend outward into the rest of the Lattice vision — the pieces that don't yet
-have a component page of their own:
+The same primitives extend outward into the rest of the Lattice vision:
 
 - **Vault & crypto-shredding** — sensitive aspects are encrypted with per-identity keys, so the
   "right to be forgotten" is *physical*: destroy the key and that identity's data — even in the
