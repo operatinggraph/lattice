@@ -498,10 +498,14 @@ Two row sources, visually distinguished:
 
 1. **Events (push, real-time):** `12:04:31 · clinic.appointmentCreated · vtx.appointment.8fQ… · op V1S…`
    — eventType mono, targetKey + requestId (`→ vtx.op.<rid>`) as links.
-2. **Derived rows (from the existing 10s poll, marked `~`):** lens re-projections
-   (`~ clinicAppointments re-projected (seq 41→43)` — diffing reporter `activeSequence` between polls) and
-   weaver/loom consumer state changes. Marked with the `~` prefix + dim styling because they are
-   poll-derived (≤10s lag), not stream truth — honest about the mechanism.
+2. **Derived rows (from the existing 10s poll, marked `~`):** state transitions on lens / component /
+   client nodes (`~ weaver green → stale`, `~ clinicAppointments projecting → rebuilding`) and lens rule
+   updates (`~ clinicAppointments rule updated (seq 41 → 43)`). Marked with the `~` prefix + dim styling
+   because they are poll-derived (≤10s lag), not stream truth — honest about the mechanism. (The original
+   "re-projected (seq 41→43)" example was spec'd on a false premise: the reporter's `activeSequence` is
+   the NATS sequence of the active RULE VERSION — `SetRuleSequence` fires on rule activation/hot-reload,
+   never on row projection — and the health entry carries no per-projection counter, so transitions +
+   rule updates are the strongest honest poll-derived signals. Grounded during the F6 build.)
 
 Ring buffer capped at 200 rows (`logic/feed.js`, pure). Header: `live` LED · rows/min counter · pause
 button (stops appending, stream stays open) · clear.
@@ -682,7 +686,7 @@ tab before its replacement exists (F2 retires Core KV, F3 retires Control, F4 re
 the same fire as its replacement).
 
 **Build checkpoint (for the next fire):** F1 ✅ `e6a8a46` · F2 ✅ `976a18f` · F3 ✅ `5865e0e` ·
-F4 ✅ `24768e8` · F5 ✅ `7f724c5` (2026-07-02, all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
+F4 ✅ `24768e8` · F5 ✅ `7f724c5` (2026-07-02) · F6 ✅ `0821a36` (2026-07-03; all 3-layer-reviewed). Live now: the Graph explorer (`#/graph` faceted/paged list —
 `/api/vertices` carries type/q/offset/includeDeleted + facets/total and sorts keys so offset windows are
 stable), the linkifying renderer (`web/js/render.js`: `renderDoc` + `keyLinkEl` — reuse these for any
 rendered reply), the hood mode (`logic/hood.js` pure model + goja tests), the `#/corekv` → `#/graph` and
@@ -726,6 +730,23 @@ FE: `logic/lens.js` (enablement table + delete-confirm + latency format, goja-te
 route-lifecycle-bound with ESC + focus trap + in-flight guard; page DOM clears before fetch). `toast`
 moved to `api.js` as the shared cross-view notice. Enablement rules now live in two places — rosterRow
 (component.js) and `logic/lens.js` — consolidate when a fire next touches the roster.
+
+**F6 shipped state:** `cmd/loupe/events.go` — `GET /api/events/stream` (per-client ephemeral ordered
+consumer, deliver-new, 4-client CAS bound, per-write rolling deadline at 3× the 15s heartbeat,
+`ConsumeErrHandler` → terminal `streamError` so a dead consumer never renders as a deaf green tail);
+`/api/systemmap` lens nodes carry `activeSequence`. FE: `logic/feed.js` (pure ring/shape/derive/rate,
+goja-tested), `pulse.js` (ONE console-wide EventSource opened at boot — F7's follow-through subscribes
+to this same module), the map-rail `#pulse-feed` (after the reserved `#sysmap-console` slot),
+`.sysmap-edge.pulse` CSS flow animation. **Adjudicated deviations:** liveness is hello-event-gated
+(never the bare 200 handshake — a refused client must not blink green); the server's SSE error event is
+named `streamError` (an SSE event literally named `error` is indistinguishable from EventSource's
+transport-error event); the topbar LED adds a red state (server-reported terminal error) to §8.4's
+green/yellow/dim and its `--text-dim` off-map-idle state is unreachable (boot-opened stream — strictly
+more visibility); §8.2 derived rows are transitions + rule updates, not "re-projected" (see §8.2's
+correction note). Terminal stream failures manual-reconnect (streamError 15s / fatal non-SSE response
+8s — EventSource retries neither natively). Feed rebuilds are rAF-coalesced (also defers hidden-tab
+work) and preserve scroll; the systemmap derive base survives an error poll (`lastNodes`, not the
+nulled `data`). F7 hookup: subscribe via `pulse.subscribe`, filter rows by `opKey`.
 
 ---
 
