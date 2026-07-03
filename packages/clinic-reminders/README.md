@@ -1,37 +1,41 @@
 # clinic-reminders
 
-The clinic vertical's **first orchestration** — a Capability Package that attaches one-shot `@at`
-reminders to `clinic-domain`'s appointments. Two convergences: the **appointment reminder** ("remind
-~24h before") and the **follow-up reminder** ("a documented visit's requested follow-up is due"), each a
-marker aspect + op + convergence lens + §10.8 playbook — the build-ready slices of the clinic's
-scheduling story (recurring availability genuinely needs `@every` and stays a separate,
-§10.4-amendment-gated item).
+The clinic vertical's **first orchestration** — a Capability Package that attaches `@at`-driven
+forcing functions to `clinic-domain`'s appointments/patients. Three convergences: the **appointment
+reminder** ("remind ~24h before"), the **follow-up reminder** ("a documented visit's requested follow-up
+is due"), and the **recurring visit series** ("a patient on a standing cadence has a visit coming due") —
+each a marker/rolling aspect + op + convergence lens + §10.8 playbook.
 
 It is the convergence **sibling** of the projection-only `clinic-domain`: clinic-domain owns the
 `appointment` vertex + its `.schedule`/`.status`/`.encounter` aspects (precomputing
 `remindAt = startsAt − 24h`, and normalizing a documented visit's `followUpDate` to a full RFC3339
 instant); clinic-reminders *attaches the reminder machinery* onto that vertex (the `loftspace-domain`
 idiom of one package adding an aspect onto another package's vertex type — the step-6 write gate keys on
-the **aspect** class, not the host vertex's owner). The follow-up half lives in `followups.go`.
+the **aspect** class, not the host vertex's owner). The follow-up half lives in `followups.go`. The
+recurring visit series is its own self-contained vertex type (`visitseries.go`, the clinic-domain
+patient/provider idiom) rather than an attached aspect, since a series outlives any single appointment.
 
 Install: `lattice-pkg install packages/clinic-reminders` (after `clinic-domain` + `orchestration-base`;
 or `make install-clinic` onto a running stack).
-Design: [`_bmad-output/implementation-artifacts/clinic-reminders-design.md`](../../_bmad-output/implementation-artifacts/clinic-reminders-design.md).
+Design: [`_bmad-output/implementation-artifacts/clinic-reminders-design.md`](../../_bmad-output/implementation-artifacts/clinic-reminders-design.md)
+(reminders) and [`clinic-recurring-visit-series-design.md`](../../_bmad-output/implementation-artifacts/clinic-recurring-visit-series-design.md)
+(visit series).
 
 ## Inventory
 
 | Kind | Canonical names |
 |---|---|
-| **DDLs** (4) | `appointmentReminderOp` · `appointmentReminder` (the `.reminder` write gate) · `followUpReminderOp` · `followUpReminder` (the `.followUpReminder` write gate) |
-| **Operations** (2) | `RecordAppointmentReminder` · `RecordFollowUpReminder` |
-| **Convergence lenses** (2) | `appointmentReminders` · `followUpReminders` → `weaver-targets` (`nats-kv`, `full` engine) |
-| **Weaver targets** (2) | `appointmentReminders` — `missing_reminder` → `directOp(RecordAppointmentReminder)` · `followUpReminders` — `missing_followup_reminder` → `directOp(RecordFollowUpReminder)` |
+| **DDLs** (8) | `appointmentReminderOp` · `appointmentReminder` (the `.reminder` write gate) · `followUpReminderOp` · `followUpReminder` (the `.followUpReminder` write gate) · `visitseries` (vertex type, owns all four visit-series ops) · `visitSeriesDefinition` / `visitSeriesProgress` / `visitSeriesPaused` (the `.series`/`.progress`/`.paused` write gates) |
+| **Operations** (6) | `RecordAppointmentReminder` · `RecordFollowUpReminder` · `StartVisitSeries` · `PauseVisitSeries` · `ResumeVisitSeries` · `AdvanceVisitSeries` |
+| **Convergence lenses** (3) | `appointmentReminders` · `followUpReminders` · `visitSeriesDue` → `weaver-targets` (`nats-kv`, `full` engine) |
+| **Read lens** (1) | `visitSeriesRead` → Postgres (`protected`, D1.5 RLS — the patient's own series + the clinic-wide staff worklist) |
+| **Weaver targets** (3) | `appointmentReminders` — `missing_reminder` → `directOp(RecordAppointmentReminder)` · `followUpReminders` — `missing_followup_reminder` → `directOp(RecordFollowUpReminder)` · `visitSeriesDue` — `missing_series_advance` → `directOp(AdvanceVisitSeries)` |
 
-`Depends`: `clinic-domain` (the appointment + `.schedule.remindAt` / `.encounter.followUpDate`) +
-`orchestration-base` (`MarkExpired` / the `freshnessExpiry` marker the `@at` firing writes). Both ops are
-granted to the `operator` role at `scope: any` (`permissions.go`) — no new capability surface; Weaver's
-service actor dispatches the `directOp` under the standing operator grant (the `objects-base` GC
-`TombstoneObject` idiom).
+`Depends`: `clinic-domain` (the appointment + `.schedule.remindAt` / `.encounter.followUpDate`; the
+patient/provider vertex types the visit series links to) + `orchestration-base` (`MarkExpired` / the
+`freshnessExpiry` marker the `@at` firing writes). All ops are granted to the `operator` role at
+`scope: any` (`permissions.go`) — no new capability surface; Weaver's service actor dispatches the
+`directOp` under the standing operator grant (the `objects-base` GC `TombstoneObject` idiom).
 
 ## Follow-up reminders (`followups.go`)
 
@@ -117,6 +121,41 @@ notification was sent. The real notification channel (email / SMS) is the deferr
 and the authoritative "do not actually notify a cancelled/changed appointment" check belongs at that
 delivery point (which must read live state at send time anyway), not here.
 
+## Recurring visit series (`visitseries.go`)
+
+A **rolling** generalization of the one-shot reminders above: a patient on a standing cadence
+(chronic-care monthly check-ins, weekly PT) gets a self-rearming "next visit due" gap instead of a
+per-entity `@every` schedule. Same convergence machinery (aspect + op + `freshUntil`-armed `@at` lens +
+`directOp` playbook), except each convergence re-arms its own next deadline instead of firing once.
+
+`StartVisitSeries{patientKey, providerKey, intervalDays, startAt, activeUntil?}` validates both
+endpoints are alive, mints its own `vtx.visitseries.<id>` vertex (not an aspect on the appointment —
+a series outlives any single appointment) with `.series` (write-once cadence) + `.progress` (rolling
+state, seeded `nextDueAt = startAt`) + `forPatient`/`withProvider` links. `PauseVisitSeries` /
+`ResumeVisitSeries` toggle `.paused` (absent = not paused); a paused series projects no due gap and no
+armed timer, and resuming picks up exactly where `.progress.nextDueAt` left off (no missed-occurrence
+catch-up burst). `AdvanceVisitSeries` is the `directOp` the `visitSeriesDue` playbook dispatches when
+`missing_series_advance` opens: it rolls `.progress` forward from `dueFor` (the deadline just serviced,
+**not** `$now` — keeps the cadence on a fixed grid immune to dispatch latency, the `followUpReminders`
+idiom), `nextDueAt = dueFor + intervalDays`, `occurrenceCount + 1`.
+
+Unlike the one-shot reminders, this convergence never permanently closes: each `AdvanceVisitSeries`
+rewrites `nextDueAt` to a new future deadline, so the row re-projects pending (re-armed) rather than
+done — the series keeps re-arming its own next wake-up until paused or past `activeUntil`. `active =
+NOT paused AND (no activeUntil OR nextDueAt <= activeUntil)`; `freshUntil` arms only while `active` and
+`nextDueAt` is future.
+
+The D1.5-protected `visitSeriesRead` Postgres lens (patient-anchored, `REQUIRED` `forPatient` walk —
+fail-closed) backs both the patient's own "my series" view and the clinic-wide staff worklist (staff
+reads the same table under the reserved `WildcardAnchor` grant, the `clinicAppointmentsRead` /
+`handleStaffAppointments` precedent) — it carries only the display columns (`active`, `next_due_at`,
+`interval_days`, `occurrence_count`), never the Weaver-dispatch columns (`freshUntil`,
+`missing_series_advance`, `violating`).
+
+Convergence pinned by `visitseries_cypher_test.go`; the write path by
+`TestStartVisitSeries_*`/`TestAdvanceVisitSeries_*` (`integration_test.go`); the read model by
+`visitseries_read_test.go`.
+
 ## Where the reminder is surfaced
 
 `clinic-reminders` writes `.reminder.sentAt`; `clinic-domain`'s `clinicAppointments` lens projects it as
@@ -136,9 +175,9 @@ and the op by `TestRecordAppointmentReminder_{WritesMarker, RejectsTombstonedApp
 ## Out of scope
 
 - **The notification channel** (email / SMS delivery) — deferred real-adapter work. This package records
-  that a reminder became due; it does not send anything.
-- **Recurring `@every` schedules** — recurring provider availability / follow-ups genuinely need
-  `@every`, which has no consumer today (§10.4 ships `@at` one-shot). That remains a deferred platform
-  item the clinic vertical forces, not one this package implements.
-</content>
-</invoke>
+  that a reminder became due (or a series occurrence came due); it does not send anything.
+- **Recurring `@every` schedules** — the visit series above meets clinic's recurring-cadence need with a
+  **rolling `@at`** (state lives in the read model; each convergence re-arms the next deadline itself),
+  so no engine-level `@every` primitive was needed (see the visit-series design doc §3 for why). A
+  genuine per-entity `@every` schedule remains a deferred platform item with no consumer today.
+
