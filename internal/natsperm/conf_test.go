@@ -262,6 +262,23 @@ func TestObjectStoreWriteIsolation(t *testing.T) {
 	}
 }
 
+// TestBridgeNoPhantomKVGrants: bridge's grant used to carry $KV.bridge-external.>
+// and $KV.bridge-schedule.> — those names are its JetStream *consumer* durables
+// (internal/bridge/engine.go's externalDurable, internal/bridge/schedule.go's
+// scheduleConsumerName), not KV buckets; bridge's only real KV write is
+// health-kv (health.go's KVPut). Pins the tightened matrix (natsperm-matrix-
+// hygiene, arch #19) — a phantom grant is a silent widen, not a working path.
+func TestBridgeNoPhantomKVGrants(t *testing.T) {
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provision(t, boot, "bridge-external")
+	provision(t, boot, "bridge-schedule")
+
+	assertDeniedPuts(t, url, "bridge-external", []string{"bridge"})
+	assertDeniedPuts(t, url, "bridge-schedule", []string{"bridge"})
+}
+
 // TestControlPlaneOperatorAccess: the operator surfaces (loupe, the lattice CLI)
 // may request the component control planes (lattice.ctrl.<comp>.<name>.<op>);
 // the responding engine replies through allow_responses. Positive pin: a missing

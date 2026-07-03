@@ -141,8 +141,8 @@ var matrix = []component{
 	},
 	{
 		name:           "bridge",
-		desc:           "external-I/O egress; replies via ops; owns its claim/schedule buckets",
-		pubAllow:       []string{bootstrap.OpsWildcardSubject, "$KV.bridge-external.>", "$KV.bridge-schedule.>", bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
+		desc:           "external-I/O egress; replies via ops; consumes its external-call/schedule durables (consumer names, not KV buckets — bridge's only KV write is health-kv)",
+		pubAllow:       []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 		allowResponses: true, // may respond to requests
 	},
