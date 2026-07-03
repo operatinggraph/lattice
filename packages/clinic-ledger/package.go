@@ -35,12 +35,10 @@
 //
 // Mirrors packages/loftspace-ledger, with the account held for a patient
 // instead of a lease — a patient may have many appointments/encounters, and
-// billing tracks a single running balance across all of them.
-// loftspace-ledger predates the independent-NanoID + guard-aspect design
-// here and still mints its account under the lease's own bare NanoID; that
-// is a defect there too (see
-// implementation-artifacts/adjacency-shared-nanoid-collision-design.md), not
-// a pattern to mirror going forward.
+// billing tracks a single running balance across all of them. Both packages
+// mint the account under its own independently-generated NanoID and enforce
+// one-account-per-holder via a guard aspect on the holder vertex (see
+// implementation-artifacts/adjacency-shared-nanoid-collision-design.md).
 //
 // Every canonicalName is vertical-prefixed (clinicaccount/clinictransaction/
 // clinicLedgerHistory, not loftspace-ledger's bare account/transaction/
