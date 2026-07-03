@@ -167,7 +167,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Refractor] Protected/plain Postgres adapter is unguarded last-writer-wins** | The plain/protected `PostgresAdapter` ignores `projectionSeq` (unconditional LWW) — a stale replay can transiently reorder a security-relevant row. Posture accepted 2026-07-02 (the D1 M3 CDC-lag analog); this row is the follow-up hardening: extend the seq-guard to protected targets. | ★ | S–M | 📋 |
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — first consumer (LoftSpace FTS unified search) filed on verticals; the OpenSearch adapter builds only on search-engine-scale demand |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
-| **[Refractor/Loupe] Silent lens-projection stall is undetectable** | A stalled projection is invisible: Clinic-PO saw committed ops stop reaching every clinic read model while Refractor self-reported `green`/`active`. Emit per-lens projection lag → Health KV; populate Loupe's `freshness` column (today always `-`). | ★★ | M | ✅ ratified (2026-07-02, StallDetect off) · [design](../../implementation-artifacts/lens-projection-liveness-design.md) · one fire (emit+backstop); freshness UI rides Loupe F5 |
 
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
@@ -196,6 +195,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `cb9d38d`+`727ddd4` · [Refractor] Lens projection liveness — Fires 1+2 shipped as one (lastProjectedAt/projectionLag + heartbeat lensLiveness backstop); freshness UI rides Loupe F5
 - 2026-07-03 · `aa92c89` · [Weaver] Bespoke contracts Fire L1 — weaver.md sanctioned-pattern note; design realized except the on-demand rounding UDF
 - 2026-07-03 · `fa49b78` · [CI] internal/loom's 66 tests marked `t.Parallel()` (already random-port + jsstore.Dir(t) isolated) — package 40.9s→11.7s in CI, unit job 2m24s→2m14s
 - 2026-07-03 · `e2a2879` · [healthkv] loftspace-app/clinic-app dependency-probing Health-KV heartbeat — Fires 1+2 shipped as one (`internal/healthkv.Reporter`); optional objmgr-adoption tail remains
