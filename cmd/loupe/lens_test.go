@@ -266,9 +266,9 @@ func TestSelectLensRows(t *testing.T) {
 }
 
 // TestLensRowsTarget pins the CONTENTS panel's target decision: nats_kv is
-// browsable, postgres is the designed pg-pending wait state, and a blank or
-// unknown targetType is an ERROR — a malformed spec must not masquerade as
-// the F9 wait state.
+// bucket-browsable, postgres routes to the read seam, and a blank or unknown
+// targetType is an ERROR — a malformed spec must not masquerade as either
+// browsable state.
 func TestLensRowsTarget(t *testing.T) {
 	kv := lensFullSpec{Found: true, TargetType: "nats_kv", Target: map[string]any{"bucket": "b1"}}
 	if kind, bucket, _ := lensRowsTarget(kv); kind != rowsTargetKV || bucket != "b1" {
@@ -280,7 +280,7 @@ func TestLensRowsTarget(t *testing.T) {
 	}
 	pg := lensFullSpec{Found: true, TargetType: "postgres"}
 	if kind, _, _ := lensRowsTarget(pg); kind != rowsTargetPG {
-		t.Errorf("postgres = %q, want pg-pending", kind)
+		t.Errorf("postgres = %q, want the pg seam", kind)
 	}
 	for _, tt := range []string{"", "mystery"} {
 		spec := lensFullSpec{Found: true, TargetType: tt}

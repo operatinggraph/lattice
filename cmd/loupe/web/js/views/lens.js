@@ -2,8 +2,9 @@
 // DEFINITION (the DDL resolved from the graph), STATE (reporter truth + the
 // Refractor heartbeat overlay + the reserved freshness slot), CONTROL
 // (allow-list-shaped inline actions + delete behind a typed confirm), and
-// CONTENTS (the read model itself for a nats_kv target; the designed
-// pg-pending state for a postgres target until the F9 read seam ships).
+// CONTENTS (the read model itself — a nats_kv target's bucket, or a postgres
+// target's table via the server's read-only LOUPE_PG_DSN seam, with the
+// designed pg-pending state when no DSN is configured).
 // Data: GET /api/lens/<id> + /api/lens/<id>/rows; mutations go through the
 // allow-listed /api/control/refractor/<id>/<op> proxy.
 
@@ -370,7 +371,8 @@ function openDeleteModal(lens) {
 
 // contentsPanel renders §6.4: the read model itself. The panel, toolbar, and
 // row rendering are identical for both target types — a postgres target
-// renders the designed pg-pending empty state until the F9 seam lights it up.
+// browses through the read-only LOUPE_PG_DSN seam, or renders the designed
+// pg-pending empty state when the server has no DSN configured.
 function contentsPanel(lens) {
   const box = panel("Contents");
   const toolbar = el("div", "panel-controls");
@@ -398,14 +400,15 @@ function contentsPanel(lens) {
     status.textContent = "";
     if (body.error) { rowsBox.appendChild(el("div", "error-text", body.error)); return; }
     if (body.pgPending) {
-      rowsBox.appendChild(el("div", "muted", "contents unavailable — postgres target; read seam pending"));
+      rowsBox.appendChild(el("div", "muted", "contents unavailable — postgres target; read seam not configured"));
       rowsBox.appendChild(el("div", "muted small",
-        "this projection lives in a Postgres table Loupe cannot read yet; the read-only seam is a flagged later fire (F9)"));
+        "this projection lives in a Postgres table; set LOUPE_PG_DSN (a read-only role) to browse it here"));
       return;
     }
     const rows = body.rows || [];
     status.textContent = rows.length + " of " + body.total + " row(s)" +
-      (body.bucket ? " · bucket " + body.bucket : "") + (body.truncated ? " · truncated" : "");
+      (body.bucket ? " · bucket " + body.bucket : "") +
+      (body.table ? " · table " + body.table : "") + (body.truncated ? " · truncated" : "");
     if (!rows.length) { rowsBox.appendChild(el("div", "muted", "(no rows)")); return; }
     rows.forEach((r) => {
       const row = el("details", "lens-row");

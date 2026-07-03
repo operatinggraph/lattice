@@ -8,9 +8,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/asolgan/lattice/cmd/lattice/output"
 	"github.com/asolgan/lattice/internal/bootstrap"
@@ -41,6 +44,16 @@ type server struct {
 	// eventClients counts live /api/events/stream tails (bounded at
 	// maxEventStreamClients).
 	eventClients atomic.Int32
+	// pg is the read-only Postgres pool for the lens-contents seam
+	// (LOUPE_PG_DSN, pg.go); nil when the seam is not configured, in which
+	// case a postgres-target lens answers the pg-pending shape. pgDSNInvalid
+	// distinguishes "never configured" from "configured but unparseable" so
+	// the latter surfaces as an error, not the friendly pending state.
+	pg           *pgxpool.Pool
+	pgDSNInvalid bool
+	// bindHost is the host part of the listen address; the same-origin gate
+	// accepts it alongside loopback hosts (the non-loopback opt-in).
+	bindHost string
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -92,6 +105,36 @@ func (s *server) writeJSON(w http.ResponseWriter, status int, v any) {
 // bad request.
 func (s *server) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// crossOriginBlocked rejects a state-changing request whose Origin header
+// names a different site — the cheap same-origin gate for a loopback-bound,
+// unauthenticated operator console (a hostile web page can form-POST to a
+// well-known local port; the browser always attaches Origin to cross-origin
+// POSTs). Requests without an Origin (curl, same-site GET-initiated) pass.
+// Every mutating endpoint checks this before doing any work: the op submit,
+// the control planes, object upload/detach, and the package installer family.
+//
+// Matching Origin against r.Host alone is rebindable — under DNS rebinding
+// both headers carry the attacker's name and agree by construction — so the
+// Origin's host must ALSO be one the console is legitimately served from: a
+// loopback host, or the explicitly-configured bind host (the warned-about
+// non-loopback opt-in). Origin "null" (sandboxed iframe, some redirects) has
+// no host and fails closed.
+func (s *server) crossOriginBlocked(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	if origin == "http://"+r.Host || origin == "https://"+r.Host {
+		if u, err := url.Parse(origin); err == nil {
+			if h := u.Hostname(); isLoopbackHost(h) || (s.bindHost != "" && h == s.bindHost) {
+				return false
+			}
+		}
+	}
+	s.writeError(w, http.StatusForbidden, "cross-origin request blocked (Origin "+origin+")")
+	return true
 }
 
 // requireConn returns the live connection, or writes a JSON 502 and returns
@@ -287,6 +330,9 @@ func (s *server) handleControl(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && len(parts) == 1:
 		s.controlRead(w, r, parts[0])
 	case r.Method == http.MethodPost && len(parts) == 3:
+		if s.crossOriginBlocked(w, r) {
+			return
+		}
 		s.controlMutate(w, r, parts[0], parts[1], parts[2])
 	default:
 		s.writeError(w, http.StatusBadRequest,
@@ -402,6 +448,9 @@ func (s *server) handlePackages(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleOp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
+		return
+	}
+	if s.crossOriginBlocked(w, r) {
 		return
 	}
 	conn, ok := s.requireConn(w)

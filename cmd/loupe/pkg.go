@@ -550,23 +550,6 @@ func (s *server) pkgContext(r *http.Request) (ctx context.Context, cancel contex
 	return context.WithTimeout(r.Context(), pkgApplyTimeout)
 }
 
-// crossOriginBlocked rejects a state-changing request whose Origin header
-// names a different site — the cheap same-origin gate for a loopback-bound,
-// unauthenticated operator console (a hostile web page can form-POST to a
-// well-known local port; the browser always attaches Origin to cross-origin
-// POSTs). Requests without an Origin (curl, same-site GET-initiated) pass.
-func (s *server) crossOriginBlocked(w http.ResponseWriter, r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return false
-	}
-	if origin == "http://"+r.Host || origin == "https://"+r.Host {
-		return false
-	}
-	s.writeError(w, http.StatusForbidden, "cross-origin request blocked (Origin "+origin+")")
-	return true
-}
-
 // kernelRoleIDs maps kernel-seeded role canonical names to their NanoIDs for
 // the installer's grant resolution (same sourcing as cmd/lattice-pkg's
 // roleIDsFromBootstrap: the kernel seeds only the operator role; every other

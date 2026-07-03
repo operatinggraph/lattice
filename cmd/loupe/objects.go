@@ -75,10 +75,16 @@ func (s *server) handleObjects(w http.ResponseWriter, r *http.Request) {
 	rest = strings.Trim(rest, "/")
 	switch {
 	case r.Method == http.MethodPost && rest == "":
+		if s.crossOriginBlocked(w, r) {
+			return
+		}
 		s.handleObjectUpload(w, r)
 	case r.Method == http.MethodGet && rest != "":
 		s.handleObjectGet(w, r, rest)
 	case r.Method == http.MethodDelete && rest != "":
+		if s.crossOriginBlocked(w, r) {
+			return
+		}
 		s.handleObjectDetach(w, r, rest)
 	default:
 		s.writeError(w, http.StatusBadRequest,

@@ -16,6 +16,8 @@
 //	LOUPE_ADDR           HTTP listen address (default: 127.0.0.1:7777)
 //	NATS_URL             NATS server URL (default: nats://localhost:4222)
 //	BOOTSTRAP_JSON_PATH  path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
+//	LOUPE_PG_DSN         read-only Postgres DSN for the lens-contents seam
+//	                     (unset: postgres-target lens contents render pg-pending)
 //
 // Logs to stderr in slog text format. The server starts even when NATS is
 // unreachable or the bootstrap file is missing: the UI is served and each
@@ -35,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
@@ -103,12 +106,37 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
+	// The lens-contents read seam. A bad DSN does not fail startup — it is
+	// remembered so postgres lens contents surface an error (not the friendly
+	// pg-pending state); a good DSN with a down Postgres surfaces per-request
+	// (pgxpool dials lazily). Logging the parse error is safe: pgx redacts
+	// the password from its connstring errors.
+	var pgPool *pgxpool.Pool
+	var pgDSNInvalid bool
+	if dsn := os.Getenv("LOUPE_PG_DSN"); dsn != "" {
+		if pgPool, err = newLoupePGPool(dsn); err != nil {
+			logger.Warn("LOUPE_PG_DSN invalid; postgres lens contents will report an error until it is fixed", "error", err)
+			pgPool, pgDSNInvalid = nil, true
+		} else {
+			logger.Info("postgres read seam configured")
+			defer pgPool.Close()
+		}
+	}
+
+	bindHost, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		bindHost = ""
+	}
+
 	srv := &server{
-		conn:        conn,
-		adminActor:  adminActor,
-		logger:      logger,
-		natsTimeout: natsRequestLimit,
-		uploadCap:   uploadCap,
+		conn:         conn,
+		adminActor:   adminActor,
+		logger:       logger,
+		natsTimeout:  natsRequestLimit,
+		uploadCap:    uploadCap,
+		pg:           pgPool,
+		pgDSNInvalid: pgDSNInvalid,
+		bindHost:     bindHost,
 	}
 
 	mux := http.NewServeMux()

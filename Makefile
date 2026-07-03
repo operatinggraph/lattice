@@ -23,6 +23,10 @@ LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:543
 # The clinic-app read-boundary DSN (D1.5), same NON-superuser SELECT-only posture
 # as LOFTSPACE_APP_PG_DSN. See provision-clinic-role.
 CLINIC_APP_PG_DSN ?= postgres://clinic_app:clinic_app_dev@localhost:5432/lattice?sslmode=disable
+# Loupe's lens-contents read seam (loupe-2-ux-design.md §6.4/F9): a read-only
+# role's DSN. Empty by default — until the role is provisioned (lattice-lane
+# item), Loupe renders postgres lens contents as pg-pending.
+LOUPE_PG_DSN ?=
 
 # Per-component dev NKey seeds (NATS account-level write restriction, Path A —
 # deploy/nats-server.conf's permission matrix). Each binary's NATS_NKEY points at
@@ -305,7 +309,7 @@ up-full:
 	@echo "==> Killing any prior Loupe process..."
 	-pkill -f "bin/loupe" 2>/dev/null || true
 	@echo "==> Starting Loupe in background..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loupe >loupe.log 2>&1 </dev/null &
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) ./bin/loupe >loupe.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Full Lattice ready. Open http://127.0.0.1:7777 (Loupe)."
 	@echo "==> Logs: loupe.log loom.log weaver.log bridge.log objmgr.log refractor.log processor.log"
@@ -574,7 +578,7 @@ run-loupe:
 	@echo "==> Building loupe binary..."
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Loupe on http://127.0.0.1:7777 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/loupe
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) ./bin/loupe
 
 ## run-gateway — Build + run the Gateway (external write-path translator) in the
 ## FOREGROUND, DEV MODE (trusts the checked-in dev JWT key — never for prod).

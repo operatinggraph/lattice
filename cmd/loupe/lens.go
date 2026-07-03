@@ -14,10 +14,12 @@ import (
 // The Lens page backend (loupe-2-ux-design.md §6): GET /api/lens/<id>
 // assembles the four-panel document — definition (the DDL resolved from the
 // graph), reporter state + the Refractor heartbeat overlay, and the owning
-// package — and GET /api/lens/<id>/rows browses a nats_kv target's read model
-// (a postgres target answers the designed pg-pending shape until the F9 read
-// seam ships). Control actions go through the existing allow-listed
-// /api/control/refractor/<id>/<op> proxy, not through here.
+// package — and GET /api/lens/<id>/rows browses the target read model: a
+// nats_kv target's bucket, or a postgres target's table through the read-only
+// LOUPE_PG_DSN seam (pg.go; without a configured DSN a postgres target
+// answers the designed pg-pending shape). Control actions go through the
+// existing allow-listed /api/control/refractor/<id>/<op> proxy, not through
+// here.
 
 const (
 	defaultLensRowsLimit = 200
@@ -327,10 +329,11 @@ func selectLensRows(keys []string, q string, limit int) (selected []string, tota
 	return selected, total, total > len(selected)
 }
 
-// The CONTENTS panel's target decision: a nats_kv target is browsable now, a
-// postgres target renders the designed pg-pending state until the F9 read
-// seam, and a blank/unknown targetType is an error — a malformed spec must
-// not masquerade as the expected F9 wait state.
+// The CONTENTS panel's target decision: a nats_kv target browses its bucket,
+// a postgres target routes to the read seam (pg.go — real rows with a
+// configured LOUPE_PG_DSN, the pg-pending shape without one), and a
+// blank/unknown targetType is an error — a malformed spec must not
+// masquerade as either browsable state.
 const (
 	rowsTargetKV  = "kv"
 	rowsTargetPG  = "pg"
@@ -409,9 +412,21 @@ func (s *server) lensDetail(w http.ResponseWriter, r *http.Request, id string) {
 	s.writeJSON(w, http.StatusOK, detail)
 }
 
+// lensRowsLimitQ parses the shared browse parameters: limit (clamped to
+// [1, maxLensRowsLimit], default defaultLensRowsLimit) and the q substring.
+func lensRowsLimitQ(r *http.Request) (limit int, q string) {
+	limit = defaultLensRowsLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, maxLensRowsLimit)
+		}
+	}
+	return limit, r.URL.Query().Get("q")
+}
+
 // lensRows implements the CONTENTS panel: a nats_kv target's keys + documents
-// (capped, filtered); a postgres target answers the pg-pending shape the panel
-// renders as its designed empty state.
+// (capped, filtered); a postgres target's table rows through the read-only
+// seam, or the pg-pending shape when no LOUPE_PG_DSN is configured.
 func (s *server) lensRows(w http.ResponseWriter, r *http.Request, id string) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -437,28 +452,15 @@ func (s *server) lensRows(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	kind, bucket, errMsg := lensRowsTarget(spec)
+	limit, q := lensRowsLimitQ(r)
 	switch kind {
 	case rowsTargetPG:
-		s.writeJSON(w, http.StatusOK, map[string]any{
-			"targetType": spec.TargetType,
-			"pgPending":  true,
-			"rows":       []any{},
-			"count":      0,
-			"total":      0,
-		})
+		s.lensRowsPG(ctx, w, id, spec, limit, q)
 		return
 	case rowsTargetBad:
 		s.writeError(w, http.StatusBadGateway, "lens "+id+": "+errMsg)
 		return
 	}
-
-	limit := defaultLensRowsLimit
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = min(n, maxLensRowsLimit)
-		}
-	}
-	q := r.URL.Query().Get("q")
 
 	keys, err := conn.KVListKeys(ctx, bucket)
 	if err != nil {
