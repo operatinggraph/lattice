@@ -819,3 +819,18 @@ of the already-3-layer-reviewed landlord consumer). **5b close's remaining gate:
 `make test-crypto-shred` to assert a secure-lens row scrubs on shred (still only proven via the
 per-lens unit tests above + the landlord real-vault shred test), then the delivery-boundary reset +
 live e2e.
+
+**Fire 5b-iv CHECKPOINT (2026-07-03, Lattice Steward, `fb66e7c`).** Closed the `test-crypto-shred`
+test gate above: the harness gains a second nats_kv-target lens with a real `pipeline.SecureDecryptor`
+attached (target-agnostic — proven only via direct-call unit tests and the Postgres-backed landlord/clinic
+fixtures until now), and the e2e now asserts its decrypted PII column projects real plaintext pre-shred
+then goes null once the REAL chain lands (`ShredIdentityKey` op → `piiKey` CDC event → async
+privacy-worker + keyshredded listeners → `RecordShredFinalization`'s later `piiKey` writes, which race
+— and land after — the actual `Vault.ShredKey` destruction). 5x local re-run, no flake. Lead review
+(S, test-only, mirrors `internal/refractor/pipeline`'s own `TestSecureLens_FullEngineRoundTrip`
+construction, zero new mechanism). **5b close's only remaining gate: the delivery-boundary reset
+(`make down && make up-full`) + a live e2e on the running stack.** Deliberately left for an attended
+session — it destroys the current shared dev stack's data (ephemeral by design, but a concurrent
+PO-discovery/vertical-exploration fire could be relying on live state at the moment an unattended fire
+picks this up) and its proof is a human-observable one, not a headless gate; same posture as the
+Phase-1 gate-retirement item's "needs an attended fire" flag elsewhere on this board.
