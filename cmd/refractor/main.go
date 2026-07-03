@@ -260,6 +260,48 @@ func main() {
 		return out
 	}
 
+	// LensProvider for the heartbeater — the generalized (non-auth-plane)
+	// projection-liveness backstop (lens-projection-liveness-design.md §3.3).
+	// Sibling of CapabilityLensProvider above: same read-only shape, scoped to
+	// business lenses so the auth-plane path stays untouched (§5.1). Reads the
+	// in-process Progress() live every beat (independent of the LagPoller's 5s
+	// cycle), so the backstop alert survives a LagPoller stall (design §5.5).
+	hb.LensProvider = func() []health.LensLivenessStatus {
+		mu.Lock()
+		entries := make([]*pipelineEntry, 0, len(registry))
+		for _, entry := range registry {
+			if !entry.authPlane && entry.pipeline != nil && entry.reporter != nil {
+				entries = append(entries, entry)
+			}
+		}
+		mu.Unlock()
+
+		out := make([]health.LensLivenessStatus, 0, len(entries))
+		for _, entry := range entries {
+			st, err := entry.reporter.GetStatus(context.Background())
+			if err != nil {
+				continue
+			}
+			pending, err := entry.pipeline.Pending(context.Background())
+			if err != nil {
+				continue
+			}
+			pauseReason := ""
+			if st.PauseReason != nil {
+				pauseReason = *st.PauseReason
+			}
+			out = append(out, health.LensLivenessStatus{
+				CanonicalName:   entry.canonicalName,
+				RuleID:          st.RuleID,
+				Status:          st.Status,
+				PauseReason:     pauseReason,
+				ProjectionLag:   pending,
+				LastProjectedAt: entry.pipeline.Progress().LastProjectedAt,
+			})
+		}
+		return out
+	}
+
 	buildAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
 		// DeleteMode is defaulted to "hard" and validated upstream (Parse /
 		// translateSpec); re-parse here to obtain the typed value for the adapter.
@@ -505,6 +547,7 @@ func main() {
 		// durable name, so the poller tracks the live consumer across a rebuild
 		// reset with no handle re-binding.
 		lp := health.NewLagPoller(conn, p.Pending, reporter, r.ID)
+		lp.SetProgressFunc(func() time.Time { return p.Progress().LastProjectedAt })
 		p.SetLagPoller(lp)
 
 		lensCtx, cancel := context.WithCancel(ctx)

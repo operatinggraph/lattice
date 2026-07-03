@@ -31,16 +31,34 @@ type LagMetric struct {
 // treats as "skip this cycle", not a fatal condition.
 type LagFunc func(ctx context.Context) (uint64, error)
 
+// ProgressFunc optionally returns the pipeline's projection-progress
+// lastProjectedAt clock for inclusion in the health Entry each poll cycle
+// (lens-projection-liveness-design.md §3.2). Returns the zero time before the
+// lens's first projection.
+type ProgressFunc func() time.Time
+
 // LagPoller publishes per-lens consumer lag metrics to lattice.refractor.metrics.<lensId>
 // at the interval captured from MetricsInterval at construction time.
-// It also updates the health KV consumerLag field on each cycle.
-// Call Start in a dedicated goroutine.
+// It also updates the health KV consumerLag/projectionLag/lastProjectedAt fields
+// on each cycle. Call Start in a dedicated goroutine.
 type LagPoller struct {
 	conn     *substrate.Conn
 	lag      LagFunc
 	reporter *Reporter // may be nil — health KV update skipped when nil
 	ruleID   string
 	interval time.Duration // captured from MetricsInterval at NewLagPoller time
+
+	// progress optionally supplies the lastProjectedAt clock. nil (the default,
+	// unless SetProgressFunc is called) folds in a zero time — the Entry's
+	// lastProjectedAt is then left at whatever it already held (see
+	// Reporter.SetProjectionProgress).
+	progress ProgressFunc
+}
+
+// SetProgressFunc attaches the pipeline's projection-progress source. Must be
+// called before Start. Pass nil to clear (the default).
+func (lp *LagPoller) SetProgressFunc(fn ProgressFunc) {
+	lp.progress = fn
 }
 
 // NewLagPoller creates a LagPoller for the given rule. The lag source is read
@@ -119,9 +137,13 @@ func (lp *LagPoller) poll(ctx context.Context) {
 	}
 
 	if lp.reporter != nil {
-		if err := lp.reporter.SetConsumerLag(ctx, lag); err != nil {
+		var lastProjectedAt time.Time
+		if lp.progress != nil {
+			lastProjectedAt = lp.progress()
+		}
+		if err := lp.reporter.SetProjectionProgress(ctx, lag, lastProjectedAt); err != nil {
 			if ctx.Err() == nil {
-				slog.Warn("lag poller: SetConsumerLag failed",
+				slog.Warn("lag poller: SetProjectionProgress failed",
 					"ruleId", lp.ruleID, "err", err)
 			}
 		}

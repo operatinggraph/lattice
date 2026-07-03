@@ -40,6 +40,17 @@ const (
 	issueCapabilityLensLagging = "CapabilityLensLagging"
 )
 
+// defaultLensLagThreshold / defaultLensLagRaiseCycles mirror the capability-lens
+// defaults (lens-projection-liveness-design.md §5.7 — the cap path's
+// battle-tested defaults, reused rather than a fresh tuning exercise).
+// Deployment-overridable via LensLagThreshold / LensLagRaiseCycles.
+const (
+	defaultLensLagThreshold    = 100
+	defaultLensLagRaiseCycles  = 3
+	issueLensProjectionPaused  = "LensProjectionPaused"
+	issueLensProjectionLagging = "LensProjectionLagging"
+)
+
 // CapabilityLensStatus is one auth-plane (capability-kv) lens's liveness snapshot,
 // supplied by CapabilityLensProvider for the per-heartbeat threshold evaluation.
 // The provider reads it from the lens's health Reporter (status / pauseReason) and
@@ -51,6 +62,20 @@ type CapabilityLensStatus struct {
 	Status        string // "active" | "paused" | "rebuilding"
 	PauseReason   string // "" when not paused
 	ConsumerLag   uint64
+}
+
+// LensLivenessStatus is one non-auth-plane (business) lens's liveness snapshot,
+// supplied by LensProvider for the general projection-liveness backstop
+// (lens-projection-liveness-design.md §3.3). Mirrors CapabilityLensStatus plus
+// the lastProjectedAt progress clock; auth-plane lenses are excluded — the
+// CapabilityLensProvider path owns them.
+type LensLivenessStatus struct {
+	CanonicalName   string
+	RuleID          string
+	Status          string // "active" | "paused" | "rebuilding"
+	PauseReason     string // "" when not paused
+	ProjectionLag   uint64
+	LastProjectedAt time.Time // zero if never projected
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -112,6 +137,14 @@ type LatticeHeartbeater struct {
 	// before any capability lens activates.
 	CapabilityLensProvider func() []CapabilityLensStatus
 
+	// LensProvider optionally returns liveness snapshots for the non-auth-plane
+	// (business) lenses — the generalized projection-liveness backstop
+	// (lens-projection-liveness-design.md §3.3). A sibling of
+	// CapabilityLensProvider, deliberately excluding auth-plane lenses (the cap
+	// path stays canonical for those — §5.1). nil before any business lens
+	// activates.
+	LensProvider func() []LensLivenessStatus
+
 	// VaultCallsTotalProvider optionally returns the cumulative count of Vault
 	// decryption calls (Contract #5 §5.4 vaultCallsTotal) — the Secure Lenses'
 	// decrypt-at-projection calls, summed across every secure lens in the
@@ -146,6 +179,14 @@ type LatticeHeartbeater struct {
 	// clamped down to it (a band cannot invert).
 	CapabilityLensLagClearThreshold uint64
 
+	// LensLagThreshold / LensLagRaiseCycles / LensLagClearThreshold are the
+	// general-lens sibling of the CapabilityLensLag* fields above — same
+	// semantics, applied to non-auth-plane lenses. Zero selects
+	// defaultLensLagThreshold / defaultLensLagRaiseCycles respectively.
+	LensLagThreshold      uint64
+	LensLagRaiseCycles    uint
+	LensLagClearThreshold uint64
+
 	// issuesMu guards openCapIssues.
 	issuesMu sync.Mutex
 	// openCapIssues tracks the `since` timestamp of each currently-open
@@ -160,6 +201,16 @@ type LatticeHeartbeater struct {
 	// persists across heartbeats. Pruned each cycle to the lenses currently
 	// reported, mirroring openCapIssues.
 	lagState map[string]*lagHysteresis
+
+	// lensIssuesMu / openLensIssues and lensLagMu / lensLagState are the
+	// general-lens sibling of issuesMu/openCapIssues and lagMu/lagState —
+	// deliberately SEPARATE maps (not shared with the cap path) so pruning one
+	// path's absent lenses never drops the other path's in-flight debounce/issue
+	// state (§5.1: additive sibling, zero regression surface on the cap path).
+	lensIssuesMu   sync.Mutex
+	openLensIssues map[string]string
+	lensLagMu      sync.Mutex
+	lensLagState   map[string]*lagHysteresis
 
 	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
 	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL. Defaults to
@@ -297,17 +348,30 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 	if len(capMetric) > 0 {
 		metrics["capabilityLens"] = capMetric
 	}
-	issues := make([]any, 0, len(capIssues))
-	for _, is := range capIssues {
+	// Generalized (non-auth-plane) lens liveness backstop — the sibling that
+	// widens the capability-lens machinery to every business lens
+	// (lens-projection-liveness-design.md §3.3). Emitted every cycle including
+	// alert:"ok" so observers can render the green state and the freshness
+	// clock, not only anomalies.
+	lensMetric, lensIssues := h.evalLenses(now)
+	if len(lensMetric) > 0 {
+		metrics["lensLiveness"] = lensMetric
+	}
+	allIssues := make([]issueRecord, 0, len(capIssues)+len(lensIssues))
+	allIssues = append(allIssues, capIssues...)
+	allIssues = append(allIssues, lensIssues...)
+	issues := make([]any, 0, len(allIssues))
+	for _, is := range allIssues {
 		issues = append(issues, is)
 	}
-	// Elevate to the §5.4 degraded/unhealthy status while a capability issue is
-	// open — at startup too, so a paused-at-boot capability lens is visible
-	// immediately. A "shutdown" beat is left as-is (the instance is tearing down),
-	// and a clean cycle keeps its lifecycle status ("starting"/"healthy").
+	// Elevate to the §5.4 degraded/unhealthy status while a capability or
+	// business-lens issue is open — at startup too, so a paused-at-boot lens is
+	// visible immediately. A "shutdown" beat is left as-is (the instance is
+	// tearing down), and a clean cycle keeps its lifecycle status
+	// ("starting"/"healthy").
 	effectiveStatus := status
-	if status != "shutdown" && len(capIssues) > 0 {
-		effectiveStatus = aggregateStatus(capIssues)
+	if status != "shutdown" && len(allIssues) > 0 {
+		effectiveStatus = aggregateStatus(allIssues)
 	}
 	doc := LatticeHealthDoc{
 		Key:         h.healthKey(),
@@ -511,6 +575,181 @@ func capLensName(s CapabilityLensStatus) string {
 		return s.CanonicalName
 	}
 	return s.RuleID
+}
+
+// lensName prefers the canonical name, falling back to the rule ID (mirrors
+// capLensName for the general-lens sibling).
+func lensName(s LensLivenessStatus) string {
+	if s.CanonicalName != "" {
+		return s.CanonicalName
+	}
+	return s.RuleID
+}
+
+// evalLenses applies the same §5.5 threshold model as evalCapabilityLenses to
+// the non-auth-plane (business) lens snapshots (lens-projection-liveness-design.md
+// §3.3), returning the metrics.lensLiveness sub-map and the open issue records.
+// Deliberately a sibling of evalCapabilityLenses rather than a shared code path
+// — auth-plane lenses are excluded (the cap path stays canonical for them, §5.1)
+// and the lag-hysteresis/open-issue state lives in separate maps so pruning
+// one path's absent lenses never touches the other's in-flight state. The one
+// substantive difference from the cap path: a paused BUSINESS lens is
+// `severity: warning` (⇒ degraded), not `error` (⇒ unhealthy) — a single frozen
+// business lens is a real outage for that vertical but must not nuke the whole
+// Refractor instance to unhealthy (design §3.3). Returns (nil, nil) when no
+// provider is wired.
+func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]any, []issueRecord) {
+	if h.LensProvider == nil {
+		return nil, nil
+	}
+	threshold := h.LensLagThreshold
+	if threshold == 0 {
+		threshold = defaultLensLagThreshold
+	}
+	raiseCycles := h.LensLagRaiseCycles
+	if raiseCycles == 0 {
+		raiseCycles = defaultLensLagRaiseCycles
+	}
+	clearThreshold := h.LensLagClearThreshold
+	if clearThreshold == 0 || clearThreshold > threshold {
+		clearThreshold = threshold
+	}
+
+	snaps := h.LensProvider()
+	metric := make(map[string]map[string]any, len(snaps))
+	var paused, lagging []string
+	seen := make(map[string]struct{}, len(snaps))
+	for _, s := range snaps {
+		name := lensName(s)
+		seen[name] = struct{}{}
+		alert := "ok"
+		switch s.Status {
+		case "paused":
+			alert = "paused"
+			reason := s.PauseReason
+			if reason == "" {
+				reason = "unknown"
+			}
+			paused = append(paused, fmt.Sprintf("%s (%s)", name, reason))
+			h.resetLensLagState(name)
+		case "active":
+			if h.evalLensLagHysteresis(name, s.ProjectionLag, threshold, clearThreshold, int(raiseCycles)) {
+				alert = "lagging"
+				lagging = append(lagging, fmt.Sprintf("%s (lag %d)", name, s.ProjectionLag))
+			}
+		default:
+			// rebuilding (or any non-active, non-paused state): not lagging; clear
+			// any pending streak.
+			h.resetLensLagState(name)
+		}
+		lastProjectedAt := ""
+		if !s.LastProjectedAt.IsZero() {
+			lastProjectedAt = substrate.FormatTimestamp(s.LastProjectedAt)
+		}
+		metric[name] = map[string]any{
+			"status":          s.Status,
+			"projectionLag":   s.ProjectionLag,
+			"lastProjectedAt": lastProjectedAt,
+			"alert":           alert,
+		}
+	}
+	h.pruneLensLagState(seen)
+
+	active := map[string]capIssue{}
+	if len(paused) > 0 {
+		active[issueLensProjectionPaused] = capIssue{
+			severity: "warning",
+			message: "lens paused; its read model is frozen (not authorization-critical, so this degrades rather than fails the instance): " +
+				strings.Join(paused, ", "),
+		}
+	}
+	if len(lagging) > 0 {
+		active[issueLensProjectionLagging] = capIssue{
+			severity: "warning",
+			message: fmt.Sprintf("lens projection lag exceeds threshold %d; its read model may be stale: %s",
+				threshold, strings.Join(lagging, ", ")),
+		}
+	}
+	return metric, h.reconcileLensIssues(active, now)
+}
+
+// reconcileLensIssues is the general-lens sibling of reconcileCapIssues — same
+// since-persistence/drop-on-resolve semantics, backed by the separate
+// openLensIssues map.
+func (h *LatticeHeartbeater) reconcileLensIssues(active map[string]capIssue, now time.Time) []issueRecord {
+	h.lensIssuesMu.Lock()
+	defer h.lensIssuesMu.Unlock()
+	if h.openLensIssues == nil {
+		h.openLensIssues = map[string]string{}
+	}
+	for code := range h.openLensIssues {
+		if _, ok := active[code]; !ok {
+			delete(h.openLensIssues, code)
+		}
+	}
+	out := make([]issueRecord, 0, len(active))
+	for code, ci := range active {
+		since, ok := h.openLensIssues[code]
+		if !ok {
+			since = substrate.FormatTimestamp(now)
+			h.openLensIssues[code] = since
+		}
+		out = append(out, issueRecord{Code: code, Severity: ci.severity, Message: ci.message, Since: since})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
+	return out
+}
+
+// evalLensLagHysteresis is the general-lens sibling of evalLagHysteresis,
+// backed by the separate lensLagState map (same raise-after-N / clear-band
+// debounce semantics).
+func (h *LatticeHeartbeater) evalLensLagHysteresis(name string, lag, threshold, clearThreshold uint64, raiseCycles int) bool {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	if h.lensLagState == nil {
+		h.lensLagState = map[string]*lagHysteresis{}
+	}
+	st := h.lensLagState[name]
+	if st == nil {
+		st = &lagHysteresis{}
+		h.lensLagState[name] = st
+	}
+	if st.raised {
+		if lag <= clearThreshold {
+			st.raised = false
+			st.overStreak = 0
+		}
+		return st.raised
+	}
+	if lag > threshold {
+		st.overStreak++
+		if st.overStreak >= raiseCycles {
+			st.raised = true
+		}
+	} else {
+		st.overStreak = 0
+	}
+	return st.raised
+}
+
+// resetLensLagState clears one lens's lag-debounce state (general-lens sibling
+// of resetLagState).
+func (h *LatticeHeartbeater) resetLensLagState(name string) {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	delete(h.lensLagState, name)
+}
+
+// pruneLensLagState drops debounce state for lenses no longer reported this
+// cycle (general-lens sibling of pruneLagState).
+func (h *LatticeHeartbeater) pruneLensLagState(seen map[string]struct{}) {
+	h.lensLagMu.Lock()
+	defer h.lensLagMu.Unlock()
+	for name := range h.lensLagState {
+		if _, ok := seen[name]; !ok {
+			delete(h.lensLagState, name)
+		}
+	}
 }
 
 func (h *LatticeHeartbeater) healthKey() string {

@@ -222,6 +222,48 @@ func TestReporter_SetConsumerLag(t *testing.T) {
 	assert.Equal(t, uint64(100), entry.ConsumerLag, "consumerLag must be preserved by SetActive")
 }
 
+// TestReporter_SetProjectionProgress_RoundTrips verifies SetProjectionProgress
+// writes ConsumerLag/ProjectionLag (same value, both names) and LastProjectedAt,
+// while preserving ErrorCount across the read-modify-write (lens-projection-liveness-design.md §3.2).
+func TestReporter_SetProjectionProgress_RoundTrips(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+
+	require.NoError(t, r.SetActive(context.Background()))
+	require.NoError(t, r.RecordError(context.Background(), "boom"))
+
+	projectedAt := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 42, projectedAt))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), entry.ConsumerLag, "legacy consumerLag field must still be set")
+	assert.Equal(t, uint64(42), entry.ProjectionLag, "operator-facing projectionLag alias must match")
+	assert.Equal(t, projectedAt.Format(time.RFC3339), entry.LastProjectedAt)
+	assert.Equal(t, uint64(1), entry.ErrorCount, "errorCount must be preserved across the read-modify-write")
+}
+
+// TestReporter_SetProjectionProgress_ZeroTimeLeavesExisting verifies that a zero
+// lastProjectedAt (no projection yet observed this cycle) does not blank an
+// already-stored value — only a genuine advance should ever be written.
+func TestReporter_SetProjectionProgress_ZeroTimeLeavesExisting(t *testing.T) {
+	kv := startHealthKV(t)
+	r := health.New(kv, "my-rule")
+	require.NoError(t, r.SetActive(context.Background()))
+
+	projectedAt := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 5, projectedAt))
+
+	// A later cycle with lag but no fresh projection (zero time) must not blank
+	// the previously-recorded lastProjectedAt.
+	require.NoError(t, r.SetProjectionProgress(context.Background(), 7, time.Time{}))
+
+	entry, err := r.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), entry.ConsumerLag)
+	assert.Equal(t, projectedAt.Format(time.RFC3339), entry.LastProjectedAt, "lastProjectedAt must not be blanked by a zero-time update")
+}
+
 // TestReporter_SetRebuilding verifies that SetRebuilding writes status "rebuilding",
 // preserves ErrorCount and ConsumerLag, and sets PauseReason and LastError to null (AC4).
 func TestReporter_SetRebuilding(t *testing.T) {

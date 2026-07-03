@@ -38,6 +38,14 @@ type Entry struct {
 	// body (Story 3.1a). Cached via SetRuleEngine and re-emitted on every
 	// status transition. Empty string when not yet set (forward-compat).
 	RuleEngine string `json:"ruleEngine,omitempty"`
+	// LastProjectedAt is the wall-clock of the last successful target write
+	// (lens-projection-liveness-design.md §3.2) — RFC3339 UTC; "" until the
+	// lens's first projection. A freshness signal, never an alert input on its
+	// own (a quiet, no-match lens naturally has an old value).
+	LastProjectedAt string `json:"lastProjectedAt,omitempty"`
+	// ProjectionLag is the operator-facing alias of ConsumerLag (same NumPending
+	// value, named for what it means to an operator: events behind).
+	ProjectionLag uint64 `json:"projectionLag"`
 }
 
 // Reporter reads and writes health KV entries for a single rule.
@@ -258,6 +266,37 @@ func (r *Reporter) SetConsumerLag(ctx context.Context, lag uint64) error {
 		return fmt.Errorf("health: SetConsumerLag read: %w", err)
 	}
 	existing.ConsumerLag = lag
+	existing.ActiveSequence = seq
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// SetProjectionProgress reads the existing entry, updates ConsumerLag/
+// ProjectionLag (the same NumPending value under both the legacy and
+// operator-facing names) and, when lastProjectedAt is non-zero, LastProjectedAt,
+// then writes (lens-projection-liveness-design.md §3.2). Called by the
+// LagPoller on its existing 5s cycle in place of SetConsumerLag — one
+// read-modify-write, no new goroutine. A zero lastProjectedAt (no projection
+// yet this process) leaves the existing stored value untouched rather than
+// blanking it.
+func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastProjectedAt time.Time) error {
+	r.mu.RLock()
+	seq := r.activeSequence
+	r.mu.RUnlock()
+
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetProjectionProgress read: %w", err)
+	}
+	existing.ConsumerLag = lag
+	existing.ProjectionLag = lag
+	if !lastProjectedAt.IsZero() {
+		existing.LastProjectedAt = lastProjectedAt.UTC().Format(time.RFC3339)
+	}
 	existing.ActiveSequence = seq
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
