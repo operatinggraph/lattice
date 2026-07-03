@@ -281,11 +281,25 @@ which is why the previously-necessary enumeration primitive is no longer needed 
 Per F-004, a same-version package reinstall does not hot-upgrade existing vertices; a live stack with
 providers/patients minted under the old package version simply has no `.bookingGuard`/`hasBooking`
 state to migrate *away from* the new mechanism needs — the new mechanism creates its slot-claim
-aspects lazily per booking, so there is **no pre-existing-vertex migration hole** (unlike the old
+aspects lazily per booking, so there is **no pre-existing-*vertex* migration hole** (unlike the old
 mechanism, which needed `.bookingGuard` seeded by `CreateProvider`/`CreatePatient` and would
-`HydrationMiss` on a pre-capability vertex). The clinic package version bumps (`0.8.0` → `0.9.0`); a
+`HydrationMiss` on a pre-capability vertex). The clinic package version bumps (`0.11.0` → `0.12.0`); a
 fresh stack (`make down && make up-clinic`) is still the clean path for exercising it live, consistent
 with the `appliedToUnit` (3704324) and Fire-2 (this redesign's predecessor) migration notes.
+
+**Caveat — pre-existing *bookings*, not just vertices (flagged by review, 2026-07-03).** A live-only
+bookable window has a real gap this migration does not close: an appointment that was already
+scheduled/confirmed/checkedIn *before* this package version installed has no `providerSlotClaim`/
+`patientSlotClaim` aspects (they never existed under the retired mechanism), so a brand-new
+`CreateAppointment` for the same provider+time can claim that cell with no `SlotConflict` — the old
+booking's slot is invisible to the new mechanism until *that* appointment itself is touched (a
+`RescheduleAppointment` or a terminal `SetAppointmentStatus`, both of which read/write its cells).
+There is no backfill script in this fire: on the trusted-tool, pre-launch, single-cell-MVP posture (no
+real production bookings yet), a fresh bootstrap has zero pre-existing appointments and the gap is
+moot. **If this ever needs to reach a stack carrying real live bookings, a one-time backfill (walk every
+non-terminal appointment, `slot_cells` its `.schedule`, `claim_cell` on both hubs) must run before older
+appointments regain double-book protection — file that as its own package-level item at that time; it
+is out of scope for this fire.**
 
 ---
 
