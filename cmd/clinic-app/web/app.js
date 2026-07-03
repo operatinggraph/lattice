@@ -241,9 +241,10 @@ function rejectionMessage(reply) {
 // for the booking / reschedule paths: a provider double-book (SlotConflict), a
 // patient double-book across providers (PatientDoubleBook), an
 // out-of-availability-window booking (OutsideHours), a date-specific time-off
-// overlap (ProviderUnavailable), and a past-dated booking (ScheduleInPast) are the
-// domain rejections CreateAppointment / RescheduleAppointment raise. Anything else
-// passes through.
+// overlap (ProviderUnavailable), a past-dated booking (ScheduleInPast), a
+// misaligned 15-minute-grid time (SlotGridViolation), and an over-long appointment
+// (AppointmentTooLong) are the domain rejections CreateAppointment /
+// RescheduleAppointment raise. Anything else passes through.
 function friendlyBookingRejection(msg) {
   if (msg.indexOf("SlotConflict") !== -1) {
     return "That time overlaps another appointment for this provider. Pick another slot.";
@@ -259,6 +260,12 @@ function friendlyBookingRejection(msg) {
   }
   if (msg.indexOf("ScheduleInPast") !== -1) {
     return "That time is in the past. Pick a future date and time.";
+  }
+  if (msg.indexOf("SlotGridViolation") !== -1) {
+    return "Appointments must start and end on the clinic's 15-minute grid (:00/:15/:30/:45). Adjust the time.";
+  }
+  if (msg.indexOf("AppointmentTooLong") !== -1) {
+    return "That appointment is too long (over 24 hours). Shorten the duration.";
   }
   return msg;
 }
@@ -902,8 +909,8 @@ async function patientAppointments(patient) {
 }
 
 // apptBlocks reports whether an appointment still occupies its slot. A cancelled /
-// no-show appointment has its hasBooking link tombstoned and is skipped by the
-// double-book guard, so the op would allow rebooking that time — exclude it from the
+// no-show appointment has its slot-claim aspects released on the terminal
+// transition, so the op would allow rebooking that time — exclude it from the
 // picker's block set.
 function apptBlocks(a) {
   return a.status !== "cancelled" && a.status !== "noShow";
@@ -1265,12 +1272,12 @@ async function submitBook(ev) {
   const submit = $("#book-submit");
   submit.disabled = true;
   try {
-    // The provider's AND the patient's .bookingGuard epochs are declared reads so the
-    // op can detect a provider double-book (SlotConflict) AND a patient double-book
-    // across providers (PatientDoubleBook) — the guard enumerates the hasBooking links
-    // (kv.Links) and serializes concurrent bookings on these OCC epochs on both sides.
+    // The op claims a deterministic slot-claim aspect per covered 15-minute grid
+    // cell on both the provider and patient hubs — the write-path key collision at
+    // commit IS the double-book lock (SlotConflict / PatientDoubleBook), so no
+    // per-hub OCC epoch needs to be declared here.
     const reply = await submitOp("CreateAppointment", "appointment", payload,
-      [state.patient, provider, provider + ".bookingGuard", state.patient + ".bookingGuard"]);
+      [state.patient, provider]);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Booking rejected — " + friendlyBookingRejection(msg), "err");
@@ -2616,9 +2623,18 @@ function lifecycleTransitions(status) {
 
 // setStatus drives SetAppointmentStatus to the given status and reloads via onDone.
 // noShow / cancelled prompt for an optional audit note (a reason recorded on the
-// .status aspect for records / billing); cancelling the prompt aborts.
+// .status aspect for records / billing); cancelling the prompt aborts. The FIRST
+// transition into a terminal status (completed/cancelled/noShow) also needs
+// provider + patient so the op can release the appointment's held slot-claim cells
+// (a same-value re-set, e.g. correcting a note, has already released them).
+const TERMINAL_STATUS_VALUES = ["completed", "cancelled", "noShow"];
+
 async function setStatus(a, status, onDone) {
   const payload = { appointmentKey: a.appointmentKey, status };
+  if (TERMINAL_STATUS_VALUES.indexOf(status) !== -1 && status !== a.status) {
+    payload.provider = a.providerKey;
+    payload.patient = a.patientKey;
+  }
   if (status === "noShow" || status === "cancelled") {
     const verb = status === "noShow" ? "Mark as no-show" : "Cancel this appointment";
     const note = prompt(verb + ". Optional note (reason):", "");
@@ -2664,10 +2680,11 @@ function lifecycleButtons(a, onDone) {
 // RescheduleAppointment rewrites the .schedule aspect with new times; the op
 // re-derives remindAt = startsAt − 24h so the ~24h reminder re-arms for a
 // not-yet-sent reminder, and rejects a move into a slot already booked for the
-// provider (SlotConflict — the guard enumerates the provider's hasBooking links,
-// serialized on the provider .bookingGuard epoch declared read). The existing reason
-// is round-tripped (the op clears it if omitted), and the provider / patient links +
-// status are untouched server-side.
+// provider (SlotConflict) or the patient (PatientDoubleBook) by releasing the
+// vacated 15-minute grid cells and claiming the newly-covered ones in the same
+// atomic batch — a collision leaves the original booking's claims intact. The
+// existing reason is round-tripped (the op clears it if omitted), and the
+// provider / patient links + status are untouched server-side.
 
 function openReschedule(a) {
   state.rescheduling = a;
@@ -2713,12 +2730,8 @@ async function submitReschedule(ev) {
   const submit = $("#reschedule-submit");
   submit.disabled = true;
   try {
-    // The provider's AND the patient's .bookingGuard epochs are declared reads so the
-    // op detects a provider double-book (SlotConflict) and a patient double-book
-    // across providers (PatientDoubleBook) against the new time (RescheduleAppointment
-    // skips this appointment on both sides; the guard enumerates the hasBooking links).
     const reply = await submitOp("RescheduleAppointment", "appointment", payload,
-      [a.appointmentKey, a.providerKey + ".bookingGuard", a.patientKey + ".bookingGuard"]);
+      [a.appointmentKey]);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not reschedule — " + friendlyBookingRejection(msg), "err");

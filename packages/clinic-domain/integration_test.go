@@ -9,14 +9,11 @@
 // links land, and the endpoint-class / status-enum / authorization guards reject
 // bad input.
 //
-// Coverage:
-//  1. TestClinic_CreateBookable        — patient + provider + appointment, aspects + links + status=scheduled
-//  2. TestClinic_SetAppointmentStatus  — upsert .status scheduled→confirmed in place
-//  3. TestClinic_RejectsBadStatus      — status not in the enum → Rejected
-//  4. TestClinic_RejectsWrongClass     — CreateAppointment endpoint alive but wrong class → Rejected
-//  5. TestClinic_RejectsDeadEndpoint   — CreateAppointment patient absent → Rejected
-//  6. TestClinic_TombstonePatient      — patient soft-deleted
-//  7. TestClinic_UnauthorizedDenied    — consumer cap (no clinic ops) → Rejected
+// Coverage spans the full lifecycle (create / reschedule / status transitions /
+// tombstone) plus the write-path 15-minute-grid slot-claim double-book mechanism
+// (SlotConflict / PatientDoubleBook / SlotGridViolation / AppointmentTooLong), the
+// provider hours/time-off guards, the past-time guard, and the authorization /
+// wrong-class / dead-endpoint rejection paths — see the per-test doc comments below.
 package clinicdomain_test
 
 import (
@@ -147,24 +144,50 @@ func clMissing(t *testing.T, ctx context.Context, conn *substrate.Conn, key stri
 	return err != nil
 }
 
-// clHasBookingLinkKey builds the hub-sourced hasBooking link key for an
-// appointment: lnk.<hubType>.<hubID>.hasBooking.appointment.<apptID> (the
-// provider-/patient-sourced enumeration link the double-book guard reads).
-func clHasBookingLinkKey(hubKey, apptKey string) string {
-	hp := strings.Split(hubKey, ".")  // vtx.<type>.<id>
-	ap := strings.Split(apptKey, ".") // vtx.appointment.<id>
-	return "lnk." + hp[1] + "." + hp[2] + ".hasBooking.appointment." + ap[2]
+// clSlotCellCode derives the deterministic slot-claim localName suffix for a
+// canonical whole-second UTC cell-start instant, mirroring the package's
+// slot_cellcode Starlark helper (strip '-'/':' and lowercase).
+func clSlotCellCode(cellStart string) string {
+	s := strings.ReplaceAll(cellStart, "-", "")
+	s = strings.ReplaceAll(s, ":", "")
+	return strings.ToLower(s)
 }
 
-// clAssertBookingLinkTombstoned asserts the hub→appointment hasBooking link exists
-// and is soft-tombstoned — the eager bound-maintenance a terminal transition /
-// TombstoneAppointment performs so the double-book guard fast-skips the dead booking.
-func clAssertBookingLinkTombstoned(t *testing.T, ctx context.Context, conn *substrate.Conn, hubKey, apptKey string) {
+// clSlotClaimKey builds a hub's slot-claim aspect key for the 15-minute cell
+// starting at cellStart (a canonical whole-second UTC instant, e.g. "09:00" or
+// "09:15" — every appointment boundary in this suite sits on a cell edge).
+func clSlotClaimKey(hubKey, cellStart string) string {
+	return hubKey + ".slot" + clSlotCellCode(cellStart)
+}
+
+// clAssertSlotClaimLive asserts the hub holds a LIVE slot-claim aspect for the
+// given 15-minute cell — the write-path double-book lock (§2.1 of
+// clinic-booking-write-path-slot-claims-design.md) is engaged for that cell.
+func clAssertSlotClaimLive(t *testing.T, ctx context.Context, conn *substrate.Conn, hubKey, cellStart string) {
 	t.Helper()
-	lk := clHasBookingLinkKey(hubKey, apptKey)
-	doc := clReadDoc(t, ctx, conn, lk)
+	k := clSlotClaimKey(hubKey, cellStart)
+	doc := clReadDoc(t, ctx, conn, k)
+	if del, _ := doc["isDeleted"].(bool); del {
+		t.Fatalf("slot claim %s should be LIVE, got isDeleted=true", k)
+	}
+}
+
+// clAssertSlotClaimReleased asserts the hub's slot-claim aspect for the given
+// 15-minute cell is tombstoned (or was never written) — the cell is free for a
+// competing booking to claim.
+func clAssertSlotClaimReleased(t *testing.T, ctx context.Context, conn *substrate.Conn, hubKey, cellStart string) {
+	t.Helper()
+	k := clSlotClaimKey(hubKey, cellStart)
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, k)
+	if err != nil {
+		return // never claimed == released
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal %s: %v", k, err)
+	}
 	if del, _ := doc["isDeleted"].(bool); !del {
-		t.Fatalf("hasBooking link %s should be tombstoned after the booking went terminal, got isDeleted=%v", lk, doc["isDeleted"])
+		t.Fatalf("slot claim %s should be RELEASED (tombstoned), got isDeleted=%v", k, del)
 	}
 }
 
@@ -240,7 +263,7 @@ func TestClinic_CreateBookable(t *testing.T) {
 
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0001", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z","reason":"Annual checkup"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	if adoc := clReadDoc(t, ctx, conn, apptKey); adoc["class"] != "appointment" {
@@ -268,6 +291,12 @@ func TestClinic_CreateBookable(t *testing.T) {
 	if ld := clReadDoc(t, ctx, conn, withProvider); ld["sourceVertex"] != apptKey || ld["targetVertex"] != providerKey {
 		t.Fatalf("withProvider link endpoints = src %v tgt %v", ld["sourceVertex"], ld["targetVertex"])
 	}
+	// The 30-minute booking covers two 15-minute cells (15:00, 15:15); both hubs
+	// hold a LIVE slot-claim aspect for each — the write-path double-book lock.
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-01T15:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-01T15:15:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-07-01T15:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-07-01T15:15:00Z")
 }
 
 // TestClinic_SetProviderProfile proves SetProviderProfile edits an existing
@@ -322,11 +351,16 @@ func TestClinic_SetProviderProfile(t *testing.T) {
 		[]string{"vtx.provider.spnope0000000000000"}, processor.OutcomeRejected)
 }
 
-// TestClinic_DoubleBookRejected proves op-time double-book rejection: CreateAppointment
-// enumerates the provider's hasBooking links, kv.Reads each candidate's live schedule + status,
-// and rejects an overlap with a still scheduled/confirmed appointment (SlotConflict) while
-// allowing disjoint / back-to-back slots, a different provider, and a freed (cancelled /
-// tombstoned) slot. Also proves the endsAt>startsAt guard.
+// TestClinic_DoubleBookRejected proves write-path double-book rejection: CreateAppointment
+// claims a deterministic providerSlotClaim aspect per covered 15-minute grid cell, and a
+// live claim on any covered cell rejects the whole booking (SlotConflict), while disjoint /
+// back-to-back cells, a different provider, and a freed (cancelled / tombstoned) slot are
+// all accepted. Also proves the endsAt>startsAt guard. The write-path CreateOnly /
+// expectedRevision conditioning that makes two truly concurrent claims for the same cell
+// collide is the Processor's own atomic-batch guarantee (Contract #2 §2.5), exercised at
+// the substrate/processor level, not re-proven here — this suite proves the FUNCTIONAL
+// claim/release behavior via sequential submissions, exactly as the retired mechanism's
+// suite did.
 func TestClinic_DoubleBookRejected(t *testing.T) {
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "double-book")
@@ -336,65 +370,99 @@ func TestClinic_DoubleBookRejected(t *testing.T) {
 	providerKey := createProvider(t, ctx, conn, cp, cons, "dbprv0001", "Dr. Vale", "Cardiology")
 	providerKey2 := createProvider(t, ctx, conn, cp, cons, "dbprv0002", "Dr. West", "Pediatrics")
 
-	bk := providerKey + ".bookingGuard"
-	bk2 := providerKey2 + ".bookingGuard"
-	mkAppt := func(label, prov, bkkey, start, end string, want processor.MessageOutcome) string {
+	mkAppt := func(label, patient, prov, start, end string, want processor.MessageOutcome) string {
 		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
-			`{"patient":"`+patientKey+`","provider":"`+prov+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{patientKey, prov, bkkey, patientKey + ".bookingGuard"}, want)
+			`{"patient":"`+patient+`","provider":"`+prov+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
+			[]string{patient, prov}, want)
 	}
 
-	// 1. First booking 10:00–10:30 → accepted.
-	a1 := mkAppt("dbappt0001", providerKey, bk, "2026-08-01T10:00:00Z", "2026-08-01T10:30:00Z", processor.OutcomeAccepted)
-	// 2. Overlapping 10:15–10:45 with the SAME provider → SlotConflict (rejected).
-	mkAppt("dbappt0002", providerKey, bk, "2026-08-01T10:15:00Z", "2026-08-01T10:45:00Z", processor.OutcomeRejected)
-	// 3. Fully containing 09:45–10:50 → also overlaps → rejected.
-	mkAppt("dbappt0003", providerKey, bk, "2026-08-01T09:45:00Z", "2026-08-01T10:50:00Z", processor.OutcomeRejected)
-	// 4. Disjoint 11:00–11:30 with the same provider → accepted.
-	a4 := mkAppt("dbappt0004", providerKey, bk, "2026-08-01T11:00:00Z", "2026-08-01T11:30:00Z", processor.OutcomeAccepted)
-	// 5. Back-to-back 10:30–11:00 (touches a1's end and a4's start, half-open → no overlap) → accepted.
-	mkAppt("dbappt0005", providerKey, bk, "2026-08-01T10:30:00Z", "2026-08-01T11:00:00Z", processor.OutcomeAccepted)
-	// 6. Same 10:00–10:30 slot but a DIFFERENT provider AND a DIFFERENT patient → the
-	//    provider conflict is per-provider, and the patient guard is per-patient, so
-	//    neither fires → accepted. (The original patient at this exact slot would now
-	//    be a PatientDoubleBook — see TestClinic_PatientDoubleBook.)
+	// 1. First booking 10:00–10:30 (cells 10:00, 10:15) → accepted.
+	a1 := mkAppt("dbappt0001", patientKey, providerKey, "2026-08-01T10:00:00Z", "2026-08-01T10:30:00Z", processor.OutcomeAccepted)
+	// 2. Overlapping 10:15–10:45 (cells 10:15, 10:30) shares cell 10:15 with a1, same
+	//    provider → SlotConflict (rejected).
+	mkAppt("dbappt0002", patientKey, providerKey, "2026-08-01T10:15:00Z", "2026-08-01T10:45:00Z", processor.OutcomeRejected)
+	// 3. Fully containing 09:45–10:45 (cells 09:45, 10:00, 10:15, 10:30) also shares
+	//    cells with a1 → rejected.
+	mkAppt("dbappt0003", patientKey, providerKey, "2026-08-01T09:45:00Z", "2026-08-01T10:45:00Z", processor.OutcomeRejected)
+	// 4. Disjoint 11:00–11:30 (cells 11:00, 11:15) with the same provider → accepted.
+	a4 := mkAppt("dbappt0004", patientKey, providerKey, "2026-08-01T11:00:00Z", "2026-08-01T11:30:00Z", processor.OutcomeAccepted)
+	// 5. Back-to-back 10:30–11:00 (cells 10:30, 10:45) — disjoint from a1's {10:00,
+	//    10:15} and a4's {11:00, 11:15}, no shared cell → accepted.
+	mkAppt("dbappt0005", patientKey, providerKey, "2026-08-01T10:30:00Z", "2026-08-01T11:00:00Z", processor.OutcomeAccepted)
+	// 6. Same 10:00–10:30 cells but a DIFFERENT provider AND a DIFFERENT patient → the
+	//    claim is per-hub-per-cell, so neither hub's claim collides → accepted. (The
+	//    original patient at this exact slot would now be a PatientDoubleBook — see
+	//    TestClinic_PatientDoubleBook.)
 	clSubmit(t, ctx, conn, cp, cons, "dbappt0006", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey2+`","provider":"`+providerKey2+`","startsAt":"2026-08-01T10:00:00Z","endsAt":"2026-08-01T10:30:00Z"}`,
-		[]string{patientKey2, providerKey2, bk2, patientKey2 + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey2, providerKey2}, processor.OutcomeAccepted)
 
-	// 7. endsAt <= startsAt → InvalidArgument (rejected), no overlap math needed.
-	mkAppt("dbappt0007", providerKey, bk, "2026-08-01T13:00:00Z", "2026-08-01T13:00:00Z", processor.OutcomeRejected)
+	// 7. endsAt <= startsAt → InvalidArgument (rejected), no cell math needed.
+	mkAppt("dbappt0007", patientKey, providerKey, "2026-08-01T13:00:00Z", "2026-08-01T13:00:00Z", processor.OutcomeRejected)
 
-	// 8. Cancel a1, then re-book its 10:00–10:30 slot → the cancelled appointment no
-	//    longer blocks (skipped by liveness; its hasBooking link is tombstoned) → accepted.
+	// 8. Cancel a1, then re-book its 10:00–10:30 cells → the cancelled appointment's
+	//    claims were released on the terminal transition, so the cells are free → accepted.
 	a1Key := "vtx.appointment." + a1
 	clSubmit(t, ctx, conn, cp, cons, "dbcancel001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+a1Key+`","status":"cancelled"}`, []string{a1Key}, processor.OutcomeAccepted)
-	mkAppt("dbappt0008", providerKey, bk, "2026-08-01T10:00:00Z", "2026-08-01T10:30:00Z", processor.OutcomeAccepted)
+		`{"appointmentKey":"`+a1Key+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{a1Key}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-01T10:00:00Z")
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-01T10:15:00Z")
+	mkAppt("dbappt0008", patientKey, providerKey, "2026-08-01T10:00:00Z", "2026-08-01T10:30:00Z", processor.OutcomeAccepted)
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-08-01T10:00:00Z")
 
-	// 9. Tombstone a4 (11:00–11:30), then re-book that slot → a tombstoned vertex is
-	//    ignored (gated on the vertex isDeleted, not the lingering aspects) → accepted.
+	// 9. Tombstone a4 (11:00–11:30), then re-book that slot → the hard tombstone
+	//    released a4's held cells too → accepted.
 	a4Key := "vtx.appointment." + a4
 	clSubmit(t, ctx, conn, cp, cons, "dbtomb0001", "TombstoneAppointment", "appointment",
-		`{"appointmentKey":"`+a4Key+`"}`, []string{a4Key}, processor.OutcomeAccepted)
-	mkAppt("dbappt0009", providerKey, bk, "2026-08-01T11:00:00Z", "2026-08-01T11:30:00Z", processor.OutcomeAccepted)
+		`{"appointmentKey":"`+a4Key+`","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{a4Key}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-01T11:00:00Z")
+	mkAppt("dbappt0009", patientKey, providerKey, "2026-08-01T11:00:00Z", "2026-08-01T11:30:00Z", processor.OutcomeAccepted)
+}
 
-	// Eager bound-maintenance: the cancelled a1 and the tombstoned a4 had their
-	// provider-sourced hasBooking links tombstoned, so the double-book guard fast-skips
-	// them (the live-status skip is the correctness backstop; this bounds the fan-out).
-	clAssertBookingLinkTombstoned(t, ctx, conn, providerKey, a1Key)
-	clAssertBookingLinkTombstoned(t, ctx, conn, providerKey, a4Key)
+// TestClinic_TombstoneAppointmentValidatesEndpoints proves TombstoneAppointment's
+// provider/patient are validated against the appointment's actual withProvider /
+// forPatient links (WrongProvider / WrongPatient) before any cell is released — a
+// wrong / fabricated endpoint must not release someone else's slot claims.
+func TestClinic_TombstoneAppointmentValidatesEndpoints(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "tomb-validate")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "tvpat0001", "Val Idate")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "tvprv0001", "Dr. Real", "Cardiology")
+	otherProvider := createProvider(t, ctx, conn, cp, cons, "tvprv0002", "Dr. Other", "Pediatrics")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "tvappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-08-05T10:00:00Z","endsAt":"2026-08-05T10:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// A provider that is NOT this appointment's actual provider → WrongProvider,
+	// rejected before any mutation.
+	clSubmit(t, ctx, conn, cp, cons, "tvtomb0001", "TombstoneAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","provider":"`+otherProvider+`","patient":"`+patientKey+`"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
+	if clMissing(t, ctx, conn, apptKey) {
+		t.Fatalf("appointment must survive a TombstoneAppointment with a wrong provider")
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-08-05T10:00:00Z")
+
+	// The real endpoints → accepted, cells released.
+	clSubmit(t, ctx, conn, cp, cons, "tvtomb0002", "TombstoneAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-05T10:00:00Z")
 }
 
 // TestClinic_PatientDoubleBook proves the patient-side double-book guard — the
-// symmetric analog of the per-provider SlotConflict. A per-provider enumeration alone
+// symmetric analog of the per-provider SlotConflict. A per-provider claim set alone
 // cannot see a patient booked with TWO DIFFERENT providers at the same instant; the
-// patient's own hasBooking links close that. CreateAppointment AND
-// RescheduleAppointment enumerate them (kv.Links), serialized on the patient's
-// .bookingGuard epoch (a declared, OCC-snapshotted contextHint.reads key), and reject
-// an overlap with the patient's other live appointment (PatientDoubleBook),
-// while allowing a different patient, a back-to-back slot, and a freed (cancelled)
-// slot. This is the exact PO live-repro: one patient cannot be in two rooms at once.
+// patient's own patientSlotClaim aspects close that. CreateAppointment AND
+// RescheduleAppointment claim one per covered cell on the patient hub, and reject
+// an overlap with the patient's other live claim (PatientDoubleBook), while allowing
+// a different patient, a back-to-back slot, and a freed (cancelled) slot. This is
+// the exact PO live-repro: one patient cannot be in two rooms at once.
 func TestClinic_PatientDoubleBook(t *testing.T) {
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "patient-double-book")
@@ -404,27 +472,28 @@ func TestClinic_PatientDoubleBook(t *testing.T) {
 	provA := createProvider(t, ctx, conn, cp, cons, "pdprvA001", "Dr. A", "Cardiology")
 	provB := createProvider(t, ctx, conn, cp, cons, "pdprvB001", "Dr. B", "Pediatrics")
 	provC := createProvider(t, ctx, conn, cp, cons, "pdprvC001", "Dr. C", "GeneralPractice")
-	pbk := patientKey + ".bookingGuard"
 
 	book := func(label, patient, prov, start, end string, want processor.MessageOutcome) string {
 		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
 			`{"patient":"`+patient+`","provider":"`+prov+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{patient, prov, prov + ".bookingGuard", patient + ".bookingGuard"}, want)
+			[]string{patient, prov}, want)
 	}
 
-	// 1. Patient booked with provider A at 14:00–14:30 → accepted (first booking).
+	// 1. Patient booked with provider A at 14:00–14:30 (cells 14:00, 14:15) → accepted.
 	aA := book("pdappt0001", patientKey, provA, "2026-08-10T14:00:00Z", "2026-08-10T14:30:00Z", processor.OutcomeAccepted)
 	// 2. SAME patient with a DIFFERENT provider B at the SAME slot → PatientDoubleBook
 	//    (the exact PO repro — provider B's own book is empty, yet the patient is busy).
 	book("pdappt0002", patientKey, provB, "2026-08-10T14:00:00Z", "2026-08-10T14:30:00Z", processor.OutcomeRejected)
-	// 3. Same patient, provider B, partially overlapping 14:15–14:45 → rejected.
+	// 3. Same patient, provider B, partially overlapping 14:15–14:45 (shares cell
+	//    14:15 with booking 1) → rejected.
 	book("pdappt0003", patientKey, provB, "2026-08-10T14:15:00Z", "2026-08-10T14:45:00Z", processor.OutcomeRejected)
-	// 4. Back-to-back 14:30–15:00 with provider B (half-open → no overlap) → accepted.
+	// 4. Back-to-back 14:30–15:00 (cells 14:30, 14:45) with provider B — disjoint from
+	//    booking 1's {14:00, 14:15} → accepted.
 	book("pdappt0004", patientKey, provB, "2026-08-10T14:30:00Z", "2026-08-10T15:00:00Z", processor.OutcomeAccepted)
 	// 5. Disjoint 16:00–16:30 with provider B → accepted.
 	book("pdappt0005", patientKey, provB, "2026-08-10T16:00:00Z", "2026-08-10T16:30:00Z", processor.OutcomeAccepted)
 	// 6. A DIFFERENT patient at the same 14:00 slot (provider C, free) → accepted: the
-	//    patient guard is per-patient, and provider C's book is free (no SlotConflict).
+	//    claim is per-patient, and provider C's book is free (no SlotConflict).
 	book("pdappt0006", patientKey2, provC, "2026-08-10T14:00:00Z", "2026-08-10T14:30:00Z", processor.OutcomeAccepted)
 
 	// 7. Reschedule a provider-B appointment back onto 14:00 (where the patient is still
@@ -433,20 +502,20 @@ func TestClinic_PatientDoubleBook(t *testing.T) {
 	a7 := "vtx.appointment." + book("pdappt0007", patientKey, provB, "2026-08-10T18:00:00Z", "2026-08-10T18:30:00Z", processor.OutcomeAccepted)
 	clSubmit(t, ctx, conn, cp, cons, "pdres0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+a7+`","provider":"`+provB+`","patient":"`+patientKey+`","startsAt":"2026-08-10T14:00:00Z","endsAt":"2026-08-10T14:30:00Z"}`,
-		[]string{a7, provB + ".bookingGuard", pbk}, processor.OutcomeRejected)
+		[]string{a7}, processor.OutcomeRejected)
 
 	// 8. Cancel the provider-A 14:00 appointment, then the reschedule onto 14:00
-	//    succeeds (the cancelled appointment's patient hasBooking link is tombstoned / skipped).
+	//    succeeds (the cancelled appointment's patient slot claims were released on
+	//    the terminal transition).
 	aAKey := "vtx.appointment." + aA
 	clSubmit(t, ctx, conn, cp, cons, "pdcancel01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+aAKey+`","status":"cancelled"}`, []string{aAKey}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+aAKey+`","status":"cancelled","provider":"`+provA+`","patient":"`+patientKey+`"}`,
+		[]string{aAKey}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-08-10T14:00:00Z")
 	clSubmit(t, ctx, conn, cp, cons, "pdres0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+a7+`","provider":"`+provB+`","patient":"`+patientKey+`","startsAt":"2026-08-10T14:00:00Z","endsAt":"2026-08-10T14:30:00Z"}`,
-		[]string{a7, provB + ".bookingGuard", pbk}, processor.OutcomeAccepted)
-
-	// Eager bound-maintenance: cancelling the provider-A appointment tombstoned its
-	// patient-sourced hasBooking link, so the patient-side guard fast-skips it.
-	clAssertBookingLinkTombstoned(t, ctx, conn, patientKey, aAKey)
+		[]string{a7}, processor.OutcomeAccepted)
+	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-08-10T14:00:00Z")
 }
 
 // TestClinic_SetAppointmentStatus proves the unconditioned-upsert idiom: a
@@ -458,8 +527,8 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0002", "Bob Tenant")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0002", "Dr. Lee", "Dermatology")
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0002", "CreateAppointment", "appointment",
-		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-02T09:00:00Z","endsAt":"2026-07-02T09:20:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-02T09:00:00Z","endsAt":"2026-07-02T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	clSubmit(t, ctx, conn, cp, cons, "setstat0001", "SetAppointmentStatus", "appointment",
@@ -487,8 +556,8 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0009", "Pat Note")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0009", "Dr. Note", "Cardiology")
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0009", "CreateAppointment", "appointment",
-		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-09T09:00:00Z","endsAt":"2026-07-09T09:20:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-09T09:00:00Z","endsAt":"2026-07-09T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	// checkedIn is a valid status (the new active state).
@@ -535,13 +604,16 @@ func TestClinic_TerminalStatusGuard(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0010", "Term Patient")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0010", "Dr. Term", "Cardiology")
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0010", "CreateAppointment", "appointment",
-		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T09:00:00Z","endsAt":"2026-07-10T09:20:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T09:00:00Z","endsAt":"2026-07-10T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	// Move to a terminal status (the visit happened).
+	// Move to a terminal status (the visit happened) — the FIRST terminal transition
+	// requires provider + patient (to release the held slot-claim cells).
 	clSubmit(t, ctx, conn, cp, cons, "setcompl001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"completed"}`, []string{apptKey}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+apptKey+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T09:00:00Z")
 
 	// completed→scheduled is REJECTED — a completed visit must not silently revert.
 	clSubmit(t, ctx, conn, cp, cons, "settrevrt01", "SetAppointmentStatus", "appointment",
@@ -584,7 +656,7 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0010", "Dr. Visit", "Family")
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0010", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T09:00:00Z","endsAt":"2026-07-10T09:30:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	// Document the visit: raw clinical content + operational follow-up.
@@ -672,18 +744,19 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0007", "Dr. Reyes", "Cardiology")
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0007", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z","reason":"Annual checkup"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	// Reschedule to a new day, re-supplying the reason (the FE round-trips it). The
 	// startsAt is given with a +02:00 offset to prove canonical-UTC normalization.
-	// The provider + patient + their .bookingGuard epochs are supplied for the conflict
-	// checks (provider SlotConflict + patient PatientDoubleBook).
-	bk := providerKey + ".bookingGuard"
-	pbk := patientKey + ".bookingGuard"
+	// provider + patient are supplied and validated (WrongProvider/WrongPatient) so
+	// the op can release the old cells and claim the new ones (SlotConflict /
+	// PatientDoubleBook conflict-check).
 	clSubmit(t, ctx, conn, cp, cons, "resched0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-12T18:00:00+02:00","endsAt":"2026-07-12T18:30:00+02:00","reason":"Annual checkup"}`,
-		[]string{apptKey, bk, pbk}, processor.OutcomeAccepted)
+		[]string{apptKey}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-12T16:00:00Z")
 
 	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
 	sd, _ := sched["data"].(map[string]any)
@@ -711,8 +784,8 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 
 	// Reschedule again with NO reason → the reason is cleared.
 	clSubmit(t, ctx, conn, cp, cons, "resched0002", "RescheduleAppointment", "appointment",
-		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-13T09:00:00Z","endsAt":"2026-07-13T09:20:00Z"}`,
-		[]string{apptKey, bk, pbk}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-13T09:00:00Z","endsAt":"2026-07-13T09:30:00Z"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
 	sd2, _ := clReadDoc(t, ctx, conn, apptKey+".schedule")["data"].(map[string]any)
 	if _, present := sd2["reason"]; present {
 		t.Fatalf("an omitted reason should clear it; got reason=%v", sd2["reason"])
@@ -723,10 +796,11 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 
 	// A tombstoned appointment cannot be rescheduled.
 	clSubmit(t, ctx, conn, cp, cons, "tombappt0001", "TombstoneAppointment", "appointment",
-		`{"appointmentKey":"`+apptKey+`"}`, []string{apptKey}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
 	clSubmit(t, ctx, conn, cp, cons, "resched0003", "RescheduleAppointment", "appointment",
-		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-14T09:00:00Z","endsAt":"2026-07-14T09:20:00Z"}`,
-		[]string{apptKey, bk, pbk}, processor.OutcomeRejected)
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-14T09:00:00Z","endsAt":"2026-07-14T09:30:00Z"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
 }
 
 // TestClinic_RescheduleIntoConflictRejected proves Increment 2's core property: a
@@ -743,18 +817,16 @@ func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "rcpat0001", "Frank Mover")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "rcprv0001", "Dr. Solis", "Cardiology")
 	providerKey2 := createProvider(t, ctx, conn, cp, cons, "rcprv0002", "Dr. Tan", "Pediatrics")
-	bk := providerKey + ".bookingGuard"
-	pbk := patientKey + ".bookingGuard"
 
 	mkAppt := func(label, start, end string) string {
 		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
 			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{patientKey, providerKey, bk, pbk}, processor.OutcomeAccepted)
+			[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	}
 	resched := func(label, apptKey, start, end string, want processor.MessageOutcome) {
 		clSubmit(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
 			`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{apptKey, bk, pbk}, want)
+			[]string{apptKey}, want)
 	}
 
 	a1 := "vtx.appointment." + mkAppt("rcappt0001", "2026-09-01T10:00:00Z", "2026-09-01T10:30:00Z")
@@ -779,13 +851,14 @@ func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
 	//    even though Dr. Tan's slot is free — a wrong provider must not bypass the
 	//    check by pointing at an empty book.
 	clSubmit(t, ctx, conn, cp, cons, "rcres0007", "RescheduleAppointment", "appointment",
-		`{"appointmentKey":"`+a2+`","provider":"`+providerKey2+`","startsAt":"2026-09-01T15:00:00Z","endsAt":"2026-09-01T15:30:00Z"}`,
-		[]string{a2, providerKey2 + ".bookingGuard"}, processor.OutcomeRejected)
+		`{"appointmentKey":"`+a2+`","provider":"`+providerKey2+`","patient":"`+patientKey+`","startsAt":"2026-09-01T15:00:00Z","endsAt":"2026-09-01T15:30:00Z"}`,
+		[]string{a2}, processor.OutcomeRejected)
 
 	// 8. Cancel a1, then move a2 onto a1's (now freed) 10:00 slot → accepted (a
-	//    cancelled appointment no longer blocks; skipped by liveness).
+	//    cancelled appointment's claims were released on the terminal transition).
 	clSubmit(t, ctx, conn, cp, cons, "rccancel01", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+a1+`","status":"cancelled"}`, []string{a1}, processor.OutcomeAccepted)
+		`{"appointmentKey":"`+a1+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{a1}, processor.OutcomeAccepted)
 	resched("rcres0008", a2, "2026-09-01T10:00:00Z", "2026-09-01T10:30:00Z", processor.OutcomeAccepted)
 }
 
@@ -801,8 +874,6 @@ func TestClinic_ProviderHoursEnforced(t *testing.T) {
 
 	patientKey := createPatient(t, ctx, conn, cp, cons, "phpat0001", "Holly Hours")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "phprv0001", "Dr. Mon", "Cardiology")
-	bk := providerKey + ".bookingGuard"
-
 	// Set Mon(1) + Wed(3) 09:00–17:00 UTC (32400–61200 seconds-of-day).
 	clSubmit(t, ctx, conn, cp, cons, "phhours001", "SetProviderHours", "provider",
 		`{"providerKey":"`+providerKey+`","windows":[{"day":1,"openSec":32400,"closeSec":61200},{"day":3,"openSec":32400,"closeSec":61200}]}`,
@@ -822,7 +893,7 @@ func TestClinic_ProviderHoursEnforced(t *testing.T) {
 	mkAppt := func(label, start, end string, want processor.MessageOutcome) string {
 		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
 			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{patientKey, providerKey, bk, patientKey + ".bookingGuard"}, want)
+			[]string{patientKey, providerKey}, want)
 	}
 
 	// Monday 10:00–10:30 — inside the window → accepted.
@@ -844,7 +915,7 @@ func TestClinic_ProviderHoursEnforced(t *testing.T) {
 	resched := func(label, start, end string, want processor.MessageOutcome) {
 		clSubmit(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
 			`{"appointmentKey":"`+a1Key+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{a1Key, bk, patientKey + ".bookingGuard"}, want)
+			[]string{a1Key}, want)
 	}
 	resched("phres0001", "2026-06-28T10:00:00Z", "2026-06-28T10:30:00Z", processor.OutcomeRejected)
 	resched("phres0002", "2026-07-01T10:00:00Z", "2026-07-01T10:30:00Z", processor.OutcomeAccepted)
@@ -853,7 +924,7 @@ func TestClinic_ProviderHoursEnforced(t *testing.T) {
 	freeProvider := createProvider(t, ctx, conn, cp, cons, "phprv0002", "Dr. Always", "GeneralPractice")
 	clSubmit(t, ctx, conn, cp, cons, "phappt0007", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+freeProvider+`","startsAt":"2026-06-28T03:00:00Z","endsAt":"2026-06-28T03:30:00Z"}`,
-		[]string{patientKey, freeProvider, freeProvider + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, freeProvider}, processor.OutcomeAccepted)
 
 	// Clearing the constraint (windows=[]) makes the original provider unconstrained:
 	// a Sunday booking is now accepted.
@@ -882,12 +953,10 @@ func TestClinic_PastTimeRejected(t *testing.T) {
 
 	patientKey := createPatient(t, ctx, conn, cp, cons, "ptpat0001", "Petra Past")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "ptprv0001", "Dr. Future", "GeneralPractice")
-	bk := providerKey + ".bookingGuard"
-
 	mkAppt := func(label, start, end string, want processor.MessageOutcome) string {
 		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
 			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{patientKey, providerKey, bk, patientKey + ".bookingGuard"}, want)
+			[]string{patientKey, providerKey}, want)
 	}
 
 	// startsAt strictly before submittedAt (the anchor) → ScheduleInPast rejected.
@@ -900,11 +969,11 @@ func TestClinic_PastTimeRejected(t *testing.T) {
 	// RescheduleAppointment into the past is rejected exactly as a create is.
 	clSubmit(t, ctx, conn, cp, cons, "ptres0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2025-06-01T10:00:00Z","endsAt":"2025-06-01T10:30:00Z"}`,
-		[]string{apptKey, bk, patientKey + ".bookingGuard"}, processor.OutcomeRejected)
+		[]string{apptKey}, processor.OutcomeRejected)
 	// A reschedule to a future time still works (and re-derives remindAt).
 	clSubmit(t, ctx, conn, cp, cons, "ptres0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-08-01T10:00:00Z","endsAt":"2026-08-01T10:30:00Z"}`,
-		[]string{apptKey, bk, patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{apptKey}, processor.OutcomeAccepted)
 	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
 	if sd, _ := sched["data"].(map[string]any); sd["startsAt"] != "2026-08-01T10:00:00Z" {
 		t.Fatalf("after future reschedule, startsAt = %v, want 2026-08-01T10:00:00Z", sched["data"])
@@ -924,8 +993,6 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 
 	patientKey := createPatient(t, ctx, conn, cp, cons, "topat0001", "Tom Off")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "toprv0001", "Dr. Away", "GeneralPractice")
-	bk := providerKey + ".bookingGuard"
-
 	// Block a vacation week 2026-07-06 00:00 → 2026-07-13 00:00 (with a reason).
 	clSubmit(t, ctx, conn, cp, cons, "tooff0001", "SetProviderTimeOff", "provider",
 		`{"providerKey":"`+providerKey+`","ranges":[{"from":"2026-07-06T00:00:00Z","to":"2026-07-13T00:00:00Z","reason":"Vacation"}]}`,
@@ -947,7 +1014,7 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 	mkAppt := func(label, start, end string, want processor.MessageOutcome) string {
 		return clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
 			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
-			[]string{patientKey, providerKey, bk, patientKey + ".bookingGuard"}, want)
+			[]string{patientKey, providerKey}, want)
 	}
 
 	// Inside the blocked week → ProviderUnavailable rejected.
@@ -962,16 +1029,16 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 	// A reschedule INTO the blocked week is rejected; a move to another free slot works.
 	clSubmit(t, ctx, conn, cp, cons, "tores0001", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+outsideKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-09T10:00:00Z","endsAt":"2026-07-09T10:30:00Z"}`,
-		[]string{outsideKey, bk, patientKey + ".bookingGuard"}, processor.OutcomeRejected)
+		[]string{outsideKey}, processor.OutcomeRejected)
 	clSubmit(t, ctx, conn, cp, cons, "tores0002", "RescheduleAppointment", "appointment",
 		`{"appointmentKey":"`+outsideKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-21T10:00:00Z","endsAt":"2026-07-21T10:30:00Z"}`,
-		[]string{outsideKey, bk, patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{outsideKey}, processor.OutcomeAccepted)
 
 	// A different provider with NO .timeOff is unrestricted — a booking in that week is fine.
 	freeProvider := createProvider(t, ctx, conn, cp, cons, "toprv0002", "Dr. Here", "GeneralPractice")
 	clSubmit(t, ctx, conn, cp, cons, "toappt0005", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+freeProvider+`","startsAt":"2026-07-08T10:00:00Z","endsAt":"2026-07-08T10:30:00Z"}`,
-		[]string{patientKey, freeProvider, freeProvider + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, freeProvider}, processor.OutcomeAccepted)
 
 	// Clearing the blackouts (ranges=[]) makes the original provider's blocked week bookable.
 	clSubmit(t, ctx, conn, cp, cons, "tooff0002", "SetProviderTimeOff", "provider",
@@ -988,6 +1055,128 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 		[]string{providerKey}, processor.OutcomeRejected)
 }
 
+// TestClinic_RescheduleToSameInterval proves the degenerate case of the
+// release/claim cell diff: a "reschedule" that resupplies the SAME startsAt/endsAt
+// the appointment already holds (e.g. a reason-only edit) computes an EMPTY
+// to_release and to_claim (every held cell appears in both the old and new set),
+// so no cell mutation is emitted — the held cells stay claimed, untouched, and a
+// second, truly conflicting booking against those same cells still correctly
+// rejects.
+func TestClinic_RescheduleToSameInterval(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "reschedule-same")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "rspat0001", "Sam Same")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "rsprv0001", "Dr. Same", "Cardiology")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "rsappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-15T09:00:00Z","endsAt":"2026-07-15T09:30:00Z","reason":"Checkup"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-15T09:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-15T09:15:00Z")
+
+	// Resupply the SAME startsAt/endsAt (only the reason changes) → accepted, held
+	// cells stay live (never released, never re-claimed — an empty diff).
+	clSubmit(t, ctx, conn, cp, cons, "rsres0001", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-15T09:00:00Z","endsAt":"2026-07-15T09:30:00Z","reason":"Checkup, updated note"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+	sd, _ := clReadDoc(t, ctx, conn, apptKey+".schedule")["data"].(map[string]any)
+	if sd["reason"] != "Checkup, updated note" {
+		t.Fatalf("reason = %v, want updated", sd["reason"])
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-15T09:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-15T09:15:00Z")
+
+	// The cells are still genuinely held: a different appointment competing for them
+	// is still rejected (the no-op diff did not silently drop the claim).
+	clSubmit(t, ctx, conn, cp, cons, "rsappt0002", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-15T09:00:00Z","endsAt":"2026-07-15T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeRejected)
+}
+
+// TestClinic_SlotGridAndTooLong proves the two new write-path-claim guards: a
+// startsAt/endsAt not aligned to the clinic's mandatory 15-minute grid is rejected
+// (SlotGridViolation), on both CreateAppointment and RescheduleAppointment; and a
+// span exceeding 96 cells (24h) is rejected (AppointmentTooLong) rather than
+// silently truncated.
+func TestClinic_SlotGridAndTooLong(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "grid-toolong")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "sgpat0001", "Grid Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "sgprv0001", "Dr. Grid", "Cardiology")
+
+	// startsAt minute (:05) is off-grid → SlotGridViolation.
+	clSubmit(t, ctx, conn, cp, cons, "sgappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-03T09:05:00Z","endsAt":"2026-07-03T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeRejected)
+	// endsAt minute (:40) is off-grid → SlotGridViolation.
+	clSubmit(t, ctx, conn, cp, cons, "sgappt0002", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-03T09:00:00Z","endsAt":"2026-07-03T09:40:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeRejected)
+
+	// A valid grid-aligned booking, to reschedule against next.
+	apptID := clSubmit(t, ctx, conn, cp, cons, "sgappt0003", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-03T09:00:00Z","endsAt":"2026-07-03T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// RescheduleAppointment enforces the same grid guard.
+	clSubmit(t, ctx, conn, cp, cons, "sgres0001", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-04T09:10:00Z","endsAt":"2026-07-04T09:30:00Z"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
+	// The appointment's original slot claims survive the rejected reschedule.
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-03T09:00:00Z")
+
+	// A span of 97 fifteen-minute cells (24h15m) exceeds MAX_SLOT_CELLS=96 →
+	// AppointmentTooLong, not a silently truncated claim set.
+	clSubmit(t, ctx, conn, cp, cons, "sgappt0004", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-08-01T00:00:00Z","endsAt":"2026-08-02T00:15:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeRejected)
+
+	// Exactly 96 cells (24h, the boundary) is accepted.
+	clSubmit(t, ctx, conn, cp, cons, "sgappt0005", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-08-05T00:00:00Z","endsAt":"2026-08-06T00:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+}
+
+// TestClinic_TerminalStatusRequiresEndpoints proves the FIRST terminal
+// SetAppointmentStatus transition requires provider + patient (to release the held
+// slot-claim cells) and validates them against the appointment's actual withProvider
+// / forPatient links (WrongProvider / WrongPatient) — a missing or wrong endpoint
+// must not silently leave the cells claimed, nor release someone else's cells.
+func TestClinic_TerminalStatusRequiresEndpoints(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "terminal-endpoints")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "tepat0001", "Ted Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "teprv0001", "Dr. Ted", "Cardiology")
+	otherPatient := createPatient(t, ctx, conn, cp, cons, "tepat0002", "Other Ted")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "teappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-06T09:00:00Z","endsAt":"2026-07-06T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// Missing provider/patient on the first terminal transition → InvalidArgument.
+	clSubmit(t, ctx, conn, cp, cons, "tecancl001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"cancelled"}`, []string{apptKey}, processor.OutcomeRejected)
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-06T09:00:00Z")
+
+	// A wrong patient (not this appointment's actual patient) → WrongPatient.
+	clSubmit(t, ctx, conn, cp, cons, "tecancl002", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+otherPatient+`"}`,
+		[]string{apptKey}, processor.OutcomeRejected)
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-06T09:00:00Z")
+
+	// The real endpoints → accepted, cells released.
+	clSubmit(t, ctx, conn, cp, cons, "tecancl003", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+		[]string{apptKey}, processor.OutcomeAccepted)
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-06T09:00:00Z")
+}
+
 // TestClinic_RejectsBadStatus proves the status enum guard.
 func TestClinic_RejectsBadStatus(t *testing.T) {
 	ctx, conn := setupClinicEnv(t)
@@ -996,8 +1185,8 @@ func TestClinic_RejectsBadStatus(t *testing.T) {
 	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpat0003", "Carol")
 	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprv0003", "Dr. Kim", "Pediatrics")
 	apptID := clSubmit(t, ctx, conn, cp, cons, "mkappt0003", "CreateAppointment", "appointment",
-		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-03T09:00:00Z","endsAt":"2026-07-03T09:20:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-03T09:00:00Z","endsAt":"2026-07-03T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	clSubmit(t, ctx, conn, cp, cons, "badstat0001", "SetAppointmentStatus", "appointment",
@@ -1023,7 +1212,7 @@ func TestClinic_RejectsWrongClass(t *testing.T) {
 	clSeedVertex(t, ctx, conn, fakePatient, "identity", false)
 
 	apptID := clSubmit(t, ctx, conn, cp, cons, "wrongcls0001", "CreateAppointment", "appointment",
-		`{"patient":"`+fakePatient+`","provider":"`+providerKey+`","startsAt":"2026-07-04T09:00:00Z","endsAt":"2026-07-04T09:20:00Z"}`,
+		`{"patient":"`+fakePatient+`","provider":"`+providerKey+`","startsAt":"2026-07-04T09:00:00Z","endsAt":"2026-07-04T09:30:00Z"}`,
 		[]string{fakePatient, providerKey}, processor.OutcomeRejected)
 
 	if !clMissing(t, ctx, conn, "vtx.appointment."+apptID) {
@@ -1041,7 +1230,7 @@ func TestClinic_RejectsDeadEndpoint(t *testing.T) {
 	absentPatient := "vtx.patient.CLabsentptHJKMNPQRS"
 
 	apptID := clSubmit(t, ctx, conn, cp, cons, "dead0001", "CreateAppointment", "appointment",
-		`{"patient":"`+absentPatient+`","provider":"`+providerKey+`","startsAt":"2026-07-05T09:00:00Z","endsAt":"2026-07-05T09:20:00Z"}`,
+		`{"patient":"`+absentPatient+`","provider":"`+providerKey+`","startsAt":"2026-07-05T09:00:00Z","endsAt":"2026-07-05T09:30:00Z"}`,
 		[]string{absentPatient, providerKey}, processor.OutcomeRejected)
 
 	if !clMissing(t, ctx, conn, "vtx.appointment."+apptID) {

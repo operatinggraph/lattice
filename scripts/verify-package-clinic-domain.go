@@ -12,8 +12,11 @@
 //	  SetAppointmentStatus + RecordEncounter + TombstoneAppointment), each with its
 //	  self-description.
 //	9 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
-//	  appointmentStatus, providerBookingGuard, providerHours, providerTimeOff,
-//	  patientBookingGuard, appointmentEncounter — their step-6 write gates.
+//	  appointmentStatus, providerHours, providerTimeOff, providerSlotClaim,
+//	  patientSlotClaim, appointmentEncounter — their step-6 write gates.
+//	The retired providerBookingGuard / patientBookingGuard DDLs are asserted ABSENT
+//	(clinic-booking-write-path-slot-claims-design.md — write-path slot claims
+//	replaced the scalar OCC epoch + hasBooking-link enumeration).
 //	12 permission vertices (one per op), scope any, granted to operator.
 //	1 package vertex + manifest aspect (name=clinic-domain).
 //
@@ -123,12 +126,16 @@ func main() {
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
 		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus"}},
-		{canonical: "providerBookingGuard", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "CreateAppointment", "RescheduleAppointment"}},
 		{canonical: "providerHours", class: "meta.ddl.aspectType", ops: []string{"SetProviderHours"}},
 		{canonical: "providerTimeOff", class: "meta.ddl.aspectType", ops: []string{"SetProviderTimeOff"}},
-		{canonical: "patientBookingGuard", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "CreateAppointment", "RescheduleAppointment"}},
+		{canonical: "providerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"}},
+		{canonical: "patientSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"}},
 		{canonical: "appointmentEncounter", class: "meta.ddl.aspectType", ops: []string{"RecordEncounter"}},
 	}
+
+	// The retired scalar-epoch DDLs must NOT exist — the write-path slot-claim
+	// mechanism replaced them entirely (clinic-booking-write-path-slot-claims-design.md).
+	retiredCanonicals := []string{"providerBookingGuard", "patientBookingGuard"}
 
 	for _, dc := range ddlChecks {
 		ddlKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, dc.canonical)
@@ -196,6 +203,17 @@ func main() {
 					ok(k + " envelope shape OK")
 				}
 			}
+		}
+	}
+
+	for _, canonical := range retiredCanonicals {
+		ddlKey, err := pkgverify.FindMetaByCanonical(ctx, coreKV, allKeys, canonical)
+		if err != nil {
+			fail(canonical+" DDL absence", fmt.Sprintf("lookup error: %v", err))
+		} else if ddlKey != "" {
+			fail(canonical+" DDL absence", fmt.Sprintf("found %s; the write-path slot-claim mechanism must have retired this DDL", ddlKey))
+		} else {
+			ok(canonical + " DDL absent (retired)")
 		}
 	}
 

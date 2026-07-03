@@ -44,8 +44,8 @@
           <div class="field-row">
             <div class="field">
               <label for="startsAt">Date &amp; time</label>
-              <input type="datetime-local" id="startsAt" />
-              <p class="hint">Double-booking this provider is rejected, and bookings outside the provider's availability hours (if set, in UTC) are rejected.</p>
+              <input type="datetime-local" id="startsAt" step="900" />
+              <p class="hint">Appointments must align to the clinic's 15-minute grid. Double-booking this provider is rejected, and bookings outside the provider's availability hours (if set, in UTC) are rejected.</p>
               <p class="hint warn" id="timeoff-warning" hidden></p>
             </div>
             <div class="field">
@@ -343,7 +343,7 @@
         <div class="field-row">
           <div class="field">
             <label for="rs-startsAt">New date &amp; time</label>
-            <input type="datetime-local" id="rs-startsAt" />
+            <input type="datetime-local" id="rs-startsAt" step="900" />
             <p class="hint">Requested time — availability isn't enforced yet.</p>
           </div>
           <div class="field">

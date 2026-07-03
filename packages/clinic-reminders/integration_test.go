@@ -144,7 +144,7 @@ func TestRecordAppointmentReminder_WritesMarker(t *testing.T) {
 
 	apptID := crSubmit(t, ctx, conn, cp, cons, "crappt001", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	// remindAt was derived by CreateAppointment = startsAt − 24h.
@@ -232,7 +232,7 @@ func TestRecordFollowUpReminder_WritesMarker(t *testing.T) {
 
 	apptID := crSubmit(t, ctx, conn, cp, cons, "crfuap001", "CreateAppointment", "appointment",
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`,
-		[]string{patientKey, providerKey, providerKey + ".bookingGuard", patientKey + ".bookingGuard"}, processor.OutcomeAccepted)
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
 	// The directOp: RecordFollowUpReminder targets the appointment. Class LEFT EMPTY

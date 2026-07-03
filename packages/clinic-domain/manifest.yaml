@@ -1,10 +1,10 @@
 name: clinic-domain
-version: 0.11.0
+version: 0.12.0
 description: |
   Clinic bookable domain. Self-contained package owning three vertex types —
   patient, provider, appointment — with their aspects (.demographics, .profile,
-  .schedule, .status, .encounter, provider/patient .bookingGuard) and links
-  (forPatient, withProvider, provider/patient-sourced hasBooking), written by the
+  .schedule, .status, .encounter, provider/patient .slot<cellcode> claims) and
+  links (forPatient, withProvider), written by the
   Create*/Reschedule/SetAppointmentStatus/RecordEncounter/Tombstone* ops.
   RecordEncounter captures the post-visit clinical record (.encounter — RAW PHI
   {summary, assessment, plan} never projected, plus operational documentation /
@@ -18,13 +18,15 @@ description: |
   (follow-ups worklist, "All providers" aggregate, the patient-context switcher
   roster) all read them as an authenticated actor instead of the unprotected
   NATS-KV buckets; the staff audiences use the reserved WildcardAnchor grant.
-  CreateAppointment + RescheduleAppointment reject a provider double-book
-  (SlotConflict) AND a patient double-book across providers (PatientDoubleBook)
-  by ENUMERATING the provider's / patient's hasBooking links (kv.Links, Contract
-  #2 §2.5.1) serialized on a scalar .bookingGuard epoch, and an out-of-hours
-  booking (OutsideHours) via the provider's opt-in .hours availability windows
-  (SetProviderHours). No package dependency. PHI/Vault and @every recurring
-  schedules are the separate deferred items this vertical forces — out of scope here.
+  The clinic's booking grid is a mandatory 15-minute cadence: CreateAppointment +
+  RescheduleAppointment reject a provider double-book (SlotConflict) AND a
+  patient double-book across providers (PatientDoubleBook) by CLAIMING a
+  deterministic providerSlotClaim/patientSlotClaim aspect per covered 15-minute
+  grid cell — the write-path key collision (CreateOnly/expectedRevision) IS the
+  lock, no read-time enumeration — and an out-of-hours booking (OutsideHours) via
+  the provider's opt-in .hours availability windows (SetProviderHours). No
+  package dependency. PHI/Vault and @every recurring schedules are the separate
+  deferred items this vertical forces — out of scope here.
 declares:
   ddls:
     - canonicalName: patient
@@ -41,13 +43,13 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: appointmentStatus
       class: meta.ddl.aspectType
-    - canonicalName: providerBookingGuard
-      class: meta.ddl.aspectType
     - canonicalName: providerHours
       class: meta.ddl.aspectType
     - canonicalName: providerTimeOff
       class: meta.ddl.aspectType
-    - canonicalName: patientBookingGuard
+    - canonicalName: providerSlotClaim
+      class: meta.ddl.aspectType
+    - canonicalName: patientSlotClaim
       class: meta.ddl.aspectType
     - canonicalName: appointmentEncounter
       class: meta.ddl.aspectType
