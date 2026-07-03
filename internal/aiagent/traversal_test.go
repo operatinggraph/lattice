@@ -159,6 +159,80 @@ func TestReadCapability_HappyPath(t *testing.T) {
 	}
 }
 
+// TestReadCapability_MergesCoreAndRoles reproduces the
+// root-designation-topology-reconverge regression: an actor holding the
+// primordial operator role (so cap.identity.<actor>, the kernel-literal
+// anchor, is projected) ALSO holds an rbac-granted permission that only
+// lives in cap.roles.identity.<actor>. Neither producer is a subset of the
+// other, so ReadCapability must return the union of both, not just one.
+func TestReadCapability_MergesCoreAndRoles(t *testing.T) {
+	ctx, conn, tr := setupUnitEnv(t)
+
+	actorID := "MergeCapTestActorID001"
+	coreKey := "cap.identity." + actorID
+	putKV(t, ctx, conn, unitCapBucket, coreKey, map[string]any{
+		"key":                    coreKey,
+		"actor":                  "vtx.identity." + actorID,
+		"version":                "1.0",
+		"projectedAt":            "2026-05-23T00:00:00Z",
+		"projectedFromRevisions": map[string]any{},
+		"lanes":                  []string{"default", "meta", "urgent", "system"},
+		"platformPermissions": []any{
+			map[string]any{"operationType": "CreateMetaVertex", "scope": "any"},
+			map[string]any{"operationType": "InstallPackage", "scope": "any"},
+		},
+		"serviceAccess":   []any{},
+		"ephemeralGrants": []any{},
+		"roles":           []string{},
+	})
+
+	rolesKey := "cap.roles.identity." + actorID
+	putKV(t, ctx, conn, unitCapBucket, rolesKey, map[string]any{
+		"key":                    rolesKey,
+		"actor":                  "vtx.identity." + actorID,
+		"version":                "1.0",
+		"projectedAt":            "2026-05-23T00:00:00Z",
+		"projectedFromRevisions": map[string]any{},
+		"lanes":                  []string{"default"},
+		"platformPermissions": []any{
+			map[string]any{"operationType": "CreateBook", "scope": "any"},
+		},
+		"serviceAccess":   []any{},
+		"ephemeralGrants": []any{},
+		"roles":           []string{"vtx.role.OperatorRoleID000001"},
+	})
+
+	doc, err := tr.ReadCapability(ctx, actorID)
+	if err != nil {
+		t.Fatalf("ReadCapability: %v", err)
+	}
+	has := func(op string) bool {
+		for _, p := range doc.PlatformPermissions {
+			if p.OperationType == op {
+				return true
+			}
+		}
+		return false
+	}
+	for _, op := range []string{"CreateMetaVertex", "InstallPackage", "CreateBook"} {
+		if !has(op) {
+			t.Errorf("merged capability doc missing %q (platformPermissions: %+v)", op, doc.PlatformPermissions)
+		}
+	}
+	if len(doc.Roles) != 1 || doc.Roles[0] != "vtx.role.OperatorRoleID000001" {
+		t.Errorf("merged capability doc lost roles: %+v", doc.Roles)
+	}
+	wantLanes := map[string]bool{"default": true, "meta": true, "urgent": true, "system": true}
+	if len(doc.Lanes) != len(wantLanes) {
+		t.Errorf("merged capability doc lanes mismatch: %+v", doc.Lanes)
+	}
+	for _, l := range doc.Lanes {
+		if !wantLanes[l] {
+			t.Errorf("unexpected lane %q in merged doc", l)
+		}
+	}
+}
+
 // TestReadCapability_NotFound asserts an error is returned when the key
 // is absent from Capability KV.
 func TestReadCapability_NotFound(t *testing.T) {
