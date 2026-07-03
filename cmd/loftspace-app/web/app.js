@@ -2077,6 +2077,13 @@ function moneyAmount(n) {
 // read_landlord_lease_applications model says this actor manages, so the picker
 // selection IS the landlord sign-in, same as the applicant flows.
 async function loadLandlord() {
+  // A stale query from a prior sign-in/refresh would keep showing that
+  // identity's search results over the freshly loaded units; clear it.
+  const searchInput = $("#unified-search");
+  if (searchInput && searchInput.value) {
+    searchInput.value = "";
+    runUnifiedSearch("");
+  }
   const grid = $("#units");
   const empty = $("#units-empty");
   if (!state.applicant) {
@@ -2268,6 +2275,142 @@ function dispChip(text, cls) {
   badge.className = "disp " + cls;
   badge.textContent = text;
   return badge;
+}
+
+// ---- Front-of-house unified search (search-target-adapter-design.md §0a) ----
+//
+// One search box in the landlord/staff console: GET /api/search fans out
+// typed queries (people + units) over the same RLS-protected read models the
+// normal my-units view uses, so authorization composes for free. Results
+// replace #landlord-normal-view while a query is active; clearing the box
+// restores it. Debounced so each keystroke does not round-trip Postgres.
+
+let unifiedSearchTimer = null;
+
+function wireUnifiedSearch() {
+  const input = $("#unified-search");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    clearTimeout(unifiedSearchTimer);
+    const q = input.value.trim();
+    unifiedSearchTimer = setTimeout(() => runUnifiedSearch(q), 250);
+  });
+}
+
+async function runUnifiedSearch(q) {
+  const results = $("#unified-search-results");
+  const summary = $("#unified-search-summary");
+  if (!q) {
+    results.hidden = true;
+    summary.textContent = "";
+    $("#landlord-normal-view").hidden = false;
+    return;
+  }
+  $("#landlord-normal-view").hidden = true;
+  results.hidden = false;
+  summary.textContent = "Searching…";
+  try {
+    const data = await authedGet("/api/search?q=" + encodeURIComponent(q));
+    // A slower-arriving response for a since-cleared/changed box would clobber
+    // the current view; drop it if the input has since moved on.
+    if ($("#unified-search").value.trim() !== q) return;
+    renderSearchResults(data);
+  } catch (e) {
+    summary.textContent = "Search failed: " + e.message;
+    $("#search-people-title").hidden = true;
+    $("#search-units-title").hidden = true;
+    $("#search-people").innerHTML = "";
+    $("#search-units").innerHTML = "";
+    $("#unified-search-empty").hidden = true;
+  }
+}
+
+function renderSearchResults(data) {
+  const people = data.people || [];
+  const units = data.units || [];
+  const peopleTitle = $("#search-people-title");
+  const unitsTitle = $("#search-units-title");
+  const peopleEl = $("#search-people");
+  const unitsEl = $("#search-units");
+  const empty = $("#unified-search-empty");
+
+  peopleEl.innerHTML = "";
+  unitsEl.innerHTML = "";
+  peopleTitle.hidden = people.length === 0;
+  unitsTitle.hidden = units.length === 0;
+  for (const p of people) peopleEl.append(renderSearchPersonCard(p));
+  for (const u of units) unitsEl.append(renderRLSUnitCard(u));
+
+  const n = people.length + units.length;
+  $("#unified-search-summary").textContent = `${n} result${n === 1 ? "" : "s"}`;
+  empty.hidden = n !== 0;
+  if (n === 0) empty.textContent = "No people or units matched.";
+}
+
+// renderSearchPersonCard renders one People hit: the applicant's name plus up
+// to maxApplicationsPerPersonHit related applications (unit + disposition +
+// contact — the same Secure-Lens columns renderRLSApplicantRow already
+// trusts), read-only. Deciding an application stays the dedicated my-units
+// RLS view's job; search is a lookup surface.
+function renderSearchPersonCard(p) {
+  const card = document.createElement("div");
+  card.className = "card unit-card rls-card";
+
+  const head = document.createElement("div");
+  head.className = "unit-head";
+  const name = document.createElement("div");
+  name.className = "addr";
+  name.textContent = p.name || shortKey(p.identityKey);
+  head.append(name);
+  card.append(head);
+
+  const list = document.createElement("div");
+  list.className = "applicants";
+  const apps = p.applications || [];
+  if (apps.length === 0) {
+    const none = document.createElement("div");
+    none.className = "applicant-none";
+    none.textContent = "No applications on record.";
+    list.append(none);
+  } else {
+    for (const a of apps) list.append(renderSearchApplicationRow(a));
+  }
+  card.append(list);
+  return card;
+}
+
+// renderSearchApplicationRow is renderRLSApplicantRow's read-only sibling: the
+// unit + disposition + contact line, no Approve/Decline (this card spans
+// units the actor may not be mid-deciding, and search is not the decision
+// surface).
+function renderSearchApplicationRow(a) {
+  const row = document.createElement("div");
+  row.className = "applicant";
+
+  const info = document.createElement("div");
+  info.className = "applicant-info";
+  const unit = document.createElement("span");
+  unit.className = "applicant-name";
+  unit.textContent = a.unitAddress || (a.unitKey ? "Unit " + shortKey(a.unitKey) : "—");
+  info.append(unit);
+  if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
+  else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
+  else info.append(dispChip("Awaiting decision", "review"));
+  if (a.signedAt) {
+    const signed = document.createElement("span");
+    signed.className = "signed";
+    signed.textContent = "✓ signed";
+    info.append(signed);
+  }
+  row.append(info);
+
+  if (a.applicantEmail || a.applicantPhone) {
+    const contact = document.createElement("div");
+    contact.className = "applicant-contact";
+    contact.textContent = [a.applicantEmail, a.applicantPhone].filter(Boolean).join(" · ");
+    row.append(contact);
+  }
+  return row;
 }
 
 function renderUnits() {
@@ -2964,6 +3107,7 @@ function init() {
   $("#mode-landlord").addEventListener("click", () => setMode("landlord"));
   $("#post-listing").addEventListener("click", openPostListing);
   $("#reload-units").addEventListener("click", loadLandlord);
+  wireUnifiedSearch();
   $("#listing-cancel").addEventListener("click", closePostListing);
   $("#listing-overlay").addEventListener("click", (e) => {
     if (e.target === $("#listing-overlay")) closePostListing();

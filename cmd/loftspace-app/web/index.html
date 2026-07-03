@@ -125,10 +125,25 @@
         <span id="units-summary" class="summary"></span>
       </div>
 
-      <div id="landlord-rls" class="rls-banner" hidden></div>
-      <div id="landlord-rls-units" class="grid grid-wide" aria-live="polite" hidden></div>
-      <div id="units" class="grid grid-wide" aria-live="polite"></div>
-      <div id="units-empty" class="empty" hidden></div>
+      <div class="panel-controls filter-bar">
+        <input id="unified-search" type="search" placeholder="Search people or units" aria-label="Search people or units by name or address" />
+        <span id="unified-search-summary" class="summary"></span>
+      </div>
+
+      <div id="unified-search-results" hidden>
+        <h3 class="search-group-title" id="search-people-title" hidden>People</h3>
+        <div id="search-people" class="grid grid-wide" aria-live="polite"></div>
+        <h3 class="search-group-title" id="search-units-title" hidden>Units</h3>
+        <div id="search-units" class="grid grid-wide" aria-live="polite"></div>
+        <div id="unified-search-empty" class="empty" hidden></div>
+      </div>
+
+      <div id="landlord-normal-view">
+        <div id="landlord-rls" class="rls-banner" hidden></div>
+        <div id="landlord-rls-units" class="grid grid-wide" aria-live="polite" hidden></div>
+        <div id="units" class="grid grid-wide" aria-live="polite"></div>
+        <div id="units-empty" class="empty" hidden></div>
+      </div>
     </section>
   </main>
 

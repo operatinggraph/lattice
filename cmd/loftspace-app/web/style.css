@@ -546,3 +546,14 @@ button.ghost.danger:hover { background: var(--red); color: #fff; }
   color: var(--text-dim);
   font-size: 0.85rem;
 }
+
+/* Front-of-house unified search grouped results. */
+.search-group-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.search-group-title:not(:first-child) { margin-top: 18px; }
