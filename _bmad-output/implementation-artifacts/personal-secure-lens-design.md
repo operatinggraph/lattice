@@ -428,6 +428,20 @@ Andrew to ratify as a contract diff *for this feature* beyond ratifying D1 + Vau
 Ordered so the security-inert machinery lands first under the trusted posture, the security gate is its own
 fire (the one D1-gated step), and confidentiality + hydration extend it. **Dependency gates are explicit.**
 
+> **🏗️ CHECKPOINT (2026-07-03).** **PL.1 shipped `4b5976a`** — `adapter/natssubject.go` (4-method SPI,
+> delta envelope, fail-closed on a malformed `__actor`, subject-union stream provisioning so two
+> `nats_subject` lenses sharing a stream name don't clobber each other's `Subjects`), `TargetNATSSubjectConfig`
+> + `translateSpec`/`Parse` wiring, `cmd/refractor/main.go`'s `nats_subject` case, `subjects.PersonalSync`,
+> and an e2e test proving the real CDC pipeline (Core KV write → CoreKVSource → pipeline → adapter →
+> subscriber). **Deviations from this section, both judgment calls within Fire 1's scope, not gaps:**
+> stream provisioning is **adapter-JIT** (`EnsureStream`), not bootstrap-pre-provisioned — §3.2 explicitly
+> offered both and only recommended bootstrap for parity, so JIT (mirroring the `nats_kv` bucket-create
+> precedent) is the sanctioned alternative; the trivial test lens is a **plain single-vertex-anchored
+> lens** (no `personal: true` flag) — that flag installs the Fire-2 `ActorEnumerator` fan-out, which PL.1
+> doesn't need (its cypher RETURN supplies `__actor` directly). `docs/components/refractor.md` got its
+> promised DOC ADD. **Next: PL.2** — the per-actor fan-out (install `ActorEnumerator` on this target) +
+> the `personal-lens-interest` Interest Set + `personal.register`/`.deregister` control RPCs.
+
 1. **PL.1 — the `nats_subject` adapter + SYNC stream (the "brand-new adapter").** Implement
    `adapter/natssubject.go` (4-method SPI + ciphertext-passthrough), `TargetNATSSubjectConfig` +
    translate/validate, the `case "nats_subject"` in `cmd/refractor/main.go`, the delta envelope, and the
