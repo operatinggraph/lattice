@@ -200,6 +200,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `f97afed` · [Core] aiagent ReadCapability fix — c9a8031's live holdsRole routing dropped rbac grants for operator-role actors; now unions cap.identity+cap.roles; fixed main-red Gate 5
 - 2026-07-03 · `c9a8031` · [Core] root-designation-topology-reconverge — Fork A: three capability sites (+ aiagent read routing) re-converged on holdsRole→operator; Gate-3 vector #16 added
 - 2026-07-02 · `eb20923` · [lease-signing] Vault Fire 5b-iii-a — real-Vault shred-undecryptable proof for landlordLeaseApplicationsRead's own committed ciphertext
 - 2026-07-02 · `3ef4830` · [docs] Arch-review: docs-truth-sweep — Gateway/Vault built, gateway.md phantom §refs + ops-publish fix, service-actors no-Gateway/enforcement-live, CONCEPT serviceClass dropped; §6.5/§6.12 flagged
