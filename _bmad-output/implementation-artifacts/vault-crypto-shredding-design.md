@@ -804,3 +804,18 @@ crypto-shred can never erase, dissolves clinic's forcing-function role, and reli
 decision #2 ("leave the field unencrypted — defeats the point"). Fallback if this build stalls: the D1.5
 readiness clone (non-sensitive boolean, technically pre-Vault-buildable) — a Winston-level re-ratification
 of Rec C, recorded in the D1.5 design.
+
+**Fire 5b-iii CHECKPOINT (2026-07-03, Lattice Steward, `7ac8a83`).** Clinic patient-contact display
+shipped: `clinicPatientsRead` gains `email`/`phone` as Secure-Lens columns (envelope-whole RETURN off
+the patient's OPTIONAL `identifiedBy` identity, `Field: value`, mirroring
+`landlordLeaseApplicationsRead`'s contact columns exactly), `identity_key` carried alongside for the
+decryptor. A patient with no `identifiedBy` link, a linked identity missing an aspect, or a shredded
+identity all project null columns without dropping the row (`TestClinicPatientsRead_ProjectsContactEnvelopesWhole`,
+`TestClinicPatientsRead_NoIdentityLinkStillProjects`). `cmd/clinic-app` threads the nullable columns
+through `protectedPatientRow` and the FE renders a contact line next to the patient switcher
+(`renderPatientContact`). Full repo build/vet/lint-conventions/golangci-lint/test suite green; lead
+review only (S-sized, reuses the ratified Secure-Lens primitive with zero new mechanism, exact mirror
+of the already-3-layer-reviewed landlord consumer). **5b close's remaining gate:** extend
+`make test-crypto-shred` to assert a secure-lens row scrubs on shred (still only proven via the
+per-lens unit tests above + the landlord real-vault shred test), then the delivery-boundary reset +
+live e2e.
