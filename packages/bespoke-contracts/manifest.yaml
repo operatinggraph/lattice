@@ -1,15 +1,15 @@
 name: bespoke-contracts
-version: 0.3.0
+version: 0.4.0
 description: |
-  LoftSpace "Executable Paper" reference package (Fires V1-V3 — fixed/one-time,
+  LoftSpace "Executable Paper" reference package (Fires V1-V4 — fixed/one-time,
   conditioned, judgment, recurring monthly, and prorated computational
-  clauses): the clause vertex type (CreateClause, .prose/.terms/.status/
-  .clauseInspection aspects, governs + chargesTo/requiresInspectionBy/
-  conditionedOn links) + the clauseSatisfaction actorAggregate convergence
-  lens (§10.2, missing_charge/missing_inspection, freshUntil-armed recurring
-  freshness) + the §10.8 playbook dispatching directOp(DebitAccount)/
-  assignTask(InspectPremises) on the gaps. Depends lease-signing +
-  loftspace-ledger.
+  clauses, plus self-amendment): the clause vertex type (CreateClause/
+  SupersedeClause, .prose/.terms/.status/.clauseInspection aspects, governs +
+  chargesTo/requiresInspectionBy/conditionedOn/amends links) + the
+  clauseSatisfaction actorAggregate convergence lens (§10.2, missing_charge/
+  missing_inspection, freshUntil-armed recurring freshness) + the §10.8
+  playbook dispatching directOp(DebitAccount)/assignTask(InspectPremises) on
+  the gaps. Depends lease-signing + loftspace-ledger.
 depends:
   - lease-signing
   - loftspace-ledger
@@ -37,9 +37,13 @@ declares:
     - operationType: InspectPremises
       scope: any
       grantsTo: [operator]
+    - operationType: SupersedeClause
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: clauseSatisfaction
       lensRef: clauseSatisfaction
   opMetas:
     - operationType: CreateClause
     - operationType: InspectPremises
+    - operationType: SupersedeClause

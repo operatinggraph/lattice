@@ -19,6 +19,11 @@ type ledgerEntryProjection struct {
 	AmountCents    *float64 `json:"amountCents"`
 	Memo           string   `json:"memo"`
 	PostedAt       string   `json:"postedAt"`
+	// ClauseKey/ClauseProse (Fire V4 "why was I charged this?") ride the
+	// authorizedBy hop the ledgerHistory lens optionally walks — empty for a
+	// plain human-submitted charge/payment that carries no clauseRef.
+	ClauseKey   string `json:"clauseKey"`
+	ClauseProse string `json:"clauseProse"`
 }
 
 // ledgerEntryRow is the payment-history row the FE renders.
@@ -28,6 +33,8 @@ type ledgerEntryRow struct {
 	AmountCents    int64  `json:"amountCents"`
 	Memo           string `json:"memo,omitempty"`
 	PostedAt       string `json:"postedAt"`
+	ClauseKey      string `json:"clauseKey,omitempty"`
+	ClauseProse    string `json:"clauseProse,omitempty"`
 }
 
 // computeLedgerHistory filters the ledgerHistory lens rows to one lease, sorts
@@ -60,6 +67,8 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			ClauseKey:      p.ClauseKey,
+			ClauseProse:    p.ClauseProse,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

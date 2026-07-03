@@ -48,6 +48,7 @@ func bcCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreditAccount", Scope: "any"},
 			{OperationType: "CreateClause", Scope: "any"},
 			{OperationType: "InspectPremises", Scope: "any"},
+			{OperationType: "SupersedeClause", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -829,4 +830,146 @@ func TestDebitAccount_RecurringClause_MismatchedPeriodOmitted_StillReArms(t *tes
 	if _, err := time.Parse(time.RFC3339, cvu); err != nil {
 		t.Fatalf("chargeValidUntil %q is not RFC3339: %v", cvu, err)
 	}
+}
+
+// TestSupersedeClause_TombstonesOldWritesAmendsLinkMintsNew (Fire V4, the
+// design's canonical self-amendment e2e path). SupersedeClause mints a
+// replacement clause exactly like CreateClause, tombstones the amended
+// clause's root (the anchor-tombstone retraction signal), marks its .status
+// superseded, and writes the amends link (new clause→old clause).
+func TestSupersedeClause_TombstonesOldWritesAmendsLinkMintsNew(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersede")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPERSDHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsupersede1", leaseKey)
+	oldClauseKey := createClause(t, ctx, conn, cp, cons, "createclausesupersd1", leaseKey, acctKey,
+		"Tenant agrees to a $45 lockout fee.", 4500)
+	oldClauseID := oldClauseKey[len("vtx.clause."):]
+
+	supersedeReqID := testutil.GenReqID("supersedeclause0001")
+	supersedeEnv := &processor.OperationEnvelope{
+		RequestID:     supersedeReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "SupersedeClause",
+		Actor:         bcActorKey,
+		SubmittedAt:   "2026-07-02T14:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
+			`","accountKey":"` + acctKey + `","prose":"Tenant agrees to a $55 lockout fee (amended).","amountCents":5500}`),
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+	}
+	testutil.PublishOp(t, conn, supersedeEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	newClauseKey := "vtx.clause." + nanoIDFromRequestID(supersedeReqID)
+	newClauseID := newClauseKey[len("vtx.clause."):]
+
+	oldDoc := readDoc(t, ctx, conn, oldClauseKey)
+	if del, _ := oldDoc["isDeleted"].(bool); !del {
+		t.Fatalf("old clause root must be tombstoned (isDeleted=true), got %v", oldDoc)
+	}
+
+	oldStatusDoc := readDoc(t, ctx, conn, oldClauseKey+".status")
+	oldStatusData, _ := oldStatusDoc["data"].(map[string]any)
+	if got, _ := oldStatusData["state"].(string); got != "superseded" {
+		t.Fatalf("old clause status.state = %q, want superseded", got)
+	}
+	if got, _ := oldStatusData["supersededBy"].(string); got != newClauseKey {
+		t.Fatalf("old clause status.supersededBy = %q, want %q", got, newClauseKey)
+	}
+	if _, ok := oldStatusData["supersededAt"]; !ok {
+		t.Fatalf("old clause status.supersededAt must be stamped, got %v", oldStatusData)
+	}
+
+	amendsLnk := "lnk.clause." + newClauseID + ".amends.clause." + oldClauseID
+	if !keyExists(t, ctx, conn, amendsLnk) {
+		t.Fatalf("amends link must exist: %s", amendsLnk)
+	}
+
+	newTermsDoc := readDoc(t, ctx, conn, newClauseKey+".terms")
+	newTermsData, _ := newTermsDoc["data"].(map[string]any)
+	if got, _ := newTermsData["amountCents"].(float64); got != 5500 {
+		t.Fatalf("new clause terms.amountCents = %v, want 5500", got)
+	}
+
+	newStatusDoc := readDoc(t, ctx, conn, newClauseKey+".status")
+	newStatusData, _ := newStatusDoc["data"].(map[string]any)
+	if got, _ := newStatusData["state"].(string); got != "active" {
+		t.Fatalf("new clause status.state = %q, want active", got)
+	}
+
+	newGovernsLnk := "lnk.clause." + newClauseID + ".governs.lease." + "BBLEASESUPERSDHJKMNP"
+	if !keyExists(t, ctx, conn, newGovernsLnk) {
+		t.Fatalf("new clause's own governs link must exist: %s", newGovernsLnk)
+	}
+}
+
+// TestSupersedeClause_UnknownOldClause_Rejected — SupersedeClause naming a
+// clauseKey that isn't alive (never existed, or already superseded) is
+// rejected, so a clause can only be amended once at a time.
+func TestSupersedeClause_UnknownOldClause_Rejected(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedeunknown")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPUNKHJKMNPQ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsupunk001", leaseKey)
+	absentClauseKey := "vtx.clause.BBABSENTCLAUSEHJKMNP"
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("supersedeunknown0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SupersedeClause",
+		Actor:         bcActorKey,
+		SubmittedAt:   "2026-07-02T14:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"clauseKey":"` + absentClauseKey + `","leaseAppKey":"` + leaseKey +
+			`","accountKey":"` + acctKey + `","prose":"x","amountCents":100}`),
+		ContextHint: &processor.ContextHint{Reads: []string{absentClauseKey, leaseKey, acctKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestSupersedeClause_DoubleSupersede_SecondRejected — a second
+// SupersedeClause naming the same already-superseded clause is rejected: the
+// first supersede's tombstone makes the old clause not-alive, so a clause can
+// only be amended once (the amendment chain grows forward through the amends
+// link, never branches).
+func TestSupersedeClause_DoubleSupersede_SecondRejected(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedetwice")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPTWCEHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsuptwice1", leaseKey)
+	oldClauseKey := createClause(t, ctx, conn, cp, cons, "createclausesuptwc1", leaseKey, acctKey,
+		"Tenant agrees to a $45 lockout fee.", 4500)
+
+	firstEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("supersedetwice00001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SupersedeClause",
+		Actor:         bcActorKey,
+		SubmittedAt:   "2026-07-02T14:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
+			`","accountKey":"` + acctKey + `","prose":"$55 amended.","amountCents":5500}`),
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+	}
+	testutil.PublishOp(t, conn, firstEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	secondEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("supersedetwice00002"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SupersedeClause",
+		Actor:         bcActorKey,
+		SubmittedAt:   "2026-07-02T15:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
+			`","accountKey":"` + acctKey + `","prose":"$60 amended again.","amountCents":6000}`),
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+	}
+	testutil.PublishOp(t, conn, secondEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }

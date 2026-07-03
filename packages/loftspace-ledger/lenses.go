@@ -55,9 +55,17 @@ func Lenses() []pkgmgr.LensSpec {
 // produces). The per-row key is the transaction key (the IntoKey default), so
 // the read model is keyed by vtx.transaction.<id>; transactionKey repeats it in
 // the body for the reader.
+//
+// The trailing OPTIONAL MATCH walks authorizedBy to a bespoke-contracts clause
+// (Fire V4 "why was I charged this?") — OPTIONAL because a plain human-
+// submitted DebitAccount/CreditAccount carries no clauseRef, and this lens
+// projects a row for every transaction regardless. No compile-time dependency
+// on bespoke-contracts: the cypher matches a vertex by class label at read
+// time, same as any other package's lens matching a cross-package link.
 const ledgerHistorySpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
+OPTIONAL MATCH (t)-[:authorizedBy]->(c:clause)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -66,7 +74,9 @@ RETURN
   t.entry.data.type AS type,
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
-  t.entry.data.postedAt AS postedAt`
+  t.entry.data.postedAt AS postedAt,
+  c.key AS clauseKey,
+  c.prose.data.text AS clauseProse`
 
 // leaseAccountsSpec projects one row per lease — the anchor is the leaseapp
 // (not the account), so a lease with no ledger account yet still gets a row

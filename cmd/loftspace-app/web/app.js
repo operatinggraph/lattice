@@ -1664,6 +1664,21 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
       const sign = t.type === "debit" ? "+" : "−";
       li.textContent =
         fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + (t.memo ? " — " + t.memo : "");
+      // "Why was I charged this?" (Fire V4) — a bespoke-contracts clause
+      // authorized this transaction (t.clauseProse from the ledgerHistory
+      // lens's optional authorizedBy hop); a plain human-recorded charge
+      // carries neither field, so no affordance renders for it.
+      if (t.clauseProse) {
+        const details = document.createElement("details");
+        details.className = "ledger-clause";
+        const summary = document.createElement("summary");
+        summary.textContent = "Why was I charged this?";
+        const prose = document.createElement("p");
+        prose.className = "ledger-clause-prose";
+        prose.textContent = t.clauseProse;
+        details.append(summary, prose);
+        li.append(details);
+      }
       list.append(li);
     }
     body.append(list);

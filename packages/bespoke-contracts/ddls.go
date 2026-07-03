@@ -3,12 +3,15 @@ package bespokecontracts
 import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `clause`
-// (CreateClause) plus its four aspect-type declarations (clauseProse,
-// clauseTerms, clauseStatus, clauseInspection). clauseStatus permits
-// DebitAccount too — the cross-package write loftspace-ledger's DebitAccount
-// makes to mark a fixed/one-time clause completed (the objectLiveness →
-// TombstoneObject precedent: a package's aspect DDL lists every op, in any
-// package, that legitimately writes it).
+// (CreateClause, InspectPremises, SupersedeClause) plus its four aspect-type
+// declarations (clauseProse, clauseTerms, clauseStatus, clauseInspection).
+// SupersedeClause (Fire V4 self-amendment) writes prose/terms/status on the
+// NEW clause exactly like CreateClause, plus a status update on the AMENDED
+// clause — so clauseProse/clauseTerms/clauseStatus each permit it too.
+// clauseStatus also permits DebitAccount — the cross-package write
+// loftspace-ledger's DebitAccount makes to mark a fixed/one-time clause
+// completed (the objectLiveness → TombstoneObject precedent: a package's
+// aspect DDL lists every op, in any package, that legitimately writes it).
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		clauseDDL(),
@@ -26,7 +29,10 @@ func clauseDDL() pkgmgr.DDLSpec {
 		// InspectPremises acts on an existing clause (writes its .inspection
 		// aspect, root untouched) the same way SignLease acts on an existing
 		// leaseapp — the op's env.Class routes to this DDL's Script.
-		PermittedCommands: []string{"CreateClause", "InspectPremises"},
+		// SupersedeClause (Fire V4) mints a replacement clause (CreateClause's
+		// shape, plus clauseKey naming the one it amends) and tombstones the
+		// amended clause's root — the anchor-tombstone retraction precedent.
+		PermittedCommands: []string{"CreateClause", "InspectPremises", "SupersedeClause"},
 		Description: "Bespoke-contract clause DDL. Vertex shape: vtx.clause.<NanoID>, class=clause, root data = {} " +
 			"(minimal, D5 — the provision text and terms are aspects). CreateClause{leaseAppKey, kind?, prose, " +
 			"accountKey?, amountCents?, period?, rateCents?, periodDays?, daysOccupied?, inspectorKey?, " +
@@ -50,7 +56,12 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"key-shape (vtx.<type>.<id>); the clauseSatisfaction lens only opens the gap while that link is live, so " +
 			"tombstoning the condition stops the fee/inspection without touching the clause. Writes the governs " +
 			"link (clause→lease, the state this provision governs) in every case — the clause is the " +
-			"later-arriving vertex on every link it writes, so it is the source (Contract #1 §1.1).",
+			"later-arriving vertex on every link it writes, so it is the source (Contract #1 §1.1). " +
+			"SupersedeClause{clauseKey, <the same fields CreateClause takes>} (Fire V4 self-amendment) mints a " +
+			"replacement clause exactly like CreateClause, writes an amends link (new clause to amended clause), " +
+			"tombstones the amended clause's root (retracting its clauseSatisfaction row via anchor-tombstone " +
+			"retraction), and marks its .status superseded (audit). clauseKey must name a currently-live clause " +
+			"(no double-amend).",
 		Script: clauseDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> this clause governs (required, validated alive)."},` +
@@ -155,6 +166,25 @@ func clauseDDL() pkgmgr.DDLSpec {
 					"periodDays:30, daysOccupied:17 for audit. Behaves exactly like the fixed-fee example from " +
 					"here on — a single directOp(DebitAccount) for 2833 cents, then completed.",
 			},
+			{
+				Name: "SupersedeClause — amend a fee amount (Fire V4)",
+				Payload: map[string]any{
+					"clauseKey":   "vtx.clause.<oldNanoID>",
+					"leaseAppKey": "vtx.leaseapp.<NanoID>",
+					"accountKey":  "vtx.account.<NanoID>",
+					"prose":       "Tenant agrees to a $55 lockout fee (amended from $45), effective this signing.",
+					"amountCents": 5500,
+				},
+				ExpectedOutcome: "Validates the old clause is alive (not already superseded), then mints a new " +
+					"vtx.clause.<freshNanoID> exactly like CreateClause. Additionally writes the amends link " +
+					"(new clause→old clause), tombstones the old clause's root (isDeleted=True — its " +
+					"clauseSatisfaction row retracts via anchor-tombstone retraction, so it stops dispatching " +
+					"further debits), and marks the old clause's .status {state:superseded, supersededAt, " +
+					"supersededBy:<newClauseKey>} (audit). Emits clause.superseded{clauseKey:<old>, " +
+					"supersededBy:<new>} then clause.created{...}. Returns the new clause's primaryKey. A second " +
+					"SupersedeClause naming the same old clauseKey is rejected (UnknownClause — already " +
+					"tombstoned).",
+			},
 		},
 	}
 }
@@ -163,9 +193,10 @@ func clauseProseAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "clauseProse",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateClause"},
+		PermittedCommands: []string{"CreateClause", "SupersedeClause"},
 		Description: "The clause's legal-paragraph text. Stored as vtx.clause.<NanoID>.prose (class clauseProse) " +
-			"= {text}. Non-sensitive. Written exactly once by CreateClause, atomically alongside the clause vertex " +
+			"= {text}. Non-sensitive. Written exactly once by CreateClause (or SupersedeClause minting the " +
+			"replacement clause, Fire V4), atomically alongside the clause vertex " +
 			"it belongs to. Declaration-only: no op handler of its own.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{"text":{"type":"string"}}}`,
@@ -187,7 +218,7 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "clauseTerms",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateClause"},
+		PermittedCommands: []string{"CreateClause", "SupersedeClause"},
 		Description: "The clause's machine terms — what 'fulfillment' means digitally. Stored as " +
 			"vtx.clause.<NanoID>.terms (class clauseTerms) = {kind, conditioned, amountCents?, period, basis?, " +
 			"rateCents?, periodDays?, daysOccupied?}, kind ∈ {computational, judgment}. Non-sensitive. " +
@@ -277,12 +308,17 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		// DebitAccount (loftspace-ledger) marks a fixed/one-time clause completed,
 		// or a monthly clause's chargeValidUntil forward, once it posts the
 		// authorizing charge — a cross-package write, the objectLiveness →
-		// TombstoneObject precedent.
-		PermittedCommands: []string{"CreateClause", "DebitAccount"},
+		// TombstoneObject precedent. SupersedeClause (Fire V4) both creates the
+		// new clause's status (active, exactly like CreateClause) and marks the
+		// amended clause's status superseded.
+		PermittedCommands: []string{"CreateClause", "DebitAccount", "SupersedeClause"},
 		Description: "The clause's lifecycle state. Stored as vtx.clause.<NanoID>.status (class clauseStatus) = " +
-			"{state, completedAt?, chargeValidUntil?}, state ∈ {active, completed, superseded}. Non-sensitive. " +
-			"Created active by CreateClause; updated by loftspace-ledger's DebitAccount when it posts the " +
-			"authorizing charge (an UNCONDITIONED update in both cases). For a period=oneTime clause: state → " +
+			"{state, completedAt?, chargeValidUntil?, supersededAt?, supersededBy?}, state ∈ {active, completed, " +
+			"superseded}. Non-sensitive. Created active by CreateClause (or SupersedeClause minting the replacement " +
+			"clause, Fire V4); updated by loftspace-ledger's DebitAccount when it posts the " +
+			"authorizing charge, or by SupersedeClause on the AMENDED clause (state→superseded, supersededAt " +
+			"stamped, supersededBy = the new clause's key — audit only, since the convergence retraction is the " +
+			"root tombstone, not this state) (an UNCONDITIONED update in every case). For a period=oneTime clause: state → " +
 			"completed + completedAt stamped — audit/display bookkeeping only, since the clauseSatisfaction " +
 			"lens's convergence gate for that case derives from the authorizedBy transaction link, not this aspect " +
 			"(see the design's R3). For a period=monthly clause (Fire V3): state STAYS active (a recurring clause " +
@@ -291,12 +327,14 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"missing_charge re-opens once chargeValidUntil lapses, and the lens projects it back out as freshUntil " +
 			"to arm Weaver's temporal lane for the next re-open.",
 		Script:       aspectDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"state":{"type":"string"},"completedAt":{"type":"string"},"chargeValidUntil":{"type":"string"}}}`,
+		InputSchema:  `{"type":"object","properties":{"state":{"type":"string"},"completedAt":{"type":"string"},"chargeValidUntil":{"type":"string"},"supersededAt":{"type":"string"},"supersededBy":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"state":            "active (CreateClause, and every monthly recharge) or completed (DebitAccount, period=oneTime clauses only).",
+			"state":            "active (CreateClause, and every monthly recharge) or completed (DebitAccount, period=oneTime clauses only) or superseded (SupersedeClause, Fire V4, on the amended clause).",
 			"completedAt":      "RFC3339 timestamp DebitAccount stamps when it marks a oneTime clause completed. Absent while active or for monthly clauses.",
 			"chargeValidUntil": "Fire V3: RFC3339 timestamp DebitAccount (re-)stamps on every charge of a period=monthly clause (completedAt + ~30d). The clauseSatisfaction lens's recurring convergence gate and the projected freshUntil column both read this field. Absent for period=oneTime clauses.",
+			"supersededAt":     "Fire V4: RFC3339 timestamp SupersedeClause stamps on the amended clause's status. Audit only — the row-retraction signal is the root tombstone, not this field.",
+			"supersededBy":     "Fire V4: the replacement clause's full vtx.clause.<NanoID> key. Audit only, same caveat as supersededAt.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -308,6 +346,11 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "clause status aspect — recharged (Fire V3 recurring)",
 				Payload:         map[string]any{"state": "active", "chargeValidUntil": "2026-08-01T12:00:00Z"},
 				ExpectedOutcome: "Updated (op:update, unconditioned) by DebitAccount when clauseRef names a period=monthly clause — stays active, re-arms chargeValidUntil ~30 days out.",
+			},
+			{
+				Name:            "clause status aspect — superseded (Fire V4)",
+				Payload:         map[string]any{"state": "superseded", "supersededAt": "2026-07-02T14:00:00Z", "supersededBy": "vtx.clause.<newNanoID>"},
+				ExpectedOutcome: "Updated (op:update, unconditioned) by SupersedeClause on the amended clause, atomically alongside the root tombstone that retracts its clauseSatisfaction row.",
 			},
 		},
 	}

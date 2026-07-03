@@ -1,9 +1,10 @@
 // Package bespokecontracts is the LoftSpace "Executable Paper" reference
-// package (Fires V1-V3 of the bespoke-contracts-executable-paper design):
+// package (Fires V1-V4 of the bespoke-contracts-executable-paper design):
 // fixed/one-time, conditioned, judgment, recurring monthly, and prorated
-// computational clauses, all riding the convergence machinery the platform
-// already ships — no new engine, no Weaver runtime, no rounding UDF (Fire V3
-// proration computes in exact Starlark bignum integer arithmetic instead).
+// computational clauses, plus self-amendment (Fire V4), all riding the
+// convergence machinery the platform already ships — no new engine, no
+// Weaver runtime, no rounding UDF (Fire V3 proration computes in exact
+// Starlark bignum integer arithmetic instead).
 //
 // It declares:
 //
@@ -46,8 +47,14 @@
 // .status — completed for a oneTime clause, or chargeValidUntil re-armed for
 // a monthly one (Fire V3) — the "why was I charged this?" chain of custody.
 //
+//   - SupersedeClause (Fire V4) mints a replacement clause (CreateClause's
+//     shape, plus clauseKey naming the amended one), writes the amends link
+//     (new clause→amended clause), tombstones the amended clause's root
+//     (anchor-tombstone retraction — its clauseSatisfaction row deletes),
+//     and marks its .status superseded (audit).
+//
 // See _bmad-output/implementation-artifacts/bespoke-contracts-executable-paper-design.md
-// §3, §4.1, §7, §10 (Fires V1-V3). Depends lease-signing (the leaseapp a
+// §3, §4.1, §7, §10 (Fires V1-V4). Depends lease-signing (the leaseapp a
 // clause governs) + loftspace-ledger (the account a clause charges + the
 // DebitAccount op the playbook dispatches).
 package bespokecontracts
@@ -57,13 +64,14 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "bespoke-contracts",
-	Version: "0.3.0",
-	Description: "LoftSpace 'Executable Paper' reference package (Fires V1-V3 — fixed/one-time, conditioned, " +
-		"judgment, recurring monthly, and prorated computational clauses): the clause vertex type (CreateClause, " +
-		".prose/.terms/.status/.clauseInspection aspects, governs + chargesTo/requiresInspectionBy/conditionedOn " +
-		"links) + the clauseSatisfaction actorAggregate convergence lens (§10.2, missing_charge/missing_inspection, " +
-		"freshUntil-armed recurring freshness) + the §10.8 playbook dispatching directOp(DebitAccount)/" +
-		"assignTask(InspectPremises) on the gaps. Depends lease-signing + loftspace-ledger.",
+	Version: "0.4.0",
+	Description: "LoftSpace 'Executable Paper' reference package (Fires V1-V4 — fixed/one-time, conditioned, " +
+		"judgment, recurring monthly, and prorated computational clauses, plus self-amendment): the clause vertex " +
+		"type (CreateClause/SupersedeClause, .prose/.terms/.status/.clauseInspection aspects, governs + " +
+		"chargesTo/requiresInspectionBy/conditionedOn/amends links) + the clauseSatisfaction actorAggregate " +
+		"convergence lens (§10.2, missing_charge/missing_inspection, freshUntil-armed recurring freshness) + the " +
+		"§10.8 playbook dispatching directOp(DebitAccount)/assignTask(InspectPremises) on the gaps. Depends " +
+		"lease-signing + loftspace-ledger.",
 	Depends:       []string{"lease-signing", "loftspace-ledger"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
