@@ -2,6 +2,9 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-02 · `da8279f` · [Core/apps] Read-path authorization (D1) CLOSED — D1.1–D1.5 all shipped; Gateway read-front + Personal Lens are beyond-D1 rows (design §7)
+- 2026-07-02 · `603fd1f` · [loftspace/vault] Fire 5b-i — applicant roster onto the Secure Lens (applicantRoster retired, applicantRosterRead secure, app reads rewired; duplicateCandidates → Designer)
+- 2026-07-02 · `a710c7a` · [lease-signing/loftspace-app] Vault Fire 5b-ii — landlord applicant contact Secure-Lens columns (name/email/phone; retraction fire now gates 5b close)
 - 2026-07-02 · `e8ade0c` · [Core/pkgmgr] privacy-base `manifest.yaml` + missing `lattice-pkg` registry entry — `make up-full`/`up-loftspace`/`up-clinic` verified green end to end
 - 2026-07-02 · `604342b` · [Core/privacy] Vault Fire 3 — ShredIdentityKey op + keyShredded event + `internal/privacyworker` Vault destruction; durable-placeholder restart fix (3-layer review)
 - 2026-07-02 · `83b7976` · [Core/privacy] Vault Fire 2 — Processor encrypt-on-write/decrypt-on-read for sensitive aspects; `privacy-base` piiKey DDL

@@ -783,6 +783,20 @@ fully covered by the new + existing tests). **Still remaining for 5b close:** a 
 run against `landlordLeaseApplicationsReadSpec`'s own committed ciphertext (proving `Vault.Decrypt`
 fails post-shred for *this* lens specifically, not just readiness-formula correctness); then 5b-iii.
 
+**Fire 5b-iii-a CHECKPOINT (Lattice Steward).** Closed the shred-proof remainder above:
+`TestLandlordLeaseApplicationsRead_ShredMakesContactUndecryptable` mints a real
+`vault.LocalBackend` identity key, encrypts `applicant_name` with it, confirms
+`landlordLeaseApplicationsRead` projects that exact ciphertext envelope whole (§6.14 —
+the lens never decrypts), decrypts it once for a sanity baseline, then calls
+`v.ShredKey` and re-attempts `Vault.Decrypt` on the SAME projected envelope — asserting
+it now fails. This is the Postgres-adapter lens's Phase-A guarantee (key destruction,
+not row nullification — the nats_kv-target nullification listener proven by
+`internal/cryptoshred`'s e2e does not apply here, this lens has none): the row survives
+the shred with its envelope intact, permanently useless. Lead review (XS, test-only,
+mirrors the established `QualifiedWithRealVaultCiphertext` real-vault pattern in the
+same file, no new mechanism). **5b close's remaining gate: 5b-iii clinic patient-contact
+re-model + display, then a delivery-boundary reset + live e2e.**
+
 **Considered and REJECTED — pre-Vault plaintext contact projection** into `clinicPatientsRead`
 (technically buildable, no test fails, outside M4's *letter* since `.demographics` cannot be
 `sensitive:true` on a non-identity vertex): it ships queryable plaintext PHI into Postgres that

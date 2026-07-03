@@ -130,7 +130,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · 5b-ii-d shipped (`04bcbf0`, sev-1 ssn-presence-vs-ciphertext fix); next: ShredIdentityKey proof on this lens, then 5b-iii clinic contact |
+| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · 5b-iii-a shipped (`eb20923`, shred-undecryptable proof); next: 5b-iii clinic contact + delivery-boundary reset/live e2e |
 | **[identity-hygiene] Dedup over encrypted PII (duplicateCandidates)** | Post-Vault, the lens's WHERE matching (email/phone equality, name Levenshtein) runs on per-identity-DEK ciphertext → functionally inert; a secure lens can't fix in-engine matching. Needs a design: blind-index/HMAC companion aspect vs sanctioned engine mechanism. | ★★ | M | 📋 needs-design (Designer) · context in the [vault design](../../implementation-artifacts/vault-crypto-shredding-design.md) Fire 5b-i checkpoint |
 | **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
 | **[Vault→Loupe] surface enablers** | For loupe F12 (Vault map node/page + Reveal + crypto-shred proof): a dedicated `health.vault.<instance>` heartbeat group (metrics ride privacy-worker today); `lattice.vault.decrypt` reachable from Loupe's actor; **grant Loupe's operator actor `ShredIdentityKey`** (op shipped `604342b`; Andrew-approved 2026-07-02, scoped). | ★★ | S | 📋 · blocks loupe F12 · [UX §3](../../implementation-artifacts/loupe-platform-edges-ux.md) |
@@ -200,6 +200,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-02 · `eb20923` · [lease-signing] Vault Fire 5b-iii-a — real-Vault shred-undecryptable proof for landlordLeaseApplicationsRead's own committed ciphertext
 - 2026-07-02 · `3ef4830` · [docs] Arch-review: docs-truth-sweep — Gateway/Vault built, gateway.md phantom §refs + ops-publish fix, service-actors no-Gateway/enforcement-live, CONCEPT serviceClass dropped; §6.5/§6.12 flagged
 - 2026-07-02 · `04bcbf0` · [lease-signing] Vault Fire 5b-ii-d — sev-1 fix: ssn presence check always null on real Vault ciphertext, blocking every real applicant from qualifying; regression test added
 - 2026-07-02 · `98cbfe8`+`f69b3e9` · [docs] Arch-review: bridge-and-substrate-doc-refresh — bridge async SPI/poll-timeout/Augur, scheduling @every+bridge-lane, substrate ctx-sigs/6-files/object+publish+stream surfaces/godoc
@@ -208,8 +209,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-02 · `13ffb75` · [lease-signing/loftspace-app] Vault Fire 5b-ii-b — landlord readiness clone (`qualified`) via a shared cypher fragment with the convergence lens; 3-layer review (security-plane)
 - 2026-07-02 · `5901bc4` · [Refractor] Negative/filter-retraction Fire 3 — target-diff retraction (DiffRetraction opt-in + activation-time unanchored-query guard; 3-layer review; CLOSES the epic, unblocks Vault 5b close)
 - 2026-07-02 · `5624392` · [Refractor] Negative/filter-retraction F1+F2 — plain-lens aspect/link reprojection + anchor-self retraction (3-layer review; Fire 3 target-diff next, gates Vault 5b)
-- 2026-07-02 · `a710c7a` · [lease-signing/loftspace-app] Vault Fire 5b-ii — landlord applicant contact Secure-Lens columns (name/email/phone; retraction fire now gates 5b close)
-- 2026-07-02 · `603fd1f` · [loftspace/vault] Fire 5b-i — applicant roster onto the Secure Lens (applicantRoster retired, applicantRosterRead secure, app reads rewired; duplicateCandidates → Designer)
-- 2026-07-02 · `da8279f` · [Core/apps] Read-path authorization (D1) CLOSED — D1.1–D1.5 all shipped; Gateway read-front + Personal Lens are beyond-D1 rows (design §7)
 - 2026-07-02 · `51ba38e` + `00b098d` · [Gateway] Fires 1+2 — external write-path translator + live JWKS polling
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*
