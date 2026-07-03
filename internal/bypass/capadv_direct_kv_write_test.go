@@ -1,23 +1,16 @@
-// Package bypass — Phase 1 Gate 3: Capability Lens adversarial test suite.
+// Package bypass holds the outcome-level adversarial residual for the
+// Capability Lens security plane — assemblies that don't reduce to one
+// mechanism's colocated white-box test.
 //
-// Vector #1 — Direct KV write role escalation.
-//
-// Attack: A rogue actor writes directly to Capability KV (cap.identity.<NanoID>)
-// injecting a fabricated platformAdmin permission to escalate their privileges.
-//
-// Phase 1 posture: NATS-account-level write restriction on Capability KV is
-// deferred to Phase 2+ operational hardening (Contract #6 §6.1 note). In Phase 1
-// the direct write SUCCEEDS at the substrate layer — this is documented and
-// expected. The defense is the Refractor's reprojection cycle: within NFR-P3
-// (500ms ceiling; Story 3.2b p99 was 5.7ms) the Refractor OVERWRITES the injected
-// entry with the graph-derived state, eliminating the fabricated permission.
-//
-// DEFENDED when: the elevation cannot be retained across the reprojection cycle
-// AND the reprojection completes within 1s wall-clock (3-σ above measured p99).
-//
-// Report row:
-//
-//	Vector #1 | Direct KV write role escalation | DEFENDED | Refractor reprojection cycle
+// Direct KV write role escalation: a rogue actor writes directly to
+// Capability KV (cap.identity.<NanoID>), injecting a fabricated platformAdmin
+// permission. NATS account-level write restriction on Capability KV
+// (internal/natsperm) denies this at the transport layer in the general case;
+// this residual proves the defense-in-depth layer behind it — the
+// Refractor's reprojection cycle overwrites any entry that does land with the
+// graph-derived state within NFR-P3 (500ms ceiling; measured p99 5.7ms),
+// eliminating a fabricated permission, and the CapabilityAuthorizer reads the
+// post-reprojection entry and denies accordingly.
 package bypass
 
 import (
@@ -144,64 +137,6 @@ func buildCapDocForIdentity(nanoID string, perms []processor.PlatformPermission,
 		EphemeralGrants:        []processor.EphemeralGrant{},
 		Roles:                  roles,
 	}
-}
-
-// TestCapAdv_V1_DirectKVWrite_InjectionSucceedsAtSubstrate verifies that in
-// Phase 1, a rogue direct write to Capability KV succeeds at the NATS layer.
-// This is the documented Phase 1 bypass window; NATS-account-level write
-// restriction is deferred to Phase 2+ operational hardening.
-func TestCapAdv_V1_DirectKVWrite_InjectionSucceedsAtSubstrate(t *testing.T) {
-	ctx, conn := setupCapAdvHarness(t)
-
-	// Seed a legitimate consumer-role identity with NO admin permissions.
-	consumerDoc := buildCapDocForIdentity(capadvNanoID1, []processor.PlatformPermission{}, []string{"vtx.role.consumer"})
-	capKey := consumerDoc.Key
-
-	// Write the legitimate entry first.
-	raw, _ := json.Marshal(consumerDoc)
-	if _, err := conn.KVPut(ctx, capadvCapBucket, capKey, raw); err != nil {
-		t.Fatalf("v1: seed legitimate cap entry: %v", err)
-	}
-
-	// Phase 1 bypass window: rogue client injects a fabricated platformAdmin
-	// permission directly into Capability KV. In Phase 2, NATS-account-level
-	// write restriction would block this. In Phase 1 it succeeds.
-	injectedDoc := buildCapDocForIdentity(capadvNanoID1, []processor.PlatformPermission{
-		{OperationType: "AdminAll", Scope: "any"},
-		{OperationType: "CreateRole", Scope: "any"},
-		{OperationType: "TombstonePermission", Scope: "any"},
-	}, []string{"vtx.role.consumer", "vtx.role.platformAdmin"})
-
-	injectedRaw, _ := json.Marshal(injectedDoc)
-	_, err := conn.KVPut(ctx, capadvCapBucket, capKey, injectedRaw)
-	if err != nil {
-		t.Fatalf("v1: UNEXPECTED: direct write to capability-kv should succeed in Phase 1: %v", err)
-	}
-
-	// Confirm the injected entry is now present with fabricated permissions.
-	entry, err := conn.KVGet(ctx, capadvCapBucket, capKey)
-	if err != nil {
-		t.Fatalf("v1: KVGet after injection: %v", err)
-	}
-	var readBack processor.CapabilityDoc
-	if err := json.Unmarshal(entry.Value, &readBack); err != nil {
-		t.Fatalf("v1: unmarshal after injection: %v", err)
-	}
-	if len(readBack.PlatformPermissions) == 0 {
-		t.Fatalf("v1: expected injected permissions to be present in Phase 1")
-	}
-	foundFabricated := false
-	for _, p := range readBack.PlatformPermissions {
-		if p.OperationType == "AdminAll" {
-			foundFabricated = true
-		}
-	}
-	if !foundFabricated {
-		t.Fatalf("v1: expected fabricated AdminAll permission to be present after injection")
-	}
-
-	t.Logf("v1: Phase 1 bypass window confirmed: fabricated AdminAll permission present in Capability KV")
-	t.Logf("v1: PHASE 2 CARRY: NATS-account-level write restriction on Capability KV (Contract #6 §6.1 note) will block this at the substrate layer")
 }
 
 // TestCapAdv_V1_DirectKVWrite_ReprojectionOverwrites verifies that a legitimate

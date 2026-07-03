@@ -56,7 +56,7 @@ VAULT_KEK_FILE ?= $(abspath ./deploy/vault/master.kek)
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-bypass test-capability-adversarial test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-augur-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -611,31 +611,6 @@ run-clinic-app:
 test:
 	@echo "==> go test ./... -p 4"
 	go test ./... -p 4
-
-## test-bypass — Run the Phase 1 Gate 2 adversarial bypass test suite.
-## Requires a running Docker stack (make up). Exits 0 only when all 4 bypass
-## categories are BLOCKED. Writes gate2-report.txt and the Health KV marker.
-.PHONY: test-bypass
-test-bypass:
-	@$(MAKE) down
-	@$(MAKE) up
-	@$(MAKE) verify-kernel
-	NATS_NKEY=$(NKEY_LATTICE_CLI) go test ./internal/bypass/... -v -count=1
-
-## test-capability-adversarial — Run the Phase 1 Gate 3 Capability Lens
-## adversarial test suite. Requires a running Docker stack (make up). Exits 0
-## only when all 4 attack vectors are DEFENDED. Writes gate3-report.txt and the
-## Health KV marker at health.gates.phase1.gate3.
-##
-## Per-vector tests (TestCapAdv_*) use embedded NATS and are self-contained.
-## The TestGate3_Report roll-up connects to the live stack for the Health KV marker.
-.PHONY: test-capability-adversarial
-test-capability-adversarial:
-	@$(MAKE) down
-	@$(MAKE) up
-	@$(MAKE) verify-kernel
-	POSTGRES_TEST_DSN=$(POSTGRES_URL) go test ./internal/bypass/... -v -run TestCapAdv -count=1
-	NATS_NKEY=$(NKEY_LATTICE_CLI) go test ./internal/bypass/... -v -run TestGate3_Report -count=1
 
 ## test-hello-lattice — Run the Phase 1 Gate 5 Hello Lattice integration test suite.
 ## Requires a running Docker stack (make up) with Refractor live.

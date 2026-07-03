@@ -18,9 +18,10 @@ on:
 # exactly one job:
 #   lint-build  — build, vet, golangci, conventions-lint            (no Docker)
 #   stack-gates — make up → verify-kernel → 10× verify-package →
-#                 Gate 2 → Gate 3 → hello-lattice                   (Docker)
+#                 hello-lattice                                     (Docker)
 #   convergence — lease-convergence, object-gc                      (no Docker, embedded NATS)
-#   unit        — go test ./... -p 4                                (no Docker, embedded NATS)
+#   unit        — go test ./... -p 4                                (a Postgres service container;
+#                                                                     otherwise no Docker, embedded NATS)
 jobs:
   lint-build:
     runs-on: ubuntu-latest
@@ -102,33 +103,6 @@ jobs:
       - name: Install + verify augur package (co-installs orchestration-base)
         run: make verify-package-augur
 
-      - name: Run Gate 2 bypass suite (Phase 1 Gate 2)
-        # Runs the 4-category bypass suite; exits non-zero if any category
-        # is not BLOCKED. Writes gate2-report.txt + Health KV marker.
-        # Stack is already up from the bootstrap step above. NATS_NKEY is only
-        # used by TestGate2_Report's best-effort live Health KV marker write
-        # (the per-category tests below it use their own embedded anonymous
-        # NATS server, unaffected by the auth-enabled dev stack) — an absolute
-        # path since go test's cwd is the package dir, not the repo root.
-        env:
-          NATS_NKEY: ${{ github.workspace }}/deploy/nkeys/lattice.nk
-        run: go test ./internal/bypass/... -v -run "TestBypass|TestGate2" -count=1
-
-      - name: Run Capability Lens adversarial test suite (Gate 3)
-        # Runs the write-path + read-path (D1.4) adversarial vectors; exits
-        # non-zero if any vector is not DEFENDED. Writes gate3-report.txt +
-        # Health KV marker. Placed after Gate 2 so both gates run in series per
-        # brief Decision #8. POSTGRES_TEST_DSN points the read-path RLS vectors
-        # at the Docker stack's Postgres (already up from the bootstrap step).
-        # NATS_NKEY is only used by TestGate3_Report's live Health KV marker
-        # write (TestCapAdv_* are embedded/anonymous, unaffected).
-        env:
-          POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
-          NATS_NKEY: ${{ github.workspace }}/deploy/nkeys/lattice.nk
-        run: |
-          go test ./internal/bypass/... -v -run TestCapAdv -count=1
-          go test ./internal/bypass/... -v -run TestGate3_Report -count=1
-
       - name: Run Hello Lattice integration suite (Phase 1 Gate 5)
         # Runs the six-milestone Hello Lattice vertical slice:
         # DDL definition, book creation, Lens projection, Postgres query,
@@ -180,6 +154,24 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # A service Postgres (not the docker-compose stack) so internal/refractor/adapter's
+    # RLS integration tests (skipIfNoPostgres) run here instead of silently skipping —
+    # they used to run under the now-retired Gate 3 stack-gates step, the only place
+    # POSTGRES_TEST_DSN was previously set.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lattice
+          POSTGRES_PASSWORD: lattice_dev
+          POSTGRES_DB: lattice
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lattice -d lattice"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v6
 
@@ -192,5 +184,9 @@ jobs:
         # -p 4: up to four test packages run concurrently. Every embedded
         # NATS+JetStream fixture binds a random port and owns a private
         # StoreDir under jsstore.Dir(t), so concurrent packages share no
-        # JetStream file state. Embedded NATS only — no Docker stack needed.
+        # JetStream file state — Postgres integration tests are the exception,
+        # sharing the service container above (unique per-test table/role names
+        # keep them -p-parallel-safe, per their own doc comments).
+        env:
+          POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: go test ./... -count=1 -p 4 -timeout 10m

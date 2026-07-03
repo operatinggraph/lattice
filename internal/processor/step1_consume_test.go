@@ -1,20 +1,10 @@
-package bypass
+package processor
 
-// Bypass #2 — Off-Namespace Stream Publish
-//
-// Enforcement: JetStream consumer FilterSubjects in step1_consume.go.
-//
-// The Processor's durable consumer is configured with:
-//   FilterSubjects: []string{"ops.default.>", "ops.urgent.>", "ops.system.>", "ops.meta.>"}
-//
-// A message published to a subject outside those filters (e.g.,
-// "bypass.attempt" or "core-operations" directly) will NOT be delivered
-// to the Processor consumer. The message may land in the stream (if the
-// stream's own subject filter matches) or be rejected by the stream
-// entirely (if no stream subject covers it).
-//
-// Report row:
-//   Off-namespace publish | BLOCKED | JetStream consumer FilterSubjects
+// TestBypass2_* — off-namespace publish adversarial vectors proving
+// step1_consume.go's EnsureConsumer FilterSubjects boundary: the Processor's
+// durable consumer only ever receives ops.default.>/ops.urgent.>/ops.system.>/
+// ops.meta.>, so a message published off-namespace (or to an unfiltered
+// subject on the same stream) never reaches it.
 
 import (
 	"context"
@@ -23,22 +13,30 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // TestBypass2_OffNamespacePublish_NotConsumed publishes a message to a subject
 // outside the ops.default.>/ops.urgent.>/ops.system.> filter set and asserts
 // the Processor's durable consumer never receives it.
 func TestBypass2_OffNamespacePublish_NotConsumed(t *testing.T) {
-	ctx, conn := setupBypassHarness(t)
+	url := startEmbeddedNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "bypass2-test"})
+	if err != nil {
+		t.Fatalf("bypass2: connect: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	provisionHarness(t, ctx, conn)
+	widenOpsStreamSubjects(t, ctx, conn)
 
-	// Create a Processor consumer with the production filter (from step1_consume.go).
-	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
-		StreamName:     bypassOpsStream,
+	cons, err := EnsureConsumer(ctx, conn.JetStream(), ConsumerConfig{
+		StreamName:     testStream,
 		Durable:        "bypass2-main",
 		FilterSubjects: []string{"ops.default.>", "ops.urgent.>", "ops.system.>"},
 		AckWait:        2 * time.Second,
-	}, bypassLogger())
+	}, testLogger())
 	if err != nil {
 		t.Fatalf("bypass2: EnsureConsumer: %v", err)
 	}
@@ -87,20 +85,29 @@ func TestBypass2_OffNamespacePublish_NotConsumed(t *testing.T) {
 // consumer. This confirms FilterSubjects is correctly scoped and not vacuously
 // blocking everything.
 func TestBypass2_ValidLanePublish_IsConsumed(t *testing.T) {
-	ctx, conn := setupBypassHarness(t)
+	url := startEmbeddedNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "bypass2-test"})
+	if err != nil {
+		t.Fatalf("bypass2: connect: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	provisionHarness(t, ctx, conn)
+	widenOpsStreamSubjects(t, ctx, conn)
 
-	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
-		StreamName:     bypassOpsStream,
+	cons, err := EnsureConsumer(ctx, conn.JetStream(), ConsumerConfig{
+		StreamName:     testStream,
 		Durable:        "bypass2-positive",
 		FilterSubjects: []string{"ops.default.>", "ops.urgent.>", "ops.system.>"},
 		AckWait:        2 * time.Second,
-	}, bypassLogger())
+	}, testLogger())
 	if err != nil {
 		t.Fatalf("bypass2: EnsureConsumer: %v", err)
 	}
 
 	// Publish a valid envelope to a filtered subject.
-	validPayload := []byte(`{"requestId":"` + bypassNanoID1 + `","lane":"default","operationType":"CreateIdentity","actor":"vtx.identity.` + bypassNanoID2 + `","submittedAt":"2026-05-14T00:00:00Z","class":"identity","payload":{}}`)
+	validPayload := []byte(`{"requestId":"` + testNanoID1 + `","lane":"default","operationType":"CreateIdentity","actor":"vtx.identity.` + testNanoID2 + `","submittedAt":"2026-05-14T00:00:00Z","class":"identity","payload":{}}`)
 	if _, err := conn.JetStream().Publish(ctx, "ops.default.bypass2", validPayload); err != nil {
 		t.Fatalf("bypass2 baseline: publish to ops.default.bypass2: %v", err)
 	}
@@ -129,15 +136,23 @@ func TestBypass2_ValidLanePublish_IsConsumed(t *testing.T) {
 // trailing segments and does not cover the two-segment form by itself.
 // This test fails if the defaults change without updating the bypass test.
 func TestBypass2_FilterSubjects_CoverageCheck(t *testing.T) {
-	ctx, conn := setupBypassHarness(t)
+	url := startEmbeddedNATS(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url, Name: "bypass2-test"})
+	if err != nil {
+		t.Fatalf("bypass2 coverage: connect: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	provisionHarness(t, ctx, conn)
 
 	// Create consumer using zero-value config — applyDefaults() fires.
-	cons, err := processor.EnsureConsumer(ctx, conn.JetStream(), processor.ConsumerConfig{
-		StreamName: bypassOpsStream,
+	cons, err := EnsureConsumer(ctx, conn.JetStream(), ConsumerConfig{
+		StreamName: testStream,
 		Durable:    "bypass2-coverage",
 		AckWait:    2 * time.Second,
 		// FilterSubjects intentionally omitted → applyDefaults() fills it.
-	}, bypassLogger())
+	}, testLogger())
 	if err != nil {
 		t.Fatalf("bypass2 coverage: EnsureConsumer: %v", err)
 	}
@@ -186,5 +201,24 @@ func assertConsumerReceivesNothing(t *testing.T, ctx context.Context, cons jetst
 	}
 	if count > 0 {
 		t.Fatalf("bypass: BYPASS ESCAPED: %s: consumer received %d message(s) that should have been filtered", tag, count)
+	}
+}
+
+// widenOpsStreamSubjects updates the core-operations stream to the real
+// production subject shape, "ops.>" (internal/bootstrap/primordial.go,
+// Contract #2 §2.3) — provisionHarness's own "ops.*"/"ops.meta.>" pair is
+// narrower and never needed a 3-segment publish subject for its existing
+// tests, but a production lane publish is "ops.<lane>.<...>".
+func widenOpsStreamSubjects(t *testing.T, ctx context.Context, conn *substrate.Conn) {
+	t.Helper()
+	js := conn.JetStream()
+	stream, err := js.Stream(ctx, testStream)
+	if err != nil {
+		t.Fatalf("widenOpsStreamSubjects: get stream: %v", err)
+	}
+	cfg := stream.CachedInfo().Config
+	cfg.Subjects = []string{"ops.>"}
+	if _, err := js.UpdateStream(ctx, cfg); err != nil {
+		t.Fatalf("widenOpsStreamSubjects: update stream: %v", err)
 	}
 }

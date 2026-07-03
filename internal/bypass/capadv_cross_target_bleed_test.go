@@ -1,6 +1,8 @@
-// Package bypass — Phase 1 Gate 3: Capability Lens adversarial test suite.
+// Package bypass holds the outcome-level adversarial residual for the
+// Capability Lens security plane — assemblies that don't reduce to one
+// mechanism's colocated white-box test.
 //
-// Vector #4 — Cross-target ephemeral grant bleed.
+// Cross-target ephemeral grant bleed.
 //
 // Attack: A manager identity (aliceManager) has an ephemeral grant derived from
 // her task assignment (aliceTask → ApproveLeaseApplication → aliceLease). She
@@ -25,10 +27,6 @@
 //
 // DEFENDED when: both cross-target denial paths fire AND alice→aliceLease positive
 // path commits AND alice's cap entry has no ephemeralGrants for bob's chain.
-//
-// Report row:
-//
-//	Vector #4 | Cross-target ephemeral grant bleed | DEFENDED | CapabilityAuthorizer ephemeralGrant target-match (§6.6)
 package bypass
 
 import (

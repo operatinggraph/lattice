@@ -199,10 +199,14 @@ emitted by production binaries.
 
 | Key Pattern | Written By | Source File |
 |---|---|---|
-| `health.gates.phase1.gate2` | Gate 2 test suite | `internal/bypass/bypass_test.go` |
-| `health.gates.phase1.gate3` | Gate 3 test suite | `internal/bypass/gate3_test.go` |
 | `health.gates.phase1.gate4` | Gate 4 test suite | `internal/aiagent/gate4_rollback_test.go` |
 | `health.gates.phase1.gate5` | Gate 5 test suite | `internal/hellolattice/hellolattice_test.go` |
+
+**Gates 2/3 retired.** The Phase-1 security gates (`health.gates.phase1.gate2`,
+`.gate3`) had no producer once `make test-bypass`/`make test-capability-adversarial`
+were retired — every real defense they proved now ships its own colocated mechanism
+test, plus a lean outcome-level residual in `internal/bypass`, all under the normal
+`go test` gate ([retire-phase1-security-gates-design.md](../../_bmad-output/implementation-artifacts/retire-phase1-security-gates-design.md)).
 
 **Gate 1 note.** Gate 1 is the bootstrap completion gate. It does not use a
 `health.gates.phase1.gate1` key. Instead, bootstrap completion is signaled by
@@ -520,7 +524,7 @@ processor.<instance>  green       12s ago       ops_consumed=142 ops_committed=1
 refractor.<instance>  green       8s ago        lensLags: capability=0
 <lensId> (lens)       active      -             consumerLag=0 errorCount=0
 health.bootstrap.comp green       -             one-shot complete
-Gates passed: 4/5  (gate2=pass gate3=pass gate4=pass gate5=pass gate1=absent)
+Gates passed: 2/2  (gate4=pass gate5=pass gate1=absent)
 Alerts: none
 Overall: GREEN
 ```
@@ -540,7 +544,7 @@ the emission surface:
 | Weaver | `health.weaver.<instance>` | `internal/weaver/health.go` |
 | Loom | `health.loom.<instance>` | `internal/loom/health.go` |
 | Bootstrap | `health.bootstrap.complete` | `internal/bootstrap/primordial.go` |
-| Gates | `health.gates.phase1.gate<N>` | integration test suites (gates 2–5) |
+| Gates | `health.gates.phase1.gate<N>` | integration test suites (gates 4–5; 2–3 retired) |
 
 All long-running components (Processor, Refractor, Weaver, Loom) have a documented emission
 surface and are read by the `lattice health summary` rollup. NFR-O3 is satisfied.

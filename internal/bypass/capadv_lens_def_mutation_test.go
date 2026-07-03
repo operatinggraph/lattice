@@ -1,6 +1,8 @@
-// Package bypass — Phase 1 Gate 3: Capability Lens adversarial test suite.
+// Package bypass holds the outcome-level adversarial residual for the
+// Capability Lens security plane — assemblies that don't reduce to one
+// mechanism's colocated white-box test.
 //
-// Vector #3 — Lens-definition mutation via AI-authored operation.
+// Lens-definition mutation via AI-authored operation.
 //
 // Attack: A rogue AI actor (an automated agent with no granted permissions)
 // attempts to weaken the Capability Lens cypher rule by submitting an
@@ -31,9 +33,6 @@
 //   - The auth trace captures planes.capabilityKV.matched == false (no-entry).
 //   - NFR-S10: no AI-actor special-case code exists in the Authorizer.
 //
-// Report row:
-//
-//	Vector #3 | Lens-def mutation via AI actor | DEFENDED | CapabilityAuthorizer NoCapabilityEntry + NFR-S10 no-special-case
 package bypass
 
 import (

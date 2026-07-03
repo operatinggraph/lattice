@@ -320,6 +320,142 @@ func TestRLS_ForceRLS_DenyAll_Integration(t *testing.T) {
 	assert.Equal(t, 0, visibleAs(protectedTbl, actor), "revoked grant hides the row")
 }
 
+// TestRLS_CrossActorAnchor_Filtered_Integration proves §6.14 read-path
+// isolation: two actors with disjoint grants on the same protected table each
+// see only the row anchored to a grant they hold, and an ungranted actor sees
+// nothing.
+func TestRLS_CrossActorAnchor_Filtered_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	role, visibleAs := rlsReaderHarness(t, pool)
+
+	suffix := sanitize(t.Name())
+	tbl := "rbv2_" + suffix
+	stmts, err := BuildProtectedTableDDL(tbl, []string{"id"}, []ColumnDef{{Name: "body", Type: "text"}})
+	require.NoError(t, err)
+	for _, s := range stmts {
+		_, err = pool.Exec(ctx, s)
+		require.NoError(t, err, "exec: %s", s)
+	}
+	_, err = pool.Exec(ctx, fmt.Sprintf(`GRANT SELECT ON "%s","actor_read_grants" TO %s`, tbl, role))
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`) })
+
+	actorA := "actorA_" + suffix
+	actorB := "actorB_" + suffix
+	anchorA := "anchorA_" + suffix
+	anchorB := "anchorB_" + suffix
+
+	w := provisionGrantWriter(t, pool)
+	require.NoError(t, w.UpsertGrant(ctx, actorA, anchorA, "cap-read.test", 1))
+	require.NoError(t, w.UpsertGrant(ctx, actorB, anchorB, "cap-read.test", 1))
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM "actor_read_grants" WHERE actor_id=$1 OR actor_id=$2`, actorA, actorB)
+	})
+
+	_, err = pool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s" (id, body, authz_anchors, projection_seq) VALUES ($1,$2,$3,$4)`, tbl),
+		"rowA", "secret-rowA", []string{anchorA}, 1)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s" (id, body, authz_anchors, projection_seq) VALUES ($1,$2,$3,$4)`, tbl),
+		"rowB", "secret-rowB", []string{anchorB}, 1)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, visibleAs(tbl, actorA), "A sees only A's row")
+	assert.Equal(t, 1, visibleAs(tbl, actorB), "B sees only B's row")
+	assert.Equal(t, 0, visibleAs(tbl, "stranger_"+suffix), "an ungranted actor sees nothing")
+	assert.Equal(t, 0, visibleAs(tbl, ""), "an unauthenticated (NULL) actor sees nothing")
+}
+
+// TestRLS_CrossAnchorBleed_Filtered_Integration proves §6.14 H5 hierarchical
+// set-membership: an actor holding a fine-grained grant (unit.X) never sees a
+// row anchored only to a different unit, while an actor holding a coarser
+// grant (building.B) sees every row tagged with that coarse anchor but not an
+// orphan row tagged with an unrelated fine anchor only.
+func TestRLS_CrossAnchorBleed_Filtered_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	role, visibleAs := rlsReaderHarness(t, pool)
+
+	suffix := sanitize(t.Name())
+	tbl := "rbv4_" + suffix
+	stmts, err := BuildProtectedTableDDL(tbl, []string{"id"}, []ColumnDef{{Name: "body", Type: "text"}})
+	require.NoError(t, err)
+	for _, s := range stmts {
+		_, err = pool.Exec(ctx, s)
+		require.NoError(t, err, "exec: %s", s)
+	}
+	_, err = pool.Exec(ctx, fmt.Sprintf(`GRANT SELECT ON "%s","actor_read_grants" TO %s`, tbl, role))
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`) })
+
+	unitX := "unitx_" + suffix
+	unitY := "unity_" + suffix
+	buildingB := "buildingb_" + suffix
+	fineActor := "fine_" + suffix
+	coarseActor := "coarse_" + suffix
+
+	w := provisionGrantWriter(t, pool)
+	require.NoError(t, w.UpsertGrant(ctx, fineActor, unitX, "cap-read.residence", 1))
+	require.NoError(t, w.UpsertGrant(ctx, coarseActor, buildingB, "cap-read.residence", 1))
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM "actor_read_grants" WHERE actor_id=$1 OR actor_id=$2`, fineActor, coarseActor)
+	})
+
+	insertRow := func(id string, anchors []string) {
+		_, err := pool.Exec(ctx, fmt.Sprintf(`INSERT INTO "%s" (id, body, authz_anchors, projection_seq) VALUES ($1,$2,$3,$4)`, tbl),
+			id, "secret-"+id, anchors, 1)
+		require.NoError(t, err)
+	}
+	insertRow("rowX", []string{unitX, buildingB})      // a unit in building B
+	insertRow("rowY", []string{unitY, buildingB})      // a different unit in building B
+	insertRow("rowOrphan", []string{unitY})            // a unit neither actor has a grant for
+
+	// fineActor (unit.X) sees rowX only — no cross-anchor bleed to rowY/rowOrphan.
+	assert.Equal(t, 1, visibleAs(tbl, fineActor), "unit.X holder sees only the unit.X row")
+	// coarseActor (building.B) sees BOTH rowX and rowY (both tagged building.B),
+	// but NOT rowOrphan (tagged unit.Y only) — the H5 hierarchical grant.
+	assert.Equal(t, 2, visibleAs(tbl, coarseActor), "building.B holder sees every unit in the building, not the orphan")
+}
+
+// rlsReaderHarness creates a per-run non-superuser reader role (RLS is
+// bypassed by superusers) and returns it with a visibleAs closure that
+// counts rows the given actor can SELECT from table under that role, with
+// lattice.actor_id set transaction-locally — the read boundary's posture.
+func rlsReaderHarness(t *testing.T, pool *pgxpool.Pool) (role string, visibleAs func(table, actor string) int) {
+	t.Helper()
+	role = "rls_read_bypass_reader_" + sanitize(t.Name())
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `DO $$ BEGIN
+		IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='`+role+`') THEN
+			CREATE ROLE `+role+` NOLOGIN;
+		END IF; END $$;`)
+	require.NoError(t, err)
+
+	visibleAs = func(table, actor string) int {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(ctx) }()
+		_, err = tx.Exec(ctx, "SET LOCAL ROLE "+role)
+		require.NoError(t, err)
+		if actor != "" {
+			_, err = tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actor)
+			require.NoError(t, err)
+		}
+		var n int
+		require.NoError(t, tx.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM "%s"`, table)).Scan(&n))
+		return n
+	}
+	return role, visibleAs
+}
+
 // sanitize maps a Go test name to a lowercase identifier-safe suffix.
 func sanitize(s string) string {
 	var b strings.Builder

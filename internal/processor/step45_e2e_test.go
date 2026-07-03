@@ -60,12 +60,15 @@ func TestE2E_ScriptErrorTerminates(t *testing.T) {
 	}
 }
 
-// TestE2E_SandboxViolationTerminates seeds a script that references `os`.
-// Step 5 returns *ScriptError with Code=SandboxViolation; the commit
-// path terms the message.
+// TestE2E_SandboxViolationTerminates seeds a script that references `os`
+// AND — even if the sandbox check were bypassed — attempts to mutate a
+// real target key. Step 5 returns *ScriptError with Code=SandboxViolation;
+// the commit path terms the message before step 6+8 ever run, so the
+// rogue mutation must never reach Core KV.
 func TestE2E_SandboxViolationTerminates(t *testing.T) {
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
-	violating := []byte(`{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    x = os.getenv(\"SECRET\")\n    return {\"mutations\": [], \"events\": []}\n"}}`)
+	rogueKey := "vtx.identity.rogueSandboxTargetAAAA"
+	violating := []byte(`{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    x = os.getenv(\"SECRET\")\n    return {\"mutations\": [{\"op\": \"create\", \"key\": \"` + rogueKey + `\", \"document\": {\"class\": \"identity\"}}], \"events\": []}\n"}}`)
 	if _, err := conn.KVPut(ctx, testCoreBucket, "vtx.meta.identity.script", violating); err != nil {
 		t.Fatalf("seed sandbox-violating script: %v", err)
 	}
@@ -75,6 +78,12 @@ func TestE2E_SandboxViolationTerminates(t *testing.T) {
 	driveOne(t, ctx, cp, cons, OutcomeRejected)
 	if metrics.OpsRejected.Load() != 1 {
 		t.Fatalf("OpsRejected = %d, want 1", metrics.OpsRejected.Load())
+	}
+
+	// The rogue mutation must never have reached Core KV: SandboxViolation
+	// halts step 5, so step 6 (validate) and step 8 (commit) never run.
+	if _, err := conn.KVGet(ctx, testCoreBucket, rogueKey); err == nil {
+		t.Fatalf("BYPASS ESCAPED: rogue mutation key %q found in Core KV after SandboxViolation", rogueKey)
 	}
 }
 

@@ -1,6 +1,8 @@
-// Package bypass — Phase 1 Gate 3: Capability Lens adversarial test suite.
+// Package bypass holds the outcome-level adversarial residual for the
+// Capability Lens security plane — assemblies that don't reduce to one
+// mechanism's colocated white-box test.
 //
-// Vector #6 — Guarded-projection rebuild integrity.
+// Guarded-projection rebuild integrity.
 //
 // This vector proves the rebuild path on a GUARDED bucket is both correct and
 // safe, covering the primary capability lens (cap.identity.<id>) as well as the
@@ -23,10 +25,6 @@
 // DEFENDED when: (a) the post-rebuild bucket is key-equal to a from-scratch
 // projection AND (b) the post-rebuild stale retry is rejected (the primary
 // cap.identity.<id> key stays a tombstone at the close-era watermark).
-//
-// Report row:
-//
-//	Vector #6 | Guarded-projection rebuild integrity | DEFENDED | Refractor force-truncate on guarded rebuild (Truncate purges watermarks → highest-seq replay wins; guard stays always-on so a concurrent stale retry cannot resurrect; §6.2)
 package bypass
 
 import (
