@@ -389,19 +389,20 @@ When the penthouse resident attempts `BookLaundryService` targeting `vtx.service
     "details": {
       "operationType": "BookLaundryService",
       "deniedService": "vtx.service.laundry-NanoID",
-      "deniedServiceClass": "service.cleaning.standard",
-      "availableServiceClasses": [
-        "service.cleaning.executive",
-        "service.financial.rentPayment"
-      ]
+      "deniedServiceClass": "service.cleaning.standard"
     }
   }
 }
 ```
 
-The denial response is structural (per Journey 5's design): names what was denied and what IS available.
+The denial response is structural (per Journey 5's design): it names what was denied, with the rich
+class (`deniedService` from `authContext.service`; `deniedServiceClass` from a single denial-time read
+of the service vertex's `.class` aspect, per §6.5). It does **not** enumerate what IS available —
+"which services can this actor use" is the application's read-model question (architecture P5: apps
+read lens projections), already answered by the actor's residence projection; the denial payload does
+not duplicate a query surface.
 
-**`actorRoles` on a service denial.** A service-op denial does **not** surface `actorRoles`. The service auth path reads the disjoint `cap.svc.<actor>` key projected by the `service-location` package's `capabilityServiceAccess` lens (the residence-based grant scheme), and that document carries `serviceAccess[]` only — no `roles`. Under the residence scheme this is the more faithful denial: a service denial is explained by residence and availability (the `deniedService` / `deniedServiceClass` / `availableServiceClasses` fields), not by the actor's roles, which never participate in the service grant. The `actorRoles` field remains populated on **role-derived** (platform-path) denials, where the role projection is what was evaluated.
+**`actorRoles` on a service denial.** A service-op denial does **not** surface `actorRoles`. The service auth path reads the disjoint `cap.svc.<actor>` key projected by the `service-location` package's `capabilityServiceAccess` lens (the residence-based grant scheme), and that document carries `serviceAccess[]` only — no `roles`. Under the residence scheme this is the more faithful denial: a service denial is explained by residence (the `deniedService` / `deniedServiceClass` fields), not by the actor's roles, which never participate in the service grant. The `actorRoles` field remains populated on **role-derived** (platform-path) denials, where the role projection is what was evaluated.
 
 ### 6.13 Implementation Notes
 
