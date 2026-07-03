@@ -764,6 +764,25 @@ Lead review only (FE-only, reuses the established gated-button + generic-`/api/o
 `landlordLeaseApplicationsReadSpec` through real shred-scrub (still only proven in halves); then
 **5b-iii** clinic contact; delivery-boundary reset + a live e2e.
 
+**Fire 5b-ii-d CHECKPOINT (2026-07-02, Lattice Steward, `04bcbf0`).** Investigating the
+"real shred-scrub" remainder above surfaced a **severity-1 production bug**, not just a
+coverage gap: `readinessWithItems` (the fragment shared by `leaseApplicationCompleteSpec`
+*and* `landlordLeaseApplicationsReadSpec`) tested "ssn on file" via `id.ssn.data.value`. Step
+6.5 replaces a sensitive aspect's entire `data` field with its ciphertext envelope (`{ct,
+nonce, keyId}` — no `value` key), so that hop resolves **null for every real, correctly
+Vault-encrypted ssn** — `missing_onboarding` could never close and `applicantApproved` /
+`qualified` could never turn true for any real (non-fixture) applicant once Vault is live.
+Every existing test used the fixture-only plaintext `{value: "..."}` shape, which masked it —
+confirmed by reproducing against a real `vault.LocalBackend`-encrypted envelope before fixing.
+**Fix:** test presence at the whole-aspect level (`id.ssn.data`, non-null under both shapes,
+never itself returned as a value) — one-line change to the shared fragment, so both consumers
+fix together. Added `TestLandlordLeaseApplicationsRead_QualifiedWithRealVaultCiphertext`
+(real-ciphertext regression guard); full `packages/lease-signing` suite, `test-lease-convergence`,
+and `test-crypto-shred` all green. Lead review (S-sized, non-security-mechanism cypher fix,
+fully covered by the new + existing tests). **Still remaining for 5b close:** a `ShredIdentityKey`
+run against `landlordLeaseApplicationsReadSpec`'s own committed ciphertext (proving `Vault.Decrypt`
+fails post-shred for *this* lens specifically, not just readiness-formula correctness); then 5b-iii.
+
 **Considered and REJECTED — pre-Vault plaintext contact projection** into `clinicPatientsRead`
 (technically buildable, no test fails, outside M4's *letter* since `.demographics` cannot be
 `sensitive:true` on a non-identity vertex): it ships queryable plaintext PHI into Postgres that
