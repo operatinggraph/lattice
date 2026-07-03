@@ -198,7 +198,7 @@ into:
 
 	adpt, err := adapter.New(targetKV, rule.Into.Key, adapter.DeleteModeHard)
 	require.NoError(h.t, err)
-	p, err := pipeline.New(rule.ID, "nats_kv", nil, testutil.HarnessCoreBucket, adjKV, coreKV, adpt, nil)
+	p, err := pipeline.New(rule.ID, "nats_kv", testutil.HarnessCoreBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(h.t, err)
 	p.UseFullEngine(full.New(), rule.CompiledRule)
 	p.RunOn(h.conn, substrate.ConsumerSpec{
@@ -269,7 +269,7 @@ RETURN a.key AS key, a.key AS identity_key, a.email.data AS email`)
 
 	adpt, err := adapter.New(secureTargetKV, []string{"key"}, adapter.DeleteModeHard)
 	require.NoError(h.t, err)
-	p, err := pipeline.New(secureLensRuleID, "nats_kv", nil, testutil.HarnessCoreBucket, adjKV, coreKV, adpt, nil)
+	p, err := pipeline.New(secureLensRuleID, "nats_kv", testutil.HarnessCoreBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(h.t, err)
 	p.UseFullEngine(eng, cr)
 

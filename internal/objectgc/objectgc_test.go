@@ -213,7 +213,7 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 
 	adpt, err := adapter.New(convKV, rule.Into.Key, adapter.DeleteModeHard)
 	require.NoError(h.t, err)
-	p, err := pipeline.New(rule.ID, "nats_kv", nil, bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
+	p, err := pipeline.New(rule.ID, "nats_kv", bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
 	require.NoError(h.t, err)
 	p.UseFullEngine(fullEngine, rule.CompiledRule)
 	require.True(h.t, projection.InstallActorAggregate(p, adpt, rule, projRev, adjKV, coreKV, h.logger),

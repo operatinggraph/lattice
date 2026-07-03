@@ -37,5 +37,5 @@ payload:
         "key": ["book_id"]
       },
       "cypherRule": "MATCH (b:book) RETURN b.key AS book_id, b.title AS title",
-      "engine": "simple"
+      "engine": "full"
     }
