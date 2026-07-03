@@ -324,14 +324,36 @@ currently reserved-but-unemitted.
         "p95Ns": <int64>,
         "p99Ns": <int64>
       }
+    },
+    "capabilityLens": {
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "consumerLag": <uint64>, "alert": "ok | paused | lagging"}
+    },
+    "lensLiveness": {
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "projectionLag": <uint64>, "lastProjectedAt": "<RFC3339>", "alert": "ok | paused | lagging"}
     }
   },
-  "issues": []
+  "issues": [
+    {"code": "CapabilityLensPaused", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilityLensLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"}
+  ]
 }
 ```
 
 `metrics.lensLags` and `metrics.lensLatency` are omitted when no lens is active or no
-latency samples have been recorded yet.
+latency samples have been recorded yet. `metrics.capabilityLens` (auth-plane lenses) and
+`metrics.lensLiveness` (every other active lens) are each emitted every heartbeat cycle,
+including the healthy `alert: "ok"` state, so observers can render the green state and
+(for `lensLiveness`) the freshness clock, not only anomalies
+(lens-projection-liveness-design.md §3.3). `LensProjection{Paused,Lagging}` are the
+generalized sibling of `CapabilityLens{Paused,Lagging}`: same raise-after-N / clear-band
+debounce (default threshold 100, raise after 3 consecutive over-threshold cycles), but
+always `severity: warning` (⇒ `status: degraded`) even when paused — a single frozen
+business lens is a real outage for that vertical but must not escalate the whole
+Refractor instance to `unhealthy` the way a frozen auth-plane lens does. Each `issues[]`
+entry's `since` persists across heartbeats while the condition holds and is dropped once
+it resolves.
 
 ### `health.weaver.<instance>` — Weaver heartbeat
 
@@ -412,12 +434,18 @@ the scan failed; `timers*` only when the temporal lane is wired).
   "errorCount": <uint64>,
   "lastError": null,
   "lastUpdated": "<RFC3339>",
-  "ruleEngine": "<engineName>"
+  "ruleEngine": "<engineName>",
+  "lastProjectedAt": "<RFC3339>",
+  "projectionLag": <uint64>
 }
 ```
 
 `pauseReason` is `null` when active; `"infra"`, `"structural"`, or `"manual"` when paused.
-`lastError` is `null` when no error has occurred.
+`lastError` is `null` when no error has occurred. `lastProjectedAt` is the wall-clock of the
+lens's last successful target write — `""` until its first projection (design:
+lens-projection-liveness-design.md §3.2); a freshness signal, never an alert input on its own
+(a genuinely quiet, no-match lens naturally has an old value). `projectionLag` is the
+operator-facing alias of `consumerLag` (same NumPending value under both names).
 
 ### `health.bootstrap.complete`
 
