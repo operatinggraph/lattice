@@ -139,6 +139,51 @@ type Pipeline struct {
 	// supervisor, so a control-plane Pause/Resume issued immediately after Run
 	// (which runs in a goroutine) acts on a live consumer.
 	started chan struct{}
+
+	// progressMu guards lastAppliedSeq / lastProjectedAt — the lens's
+	// projection-liveness clocks (lens-projection-liveness-design.md §3.1).
+	progressMu sync.Mutex
+	// lastAppliedSeq is the Core KV stream sequence of the last event this
+	// consumer acked, including ack-and-skip. Advances whenever the lens
+	// consumes anything; a wedged consumer (delivering nothing) leaves it frozen.
+	lastAppliedSeq uint64
+	// lastProjectedAt is the wall-clock of the last successful target write.
+	// Advances only on real output, so a caught-up-but-no-op consumer leaves it
+	// frozen even as lastAppliedSeq moves. Zero until the first projection.
+	lastProjectedAt time.Time
+}
+
+// ProjectionProgress is the lens's forward-progress snapshot for the health
+// plane (lens-projection-liveness-design.md §3.1).
+type ProjectionProgress struct {
+	LastAppliedSeq  uint64
+	LastProjectedAt time.Time
+}
+
+// Progress returns the pipeline's current forward-progress snapshot.
+// Thread-safe; read by the LagPoller each cycle.
+func (p *Pipeline) Progress() ProjectionProgress {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	return ProjectionProgress{LastAppliedSeq: p.lastAppliedSeq, LastProjectedAt: p.lastProjectedAt}
+}
+
+// recordAppliedSeq advances the consumer's forward cursor. Called for every
+// acked message (including ack-and-skip), never for a Nak (redelivery means
+// the message has not actually been consumed yet).
+func (p *Pipeline) recordAppliedSeq(seq uint64) {
+	p.progressMu.Lock()
+	p.lastAppliedSeq = seq
+	p.progressMu.Unlock()
+}
+
+// recordProjected stamps the read-model's last-touch clock. Called only after
+// a successful adapter write (Create/Update/Delete actually reaching the
+// target) — never on ack-and-skip or a write error.
+func (p *Pipeline) recordProjected() {
+	p.progressMu.Lock()
+	p.lastProjectedAt = time.Now()
+	p.progressMu.Unlock()
 }
 
 // EnvelopeFn rewrites a projection-row map into the on-wire shape the
@@ -396,7 +441,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 	go p.runAdjWatch(ctx)
 
 	spec := p.consumerCfg
-	spec.Handler = p.handle
+	spec.Handler = p.handleTracked
 	spec.Classify = classifyForSupervisor
 	spec.Probe = func(pctx context.Context) error { return p.currentAdapter().Probe(pctx) }
 	spec.Health = newHealthSink(p.reporter, p.rebuildInFlight.Load)
@@ -529,6 +574,17 @@ func (p *Pipeline) watchRebuildCompletion(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// handleTracked wraps handle to advance the projection-liveness forward
+// cursor (lastAppliedSeq) on every Ack — including ack-and-skip — but never on
+// Nak (redelivery means the message has not actually been consumed yet).
+func (p *Pipeline) handleTracked(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
+	decision, err := p.handle(ctx, msg)
+	if decision == substrate.Ack {
+		p.recordAppliedSeq(msg.Sequence)
+	}
+	return decision, err
 }
 
 // handle is the supervised message handler (substrate.SupervisedHandler). It
@@ -922,6 +978,7 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 			return substrate.Nak, nil
 		}
 
+		p.recordProjected()
 		p.writeAudit(ctx, key, result)
 	}
 
@@ -1269,6 +1326,7 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjKey string) {
 			// but the error is recorded in health KV for operator visibility.
 			continue
 		}
+		p.recordProjected()
 		slog.Info("pipeline: adj watch: re-evaluated",
 			"ruleId", p.ruleID, "entityId", nodeKey,
 			"stage", "pipeline", "adapter", p.adapterName)
