@@ -1,9 +1,26 @@
 # Object-plane NATS permissions — fix the blob-plane transport grants
 
-**Status: 📐 awaiting-Andrew (ratification).** One-fire correctness fix on the NATS account-level
-write-restriction matrix (`deploy/gen-dev-nkeys/main.go` → `deploy/nats-server.conf`) so the
-legitimate blob-plane writers can actually write under enforcement, plus the first `natsperm`
-object-plane conformance vectors and a live-stack upload/GC verification.
+**Status: ✅ shipped (`9972fec`, 2026-07-03, Lattice Steward).** Winston self-ratified at build
+time — the doc's own "For Andrew" section already established no fork / no contract change, so the
+only open items were implementation-level (decide-don't-defer). One-fire correctness fix on the NATS
+account-level write-restriction matrix (`deploy/gen-dev-nkeys/main.go` → `deploy/nats-server.conf`)
+so the legitimate blob-plane writers can actually write under enforcement, plus the first `natsperm`
+object-plane conformance vectors.
+
+**Fire 1 CHECKPOINT (2026-07-03, Lattice Steward, `9972fec`).** Shipped: the three grant fixes (§3) +
+bootstrap's `$OBJ.>`→`$O.>` typo; `TestObjectStoreWriteAccess` / `TestObjectStoreWriteIsolation` added
+to `internal/natsperm/conf_test.go` and green (embedded server booted from the exact regenerated
+conf — the authoritative conformance proof). NKey seeds unchanged (idempotent regen, 13 users).
+**Live-stack verification narrowed from the §5 plan:** the pre-fix denial was reproduced against the
+actual running (old-conf) stack via a throwaway, unpersisted probe (`loftspace-app` `ObjectPut` →
+`Permissions Violation` on `$O.core-objects.M.<name>`), confirming the arch-review finding is real —
+but applying the fix live would need a NATS-process restart to reload the mounted conf, which this
+fire deferred: the shared dev stack was 14h up, backing concurrent fires + `loupe`/`loftspace-app`/
+`clinic-app`, and restarting it unattended was judged out of proportion to a config-only fix already
+proven by the embedded conformance suite. Applies automatically on the stack's next natural
+`make down && make up(-full)` cycle. `go build`, `make vet`, `golangci-lint`, `STRICT=1
+lint-conventions` all green; Gate 2/3 + `verify-kernel` skipped (they require a stack reset this fire
+didn't take, and don't exercise this diff — the natsperm suite is the purpose-built proof here).
 **Author:** Winston (Designer fire, 2026-07-02)
 **Backlog:** Stream-2 arch-review intake — *object-plane-nats-permissions* (★★★, S) — arch-review correction #2.
 **Owning artifacts:** `deploy/gen-dev-nkeys/main.go` (the matrix, single source of truth) → the generated

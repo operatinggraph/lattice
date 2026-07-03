@@ -84,7 +84,6 @@ Severity-ordered; same row discipline as component maintenance (shipped rows col
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **object-plane-nats-permissions** | Object-plane NKey grants mismatch the pinned nats.go: writes publish on `$O.core-objects.C/M.>` but objmgr is granted `$OBJ.objects-base.>` (wrong prefix + bucket) and Loupe/loftspace-app have no `$O.` grant at all — blob upload + GC delete should be transport-denied on the live stack. Fix the grants; add natsperm object vectors (zero today); verify a live upload. | ★★★ | S | 📐 awaiting-Andrew · [design](../../implementation-artifacts/object-plane-nats-permissions-design.md) · one fire; no contract change |
 | **gateway-revocation-kill-switch-activation** | Kill-switch dormant — nothing populates a revocation set, no admin surface revokes, a failed bucket-open silently disables checking. Andrew-steered mechanism (`RevokeActor` op → outboxed event → Gateway-owned local KV, fail-closed) in the design doc. | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/gateway-token-revocation-activation-design.md) · no contract change; 2 fires; blocks loupe F11 |
 | **[Gateway] up-full deploy + JWKS heartbeat block (Loupe enablers)** | Gateway isn't started by `make up-full`'s `orchestration` target (`run-gateway` exists) → its map node is a ghost; and its heartbeat carries no trusted-key state. Start it in up-full (dev-mode + dev key); add a `jwks` block `{keys:[{kid,source,alg,addedAt}],lastPoll,swaps}` to `health.gateway.<instance>`. | ★★ | S | 📋 · blocks loupe F10 (truthful node) / F11 (JWKS panel) |
 | **heartbeat-false-green-aggregation** | Bridge, Gateway, and object-store-manager emit status "healthy" unconditionally while carrying (or ignoring) issues — an outage rides a green heartbeat; Loom/Weaver already aggregate issue severity. Port the aggregateStatus rule into all three heartbeaters. | ★★ | S | 📋 |
@@ -198,6 +197,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `9972fec` · [natsperm] object-plane-nats-permissions — arch #2 fixed (Winston self-ratified, no fork/contract); first object-plane natsperm vectors
 - 2026-07-03 · `971011c` · [Loom/Weaver/Bridge] health-sink consolidation — shared internal/healthkv.ConsumerSink, pause-restore round-trip covered
 - 2026-07-03 · `338727d` · [clinic] Vault Fire 5b-iii — CreatePatient identityKey wires identifiedBy; .demographics drops dob/email/phone
 - 2026-07-03 · `94c8224` · [CI] hello-lattice NFR-P3 deadline widened 1000ms→2000ms — eradicated the recurring Milestone4 projection-poll flake
