@@ -61,7 +61,7 @@ func (k *KeyField) UnmarshalYAML(value *yaml.Node) error {
 
 // IntoConfig describes the target store for a rule's output.
 type IntoConfig struct {
-	Target          string        `yaml:"target"`        // "nats_kv" or "postgres"
+	Target          string        `yaml:"target"`        // "nats_kv", "postgres", or "nats_subject"
 	Bucket          string        `yaml:"bucket"`        // NATS KV bucket name (nats_kv only)
 	DSN             string        `yaml:"dsn"`           // Postgres connection string (postgres only)
 	Table           string        `yaml:"table"`         // Postgres table name (postgres only)
@@ -92,6 +92,12 @@ type IntoConfig struct {
 	// anchor-self presence check (which structurally cannot reach this shape).
 	// Populated from the LensSpec targetConfig by translateSpec; not from YAML.
 	DiffRetraction bool `yaml:"-"`
+
+	// SubjectPrefix and Stream configure a "nats_subject" target — the
+	// Personal Lens transport (personal-secure-lens-design.md Fire 1).
+	// Populated from the LensSpec targetConfig by translateSpec; not from YAML.
+	SubjectPrefix string `yaml:"-"`
+	Stream        string `yaml:"-"`
 }
 
 // RetryConfig describes retry behaviour for transient write failures.
@@ -209,8 +215,12 @@ func Parse(data []byte) (*Rule, error) {
 		if r.Into.Table == "" {
 			return nil, fmt.Errorf("rule validation: into.table is required when target is \"postgres\"")
 		}
+	case "nats_subject":
+		// SubjectPrefix/Stream are translateSpec-only (JSON targetConfig), the
+		// same as postgres's Protected/Columns — a YAML rule declaring this
+		// target fails later at adapter construction, not here.
 	default:
-		return nil, fmt.Errorf("rule validation: into.target must be \"nats_kv\" or \"postgres\", got %q", r.Into.Target)
+		return nil, fmt.Errorf("rule validation: into.target must be \"nats_kv\", \"postgres\", or \"nats_subject\", got %q", r.Into.Target)
 	}
 
 	// Validate + default delete_mode: absent → "hard"; reject values outside

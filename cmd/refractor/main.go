@@ -354,6 +354,13 @@ func main() {
 				return base, nil
 			}
 			return adapter.NewProtectedAdapter(base, r.Into.ArrayColumns, r.Into.Columns)
+		case "nats_subject":
+			// The Personal Lens transport (personal-secure-lens-design.md Fire 1):
+			// a fire-and-forget per-actor delta publish, not a KV write — no
+			// bucket/table to open, just the backing SYNC-style stream, which the
+			// adapter ensures (JIT, mirroring the nats_kv bucket-create-if-absent
+			// above).
+			return adapter.NewNatsSubjectAdapter(ctx, conn, r.Into.SubjectPrefix, r.Into.Stream, r.Into.Key)
 		default:
 			return nil, fmt.Errorf("unknown adapter target %q", r.Into.Target)
 		}

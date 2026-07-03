@@ -77,6 +77,25 @@ func TestAudit(t *testing.T) {
 	}
 }
 
+func TestPersonalSync(t *testing.T) {
+	tests := []struct {
+		prefix, actorID, want string
+	}{
+		{"lattice.sync.user", "Op4Nb2mPq6rTwzKxVyP7", "lattice.sync.user.Op4Nb2mPq6rTwzKxVyP7"},
+		{"lattice.sync.user", "identityA", "lattice.sync.user.identityA"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, PersonalSync(tt.prefix, tt.actorID))
+	}
+}
+
+func TestPersonalSync_InvalidInputPanics(t *testing.T) {
+	assert.Panics(t, func() { PersonalSync("", "identityA") })
+	assert.Panics(t, func() { PersonalSync("lattice.sync.user", "") })
+	assert.Panics(t, func() { PersonalSync("lattice.sync.user", "actor.id") })
+	assert.Panics(t, func() { PersonalSync("lattice.sync.user", "actor*") })
+}
+
 func TestCoreKVStream(t *testing.T) {
 	assert.Equal(t, "KV_core", CoreKVStream("core"))
 	assert.Equal(t, "KV_my-bucket", CoreKVStream("my-bucket"))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +75,7 @@ type envelopeProbe struct {
 type LensSpec struct {
 	ID            string          `json:"id"`            // lens NanoID; matches the key segment
 	CanonicalName string          `json:"canonicalName"` // e.g., "lens.contract-view"
-	TargetType    string          `json:"targetType"`    // "postgres" | "nats_kv"
+	TargetType    string          `json:"targetType"`    // "postgres" | "nats_kv" | "nats_subject"
 	TargetConfig  json.RawMessage `json:"targetConfig"`  // adapter-specific JSON object
 	CypherRule    string          `json:"cypherRule"`    // openCypher MATCH/RETURN
 	OutputSchema  json.RawMessage `json:"outputSchema"`  // JSON schema for projection rows (passthrough)
@@ -218,6 +219,17 @@ type TargetNATSKVConfig struct {
 	Protected     bool           `json:"protected,omitempty"`
 	GrantTable    bool           `json:"grantTable,omitempty"`
 	SecureColumns []SecureColumn `json:"secureColumns,omitempty"`
+}
+
+// TargetNATSSubjectConfig is the expected shape of LensSpec.TargetConfig
+// when TargetType == "nats_subject" — the Personal Lens transport
+// (personal-secure-lens-design.md Fire 1: PL.1). Key must include
+// adapter.PersonalActorKeyField ("__actor") exactly once; the lens's cypher
+// RETURN aliases that column to the recipient identity.
+type TargetNATSSubjectConfig struct {
+	SubjectPrefix string   `json:"subjectPrefix"` // e.g. "lattice.sync.user"
+	Stream        string   `json:"stream"`        // backing JetStream stream name, e.g. "SYNC"
+	Key           []string `json:"key"`
 }
 
 // NewCoreKVSource constructs a watcher. logger may be nil.
@@ -566,8 +578,25 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 			Key:        KeyField(cfg.Key),
 			DeleteMode: string(dm),
 		}
+	case "nats_subject":
+		var cfg TargetNATSSubjectConfig
+		if err := json.Unmarshal(spec.TargetConfig, &cfg); err != nil {
+			return nil, fmt.Errorf("lens %q: targetConfig unmarshal: %w", spec.ID, err)
+		}
+		if cfg.SubjectPrefix == "" || cfg.Stream == "" || len(cfg.Key) == 0 {
+			return nil, fmt.Errorf("lens %q: targetConfig.{subjectPrefix,stream,key} required for nats_subject", spec.ID)
+		}
+		if !slices.Contains(cfg.Key, adapter.PersonalActorKeyField) {
+			return nil, fmt.Errorf("lens %q: targetConfig.key must include %q for nats_subject", spec.ID, adapter.PersonalActorKeyField)
+		}
+		r.Into = IntoConfig{
+			Target:        "nats_subject",
+			Key:           KeyField(cfg.Key),
+			SubjectPrefix: cfg.SubjectPrefix,
+			Stream:        cfg.Stream,
+		}
 	default:
-		return nil, fmt.Errorf("lens %q: unknown targetType %q (expected postgres|nats_kv)", spec.ID, spec.TargetType)
+		return nil, fmt.Errorf("lens %q: unknown targetType %q (expected postgres|nats_kv|nats_subject)", spec.ID, spec.TargetType)
 	}
 
 	// Resolve the engine through the registry so the pipeline can route

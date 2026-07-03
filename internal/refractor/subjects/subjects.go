@@ -40,6 +40,19 @@ func AdjKey(nodeID string) string {
 	return fmt.Sprintf("adj.%s", nodeID)
 }
 
+// PersonalSync returns the NATS subject for a Personal Lens's per-identity
+// delta stream (personal-secure-lens-design.md Fire 1): prefix is the lens's
+// configured subjectPrefix (a multi-segment convention, e.g.
+// "lattice.sync.user" — not itself a single token) and actorID is the
+// recipient identity, validated as a single subject token.
+func PersonalSync(prefix, actorID string) string {
+	if prefix == "" {
+		panic("subjects: prefix must not be empty")
+	}
+	validateToken("actorID", actorID)
+	return prefix + "." + actorID
+}
+
 // CoreKVStream returns the JetStream stream name for the given NATS KV bucket.
 // NATS convention: KV bucket "foo" is backed by stream "KV_foo".
 func CoreKVStream(bucket string) string {
