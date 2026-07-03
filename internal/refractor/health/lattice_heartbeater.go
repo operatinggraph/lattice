@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -159,6 +160,12 @@ type LatticeHeartbeater struct {
 	// persists across heartbeats. Pruned each cycle to the lenses currently
 	// reported, mirroring openCapIssues.
 	lagState map[string]*lagHysteresis
+
+	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
+	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL. Defaults to
+	// healthkv.DefaultTTLMultiplier via NewLatticeHeartbeater; overridable with
+	// SetTTLMultiplier.
+	ttlMultiplier int
 }
 
 // lagHysteresis is one capability lens's lag-debounce state across heartbeats.
@@ -189,13 +196,31 @@ func NewLatticeHeartbeater(conn *substrate.Conn, bucket, instance string, interv
 		logger = slog.Default()
 	}
 	return &LatticeHeartbeater{
-		conn:      conn,
-		bucket:    bucket,
-		instance:  instance,
-		startedAt: time.Now(),
-		interval:  interval,
-		logger:    logger,
+		conn:          conn,
+		bucket:        bucket,
+		instance:      instance,
+		startedAt:     time.Now(),
+		interval:      interval,
+		logger:        logger,
+		ttlMultiplier: healthkv.DefaultTTLMultiplier,
 	}
+}
+
+// SetTTLMultiplier overrides the heartbeat TTL multiplier (TTL = interval ×
+// multiplier, Contract #5 §5.6). Must be called before Run starts. Zero
+// disables the TTL (an escape hatch for an operator who wants sticky keys); a
+// negative value is clamped to 0.
+func (h *LatticeHeartbeater) SetTTLMultiplier(n int) {
+	if n < 0 {
+		n = 0
+	}
+	h.ttlMultiplier = n
+}
+
+// heartbeatTTL derives the current TTL from interval × ttlMultiplier
+// (Contract #5 §5.6) — 0 when TTL is disabled.
+func (h *LatticeHeartbeater) heartbeatTTL() time.Duration {
+	return h.interval * time.Duration(h.ttlMultiplier)
 }
 
 // Run blocks until ctx is cancelled, emitting heartbeats on a ticker.
@@ -301,7 +326,7 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 		h.logger.Error("refractor heartbeat marshal", "err", err)
 		return
 	}
-	if _, err := h.conn.KVPut(ctx, h.bucket, h.healthKey(), data); err != nil {
+	if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, h.healthKey(), data, h.heartbeatTTL()); err != nil {
 		h.logger.Warn("refractor heartbeat put", "err", err, "key", h.healthKey())
 	}
 }

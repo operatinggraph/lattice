@@ -87,6 +87,10 @@ type heartbeater struct {
 	states    *healthkv.ConsumerStateCache
 	counter   *runningInstanceCounter
 	logger    *slog.Logger
+
+	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
+	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL.
+	ttlMultiplier int
 }
 
 func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance string, every time.Duration, states *healthkv.ConsumerStateCache, logger *slog.Logger) *heartbeater {
@@ -97,15 +101,33 @@ func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance st
 		every = defaultHeartbeatEvery
 	}
 	return &heartbeater{
-		conn:      conn,
-		bucket:    healthBucket,
-		instance:  instance,
-		startedAt: time.Now(),
-		interval:  every,
-		states:    states,
-		counter:   &runningInstanceCounter{conn: conn, bucket: stateBucket, logger: logger},
-		logger:    logger,
+		conn:          conn,
+		bucket:        healthBucket,
+		instance:      instance,
+		startedAt:     time.Now(),
+		interval:      every,
+		states:        states,
+		counter:       &runningInstanceCounter{conn: conn, bucket: stateBucket, logger: logger},
+		logger:        logger,
+		ttlMultiplier: healthkv.DefaultTTLMultiplier,
 	}
+}
+
+// SetTTLMultiplier overrides the heartbeat TTL multiplier (TTL = interval ×
+// multiplier, Contract #5 §5.6). Must be called before run starts. Zero
+// disables the TTL (an escape hatch for an operator who wants sticky keys); a
+// negative value is clamped to 0.
+func (h *heartbeater) SetTTLMultiplier(n int) {
+	if n < 0 {
+		n = 0
+	}
+	h.ttlMultiplier = n
+}
+
+// heartbeatTTL derives the current TTL from interval × ttlMultiplier
+// (Contract #5 §5.6) — 0 when TTL is disabled.
+func (h *heartbeater) heartbeatTTL() time.Duration {
+	return h.interval * time.Duration(h.ttlMultiplier)
 }
 
 // run blocks until ctx is cancelled, emitting one heartbeat immediately and
@@ -169,7 +191,7 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		h.logger.Error("loom heartbeat marshal", "err", err)
 		return
 	}
-	if _, err := h.conn.KVPut(ctx, h.bucket, h.key(), data); err != nil {
+	if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, h.key(), data, h.heartbeatTTL()); err != nil {
 		h.logger.Warn("loom heartbeat put", "err", err, "key", h.key())
 	}
 }

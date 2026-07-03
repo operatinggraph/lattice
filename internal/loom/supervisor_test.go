@@ -18,9 +18,15 @@ const healthKVBucket = "health-kv"
 
 // provisionHealthKV adds the health-kv bucket the heartbeater + per-consumer
 // sinks write to. The base provision() helper does not create it.
+// LimitMarkerTTL enables AllowMsgTTL (Contract #5 §5.6) — production's
+// bootstrap already sets this on the real bucket; tests must mirror it or the
+// heartbeater's KVPutWithTTL call errors (per-message TTL is disabled).
 func provisionHealthKV(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
-	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: healthKVBucket})
+	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:         healthKVBucket,
+		LimitMarkerTTL: time.Second,
+	})
 	require.NoError(t, err)
 }
 

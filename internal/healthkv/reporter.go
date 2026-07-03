@@ -68,10 +68,15 @@ type Config struct {
 }
 
 const (
-	defaultInterval     = 10 * time.Second
-	defaultTTLMultiple  = 10
-	defaultProbeTimeout = 5 * time.Second
-	healthVersion       = "1.0"
+	defaultInterval = 10 * time.Second
+	// DefaultTTLMultiplier is the Contract #5 §5.6 architecture-locked default:
+	// a heartbeat's TTL = interval × DefaultTTLMultiplier (100s at the 10s
+	// floor). Shared by every Health-KV heartbeat writer (this Reporter and the
+	// per-component heartbeaters) so they agree on the derived-TTL convention
+	// out of the box.
+	DefaultTTLMultiplier = 10
+	defaultProbeTimeout  = 5 * time.Second
+	healthVersion        = "1.0"
 )
 
 // Reporter runs a Contract #5 heartbeat loop for a simple, consumer-less
@@ -94,7 +99,7 @@ func New(cfg Config) *Reporter {
 		cfg.Interval = defaultInterval
 	}
 	if cfg.TTL == 0 {
-		cfg.TTL = cfg.Interval * defaultTTLMultiple
+		cfg.TTL = cfg.Interval * DefaultTTLMultiplier
 	}
 	if cfg.TTL < 0 {
 		cfg.TTL = 0

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -80,6 +81,11 @@ type HealthHeartbeater struct {
 	metrics   *Metrics
 	logger    *slog.Logger
 
+	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
+	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL (falls back to a
+	// plain, non-expiring KVPut) — an operator escape hatch; default is on.
+	ttlMultiplier int
+
 	// Per-tick step-3 capability auth signal. The CapabilityAuthorizer is
 	// wired by MakePipeline when AuthMode resolves to capability. step3-latency
 	// always emits.
@@ -111,15 +117,16 @@ func NewHealthHeartbeater(conn *substrate.Conn, bucket, instance string, interva
 		interval = 10 * time.Second
 	}
 	return &HealthHeartbeater{
-		conn:         conn,
-		bucket:       bucket,
-		instance:     instance,
-		startedAt:    time.Now(),
-		interval:     interval,
-		metrics:      metrics,
-		logger:       logger,
-		lagThreshold: defaultLaneLagThreshold,
-		openIssues:   map[string]string{},
+		conn:          conn,
+		bucket:        bucket,
+		instance:      instance,
+		startedAt:     time.Now(),
+		interval:      interval,
+		metrics:       metrics,
+		logger:        logger,
+		lagThreshold:  defaultLaneLagThreshold,
+		openIssues:    map[string]string{},
+		ttlMultiplier: healthkv.DefaultTTLMultiplier,
 	}
 }
 
@@ -180,6 +187,23 @@ func (h *HealthHeartbeater) SetLagThreshold(n uint64) {
 	}
 }
 
+// SetTTLMultiplier overrides the heartbeat TTL multiplier (TTL = interval ×
+// multiplier, Contract #5 §5.6). Must be called before Run starts. Zero
+// disables the TTL (an escape hatch for an operator who wants sticky keys); a
+// negative value is clamped to 0.
+func (h *HealthHeartbeater) SetTTLMultiplier(n int) {
+	if n < 0 {
+		n = 0
+	}
+	h.ttlMultiplier = n
+}
+
+// heartbeatTTL derives the current TTL from interval × ttlMultiplier
+// (Contract #5 §5.6) — 0 when TTL is disabled.
+func (h *HealthHeartbeater) heartbeatTTL() time.Duration {
+	return h.interval * time.Duration(h.ttlMultiplier)
+}
+
 // EmitMalformedOperation writes the per-malformed-envelope marker into
 // Health KV. Key form: `health.processor.<instance>.malformed-operation.<requestId>`.
 // Called inline from step 1 when an envelope fails to parse but a
@@ -212,7 +236,7 @@ func (h *HealthHeartbeater) emit(ctx context.Context, lifecycle string) {
 		h.logger.Warn("health: marshal heartbeat", "error", err)
 		return
 	}
-	if _, err := h.conn.KVPut(ctx, h.bucket, h.healthKey(), b); err != nil {
+	if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, h.healthKey(), b, h.heartbeatTTL()); err != nil {
 		h.logger.Warn("health: write heartbeat", "key", h.healthKey(), "error", err)
 	}
 
@@ -386,7 +410,7 @@ func (h *HealthHeartbeater) emitCapabilityAuthSignals(ctx context.Context) {
 		"p99Ns":      latency.P99.Nanoseconds(),
 	}
 	if raw, err := json.Marshal(latencyDoc); err == nil {
-		if _, err := h.conn.KVPut(ctx, h.bucket, latencyKey, raw); err != nil {
+		if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, latencyKey, raw, h.heartbeatTTL()); err != nil {
 			h.logger.Warn("health: write step3-latency", "key", latencyKey, "error", err)
 		}
 	}

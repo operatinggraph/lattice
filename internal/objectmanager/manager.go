@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -290,7 +291,9 @@ func (m *Manager) heartbeatLoop(ctx context.Context) {
 }
 
 // emitHeartbeat writes the Contract #5 health entry directly to Health KV (the
-// sanctioned direct-write plane, Decision #4).
+// sanctioned direct-write plane, Decision #4). TTL = heartbeatEvery ×
+// healthkv.DefaultTTLMultiplier (§5.6) so a crashed instance's key self-expires
+// instead of orphaning forever.
 func (m *Manager) emitHeartbeat(ctx context.Context) {
 	key := "health.object-store-manager." + m.cfg.Instance
 	doc, _ := json.Marshal(map[string]any{
@@ -299,7 +302,8 @@ func (m *Manager) emitHeartbeat(ctx context.Context) {
 		"status":    "healthy",
 		"updatedAt": m.cfg.now().UTC().Format(time.RFC3339),
 	})
-	if _, err := m.cfg.Conn.KVPut(ctx, m.cfg.HealthKVBucket, key, doc); err != nil {
+	ttl := heartbeatEvery * healthkv.DefaultTTLMultiplier
+	if _, err := m.cfg.Conn.KVPutWithTTL(ctx, m.cfg.HealthKVBucket, key, doc, ttl); err != nil {
 		m.cfg.Logger.Warn("object-store-manager: heartbeat write failed", "error", err)
 	}
 }

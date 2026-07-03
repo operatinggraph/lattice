@@ -41,7 +41,7 @@ func TestLatticeHeartbeater_EmitsLensLatency(t *testing.T) {
 	defer cancel()
 
 	js := conn.JetStream()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv"})
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv", LimitMarkerTTL: time.Second})
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -128,7 +128,7 @@ func TestLatticeHeartbeater_EmitsVaultAndKeyShreddedCounters(t *testing.T) {
 	defer cancel()
 
 	js := conn.JetStream()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv"})
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv", LimitMarkerTTL: time.Second})
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -185,7 +185,7 @@ func TestLatticeHeartbeater_SkipsZeroSampleLenses(t *testing.T) {
 	defer cancel()
 
 	js := conn.JetStream()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv-zero"})
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv-zero", LimitMarkerTTL: time.Second})
 	require.NoError(t, err)
 	hb := health.NewLatticeHeartbeater(conn, "health-kv-zero", "rfx-zero", 10*time.Second, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	// Provider returns a zero-count snapshot — the heartbeater must
@@ -240,7 +240,7 @@ func TestLatticeHeartbeater_PausedCapabilityLensDegradesHealth(t *testing.T) {
 	defer cancel()
 
 	js := conn.JetStream()
-	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv-cap"})
+	_, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "health-kv-cap", LimitMarkerTTL: time.Second})
 	require.NoError(t, err)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
