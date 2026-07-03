@@ -97,11 +97,12 @@ type capabilityAuthorizerOptions struct {
 	// extraEntries adds package-declared dispatch entries to the core seeds.
 	// They are guarded fail-closed at registration (see buildAuthRegistry).
 	extraEntries []authEntry
-	// platformKeyDerivation overrides the platform entry's key derivation. Nil
-	// keeps the default cap.<actor>. When rbac-domain is installed, core passes
-	// the class-aware derivation (system actor → cap.<actor>, ordinary actor →
-	// cap.roles.<actor>).
-	platformKeyDerivation func(string) (string, error)
+	// platformKeysDerivation overrides the platform entry's key-list derivation.
+	// Nil keeps the default single-key cap.<actor>. When rbac-domain is
+	// installed, core passes the class-aware derivation (system actor →
+	// [cap.<actor>, cap.roles.<actor>] union, ordinary actor →
+	// [cap.roles.<actor>]).
+	platformKeysDerivation func(string) ([]string, error)
 }
 
 // NewCapabilityAuthorizer constructs the production authorizer. `reader`
@@ -135,7 +136,7 @@ func newCapabilityAuthorizer(reader CapabilityReader, bucket string, clock Clock
 	if logger == nil {
 		logger = slog.Default()
 	}
-	registry, err := buildAuthRegistry(opts.extraEntries, opts.platformKeyDerivation)
+	registry, err := buildAuthRegistry(opts.extraEntries, opts.platformKeysDerivation)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +215,7 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 		}, nil
 	}
 
-	key, derr := entry.keyDerivation(env.Actor)
+	keys, derr := entry.deriveKeys(env.Actor)
 	if derr != nil {
 		// Malformed actor key would have been rejected at step 1, but keep the
 		// defensive branch so a programming bug here surfaces as a typed denial
@@ -226,32 +227,25 @@ func (a *CapabilityAuthorizer) Authorize(ctx context.Context, env *OperationEnve
 		}, nil
 	}
 
-	kvEntry, err := a.reader.KVGet(ctx, a.bucket, key)
+	doc, key, err := a.readAndMergeDoc(ctx, keys)
 	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			// Contract #6 §6.8 — an absent key denies with the path's own denial
-			// code. A soft-tombstoned key is not absent (the GET returns its body),
-			// but it carries an empty grant body, so the matcher below finds no
-			// grant and denies all the same — there is no isDeleted inspection here.
-			a.logger.Info("step 3: no Capability KV entry for actor on auth path",
-				"requestId", env.RequestID, "actor", env.Actor, "path", entry.name, "key", key)
-			return Decision{
-				Authorized: false,
-				Code:       entry.absentKeyCode,
-				Reason:     entry.absentKeyReason,
-			}, nil
-		}
 		// Genuine infrastructure failure — return error so commit path naks for
 		// redelivery (existing authorizer-error branch in commit_path.go).
-		return Decision{}, fmt.Errorf("capability kv read %q: %w", key, err)
+		return Decision{}, err
 	}
-
-	doc, err := ParseCapabilityDoc(kvEntry.Value)
-	if err != nil {
-		// Parse failure indicates a producer / contract drift — should be
-		// caught by conformance tests long before runtime. Surface as internal
-		// error rather than denial so operators see the real problem.
-		return Decision{}, fmt.Errorf("capability kv parse %q: %w", key, err)
+	if doc == nil {
+		// Contract #6 §6.8 — every member key absent denies with the path's own
+		// denial code (deny-closed by construction: absence never grants). A
+		// soft-tombstoned key is not absent (the GET returns its body), but it
+		// carries an empty grant body, so the matcher below finds no grant and
+		// denies all the same — there is no isDeleted inspection here.
+		a.logger.Info("step 3: no Capability KV entry for actor on auth path",
+			"requestId", env.RequestID, "actor", env.Actor, "path", entry.name, "keys", keys)
+		return Decision{
+			Authorized: false,
+			Code:       entry.absentKeyCode,
+			Reason:     entry.absentKeyReason,
+		}, nil
 	}
 
 	// Platform-path lane gate (Contract #2 §2.3) — the actor's standing
@@ -296,6 +290,109 @@ func (a *CapabilityAuthorizer) selectEntry(ac *AuthContext) *authEntry {
 		}
 	}
 	return nil
+}
+
+// deriveKeys returns the entry's disjoint Capability-KV key(s) for actor.
+// Every entry but the core platform entry derives exactly one key
+// (keyDerivation); keysDerivation, when set, overrides with a key-list union
+// read (Contract #6 §6.1's bounded system-actor platform-path carve-out).
+func (e *authEntry) deriveKeys(actor string) ([]string, error) {
+	if e.keysDerivation != nil {
+		return e.keysDerivation(actor)
+	}
+	k, err := e.keyDerivation(actor)
+	if err != nil {
+		return nil, err
+	}
+	return []string{k}, nil
+}
+
+// readAndMergeDoc GETs each key independently and folds the present docs into
+// one merged CapabilityDoc (mergeCapabilityDocs). A KeyNotFound on one member
+// is an empty skip, not a hard deny — the caller denies with the path's
+// absentKeyCode only when EVERY member is absent (doc == nil, deny-closed).
+// A non-NotFound read error, or a parse failure, aborts immediately: the
+// caller returns it so the commit path naks for redelivery rather than
+// silently degrading the grant set. The returned key is the "+"-joined list
+// of keys that were actually present (a single key, unchanged, for every
+// entry but the union platform read).
+func (a *CapabilityAuthorizer) readAndMergeDoc(ctx context.Context, keys []string) (*CapabilityDoc, string, error) {
+	var doc *CapabilityDoc
+	var present []string
+	for _, key := range keys {
+		kvEntry, err := a.reader.KVGet(ctx, a.bucket, key)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				continue
+			}
+			return nil, "", fmt.Errorf("capability kv read %q: %w", key, err)
+		}
+		parsed, err := ParseCapabilityDoc(kvEntry.Value)
+		if err != nil {
+			// Parse failure indicates a producer / contract drift — should be
+			// caught by conformance tests long before runtime. Surface as
+			// internal error rather than denial so operators see the real
+			// problem.
+			return nil, "", fmt.Errorf("capability kv parse %q: %w", key, err)
+		}
+		present = append(present, key)
+		if doc == nil {
+			doc = parsed
+		} else {
+			doc = mergeCapabilityDocs(doc, parsed)
+		}
+	}
+	if doc == nil {
+		return nil, "", nil
+	}
+	return doc, strings.Join(present, "+"), nil
+}
+
+// mergeCapabilityDocs folds extra's grant-bearing fields into base
+// (deny-closed union — Contract #6 §6.1 system-actor platform-path carve-out).
+// platformPermissions concatenate (the op matcher scans the merged slice: an
+// op is granted iff SOME source grants it); lanes and roles union (dedup).
+// projectedFromRevisions merges for auth-trace provenance (both source keys
+// recorded). base is never mutated; a new doc is returned.
+func mergeCapabilityDocs(base, extra *CapabilityDoc) *CapabilityDoc {
+	merged := *base
+	merged.PlatformPermissions = append(
+		append([]PlatformPermission{}, base.PlatformPermissions...),
+		extra.PlatformPermissions...)
+	merged.Lanes = unionStrings(base.Lanes, extra.Lanes)
+	merged.Roles = unionStrings(base.Roles, extra.Roles)
+	if len(extra.ProjectedFromRevisions) > 0 {
+		merged.ProjectedFromRevisions = make(map[string]uint64, len(base.ProjectedFromRevisions)+len(extra.ProjectedFromRevisions))
+		for k, v := range base.ProjectedFromRevisions {
+			merged.ProjectedFromRevisions[k] = v
+		}
+		for k, v := range extra.ProjectedFromRevisions {
+			merged.ProjectedFromRevisions[k] = v
+		}
+	}
+	return &merged
+}
+
+// unionStrings returns the deduplicated concatenation of a and b, preserving
+// first-seen order.
+func unionStrings(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range b {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 func (a *CapabilityAuthorizer) matchEphemeralGrant(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {

@@ -73,6 +73,16 @@ type authEntry struct {
 	// keyDerivation maps the actor key to the single disjoint Capability-KV
 	// key this path reads.
 	keyDerivation func(actor string) (string, error)
+	// keysDerivation, when non-nil, overrides keyDerivation with a key-LIST
+	// derivation for a multi-key union read — Contract #6 §6.1's bounded
+	// system-actor platform-path carve-out (Contract #2 §2.8's one-key-per-path
+	// exception). Only the core platform entry ever sets this (via
+	// classAwarePlatformKey); task, service, and every package extra stay
+	// single-key via keyDerivation. Each key is GET independently: KeyNotFound
+	// on one member is an empty skip, not a hard deny — absentKeyCode fires
+	// only when every member is absent. Present docs fold via
+	// mergeCapabilityDocs (concat platformPermissions, union lanes/roles).
+	keysDerivation func(actor string) ([]string, error)
 	// absentKeyCode is the denial Code emitted when the disjoint key is absent.
 	// Contract #6 §6.8 — no entry equals no access. A soft-tombstoned key is not
 	// absent: its GET succeeds and the matcher runs, but the tombstone body carries
@@ -127,23 +137,28 @@ func seedSpecificEntries() []authEntry {
 // is the final fallback for any authContext no specific or package path
 // claimed. It must remain LAST in the registry.
 //
-// platformKeyDerivation governs which Capability-KV key the platform read
-// targets. When rbac-domain is installed it is the class-aware derivation that
-// routes ordinary actors to cap.roles.<actor> (rbac-domain's projection) and
-// the kernel-seeded system actors to cap.<actor> (the core primordial anchor);
-// when rbac-domain is absent it is the plain cap.<actor> derivation (today's
-// behavior — ordinary actors then read a cap.<actor> that no longer carries
-// role-derived grants, so they deny by absence per Contract #6 §6.8). Exactly
-// one key is read per call either way (one-key-per-path).
-func seedPlatformEntry(platformKeyDerivation func(string) (string, error)) authEntry {
-	if platformKeyDerivation == nil {
-		platformKeyDerivation = capabilityKeyFromActor
+// platformKeysDerivation governs which Capability-KV key(s) the platform read
+// targets. When rbac-domain is installed it is the class-aware derivation
+// (classAwarePlatformKey) that routes ordinary actors to a single
+// cap.roles.<actor> GET (rbac-domain's projection) and the kernel-seeded
+// system actors to a UNION read of [cap.<actor>, cap.roles.<actor>] — the
+// rbac-independent kernel floor plus the rbac-derived package-op extension
+// (system-actor-package-op-grants-design.md). When rbac-domain is absent it
+// is the plain single-key cap.<actor> derivation (today's behavior —
+// ordinary actors then read a cap.<actor> that no longer carries role-derived
+// grants, so they deny by absence per Contract #6 §6.8). Every non-system
+// actor, and every rbac-absent actor, still reads exactly one key
+// (one-key-per-path holds for the user hot path); only the bounded
+// system-actor set spans two.
+func seedPlatformEntry(platformKeysDerivation func(string) ([]string, error)) authEntry {
+	if platformKeysDerivation == nil {
+		platformKeysDerivation = singleKeyList(capabilityKeyFromActor)
 	}
 	return authEntry{
 		name:               "platform",
 		selects:            func(ac *AuthContext) bool { return true },
 		kind:               matchPlatformPermissionKind,
-		keyDerivation:      platformKeyDerivation,
+		keysDerivation:     platformKeysDerivation,
 		absentKeyCode:      ErrCodeAuthDenied,
 		absentKeyReason:    "NoCapabilityEntry",
 		threadsDocOnDenial: true,
@@ -151,25 +166,50 @@ func seedPlatformEntry(platformKeyDerivation func(string) (string, error)) authE
 	}
 }
 
-// classAwarePlatformKey returns a platform key-derivation closure that routes
-// the kernel-seeded system actors (systemActorKeys) to their core cap.<actor>
-// anchor and every other (ordinary) actor to cap.roles.<actor>. It is the
-// single platform entry's class-aware derivation (Q1): one key chosen per
-// Authorize call by actor class, never a fan-out. systemActorKeys are the full
-// vtx.identity.<id> actor keys of the primordial admin + the kernel-seeded
-// service actors (graph-discovered by bootstrap.SystemActorKeys).
-func classAwarePlatformKey(systemActorKeys []string) func(string) (string, error) {
+// singleKeyList adapts a single-key derivation to the key-list shape so the
+// platform entry's default (rbac-absent) case shares the same read/merge code
+// path as the union case, always yielding a one-element list.
+func singleKeyList(derive func(string) (string, error)) func(string) ([]string, error) {
+	return func(actor string) ([]string, error) {
+		k, err := derive(actor)
+		if err != nil {
+			return nil, err
+		}
+		return []string{k}, nil
+	}
+}
+
+// classAwarePlatformKey returns a platform key-LIST derivation closure that
+// routes the kernel-seeded system actors (systemActorKeys) to a UNION read of
+// their core cap.<actor> anchor (the rbac-independent floor: privileged lanes
+// + the 6 bootstrap ops) and cap.roles.<actor> (the rbac-derived package-op
+// extension), and every other (ordinary) actor to a single cap.roles.<actor>
+// GET — unchanged. This is the platform entry's class-aware derivation
+// (system-actor-package-op-grants-design.md §3.1): the bounded exception to
+// one-key-per-path, scoped to the fixed kernel-seeded actor set.
+// systemActorKeys are the full vtx.identity.<id> actor keys of the primordial
+// admin + the kernel-seeded service actors (graph-discovered by
+// bootstrap.SystemActorKeys).
+func classAwarePlatformKey(systemActorKeys []string) func(string) ([]string, error) {
 	system := make(map[string]struct{}, len(systemActorKeys))
 	for _, k := range systemActorKeys {
 		if k != "" {
 			system[k] = struct{}{}
 		}
 	}
-	return func(actor string) (string, error) {
-		if _, isSystem := system[actor]; isSystem {
-			return capabilityKeyFromActor(actor)
+	return func(actor string) ([]string, error) {
+		rolesKey, err := rolesKeyFromActor(actor)
+		if err != nil {
+			return nil, err
 		}
-		return rolesKeyFromActor(actor)
+		if _, isSystem := system[actor]; !isSystem {
+			return []string{rolesKey}, nil
+		}
+		anchorKey, err := capabilityKeyFromActor(actor)
+		if err != nil {
+			return nil, err
+		}
+		return []string{anchorKey, rolesKey}, nil
 	}
 }
 
@@ -200,9 +240,9 @@ func classAwarePlatformKey(systemActorKeys []string) func(string) (string, error
 // trips this guard and one-key-per-path is preserved (exactly one key chosen
 // per Authorize call). The guard governs any genuinely-separate future package
 // path supplied via ExtraEntries.
-func buildAuthRegistry(extra []authEntry, platformKeyDerivation func(string) (string, error)) ([]authEntry, error) {
+func buildAuthRegistry(extra []authEntry, platformKeysDerivation func(string) ([]string, error)) ([]authEntry, error) {
 	specific := seedSpecificEntries()
-	platform := seedPlatformEntry(platformKeyDerivation)
+	platform := seedPlatformEntry(platformKeysDerivation)
 
 	entries := make([]authEntry, 0, len(specific)+len(extra)+1)
 	entries = append(entries, specific...)
@@ -227,8 +267,11 @@ func buildAuthRegistry(extra []authEntry, platformKeyDerivation func(string) (st
 		if e.name == "" {
 			return nil, fmt.Errorf("auth registry: entry %d has an empty path name", i)
 		}
-		if e.selects == nil || e.kind == nil || e.keyDerivation == nil {
-			return nil, fmt.Errorf("auth registry: entry %q is missing a predicate, kind, or key derivation", e.name)
+		if e.selects == nil || e.kind == nil {
+			return nil, fmt.Errorf("auth registry: entry %q is missing a predicate or kind", e.name)
+		}
+		if e.keyDerivation == nil && e.keysDerivation == nil {
+			return nil, fmt.Errorf("auth registry: entry %q is missing a key derivation", e.name)
 		}
 		if _, dup := seen[e.name]; dup {
 			return nil, fmt.Errorf("auth registry: duplicate path %q — two entries select the same path (one-key-per-path violation)", e.name)

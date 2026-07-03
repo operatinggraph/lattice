@@ -24,7 +24,9 @@ func rolesDoc(nanoID string, perms ...PlatformPermission) *CapabilityDoc {
 }
 
 // anchorDoc builds a cap.identity.<id> doc carrying the kernel root grants —
-// the projection the core primordial anchor produces for a system actor.
+// the projection the core primordial anchor produces for a system actor: the
+// rbac-independent floor (all four privileged lanes + whatever bootstrap ops
+// perms carries).
 func anchorDoc(nanoID string, perms ...PlatformPermission) *CapabilityDoc {
 	actorKey := "vtx.identity." + nanoID
 	return &CapabilityDoc{
@@ -32,7 +34,7 @@ func anchorDoc(nanoID string, perms ...PlatformPermission) *CapabilityDoc {
 		Actor:               actorKey,
 		Version:             "1.0",
 		ProjectedAt:         time.Now().UTC().Format(time.RFC3339Nano),
-		Lanes:               []string{"default"},
+		Lanes:               []string{"default", "meta", "urgent", "system"},
 		PlatformPermissions: perms,
 	}
 }
@@ -49,7 +51,7 @@ func rbacAuthorizer(t *testing.T, systemActorKeys []string, docs ...*CapabilityD
 	}
 	a, err := newCapabilityAuthorizer(reader, "capability-kv", &fakeClock{now: time.Now()},
 		DefaultCapabilityAuthorizerConfig(), capTestLogger(),
-		capabilityAuthorizerOptions{platformKeyDerivation: classAwarePlatformKey(systemActorKeys)})
+		capabilityAuthorizerOptions{platformKeysDerivation: classAwarePlatformKey(systemActorKeys)})
 	if err != nil {
 		t.Fatalf("newCapabilityAuthorizer: %v", err)
 	}
@@ -60,7 +62,11 @@ func platformEnv(actor, op string) *OperationEnvelope {
 	// Lane is parse-validated at step 1, so a real envelope always carries a
 	// valid lane; default is the universal grant (the rolesDoc/anchorDoc fixtures
 	// grant it).
-	return &OperationEnvelope{RequestID: "r-" + actor, Actor: actor, OperationType: op, Lane: LaneDefault}
+	return platformEnvLane(actor, op, LaneDefault)
+}
+
+func platformEnvLane(actor, op string, lane Lane) *OperationEnvelope {
+	return &OperationEnvelope{RequestID: "r-" + actor, Actor: actor, OperationType: op, Lane: lane}
 }
 
 // TestRbacHook_OrdinaryActorReadsRolesKey proves an ordinary actor's platform
@@ -87,28 +93,148 @@ func TestRbacHook_OrdinaryActorReadsRolesKey(t *testing.T) {
 	}
 }
 
-// TestRbacHook_SystemActorReadsAnchorKey proves a kernel-seeded system actor's
-// platform authorize reads its core cap.<actor> anchor doc (NOT cap.roles),
-// with exactly one KV GET (AC-A4 one-key-per-path by actor class).
-func TestRbacHook_SystemActorReadsAnchorKey(t *testing.T) {
-	const systemID = "systemAdmin000000001"
+// TestRbacHook_SystemActorUnion_PackageOpOnSystemLane proves the core
+// regression the union read fixes (design §6.1): a system actor's
+// engine-submitted package op (granted via cap.roles, not the anchor) on a
+// privileged lane (granted only by the anchor) authorizes — the union reads
+// BOTH keys and merges perms + lanes.
+func TestRbacHook_SystemActorUnion_PackageOpOnSystemLane(t *testing.T) {
+	const systemID = "weaverActor00000000001"
 	systemActor := "vtx.identity." + systemID
-	doc := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
-	a := rbacAuthorizer(t, []string{systemActor}, doc)
+	anchor := anchorDoc(systemID) // floor: no package op, but grants the system lane
+	roles := rolesDoc(systemID, PlatformPermission{OperationType: "MarkExpired", Scope: "any"})
+	a := rbacAuthorizer(t, []string{systemActor}, anchor, roles)
 
-	dec, err := a.Authorize(context.Background(), platformEnv(systemActor, "InstallPackage"))
+	dec, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "MarkExpired", LaneSystem))
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
 	if !dec.Authorized {
-		t.Fatalf("system actor must authorize via cap.<actor> anchor; got denial %q/%q", dec.Code, dec.Reason)
+		t.Fatalf("system actor's package op on the system lane must authorize via the union; got denial %q/%q", dec.Code, dec.Reason)
 	}
 	reader := a.reader.(*fakeReader)
-	if len(reader.gets) != 1 {
-		t.Fatalf("expected exactly one KV GET; got %v", reader.gets)
+	if len(reader.gets) != 2 {
+		t.Fatalf("expected the union read (2 KV GETs); got %v", reader.gets)
 	}
-	if want := "cap.identity." + systemID; reader.gets[0] != want {
-		t.Fatalf("system actor must read %q; read %q", want, reader.gets[0])
+}
+
+// TestRbacHook_SystemActorUnion_FloorOpStillGrants proves the union didn't
+// drop the floor (design §6.2): a system actor's bootstrap op (InstallPackage,
+// granted only by the anchor) on the meta lane still authorizes even with
+// cap.roles present.
+func TestRbacHook_SystemActorUnion_FloorOpStillGrants(t *testing.T) {
+	const systemID = "systemAdmin000000001"
+	systemActor := "vtx.identity." + systemID
+	anchor := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
+	roles := rolesDoc(systemID, PlatformPermission{OperationType: "CreateTask", Scope: "any"})
+	a := rbacAuthorizer(t, []string{systemActor}, anchor, roles)
+
+	dec, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "InstallPackage", LaneMeta))
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !dec.Authorized {
+		t.Fatalf("floor op on the meta lane must still authorize; got denial %q/%q", dec.Code, dec.Reason)
+	}
+	reader := a.reader.(*fakeReader)
+	if len(reader.gets) != 2 {
+		t.Fatalf("expected the union read (2 KV GETs); got %v", reader.gets)
+	}
+}
+
+// TestRbacHook_SystemActorUnion_RolesAbsentFloorSurvives proves graceful
+// degradation (design §6.3): mid rbac-domain-install, cap.roles is absent —
+// the floor op still allows, and a package op denies (not a crash).
+func TestRbacHook_SystemActorUnion_RolesAbsentFloorSurvives(t *testing.T) {
+	const systemID = "systemAdmin000000002"
+	systemActor := "vtx.identity." + systemID
+	anchor := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
+	a := rbacAuthorizer(t, []string{systemActor}, anchor) // cap.roles NOT seeded
+
+	dec, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "InstallPackage", LaneMeta))
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if !dec.Authorized {
+		t.Fatalf("floor op must still allow with cap.roles absent; got denial %q/%q", dec.Code, dec.Reason)
+	}
+
+	dec2, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "MarkExpired", LaneSystem))
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec2.Authorized {
+		t.Fatalf("package op must deny (not crash) when cap.roles is absent")
+	}
+}
+
+// TestRbacHook_SystemActorUnion_BothAbsentDenies proves fail-closed absence
+// (design §6.4): every union member missing denies with the path's
+// absentKeyCode, never a panic or a silent allow.
+func TestRbacHook_SystemActorUnion_BothAbsentDenies(t *testing.T) {
+	const systemID = "systemAdmin000000003"
+	systemActor := "vtx.identity." + systemID
+	a := rbacAuthorizer(t, []string{systemActor}) // no docs seeded at all
+
+	dec, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "InstallPackage", LaneMeta))
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec.Authorized {
+		t.Fatalf("both keys absent must deny")
+	}
+	if dec.Code != ErrCodeAuthDenied {
+		t.Fatalf("expected AuthDenied (NoCapabilityEntry); got %q/%q", dec.Code, dec.Reason)
+	}
+}
+
+// TestRbacHook_SystemActorUnion_DenyClosed proves the merge never over-grants
+// (design §6.6): an op present in neither slice denies, and the system lane
+// for an actor whose merged Lanes lacks it denies with LaneUnauthorized.
+func TestRbacHook_SystemActorUnion_DenyClosed(t *testing.T) {
+	const systemID = "systemAdmin000000004"
+	systemActor := "vtx.identity." + systemID
+	anchor := anchorDoc(systemID, PlatformPermission{OperationType: "InstallPackage", Scope: "any"})
+	roles := rolesDoc(systemID, PlatformPermission{OperationType: "CreateTask", Scope: "any"})
+	a := rbacAuthorizer(t, []string{systemActor}, anchor, roles)
+
+	dec, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "SomeUnrelatedOp", LaneMeta))
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec.Authorized {
+		t.Fatalf("an op present in neither slice must deny")
+	}
+	if dec.Code != ErrCodeAuthDenied {
+		t.Fatalf("expected AuthDenied; got %q/%q", dec.Code, dec.Reason)
+	}
+}
+
+// TestRbacHook_SystemActorUnion_LaneNotInMergedSetDenies proves the merged
+// Lanes union is still deny-closed: a lane neither source grants denies with
+// LaneUnauthorized, even though the op itself is granted.
+func TestRbacHook_SystemActorUnion_LaneNotInMergedSetDenies(t *testing.T) {
+	const systemID = "systemAdmin000000005"
+	systemActor := "vtx.identity." + systemID
+	// A degenerate anchor granting only "default" (no privileged lanes) — not
+	// the real primordial anchor's shape, but isolates the lane-merge assertion.
+	anchor := &CapabilityDoc{
+		Key: "cap.identity." + systemID, Actor: systemActor, Version: "1.0",
+		ProjectedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Lanes:       []string{"default"},
+	}
+	roles := rolesDoc(systemID, PlatformPermission{OperationType: "MarkExpired", Scope: "any"})
+	a := rbacAuthorizer(t, []string{systemActor}, anchor, roles)
+
+	dec, err := a.Authorize(context.Background(), platformEnvLane(systemActor, "MarkExpired", LaneSystem))
+	if err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if dec.Authorized {
+		t.Fatalf("the system lane must deny when neither source grants it")
+	}
+	if dec.Code != ErrCodeLaneUnauthorized {
+		t.Fatalf("expected LaneUnauthorized; got %q/%q", dec.Code, dec.Reason)
 	}
 }
 

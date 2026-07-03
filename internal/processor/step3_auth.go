@@ -137,20 +137,24 @@ type SelectAuthorizerOpts struct {
 	// genuinely-disjoint dispatch path.
 	ExtraEntries []authEntry
 
-	// RbacRolesActive routes the platform read by actor class when true:
-	// the kernel-seeded system actors (SystemActorKeys) read their core
-	// cap.<actor> primordial-anchor doc; every other (ordinary) actor reads
-	// cap.roles.<actor> (rbac-domain's capabilityRoles projection). Set true
-	// only when rbac-domain is installed. When false the platform read targets
-	// cap.<actor> for all actors (rbac-absent degradation: ordinary actors deny
-	// by absence, Contract #6 §6.8). The rbac hook is folded into the platform
-	// entry's key derivation here — NOT a separate dispatch entry — so
-	// one-key-per-path holds and the overlap guard is not tripped.
+	// RbacRolesActive routes the platform read by actor class when true: the
+	// kernel-seeded system actors (SystemActorKeys) read a UNION of their core
+	// cap.<actor> primordial-anchor doc and cap.roles.<actor> (rbac-domain's
+	// capabilityRoles projection) — the floor plus the rbac-derived
+	// package-op extension (system-actor-package-op-grants-design.md); every
+	// other (ordinary) actor reads cap.roles.<actor> alone, unchanged. Set
+	// true only when rbac-domain is installed. When false the platform read
+	// targets cap.<actor> for all actors (rbac-absent degradation: ordinary
+	// actors deny by absence, Contract #6 §6.8). The rbac hook is folded into
+	// the platform entry's key derivation here — NOT a separate dispatch
+	// entry — so the user hot path stays single-key and the overlap guard is
+	// not tripped.
 	RbacRolesActive bool
 
 	// SystemActorKeys are the full vtx.identity.<id> keys of the kernel-seeded
-	// system actors (the primordial admin + the kernel-seeded service actors) that keep reading
-	// cap.<actor> when RbacRolesActive is true.
+	// system actors (the primordial admin + the kernel-seeded service actors)
+	// that read the cap.<actor> ∪ cap.roles.<actor> union when RbacRolesActive
+	// is true.
 	SystemActorKeys []string
 }
 
@@ -179,14 +183,14 @@ func SelectAuthorizerArgs(opts SelectAuthorizerOpts) (Authorizer, error) {
 		if cfg.NFRP3 == 0 && cfg.LatencyBufferSize == 0 {
 			cfg = DefaultCapabilityAuthorizerConfig()
 		}
-		var platformKeyDerivation func(string) (string, error)
+		var platformKeysDerivation func(string) ([]string, error)
 		if opts.RbacRolesActive {
-			platformKeyDerivation = classAwarePlatformKey(opts.SystemActorKeys)
+			platformKeysDerivation = classAwarePlatformKey(opts.SystemActorKeys)
 		}
 		return newCapabilityAuthorizer(opts.Reader, opts.CapabilityBucket, opts.Clock, cfg, opts.Logger,
 			capabilityAuthorizerOptions{
-				extraEntries:          opts.ExtraEntries,
-				platformKeyDerivation: platformKeyDerivation,
+				extraEntries:           opts.ExtraEntries,
+				platformKeysDerivation: platformKeysDerivation,
 			})
 	default:
 		return nil, errUnknownAuthMode(opts.Mode)
