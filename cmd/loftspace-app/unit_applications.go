@@ -14,11 +14,12 @@ import (
 // name, and a coarse disposition derived from the convergence row. status is
 // "leased" (landlord-approved AND the unit leased — the terminal done state),
 // "approved" (the landlord approved, lease in flight), "qualified" (every applicant
-// gap closed but the landlord has not decided — the Approve/Decline action state),
-// "declined" (a standing business rejection OR a landlord decline), or "in_review"
-// (still converging). signed reflects whether the applicant has executed the lease
-// (the .signature aspect). qualified/landlordApproved/landlordDeclined are the raw
-// decision columns the landlord FE drives the Approve/Decline buttons + badges off.
+// gap closed but the landlord has not decided), "declined" (a standing business
+// rejection OR a landlord decline), or "in_review" (still converging). signed
+// reflects whether the applicant has executed the lease (the .signature aspect).
+// This console is informational only; the RLS-enforced protectedLandlordRow
+// carries the equivalent qualified/landlordApproved/landlordDeclined columns
+// the FE drives the Approve/Decline buttons off (landlord_applications.go).
 type applicantSummary struct {
 	LeaseAppKey      string `json:"leaseAppKey"`
 	Applicant        string `json:"applicant"`
@@ -181,9 +182,11 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 // handleUnitApplications implements GET /api/unit-applications — the landlord /
 // property-manager operator console: every unit the SIGNED-IN landlord manages
 // and the live applications against it, each with the applicant's name and full
-// convergence disposition (the Approve/Decline gap/qualification detail the
+// convergence disposition (the fine-grained gap/qualification detail the
 // protected `read_landlord_lease_applications` model does not carry — see
-// landlord_applications.go). D1.5: this handler used to serve the entire
+// landlord_applications.go). Informational only — Approve/Decline is driven
+// from the RLS-enforced read (landlord_applications.go).
+// D1.5: this handler used to serve the entire
 // platform's applicant roster with NO authentication at all (every landlord's
 // units, every applicant's income/employment/reference signals, PII names) to
 // any caller. It is now an AUTHENTICATED read, scoped to the caller's own units:

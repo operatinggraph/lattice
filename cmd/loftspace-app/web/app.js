@@ -2086,15 +2086,14 @@ async function loadLandlord() {
   loadLandlordRLS();
 }
 
-// loadLandlordRLS exercises the D1.3 Increment-3 PROTECTED read boundary: the
-// signed-in identity reads /api/landlord/applications as an AUTHENTICATED actor, and
-// Postgres RLS returns ONLY the applications to units that identity manages —
-// the SAME scope the operator console above now enforces (D1.5). This adds the
-// RICH read-only card view (qualification-profile signals via renderQualification)
-// as a second rendering of that same RLS-scoped set; it stays INFORMATIONAL — no
-// Approve/Decline (those live on the operator console above). Best-effort: a
-// missing read boundary (no Postgres / protected lens) degrades to an
-// informational note, never blocking the operator console.
+// loadLandlordRLS reads /api/landlord/applications as an AUTHENTICATED actor;
+// Postgres RLS returns ONLY the applications to units the signed-in landlord
+// manages. This is the landlord's decision surface — Approve/Decline
+// (renderRLSApplicantRow) gate on the lens's own `qualified` readiness column,
+// so a decision runs entirely through the RLS-enforced read. The console below
+// is for unit/listing management only. Best-effort: a missing read boundary
+// (no Postgres / protected lens) degrades to an informational note, never
+// blocking the console.
 async function loadLandlordRLS() {
   const el = $("#landlord-rls");
   const listEl = $("#landlord-rls-units");
@@ -2116,7 +2115,7 @@ async function loadLandlordRLS() {
       if (listEl) { listEl.hidden = true; listEl.innerHTML = ""; }
       return;
     }
-    el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}) — the operator console above is sourced from this same RLS-scoped read and is where you Approve/Decline.`;
+    el.textContent = `🔒 RLS read boundary: Postgres scopes you to ${units.length} unit${units.length === 1 ? "" : "s"} you manage (${apps} application${apps === 1 ? "" : "s"}) — decide applications from the cards below.`;
     renderLandlordRLSUnits(units);
   } catch (e) {
     // The boundary is not provisioned in every dev posture; do not break the view.
@@ -2128,9 +2127,9 @@ async function loadLandlordRLS() {
   }
 }
 
-// renderLandlordRLSUnits renders the RLS-scoped units + applications as a
-// read-only card list — the enforced-scope counterpart of renderUnitCard, minus
-// Approve/Decline (informational only, per D1.5 Rec C).
+// renderLandlordRLSUnits renders the RLS-scoped units + applications as the
+// decision card list — the enforced-scope counterpart of renderUnitCard,
+// carrying Approve/Decline gated on each row's own `qualified` readiness.
 function renderLandlordRLSUnits(units) {
   const listEl = $("#landlord-rls-units");
   if (!listEl) return;
@@ -2169,7 +2168,7 @@ function renderRLSUnitCard(u) {
     none.textContent = "No applications yet.";
     list.append(none);
   } else {
-    for (const a of apps) list.append(renderRLSApplicantRow(a));
+    for (const a of apps) list.append(renderRLSApplicantRow(a, u));
   }
   card.append(list);
   return card;
@@ -2181,11 +2180,12 @@ function renderRLSUnitCard(u) {
 // the RLS table, so only the managing landlord reads them; null for an
 // applicant who never recorded the aspect or was crypto-shredded, falling back
 // to the short key), the landlord's disposition, and the SAME
-// qualification-profile chips the trusted console shows (renderQualification —
-// D1.5 Rec C, informational, no aggregation/readiness gate). No Approve/Decline
-// here; that stays on the trusted console (unitLeased / a.qualified gating out
-// of scope for this informational read).
-function renderRLSApplicantRow(a) {
+// qualification-profile chips the trusted console shows (renderQualification).
+// This row is the landlord's decision surface: `a.qualified` is the lens's own
+// readiness clone (ssn + fresh bgcheck + payment + signature, mirroring the
+// convergence lens's applicantApproved), so Approve/Decline gate on it entirely
+// within the RLS-enforced read.
+function renderRLSApplicantRow(a, unit) {
   const row = document.createElement("div");
   row.className = "applicant";
 
@@ -2216,6 +2216,26 @@ function renderRLSApplicantRow(a) {
   }
 
   row.append(renderQualification(a));
+
+  const unitLeased = (unit && unit.unitStatus) === "leased";
+  if (a.qualified && !unitLeased) {
+    const actions = document.createElement("div");
+    actions.className = "applicant-actions";
+    const approve = document.createElement("button");
+    approve.textContent = "Approve";
+    approve.addEventListener("click", () => decideApplication({ ...a, leaseAppKey: a.entityKey }, "approved"));
+    const decline = document.createElement("button");
+    decline.className = "ghost danger";
+    decline.textContent = "Decline";
+    decline.addEventListener("click", () => decideApplication({ ...a, leaseAppKey: a.entityKey }, "declined"));
+    actions.append(approve, decline);
+    row.append(actions);
+  } else if (unitLeased && !a.landlordApproved && !a.landlordDeclined) {
+    const note = document.createElement("div");
+    note.className = "applicant-note";
+    note.textContent = "Unit leased to another applicant.";
+    row.append(note);
+  }
 
   if (a.landlordDeclined && a.declineReason) {
     const reason = document.createElement("div");
@@ -2367,24 +2387,15 @@ function renderApplicantRow(a, unit, isTopMatch) {
   }
   row.append(info);
 
-  // The qualification profile the landlord decides on — derived signals only
+  // The qualification profile the landlord reviews — derived signals only
   // (never the raw financials). Absent until the applicant submits a profile.
+  // Informational only: Approve/Decline lives on the RLS-enforced card list
+  // above (renderRLSApplicantRow) — this console is for unit/listing
+  // management (Edit / Unpublish / Relist / Photos).
   row.append(renderQualification(a));
 
   const unitLeased = unit.unitStatus === "leased";
-  if (a.qualified && !unitLeased) {
-    const actions = document.createElement("div");
-    actions.className = "applicant-actions";
-    const approve = document.createElement("button");
-    approve.textContent = "Approve";
-    approve.addEventListener("click", () => decideApplication(a, "approved"));
-    const decline = document.createElement("button");
-    decline.className = "ghost danger";
-    decline.textContent = "Decline";
-    decline.addEventListener("click", () => decideApplication(a, "declined"));
-    actions.append(approve, decline);
-    row.append(actions);
-  } else if (unitLeased && a.status !== "leased" && a.status !== "declined") {
+  if (unitLeased && a.status !== "leased" && a.status !== "declined") {
     const note = document.createElement("div");
     note.className = "applicant-note";
     note.textContent = "Unit leased to another applicant.";
