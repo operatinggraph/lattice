@@ -1,7 +1,11 @@
 # Retire the Phase-1 destructive security-gate apparatus
 
-**Status: ✅ Andrew-ratified (direction, in-session 2026-07-03).** The per-vector coverage audit
-(§4) is Fire 1's own gate — a vector is deleted only once its assertion is shown covered elsewhere.
+**Status: ✅ SHIPPED (2026-07-03, `df75ee9`+`db8beed`, CI green).** The per-vector coverage audit
+(§4) ran clean: 34 deleted (exact duplicate or stale premise), 6 promoted (uncovered elsewhere),
+14 kept as the outcome-level adversarial residual in `internal/bypass`. A follow-up fix
+(`db8beed`) was needed in `internal/hellolattice/hellolattice_test.go`'s Milestone 1 — it asserted
+a `health.gates.phase1.*` row already carried `passed=true`, an assumption that depended on gate2/
+gate3 having run first; the assertion now only checks the CLI command's own exit code.
 Author: Winston. Supersedes the Warden new-component proposal
 ([security-proof-watchdog-design.md](./security-proof-watchdog-design.md), now deferred — §6).
 

@@ -122,7 +122,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) · F1+F2 shipped (live enforcement ON, `1f2f999`+`083b0ad`); next: optional Fire 3 (flip Gate 2/3 bypass tests hard + verify-nats-permissions CI job) |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |
 | **System-actor package-op grants absent under capability auth** | A kernel system actor's platform read is the fixed 6-op `cap.<actor>` anchor, so every engine-submitted package op (MarkExpired, CreateTask, DetachObject, RecordShredFinalization) authorizes only under the dev stub (`make up` runs `LATTICE_AUTH_MODE=stub`). | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/system-actor-package-op-grants-design.md) · Fork: union read (anchor ∪ cap.roles); §6.1/§2.8 edits staged |
-| **Retire the Phase-1 destructive security-gate apparatus** | gate2/gate3 were Phase-1 proofs under stubbed auth; each real defense now ships its own colocated test. Delete the destructive `make` targets + roll-up markers + redundant/stale vectors; keep every mechanism test + a lean adversarial residual in CI. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/retire-phase1-security-gates-design.md) §10 · audit done; 🚧 needs an attended fire (unattended safety-gate blocked the deletion) |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
@@ -194,6 +193,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `df75ee9`+`db8beed` · [Security] Retire the Phase-1 destructive security-gate apparatus — gate2/gate3 `make down && up` recipes deleted; 6 vectors promoted, 14 kept as residual
 - 2026-07-03 · `103f878` · [Refractor] Full-engine phantom aggregate row on empty required-MATCH — `projectItems` no longer fabricates a null row; unblocks `landlordLeaseApplicationsRead` and any other unanchored aggregating lens
 - 2026-07-03 · `cb9d38d`+`727ddd4` · [Refractor] Lens projection liveness — Fires 1+2 shipped as one (lastProjectedAt/projectionLag + heartbeat lensLiveness backstop); freshness UI rides Loupe F5
 - 2026-07-03 · `aa92c89` · [Weaver] Bespoke contracts Fire L1 — weaver.md sanctioned-pattern note; design realized except the on-demand rounding UDF
