@@ -2,6 +2,10 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-02 · `13ffb75` · [lease-signing/loftspace-app] Vault Fire 5b-ii-b — landlord readiness clone (`qualified`) via a shared cypher fragment with the convergence lens; 3-layer review (security-plane)
+- 2026-07-02 · `5901bc4` · [Refractor] Negative/filter-retraction Fire 3 — target-diff retraction (DiffRetraction opt-in + activation-time unanchored-query guard; 3-layer review; CLOSES the epic, unblocks Vault 5b close)
+- 2026-07-02 · `5624392` · [Refractor] Negative/filter-retraction F1+F2 — plain-lens aspect/link reprojection + anchor-self retraction (3-layer review; Fire 3 target-diff next, gates Vault 5b)
+- 2026-07-02 · `51ba38e` + `00b098d` · [Gateway] Fires 1+2 — external write-path translator + live JWKS polling
 - 2026-07-02 · `da8279f` · [Core/apps] Read-path authorization (D1) CLOSED — D1.1–D1.5 all shipped; Gateway read-front + Personal Lens are beyond-D1 rows (design §7)
 - 2026-07-02 · `603fd1f` · [loftspace/vault] Fire 5b-i — applicant roster onto the Secure Lens (applicantRoster retired, applicantRosterRead secure, app reads rewired; duplicateCandidates → Designer)
 - 2026-07-02 · `a710c7a` · [lease-signing/loftspace-app] Vault Fire 5b-ii — landlord applicant contact Secure-Lens columns (name/email/phone; retraction fire now gates 5b close)
