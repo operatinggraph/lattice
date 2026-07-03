@@ -47,6 +47,9 @@ choices live HERE. Per-package capability definitions live under
   Loupe + the CLI drive.
 - [Refractor failure tiers](./refractor-failure-tiers.md) — the four-tier failure
   model and the designed-but-not-built privacy / security supersession tiers.
+- [Object-store-manager](./object-store-manager.md) — the always-on byte-janitor of the
+  off-graph blob plane: Loop B tombstone reclaim, the never-attached crash-orphan reconcile,
+  and the owner-tombstone-cascade.
 
 **Experience layer**
 
@@ -71,7 +74,7 @@ between page and code is treated as a documentation bug.
 | Component | Status |
 |-----------|--------|
 | Processor, Refractor, Substrate, Capability Lens, Capability Packages | ✅ Built (Phase 1 / 1.5) |
-| Loom, Weaver, Bridge, service actors, platform scheduling | ✅ Built (Phase 2) |
+| Loom, Weaver, Bridge, object-store-manager, service actors, platform scheduling | ✅ Built (Phase 2) |
 | Loupe — operator view-and-control console (trusted single-identity, loopback, no auth) | ✅ Built (Phase 3) |
 | Gateway — JWT auth, `Lattice-Actor` stamping | ✅ Built (Phase 3) — write-path (Fires 1+2: JWT verify + actor stamping + live JWKS); read-path enforcement in progress |
 | Vault — per-identity keys, crypto-shredding | ✅ Built (Phase 3) — encrypt-on-write/decrypt-on-read + `ShredIdentityKey`; per-vertical fires ongoing |
