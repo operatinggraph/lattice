@@ -1,8 +1,18 @@
 # Continuous security-proof watchdog — **Warden** (a new Lattice component)
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-02).
-Brief: [security-proof-watchdog-brief.md](./security-proof-watchdog-brief.md) (Andrew, 2026-07-02).
-Board row: `Continuous security-proof watchdog (new component)` — Lattice lane.
+**Status: 🗄️ deferred-backup (Andrew, 2026-07-03).** Superseded by
+[retire-phase1-security-gates-design.md](./retire-phase1-security-gates-design.md): the gate suites
+this watchdog would have run continuously are being **retired** (duplicated by each defense's colocated
+test), so a component to run them is no longer needed. Warden's **one** surviving justification is
+**deployment-config drift** (that the *running* `nats-server.conf` matrix + *installed* RLS policies
+haven't drifted from what the tests assume) — low on a single-cell stack, so Warden waits for a real
+multi-node driver. If it revives, take the **corrected model** (§ below): a lean live
+under-privileged-adversary **drift-probe** against the real stack, NOT the embedded stack-runner the
+body of this doc describes. The embedded framing below is retained for the record but is **not** the
+design to build.
+
+Author: Winston (Designer fire, 2026-07-02). Brief:
+[security-proof-watchdog-brief.md](./security-proof-watchdog-brief.md).
 
 ---
 
