@@ -172,7 +172,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `internal/bridge` require.Never windows trimmed to actual margin (f8e017d, 44.5s→27.6s); next: `internal/loom` (41.6s) now the `unit` job's long pole |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `internal/loom`'s 66 tests given `t.Parallel()` (fa49b78, 40.9s→11.7s); next: `internal/bridge` (28.4s) now the `unit` job's long pole |
 | **[CI/Refractor] Hello-Lattice NFR-P3 latency flake** | The capability-projection probe fails-then-passes on the shared CI runner — re-scoped to a 1000ms regression guard (Andrew-ratified; reported SLA unchanged), but the runner floor has drifted to ~1.1s. | ★★ | M | ✅ fixed 2026-07-03 (`94c8224`, deadline 1000ms→2000ms) — re-examine if it recurs |
 | **Op-time bounded reverse-link / adjacency read (`kv.Links`)** | One sanctioned, bounded, fail-closed, paged op-time link-enumeration builtin (`kv.Links(hub, relation, direction, cursor, limit)`) — retires the key-list-in-aspect guard indexes. Relaxes the write-path no-scans invariant by exactly one primitive. | ★★★ | M–L | 🏗️ building · [design](../../implementation-artifacts/op-time-bounded-link-enumeration-design.md) · ⚠️ build diverged from the ratification banner (inverted `hasBooking`, §1.1) — fix rides the verticals slot-claims redesign · Fire 3 parked |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
@@ -196,6 +196,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `fa49b78` · [CI] internal/loom's 66 tests marked `t.Parallel()` (already random-port + jsstore.Dir(t) isolated) — package 40.9s→11.7s in CI, unit job 2m24s→2m14s
 - 2026-07-03 · `e2a2879` · [healthkv] loftspace-app/clinic-app dependency-probing Health-KV heartbeat — Fires 1+2 shipped as one (`internal/healthkv.Reporter`); optional objmgr-adoption tail remains
 - 2026-07-03 · `fb66e7c` · [vault] Fire 5b-iv — test-crypto-shred proves Secure-Lens PII scrub through the real async shred chain (5b's last code gate; remaining: attended delivery-boundary reset + live e2e)
 - 2026-07-03 · `0377938` · [natsperm] bridge phantom KV-bucket grants pruned (arch #19, bridge half) — TestBridgeNoPhantomKVGrants added
