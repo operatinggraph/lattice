@@ -6,10 +6,11 @@
 // Shape:
 //   - Manifest is YAML (`manifest.yaml`); package definitions are Go
 //     (each package exports a `Package = pkgmgr.Definition{...}`).
-//   - One atomic batch per install against the `core-kv` bucket.
+//   - Install/upgrade/uninstall submit an op (InstallPackage / UpgradePackage /
+//     UninstallPackage) to the Processor over ops.meta; the Processor is the
+//     sole writer of the `core-kv` bucket.
 //   - Operator credential is the admin actor NanoID read from
 //     `lattice.bootstrap.json`.
-//   - Install writes directly to core-kv (substrate-direct).
 package pkgmgr
 
 import "fmt"

@@ -8,8 +8,8 @@
 //	lattice-pkg list
 //
 // The operator credential is the admin actor NanoID read from
-// lattice.bootstrap.json. Install writes directly to core-kv via
-// an atomic batch.
+// lattice.bootstrap.json. Install submits an InstallPackage op to the
+// Processor; the Processor is the sole writer of core-kv.
 package main
 
 import (
