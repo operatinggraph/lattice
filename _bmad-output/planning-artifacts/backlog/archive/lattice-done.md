@@ -2,6 +2,11 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-03 · `103f878` · [Refractor] Full-engine phantom aggregate row on empty required-MATCH — `projectItems` no longer fabricates a null row; unblocks `landlordLeaseApplicationsRead` and any other unanchored aggregating lens
+- 2026-07-03 · `cb9d38d`+`727ddd4` · [Refractor] Lens projection liveness — Fires 1+2 shipped as one (lastProjectedAt/projectionLag + heartbeat lensLiveness backstop); freshness UI rides Loupe F5
+- 2026-07-03 · `aa92c89` · [Weaver] Bespoke contracts Fire L1 — weaver.md sanctioned-pattern note; design realized except the on-demand rounding UDF
+- 2026-07-03 · `fa49b78` · [CI] internal/loom's 66 tests marked `t.Parallel()` (already random-port + jsstore.Dir(t) isolated) — package 40.9s→11.7s in CI, unit job 2m24s→2m14s
+- 2026-07-03 · `e2a2879` · [healthkv] loftspace-app/clinic-app dependency-probing Health-KV heartbeat — Fires 1+2 shipped as one (`internal/healthkv.Reporter`); optional objmgr-adoption tail remains
 - 2026-07-03 · `971011c` · [Loom/Weaver/Bridge] health-sink consolidation — shared internal/healthkv.ConsumerSink, pause-restore round-trip covered
 - 2026-07-03 · `338727d` · [clinic] Vault Fire 5b-iii — CreatePatient identityKey wires identifiedBy; .demographics drops dob/email/phone
 - 2026-07-03 · `94c8224` · [CI] hello-lattice NFR-P3 deadline widened 1000ms→2000ms — eradicated the recurring Milestone4 projection-poll flake

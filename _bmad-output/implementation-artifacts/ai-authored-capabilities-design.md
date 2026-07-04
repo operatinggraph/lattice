@@ -103,6 +103,39 @@ loop); (d) the **grant** kind in the materializer (§5 scope-check) — Fire 1's
 collapse. Full 3-layer adversarial review is still owed before Fire 1 is considered complete (this increment
 got a self-review only, matching the Designer's own §7 recommendation for the build-time review depth).
 
+**Grounding pass for the escalation-dispatch increment (Steward, 2026-07-04) — two concrete findings for
+whoever builds it next, so this re-derivation isn't repeated:**
+1. **Dispatch mechanism = the standard `triggerLoom` gap-action, self-anchored — NOT Augur's Option F.**
+   Traced both paths: Augur dispatches `CreateAugurReasoningClaim` as a **directOp** straight from Weaver's
+   evaluator (`internal/weaver/strategist.go` `augurEscalation`, "Option F — no Loom wrapper"; no Loom
+   instance ever exists for that leg) — that mechanism is Augur-specific and must NOT be mirrored here. This
+   design's own §3.4 wants the **ordinary** `triggerLoom → externalTask` path (`lease-signing`'s
+   `backgroundCheck`/`onboarding` is the correct model, confirmed). Concretely: a new lens anchored on
+   `capabilityproposal` itself (one row per proposal) with a `missing_authoring` gap column (true while
+   `.request` is live and no `.claim` aspect exists yet); a `meta.weaverTarget` mapping
+   `missing_authoring → {Action:"triggerLoom", Pattern:"capabilityAuthor", Subject:"row.entityKey"}` — **self-anchored
+   dispatch is the ordinary case** (every `weaver-targets` row already echoes its own anchor key as
+   `entityKey`, §10.2 frozen convention), not a novel shape; `lease-signing`'s `row.applicant` is actually the
+   special (neighbor-projected) case, not the default. `CreateAuthoringClaim` (the Loom step's `InstanceOp`)
+   writes a create-only `.claim` aspect onto the **same, already-existing** `vtx.capabilityproposal.<id>` (no
+   new vertex to mint — unlike Augur, this design already has a separate upfront `RequestCapabilityAuthoring`
+   op, so the claim is just the write-ahead-before-the-call marker that closes the lens gap immediately).
+2. **Increment 1's `RecordCapabilityProposal` payload shape needs to change to fit the standard bridge
+   translator — flag this, don't skip it.** The bridge's generic externalTask reply leg
+   (`internal/bridge/dispatch.go`'s terminal-outcome path) always submits the configured `replyOp` with the
+   generic payload `{externalRef, status, result}` (`result` = the adapter's `Result.Detail`, an opaque
+   string) — confirmed on Augur's own `RecordProposal`, which decodes a single JSON `result` blob itself
+   inside the Starlark script rather than receiving `kind`/`content`/`target`/… as separate top-level payload
+   keys. Increment 1's `RecordCapabilityProposal` (as shipped, `ff25188`) was built against a flat
+   caller-supplied-field shape (`proposalId, kind, content, targetMode, …` all top-level) — that was
+   deliberately provisional (see the DDL's own `proposalId` field comment: "Increment 1: caller-supplied…").
+   **This increment must revise the script to accept `{externalRef, status, result}` and decode a single
+   `result` JSON blob for `kind/content/target/rationale/confidence/validation*/provenance*`** (mirroring
+   `packages/augur/ddls.go`'s `RecordProposal` decode exactly), derive `proposalId` from `externalRef` (not a
+   payload field), and update `proposal_test.go` accordingly. Do this revision **before** wiring the Loom
+   pattern, not after — building the pattern against the current (wrong) shape would ship an escalation path
+   that can never actually close.
+
 ---
 
 ## 1. Problem & intent

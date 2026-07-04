@@ -46,8 +46,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Health-KV] Orphaned dead-instance heartbeat keys never expire** | Each `health.<component>.<instanceID>` is written with no TTL, so a dead instance's key persists forever → permanent stale entries the Lamplighter must distinguish from live. | ★★ | S–M | 🏗️ building · [design](../../implementation-artifacts/health-kv-ttl-orphan-expiry-design.md) · Fire 1 (Category A heartbeat TTL) shipped `f68df4e`; next: Fire 2 (Category B diagnostic-key TTL), then Fire 3 (consumer-state re-key) |
-| **[Core] Processor per-lane consumers (ConsumerSupervisor adoption)** | Replace the single `processor-main` durable over all `ops.*` lanes (Phase-1 simplification) with per-lane consumers, per the architecture's design-of-record. | ★★ | M | 🏗️ building (per-lane fires shipped; see git) |
+| **[Health-KV] Orphaned dead-instance heartbeat keys never expire** | Each `health.<component>.<instanceID>` is written with no TTL, so a dead instance's key persists forever → permanent stale entries the Lamplighter must distinguish from live. | ★★ | S–M | 🏗️ building · [design](../../implementation-artifacts/health-kv-ttl-orphan-expiry-design.md) · Fire 1 (Categories A+B TTL) shipped `f68df4e`+`9727cd4`; next: Fire 3 (consumer-state re-key) |
 | **[Weaver] Registry cleanup edge branches uncovered** | `targetSource.removeOwnedTargetLocked` (targetId-rename removal, 33%), `removePatternLocked` + `removeOpMetaLocked` (pattern/op-meta vertex deletion index cleanup, 50%) — untested paths that keep the in-memory dispatch-resolution indices (`patternMeta`, `opMetaByType`) from leaking stale entries when a referenced `meta.loomPattern`/op meta-vertex is deleted or a target's `targetId` is renamed. | ★ | XS–S | 📋 · `internal/weaver/registry.go:372,586,640` |
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Refractor/adapter] Postgres integration tests leak stray tables on rerun** | Several tests `defer pool.Close()` before registering a `t.Cleanup` DROP TABLE — defer unwinds first, closing the pool before the drop runs, so it silently fails and the table leaks (PK conflicts on rerun). Fix: `t.Cleanup(pool.Close)` registered before the drop (LIFO puts drop first). | ★ | XS | 📋 · `internal/refractor/adapter/{rls,postgres,rls_verify}_test.go` |
@@ -191,6 +190,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-04 · `9727cd4` · [Health-KV] Category B diagnostic-key TTL — malformed-op/claim-attempts/commit-conflicts now KVPutWithTTL; Fire 3 (consumer-state re-key) remains
+- 2026-07-04 · `c16f739`+`c5e1fc2`+`fb8fa5a` · [Core] Processor per-lane consumers — CLOSED (board row was stale); Fire 4 (control-plane responder) unfiled follow-on
 - 2026-07-04 · `37b54b2` · [Gateway] Revocation materializer poison-pill fixed — NanoID-charset `required_actor` gate + Term-on-invalid-key (Classify hook fix closes a pause-spin found in review)
 - 2026-07-04 · `c8bc5a6` · [Weaver] Planner mandate Fire 6 Increment 2 — goal-regression State-schema bridge (`goalColumns` lens-column→aspect-path map, zero new Core-KV reads)
 - 2026-07-04 · `1cda5d3` · [Weaver] Planner mandate Fire 6 Increment 1 — runtime op-effects catalog (pkgmgr `.effects` aspect + registry `effectsCatalog()`); zero dispatch change; Increment 2 gated on a State-schema decision
@@ -211,11 +212,6 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-03 · `cc2613f` · [Core] `kv.Links` Fire 1 shipped as a primitive; clinic consumer reverted, superseded by write-path slot-claims (`f37bb82`) — stands unconsumed
 - 2026-07-03 · `fa2b570` · [Health] Bridge/Gateway/objmgr heartbeats aggregate issue severity (arch #8) — no more false-green; objmgr's doc brought to full Contract #5 shape
 - 2026-07-03 · `df75ee9`+`db8beed` · [Security] Retire the Phase-1 destructive security-gate apparatus — gate2/gate3 `make down && up` recipes deleted; 6 vectors promoted, 14 kept as residual
-- 2026-07-03 · `103f878` · [Refractor] Full-engine phantom aggregate row on empty required-MATCH — `projectItems` no longer fabricates a null row; unblocks `landlordLeaseApplicationsRead` and any other unanchored aggregating lens
-- 2026-07-03 · `cb9d38d`+`727ddd4` · [Refractor] Lens projection liveness — Fires 1+2 shipped as one (lastProjectedAt/projectionLag + heartbeat lensLiveness backstop); freshness UI rides Loupe F5
-- 2026-07-03 · `aa92c89` · [Weaver] Bespoke contracts Fire L1 — weaver.md sanctioned-pattern note; design realized except the on-demand rounding UDF
-- 2026-07-03 · `fa49b78` · [CI] internal/loom's 66 tests marked `t.Parallel()` (already random-port + jsstore.Dir(t) isolated) — package 40.9s→11.7s in CI, unit job 2m24s→2m14s
-- 2026-07-03 · `e2a2879` · [healthkv] loftspace-app/clinic-app dependency-probing Health-KV heartbeat — Fires 1+2 shipped as one (`internal/healthkv.Reporter`); optional objmgr-adoption tail remains
 - 2026-07-03 · `fb66e7c` · [vault] Fire 5b-iv — test-crypto-shred proves Secure-Lens PII scrub through the real async shred chain (5b's last code gate; remaining: attended delivery-boundary reset + live e2e)
 - 2026-07-03 · `0377938` · [natsperm] bridge phantom KV-bucket grants pruned (arch #19, bridge half) — TestBridgeNoPhantomKVGrants added
 - 2026-07-03 · `9972fec` · [natsperm] object-plane-nats-permissions — arch #2 fixed (Winston self-ratified, no fork/contract); first object-plane natsperm vectors
