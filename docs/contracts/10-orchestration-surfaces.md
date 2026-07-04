@@ -353,6 +353,19 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   terminated is resolved by level-reconciled mark-clearing, not by re-triggering the pattern.
 - `entityKey` carries the full `vtx.<type>.<id>` (doc-is-truth); the key holds only the ID.
 
+#### Reserved (non-mark) `weaver-state` key shapes
+
+The mark shape above shares the bucket with reserved engine keys. All are structurally disjoint from
+marks: `entityId`s are NanoIDs (`substrate.Alphabet` contains no underscore) and gap columns carry the
+`missing_` prefix, so a reserved `__`-token can never collide with a mark segment. The reconciler sweep
+skips all three (never enumerated as `CorruptMark`).
+
+| Key shape | Role |
+|---|---|
+| `<targetId>.__control` | *(as-built since FR30 — documented here per the 2026-07-02 arch-review reconciliation)* durable dispatch-disable marker; authority for the control plane's `disable`/`enable`/`revoke` remediation-skip (`docs/components/weaver.md`). |
+| `<targetId>.<entityId>.<gapColumn>.__count` | *(as-built — same reconciliation)* the retry-budget dispatch-count bounded by the lens's `maxretries_<g>` column; incremented on both dispatch legs, deleted on gap-close, long-TTL orphan backstop. |
+| `<targetId>.__effect.<gapColumn>.<actionRef>` | 📐 **PROPOSED 2026-07-04 (planner extension, unratified — see §10.8).** Per-(gap, action) effect bookkeeping: dispatch/close counters over a sliding window of the last K episodes (K config-tunable, default 20; event-keyed ring in the value, no clock sampling). Written on the two real dispatch legs and the level-reconciled gap-close path; GC'd by the sweep's orphan legs when the target/gap/action leaves the registry. |
+
 ### `weaver-claims` — RETIRED (Amended 2026-06-18 — 13.1, External I/O Bridge)
 
 The Two-Phase Nudge claim record and the in-Weaver **Claim → Execute → Resolve** protocol are
@@ -1079,6 +1092,54 @@ in-flight**, the Strategist looks up `gaps[col]` and the Actuator executes:
 
 Target + playbook are **package data**; the Weaver engine is a generic dispatcher.
 
+### Planner extension — selection & synthesis (📐 PROPOSED 2026-07-04 — UNRATIFIED)
+
+> Full design: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md`. **Everything in
+> this subsection is additive and opt-in**: a target carrying none of the new fields — and every target
+> installed today — behaves **byte-identically** to the frozen shapes above. Nothing here changes the
+> action table, templating, anti-storm, or the augur block; external I/O placement (13.1) is untouched.
+
+**Op-DDL `effects` (additive).** An op DDL MAY declare `effects: [<guard>…]` — §10.5 guard-grammar
+predicates (atoms + combinators, the two subject-path shapes, pinned absence semantics; the Starlark
+escape hatch stays RESERVED) that the op's commit entails on its target subject. Install-time validation
+rejects wholesale on a malformed guard (same doctrine as pattern load). *(Placement note for
+ratification: specified here because Weaver is the consumer; may relocate to a DDL self-description
+contract.)*
+
+**`meta.weaverTarget` additions** (all install-validated, all optional):
+
+```
+"mode": "shadow" | "planned",              // target-level; ABSENT = frozen behavior, byte-identical
+"gaps": {
+  "missing_<g>": { "action": … }           // frozen shape — ALWAYS wins (operator override)
+               | { "candidates": [ { "action": …, "pre"?: <guard>, "cost"?: int }, … ] }
+               | { "goal": <guard> }       // synthesis target over the installed effects catalog
+}
+```
+
+- **Precedence per gap: explicit `action` > `candidates` > `goal`.** In `mode: "shadow"` the planner's
+  choice is recorded (heartbeat counters + a per-target Health doc) and **never dispatched** — the table
+  path dispatches exactly as frozen. Only `mode: "planned"` dispatches planner choices.
+- **Selection (`candidates`) is deterministic:** preconditions evaluate against the §10.2 **row** (a
+  `pre` referencing a column the lens does not project is an install-time error — the existing
+  §10.2↔§10.8 column seam; no new Weaver Core-KV reads), ranked by (precondition satisfaction,
+  windowed close-rate from `__effect` (§10.3), declared `cost`, then lexicographic actionRef). The
+  `maxretries_<g>` budget bounds the **gap across candidates**.
+- **Synthesis (`goal`) is bounded goal regression** over the installed catalog (ops with `effects` +
+  Loom patterns as macro-actions), a pure function of (row, catalog, `__effect` window) with canonical
+  tie-breaking. The plan compiles to a linear Loom pattern submitted **via the Processor** as a
+  `meta.loomPattern` vertex keyed by content hash (**`plan-<hash(canonical plan JSON)>`** — same
+  (state, catalog) re-derivation → same vertex, re-fires collapse), then `triggerLoom` as frozen
+  (§10.5 pinning governs in-flight instances; GC when no live pin and no current re-derivation).
+  Dispatch-time re-validation mirrors `proposedOp` (action vocabulary · live-registry resolution ·
+  Weaver-authority).
+- **The mark pins the choice for the episode's lifetime:** the §10.3 mark's `action` carries the chosen
+  actionRef / plan hash at CAS-create, and a sweep reclaim re-dispatches the **pinned** choice — the
+  planner never re-plans mid-episode. Replanning happens only at episode boundaries (close→reopen),
+  preserving the deterministic-requestId / reclaim-collapse machinery unchanged.
+- **Escalation:** "no plan derivable" flows into the existing `augur.escalate` **`unplannable`** trigger
+  (its meaning extends to "no playbook entry AND no derivable plan"); no new trigger token.
+
 ---
 
 ## 10.9 Pattern trigger & lifecycle — `loom`-domain ops
@@ -1164,4 +1225,5 @@ emits events and writes no business vertex — nothing in the pipeline special-c
 | 2026-06-13 | **§10.8 `nudge` action `operation` field ratified (Andrew) — §10.8** (`cmd/weaver/CONTRACT-AMENDMENT-REQUEST.md` Request 4, Story 10.2). The `nudge` action params become **`{ adapter, operation, subject, params? }`** (`operation` **required**), and the `missing_bgcheck` example gains `"operation": "ResolveBackgroundCheck"`. `operation` is the **resolve-op type** — the op the Two-Phase Nudge submits in its Resolve leg to record the external outcome back into Core KV (Claim→Execute→Resolve, arch Item 3). Reconciles an internal inconsistency: the §10.3 `weaver-claims` record already carries `operation`, but that value could only come from the playbook's nudge action, which had no field for it; without it the Resolve leg has no op to submit and a claim could never reach `state=resolved`. A blank or `row.`-templated `operation` routes to the same `errConfig`-surfaced-to-Health posture as a blank/templated `adapter`. |
 | 2026-06-18 | **External I/O Bridge amendments ratified (Andrew) — §10.2 / §10.3 / §10.5 / §10.6 / §10.8** (one coherent package; CARs in `cmd/{loom,weaver,refractor}/CONTRACT-AMENDMENT-REQUEST.md`; umbrella `_bmad-output/planning-artifacts/sprint-change-proposal-2026-06-18.md`). The reference vertical surfaced that external I/O sat in the wrong engine; it moves out of Weaver (convergence *detection*) into **Loom + a new generic `bridge` component** (deterministic *execution*), event-driven and symmetric to userTasks. **§10.5/§10.6 (loom):** new **`externalTask`** step kind — two-op-shaped `{kind, adapter, params, replyOp, instanceOp}` (Loom submits the `instanceOp`, which creates the `service.<x>.instance` claim vertex + emits an `external.<adapter>` event via that op's transactional outbox, then **parks**); a **third** completion-correlation key **`payload.externalRef`** (= the `instanceKey` Loom mints write-ahead and parks on as `token.<instanceKey>`; the bridge's `replyOp` echoes it back). The "no new envelope field" userTask assumption is **struck** — this is a real engine extension (a 3rd `correlationKeys` key). Loom stays pure (event rides the op's outbox, no NATS handle). **§10.3 (weaver A):** **`weaver-claims` RETIRED** — the Two-Phase Nudge claim record + Claim→Execute→Resolve protocol leave Weaver; the visible-claim guarantee (FR58/NFR-S11) is now the **service-instance vertex in Core KV** (created before the `external.*` event is publishable). Reason: the resolve op could not address a candidate ≠ the nudge `subject` (hard-coded payload + Starlark can't read `authContext`). **Hard invariant pinned:** the bridge result-op `requestId` MUST be `deterministic(idempotencyKey = instanceKey)` (redelivery collapses on the Contract #4 tracker → exactly one result mutation). `weaver-state` + the reconciler/sweeper are **KEPT** (they serve `triggerLoom`/`assignTask`/`directOp`); only the nudge-specific `claimId` clauses retired. **§10.8 (weaver B):** **`nudge` GapAction RETIRED** (supersedes the Story-10.2 `operation`-on-nudge addition above) — external remediation is now `triggerLoom` of a pattern containing an `externalTask`; the `missing_bgcheck` example becomes a `triggerLoom`. **§10.2 (refractor, Option (b)):** a convergence target lens MAY be an **`actorAggregate`** (needed to reproject on linked-constituent change — identity aspects + service-instance across links); the **frozen §10.2 key + `splitRowKey` stay UNCHANGED** — such a lens declares an explicit key column emitting the bare-NanoID `<entityId>` instead of the default `{actorSuffix}` (= `<type>.<id>`), landing in the Epic-12 Output-descriptor machinery. **Contract #3 — NO amendment** (dropped at ratification): `external` is an ordinary domain under the open `<domain>.<eventName>` model (no Processor allowlist), realized via a package event-type DDL + the bridge's `events.external.>` consumer (envelope spec → `docs/components/bridge.md`). Bucket/constant/verify-enumeration teardown + the engine work land in the External I/O Bridge epic — Epic 13, stories 13.2–13.5 — under full 3-layer review + the FR58 crash/retry proof; the `Fake*` adapters move-then-delete to the bridge (never a window where neither path works). **Pre-commit coherence refinement (Andrew, 2026-06-18):** the claim vertex's **type is package-chosen** (the bridge is **type-agnostic** — `service.<x>.instance` is the lease demo's choice, not a contract constraint), the external **outcome is recorded as aspect(s) per D5** (minimum data in the vertex root, never fat root `data`), and bridge idempotency rests on the deterministic result-op `requestId` + the adapter's `idempotencyKey` dedup — **not** a typed-vertex read. |
 | 2026-06-18 | **externalTask deadline + completion symmetry (UNCOMMITTED — pending Andrew's review) — §10.5/§10.6.** Corrects the externalTask deadline, which (as first ratified above) said "exactly like a systemOp": on deadline-fire with a committed-but-not-yet-replied `instanceOp` the engine would **advance the cursor before the external result landed** — broken wait-for-result (a later outcome-branching step reads stale/absent data) on any slow/dead bridge or short timeout. **Fix: externalTask is handled like a `userTask`, not a systemOp.** The deadline is a **bounded creation-deadline on the `instanceOp` submission**; on `instanceOp` commit it **disarms** → the wait for the bridge `replyOp` is **unbounded** (never advances on the deadline). A rejected/lost `instanceOp` still → `FailPattern` (FR29; the submission is never a silent wedge). **Completion** becomes a dedicated **`orchestration.externalTaskCompleted{externalRef}`** event **emitted by the `replyOp` DDL** — the uniform orchestration-domain signal symmetric to `orchestration.taskCompleted{taskKey}` (Loom's existing `loom-orchestration` consumer advances it; externalTask patterns declare `completionDomains: ["orchestration"]`; a load-time warn mirrors `userTaskCompletionUnobservable`). Emitted-by-the-replyOp (not platform-injected as `taskCompleted` is) because the `replyOp` is a purpose-built completion op, not an oblivious business op. Also corrected the stale "full `vtx.<type>.<id>` key" §10.6 wording to the **opaque bare-NanoID handle** Loom actually mints (the Story 13.2 §0 resolution; the `instanceOp` DDL forms the typed key from the handle). Engine + 13.2-fixture/test updates land in the follow-up story; `docs/components/{loom,bridge}.md` updated in lockstep. |
+| 2026-07-04 | **📐 PROPOSED (UNCOMMITTED — pending Andrew's ratification) — §10.3 reserved key shapes + §10.8 Planner extension.** §10.3: documents the two **as-built** reserved `weaver-state` shapes (`<targetId>.__control`, `…​.__count` — the arch-review-flagged drift) and adds the **proposed** `<targetId>.__effect.<gapColumn>.<actionRef>` effect-bookkeeping shape. §10.8: new additive opt-in "Planner extension" subsection — op-DDL `effects` (guard-grammar atoms), `meta.weaverTarget` `mode: shadow\|planned` + per-gap `candidates`/`goal` (precedence: explicit `action` > `candidates` > `goal`; absent mode = byte-identical frozen behavior), deterministic selection/goal-regression synthesis, content-addressed `plan-<hash>` Loom-pattern vertices via the Processor, mark-pinned per-episode choice (reclaim never re-plans), `unplannable` escalation reuse. Design: `weaver-planner-mandate-design.md`. |
 | 2026-06-19 | **§10.8 — `directOp` gains optional `reads?` (ratified, Andrew).** Additive + `omitempty`: a `directOp` gap action may declare `reads?` — its dispatched op's `contextHint.reads` (bare vertex keys, each a literal or `row.<column>`) — so an op that must hydrate its candidate vertex gets the key from the lens row. Needed because no Weaver gap action declared the dispatched op's reads, and the off-graph-blob GC's `directOp(TombstoneObject)` must hydrate the object to read its `data.linkEpoch` for the orphan-detection stale-check; the candidate key is already the lens row's `entityKey`, so this routes it. Engine: `GapActionSpec`/`GapAction` gain `Reads []string`; `buildPlan`'s `directOp` branch resolves the templates + sets `plan.reads`. The off-graph blob plane (`objects-base`) is the first `directOp` consumer. No existing target's emitted body changes (omitempty). |
