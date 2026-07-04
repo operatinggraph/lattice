@@ -412,17 +412,58 @@ table didn't have (design §3.3). A malformed `.effects` body is logged and drop
 live path (pkgmgr's install-time validation already rejects that shape before it can reach Core KV).
 
 **Not yet wired** (the rest of Fire 6, checkpointed in `weaver-planner-mandate-design.md` §8): calling
-`planner.Synthesize` against this catalog to actually dispatch a `goal`-only gap. Before that lands, the
-State-schema question the catalog's own shape surfaces must be resolved: `rowState` (Fire 4/5) maps a lens
-row's columns onto **root** guard-grammar paths (`subject.data.<column>`), the convention a `goal`/`pre`
-guard is authored against — but a declared op **Effect** (e.g. `SignLease`'s
-`subject.signature.data.signedAt`) asserts an **aspect** path (`Path{Aspect:"signature", ...}`), the real
-Core-KV write. These are disjoint keys in `planner.State`: a synthesized plan's effects can never satisfy a
-row-space goal by construction, so wiring dispatch on top of today's `rowState` alone would silently return
-`ErrNoPlan` for every real op-effects catalog — a config/data-shaped bug that would ship quietly, exactly
-the class of hazard the Fire 5 pre-build gate was watching for. The next fire must decide how a goal-only
-gap's starting `State` is built (a fresh aspect read of the candidate subject, keyed to match the catalog's
-path space, is the leading candidate) before any dispatch/plan-vertex/GC work is safe to build on top.
+`planner.Synthesize` against this catalog to actually dispatch a `goal`-only gap. Increment 2 (below)
+resolves the State-schema question this raised; the remaining dispatch/plan-vertex/GC work is a later
+increment, gated on a real package first authoring a `goal`.
+
+## Goal-regression State-schema bridge (Fire 6 Increment 2)
+
+Increment 1 surfaced a real gap: `rowState` (Fire 4/5) maps a lens row's columns onto **root** guard-grammar
+paths (`subject.data.<column>`) — the convention a `pre` guard is authored against — but a declared op
+**Effect** (e.g. `SignLease`'s `subject.signature.data.signedAt`) asserts an **aspect** path
+(`Path{Aspect:"signature", ...}`). These are disjoint keys in `planner.State`; without a bridge, a goal
+authored against the same real-world fact an op's Effects assert would silently never read as satisfied —
+worse, it would drive the search to synthesize a **spurious** plan (re-run `SignLease` on an
+already-signed application) because the aspect-qualified fact is invisible under the row's untagged root
+key.
+
+**Resolution: a lens-column → aspect-path bridge, not a new Core-KV read.** Contract #10 §10.8 already
+commits synthesis to being "a pure function of (row, catalog, `__effect` window)" — a live read of the
+candidate subject's aspects would violate that framing and widen Weaver's Core-KV footprint, which Andrew
+has held as Processor-exclusive (Loom's guard-precondition read is the one tolerated, provisional
+exception; effect-probing reads are explicitly not that exception). A real target's own lens already
+projects aspect fields onto plain row columns today (`packages/lease-signing/lenses.go:551`:
+`app.signature.data.signedAt AS signedAt`) — the row already carries the fact, it just loses the aspect
+tag when flattened. So the fix is purely a keying decision:
+
+- A gap's (additive, optional) **`goalColumns`** field maps a row column name to the aspect-qualified
+  guard-grammar path it actually represents (`{"signedAt": "subject.signature.data.signedAt"}`).
+  **Scoped per-gap, not target-wide** — two gaps in one target may reuse the same column name for
+  unrelated facts, and a shared target-level map would silently rebase both onto whichever gap declared
+  it. Install-time validation (`parseGoalColumns`, `registry.go`) requires each value to parse under §10.5
+  and be aspect-qualified (a root-shaped entry is redundant — a column absent from the map already
+  addresses `subject.data.<column>` by default), requires values to be unique (two columns mapping to the
+  same path would make `rowState`'s result depend on Go's nondeterministic map-iteration order over the
+  row), and requires every declared path to actually appear somewhere in the gap's own `goal` — an entry
+  the goal never references is exactly as inert as a typo'd column name, and this is the catchable half of
+  that mistake (there's no lens schema here to check the column name itself against). Parsed paths cache
+  on the gap as `goalColumnPaths`, mirroring `goalGuard`'s own parse-once pattern. The mirror-image
+  mistake — an aspect-shaped `candidates[].pre` — is rejected too: `rankCandidates` evaluates `pre`
+  against `rowState(row, nil)` (root-only, no bridge), so an aspect-shaped `pre` could never be satisfied
+  and would silently make that candidate permanently ineligible.
+- `rowState(row, aspectCols)` (`planner_shadow.go`) takes the parsed map and keys a listed column at its
+  real `Path{Aspect, Field}` instead of the default root mapping; an absent-from-the-map column is
+  unaffected. Fire 4/5's candidate ranking passes `nil` (unchanged, root-only).
+
+Proven in `goal_state_internal_test.go` against the real lease-signing shape: a row reflecting an
+already-signed application, without the bridge, synthesizes a spurious one-step `SignLease` plan (the
+aspect fact is invisible under the wrong key); with the bridge, the same row correctly resolves the goal
+as already met (zero-step plan). Zero new Weaver Core-KV reads either way.
+
+**Not yet wired:** no package authors a `goalColumns`/`goal` pair yet (Fire 5 only shipped `candidates`) —
+this increment resolves the schema and proves it in isolation. The next increment wires actual
+`mode:"planned"` goal-regression dispatch once a real target uses it, plus the plan-vertex/GC work §8
+describes.
 
 ---
 

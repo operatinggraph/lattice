@@ -46,20 +46,41 @@ catalog); the Weaver registry indexes it (order-independent join against the op-
 `effectsCatalog() []planner.Action`. Zero dispatch-decision change; full detail in
 `docs/components/weaver.md` "Op-effects runtime catalog" section.
 
-**Increment 2 (next fire) must resolve first, before any dispatch/plan-vertex/GC work**: a real
-**State-schema gap** the catalog's own shape surfaces. `rowState` (Fire 4/5) maps a lens row onto **root**
-guard-grammar paths (`subject.data.<column>`) — the space a `goal`/`pre` guard is authored against — but a
-declared op **Effect** (e.g. `SignLease`'s `subject.signature.data.signedAt`) asserts an **aspect** path.
-These are disjoint keys in `planner.State`: `planner.Synthesize`'d search could never let a real catalog
-action's effects satisfy a row-authored goal, so naively wiring Fire 6 dispatch on top of `rowState` alone
-would silently return `ErrNoPlan` for every real target — a config/data-shaped bug that ships quietly,
-exactly the class of hazard the Fire 5 pre-build gate existed to catch. Leading candidate: build the
-goal-regression starting `State` from a fresh read of the candidate subject's aspects (not the lens row),
-keyed to match the catalog's path space — ground this against a real target's `goal` declaration (none
-ship yet; Fire 5 only shipped `candidates`) before committing to the shape. Only once this is resolved do
-plan-vertex compilation (`plan-<hash>`), the new op/DDL surface for Weaver to author a `meta.loomPattern`
-vertex at runtime (no existing precedent — package install is the only place one is created today), plan
-GC, and dispatch-time re-validation become safe to build.
+**✅ Increment 2 (2026-07-04) shipped — State-schema gap resolved.** `rowState` (Fire 4/5) mapped every
+lens row column onto a **root** guard-grammar path (`subject.data.<column>`), but a declared op **Effect**
+(e.g. `SignLease`'s `subject.signature.data.signedAt`) asserts an **aspect** path — disjoint keys in
+`planner.State`, so a goal authored against the same real-world fact an op's Effects assert would read as
+perpetually absent, driving the search to synthesize a **spurious** plan even when the goal was already
+met. The design doc's own "fresh Core-KV read" leading candidate was **rejected**: it contradicts §10.8's
+own frozen "pure function of (row, catalog, `__effect` window)" framing and would be a new Weaver-side
+Core-KV read of exactly the kind Andrew has held Processor-exclusive (Loom's guard-precondition read is the
+one tolerated, provisional exception — effect-probing is explicitly not that exception,
+[[feedback_no_new_engine_corekv_reads]]). **Resolution: a lens-column → aspect-path bridge, zero new
+reads** — a real lens already projects an aspect field onto a plain row column today
+(`packages/lease-signing/lenses.go:551`), so a gap's (additive, optional) **per-gap** `goalColumns` field
+(`{"signedAt": "subject.signature.data.signedAt"}`) tells `rowState` which columns to key at their real
+aspect path instead of the default root mapping; install-validated (`parseGoalColumns`: aspect-qualified,
+unique values, and every path must be referenced by that gap's own `goal` — an unreferenced entry is as
+inert as a typo and now rejected rather than silently degrading) and cached as `goalColumnPaths`,
+mirroring `goalGuard`'s parse-once pattern. **Scoped per-gap, not target-wide**, closing a real 3-layer
+review finding: a shared target-level map would have let two gaps reusing the same column name for
+unrelated facts silently rebase onto whichever gap declared it. The mirror-image mistake — an
+aspect-shaped `candidates[].pre`, which `rankCandidates` can never bridge — is now rejected too. Proven
+end to end (`goal_state_internal_test.go`) against the real lease-signing shape: without the bridge, an
+already-signed application's row synthesizes a spurious one-step `SignLease` plan; with it, the same row
+correctly resolves the goal as already met. Full detail: `docs/components/weaver.md` "Goal-regression
+State-schema bridge" section. **Contract #10 §10.8 needs a small additive amendment** documenting
+`goalColumns` (staged uncommitted, flagged for Andrew — no fork, no dispatch-decision change, purely the
+row-keying convention this increment adds).
+
+**Increment 3 (next fire), gated on a real consumer:** no package authors a `goal`/`goalColumns` pair yet
+(Fire 5 only shipped `candidates`) — wiring actual `mode:"planned"` goal-regression dispatch needs a real
+target to prove it against end-to-end (`lease-signing`'s `missing_signature` gap is the natural first
+candidate, though `assignTask` may remain the better fit there — ground before forcing a `goal` onto it
+just to exercise the machinery). Only once a real consumer exists do plan-vertex compilation
+(`plan-<hash>`), the new op/DDL surface for Weaver to author a `meta.loomPattern` vertex at runtime (no
+existing precedent — package install is the only place one is created today), plan GC, and dispatch-time
+re-validation become safe to build.
 
 **Pre-build gate (run 2026-07-04, in the Fire 5 session):** the self-imposed adversarial pass over
 episode-stability under reclaim, focused specifically on the hazard the existing dispatch pipeline
