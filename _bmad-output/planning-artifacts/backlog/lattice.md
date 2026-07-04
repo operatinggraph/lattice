@@ -155,7 +155,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | AI-authored capabilities | A Lattice-aware agent proposes DDL/Starlark/lenses/workflows through human review + deterministic validation + rollback. | ★★–★★★ | L | 🏗️ building · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) · Fire 1 Increment 1 (capture pair, lens kind) shipped; next: bridge adapter + Loom dispatch |
 | **The Augur** (AI reasoning tier — L3 evaluator) | Weaver's AI-assisted reasoning tier for ambiguous/novel convergence gaps. The marquee AI-native feature. | ★★ | M–L | ✅ Fires 1+2a+2b shipped (loop closes: escalate→review→dispatch) · [design](../../implementation-artifacts/augur-design.md) + [dispatch design](../../implementation-artifacts/augur-dispatch-pickup-design.md) · 🚧 Fire 3 autoApply Andrew-gated; follow-up: mid-flight-kill + drift-invalid e2e (§6 residual) |
 | Starlark guards (Loom) | The reserved `{reads, starlark}` guard escape hatch needs a verified-pure sandbox. | ★ | M | ✅ ratified (split) · [design](../../implementation-artifacts/loom-starlark-guards-design.md) · 🚧 Loom-side held (ships with first consumer) |
-| **Weaver planner mandate (dispatcher → solver)** | Remediation stops being a static gap→action lookup: deterministic planner (per-gap candidate selection, then goal-regression synthesis over op-declared effects) executed as content-addressed pinned Loom patterns, plus contraction/oscillation diagnostics and fleet admission control; shadow mode + per-target cutover; the Augur stays the AI boundary. | ★★★ | XL | 🏗️ building · [design](../../implementation-artifacts/weaver-planner-mandate-design.md) · Fires 1-3 done; next: Fire 4 (shadow compare) |
+| **Weaver planner mandate (dispatcher → solver)** | Remediation stops being a static gap→action lookup: deterministic planner (per-gap candidate selection, then goal-regression synthesis over op-declared effects) executed as content-addressed pinned Loom patterns, plus contraction/oscillation diagnostics and fleet admission control; shadow mode + per-target cutover; the Augur stays the AI boundary. | ★★★ | XL | 🏗️ building · [design](../../implementation-artifacts/weaver-planner-mandate-design.md) · Fires 1-4 done; next: Fire 5 (candidates selection dispatch) |
 
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
@@ -193,6 +193,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-04 · `6c134d9` · [Weaver] Planner mandate Fire 4 — `mode`/`candidates`/`goal` install-parsing + shadow-compare diagnostic (agree/diverge heartbeat metrics); zero dispatch-decision change; Fire 5 next
 - 2026-07-04 · `4d6df0a` · [Weaver] Planner mandate Fire 3 — pure `internal/weaver/planner` goal-regression library (STRIPS/GOAP UCS, canonical determinism, `ErrNoPlan`); not yet wired to any dispatch decision; Fire 4 next
 - 2026-07-04 · `7b9191b` · [Weaver] Planner mandate Fire 2 — `__effect` confidence-window bookkeeping (both dispatch legs + gap-close path) + heartbeat `LensEffectMismatch` issue; Fire 3 (planner library) next
 - 2026-07-04 · `a673d23` · [Weaver] Planner mandate Fire 1 — op-DDL `Effects` (`internal/guardgrammar` + pkgmgr install validation) + lease-signing declarations; zero engine change; Fires 2-9 remain
@@ -215,10 +216,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-03 · `fb66e7c` · [vault] Fire 5b-iv — test-crypto-shred proves Secure-Lens PII scrub through the real async shred chain (5b's last code gate; remaining: attended delivery-boundary reset + live e2e)
 - 2026-07-03 · `0377938` · [natsperm] bridge phantom KV-bucket grants pruned (arch #19, bridge half) — TestBridgeNoPhantomKVGrants added
 - 2026-07-03 · `9972fec` · [natsperm] object-plane-nats-permissions — arch #2 fixed (Winston self-ratified, no fork/contract); first object-plane natsperm vectors
-- 2026-07-03 · `971011c` · [Loom/Weaver/Bridge] health-sink consolidation — shared internal/healthkv.ConsumerSink, pause-restore round-trip covered
-- 2026-07-03 · `338727d` · [clinic] Vault Fire 5b-iii — CreatePatient identityKey wires identifiedBy; .demographics drops dob/email/phone
-- 2026-07-03 · `94c8224` · [CI] hello-lattice NFR-P3 deadline widened 1000ms→2000ms — eradicated the recurring Milestone4 projection-poll flake
-- 2026-07-03 · `f97afed` · [Core] aiagent ReadCapability fix — c9a8031's live holdsRole routing dropped rbac grants for operator-role actors; now unions cap.identity+cap.roles; fixed main-red Gate 5
-- 2026-07-03 · `c9a8031` · [Core] root-designation-topology-reconverge — Fork A: three capability sites (+ aiagent read routing) re-converged on holdsRole→operator; Gate-3 vector #16 added
-- 2026-07-02 · `eb20923` · [lease-signing] Vault Fire 5b-iii-a — real-Vault shred-undecryptable proof for landlordLeaseApplicationsRead's own committed ciphertext
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*

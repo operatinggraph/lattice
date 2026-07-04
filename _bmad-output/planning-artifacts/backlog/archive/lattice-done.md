@@ -2,6 +2,12 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-03 · `971011c` · [Loom/Weaver/Bridge] health-sink consolidation — shared internal/healthkv.ConsumerSink, pause-restore round-trip covered
+- 2026-07-03 · `338727d` · [clinic] Vault Fire 5b-iii — CreatePatient identityKey wires identifiedBy; .demographics drops dob/email/phone
+- 2026-07-03 · `94c8224` · [CI] hello-lattice NFR-P3 deadline widened 1000ms→2000ms — eradicated the recurring Milestone4 projection-poll flake
+- 2026-07-03 · `f97afed` · [Core] aiagent ReadCapability fix — c9a8031's live holdsRole routing dropped rbac grants for operator-role actors; now unions cap.identity+cap.roles; fixed main-red Gate 5
+- 2026-07-03 · `c9a8031` · [Core] root-designation-topology-reconverge — Fork A: three capability sites (+ aiagent read routing) re-converged on holdsRole→operator; Gate-3 vector #16 added
+- 2026-07-02 · `eb20923` · [lease-signing] Vault Fire 5b-iii-a — real-Vault shred-undecryptable proof for landlordLeaseApplicationsRead's own committed ciphertext
 - 2026-07-02 · `3ef4830` · [docs] Arch-review: docs-truth-sweep — Gateway/Vault built, gateway.md phantom §refs + ops-publish fix, service-actors no-Gateway/enforcement-live, CONCEPT serviceClass dropped; §6.5/§6.12 flagged
 - 2026-07-02 · `04bcbf0` · [lease-signing] Vault Fire 5b-ii-d — sev-1 fix: ssn presence check always null on real Vault ciphertext, blocking every real applicant from qualifying; regression test added
 - 2026-07-02 · `98cbfe8`+`f69b3e9` · [docs] Arch-review: bridge-and-substrate-doc-refresh — bridge async SPI/poll-timeout/Augur, scheduling @every+bridge-lane, substrate ctx-sigs/6-files/object+publish+stream surfaces/godoc
