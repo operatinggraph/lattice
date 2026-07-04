@@ -161,17 +161,22 @@ console) — done.
 **Deferred (follow-up fires, per the design's decomposition):**
 - **Fire 3** — the read-path front (`GET /v1/<readmodel>`), sequenced behind D1.3's first live
   protected Postgres read-model (chain-grounding — not dead scaffolding).
-- **Fire 4 — needs re-grounding, not a straightforward build.** The design assumed an *unauthenticated*
-  `POST /v1/claim` front for `CreateUnclaimedIdentity`/`ClaimIdentity`. The shipped `identity-domain`
-  package's permission grants (`packages/identity-domain/permissions.go`) require an
-  **already-authenticated, role-holding actor** for both: `CreateUnclaimedIdentity` grants to
-  `frontOfHouse`/`backOfHouse`/`operator` (staff), `ClaimIdentity` grants to `consumer` at `scope: self`
-  (the claiming actor must already hold a `consumer`-role identity). Neither op is callable by a truly
-  anonymous caller with no prior Lattice identity — both already route correctly through Fire 1's
-  authenticated `POST /v1/operations`. Before building a separate unauthenticated door, re-derive what
-  actual caller state exists at claim time (does "consumer" get auto-granted on Gateway-mediated
-  first-JWT-use? is Fire 4 solving a real first-touch-signup gap, or is it redundant with Fire 1?) —
-  don't build an unauthenticated bypass for ops that are structurally role-gated without resolving that
-  first.
+- **Fire 4 — retired as originally conceived; re-grounded 2026-07-04.** The design assumed an
+  *unauthenticated* `POST /v1/claim` front for `CreateUnclaimedIdentity`/`ClaimIdentity`. Grounding
+  (`gateway-claim-flow-identity-provisioning-design.md`) found this would not have fixed anything:
+  `CreateUnclaimedIdentity` (staff-role-gated) already routes correctly through Fire 1's authenticated
+  `POST /v1/operations` — never a gap. `ClaimIdentity` (`scope: self`, `GrantsTo: consumer`) is a hard,
+  pre-Starlark step-3 gate requiring the calling actor to **already** hold `consumer` — unreachable by
+  *any* actor, authenticated or not, because nothing in the platform ever grants a fresh actor its first
+  role (`AssignRole` is the only path to a `holdsRole` link, and it's operator-only; nothing calls it for
+  `consumer`, in any existing or planned flow). An unauthenticated HTTP front changes who calls the
+  endpoint, not whether the resulting envelope's actor holds a capability grant — the real gap is
+  authorization, not authentication. The design's resolution: a new `ProvisionConsumerIdentity` op the
+  Gateway submits under its own bootstrap-seeded system identity (a narrow `identityProvisioner` role, not
+  full `operator` — the Gateway is internet-facing in a way Loom/Weaver/objmgr/privacy are not) the first
+  time it authenticates a not-yet-seen actor, closing the gap with the same system-actor pattern already
+  shipped. **📐 Awaiting Andrew's ratification; recommended: ratify the design, shelve the build** — zero
+  current/planned vertical needs self-service consumer signup (both reference verticals grant every op to
+  `operator` only); build only once a real driver files. No unauthenticated door will be built.
 - **Fire 5 (ops, not platform code)** — the prod reverse-proxy (`deploy/nginx.conf`: TLS termination,
   rate limiting, CORS, IP allowlisting) per the ratified Gateway Architecture Decision.

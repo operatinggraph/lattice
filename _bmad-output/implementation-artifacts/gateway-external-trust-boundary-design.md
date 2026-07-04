@@ -163,17 +163,31 @@ HTTP POST /v1/operations        1. Authenticate(Bearer JWT)            (unchange
   the D1 ruling a `protected` model must target Postgres (lint-failable); the Gateway read-front serves
   only RLS-backed Postgres models + explicitly-`public` NATS-KV models.
 
-### 3.3 Identity-claim front (Contract #9)
+### 3.3 Identity-claim front (Contract #9) — SUPERSEDED 2026-07-04, see below
 
-- `CreateUnclaimedIdentity` and `ClaimIdentity` are how an actor *gets* an identity, so the claim itself
-  cannot require a pre-existing verified token. Design: a **bounded, rate-limited, unauthenticated**
-  surface `POST /v1/claim` that admits **only** those two operationTypes (an allow-list, fail-closed —
-  any other op on that path is 403). The claiming op is stamped with the **unclaimed identity's own key**
-  per the existing claim DDL, not a verified actor.
-- Contract #9 is honored untouched: the client already submits only `sha256(plaintext)` in the payload;
-  the Gateway forwards the envelope verbatim and **never sees, logs, or stores the plaintext** (there is no
-  plaintext on the wire to it). The `/v1/claim` handler must carry the same do-not-log discipline as the
-  rest of the gateway (no body logging on the claim path).
+> **This section's original plan (an unauthenticated `POST /v1/claim` front) is retired, not built.**
+> Re-grounding (`gateway-claim-flow-identity-provisioning-design.md`) found it would not have fixed
+> anything: `CreateUnclaimedIdentity` already routes correctly through Fire 1 (§3.1) for its
+> staff-role-holding callers, and `ClaimIdentity`'s `scope: self` permission is a hard step-3 gate
+> requiring the calling actor to **already** hold `consumer` — unreachable by any actor, authenticated or
+> not, because nothing in the platform ever grants a fresh actor its first role. An unauthenticated HTTP
+> door changes who calls the endpoint, not whether the resulting envelope's actor holds a capability
+> grant, so it does not touch the real gap. The resolution (a Gateway-submitted `ProvisionConsumerIdentity`
+> op under a narrow new system-actor role, closing the "first role" gap directly) lives entirely in the
+> linked design, **📐 awaiting Andrew's ratification** with a recommendation to ratify-but-shelve (no
+> current vertical needs self-service consumer signup) — not part of this fire's build either way. The
+> original bullets below are struck and kept only for history; do not build them.
+>
+> ~~`CreateUnclaimedIdentity` and `ClaimIdentity` are how an actor *gets* an identity, so the claim itself
+> cannot require a pre-existing verified token. Design: a bounded, rate-limited, unauthenticated surface
+> `POST /v1/claim` that admits only those two operationTypes (an allow-list, fail-closed — any other op on
+> that path is 403). The claiming op is stamped with the unclaimed identity's own key per the existing
+> claim DDL, not a verified actor.~~
+>
+> ~~Contract #9 is honored untouched: the client already submits only `sha256(plaintext)` in the payload;
+> the Gateway forwards the envelope verbatim and never sees, logs, or stores the plaintext (there is no
+> plaintext on the wire to it). The `/v1/claim` handler must carry the same do-not-log discipline as the
+> rest of the gateway (no body logging on the claim path).~~
 
 ### 3.4 Service actors bypass the Gateway (unchanged)
 
@@ -264,7 +278,7 @@ ops fires. This is the same **ratify-now / build-Fire-1** pattern already accept
 |---|---|---|
 | #2 Operation Envelope | §2.34 `actor`; **§2.39 (header→full-key stamping by Gateway — already reserved)**; §2.3/§2.6 lane-auth + `LaneUnauthorized` | The Gateway stamps the `actor` field the contract already specifies; lane-auth already enforced (shipped). |
 | #6 Capability KV | §6.x | The stamped actor is looked up unchanged at step-3 (shipped). |
-| #9 Identity Claim Flow | §9.1 (plaintext never enters Lattice) | The `/v1/claim` front forwards `sha256(plaintext)` payloads verbatim; never sees/logs plaintext. |
+| #9 Identity Claim Flow | §9.1 (plaintext never enters Lattice) | **No `/v1/claim` front** (§3.3 superseded) — `CreateUnclaimedIdentity`/`ClaimIdentity` reach the Processor only through the standard authenticated `POST /v1/operations` (§3.1), like every other op; Contract #9's plaintext-never-enters-Lattice invariant is unaffected either way. |
 | #5 Health KV | §5.2–5.5 | A `gateway` heartbeat component (status/issues), the seventh self-reporter; Loupe system-map node. |
 
 **New (not frozen):** `docs/components/gateway.md` — present-tense component doc (mandate, the
@@ -327,10 +341,12 @@ Andrew prefers freezing now, I'll stage the §11 edit uncommitted on request.
 ## 8. Fire-by-fire decomposition (for the Lattice Steward)
 
 Each fire is independently shippable + green. **Build only after ✅ Andrew-ratified.** **Ratified collapse
-(Andrew, 2026-06-29, fewer-larger-fires):** Fires 1+2+4 below land as **one fire** (the whole buildable-now write
-surface — translator + dev signer + JWKS + claim-front + health + doc); Fire 3 (read-front) is the **2nd** fire,
-behind D1.3, **one-way** (Lattice consumes the Verticals D1.3 read-model); Fire 5 (reverse-proxy) is **ops**, not
-a Steward fire. **Hard gate: the write-surface fire lands with/after #75 Fire 2b (enforcement, not yet live).**
+(Andrew, 2026-06-29, fewer-larger-fires):** Fires 1+2 below shipped as **one fire** (the buildable-now write
+surface — translator + dev signer + JWKS + health + doc); **Fire 4 (claim-front) was correctly held back**
+once its own premise was found self-contradictory at build time and is now **retired** (§3.3, §8 item 4 —
+re-grounded 2026-07-04, not built in any form). Fire 3 (read-front) is the **next** fire, behind D1.3,
+**one-way** (Lattice consumes the Verticals D1.3 read-model); Fire 5 (reverse-proxy) is **ops**, not a
+Steward fire. **Hard gate: the write-surface fire lands with/after #75 Fire 2b (enforcement, not yet live).**
 
 1. **Fire 1 — write-path translator (the keystone; buildable now; full 3-layer security review).**
    `internal/gateway/gateway.go` + a `cmd/gateway` binary: HTTP `POST /v1/operations`, Bearer auth via the
@@ -345,9 +361,13 @@ a Steward fire. **Hard gate: the write-surface fire lands with/after #75 Fire 2b
 3. **Fire 3 — read-path front (behind D1.3; full 3-layer, read-enforcement).** `GET /v1/<readmodel>`:
    authenticate → open Postgres session → `SET LOCAL lattice.actor_id` → RLS-filtered read. Composes on
    D1.3's first live protected Postgres read-model. "A sees only A" e2e through the Gateway.
-4. **Fire 4 — claim-flow front (Contract #9).** Bounded, rate-limited, unauthenticated `POST /v1/claim`
-   admitting only `CreateUnclaimedIdentity`/`ClaimIdentity` (allow-list, fail-closed), do-not-log
-   discipline; e2e: claim → JWT issuance handoff → first authenticated op.
+4. **Fire 4 — RETIRED as originally conceived (2026-07-04); not a Steward fire.** The unauthenticated
+   `POST /v1/claim` front never gets built (§3.3). `CreateUnclaimedIdentity`/`ClaimIdentity` already reach
+   the Processor via Fire 1's authenticated `POST /v1/operations`. The real, distinct gap this row's
+   original grounding surfaced (nothing ever grants a fresh actor its first `consumer` role) is designed in
+   `gateway-claim-flow-identity-provisioning-design.md`, **📐 awaiting Andrew's ratification** with a
+   recommendation to ratify-but-shelve (sequenced behind a real self-service-signup driver; none exists
+   today) — not part of this epic's numbered fires either way.
 5. **Fire 5 — prod reverse-proxy hardening (OPS, not platform code).** `deploy/nginx.conf` (TLS termination,
    rate limit, request-size limits, CORS, IP allowlist), prod IdP/OIDC integration. Infra config per the
    ratified Gateway Architecture Decision — **not** Go code; sized/owned by ops, not the Steward.
