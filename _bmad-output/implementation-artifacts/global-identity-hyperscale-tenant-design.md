@@ -272,7 +272,14 @@ Three classes, each with a defined direction and transport:
    KV** (D1, brainstorm #118/#111) is replicated and checked at every read/write boundary: killing the
    member's JWT denies **all** ops everywhere immediately, independent of shadows. Right-to-be-forgotten
    additionally destroys the home-cell Vault key (crypto-shred) — the shadows hold no PII, so there is nothing
-   to shred in them; only the canonical home aspect is destroyed.
+   to shred in them; only the canonical home aspect is destroyed. **One multi-cell reconciliation owed
+   (Fire 4):** the ratified single-cell activation mechanism
+   (`gateway-token-revocation-activation-design.md`, 2026-07-03) materializes each Gateway's bucket from
+   **that cell's own** `events.gateway.>` stream, so a home-cell `RevokeActor` does not reach acting cells'
+   buckets by itself. At multi-cell time the cut needs a named cross-cell transport — the revocation bucket
+   joins the R3-replicated operational family (the `identity-registry`/`cell-index` precedent) **or** the
+   revoke event rides the §3.4 `shadowCells` fan-out. Owned by Fire 4, whose pre-build gate already covers
+   the revocation boundary.
 
 This separation is the heart of the design: **additions tolerate lag because lag under-permits; revocations
 must not, so they ride a generation fast-path that fails closed; account-level cut is the existing instant
@@ -456,7 +463,9 @@ build like Vault/D1/HA/multi-cell. When the gate clears, the fires are:
   FULL 3-layer + the pre-build party-mode gate below — this is the security-plane increment).** The home
   Weaver refresh/retraction fan-out addressed by `shadowCells` (soft-tombstone retraction reused); the
   `revocationGen` bump-on-revoke + the shadow-actor auth compare (fail-closed); the whole-actor
-  token-revocation-KV path validated across cells. Tests: addition lags then converges (under-permit during
+  token-revocation-KV path validated across cells **including its cross-cell transport** (§3.5 class 3 —
+  replicate the bucket or ride the fan-out; the single-cell materializer alone does not propagate). Tests:
+  addition lags then converges (under-permit during
   lag); revoke bumps gen → denied everywhere before the tombstone arrives; whole-actor cut instant; stale-gen
   fail-closed; off-board retracts across all `shadowCells`.
 - **Fire 5 — shadow GC + residency relocation + the cross-region acceptance gate (behind Fire 4).** The
@@ -495,7 +504,8 @@ build like Vault/D1/HA/multi-cell. When the gate clears, the fires are:
 For **Fire 4** (the consistency contract — the revocation-generation fast-path + the cross-cell retraction
 fan-out, the one security-plane, new-coordination increment), run a **`bmad-party-mode` adversarial pass on
 the revocation boundary** (the `revocationGen` bump-vs-compare race, the shadow-actor auth gate, the
-fail-closed-on-stale-gen window, the off-board retraction across `shadowCells`, the hydrate-races-revoke case)
+fail-closed-on-stale-gen window, the off-board retraction across `shadowCells`, the hydrate-races-revoke case,
+the cross-cell token-revocation transport — §3.5 class 3)
 **before building**, and record it as run — mirroring the pre-build passes multi-cell/D1/HA self-flagged. The
 rest of the surface (the Registry, the shadow data model, the hydrate saga) is covered by the integration +
 multi-cell-fixture tests. This gate is a **Designer-lane obligation discharged at build time**, not a dangling
