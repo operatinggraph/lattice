@@ -73,14 +73,18 @@ State-schema bridge" section. **Contract #10 §10.8 needs a small additive amend
 `goalColumns` (staged uncommitted, flagged for Andrew — no fork, no dispatch-decision change, purely the
 row-keying convention this increment adds).
 
-**Increment 3 (next fire), gated on a real consumer:** no package authors a `goal`/`goalColumns` pair yet
-(Fire 5 only shipped `candidates`) — wiring actual `mode:"planned"` goal-regression dispatch needs a real
-target to prove it against end-to-end (`lease-signing`'s `missing_signature` gap is the natural first
-candidate, though `assignTask` may remain the better fit there — ground before forcing a `goal` onto it
-just to exercise the machinery). Only once a real consumer exists do plan-vertex compilation
-(`plan-<hash>`), the new op/DDL surface for Weaver to author a `meta.loomPattern` vertex at runtime (no
-existing precedent — package install is the only place one is created today), plan GC, and dispatch-time
-re-validation become safe to build.
+**Increment 3 grounding pass (2026-07-04): HELD — no real consumer exists, dead-scaffolding test fails.**
+Surveyed every gap in every installed package (`lease-signing`, `clinic-reminders`, `objects-base`):
+every one closes via a **single** dispatch — `assignTask`, `directOp`, or a delegated `triggerLoom`
+pattern. `missing_signature` (the design's own leading candidate) is confirmed a genuine single-step
+human task (`assignTask SignLease`); forcing a `goal` onto it would synthesize a one-step plan
+duplicating what `candidates`/the static table already express — exactly the "just to exercise the
+machinery" case this doc already warned against, and the same dead-scaffolding doctrine that shelved
+Fire 6's speculative-validation lane (§7.3). Goal regression's entire value-add over Fire 5's `candidates`
+is **chaining ≥2 ops**; no installed package has a gap that needs it yet. **Holding, not building dark:**
+plan-vertex compilation, runtime `meta.loomPattern` authoring, plan GC, and dispatch-time re-validation
+stay unbuilt until a real multi-op gap surfaces (Surveyor/vertical-PO signal, not manufactured). Re-check
+this gate whenever a new package/gap is filed with ≥2 ops that could close one gap.
 
 **Pre-build gate (run 2026-07-04, in the Fire 5 session):** the self-imposed adversarial pass over
 episode-stability under reclaim, focused specifically on the hazard the existing dispatch pipeline
