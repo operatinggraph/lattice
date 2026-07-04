@@ -1,6 +1,10 @@
 package leasesigning
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import (
+	"encoding/json"
+
+	"github.com/asolgan/lattice/internal/pkgmgr"
+)
 
 // DDLs returns the package's DDL meta-vertex declarations:
 //
@@ -213,6 +217,12 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"application's unit (UnitMismatch), a non-positive annualIncome, or an out-of-enum employmentStatus.",
 			},
 		},
+		Effects: map[string][]json.RawMessage{
+			// SignLease unconditionally writes the .signature aspect on commit —
+			// exactly the fact that closes the §10.8 playbook's missing_signature
+			// gap (targets.go).
+			"SignLease": {json.RawMessage(`{"present":"subject.signature.data.signedAt"}`)},
+		},
 	}
 }
 
@@ -339,6 +349,15 @@ func leaseServiceReplyDDL() pkgmgr.DDLSpec {
 					"keeps violating). Emits the same completion + provenance events. Rejects an absent or non-{completed,failed} status " +
 					"with InvalidArgument.",
 			},
+		},
+		Effects: map[string][]json.RawMessage{
+			// RecordLeaseServiceOutcome unconditionally writes the .outcome aspect
+			// on commit, regardless of the completed/failed verdict carried in the
+			// param — the coarse fact a goal-regression planner (Fire 6) can chain
+			// on; a completed-specific effect needs a param-conditioned guard the
+			// §10.5 grammar does not express (it reads state, not op params), so
+			// this declares only what every commit entails unconditionally.
+			"RecordLeaseServiceOutcome": {json.RawMessage(`{"present":"subject.outcome.data.status"}`)},
 		},
 	}
 }

@@ -13,7 +13,10 @@
 //     `lattice.bootstrap.json`.
 package pkgmgr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // validateAll runs every field-level package validator in a fixed order. It is
 // the shared pre-flight for Install / Upgrade / Apply so all three reject a
@@ -27,6 +30,7 @@ func (def Definition) validateAll() error {
 		def.validateWeaverTargets,
 		def.validateLoomPatterns,
 		def.validateOpMetas,
+		def.validateEffects,
 		def.validateCanonicalNameUniqueness,
 		def.validatePermissionIdentityUniqueness,
 	} {
@@ -363,6 +367,18 @@ type DDLSpec struct {
 
 	// Examples is an ordered list of named usage examples for this DDL.
 	Examples []ExampleSpec
+
+	// Effects maps a PermittedCommands operationType to the §10.5 guard-grammar
+	// predicates (Contract #10 §10.8 Planner extension, ratified 2026-07-04) its
+	// commit entails on its target subject — declared self-description the
+	// Weaver planner consumes for candidate ranking (Fire 5) and goal-regression
+	// synthesis (Fire 6). Additive/optional: an operationType absent from
+	// Effects declares none (still fully dispatchable via an explicit
+	// action/candidates gap entry today; only unplannable via goal regression).
+	// Install-time validated: every key must be one of this DDL's
+	// PermittedCommands, and every guard must parse (same grammar as a Loom
+	// step Guard, §10.5) — a malformed effect rejects the whole install.
+	Effects map[string][]json.RawMessage
 }
 
 // ExampleSpec is a single named usage example for a DDL operation.

@@ -434,6 +434,7 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 | **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
 | **Lane 2 (event-targeted-audit) + `weaver-work`** | ⏳ Phase 3 (§10.3: no durable bucket today). |
 | **Real target Lens via Refractor + playbook package data** | ✅ Shipped — the `lease-signing` reference vertical provides a real convergence target + §10.8 playbook; the engine also runs against test-written §10.2 fixture rows. |
+| **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Zero engine behavior change — the Strategist does not read `Effects` yet. Fires 2–9 (bookkeeping, the planner library, shadow mode, selection, synthesis, diagnostics, admission control, Augur floor) remain: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |
 
 ---
 
