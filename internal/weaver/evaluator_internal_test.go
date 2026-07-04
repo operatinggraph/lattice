@@ -594,3 +594,55 @@ func TestHandleRow_BudgetResetsOnGapClose(t *testing.T) {
 		t.Fatalf("the fresh-budget redispatch must restart the count at 1: got %d (err=%v)", got, err)
 	}
 }
+
+// TestHandleRow_EffectDispatchAndClose proves the lane-1 half of the §10.3
+// `__effect` confidence window (weaver-planner-mandate design §3.2, Fire 2):
+// a fresh CAS-create-won dispatch appends a pending entry keyed by the gap's
+// playbook action, and the level-reconciled close path (clearClosedMarks)
+// flips it — read from the mark's Action BEFORE the mark is deleted, so the
+// close lands against the SAME actionRef the dispatch recorded.
+func TestHandleRow_EffectDispatchAndClose(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixtureEffect"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	open := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.Ack {
+		t.Fatalf("fresh dispatch must Ack, got %v", dec)
+	}
+	h.nextOp(t) // the dispatch op fired
+
+	stats, _, ok, err := readEffectStats(ctx, h.engine.marks, targetID, "missing_x", actionDirectOp)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats after dispatch: err=%v ok=%v", err, ok)
+	}
+	if len(stats.Window) != 1 || stats.Window[0] {
+		t.Fatalf("window after one fresh dispatch = %v, want [false] (pending)", stats.Window)
+	}
+
+	closed := map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": false, "missing_x": false,
+	}
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, closed, 2, 1)); dec != substrate.Ack {
+		t.Fatalf("gap-close row must Ack, got %v", dec)
+	}
+	stats, _, ok, err = readEffectStats(ctx, h.engine.marks, targetID, "missing_x", actionDirectOp)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats after close: err=%v ok=%v", err, ok)
+	}
+	if len(stats.Window) != 1 || !stats.Window[0] {
+		t.Fatalf("window after close = %v, want [true]", stats.Window)
+	}
+}

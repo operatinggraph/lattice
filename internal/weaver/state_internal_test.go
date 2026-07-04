@@ -2,6 +2,8 @@ package weaver
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -358,4 +360,186 @@ func TestDispatchCount_TTLBackstop(t *testing.T) {
 	if got := raw.Header.Get("Nats-TTL"); got != wantTTL {
 		t.Fatalf("count Nats-TTL header = %q, want %q (dispatchCountTTLBackstopFactor × lease)", got, wantTTL)
 	}
+}
+
+// TestEffectKey_Shape verifies the reserved `__effect` key shape is disjoint
+// from the mark (2 dots), the `__control` marker (1 dot), and the `__count`
+// key (3 dots, `__count` suffix): an effect key has exactly 3 dots and the
+// `__effect` marker never collides with any of the other three families.
+func TestEffectKey_Shape(t *testing.T) {
+	t.Parallel()
+	ek := effectKey("t1", "missing_x", "directOp")
+	if got, want := strings.Count(ek, "."), 3; got != want {
+		t.Fatalf("effectKey(...) = %q has %d dots, want %d", ek, got, want)
+	}
+	if !strings.Contains(ek, effectKeyMarker) {
+		t.Fatalf("effectKey(...) = %q does not contain marker %q", ek, effectKeyMarker)
+	}
+	mk := markKey("t1", "someEntityID12345678", "missing_x")
+	ck := countKey("t1", "someEntityID12345678", "missing_x")
+	if ek == mk || ek == ck {
+		t.Fatalf("effectKey collided with markKey/countKey: %q", ek)
+	}
+	if strings.HasSuffix(mk, countKeySuffix) || strings.Contains(mk, effectKeyMarker) {
+		t.Fatalf("a real mark key %q must not carry the count suffix or the effect marker", mk)
+	}
+	targetID, gapColumn, actionRef, ok := splitEffectKey(ek)
+	if !ok || targetID != "t1" || gapColumn != "missing_x" || actionRef != "directOp" {
+		t.Fatalf("splitEffectKey(%q) = (%q,%q,%q,%v), want (t1,missing_x,directOp,true)",
+			ek, targetID, gapColumn, actionRef, ok)
+	}
+	if _, _, _, ok := splitEffectKey(mk); ok {
+		t.Fatalf("splitEffectKey must reject a real mark key %q", mk)
+	}
+}
+
+// TestEffectDispatchClose_RoundTrip proves the §10.3 `__effect` confidence
+// window: dispatch appends a pending (false) slot; close flips the OLDEST
+// still-pending slot to true (FIFO, not per-entity paired); a close with no
+// pending slot (nothing dispatched yet, or every slot already closed) is a
+// no-op; the window survives a fresh markStore instance against the same
+// bucket (durable — proves "counters survive restart").
+func TestEffectDispatchClose_RoundTrip(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+	const targetID, gap, action = "t1", "missing_x", "directOp"
+
+	// A close before any dispatch is a no-op success (nothing pending).
+	if err := m.recordEffectClose(ctx, targetID, gap, action); err != nil {
+		t.Fatalf("recordEffectClose on an absent window must be a no-op: %v", err)
+	}
+	mismatches, err := m.scanEffectMismatches(ctx)
+	if err != nil || len(mismatches) != 0 {
+		t.Fatalf("scanEffectMismatches after a no-op close = %v (err=%v), want none", mismatches, err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := m.recordEffectDispatch(ctx, targetID, gap, action); err != nil {
+			t.Fatalf("recordEffectDispatch #%d: %v", i, err)
+		}
+	}
+	rec, _, ok, err := readEffectStats(ctx, m, targetID, gap, action)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats: err=%v ok=%v", err, ok)
+	}
+	if len(rec.Window) != 3 || rec.Window[0] || rec.Window[1] || rec.Window[2] {
+		t.Fatalf("window after 3 dispatches = %v, want [false false false]", rec.Window)
+	}
+
+	// Close flips the OLDEST pending slot (index 0), not the most recent.
+	if err := m.recordEffectClose(ctx, targetID, gap, action); err != nil {
+		t.Fatalf("recordEffectClose: %v", err)
+	}
+	rec, _, ok, err = readEffectStats(ctx, m, targetID, gap, action)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats after close: err=%v ok=%v", err, ok)
+	}
+	if !rec.Window[0] || rec.Window[1] || rec.Window[2] {
+		t.Fatalf("window after 1 close = %v, want [true false false] (oldest-pending flip)", rec.Window)
+	}
+
+	// Simulate a restart: a fresh markStore against the SAME durable bucket
+	// must read back the identical window — the state lives in weaver-state,
+	// not in-process.
+	restarted := newMarkStore(m.conn, m.bucket, m.lease, "unit-restarted-"+testNanoID(t))
+	rec2, _, ok, err := readEffectStats(ctx, restarted, targetID, gap, action)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats after simulated restart: err=%v ok=%v", err, ok)
+	}
+	if len(rec2.Window) != 3 || !rec2.Window[0] || rec2.Window[1] || rec2.Window[2] {
+		t.Fatalf("window after simulated restart = %v, want [true false false]", rec2.Window)
+	}
+}
+
+// TestEffectDispatch_RingEviction proves the sliding window is a FIFO ring
+// capped at effectWindowSize: dispatching past the cap evicts the OLDEST
+// entry (whatever its outcome), never grows unbounded.
+func TestEffectDispatch_RingEviction(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+	const targetID, gap, action = "t1", "missing_x", "directOp"
+
+	for i := 0; i < effectWindowSize+5; i++ {
+		if err := m.recordEffectDispatch(ctx, targetID, gap, action); err != nil {
+			t.Fatalf("recordEffectDispatch #%d: %v", i, err)
+		}
+	}
+	rec, _, ok, err := readEffectStats(ctx, m, targetID, gap, action)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats: err=%v ok=%v", err, ok)
+	}
+	if len(rec.Window) != effectWindowSize {
+		t.Fatalf("window len = %d after %d dispatches, want capped at %d", len(rec.Window), effectWindowSize+5, effectWindowSize)
+	}
+}
+
+// TestScanEffectMismatches_FullWindowZeroCloses proves the heartbeat-cadence
+// scan raises a mismatch only once the window is FULL (effectWindowSize
+// dispatches) AND carries zero closes — a not-yet-full window (a normal
+// in-progress chain) never alerts, and a single close anywhere in a full
+// window clears it.
+func TestScanEffectMismatches_FullWindowZeroCloses(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx := context.Background()
+	m := newStateTestStore(t, ctx)
+	const targetID, gap, action = "t1", "missing_x", "directOp"
+
+	for i := 0; i < effectWindowSize-1; i++ {
+		if err := m.recordEffectDispatch(ctx, targetID, gap, action); err != nil {
+			t.Fatalf("recordEffectDispatch #%d: %v", i, err)
+		}
+	}
+	mismatches, err := m.scanEffectMismatches(ctx)
+	if err != nil || len(mismatches) != 0 {
+		t.Fatalf("scanEffectMismatches on a not-yet-full window = %v (err=%v), want none", mismatches, err)
+	}
+
+	// The window-filling dispatch, still zero closes: now it must alert.
+	if err := m.recordEffectDispatch(ctx, targetID, gap, action); err != nil {
+		t.Fatalf("recordEffectDispatch (window-filling): %v", err)
+	}
+	mismatches, err = m.scanEffectMismatches(ctx)
+	if err != nil || len(mismatches) != 1 {
+		t.Fatalf("scanEffectMismatches on a full zero-close window = %v (err=%v), want exactly 1", mismatches, err)
+	}
+	if mismatches[0].TargetID != targetID || mismatches[0].GapColumn != gap || mismatches[0].ActionRef != action {
+		t.Fatalf("mismatch = %+v, want target=%s gap=%s action=%s", mismatches[0], targetID, gap, action)
+	}
+
+	// One close clears the mismatch.
+	if err := m.recordEffectClose(ctx, targetID, gap, action); err != nil {
+		t.Fatalf("recordEffectClose: %v", err)
+	}
+	mismatches, err = m.scanEffectMismatches(ctx)
+	if err != nil || len(mismatches) != 0 {
+		t.Fatalf("scanEffectMismatches after one close in a full window = %v (err=%v), want none", mismatches, err)
+	}
+}
+
+// readEffectStats reads back the effectStats value for a (target, gap,
+// action) triple, unmarshalled — a test-only accessor mirroring markStore.get.
+func readEffectStats(ctx context.Context, m *markStore, targetID, gap, action string) (effectStats, uint64, bool, error) {
+	entry, err := m.conn.KVGet(ctx, m.bucket, effectKey(targetID, gap, action))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return effectStats{}, 0, false, nil
+		}
+		return effectStats{}, 0, false, err
+	}
+	var stats effectStats
+	if uErr := json.Unmarshal(entry.Value, &stats); uErr != nil {
+		return effectStats{}, 0, false, uErr
+	}
+	return stats, entry.Revision, true, nil
 }

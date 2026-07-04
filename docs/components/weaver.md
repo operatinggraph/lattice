@@ -261,6 +261,42 @@ bounded retry against those caps.
 
 ---
 
+## Planner-mandate effect bookkeeping — `__effect` (Contract #10 §10.3/§10.8, Fire 2)
+
+Weaver keeps a per-`(targetId, gapColumn, actionRef)` **confidence window** in `weaver-state`
+(`<targetId>.__effect.<gapColumn>.<actionRef>`, a reserved key shape disjoint from marks, `__control`,
+and `__count` — the same reserved-underscore-token argument). Unlike the dispatch-count (scoped to one
+`(targetId, entityId, gapColumn)` chain), the effect window aggregates **across every entity** that
+dispatches a given `(target, gap, actionRef)` — it is the future ranking input for Fire 5's `candidates`
+selection (close-rate), not a dispatch gate.
+
+The value is a **FIFO ring capped at `effectWindowSize` (K=20)**: each real dispatch appends one
+`false` (pending) entry; a gap-close flips the **oldest still-pending** entry to `true` (FIFO matching
+across entities, not per-episode pairing — Fire 5's ranking only reads the aggregate close-rate).
+Eviction past the cap ages out old episodes with no clock sampling — the sliding window is the decay.
+Written at the **same two dispatch legs the dispatch-count uses** (the lane-1 CAS-create-won path and
+the sweep's reclaim) and the level-reconciled gap-close path (`clearClosedMarks`, which reads the
+mark's `Action` **before** deleting it so the close lands against the same `actionRef` the dispatch
+recorded).
+
+Unlike the dispatch-count's TTL backstop, `__effect` keys carry **no TTL** — they are GC'd by a
+dedicated sweep leg (`sweeper.sweepEffect`) mirroring the mark orphan legs' registry-warm-up gate: a
+window whose target is uninstalled or whose gap column the current playbook no longer declares is
+deleted; a full-target removal is also covered for free by `deleteByTargetPrefix` (Disable/Enable/
+Revoke), since `__effect` keys share the `<targetId>.` prefix.
+
+The heartbeat (cadence, never per-message) scans every `__effect` window and raises a
+**`LensEffectMismatch`** issue (`warning`) for any whose window is **full (K dispatches) with zero
+observed closes** — the loud surface for "dispatches commit but closes never arrive" (a stale/wrong
+guard, a lens projecting the wrong column, or a remediation that silently no-ops), clearing once a
+close lands or the window ages back below K. `metrics.effectMismatches` carries the live count.
+
+Fires 3–9 (`internal/weaver/planner`, `mode`/`candidates`/`goal` parsing, selection, goal regression,
+diagnostics, admission control, the Augur floor) remain — see
+`weaver-planner-mandate-design.md` §8. Fire 2 changes **no** dispatch decision.
+
+---
+
 ## Control plane (FR30)
 
 Operators manage Weaver's currently-registered convergence targets via a `nats-io/nats.go/micro`

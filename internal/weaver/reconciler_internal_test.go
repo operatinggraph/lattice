@@ -1196,6 +1196,158 @@ func TestSweep_ReclaimIncrementsBudget(t *testing.T) {
 	}
 }
 
+// TestSweep_ReclaimRecordsEffectDispatch proves the sweep-reclaim half of the
+// §10.3 `__effect` confidence window (design §3.2, Fire 2): a reclaim IS a
+// fresh dispatch, so it must advance the (target, gap, actionRef) window
+// exactly like the lane-1 CAS-create path — the same seam bumpDispatchCount
+// uses.
+func TestSweep_ReclaimRecordsEffectDispatch(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureReclaimEffect"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "directOp", pastLease()))
+	h.putRow(t, ctx, targetID, entityID, map[string]any{
+		"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+		"inflight_x": false, "maxretries_x": 5,
+	})
+
+	h.pass(ctx)
+	h.nextOp(t) // the reclaim re-dispatched
+
+	stats, _, ok, err := readEffectStats(ctx, h.engine.marks, targetID, "missing_x", actionDirectOp)
+	if err != nil || !ok {
+		t.Fatalf("read effect stats after reclaim: err=%v ok=%v", err, ok)
+	}
+	if len(stats.Window) != 1 || stats.Window[0] {
+		t.Fatalf("window after one reclaim dispatch = %v, want [false] (pending)", stats.Window)
+	}
+}
+
+// TestSweep_EffectOrphanColumn proves the `__effect` sweep-GC leg's
+// orphan-column half (mirrors TestSweep_OrphanColumn for the confidence
+// window instead of a mark): once the warm-up window has elapsed, a
+// confidence window whose gap column the CURRENT playbook no longer names is
+// deleted.
+func TestSweep_EffectOrphanColumn(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureEffectDroppedColumn"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_other": {Action: actionDirectOp, Operation: "FixOther"}},
+	})
+	key := effectKey(targetID, "missing_x", "directOp")
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", key, mustMarshalEffectStats(t, effectStats{Window: []bool{false}})); err != nil {
+		t.Fatalf("seed effect key: %v", err)
+	}
+
+	h.pass(ctx)
+	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err == nil {
+		t.Fatalf("an effect window at a column absent from the current playbook must be deleted")
+	}
+	if _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+		t.Fatalf("sweepOrphansDeleted = %d, want 1", orphans)
+	}
+}
+
+// TestSweep_EffectTargetRemoved proves the `__effect` sweep-GC leg's
+// target-removed half, warm-up gated exactly like the mark orphan legs: an
+// uninstalled target's confidence window survives during warm-up and is
+// deleted once the window elapses.
+func TestSweep_EffectTargetRemoved(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx, func(c *Config) { c.SweepOrphanWarmup = time.Hour })
+
+	const targetID = "fixtureEffectGoneTarget"
+	key := effectKey(targetID, "missing_x", "directOp")
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", key, mustMarshalEffectStats(t, effectStats{Window: []bool{false, true}})); err != nil {
+		t.Fatalf("seed effect key: %v", err)
+	}
+
+	h.pass(ctx)
+	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err != nil {
+		t.Fatalf("during warm-up an uninstalled target's effect window must survive: %v", err)
+	}
+
+	h.agePastWarmup()
+	h.pass(ctx)
+	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err == nil {
+		t.Fatalf("after the warm-up window an uninstalled target's effect window must be deleted")
+	}
+	if _, _, orphans, _, _ := h.engine.sweep.metrics(); orphans != 1 {
+		t.Fatalf("sweepOrphansDeleted = %d, want 1", orphans)
+	}
+}
+
+// TestSweep_EffectKeyLiveTargetSurvives proves the converse of the two orphan
+// tests above: a live (installed target, declared gap column) confidence
+// window is never touched by the sweep — the reserved-marker guard routes it
+// to sweepEffect (not sweepMark's corrupt-key path), and sweepEffect only
+// deletes on an orphan verdict.
+func TestSweep_EffectKeyLiveTargetSurvives(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+	h.agePastWarmup()
+
+	const targetID = "fixtureEffectLive"
+	h.seedTarget(&Target{
+		TargetID: targetID,
+		Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+	})
+	key := effectKey(targetID, "missing_x", actionDirectOp)
+	if _, err := h.conn.KVCreate(ctx, "weaver-state", key, mustMarshalEffectStats(t, effectStats{Window: []bool{false}})); err != nil {
+		t.Fatalf("seed effect key: %v", err)
+	}
+
+	h.pass(ctx)
+	h.pass(ctx)
+	if _, err := h.conn.KVGet(ctx, "weaver-state", key); err != nil {
+		t.Fatalf("a live target/column's effect window must survive the sweep: %v", err)
+	}
+	if _, _, orphans, corrupt, _ := h.engine.sweep.metrics(); orphans != 0 || corrupt != 0 {
+		t.Fatalf("sweepOrphansDeleted = %d, sweepCorrupt = %d; want 0, 0", orphans, corrupt)
+	}
+}
+
+func mustMarshalEffectStats(t *testing.T, stats effectStats) []byte {
+	t.Helper()
+	body, err := json.Marshal(stats)
+	if err != nil {
+		t.Fatalf("marshal effect stats: %v", err)
+	}
+	return body
+}
+
 // TestSweep_CountKeySurvives proves the reserved count-key guard: a
 // `…__count` dispatch-count is not a §10.3 mark (it has a 4th segment, so
 // splitMarkKey would reject it as corrupt) — the sweep must skip it entirely,

@@ -106,6 +106,14 @@ type heartbeater struct {
 	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
 	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL.
 	ttlMultiplier int
+
+	// effectMismatchAlerted tracks the `__effect` confidence windows currently
+	// carrying a standing LensEffectMismatch issue, so a window that recovers
+	// (a close finally arrives, or the window ages below effectWindowSize) has
+	// its issue cleared on the pass that no longer lists it. Owned solely by
+	// emit, which only ever runs on the single heartbeat ticker goroutine — no
+	// lock needed.
+	effectMismatchAlerted map[string]struct{}
 }
 
 func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every time.Duration,
@@ -118,19 +126,20 @@ func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every t
 		every = defaultHeartbeatEvery
 	}
 	return &heartbeater{
-		conn:          conn,
-		bucket:        healthBucket,
-		instance:      instance,
-		startedAt:     time.Now(),
-		interval:      every,
-		states:        states,
-		issues:        issues,
-		source:        source,
-		marks:         marks,
-		sweep:         sweep,
-		temporal:      temporal,
-		logger:        logger,
-		ttlMultiplier: healthkv.DefaultTTLMultiplier,
+		conn:                  conn,
+		bucket:                healthBucket,
+		instance:              instance,
+		startedAt:             time.Now(),
+		interval:              every,
+		states:                states,
+		issues:                issues,
+		source:                source,
+		marks:                 marks,
+		sweep:                 sweep,
+		temporal:              temporal,
+		logger:                logger,
+		ttlMultiplier:         healthkv.DefaultTTLMultiplier,
+		effectMismatchAlerted: make(map[string]struct{}),
 	}
 }
 
@@ -201,6 +210,7 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		metrics["timersScheduled"] = h.temporal.scheduled.Load()
 		metrics["timersFired"] = h.temporal.fired.Load()
 	}
+	h.flagEffectMismatches(ctx, metrics)
 
 	issues := h.issues.snapshot()
 	for name, state := range states {
@@ -246,6 +256,41 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 
 func (h *heartbeater) key() string {
 	return "health.weaver." + h.instance
+}
+
+// flagEffectMismatches scans every `__effect` confidence window (heartbeat
+// cadence, never per-message) and raises a LensEffectMismatch issue for each
+// one whose last effectWindowSize dispatch episodes recorded zero observed
+// closes — the loud surface for "dispatches commit but closes never arrive"
+// (design weaver-planner-mandate-design.md §3.4): a package's declared
+// remediation keeps firing but the lens gap it targets never flips, which
+// points at a stale/wrong guard, a lens projecting the wrong column, or a
+// remediation that silently no-ops. A window that recovers (a close finally
+// lands, or it ages back below the full-window threshold) has its issue
+// cleared on the first pass that no longer lists it — mirrors the sweep's
+// corruptAlerted reconciliation.
+func (h *heartbeater) flagEffectMismatches(ctx context.Context, metrics map[string]any) {
+	mismatches, err := h.marks.scanEffectMismatches(ctx)
+	if err != nil {
+		h.logger.Warn("weaver heartbeat: effect mismatch scan failed", "err", err)
+		return
+	}
+	current := make(map[string]struct{}, len(mismatches))
+	for _, mm := range mismatches {
+		key := issueKeyEffect(mm.TargetID, mm.GapColumn, mm.ActionRef)
+		current[key] = struct{}{}
+		h.effectMismatchAlerted[key] = struct{}{}
+		h.issues.set(key, "warning", "LensEffectMismatch",
+			"target "+mm.TargetID+" gap "+mm.GapColumn+" action "+mm.ActionRef+": last "+
+				strconv.Itoa(effectWindowSize)+" dispatches recorded zero observed closes")
+	}
+	for key := range h.effectMismatchAlerted {
+		if _, ok := current[key]; !ok {
+			delete(h.effectMismatchAlerted, key)
+			h.issues.clear(key)
+		}
+	}
+	metrics["effectMismatches"] = len(mismatches)
 }
 
 // aggregateStatus reconciles the reported lifecycle status with the open issue

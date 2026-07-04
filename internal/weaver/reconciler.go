@@ -148,6 +148,15 @@ func (s *sweeper) pass(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if strings.Contains(key, effectKeyMarker) {
+			// A `<targetId>.__effect.<gapColumn>.<actionRef>` confidence window is
+			// not a §10.3 mark either — it carries its own orphan leg (below),
+			// mirroring the mark orphan legs but keyed at (target, gapColumn,
+			// actionRef) granularity, since it has no <entityId> segment to level-
+			// reconcile against a row.
+			s.sweepEffect(ctx, key)
+			continue
+		}
 		if strings.HasSuffix(key, controlKeySuffix) || strings.HasSuffix(key, countKeySuffix) {
 			// Neither the `<targetId>.__control` dispatch-skip marker nor a
 			// `…__count` retry-budget dispatch-count is a §10.3 mark — the
@@ -245,6 +254,76 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 		return
 	}
 	s.reclaim(ctx, key, entry.Revision, &rec, targetID, entityID, gapColumn, row, rowEntry.Revision)
+}
+
+// sweepEffect level-reconciles one `<targetId>.__effect.<gapColumn>.<actionRef>`
+// confidence window: unparseable key/value is corrupt (delete + alert —
+// weaver-state is weaver-private, so garbage otherwise lives forever);
+// otherwise, mirroring the mark orphan legs' registry warm-up gate, a window
+// whose target is no longer installed or whose gap column the playbook no
+// longer declares is orphaned and deleted. A live (target, gapColumn) pair is
+// left untouched regardless of its window contents — level reconcile here
+// never resets confidence, only removes what can no longer accumulate it (a
+// full-target removal is also covered for free by deleteByTargetPrefix on
+// Disable/Enable/Revoke, since `__effect` keys share the `<targetId>.` prefix
+// — this leg is what catches the narrower orphan-column case and a target
+// removed between reconciler passes).
+func (s *sweeper) sweepEffect(ctx context.Context, key string) {
+	e := s.engine
+	entry, err := e.conn.KVGet(ctx, e.cfg.WeaverStateBucket, key)
+	if err != nil {
+		if !errors.Is(err, substrate.ErrKeyNotFound) {
+			e.logger.Warn("weaver sweep: effect key read failed", "key", key, "err", err)
+		}
+		return
+	}
+	targetID, gapColumn, _, ok := splitEffectKey(key)
+	if !ok {
+		s.deleteCorrupt(ctx, key, entry.Revision, "effect key is not <targetId>.__effect.<gapColumn>.<actionRef>")
+		return
+	}
+	var stats effectStats
+	if err := json.Unmarshal(entry.Value, &stats); err != nil {
+		s.deleteCorrupt(ctx, key, entry.Revision, "effect value unparseable: "+err.Error())
+		return
+	}
+	target, installed := e.source.target(targetID)
+	if !installed {
+		if !s.warmedUp() {
+			// Registry warm-up: see sweeper.warmup.
+			return
+		}
+		if s.deleteEffect(ctx, key, entry.Revision, sweepReasonTargetRemoved) {
+			s.bump(&s.orphansDeleted)
+		}
+		return
+	}
+	if _, ok := target.Gaps[gapColumn]; !ok {
+		if !s.warmedUp() {
+			return
+		}
+		if s.deleteEffect(ctx, key, entry.Revision, sweepReasonOrphanColumn) {
+			s.bump(&s.orphansDeleted)
+		}
+	}
+}
+
+// deleteEffect deletes one `__effect` confidence-window key at the revision
+// read this pass. A revision conflict means a fresh dispatch/close raced the
+// sweep between the read and this delete — the fresh state is intact and the
+// delete is skipped (re-evaluated next pass).
+func (s *sweeper) deleteEffect(ctx context.Context, key string, revision uint64, reason string) bool {
+	e := s.engine
+	if err := e.conn.KVDeleteRevision(ctx, e.cfg.WeaverStateBucket, key, revision); err != nil {
+		if errors.Is(err, substrate.ErrRevisionConflict) {
+			e.logger.Debug("weaver sweep: effect key changed since read; skipping delete", "key", key)
+			return false
+		}
+		e.logger.Warn("weaver sweep: effect key delete failed", "key", key, "err", err)
+		return false
+	}
+	e.logger.Warn("weaver sweep: effect key reclaimed", "key", key, "reason", reason)
+	return true
 }
 
 // reclaim handles an expired (or lease-less) mark whose column is still true:
@@ -415,6 +494,7 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// CAS-create path — this is how a multi-attempt chain driven by sweep
 	// re-dispatches (not just CDC touches) accumulates toward maxretries_<g>.
 	e.bumpDispatchCount(ctx, targetID, entityID, gapColumn)
+	e.bumpEffectDispatch(ctx, targetID, gapColumn, ga.Action)
 	// Fresh episode: the requestId derives from the replace revision (a real new
 	// dispatch attempt). The preserved claimId keeps the userTask identity stable,
 	// so the new attempt collapses on the existing task/instance. A publish failure

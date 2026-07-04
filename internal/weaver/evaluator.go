@@ -282,6 +282,7 @@ func (e *Engine) fireEpisode(ctx context.Context, targetID, entityID, entityKey,
 	// that lost the CAS) is structurally impossible, while under-counting only
 	// allows one extra attempt — far safer than wedging a live dispatch.
 	e.bumpDispatchCount(ctx, targetID, entityID, col)
+	e.bumpEffectDispatch(ctx, targetID, col, action)
 	return e.fire(ctx, targetID, entityID, col, rev, claimID, pl)
 }
 
@@ -294,6 +295,19 @@ func (e *Engine) bumpDispatchCount(ctx context.Context, targetID, entityID, col 
 	if _, err := e.marks.incrementDispatchCount(ctx, targetID, entityID, col); err != nil {
 		e.logger.Warn("weaver: dispatch-count increment failed; the retry budget may under-count",
 			"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+	}
+}
+
+// bumpEffectDispatch records a fresh dispatch episode against the
+// per-(target, gapColumn, actionRef) confidence window (§10.3 `__effect`,
+// weaver-planner-mandate design §3.2) at the exact same seam bumpDispatchCount
+// uses — the CAS-create-won lane-1 path and the sweep's reclaim, never a
+// redelivery re-fire. A failure is logged, never propagated: the window is
+// Fire 5's future ranking input, not a dispatch gate.
+func (e *Engine) bumpEffectDispatch(ctx context.Context, targetID, gapColumn, actionRef string) {
+	if err := e.marks.recordEffectDispatch(ctx, targetID, gapColumn, actionRef); err != nil {
+		e.logger.Warn("weaver: effect dispatch record failed",
+			"targetId", targetID, "gap", gapColumn, "action", actionRef, "err", err)
 	}
 }
 
@@ -347,11 +361,23 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 // success," so the gap-close path here owns it. The count delete shares the
 // gap's not-currently-true condition with the mark delete, so it runs in exactly
 // the same cases (gap closed, column dropped, or entity deleted).
+//
+// A gap actually being cleared here (a mark existed) is also a CLOSE event for
+// the §10.3 `__effect` confidence window (design §3.2): the mark's Action names
+// which actionRef to record the close against. Read BEFORE delete (the delete
+// itself carries no value to recover the action from); a read failure logs and
+// skips the effect record — the window is a future ranking input, never a gate,
+// so it must never block the mark/count clear it rides alongside.
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
 	for _, col := range markCandidateColumns(target, row) {
 		if row != nil && e.boolColumn(targetID, row, col) {
 			continue
+		}
+		rec, _, found, gErr := e.marks.get(ctx, targetID, entityID, col)
+		if gErr != nil {
+			e.logger.Warn("weaver: mark read before clear failed; effect close not recorded",
+				"targetId", targetID, "entityId", entityID, "gap", col, "err", gErr)
 		}
 		if err := e.marks.delete(ctx, targetID, entityID, col); err != nil {
 			e.logger.Error("weaver: mark clear failed",
@@ -362,6 +388,12 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 			e.logger.Error("weaver: dispatch-count reset failed",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 			ok = false
+		}
+		if gErr == nil && found {
+			if cErr := e.marks.recordEffectClose(ctx, targetID, col, rec.Action); cErr != nil {
+				e.logger.Warn("weaver: effect close record failed",
+					"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
+			}
 		}
 	}
 	return ok
@@ -519,3 +551,6 @@ func (e *Engine) alert(key, severity, code, message string) {
 
 func issueKeyGap(targetID, col string) string  { return "gap:" + targetID + "." + col }
 func issueKeyData(targetID, col string) string { return "data:" + targetID + "." + col }
+func issueKeyEffect(targetID, gapColumn, actionRef string) string {
+	return "effect:" + targetID + "." + gapColumn + "." + actionRef
+}

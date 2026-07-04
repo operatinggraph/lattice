@@ -340,9 +340,10 @@ func (m *markStore) deleteDispatchCount(ctx context.Context, targetID, entityID,
 
 // countInFlight reports how many in-flight marks exist in the bucket, scanned
 // on the heartbeat cadence (never per-message). Reserved `<targetId>.__control`
-// dispatch-skip markers and `…__count` dispatch-count keys are skipped — neither
-// is a §10.3 mark (the same guard the reconciler sweep applies), so the
-// marksInFlight gauge counts only real in-flight dispatch.
+// dispatch-skip markers, `…__count` dispatch-count keys, and `…__effect…`
+// confidence windows are skipped — none is a §10.3 mark (the same guard the
+// reconciler sweep applies), so the marksInFlight gauge counts only real
+// in-flight dispatch.
 func (m *markStore) countInFlight(ctx context.Context) (int, error) {
 	keys, err := m.conn.KVListKeys(ctx, m.bucket)
 	if err != nil {
@@ -350,12 +351,221 @@ func (m *markStore) countInFlight(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for _, key := range keys {
-		if strings.HasSuffix(key, controlKeySuffix) || strings.HasSuffix(key, countKeySuffix) {
+		if strings.HasSuffix(key, controlKeySuffix) || strings.HasSuffix(key, countKeySuffix) ||
+			strings.Contains(key, effectKeyMarker) {
 			continue
 		}
 		n++
 	}
 	return n, nil
+}
+
+// effectKeyMarker names the reserved §10.3/§10.8 effect-bookkeeping shape:
+// `<targetId>.__effect.<gapColumn>.<actionRef>` (Contract #10 §10.3, ratified
+// 2026-07-04). Disjoint from marks/`__control`/`__count` by the same
+// reserved-underscore-token argument: a real mark's segments never contain
+// "__effect", so the marker can never collide.
+const effectKeyMarker = ".__effect."
+
+// effectWindowSize (K) sizes the sliding window of per-(target, gapColumn,
+// actionRef) dispatch/close outcomes the planner's future close-rate ranking
+// (Fire 5) reads. Config-tunable like MarkLease; a constant default here —
+// Fire 5's brief may promote it to a config knob, the mechanism is fixed.
+const effectWindowSize = 20
+
+// effectStats is the JSON body of an `__effect` confidence-window key: a FIFO
+// ring, oldest first, capped at effectWindowSize — one entry per dispatch
+// episode of this (target, gapColumn, actionRef), true once that episode's
+// gap has been observed to close, false while still open/pending. Eviction
+// (the oldest entry dropped once len exceeds the cap, whatever its outcome)
+// ages out old episodes on its own — the sliding window IS the decay, no
+// clock sampling (design weaver-planner-mandate-design.md §3.2).
+type effectStats struct {
+	Window []bool `json:"window"`
+}
+
+// effectKey builds the reserved effect-bookkeeping key.
+func effectKey(targetID, gapColumn, actionRef string) string {
+	return targetID + effectKeyMarker + gapColumn + "." + actionRef
+}
+
+// splitEffectKey splits a `<targetId>.__effect.<gapColumn>.<actionRef>` key.
+// targetId/gapColumn/actionRef are install-validated single dot-free tokens
+// (singleTokenPattern), so the split is positional off the reserved marker.
+func splitEffectKey(key string) (targetID, gapColumn, actionRef string, ok bool) {
+	idx := strings.Index(key, effectKeyMarker)
+	if idx <= 0 {
+		return "", "", "", false
+	}
+	targetID = key[:idx]
+	rest := key[idx+len(effectKeyMarker):]
+	j := strings.IndexByte(rest, '.')
+	if j <= 0 {
+		return "", "", "", false
+	}
+	gapColumn, actionRef = rest[:j], rest[j+1:]
+	if !singleTokenPattern.MatchString(targetID) || !singleTokenPattern.MatchString(gapColumn) ||
+		!singleTokenPattern.MatchString(actionRef) {
+		return "", "", "", false
+	}
+	return targetID, gapColumn, actionRef, true
+}
+
+// recordEffectDispatch appends one fresh dispatch episode (pending, not yet
+// closed) to the (targetID, gapColumn, actionRef) confidence window — the SAME
+// two seams that advance the chain's dispatch-count (the CAS-create-won
+// lane-1 path and the sweep's reclaim), never a redelivery re-fire. Read-
+// modify-write retried like incrementDispatchCount (no atomic-append
+// primitive exists); a persistent failure is the caller's to log and skip —
+// the window is Fire 5's future ranking input, never a dispatch gate.
+func (m *markStore) recordEffectDispatch(ctx context.Context, targetID, gapColumn, actionRef string) error {
+	key := effectKey(targetID, gapColumn, actionRef)
+	for attempt := 0; attempt < dispatchCountCASRetries; attempt++ {
+		entry, err := m.conn.KVGet(ctx, m.bucket, key)
+		var stats effectStats
+		existed := false
+		var rev uint64
+		if err != nil {
+			if !errors.Is(err, substrate.ErrKeyNotFound) {
+				return err
+			}
+		} else {
+			if uErr := json.Unmarshal(entry.Value, &stats); uErr != nil {
+				return fmt.Errorf("weaver: unmarshal effect stats %s: %w", key, uErr)
+			}
+			existed = true
+			rev = entry.Revision
+		}
+		stats.Window = append(stats.Window, false)
+		if len(stats.Window) > effectWindowSize {
+			stats.Window = stats.Window[len(stats.Window)-effectWindowSize:]
+		}
+		body, mErr := json.Marshal(stats)
+		if mErr != nil {
+			return fmt.Errorf("weaver: marshal effect stats: %w", mErr)
+		}
+		if !existed {
+			if _, cErr := m.conn.KVCreate(ctx, m.bucket, key, body); cErr != nil {
+				if errors.Is(cErr, substrate.ErrRevisionConflict) {
+					continue // someone created it first — re-read and update.
+				}
+				return cErr
+			}
+			return nil
+		}
+		if _, uErr := m.conn.KVUpdate(ctx, m.bucket, key, body, rev); uErr != nil {
+			if errors.Is(uErr, substrate.ErrRevisionConflict) {
+				continue // lost the race — re-read and retry.
+			}
+			return uErr
+		}
+		return nil
+	}
+	return fmt.Errorf("weaver: effect stats %s contended past %d retries", key, dispatchCountCASRetries)
+}
+
+// recordEffectClose flips the OLDEST still-pending (not-yet-closed) episode in
+// the (targetID, gapColumn, actionRef) confidence window to closed — run from
+// the gap-close path (clearClosedMarks), the same level-reconciled seam that
+// resets the dispatch-count. FIFO-oldest matching, not per-entity pairing: the
+// window aggregates outcomes across every entity that dispatched this
+// (target, gapColumn, actionRef), so an exact per-episode pairing is neither
+// available nor needed — Fire 5's close-rate ranking only reads the
+// aggregate. A missing key (nothing was ever dispatched for this pair) or a
+// window with no pending slot (a stale/duplicate close, or every slot already
+// closed) is a no-op, never an error.
+func (m *markStore) recordEffectClose(ctx context.Context, targetID, gapColumn, actionRef string) error {
+	key := effectKey(targetID, gapColumn, actionRef)
+	for attempt := 0; attempt < dispatchCountCASRetries; attempt++ {
+		entry, err := m.conn.KVGet(ctx, m.bucket, key)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				return nil
+			}
+			return err
+		}
+		var stats effectStats
+		if uErr := json.Unmarshal(entry.Value, &stats); uErr != nil {
+			return fmt.Errorf("weaver: unmarshal effect stats %s: %w", key, uErr)
+		}
+		flipped := false
+		for i := range stats.Window {
+			if !stats.Window[i] {
+				stats.Window[i] = true
+				flipped = true
+				break
+			}
+		}
+		if !flipped {
+			return nil
+		}
+		body, mErr := json.Marshal(stats)
+		if mErr != nil {
+			return fmt.Errorf("weaver: marshal effect stats: %w", mErr)
+		}
+		if _, uErr := m.conn.KVUpdate(ctx, m.bucket, key, body, entry.Revision); uErr != nil {
+			if errors.Is(uErr, substrate.ErrRevisionConflict) {
+				continue // lost the race — re-read and retry.
+			}
+			return uErr
+		}
+		return nil
+	}
+	return fmt.Errorf("weaver: effect stats %s contended past %d retries", key, dispatchCountCASRetries)
+}
+
+// effectMismatch names one (target, gapColumn, actionRef) confidence window
+// whose last effectWindowSize dispatch episodes recorded ZERO observed
+// closes — the heartbeat-cadence signal for "dispatches commit but closes
+// never arrive" (design §3.4): a package's declared remediation keeps firing
+// but the lens gap it targets never flips, loudly a lens/effect mismatch (a
+// stale/wrong guard, a lens projecting the wrong column, or a remediation that
+// silently no-ops) rather than a normal in-progress retry chain (a window not
+// yet full never alerts).
+type effectMismatch struct {
+	TargetID  string
+	GapColumn string
+	ActionRef string
+}
+
+// scanEffectMismatches enumerates every `__effect` confidence window in the
+// bucket (heartbeat cadence, never per-message — mirrors countInFlight) and
+// reports every one whose window has reached effectWindowSize dispatches with
+// zero recorded closes. An unparseable key or value is skipped (the sweep's
+// corrupt-key leg owns that cleanup); this scan is read-only.
+func (m *markStore) scanEffectMismatches(ctx context.Context) ([]effectMismatch, error) {
+	keys, err := m.conn.KVListKeys(ctx, m.bucket)
+	if err != nil {
+		return nil, err
+	}
+	var out []effectMismatch
+	for _, key := range keys {
+		targetID, gapColumn, actionRef, ok := splitEffectKey(key)
+		if !ok {
+			continue
+		}
+		entry, err := m.conn.KVGet(ctx, m.bucket, key)
+		if err != nil {
+			continue
+		}
+		var stats effectStats
+		if err := json.Unmarshal(entry.Value, &stats); err != nil {
+			continue
+		}
+		if len(stats.Window) < effectWindowSize {
+			continue
+		}
+		closed := 0
+		for _, w := range stats.Window {
+			if w {
+				closed++
+			}
+		}
+		if closed == 0 {
+			out = append(out, effectMismatch{TargetID: targetID, GapColumn: gapColumn, ActionRef: actionRef})
+		}
+	}
+	return out, nil
 }
 
 // controlKeySuffix names the reserved per-target dispatch-skip marker
@@ -429,8 +639,10 @@ func (m *markStore) isDisabledKey(ctx context.Context, key string) (bool, error)
 }
 
 // deleteByTargetPrefix deletes every weaver-state key with prefix
-// "<targetID>." — every `<targetId>.<entityId>.<gapColumn>` in-flight mark AND
-// the `<targetId>.__control` dispatch-skip marker. The trailing
+// "<targetID>." — every `<targetId>.<entityId>.<gapColumn>` in-flight mark,
+// the `<targetId>.__control` dispatch-skip marker, and every
+// `<targetId>.__effect.<gapColumn>.<actionRef>` confidence window (all share
+// the prefix). The trailing
 // "." in the prefix means "t1." never matches a key under "t10." — no
 // accidental cross-target overlap from a shared numeric prefix. Tolerates
 // ErrKeyNotFound mid-scan (mirrors the reconciler sweep's scan-tolerance
