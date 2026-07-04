@@ -169,7 +169,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `internal/loom`'s 66 tests given `t.Parallel()` (fa49b78, 40.9s→11.7s); next: `internal/bridge` (28.4s) now the `unit` job's long pole |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `internal/bridge`'s 46 tests + a fixture race fixed (d2b6321, package 35s→7s) but `unit` job wall-clock unchanged (~137s) — local per-package sums don't predict the `-p4` critical path; next: capture real per-package timing FROM a CI run to find the actual pole |
 | **[CI/Refractor] Hello-Lattice NFR-P3 latency flake** | The capability-projection probe fails-then-passes on the shared CI runner — re-scoped to a 1000ms regression guard (Andrew-ratified; reported SLA unchanged), but the runner floor has drifted to ~1.1s. | ★★ | M | ✅ fixed 2026-07-03 (`94c8224`, deadline 1000ms→2000ms) — re-examine if it recurs |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ ratified · [design](../../implementation-artifacts/script-read-posture-design.md) · Fires 1–2 shippable (Contract #2 committed); guard (Fire 3) build + contracts deferred |
@@ -193,6 +193,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-04 · `d2b6321` · [CI] internal/bridge's 46 tests marked `t.Parallel()` + a fixture ordering-race fixed — package 35s→7s locally, but unit job wall-clock unchanged (~137s, bottleneck is elsewhere)
 - 2026-07-04 · `ff25188` · [AI-native] AI-authored capabilities Fire 1 Increment 1 — capabilityproposal DDL capture pair (lens kind) + the pkgmgr §5 materializer; bridge adapter/Loom dispatch + review/apply remain
 - 2026-07-04 · `e3053cf` · [Refractor] Personal Lens Fire 2 (PL.2) — ActorEnumerator fan-out + Interest Set (personalinterest, personal.register/.deregister control RPCs); PL.3 (D1 readableAnchors) remains, gated
 - 2026-07-04 · `7fbc962` · [Gateway] Token-revocation kill-switch Fire 2 — rich `revocation` heartbeat block (consumerConnected/revokedCount/lastEventSeq/lastSyncAt); item CLOSED, unblocks Loupe F11
@@ -217,8 +218,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-03 · `f97afed` · [Core] aiagent ReadCapability fix — c9a8031's live holdsRole routing dropped rbac grants for operator-role actors; now unions cap.identity+cap.roles; fixed main-red Gate 5
 - 2026-07-03 · `c9a8031` · [Core] root-designation-topology-reconverge — Fork A: three capability sites (+ aiagent read routing) re-converged on holdsRole→operator; Gate-3 vector #16 added
 - 2026-07-02 · `eb20923` · [lease-signing] Vault Fire 5b-iii-a — real-Vault shred-undecryptable proof for landlordLeaseApplicationsRead's own committed ciphertext
-- 2026-07-02 · `3ef4830` · [docs] Arch-review: docs-truth-sweep — Gateway/Vault built, gateway.md phantom §refs + ops-publish fix, service-actors no-Gateway/enforcement-live, CONCEPT serviceClass dropped; §6.5/§6.12 flagged
-- 2026-07-02 · `04bcbf0` · [lease-signing] Vault Fire 5b-ii-d — sev-1 fix: ssn presence check always null on real Vault ciphertext, blocking every real applicant from qualifying; regression test added
-- 2026-07-02 · `98cbfe8`+`f69b3e9` · [docs] Arch-review: bridge-and-substrate-doc-refresh — bridge async SPI/poll-timeout/Augur, scheduling @every+bridge-lane, substrate ctx-sigs/6-files/object+publish+stream surfaces/godoc
-- 2026-07-02 · `6ddb1fb` · [docs/control-plane] Arch-review: control-plane-surface-contract — new `docs/components/control-plane.md` (subject grammar, per-plane op vocab, reply envelope, transport+stub auth posture, drift guard) + index row
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*

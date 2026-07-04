@@ -2,6 +2,10 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-02 · `3ef4830` · [docs] Arch-review: docs-truth-sweep — Gateway/Vault built, gateway.md phantom §refs + ops-publish fix, service-actors no-Gateway/enforcement-live, CONCEPT serviceClass dropped; §6.5/§6.12 flagged
+- 2026-07-02 · `04bcbf0` · [lease-signing] Vault Fire 5b-ii-d — sev-1 fix: ssn presence check always null on real Vault ciphertext, blocking every real applicant from qualifying; regression test added
+- 2026-07-02 · `98cbfe8`+`f69b3e9` · [docs] Arch-review: bridge-and-substrate-doc-refresh — bridge async SPI/poll-timeout/Augur, scheduling @every+bridge-lane, substrate ctx-sigs/6-files/object+publish+stream surfaces/godoc
+- 2026-07-02 · `6ddb1fb` · [docs/control-plane] Arch-review: control-plane-surface-contract — new `docs/components/control-plane.md` (subject grammar, per-plane op vocab, reply envelope, transport+stub auth posture, drift guard) + index row
 - 2026-07-02 · `7eb3330` · [lease-signing/loftspace-app] Vault Fire 5b-ii-c — landlord decisioning moved onto the RLS-enforced read; trusted console's Approve/Decline retired (lead review, FE-only)
 - 2026-07-02 · `13ffb75` · [lease-signing/loftspace-app] Vault Fire 5b-ii-b — landlord readiness clone (`qualified`) via a shared cypher fragment with the convergence lens; 3-layer review (security-plane)
 - 2026-07-02 · `5901bc4` · [Refractor] Negative/filter-retraction Fire 3 — target-diff retraction (DiffRetraction opt-in + activation-time unanchored-query guard; 3-layer review; CLOSES the epic, unblocks Vault 5b close)
