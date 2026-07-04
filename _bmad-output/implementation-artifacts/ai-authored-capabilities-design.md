@@ -80,6 +80,29 @@ validate → human-approve → operator-applies (F-004) → live + F-004-reverti
 **grant** kind is the fast-follow. **⑥ linkage:** the gated Starlark fire is ⑥'s shared-sandbox **first
 consumer**, so the `internal/starlarksandbox` extraction lands *with* that fire.
 
+**🏗️ Fire 1 checkpoint (Steward, 2026-07-04).** Worktree: `../lattice-wt-ai-authored-caps-fire1` (branch
+`steward-ai-authored-capabilities-fire1`). **Done (Increment 1 of Fire 1 — the capture half, lens kind only):**
+the `packages/capability-author` package (`capabilityproposal` DDL — `RequestCapabilityAuthoring` mints the
+proposal vertex write-ahead; `RecordCapabilityProposal` records a proposed artifact + its verdict,
+review.state = pending|invalid; no-orphan + create-only idempotency proven); the Go-side §5 materializer
+(`internal/pkgmgr.ValidateCapabilityArtifact` + `CypherParser` — parses the lens cypher via the real engine
+and reuses `validateAll` verbatim, unit-tested against the accept/reject table incl. the P5 core-kv-adapter
+and reserved-bucket-alias guards); registered in `cmd/lattice-pkg` + `cmd/loupe`'s package registries;
+full e2e suite through the real Processor (`packages/capability-author/proposal_test.go`) green.
+**Interim scope note:** `RecordCapabilityProposal`'s validation verdict is CALLER-SUPPLIED in this increment
+(the bridge doesn't exist yet) — the script trusts it, exactly as F-004 trusts a client-computed dry-run; this
+is safe because no apply path exists yet for anything to act on a fabricated verdict (§5 point 4's kernel
+step-8 guard remains the authoritative backstop once apply lands). `RequestCapabilityAuthoring` is granted to
+`operator` (not yet a dedicated `identity.ai.*` grant — Item 4's narrower posture arrives with the escalation
+increment). **Next (remaining Fire 1 increments, in order):** (a) the `capabilityAuthor` bridge adapter +
+`FakeCapabilityAuthor` + the `capabilityAuthor` Loom pattern + the Weaver-target gap wiring that auto-dispatches
+a request (mirrors `packages/lease-signing`'s `backgroundCheck`/`onboarding` triggerLoom pattern — the concrete
+model to copy); (b) the `capability-proposals` review lens + `capability-author-context` catalog lens (P5 read
+models); (c) `ReviewCapabilityProposal` + the operator-submitted F-004 apply + the `applied` flip (closes the
+loop); (d) the **grant** kind in the materializer (§5 scope-check) — Fire 1's fast-follow per the ratified
+collapse. Full 3-layer adversarial review is still owed before Fire 1 is considered complete (this increment
+got a self-review only, matching the Designer's own §7 recommendation for the build-time review depth).
+
 ---
 
 ## 1. Problem & intent

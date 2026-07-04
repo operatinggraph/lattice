@@ -29,6 +29,7 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 	augur "github.com/asolgan/lattice/packages/augur"
 	bespokecontracts "github.com/asolgan/lattice/packages/bespoke-contracts"
+	capabilityauthor "github.com/asolgan/lattice/packages/capability-author"
 	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
 	clinicledger "github.com/asolgan/lattice/packages/clinic-ledger"
 	clinicreminders "github.com/asolgan/lattice/packages/clinic-reminders"
@@ -65,6 +66,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"loftspace-ledger":   loftspaceledger.Package,
 	"objects-base":       objectsbase.Package,
 	"augur":              augur.Package,
+	"capability-author":  capabilityauthor.Package,
 	"privacy-base":       privacybase.Package,
 	"bespoke-contracts":  bespokecontracts.Package,
 }

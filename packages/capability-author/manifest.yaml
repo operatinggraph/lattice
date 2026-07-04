@@ -1,0 +1,23 @@
+name: capability-author
+version: 0.1.0
+description: |
+  AI-authored capabilities — Increment 1 of Fire 1 (ai-authored-capabilities-design.md).
+  The capabilityproposal vertex type + the RequestCapabilityAuthoring/RecordCapabilityProposal
+  capture pair: a request mints the proposal vertex write-ahead; a record carries a proposed
+  artifact + its already-computed §5 deterministic-validation verdict (parsed cypher +
+  validateAll for the lens kind, via the internal/pkgmgr materializer) and stores
+  review.state = pending | invalid. The AI proposes; a human will decide (the review/apply
+  ops land in a later increment); the Processor stays sole writer.
+depends:
+  - orchestration-base
+declares:
+  ddls:
+    - canonicalName: capabilityproposal
+      class: meta.ddl.vertexType
+  permissions:
+    - operationType: RequestCapabilityAuthoring
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordCapabilityProposal
+      scope: any
+      grantsTo: [operator]
