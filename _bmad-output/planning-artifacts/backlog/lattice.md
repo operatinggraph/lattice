@@ -127,7 +127,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · secure-lens shred test gate closed (`fb66e7c`); next: delivery-boundary reset + live e2e (needs an attended fire — destructive to shared dev stack) |
 | **[identity-hygiene] Dedup over encrypted PII (duplicateCandidates)** | Post-Vault, the lens's WHERE matching (email/phone equality, name Levenshtein) runs on per-identity-DEK ciphertext → functionally inert; a secure lens can't fix in-engine matching. Needs a design: blind-index/HMAC companion aspect vs sanctioned engine mechanism. | ★★ | M | 📋 needs-design (Designer) · context in the [vault design](../../implementation-artifacts/vault-crypto-shredding-design.md) Fire 5b-i checkpoint |
 | **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
-| **[Vault→Loupe] surface enablers** | For loupe F12 (Vault map node/page + Reveal + crypto-shred proof): a dedicated `health.vault.<instance>` heartbeat group (metrics ride privacy-worker today); `lattice.vault.decrypt` reachable from Loupe's actor; **grant Loupe's operator actor `ShredIdentityKey`** (op shipped `604342b`; Andrew-approved 2026-07-02, scoped). | ★★ | S | 📋 · blocks loupe F12 · [UX §3](../../implementation-artifacts/loupe-platform-edges-ux.md) |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -193,6 +192,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-04 · `9f6a1f2` · [Vault→Loupe] Surface enablers — health.vault heartbeat + vault.decrypt reachability + privacy-operator-grant package; unblocks loupe F12
 - 2026-07-04 · `6c134d9` · [Weaver] Planner mandate Fire 4 — `mode`/`candidates`/`goal` install-parsing + shadow-compare diagnostic (agree/diverge heartbeat metrics); zero dispatch-decision change; Fire 5 next
 - 2026-07-04 · `4d6df0a` · [Weaver] Planner mandate Fire 3 — pure `internal/weaver/planner` goal-regression library (STRIPS/GOAP UCS, canonical determinism, `ErrNoPlan`); not yet wired to any dispatch decision; Fire 4 next
 - 2026-07-04 · `7b9191b` · [Weaver] Planner mandate Fire 2 — `__effect` confidence-window bookkeeping (both dispatch legs + gap-close path) + heartbeat `LensEffectMismatch` issue; Fire 3 (planner library) next
