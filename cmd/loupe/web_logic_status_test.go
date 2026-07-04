@@ -123,11 +123,85 @@ func TestSysmapTierJS(t *testing.T) {
 		{map[string]any{"kind": "component", "id": "chronicler"}, 3},
 		{map[string]any{"kind": "lens", "id": "SomeLensId"}, 4},
 		{map[string]any{"kind": "infra", "id": "object-store"}, 4},
+		// F14: declared apps join the door band beside the Gateway.
+		{map[string]any{"kind": "app", "id": "clinic-app"}, -1},
+		{map[string]any{"kind": "app", "id": "loftspace-app"}, -1},
 	}
 	for _, c := range cases {
 		if got := call(t, vm, "sysmapTier", c.node); got != c.want {
 			t.Errorf("sysmapTier(%v) = %v, want %d", c.node, got, c.want)
 		}
+	}
+}
+
+// F14: componentStatusClass carries the offline (dim) family for a declared
+// app with no heartbeat.
+func TestComponentStatusClassOfflineJS(t *testing.T) {
+	vm := logicVM(t, "status.js")
+	cls, ok := vm.Get("componentStatusClass").Export().(map[string]any)
+	if !ok {
+		t.Fatal("componentStatusClass is not an object")
+	}
+	if cls["offline"] != "dim" {
+		t.Errorf(`componentStatusClass["offline"] = %v, want "dim"`, cls["offline"])
+	}
+}
+
+// F14: an offline declared app never counts toward the yellow "degraded"
+// line — verticals are optional workloads, symmetric with design-ahead.
+func TestSysmapSummaryOfflineJS(t *testing.T) {
+	vm := logicVM(t, "status.js")
+	nodes := []any{
+		map[string]any{"status": "green"},
+		map[string]any{"status": "offline"},
+		map[string]any{"status": "offline"},
+	}
+	got, ok := call(t, vm, "sysmapSummary", nodes).(map[string]any)
+	if !ok {
+		t.Fatal("sysmapSummary did not return an object")
+	}
+	if got["degraded"] != int64(0) {
+		t.Errorf("summary[degraded] = %v, want 0 (offline apps never degrade)", got["degraded"])
+	}
+}
+
+// groupLenses buckets lens nodes by their server-stamped pkg field, sorted by
+// group name: worst-of status, count, protected count, and member chips in
+// input order — the exception-first density rule reads this without a fresh
+// DOM pass.
+func TestGroupLensesJS(t *testing.T) {
+	vm := logicVM(t, "status.js")
+	nodes := []any{
+		map[string]any{"kind": "component", "id": "processor", "status": "green"}, // non-lens, ignored
+		map[string]any{"kind": "lens", "id": "L1", "pkg": "clinic", "pkgKey": "vtx.package.P2", "status": "projecting", "label": "aaa"},
+		map[string]any{"kind": "lens", "id": "L2", "pkg": "clinic", "pkgKey": "vtx.package.P2", "status": "fault", "label": "bbb", "protected": true},
+		map[string]any{"kind": "lens", "id": "L3", "status": "projecting", "label": "ccc"}, // no pkg → kernel
+	}
+	groups, ok := call(t, vm, "groupLenses", nodes).([]any)
+	if !ok {
+		t.Fatalf("groupLenses did not return an array: %T", call(t, vm, "groupLenses", nodes))
+	}
+	if len(groups) != 2 {
+		t.Fatalf("groups = %+v, want 2 (clinic, kernel)", groups)
+	}
+	// Sorted by group name: "clinic" before "kernel".
+	clinic, ok := groups[0].(map[string]any)
+	if !ok || clinic["group"] != "clinic" {
+		t.Fatalf("groups[0] = %+v, want clinic first (alphabetical)", groups[0])
+	}
+	if clinic["count"] != int64(2) || clinic["protected"] != int64(1) || clinic["worst"] != "fault" {
+		t.Errorf("clinic group = %+v, want count=2 protected=1 worst=fault", clinic)
+	}
+	if clinic["pkgKey"] != "vtx.package.P2" {
+		t.Errorf("clinic pkgKey = %v, want vtx.package.P2", clinic["pkgKey"])
+	}
+	chips, ok := clinic["chips"].([]any)
+	if !ok || len(chips) != 2 {
+		t.Fatalf("clinic chips = %+v, want 2 members", clinic["chips"])
+	}
+	kernel, ok := groups[1].(map[string]any)
+	if !ok || kernel["group"] != "kernel" || kernel["count"] != int64(1) || kernel["worst"] != "projecting" {
+		t.Errorf("groups[1] = %+v, want kernel/count=1/worst=projecting", groups[1])
 	}
 }
 

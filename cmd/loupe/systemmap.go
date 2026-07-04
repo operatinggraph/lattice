@@ -6,23 +6,25 @@ import (
 )
 
 // mapNode is one vertex of the system map. Kind is "component" (a declared
-// engine that heartbeats to Health KV), "client" (an undeclared heartbeat
-// group discovered at runtime — e.g. a vertical app's reporter; rendered as a
-// chip on the clients shelf, no skeleton edges), "lens" (a Refractor
-// projection), "infra" (a core stream / KV store — the spine the components
-// hang off), or "ingress" (the external-actors marker above the Gateway — a
-// plain non-interactive chip, no heartbeat). Status carries the live overlay:
-// a component/client is "green" / "stale" / "absent" — or "design-ahead" for a
-// declared-but-not-yet-deployed component (surface built, backend pending;
-// informational, never degrades the rollup); a lens carries its §4.2
-// renderedState ("projecting" / "lagging" / "paused" / "pending-readpath" /
-// "rebuilding" / "fault" / "unknown"); infra/ingress is "present" (it exists
-// if Loupe could read Health KV). Protected marks a read-path-authorized lens
-// (spec-side truth — the ◆ tag renders in every state). Lateral marks a
-// component the map places beside its anchor (Vault beside Core KV) instead of
-// in its tier row. Component/client nodes carry every live instance in
-// Instances; the node-level Status is the worst instance's, Freshness the
-// freshest, Detail the worst instance's id.
+// engine that heartbeats to Health KV), "app" (a curated vertical on the F14
+// door band — clinic-app, loftspace-app), "client" (an undeclared heartbeat
+// group discovered at runtime; rendered as a chip on the clients shelf, no
+// skeleton edges), "lens" (a Refractor projection), "infra" (a core stream /
+// KV store — the spine the components hang off), or "ingress" (the
+// external-actors marker above the door band — a plain non-interactive chip,
+// no heartbeat). Status carries the live overlay: a component/client/app is
+// "green" / "stale" / "absent" — or "design-ahead" for a declared-but-not-
+// yet-deployed component, or "offline" for a declared app with no heartbeat
+// (surface built, backend/workload not running; both informational, never
+// degrade the rollup); a lens carries its §4.2 renderedState ("projecting" /
+// "lagging" / "paused" / "pending-readpath" / "rebuilding" / "fault" /
+// "unknown"); infra/ingress is "present" (it exists if Loupe could read
+// Health KV). Protected marks a read-path-authorized lens (spec-side truth —
+// the ◆ tag renders in every state). Lateral marks a component the map places
+// beside its anchor (Vault beside Core KV) instead of in its tier row.
+// Component/client/app nodes carry every live instance in Instances; the
+// node-level Status is the worst instance's, Freshness the freshest, Detail
+// the worst instance's id.
 type mapNode struct {
 	ID        string        `json:"id"`
 	Label     string        `json:"label"`
@@ -40,6 +42,13 @@ type mapNode struct {
 	// activation/update, not on row projection). The pulse feed diffs it
 	// between polls to surface rule updates.
 	ActiveSequence uint64 `json:"activeSequence,omitempty"`
+	// Pkg is a lens node's owning package canonical name — the F14 cluster
+	// grouping key (loupe-map-scale-ux.md §1); "kernel" for a lens no
+	// installed manifest claims. PkgKey is the owning package's vertex key,
+	// empty for the kernel group (which links to the Refractor roster
+	// instead of a package page).
+	Pkg    string `json:"pkg,omitempty"`
+	PkgKey string `json:"pkgKey,omitempty"`
 }
 
 // mapInstance is one heartbeat of a component/client node — the per-instance
@@ -51,11 +60,15 @@ type mapInstance struct {
 	Issues    []string `json:"issues,omitempty"`
 }
 
-// mapEdge is a directed data-flow edge between two node ids.
+// mapEdge is a directed data-flow edge between two node ids. DesignAhead
+// marks a door-band edge that draws dashed — the ratified end-state route
+// (gateway-external-trust-boundary-design.md F5) a vertical's traffic hasn't
+// adopted yet.
 type mapEdge struct {
-	From  string `json:"from"`
-	To    string `json:"to"`
-	Label string `json:"label,omitempty"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Label       string `json:"label,omitempty"`
+	DesignAhead bool   `json:"designAhead,omitempty"`
 }
 
 // systemMap is the GET /api/systemmap response: the canonical component
@@ -78,9 +91,22 @@ const (
 	nodeLens      = "lens"
 	nodeInfra     = "infra"
 	nodeIngress   = "ingress"
+	nodeApp       = "app"
 )
 
 const refractorID = "refractor"
+
+// kernelGroup is the curated lens-cluster fallback for a lens no installed
+// package manifest claims — the bootstrap kernel-seed family.
+const kernelGroup = "kernel"
+
+// The F14 door-band edge labels, applied once across the declaredApps set
+// (the returnLabelled label-once precedent) — every other app's matching
+// edge carries an empty label so the pair doesn't repeat the same text twice.
+const (
+	doorDirectLabel  = "submit ops · direct (today)"
+	doorGatewayLabel = "user writes · end-state"
+)
 
 // declaredComponent is an engine the deployment is expected to run. Its id is
 // the Health KV group name (classifyHealthKey) so the overlay matches by id.
@@ -127,13 +153,32 @@ var ingressNodes = []mapNode{
 	{ID: "external", Label: "external actors · Bearer JWT", Kind: nodeIngress, Status: "present"},
 }
 
+// declaredApp is a vertical application curated onto the door band
+// (loupe-map-scale-ux.md §2) — the map stays curated, so adding a vertical is
+// a one-line edit here, mirroring declaredComponents.
+type declaredApp struct {
+	id    string
+	label string
+}
+
+// declaredApps are the vertical apps curated onto the ingress door band.
+// Verticals are optional workloads: a declared app with no heartbeat renders
+// "offline" (dim, zero rollup contribution), never absent-red — kernel-only
+// `make up` must stay green regardless of which verticals are running.
+var declaredApps = []declaredApp{
+	{id: "clinic-app", label: "Clinic"},
+	{id: "loftspace-app", label: "LoftSpace"},
+}
+
 // skeletonEdges is the canonical data flow (architecture-overview.md §"data
 // flow"): operations land on core-operations → Processor commits to Core KV and
 // publishes business events to core-events → Loom / Weaver / Bridge /
 // object-store-manager consume core-events and submit new ops back; the
 // Refractor is the CDC materializer, projecting lenses off Core KV's backing
-// stream; a Loom externalTask dispatches through the Bridge. Lens edges
-// (refractor → <lens>) are added per live lens in computeSystemMap.
+// stream; a Loom externalTask dispatches through the Bridge. Per-lens edges
+// are retired (F14) — the lens shelf clusters by package client-side and
+// draws one synthetic refractor→cluster edge itself; the door-band edges for
+// declaredApps are appended in computeSystemMap.
 var skeletonEdges = []mapEdge{
 	{From: "core-operations", To: "processor", Label: "ops"},
 	{From: "processor", To: "core-kv", Label: "commit"},
@@ -174,6 +219,8 @@ var skeletonEdges = []mapEdge{
 // renders "stale" (yellow); each live lens becomes a node parented to
 // Refractor carrying its renderedState — a pending-readpath lens contributes
 // nothing to the rollup (it is expected fail-closed state, not degradation).
+// pkgIndex is the once-per-poll reverse index from lens id to owning package
+// (buildLensPackageIndex) that stamps each lens node's Pkg/PkgKey.
 func computeSystemMap(
 	keys []string,
 	readEntry func(string) (map[string]any, bool),
@@ -181,6 +228,7 @@ func computeSystemMap(
 	resolveSpec func(id string) lensSpecInfo,
 	staleThreshold time.Duration,
 	everLive map[string]bool,
+	pkgIndex map[string]lensPackageRef,
 ) systemMap {
 	const (
 		green  = 0
@@ -255,6 +303,11 @@ func computeSystemMap(
 			var level int
 			node.Status, node.Issues, level = lensRenderedState(doc, spec)
 			node.Protected = spec.Protected || spec.GrantTable
+			if ref, ok := pkgIndex[k]; ok {
+				node.Pkg, node.PkgKey = ref.Name, ref.Key
+			} else {
+				node.Pkg = kernelGroup
+			}
 			if seq, ok := doc["activeSequence"].(float64); ok && seq > 0 {
 				node.ActiveSequence = uint64(seq)
 			}
@@ -289,6 +342,23 @@ func computeSystemMap(
 			node.Status = "absent"
 			node.Freshness = "-"
 			worse(red)
+		}
+		nodes = append(nodes, node)
+	}
+
+	// F14 door band: declared vertical apps overlay heartbeats exactly like
+	// components, but a missing heartbeat renders "offline" (never
+	// absent-red, no rollup contribution) — verticals are optional
+	// workloads, unlike the platform engines above.
+	for _, da := range declaredApps {
+		declared[da.id] = true
+		taken[da.id] = true
+		node := mapNode{ID: da.id, Label: da.label, Kind: nodeApp}
+		if bs, ok := beats[da.id]; ok {
+			worse(applyBeats(&node, bs))
+		} else {
+			node.Status = "offline"
+			node.Freshness = "-"
 		}
 		nodes = append(nodes, node)
 	}
@@ -330,10 +400,16 @@ func computeSystemMap(
 	})
 	nodes = append(nodes, lensNodes...)
 
-	edges := make([]mapEdge, 0, len(skeletonEdges)+len(lensNodes))
+	edges := make([]mapEdge, 0, len(skeletonEdges)+len(declaredApps)*3)
 	edges = append(edges, skeletonEdges...)
-	for _, ln := range lensNodes {
-		edges = append(edges, mapEdge{From: refractorID, To: ln.ID, Label: "project"})
+	for i, da := range declaredApps {
+		edges = append(edges, mapEdge{From: "external", To: da.id})
+		direct, gateway := "", ""
+		if i == 0 {
+			direct, gateway = doorDirectLabel, doorGatewayLabel
+		}
+		edges = append(edges, mapEdge{From: da.id, To: "core-operations", Label: direct})
+		edges = append(edges, mapEdge{From: da.id, To: "gateway", Label: gateway, DesignAhead: true})
 	}
 
 	if !bootstrapPresent {

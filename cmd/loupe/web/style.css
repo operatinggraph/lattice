@@ -431,6 +431,10 @@ table.grid td { font-family: var(--mono); }
 .sysmap-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
 .sysmap-edge.secondary { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
 .sysmap-edge.secondary:hover { stroke: var(--text-dim); }
+/* design-ahead (F14 door band): the ratified end-state route a vertical's
+   traffic hasn't adopted yet — dashed, the same informational vocabulary as
+   a design-ahead node. */
+.sysmap-edge.design-ahead { stroke: var(--accent-dim); stroke-dasharray: 4 3; }
 .sysmap-edge-label { fill: var(--text-dim); font-family: var(--mono); font-size: 10px; }
 .sysmap-edge-label-bg { fill: var(--bg); }
 
@@ -452,7 +456,8 @@ table.grid td { font-family: var(--mono); }
   font-size: 12px;
 }
 
-.sysmap-node.component {
+.sysmap-node.component,
+.sysmap-node.app {
   border-radius: 8px;
   border-left-width: 3px;
   border-left-color: var(--green);
@@ -477,6 +482,14 @@ table.grid td { font-family: var(--mono); }
   opacity: 0.75;
 }
 .sysmap-node.component.designahead .sysmap-label { color: var(--text-dim); }
+/* offline (F14): a declared vertical app with no heartbeat — the plain dim
+   family, distinct from absent-red (verticals are optional workloads). */
+.sysmap-node.app.offline {
+  border: 1px dashed var(--border);
+  border-left-width: 3px;
+  opacity: 0.6;
+}
+.sysmap-node.app.offline .sysmap-label { color: var(--text-dim); }
 
 /* The ingress marker (external actors · Bearer JWT): a deliberately-plain
    non-interactive chip above the Gateway. */
@@ -492,7 +505,8 @@ table.grid td { font-family: var(--mono); }
 
 .sysmap-node-head { display: flex; align-items: center; gap: 7px; }
 .sysmap-label { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sysmap-node.component .sysmap-label { flex: 1; min-width: 0; }
+.sysmap-node.component .sysmap-label,
+.sysmap-node.app .sysmap-label { flex: 1; min-width: 0; }
 .sysmap-detail { font-family: var(--mono); font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 .sysmap-freshness { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 
@@ -533,10 +547,50 @@ table.grid td { font-family: var(--mono); }
   flex-wrap: wrap;
   gap: 10px;
   align-content: flex-start;
-  max-height: 240px;
-  overflow-y: auto;
 }
-.sysmap-shelf .sysmap-node.lens { position: static; }
+
+/* F14 lens clusters (loupe-map-scale-ux.md §1): the lens shelf is package-
+   grouped cards, not a flat flex-wrap of chips — height grows with problem
+   count, not lens count, so no shelf-level scrollbar is needed. */
+.sysmap-clusters { flex-direction: column; align-items: stretch; }
+.sysmap-cluster-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.sysmap-filter-input { flex: 1; max-width: 280px; font-size: 12px; }
+.sysmap-density-toggle { font-size: 11px; padding: 3px 10px; }
+.sysmap-cluster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+.sysmap-cluster-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  padding: 8px 10px;
+}
+.sysmap-cluster-head { display: flex; align-items: center; gap: 6px; }
+.sysmap-cluster-name { color: var(--accent); font-size: 12px; font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sysmap-cluster-name:hover { text-decoration: underline; }
+.sysmap-cluster-count { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+.sysmap-cluster-twisty {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+}
+.sysmap-cluster-body { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sysmap-cluster-body .sysmap-node.lens { position: static; }
+.lens-expander {
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  padding: 7px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
 
 .sysmap-hint { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); }
 

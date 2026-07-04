@@ -7,9 +7,11 @@
 // drives its color. Unknown statuses fall back to a neutral dot. design-ahead
 // (surface built, backend not yet deployed) uses the accent (informational)
 // family — the component analog of a pending-readpath lens, never red.
+// offline (a F14 declared app with no heartbeat) is the plain dim family —
+// verticals are optional workloads, never absent-red.
 var componentStatusClass = {
   green: "green", stale: "stale", absent: "absent", unknown: "unknown",
-  degraded: "yellow", unhealthy: "red", "design-ahead": "designahead",
+  degraded: "yellow", unhealthy: "red", "design-ahead": "designahead", offline: "dim",
 };
 
 // The operator copy for a design-ahead node's hover tip, plus the per-component
@@ -20,6 +22,11 @@ var designAheadPointer = {
   vault: "Vault: crypto-shred key custody — behind the Lattice-lane Vault build",
   chronicler: "Chronicler: append-only history — behind the Lattice-lane Chronicler build",
 };
+
+// appPointerCopy is the curated hover copy for a F14 declared-app door-band
+// node — the migration story: today's direct-submit wart vs the ratified
+// Gateway end-state (gateway-external-trust-boundary-design.md F5).
+var appPointerCopy = "product front-end — verifies user JWTs for reads (RLS); today submits ops directly to core-operations (self-asserted actor — known wart); end-state routes user writes through the Gateway's strip-and-stamp front (gateway design F5).";
 
 // lensStateDot / lensStateGlyph render a lens's renderedState. pending-readpath
 // deliberately uses the accent (informational) family, not yellow — it is the
@@ -80,6 +87,7 @@ function sysmapSummary(nodes) {
     var st = list[i].status || "";
     if (st === "pending-readpath") { out.pending++; continue; }
     if (st === "design-ahead") { out.designAhead++; continue; }
+    if (st === "offline") continue; // F14 declared app, no heartbeat — zero rollup contribution
     if (st === "absent") out.absent++;
     if (st === "unhealthy") out.unhealthy++;
     if (!healthy[st]) out.degraded++;
@@ -88,12 +96,14 @@ function sysmapSummary(nodes) {
 }
 
 // sysmapTier derives a node's tier (-1..4) from its kind + id, never hardcoded
-// x/y — so the layout survives backend node-set changes. Tier -1 is the
-// ingress band (the door): the external-actors marker + the Gateway, above
+// x/y — so the layout survives backend node-set changes. Tier -1 is the door
+// band: the external-actors marker on its own line, the Gateway + F14
+// declared apps (clinic-app, loftspace-app) on the doors line under it, above
 // core-operations. object-store is the archive sink, bottom band with the
 // read-models.
 function sysmapTier(node) {
   if (node.kind === "ingress") return -1;
+  if (node.kind === "app") return -1;
   if (node.kind === "lens") return 4;
   if (node.kind === "infra") {
     if (node.id === "object-store") return 4;
@@ -107,4 +117,45 @@ function sysmapTier(node) {
   return node.id === "processor" ? 1 : 3;
 }
 
-export { componentStatusClass, designAheadCopy, designAheadPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier };
+// lensSeverity ranks a lens renderedState for a F14 cluster header's
+// worst-of dot — informational/degraded states outrank the healthy
+// "projecting" default, so one sick lens surfaces its whole card even while
+// most chips inside are collapsed (exception-first density).
+var lensSeverity = {
+  fault: 5, paused: 4, rebuilding: 4, lagging: 3, "pending-readpath": 2,
+  unknown: 1, projecting: 0,
+};
+
+// groupLenses buckets the map's lens nodes by their server-stamped pkg field
+// (loupe-map-scale-ux.md §1) into one card model per group, sorted by group
+// name: worst-of status (the header dot), total count, protected count, and
+// every member chip in server order (label-sorted) — so the view's
+// exception-first density rule (only non-"projecting" chips render, the rest
+// collapse into "+N projecting") is a plain filter over pure, goja-tested
+// data, not a fresh pass over raw nodes.
+function groupLenses(nodes) {
+  var groups = {};
+  var order = [];
+  var list = nodes || [];
+  for (var i = 0; i < list.length; i++) {
+    var n = list[i];
+    if (n.kind !== "lens") continue;
+    var key = n.pkg || "kernel";
+    if (!groups[key]) {
+      groups[key] = { group: key, pkgKey: n.pkgKey || "", worst: "projecting", count: 0, protected: 0, chips: [] };
+      order.push(key);
+    }
+    var g = groups[key];
+    g.count++;
+    if (n.protected) g.protected++;
+    g.chips.push(n);
+    var sev = lensSeverity[n.status] || 0;
+    if (sev > (lensSeverity[g.worst] || 0)) g.worst = n.status;
+  }
+  var out = [];
+  for (var j = 0; j < order.length; j++) out.push(groups[order[j]]);
+  out.sort(function (a, b) { return a.group < b.group ? -1 : a.group > b.group ? 1 : 0; });
+  return out;
+}
+
+export { appPointerCopy, componentStatusClass, designAheadCopy, designAheadPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier, groupLenses };

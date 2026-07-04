@@ -126,6 +126,42 @@ func TestFindOwningPackage(t *testing.T) {
 	}
 }
 
+// buildLensPackageIndex resolves the same claims as findOwningPackage, but in
+// one O(#packages) pass instead of rescanning every manifest per lens (the
+// system map's per-poll assembly, loupe-map-scale-ux.md §1).
+func TestBuildLensPackageIndex(t *testing.T) {
+	manifest := func(name, version string, declared ...string) []byte {
+		keys := make([]any, len(declared))
+		for i, d := range declared {
+			keys[i] = d
+		}
+		return specEnv(map[string]any{"name": name, "version": version, "declaredKeys": keys})
+	}
+	envs := map[string][]byte{
+		"vtx.package.P1.manifest": manifest("loftspace", "1.2.0", "vtx.meta.LensA", "vtx.role.R1"),
+		"vtx.package.P2.manifest": manifest("clinic", "0.9.0", "vtx.meta.LensB"),
+	}
+	get := func(k string) ([]byte, bool) { v, ok := envs[k]; return v, ok }
+	keys := []string{"vtx.package.P2.manifest", "vtx.package.P1.manifest", "vtx.meta.LensA", "lnk.a.b.c.d.e"}
+
+	index := buildLensPackageIndex(keys, get)
+	if ref, ok := index["LensA"]; !ok || ref.Key != "vtx.package.P1" || ref.Name != "loftspace" || ref.Version != "1.2.0" {
+		t.Errorf("index[LensA] = %+v, ok=%v", ref, ok)
+	}
+	if ref, ok := index["LensB"]; !ok || ref.Name != "clinic" {
+		t.Errorf("index[LensB] = %+v, ok=%v", ref, ok)
+	}
+	// A kernel (bootstrap-seeded) lens is claimed by no manifest.
+	if _, ok := index["KernelLens"]; ok {
+		t.Error("KernelLens must not appear in the index")
+	}
+	// vtx.role.R1 is a declared root, not a bare vtx.meta.<id> — it must not
+	// leak into the lens index under id "R1"-shaped keys from other classes.
+	if len(index) != 2 {
+		t.Errorf("index = %+v, want exactly 2 entries", index)
+	}
+}
+
 func TestRefractorLensOverlay(t *testing.T) {
 	docs := map[string]map[string]any{
 		// Older instance: stale lag figure, but the only latency report.

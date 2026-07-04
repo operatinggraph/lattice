@@ -318,7 +318,22 @@ func (s *server) handleSystemMap(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "list health-kv: "+err.Error())
 		return
 	}
-	m := computeSystemMap(keys, readEntry, resolveLens, resolveSpec, staleThreshold, s.snapshotEverLive())
+	// The F14 lens-cluster grouping key (Loupe is the P5 inspector exception):
+	// one Core-KV key list + package-manifest pass per poll, not per lens.
+	coreKeys, err := conn.KVListKeys(ctx, bootstrap.CoreKVBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "list core-kv: "+err.Error())
+		return
+	}
+	coreGet := func(key string) ([]byte, bool) {
+		entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+		if err != nil {
+			return nil, false
+		}
+		return entry.Value, true
+	}
+	pkgIndex := buildLensPackageIndex(coreKeys, coreGet)
+	m := computeSystemMap(keys, readEntry, resolveLens, resolveSpec, staleThreshold, s.snapshotEverLive(), pkgIndex)
 	for _, n := range m.Nodes {
 		if n.Kind == nodeComponent && len(n.Instances) > 0 {
 			s.noteEverLive(n.ID)

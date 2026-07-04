@@ -6,24 +6,41 @@
 // data change, not new rendering logic.
 
 import { el, api, setStatus } from "../api.js";
-import { componentStatusClass, designAheadCopy, designAheadPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
+import { appPointerCopy, componentStatusClass, designAheadCopy, designAheadPointer, groupLenses, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
 import { deriveTransitions, ledClass } from "../logic/feed.js";
 import { keyTarget } from "../logic/keys.js";
 import { navigate } from "../router.js";
 import * as pulse from "../pulse.js";
 
-// Tier rows 0-4, with the ingress band (tier -1: the external-actors marker +
-// the Gateway — the door) above them.
-const SYSMAP_INGRESS_Y = 40;
-const SYSMAP_TIER_Y = [130, 240, 360, 490, 620];
+// Tier rows 0-4 sit below the door band (tier -1): the external-actors marker
+// on its own line, then the doors row (Gateway + F14 declared apps) below it.
+const SYSMAP_INGRESS_Y = 24;
+const SYSMAP_DOORS_Y = 92;
+const SYSMAP_TIER_Y = [190, 300, 420, 550, 680];
 const SYSMAP_NODE_H = 58;
 const SVG_NS = "http://www.w3.org/2000/svg";
 const refractorId = "refractor"; // the sole lens parent (see systemmap.go)
 
+// doorRank orders the F14 doors row left-to-right (clinic-app · Gateway ·
+// loftspace-app, loupe-map-scale-ux.md §2); anything uncurated stays beside
+// the Gateway rather than at an arbitrary end.
+function doorRank(id) {
+  if (id === "clinic-app") return 0;
+  if (id === "gateway") return 1;
+  if (id === "loftspace-app") return 2;
+  return 1;
+}
+
 // sysmap holds the last-rendered data + transient render state. nodeEls maps a
-// node id to its DOM element for edge measurement; tip is the single shared
-// hover popover.
-const sysmap = { data: null, lastNodes: null, nodeEls: new Map(), tip: null, autoTimer: null, resizeTimer: null, fetchSeq: 0, unsubPulse: null, feedRAF: 0 };
+// node id to its DOM element for edge measurement (a lens-cluster card
+// registers under a synthetic "cluster:<group>" id); tip is the single shared
+// hover popover. clusterDensity/clusterExpanded/clusterFilter drive the F14
+// lens-shelf cards (loupe-map-scale-ux.md §1).
+const sysmap = {
+  data: null, lastNodes: null, nodeEls: new Map(), tip: null, autoTimer: null, resizeTimer: null,
+  fetchSeq: 0, unsubPulse: null, feedRAF: 0,
+  clusterDensity: "overview", clusterExpanded: new Set(), clusterFilter: "",
+};
 
 function enter() {
   refreshSystemMap();
@@ -157,6 +174,11 @@ function setSysmapRollup(data) {
 function renderSystemMap(data) {
   const stage = sysmapStage();
   if (!stage) return;
+  // The cluster filter input re-renders on every keystroke (it's plain data
+  // driving a full rebuild, not its own component) — without this the input
+  // would lose focus after each character typed.
+  const filterFocused = document.activeElement && document.activeElement.id === "sysmap-cluster-filter";
+  const filterSelection = filterFocused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   setSysmapRollup(data);
   stage.innerHTML = "";
   sysmap.nodeEls = new Map();
@@ -170,24 +192,27 @@ function renderSystemMap(data) {
   const width = stage.clientWidth || 1100;
 
   // Tiers 0-3: absolutely positioned, evenly spaced across the stage width.
-  // The ingress band (tier -1) sits above tier 0; a lateral component (Vault)
-  // is placed beside its Core-KV anchor after the rows are laid out; tier-4
-  // infra (the object store) joins the shelf. Lenses and runtime-discovered
-  // clients render on shelves, not tiers.
+  // The door band (tier -1) sits above tier 0, split into two lines: the
+  // plain ingress marker, and the doors row (Gateway + F14 declared apps). A
+  // lateral component (Vault) is placed beside its Core-KV anchor after the
+  // rows are laid out; tier-4 infra (the object store) joins the shelf.
+  // Lenses cluster into cards and runtime-discovered clients render on
+  // shelves, not tiers.
   const tierMembers = [[], [], [], []];
   const ingressMembers = [];
+  const doorMembers = [];
   const lateralMembers = [];
-  const lenses = [];
   const shelfInfra = [];
   const clients = [];
   nodes.forEach((n) => {
     if (n.kind === "client") { clients.push(n); return; }
     if (n.lateral) { lateralMembers.push(n); return; }
     const t = sysmapTier(n);
-    if (t === -1) { ingressMembers.push(n); return; }
-    if (t === 4) { (n.kind === "infra" ? shelfInfra : lenses).push(n); return; }
+    if (t === -1) { (n.kind === "ingress" ? ingressMembers : doorMembers).push(n); return; }
+    if (t === 4) { if (n.kind === "infra") shelfInfra.push(n); return; } // lenses cluster below, not per-node
     tierMembers[t].push(n);
   });
+  doorMembers.sort((a, b) => doorRank(a.id) - doorRank(b.id));
 
   // Refractor is the left-most tier-3 slot so its project edges drop cleanly
   // into the shelf without crossing the other engines' return paths;
@@ -204,6 +229,15 @@ function renderSystemMap(data) {
     const node = buildSysmapNode(n);
     node.style.left = ((i + 1) / (ingressMembers.length + 1) * width) + "px";
     node.style.top = SYSMAP_INGRESS_Y + "px";
+    node.style.transform = "translateX(-50%)";
+    stage.appendChild(node);
+    sysmap.nodeEls.set(n.id, node);
+  });
+
+  doorMembers.forEach((n, i) => {
+    const node = buildSysmapNode(n);
+    node.style.left = ((i + 1) / (doorMembers.length + 1) * width) + "px";
+    node.style.top = SYSMAP_DOORS_Y + "px";
     node.style.transform = "translateX(-50%)";
     stage.appendChild(node);
     sysmap.nodeEls.set(n.id, node);
@@ -241,22 +275,14 @@ function renderSystemMap(data) {
     sysmap.nodeEls.set(n.id, node);
   });
 
-  // Tier 4: the lens shelf — flex-wrap chips, not per-node absolute placement.
-  // Tier-4 infra (the object-store archive sink) sits in its own column to the
-  // shelf's right — inside the scrollable shelf it would hide below the fold
-  // and the chronicler → object-store edge would point into clipped overflow.
-  const shelf = el("div", "sysmap-shelf");
+  // Tier 4: the lens shelf — one cluster card per owning package (F14), not
+  // per-node absolute placement. Tier-4 infra (the object-store archive sink)
+  // sits in its own column to the shelf's right — inside the shelf it would
+  // hide below the fold and the chronicler → object-store edge would point
+  // into clipped overflow.
+  const { shelf, clusterEdges } = renderLensClusterShelf(nodes);
   shelf.style.top = SYSMAP_TIER_Y[4] + "px";
   if (shelfInfra.length) shelf.style.right = "190px";
-  if (!lenses.length) {
-    shelf.appendChild(el("div", "muted", "(no lenses projecting)"));
-  } else {
-    lenses.forEach((n) => {
-      const chip = buildSysmapNode(n);
-      shelf.appendChild(chip);
-      sysmap.nodeEls.set(n.id, chip);
-    });
-  }
   stage.appendChild(shelf);
   shelfInfra.forEach((n, i) => {
     const node = buildSysmapNode(n);
@@ -283,10 +309,19 @@ function renderSystemMap(data) {
   // Empty / no-health hint: every component absent (or design-ahead — also
   // heartbeatless) and zero lenses.
   const components = nodes.filter((n) => n.kind === "component");
-  if (components.length && components.every((n) => n.status === "absent" || n.status === "design-ahead") && !lenses.length) {
+  const hasLenses = nodes.some((n) => n.kind === "lens");
+  if (components.length && components.every((n) => n.status === "absent" || n.status === "design-ahead") && !hasLenses) {
     const hint = el("div", "muted sysmap-hint",
       "No live components reporting — is the stack running? (make up-full)");
     stage.appendChild(hint);
+  }
+
+  if (filterFocused) {
+    const restored = document.getElementById("sysmap-cluster-filter");
+    if (restored) {
+      restored.focus();
+      if (filterSelection) restored.setSelectionRange(filterSelection[0], filterSelection[1]);
+    }
   }
 
   // Size the stage to fit the shelves (the clients shelf stacks under the
@@ -304,8 +339,113 @@ function renderSystemMap(data) {
       }
     }
     stageNow.style.minHeight = (bottom + 40) + "px";
-    drawSysmapEdges(data);
+    drawSysmapEdges({ ...data, edges: (data.edges || []).concat(clusterEdges) });
   });
+}
+
+// renderLensClusterShelf groups the map's lens nodes into one card per owning
+// package (groupLenses, loupe-map-scale-ux.md §1) — exception-first density
+// (only non-"projecting" chips show by default, healthy ones collapse into a
+// "+N projecting" expander), a shelf-wide overview|all density toggle, and a
+// live filter that narrows chips across every card. Each card registers under
+// a synthetic "cluster:<group>" id so the caller can draw one
+// refractor→cluster edge per group (label carried once across the set).
+function renderLensClusterShelf(nodes) {
+  const shelf = el("div", "sysmap-shelf sysmap-clusters");
+  const groups = groupLenses(nodes);
+  if (!groups.length) {
+    shelf.appendChild(el("div", "muted", "(no lenses projecting)"));
+    return { shelf, clusterEdges: [] };
+  }
+
+  const bar = el("div", "sysmap-cluster-bar");
+  const filterInput = el("input", "sysmap-filter-input");
+  filterInput.id = "sysmap-cluster-filter";
+  filterInput.type = "text";
+  filterInput.placeholder = "filter lenses…";
+  filterInput.value = sysmap.clusterFilter;
+  filterInput.addEventListener("input", () => {
+    sysmap.clusterFilter = filterInput.value;
+    if (sysmap.data) renderSystemMap(sysmap.data);
+  });
+  bar.appendChild(filterInput);
+  const densityBtn = el("button", "sysmap-density-toggle",
+    sysmap.clusterDensity === "all" ? "show overview" : "show all");
+  densityBtn.addEventListener("click", () => {
+    sysmap.clusterDensity = sysmap.clusterDensity === "all" ? "overview" : "all";
+    if (sysmap.data) renderSystemMap(sysmap.data);
+  });
+  bar.appendChild(densityBtn);
+  shelf.appendChild(bar);
+
+  const grid = el("div", "sysmap-cluster-grid");
+  const filterText = sysmap.clusterFilter.trim().toLowerCase();
+  const matches = (n) => (n.label || "").toLowerCase().indexOf(filterText) !== -1
+    || (n.id || "").toLowerCase().indexOf(filterText) !== -1;
+
+  const clusterEdges = [];
+  let labelled = false;
+  groups.forEach((g) => {
+    let visible, expanded;
+    if (filterText) {
+      visible = g.chips.filter(matches);
+      if (!visible.length) return; // card hidden — nothing in it matches
+      expanded = true;
+    } else {
+      expanded = sysmap.clusterDensity === "all" || sysmap.clusterExpanded.has(g.group);
+      visible = expanded ? g.chips : g.chips.filter((n) => n.status !== "projecting");
+    }
+    const collapsedCount = g.chips.length - visible.length;
+
+    const card = el("div", "sysmap-cluster-card");
+    const head = el("div", "sysmap-cluster-head");
+    head.appendChild(el("span", "sysmap-dot " + (lensStateDot[g.worst] || "dim")));
+    const nameLink = el("a", "sysmap-cluster-name", g.group);
+    nameLink.href = g.group === "kernel" ? "#/component/" + refractorId : "#/package/" + g.pkgKey;
+    head.appendChild(nameLink);
+    head.appendChild(el("span", "sysmap-cluster-count", "· " + g.count));
+    if (g.protected) head.appendChild(el("span", "sysmap-tag protected", "◆" + g.protected));
+    if (!filterText) {
+      const twisty = el("button", "sysmap-cluster-twisty", expanded ? "▾" : "▸");
+      twisty.title = expanded ? "collapse" : "expand";
+      twisty.addEventListener("click", () => {
+        if (sysmap.clusterExpanded.has(g.group)) sysmap.clusterExpanded.delete(g.group);
+        else sysmap.clusterExpanded.add(g.group);
+        if (sysmap.data) renderSystemMap(sysmap.data);
+      });
+      head.appendChild(twisty);
+    }
+    card.appendChild(head);
+
+    const body = el("div", "sysmap-cluster-body");
+    visible.forEach((n) => {
+      const chip = buildSysmapNode(n);
+      body.appendChild(chip);
+      sysmap.nodeEls.set(n.id, chip);
+    });
+    if (collapsedCount > 0) {
+      const expander = el("div", "sysmap-node lens-expander muted", "+" + collapsedCount + " projecting");
+      expander.addEventListener("click", () => {
+        sysmap.clusterExpanded.add(g.group);
+        if (sysmap.data) renderSystemMap(sysmap.data);
+      });
+      body.appendChild(expander);
+    }
+    card.appendChild(body);
+    grid.appendChild(card);
+
+    // A synthetic node id lets the caller register the whole card for edge
+    // measurement — the shelf renders position:static children, so the card
+    // itself (not a chip) is what a refractor→cluster edge needs to measure.
+    sysmap.nodeEls.set("cluster:" + g.group, card);
+    clusterEdges.push({ from: refractorId, to: "cluster:" + g.group, label: labelled ? "" : "project" });
+    labelled = true;
+  });
+  if (filterText && !grid.children.length) {
+    grid.appendChild(el("div", "muted", "no lenses match \"" + sysmap.clusterFilter + "\""));
+  }
+  shelf.appendChild(grid);
+  return { shelf, clusterEdges };
 }
 
 // buildSysmapNode renders one node element for its kind, with the status
@@ -316,19 +456,21 @@ function buildSysmapNode(n) {
   node.dataset.status = n.status || "";
   node.dataset.id = n.id;
 
-  if (n.kind === "component") {
+  if (n.kind === "component" || n.kind === "app") {
     const cls = componentStatusClass[n.status] || "unknown";
     if (cls === "absent") node.classList.add("absent");
     if (cls === "stale") node.classList.add("stale");
     if (cls === "designahead") node.classList.add("designahead");
     if (n.status === "degraded") node.classList.add("degraded");
     if (n.status === "unhealthy") node.classList.add("unhealthy");
+    if (n.status === "offline") node.classList.add("offline");
     const head = el("div", "sysmap-node-head");
     head.appendChild(el("span", "sysmap-dot " + cls));
     head.appendChild(el("span", "sysmap-label", n.label));
     if (n.status === "stale") head.appendChild(el("span", "sysmap-tag", "stale"));
     if (n.status === "degraded") head.appendChild(el("span", "sysmap-tag warn", "degraded"));
     if (n.status === "unhealthy") head.appendChild(el("span", "sysmap-tag bad", "unhealthy"));
+    if (n.status === "offline") head.appendChild(el("span", "sysmap-tag", "offline"));
     if (n.instances && n.instances.length > 1) head.appendChild(el("span", "sysmap-tag", "×" + n.instances.length));
     if (n.issues && n.issues.length) head.appendChild(el("span", "sysmap-tag warn", "⚠ " + n.issues.length));
     node.appendChild(head);
@@ -370,7 +512,7 @@ function buildSysmapNode(n) {
     node.appendChild(el("span", "sysmap-label", n.label));
   }
 
-  if (n.kind === "component" || n.kind === "lens" || n.kind === "client") {
+  if (n.kind === "component" || n.kind === "app" || n.kind === "lens" || n.kind === "client") {
     node.addEventListener("mouseenter", (e) => showSysmapTip(n, e));
     node.addEventListener("mouseleave", hideSysmapTip);
     node.addEventListener("click", () => drillSysmapNode(n));
@@ -410,6 +552,9 @@ function showSysmapTip(n, evt) {
     if (designAheadPointer[n.id]) {
       tip.appendChild(el("div", "sysmap-tip-ahead", designAheadPointer[n.id]));
     }
+  }
+  if (n.kind === "app") {
+    tip.appendChild(el("div", "sysmap-tip-ahead", appPointerCopy));
   }
   if (n.detail) line("detail", n.detail);
   if (n.freshness) line("freshness", n.freshness);
@@ -475,7 +620,10 @@ function drawSysmapEdges(data) {
     const r = e.getBoundingClientRect();
     return { l: r.left - stageBox.left, t: r.top - stageBox.top, w: r.width, h: r.height };
   };
+  // A synthetic lens-cluster card (see renderLensClusterShelf) has no server
+  // node to look up — it lives on the same tier-4 shelf its member lenses do.
   const tierOf = (id) => {
+    if (id.indexOf("cluster:") === 0) return 4;
     const node = (data.nodes || []).find((x) => x.id === id);
     return node ? sysmapTier(node) : -1;
   };
@@ -523,7 +671,7 @@ function drawSysmapEdges(data) {
 
     const p = document.createElementNS(SVG_NS, "path");
     p.setAttribute("d", path);
-    p.setAttribute("class", "sysmap-edge" + (secondary ? " secondary" : ""));
+    p.setAttribute("class", "sysmap-edge" + (secondary ? " secondary" : "") + (edge.designAhead ? " design-ahead" : ""));
     p.setAttribute("marker-end", "url(#sysmap-arrow)");
     // from/to tags let the pulse animation find the flow path.
     p.dataset.from = edge.from;

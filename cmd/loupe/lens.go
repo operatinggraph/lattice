@@ -169,6 +169,45 @@ func findOwningPackage(coreKeys []string, get kvGetter, lensID string) *lensPack
 	return nil
 }
 
+// buildLensPackageIndex scans every installed package's manifest ONCE and
+// returns the reverse index from lens id to its owning package — the same
+// claim findOwningPackage resolves per-lens, computed in a single
+// O(#packages) pass for the system map's per-poll assembly
+// (loupe-map-scale-ux.md §1) instead of rescanning every manifest per lens.
+// Sorted manifest order resolves a (pathological) double claim the same way
+// findOwningPackage does: first-claim wins.
+func buildLensPackageIndex(coreKeys []string, get kvGetter) map[string]lensPackageRef {
+	manifests := make([]string, 0, 4)
+	for _, k := range coreKeys {
+		if strings.HasPrefix(k, "vtx.package.") && strings.HasSuffix(k, ".manifest") && classifyKey(k) == classAspect {
+			manifests = append(manifests, k)
+		}
+	}
+	sort.Strings(manifests)
+	index := make(map[string]lensPackageRef, len(manifests))
+	for _, mk := range manifests {
+		d := metaData(get, mk)
+		if d == nil {
+			continue
+		}
+		ref := lensPackageRef{
+			Key:     strings.TrimSuffix(mk, ".manifest"),
+			Name:    dataString(d, "name"),
+			Version: dataString(d, "version"),
+		}
+		for _, dk := range dataStrings(d, "declaredKeys") {
+			id := strings.TrimPrefix(dk, "vtx.meta.")
+			if id == dk || strings.Contains(id, ".") {
+				continue // not a bare vtx.meta.<id> declaration (e.g. an aspect)
+			}
+			if _, claimed := index[id]; !claimed {
+				index[id] = ref
+			}
+		}
+	}
+	return index
+}
+
 // refractorLensOverlay pulls this lens's slice of the Refractor heartbeat —
 // metrics.lensLags + metrics.lensLatency — merged per metric from the
 // freshest refractor instance carrying that metric (with plural instances,

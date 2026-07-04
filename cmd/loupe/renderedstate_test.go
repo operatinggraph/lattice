@@ -132,7 +132,7 @@ func TestComputeSystemMapPendingReadpathExcludedFromRollup(t *testing.T) {
 		return lensSpecInfo{}
 	}
 
-	m := computeSystemMap(keys, read, nil, spec, time.Minute, nil)
+	m := computeSystemMap(keys, read, nil, spec, time.Minute, nil, nil)
 	if m.Overall != "green" {
 		t.Errorf("overall = %q, want green (pending-readpath is not degradation)", m.Overall)
 	}
@@ -164,14 +164,14 @@ func TestComputeSystemMapAlertsAndBootstrapFoldIntoOverall(t *testing.T) {
 	withAlert := base()
 	withAlert["health.alerts.security.stub-auth-active"] = map[string]any{"severity": "warning", "message": "stub"}
 	read := func(k string) (map[string]any, bool) { d, ok := withAlert[k]; return d, ok }
-	if m := computeSystemMap(keysOf(withAlert), read, nil, nil, time.Minute, nil); m.Overall != "yellow" {
+	if m := computeSystemMap(keysOf(withAlert), read, nil, nil, time.Minute, nil, nil); m.Overall != "yellow" {
 		t.Errorf("overall = %q, want yellow (warning alert folds in)", m.Overall)
 	}
 
 	noBoot := base()
 	delete(noBoot, "health.bootstrap.complete")
 	read = func(k string) (map[string]any, bool) { d, ok := noBoot[k]; return d, ok }
-	if m := computeSystemMap(keysOf(noBoot), read, nil, nil, time.Minute, nil); m.Overall != "red" {
+	if m := computeSystemMap(keysOf(noBoot), read, nil, nil, time.Minute, nil, nil); m.Overall != "red" {
 		t.Errorf("overall = %q, want red (bootstrap marker missing)", m.Overall)
 	}
 }
