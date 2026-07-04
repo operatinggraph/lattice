@@ -196,6 +196,7 @@ func VerifyKernel(ctx context.Context, conn *substrate.Conn) []string {
 	for _, bucket := range []string{
 		CoreKVBucket, HealthKVBucket, CapabilityKVBucket,
 		WeaverStateBucket, LoomStateBucket, WeaverTargetsBucket, RefractorAdjacencyKV,
+		PersonalLensInterestKV,
 	} {
 		if _, err := js.KeyValue(ctx, bucket); err != nil {
 			failures = append(failures, fmt.Sprintf("MISSING KV bucket: %s (%v)", bucket, err))

@@ -224,12 +224,17 @@ type TargetNATSKVConfig struct {
 // TargetNATSSubjectConfig is the expected shape of LensSpec.TargetConfig
 // when TargetType == "nats_subject" — the Personal Lens transport
 // (personal-secure-lens-design.md Fire 1: PL.1). Key must include
-// adapter.PersonalActorKeyField ("__actor") exactly once; the lens's cypher
-// RETURN aliases that column to the recipient identity.
+// adapter.PersonalActorKeyField ("__actor") exactly once; a direct (non-
+// Personal) lens's cypher RETURN aliases that column to the recipient
+// identity itself.
 type TargetNATSSubjectConfig struct {
 	SubjectPrefix string   `json:"subjectPrefix"` // e.g. "lattice.sync.user"
 	Stream        string   `json:"stream"`        // backing JetStream stream name, e.g. "SYNC"
 	Key           []string `json:"key"`
+	// Personal opts this lens into Fire 2's cross-vertex fan-out (see
+	// IntoConfig.Personal). When true, "__actor" is NOT a RETURN alias
+	// requirement — the enumerated recipient is injected by the pipeline.
+	Personal bool `json:"personal,omitempty"`
 }
 
 // NewCoreKVSource constructs a watcher. logger may be nil.
@@ -594,6 +599,7 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 			Key:           KeyField(cfg.Key),
 			SubjectPrefix: cfg.SubjectPrefix,
 			Stream:        cfg.Stream,
+			Personal:      cfg.Personal,
 		}
 	default:
 		return nil, fmt.Errorf("lens %q: unknown targetType %q (expected postgres|nats_kv|nats_subject)", spec.ID, spec.TargetType)

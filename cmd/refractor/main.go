@@ -38,10 +38,11 @@ import (
 )
 
 const (
-	coreKVBucket          = "core-kv"
-	healthKVBucket        = "health-kv"
-	adjacencyKVBucket     = "refractor-adjacency"
-	defaultHeartbeatEvery = 10 * time.Second
+	coreKVBucket             = "core-kv"
+	healthKVBucket           = "health-kv"
+	adjacencyKVBucket        = "refractor-adjacency"
+	personalInterestKVBucket = "personal-lens-interest"
+	defaultHeartbeatEvery    = 10 * time.Second
 )
 
 type pipelineEntry struct {
@@ -107,6 +108,14 @@ func main() {
 		logger.Error("open health KV", "bucket", healthKVBucket, "err", err)
 		os.Exit(1)
 	}
+	// The Personal Lens's per-device Interest Set registry (Fire PL.2):
+	// backs the control plane's "register"/"deregister" ops and the fan-out
+	// pipeline's relevance filter (personal-secure-lens-design.md §3.3).
+	personalInterestKV, err := conn.OpenKV(ctx, personalInterestKVBucket)
+	if err != nil {
+		logger.Error("open personal-lens-interest KV", "bucket", personalInterestKVBucket, "err", err)
+		os.Exit(1)
+	}
 
 	bootstrapper := consumer.NewBootstrapper(conn, coreKVBucket, adjKV)
 	go func() {
@@ -118,6 +127,7 @@ func main() {
 
 	poolManager := adapter.NewPoolManager()
 	controlSvc := control.NewService()
+	controlSvc.SetPersonalInterestKV(personalInterestKV)
 
 	// The KeyShredded nullification listener (vault-crypto-shredding-design.md
 	// §2.4, Fire 4a) — the Refractor half of crypto-shredding's async
@@ -421,9 +431,13 @@ func main() {
 			// operation-role-index) derives its projection key from the envelope
 			// at write time, so its Into.Key (e.g. ["key"]) is not a RETURN alias
 			// and its applyReturn key map is discarded — threading/validating it
-			// would wrongly fail activation.
+			// would wrongly fail activation. A fan-out Personal Lens
+			// (projection.IsPersonalLens) is the same shape: its "__actor" key
+			// field is injected by the envelope from the enumerated recipient, not
+			// a RETURN alias, so InstallPersonalLens threads its business-only key
+			// columns itself.
 			if cr, ok := r.CompiledRule.(*full.CompiledRule); ok &&
-				!projection.IsActorAggregate(r) && !isOperationRoleIndexLens(r) {
+				!projection.IsActorAggregate(r) && !isOperationRoleIndexLens(r) && !projection.IsPersonalLens(r) {
 				cr.KeyColumns = []string(r.Into.Key)
 				if err := cr.ValidateKeyColumns(); err != nil {
 					logger.Error("full engine key-column validation", "lensId", r.ID, "err", err)
@@ -490,6 +504,13 @@ func main() {
 			p.SetEnvelopeFn(capabilityenv.NewRoleIndexWrapper())
 			p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 			logger.Info("operation-aggregate envelope installed", "lensId", r.ID, "key", r.Into.Key[0])
+		case projection.IsPersonalLens(r):
+			// Personal Lens fan-out (personal-secure-lens-design.md §3.3, Fire
+			// PL.2): installs the ActorEnumerator + the "__actor"-injecting
+			// envelope, filtered through the Interest Set registry.
+			if !projection.InstallPersonalLens(p, r, adjKV, coreKV, personalInterestKV, logger) {
+				return
+			}
 		}
 
 		// A Secure Lens (Contract #3 §3.10): install the decrypt-at-projection

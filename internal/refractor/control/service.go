@@ -15,6 +15,8 @@ import (
 
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
+	"github.com/asolgan/lattice/internal/refractor/personalinterest"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // ErrRuleNotRegistered is returned by NullifyRow (and other per-ruleID lookups)
@@ -85,6 +87,16 @@ type ControlRequest struct {
 	Op       string `json:"op,omitempty"`       // legacy; subject path is authoritative
 	RuleID   string `json:"ruleId,omitempty"`   // legacy; subject path is authoritative
 	Truncate bool   `json:"truncate,omitempty"` // used by "rebuild" op; default false
+
+	// IdentityID, DeviceID, Types, Anchors are used by the "register"/
+	// "deregister" ops (personal-secure-lens-design.md §3.3, Fire PL.2): a
+	// Personal Lens device Interest Set registration. Sent on
+	// lattice.ctrl.refractor.personal.{register,deregister} — the "personal"
+	// subject segment is a fixed pseudo-lensId, not a real lens.
+	IdentityID string   `json:"identityId,omitempty"`
+	DeviceID   string   `json:"deviceId,omitempty"`
+	Types      []string `json:"types,omitempty"`
+	Anchors    []string `json:"anchors,omitempty"`
 }
 
 // ControlResponse is the JSON payload returned by the control service.
@@ -96,13 +108,15 @@ type ControlRequest struct {
 // On success (delete op): Delete field is present; Entry fields are absent.
 // On error: only "error" field is present.
 type ControlResponse struct {
-	*health.Entry                 // embedded; nil on non-health ops → fields absent in JSON
-	Error         string          `json:"error,omitempty"`
-	Validate      *ValidateResult `json:"validate,omitempty"` // present only for "validate" op
-	Rebuild       *RebuildResult  `json:"rebuild,omitempty"`  // present only for "rebuild" op
-	Pause         *PauseResult    `json:"pause,omitempty"`    // present only for "pause" op
-	Resume        *ResumeResult   `json:"resume,omitempty"`   // present only for "resume" op
-	Delete        *DeleteResult   `json:"delete,omitempty"`   // present only for "delete" op
+	*health.Entry                                // embedded; nil on non-health ops → fields absent in JSON
+	Error              string                    `json:"error,omitempty"`
+	Validate           *ValidateResult           `json:"validate,omitempty"`           // present only for "validate" op
+	Rebuild            *RebuildResult            `json:"rebuild,omitempty"`            // present only for "rebuild" op
+	Pause              *PauseResult              `json:"pause,omitempty"`              // present only for "pause" op
+	Resume             *ResumeResult             `json:"resume,omitempty"`             // present only for "resume" op
+	Delete             *DeleteResult             `json:"delete,omitempty"`             // present only for "delete" op
+	PersonalRegister   *PersonalRegisterResult   `json:"personalRegister,omitempty"`   // present only for "register" op
+	PersonalDeregister *PersonalDeregisterResult `json:"personalDeregister,omitempty"` // present only for "deregister" op
 }
 
 // RebuildResult is the async acknowledgement returned by the "rebuild" op.
@@ -127,6 +141,18 @@ type ResumeResult struct {
 // Deleted is always true when the op is accepted.
 type DeleteResult struct {
 	Deleted bool `json:"deleted"`
+}
+
+// PersonalRegisterResult is the synchronous acknowledgement returned by the
+// "register" op (personal-secure-lens-design.md §3.3, Fire PL.2).
+type PersonalRegisterResult struct {
+	Registered bool `json:"registered"`
+}
+
+// PersonalDeregisterResult is the synchronous acknowledgement returned by the
+// "deregister" op.
+type PersonalDeregisterResult struct {
+	Deregistered bool `json:"deregistered"`
 }
 
 // ValidateResult is returned by the "validate" op. It contains a best-effort
@@ -164,6 +190,10 @@ type Service struct {
 	reporters            map[string]*health.Reporter
 	microSvc             micro.Service // set by StartNATSListener; nil until started
 	ruleGetter           RuleGetter    // set via SetRuleGetter; used by validate op
+	// personalInterestKV backs the "register"/"deregister" ops (Personal Lens
+	// Interest Set, personal-secure-lens-design.md §3.3). nil until
+	// SetPersonalInterestKV is called; those two ops fail closed until then.
+	personalInterestKV *substrate.KV
 }
 
 // NewService creates a new Service with empty registries.
@@ -183,6 +213,15 @@ func NewService() *Service {
 func (s *Service) SetRuleGetter(rg RuleGetter) {
 	s.mu.Lock()
 	s.ruleGetter = rg
+	s.mu.Unlock()
+}
+
+// SetPersonalInterestKV registers the personal-lens-interest KV handle the
+// "register"/"deregister" ops write through. Thread-safe; may be called at
+// any time. Until called, both ops fail closed with an error response.
+func (s *Service) SetPersonalInterestKV(kv *substrate.KV) {
+	s.mu.Lock()
+	s.personalInterestKV = kv
 	s.mu.Unlock()
 }
 
@@ -351,13 +390,16 @@ const controlSubjectPrefix = "lattice.ctrl.refractor"
 // supportedOps enumerates the per-op endpoint suffixes registered under
 // the NATS Services framework. The op name is taken from the trailing
 // subject token; see opFromSubject.
-var supportedOps = []string{"health", "validate", "rebuild", "pause", "resume", "delete"}
+var supportedOps = []string{"health", "validate", "rebuild", "pause", "resume", "delete", "register", "deregister"}
 
 // StartNATSListener registers the Refractor control plane as a NATS
-// micro-service named "refractor-control". Six endpoints are added —
-// one per op — all sharing the wildcard subject pattern
+// micro-service named "refractor-control". One endpoint is added per
+// supportedOps entry, all sharing the wildcard subject pattern
 // "lattice.ctrl.refractor.*.<op>" so a single handler instance serves
-// every lens ID without prior knowledge.
+// every lens ID without prior knowledge. The "register"/"deregister" ops
+// (Personal Lens Interest Set) reuse the same wildcard: callers address them
+// at the fixed "lattice.ctrl.refractor.personal.<op>" subject — "personal" is
+// a pseudo-lensId, not a real lens.
 //
 // All endpoints share the default queue group ("q") so multiple
 // Refractor instances distribute load — replaces the explicit
@@ -453,6 +495,10 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 		s.respondMicro(req, s.resumeRule(context.Background(), lensID))
 	case "delete":
 		s.respondMicro(req, s.deleteRule(context.Background(), lensID))
+	case "register":
+		s.respondMicro(req, s.personalRegister(context.Background(), body))
+	case "deregister":
+		s.respondMicro(req, s.personalDeregister(context.Background(), body))
 	default:
 		// Unreachable — supportedOps gates the endpoint registration.
 		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("unknown operation: %s", op)})
@@ -567,6 +613,46 @@ func (s *Service) deleteRule(ctx context.Context, ruleID string) ControlResponse
 	}
 	s.Unregister(ruleID) // cleans remaining four registries (deleterByRuleID already cleared above)
 	return ControlResponse{Delete: &DeleteResult{Deleted: true}}
+}
+
+// personalRegister upserts a device's Personal Lens Interest Set
+// (personal-secure-lens-design.md §3.3, Fire PL.2). Fails closed if
+// SetPersonalInterestKV hasn't been called, or if identityId/deviceId are
+// missing from the request body.
+func (s *Service) personalRegister(ctx context.Context, body ControlRequest) ControlResponse {
+	s.mu.Lock()
+	kv := s.personalInterestKV
+	s.mu.Unlock()
+	if kv == nil {
+		return ControlResponse{Error: "register: personal-lens-interest KV not configured"}
+	}
+	if body.IdentityID == "" || body.DeviceID == "" {
+		return ControlResponse{Error: "register: identityId and deviceId are required"}
+	}
+	if err := personalinterest.Register(ctx, kv, body.IdentityID, body.DeviceID, body.Types, body.Anchors,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return ControlResponse{Error: err.Error()}
+	}
+	return ControlResponse{PersonalRegister: &PersonalRegisterResult{Registered: true}}
+}
+
+// personalDeregister removes a device's Personal Lens Interest Set
+// registration. Fails closed if SetPersonalInterestKV hasn't been called, or
+// if identityId/deviceId are missing from the request body.
+func (s *Service) personalDeregister(ctx context.Context, body ControlRequest) ControlResponse {
+	s.mu.Lock()
+	kv := s.personalInterestKV
+	s.mu.Unlock()
+	if kv == nil {
+		return ControlResponse{Error: "deregister: personal-lens-interest KV not configured"}
+	}
+	if body.IdentityID == "" || body.DeviceID == "" {
+		return ControlResponse{Error: "deregister: identityId and deviceId are required"}
+	}
+	if err := personalinterest.Deregister(ctx, kv, body.IdentityID, body.DeviceID); err != nil {
+		return ControlResponse{Error: err.Error()}
+	}
+	return ControlResponse{PersonalDeregister: &PersonalDeregisterResult{Deregistered: true}}
 }
 
 // validateRule reports that field-level validation is not available. It

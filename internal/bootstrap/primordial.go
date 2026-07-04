@@ -27,6 +27,12 @@ const (
 	LoomStateBucket      = "loom-state"          // Loom's per-instance cursor store (Contract #10 §10.3)
 	WeaverTargetsBucket  = "weaver-targets"      // shared target-Lens projection bucket (Contract #10 §10.2)
 	RefractorAdjacencyKV = "refractor-adjacency" // Refractor's internal adjacency store (private, not a Lens target)
+	// PersonalLensInterestKV is the Refractor's per-device Personal Lens
+	// Interest Set registry (personal-secure-lens-design.md §3.3, Fire PL.2):
+	// operational subscription state, not business truth (P1) — keyed
+	// `<identityId>.<deviceId>`, written only by the Refractor's own
+	// personal.register/.deregister control RPCs, never a Lens target.
+	PersonalLensInterestKV = "personal-lens-interest"
 	// GatewayRevocationBucket is the Gateway's token-revocation kill-switch set
 	// (must match internal/gateway/revocation.BucketName by value — bootstrap
 	// does not import the gateway package). Materialized by the Gateway's own
@@ -95,6 +101,7 @@ func (s *Seeder) ProvisionBuckets(ctx context.Context) error {
 		// default 1, which is what DeliverLastPerSubject CDC consumers expect.
 		{WeaverTargetsBucket, "Lattice Weaver Targets KV — shared target-Lens projection bucket", false},
 		{RefractorAdjacencyKV, "Refractor internal adjacency store (private)", false},
+		{PersonalLensInterestKV, "Refractor Personal Lens Interest Set registry (private)", false},
 		// token-revocation is a compacting latest-per-actor set (put on revoke,
 		// del on unrevoke) materialized by the Gateway from events.gateway.>; no
 		// per-key TTL, durable (rebuildable from the event stream on cold start,

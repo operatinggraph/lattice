@@ -98,6 +98,16 @@ type IntoConfig struct {
 	// Populated from the LensSpec targetConfig by translateSpec; not from YAML.
 	SubjectPrefix string `yaml:"-"`
 	Stream        string `yaml:"-"`
+
+	// Personal opts a "nats_subject" lens into the Fire 2 cross-vertex fan-out:
+	// the projection.InstallPersonalLens path installs an ActorEnumerator
+	// (actorType "identity") and re-executes the lens cypher once per
+	// enumerated recipient, injecting the recipient into the reserved
+	// "__actor" key field (personal-secure-lens-design.md §3.3). Absent, a
+	// "nats_subject" lens is PL.1's direct shape: its own cypher RETURN
+	// supplies "__actor" and no fan-out is installed. Populated from the
+	// LensSpec targetConfig by translateSpec; not from YAML.
+	Personal bool `yaml:"-"`
 }
 
 // RetryConfig describes retry behaviour for transient write failures.

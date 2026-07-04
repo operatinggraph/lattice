@@ -66,6 +66,12 @@ func (k *KV) ListKeys(ctx context.Context) ([]string, error) {
 	return k.conn.KVListKeys(ctx, k.bucket)
 }
 
+// ListKeysPrefix returns every key under the given key prefix. See
+// Conn.KVListKeysPrefix.
+func (k *KV) ListKeysPrefix(ctx context.Context, prefix string) ([]string, error) {
+	return k.conn.KVListKeysPrefix(ctx, k.bucket, prefix)
+}
+
 // Purge removes key and its history, leaving a purge marker. Purging an absent
 // key is a no-op (idempotent). See Conn.KVPurge.
 func (k *KV) Purge(ctx context.Context, key string) error {
