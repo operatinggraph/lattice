@@ -77,6 +77,13 @@ const (
 	DefaultTTLMultiplier = 10
 	defaultProbeTimeout  = 5 * time.Second
 	healthVersion        = "1.0"
+	// DefaultDiagnosticTTL is the fixed (not re-armed) TTL for sparse
+	// per-instance diagnostic breadcrumbs (malformed-operation markers,
+	// claim-attempt/commit-conflict counters) — mirrors the shipped
+	// `internal/processor/step3_auth_trace.go` auth-trace precedent. These are
+	// write-once/rolling breadcrumbs, not liveness signals, so they use a fixed
+	// window rather than the heartbeat's interval-derived TTL.
+	DefaultDiagnosticTTL = time.Hour
 )
 
 // Reporter runs a Contract #5 heartbeat loop for a simple, consumer-less

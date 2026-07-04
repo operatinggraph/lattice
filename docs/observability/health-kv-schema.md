@@ -31,10 +31,16 @@ Three lifecycle classes:
   object-store-manager (each via `KVPutWithTTL`; `SetTTLMultiplier(0)` disables TTL as an
   operator escape hatch). The vertical-app `healthkv.Reporter` (loftspace-app, clinic-app) is
   born TTL-on with the same default.
-- **Category B — sparse per-instance diagnostic keys** (e.g.
-  `health.processor.<instance>.malformed-operation.<requestId>`, `.claim-attempts.<outcome>`,
-  `.commit-conflicts`): a fixed, non-re-armed diagnostic TTL (not yet wired — tracked as the
-  next fire of the [Health-KV TTL design](../../_bmad-output/implementation-artifacts/health-kv-ttl-orphan-expiry-design.md)).
+- **Category B — sparse per-instance diagnostic keys** (`health.processor.<instance>`
+  `.malformed-operation.<requestId>`, `.claim-attempts.<outcome>`, `.commit-conflicts`): a fixed
+  `diagnosticTTL` (default 1h, configurable via `SetDiagnosticTTL`; 0 disables it), wired via
+  `KVPutWithTTL`. `.malformed-operation.<requestId>` is write-once per request — its TTL is never
+  re-armed. `.claim-attempts.<outcome>` and `.commit-conflicts` are rolling per-instance counters
+  (read-modify-write) — their TTL re-arms on every write, so it bounds the key's lifetime to
+  `diagnosticTTL` *after the instance's last write*, the same "dead instance's key eventually
+  clears" property Category A gets from its heartbeat, applied here to a non-heartbeat breadcrumb.
+  See the [Health-KV TTL design](../../_bmad-output/implementation-artifacts/health-kv-ttl-orphan-expiry-design.md)
+  for the full orphan taxonomy (Category C, the durable consumer-state re-key, remains open).
 - **Category C — durable consumer pause-state** (`health.<component>.<instance>.consumer.<name>`,
   written by the shared `internal/healthkv.ConsumerSink`): **no TTL** — this is durable
   operator/structural pause state, not a liveness signal; a death-tied TTL would risk silently
@@ -66,8 +72,9 @@ Source package: `internal/processor/`
 |---|---|---|---|---|
 | `health.processor.<instance>` | ≥ 10s heartbeat | `internal/processor/health.go` | `HealthHeartbeater.emit()` | Category A — `interval×10`, re-armed |
 | `health.processor.<instance>.step3-latency` | per heartbeat tick | `internal/processor/health.go` | `HealthHeartbeater.emitCapabilityAuthSignals()` | Category A — same TTL, lock-step with the heartbeat |
-| `health.processor.<instance>.malformed-operation.<requestId>` | per malformed envelope | `internal/processor/health.go` | `HealthHeartbeater.EmitMalformedOperation()` | Category B — none yet (next fire) |
-| `health.processor.<instance>.claim-attempts.<outcome>` | per `ClaimIdentity` call | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — none yet (next fire) |
+| `health.processor.<instance>.malformed-operation.<requestId>` | per malformed envelope | `internal/processor/health.go` | `HealthHeartbeater.EmitMalformedOperation()` | Category B — fixed 1h default, not re-armed |
+| `health.processor.<instance>.claim-attempts.<outcome>` | per `ClaimIdentity` call | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordClaimAttempt()` | Category B — 1h default, re-armed each write |
+| `health.processor.<instance>.commit-conflicts` | per same-key commit conflict | `internal/processor/health_alerts.go` | `HealthAlertEmitter.RecordCommitConflict()` | Category B — 1h default, re-armed each write |
 | `health.alerts.security.<alertCode>` | on security event | `internal/processor/health_alerts.go` | `HealthAlertEmitter.EmitAlert()` | Category D — alert-code-scoped, out of scope (§ TTL / Lifecycle) |
 | `health.processor.<instance>.auth-trace.<requestId>` | per auth denial | `internal/processor/step3_auth_trace.go` | `AuthTraceEmitter.Emit()` | fixed 1h |
 
@@ -83,6 +90,7 @@ completeness test):
 - `health.processor.<instance>.auth-trace.<requestId>` — per denial only
 - `health.processor.<instance>.malformed-operation.<requestId>` — per malformed envelope only
 - `health.processor.<instance>.claim-attempts.<outcome>` — per ClaimIdentity call only
+- `health.processor.<instance>.commit-conflicts` — per same-key commit conflict only
 - `health.alerts.security.<alertCode>` — on event only
 
 ### Refractor (instance heartbeat)

@@ -86,6 +86,12 @@ type HealthHeartbeater struct {
 	// plain, non-expiring KVPut) — an operator escape hatch; default is on.
 	ttlMultiplier int
 
+	// diagnosticTTL bounds sparse per-instance diagnostic breadcrumbs
+	// (malformed-operation markers) — a fixed, not re-armed, window (unlike
+	// the heartbeat's interval-derived TTL) since these are write-once
+	// records, not a liveness signal. Zero disables TTL (plain KVPut).
+	diagnosticTTL time.Duration
+
 	// Per-tick step-3 capability auth signal. The CapabilityAuthorizer is
 	// wired by MakePipeline when AuthMode resolves to capability. step3-latency
 	// always emits.
@@ -127,6 +133,7 @@ func NewHealthHeartbeater(conn *substrate.Conn, bucket, instance string, interva
 		lagThreshold:  defaultLaneLagThreshold,
 		openIssues:    map[string]string{},
 		ttlMultiplier: healthkv.DefaultTTLMultiplier,
+		diagnosticTTL: healthkv.DefaultDiagnosticTTL,
 	}
 }
 
@@ -204,10 +211,22 @@ func (h *HealthHeartbeater) heartbeatTTL() time.Duration {
 	return h.interval * time.Duration(h.ttlMultiplier)
 }
 
+// SetDiagnosticTTL overrides the fixed TTL applied to sparse per-instance
+// diagnostic breadcrumbs (malformed-operation markers). Zero disables the TTL
+// (sticky keys); a negative value is clamped to 0.
+func (h *HealthHeartbeater) SetDiagnosticTTL(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	h.diagnosticTTL = d
+}
+
 // EmitMalformedOperation writes the per-malformed-envelope marker into
 // Health KV. Key form: `health.processor.<instance>.malformed-operation.<requestId>`.
 // Called inline from step 1 when an envelope fails to parse but a
-// requestId is recoverable.
+// requestId is recoverable. Carries a fixed diagnosticTTL (not re-armed) so a
+// dead instance's malformed-operation breadcrumbs clear within the window
+// instead of accruing forever.
 func (h *HealthHeartbeater) EmitMalformedOperation(ctx context.Context, requestID, reason string) {
 	if requestID == "" {
 		return
@@ -223,7 +242,7 @@ func (h *HealthHeartbeater) EmitMalformedOperation(ctx context.Context, requestI
 		"observedAt": substrate.FormatTimestamp(time.Now()),
 	}
 	b, _ := json.Marshal(doc)
-	if _, err := h.conn.KVPut(ctx, h.bucket, key, b); err != nil {
+	if _, err := h.conn.KVPutWithTTL(ctx, h.bucket, key, b, h.diagnosticTTL); err != nil {
 		h.logger.Warn("health: failed to write malformed-operation marker",
 			"key", key, "error", err)
 	}

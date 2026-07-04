@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -74,7 +75,7 @@ func NewCommitConflictEmitter(conn *substrate.Conn, bucket, instance string, log
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &HealthAlertEmitter{conn: conn, bucket: bucket, instance: instance, logger: logger}
+	return &HealthAlertEmitter{conn: conn, bucket: bucket, instance: instance, logger: logger, diagnosticTTL: healthkv.DefaultDiagnosticTTL}
 }
 
 // RecordCommitConflict implements CommitConflictEmitter. Writes a best-effort
@@ -88,7 +89,9 @@ func NewCommitConflictEmitter(conn *substrate.Conn, bucket, instance string, log
 // same posture as claim-attempts); the AUTHORITATIVE totals are the atomic
 // heartbeat counters commit_retries_total / commit_retry_exhausted_total. This
 // marker carries the actionable context (which key, which lane) the counters
-// cannot.
+// cannot. Carries diagnosticTTL, re-armed on every write, so a dead instance's
+// key clears diagnosticTTL after its last conflict instead of persisting
+// forever.
 func (e *HealthAlertEmitter) RecordCommitConflict(ctx context.Context, info CommitConflictInfo) {
 	if e.instance == "" {
 		return
@@ -121,7 +124,7 @@ func (e *HealthAlertEmitter) RecordCommitConflict(ctx context.Context, info Comm
 		e.logger.Warn("commit-conflicts: marshal failed", "key", key, "error", err)
 		return
 	}
-	if _, err := e.conn.KVPut(ctx, e.bucket, key, raw); err != nil {
+	if _, err := e.conn.KVPutWithTTL(ctx, e.bucket, key, raw, e.diagnosticTTL); err != nil {
 		e.logger.Warn("commit-conflicts: KV write failed", "key", key, "error", err)
 	}
 }
@@ -132,6 +135,14 @@ type HealthAlertEmitter struct {
 	bucket   string
 	instance string
 	logger   *slog.Logger
+
+	// diagnosticTTL bounds the per-instance claim-attempts/commit-conflicts
+	// breadcrumbs — a fixed window applied on every write (each write re-arms
+	// it), so a dead instance's counters clear diagnosticTTL after its last
+	// write instead of persisting forever. Zero disables TTL (plain KVPut).
+	// Unused by EmitAlert (security alerts stay sticky "currently happening"
+	// state, not a diagnostic breadcrumb).
+	diagnosticTTL time.Duration
 }
 
 // NewHealthAlertEmitter constructs the emitter. Nil conn returns a noop
@@ -155,13 +166,15 @@ func NewClaimAttemptEmitter(conn *substrate.Conn, bucket, instance string, logge
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &HealthAlertEmitter{conn: conn, bucket: bucket, instance: instance, logger: logger}
+	return &HealthAlertEmitter{conn: conn, bucket: bucket, instance: instance, logger: logger, diagnosticTTL: healthkv.DefaultDiagnosticTTL}
 }
 
 // RecordClaimAttempt implements ClaimAttemptEmitter. Writes a best-effort
 // counter to health.processor.<instance>.claim-attempts.<outcome> with shape
 // {count: N, lastAt: <RFC3339>}. Counter is read-modify-write; under
 // contention last writer wins (Phase 1 acceptable; precise counting is Phase 2).
+// Carries diagnosticTTL, re-armed on every write, so a dead instance's outcome
+// keys clear diagnosticTTL after its last attempt instead of persisting forever.
 func (e *HealthAlertEmitter) RecordClaimAttempt(ctx context.Context, outcome string) {
 	if e.instance == "" {
 		return
@@ -192,7 +205,7 @@ func (e *HealthAlertEmitter) RecordClaimAttempt(ctx context.Context, outcome str
 		e.logger.Warn("claim-attempts: marshal failed", "outcome", outcome, "error", err)
 		return
 	}
-	if _, err := e.conn.KVPut(ctx, e.bucket, key, raw); err != nil {
+	if _, err := e.conn.KVPutWithTTL(ctx, e.bucket, key, raw, e.diagnosticTTL); err != nil {
 		e.logger.Warn("claim-attempts: KV write failed", "outcome", outcome, "key", key, "error", err)
 	}
 }

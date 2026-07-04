@@ -137,3 +137,104 @@ func TestHeartbeatTTL_Derivation(t *testing.T) {
 		t.Fatalf("negative multiplier must clamp to 0, heartbeatTTL() = %v, want %v", got, want)
 	}
 }
+
+// newTestHealthAlertEmitter builds a HealthAlertEmitter with a caller-set
+// diagnosticTTL — constructed directly (same package) since the constructors
+// return the narrower Emitter interfaces and default to
+// healthkv.DefaultDiagnosticTTL, too slow for a TTL-expiry test.
+func newTestHealthAlertEmitter(conn *substrate.Conn, instance string, ttl time.Duration, logger *slog.Logger) *HealthAlertEmitter {
+	return &HealthAlertEmitter{conn: conn, bucket: ttlTestHealthBucket, instance: instance, logger: logger, diagnosticTTL: ttl}
+}
+
+// Category B — sparse per-instance diagnostic breadcrumbs (malformed-operation
+// markers, claim-attempts, commit-conflicts) carry a fixed diagnosticTTL so a
+// dead instance's breadcrumbs clear within the window instead of persisting
+// forever (health-kv-ttl-orphan-expiry-design.md Fire 1's second half).
+func TestDiagnosticKeys_TTLExpiryAndRearm(t *testing.T) {
+	ctx, conn := setupTTLHarness(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("malformed-operation marker expires within its fixed TTL (not re-armed)", func(t *testing.T) {
+		h := newShortIntervalHeartbeater(conn, "proc-diag-1", 10*time.Second, logger)
+		h.SetDiagnosticTTL(1 * time.Second)
+		h.EmitMalformedOperation(ctx, "req-1", "bad envelope")
+		key := "health.processor.proc-diag-1.malformed-operation.req-1"
+
+		if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); err != nil {
+			t.Fatalf("key missing right after emit: %v", err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		expired := false
+		for time.Now().Before(deadline) {
+			if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); errors.Is(err, substrate.ErrKeyNotFound) {
+				expired = true
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if !expired {
+			t.Fatalf("malformed-operation key %q never expired via its TTL", key)
+		}
+	})
+
+	t.Run("diagnosticTTL=0 disables TTL (sticky key)", func(t *testing.T) {
+		h := newShortIntervalHeartbeater(conn, "proc-diag-2", 10*time.Second, logger)
+		h.SetDiagnosticTTL(0)
+		h.EmitMalformedOperation(ctx, "req-1", "bad envelope")
+		key := "health.processor.proc-diag-2.malformed-operation.req-1"
+
+		time.Sleep(2 * time.Second)
+		if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); err != nil {
+			t.Fatalf("diagnosticTTL=0 must disable TTL, but key is gone: %v", err)
+		}
+	})
+
+	t.Run("claim-attempts counter re-arms across repeated attempts, then expires once they stop", func(t *testing.T) {
+		e := newTestHealthAlertEmitter(conn, "proc-diag-3", 1*time.Second, logger)
+		key := "health.processor.proc-diag-3.claim-attempts.success"
+
+		stop := time.Now().Add(3 * time.Second) // > TTL
+		for time.Now().Before(stop) {
+			e.RecordClaimAttempt(ctx, "success")
+			time.Sleep(300 * time.Millisecond)
+		}
+		if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); err != nil {
+			t.Fatalf("re-armed claim-attempts key should still be present past one TTL window: %v", err)
+		}
+
+		deadline := time.Now().Add(10 * time.Second)
+		expired := false
+		for time.Now().Before(deadline) {
+			if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); errors.Is(err, substrate.ErrKeyNotFound) {
+				expired = true
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if !expired {
+			t.Fatalf("claim-attempts key %q never expired once attempts stopped", key)
+		}
+	})
+
+	t.Run("commit-conflicts counter carries a TTL too", func(t *testing.T) {
+		e := newTestHealthAlertEmitter(conn, "proc-diag-4", 1*time.Second, logger)
+		key := "health.processor.proc-diag-4.commit-conflicts"
+
+		e.RecordCommitConflict(ctx, CommitConflictInfo{ConflictingKey: "vtx.identity.abc", Lane: "default", OperationType: "UpdateThing"})
+		if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); err != nil {
+			t.Fatalf("key missing right after emit: %v", err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		expired := false
+		for time.Now().Before(deadline) {
+			if _, err := conn.KVGet(ctx, ttlTestHealthBucket, key); errors.Is(err, substrate.ErrKeyNotFound) {
+				expired = true
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if !expired {
+			t.Fatalf("commit-conflicts key %q never expired via its TTL", key)
+		}
+	})
+}
