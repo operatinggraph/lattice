@@ -387,6 +387,45 @@ Fires 6–9 (goal-regression synthesis + dispatch, diagnostics, admission contro
 
 ---
 
+## Op-effects runtime catalog (Contract #10 §10.8, Fire 6 Increment 1)
+
+Fire 1 declared op-DDL `Effects` and install-validated them, but discarded the parsed guards after
+validation — nothing persisted them anywhere a runtime reader could reach, so the registry's own Fire-4/5
+comments noted "the catalog this needs first exists at runtime with Fire 6's engine work." This increment
+closes that gap; it makes **no** dispatch-decision change (byte-identical to Fire 5).
+
+`pkgmgr.buildInstallBatch` now flattens every DDL's `Effects` map and, for each `OpMetaSpec` whose
+`OperationType` carries a non-empty entry, emits a sibling `.effects` aspect on that op-meta vertex
+(`vtx.meta.<opId>.effects`, `{"guards": [...]}` — the raw §10.5 guard-grammar predicates verbatim). An op
+with no declared Effects emits nothing extra. `validateEffects` now also rejects an Effects operationType
+with no matching `OpMetaSpec` in the same package — such an effect would have nowhere to materialize onto
+and would silently never reach any catalog (fail-closed, same doctrine as every other install validator).
+
+The Weaver registry (`registry.go`) indexes this aspect independently of the op-meta vertex envelope
+(`indexOpEffects`, keyed by vertex id) — the two CDC keys may arrive in either order, so `effectsCatalog()`
+joins them by id at read time rather than buffering. `effectsCatalog()` returns one `planner.Action` per
+operationType that has both an indexed op-meta vertex and a parsed (non-empty) `.effects` entry,
+deterministically sorted by `Ref`: `Cost` is uniformly 1 (no declared per-op cost surface exists yet) and
+`Precondition` is left nil — dispatch-time re-validation (mirroring the `proposedOp` precedent, same as
+every other action) is what actually gates whether an op may fire; the planner gets no scope the frozen
+table didn't have (design §3.3). A malformed `.effects` body is logged and dropped, never surfaced as a
+live path (pkgmgr's install-time validation already rejects that shape before it can reach Core KV).
+
+**Not yet wired** (the rest of Fire 6, checkpointed in `weaver-planner-mandate-design.md` §8): calling
+`planner.Synthesize` against this catalog to actually dispatch a `goal`-only gap. Before that lands, the
+State-schema question the catalog's own shape surfaces must be resolved: `rowState` (Fire 4/5) maps a lens
+row's columns onto **root** guard-grammar paths (`subject.data.<column>`), the convention a `goal`/`pre`
+guard is authored against — but a declared op **Effect** (e.g. `SignLease`'s
+`subject.signature.data.signedAt`) asserts an **aspect** path (`Path{Aspect:"signature", ...}`), the real
+Core-KV write. These are disjoint keys in `planner.State`: a synthesized plan's effects can never satisfy a
+row-space goal by construction, so wiring dispatch on top of today's `rowState` alone would silently return
+`ErrNoPlan` for every real op-effects catalog — a config/data-shaped bug that would ship quietly, exactly
+the class of hazard the Fire 5 pre-build gate was watching for. The next fire must decide how a goal-only
+gap's starting `State` is built (a fresh aspect read of the candidate subject, keyed to match the catalog's
+path space, is the leading candidate) before any dispatch/plan-vertex/GC work is safe to build on top.
+
+---
+
 ## Control plane (FR30)
 
 Operators manage Weaver's currently-registered convergence targets via a `nats-io/nats.go/micro`
@@ -560,7 +599,7 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 | **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
 | **Lane 2 (event-targeted-audit) + `weaver-work`** | ⏳ Phase 3 (§10.3: no durable bucket today). |
 | **Real target Lens via Refractor + playbook package data** | ✅ Shipped — the `lease-signing` reference vertical provides a real convergence target + §10.8 playbook; the engine also runs against test-written §10.2 fixture rows. |
-| **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable, not yet wired to any dispatch decision. Fire 4 ✅: `mode`/`candidates`/`goal` install-validated parsing + the shadow-compare diagnostic (see above) — still zero dispatch-decision change; the Strategist's real dispatch reads only `ga.Action`. Fire 5 ✅: `mode:"planned"` candidate selection actually dispatches (see above) — the first fire that changes a real decision; mark-pinned across reclaim, byte-identical for every other mode/explicit-action gap. Fires 6–9 (goal-regression synthesis dispatch, diagnostics, admission control, Augur floor) remain: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |
+| **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable, not yet wired to any dispatch decision. Fire 4 ✅: `mode`/`candidates`/`goal` install-validated parsing + the shadow-compare diagnostic (see above) — still zero dispatch-decision change; the Strategist's real dispatch reads only `ga.Action`. Fire 5 ✅: `mode:"planned"` candidate selection actually dispatches (see above) — the first fire that changes a real decision; mark-pinned across reclaim, byte-identical for every other mode/explicit-action gap. Fire 6 Increment 1 ✅: the runtime op-effects catalog (see above) — `pkgmgr` materializes declared Effects onto an op-meta `.effects` aspect, the registry indexes + joins it into `effectsCatalog()`; zero dispatch-decision change. Fire 6's remaining goal-regression dispatch is checkpointed on the row-vs-aspect `State`-schema question (see above); Fires 7–9 (diagnostics, admission control, Augur floor) remain: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |
 
 ---
 

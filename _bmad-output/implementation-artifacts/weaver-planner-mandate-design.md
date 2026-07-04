@@ -37,6 +37,30 @@ surface merged to `main`:
 `mode`/`candidates`/`goal` parsing + shadow compare; `mode:"planned"` candidate-selection dispatch). The
 Lattice Steward builds **Fire 6** (goal-regression synthesis dispatch) next from §8.
 
+**🏗️ Fire 6 CHECKPOINT (2026-07-04, Increment 1 of 2):** Increment 1 shipped — the runtime op-effects
+catalog Fire 4/5's own comments flagged as missing (Fire 1 validated `Effects` at install time but never
+persisted them; nothing existed for a planner to read). `pkgmgr.buildInstallBatch` now materializes each
+op-meta vertex's declared Effects onto a sibling `.effects` aspect; `validateEffects` now also requires a
+matching `OpMetaSpec` (fail-closed — an effect with nowhere to materialize would silently never reach any
+catalog); the Weaver registry indexes it (order-independent join against the op-meta envelope) and exposes
+`effectsCatalog() []planner.Action`. Zero dispatch-decision change; full detail in
+`docs/components/weaver.md` "Op-effects runtime catalog" section.
+
+**Increment 2 (next fire) must resolve first, before any dispatch/plan-vertex/GC work**: a real
+**State-schema gap** the catalog's own shape surfaces. `rowState` (Fire 4/5) maps a lens row onto **root**
+guard-grammar paths (`subject.data.<column>`) — the space a `goal`/`pre` guard is authored against — but a
+declared op **Effect** (e.g. `SignLease`'s `subject.signature.data.signedAt`) asserts an **aspect** path.
+These are disjoint keys in `planner.State`: `planner.Synthesize`'d search could never let a real catalog
+action's effects satisfy a row-authored goal, so naively wiring Fire 6 dispatch on top of `rowState` alone
+would silently return `ErrNoPlan` for every real target — a config/data-shaped bug that ships quietly,
+exactly the class of hazard the Fire 5 pre-build gate existed to catch. Leading candidate: build the
+goal-regression starting `State` from a fresh read of the candidate subject's aspects (not the lens row),
+keyed to match the catalog's path space — ground this against a real target's `goal` declaration (none
+ship yet; Fire 5 only shipped `candidates`) before committing to the shape. Only once this is resolved do
+plan-vertex compilation (`plan-<hash>`), the new op/DDL surface for Weaver to author a `meta.loomPattern`
+vertex at runtime (no existing precedent — package install is the only place one is created today), plan
+GC, and dispatch-time re-validation become safe to build.
+
 **Pre-build gate (run 2026-07-04, in the Fire 5 session):** the self-imposed adversarial pass over
 episode-stability under reclaim, focused specifically on the hazard the existing dispatch pipeline
 structurally invited — `dispatchGap`/`planGap` resolve a plan from the target's playbook *before*
