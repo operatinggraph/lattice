@@ -192,6 +192,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-04 · `1cda5d3` · [Weaver] Planner mandate Fire 6 Increment 1 — runtime op-effects catalog (pkgmgr `.effects` aspect + registry `effectsCatalog()`); zero dispatch change; Increment 2 gated on a State-schema decision
 - 2026-07-04 · `b472c91` · [Weaver] Planner mandate Fire 5 — `mode:"planned"` candidate-selection dispatch, mark-pinned across reclaim (first real dispatch-decision change); pre-build gate closed; Fire 6 next
 - 2026-07-04 · `9f6a1f2` · [Vault→Loupe] Surface enablers — health.vault heartbeat + vault.decrypt reachability + privacy-operator-grant package; unblocks loupe F12
 - 2026-07-04 · `6c134d9` · [Weaver] Planner mandate Fire 4 — `mode`/`candidates`/`goal` install-parsing + shadow-compare diagnostic (agree/diverge heartbeat metrics); zero dispatch-decision change; Fire 5 next
