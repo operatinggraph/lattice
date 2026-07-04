@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
+	"github.com/asolgan/lattice/internal/gateway/revocation"
 	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -69,6 +70,62 @@ func TestHeartbeater_EmitWritesContract5Doc(t *testing.T) {
 	reqTotal, _ := doc.Metrics["requests_total"].(float64)
 	if int64(reqTotal) != 3 {
 		t.Errorf("metrics.requests_total = %v, want 3", doc.Metrics["requests_total"])
+	}
+}
+
+// TestHeartbeater_EmitIncludesRevocationBlock locks the §2.6 heartbeat
+// extension: a fresh Heartbeater (no materializer wired) reports the
+// pre-materializer zero state, RecordRevocationSync/SetRevocationConnected
+// surface in the next emit, and revokedCount is scanned live off the
+// token-revocation bucket rather than cached at call time.
+func TestHeartbeater_EmitIncludesRevocationBlock(t *testing.T) {
+	conn, ctx := newHealthTestConn(t)
+	_, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: revocation.BucketName})
+	require.NoError(t, err)
+
+	hb := NewHeartbeater(conn, "health-kv", "gw-test-rev", &Metrics{}, nil)
+	hb.emit(ctx, "healthy")
+
+	entry, err := conn.KVGet(ctx, "health-kv", "health.gateway.gw-test-rev")
+	require.NoError(t, err)
+	var doc healthDoc
+	require.NoError(t, json.Unmarshal(entry.Value, &doc))
+
+	if !doc.Revocation.ConsumerConnected {
+		t.Error("Revocation.ConsumerConnected = false before any SetRevocationConnected(false) call, want true (assumed-connected default)")
+	}
+	if doc.Revocation.RevokedCount != 0 {
+		t.Errorf("Revocation.RevokedCount = %d, want 0 (empty bucket)", doc.Revocation.RevokedCount)
+	}
+	if doc.Revocation.LastEventSeq != 0 {
+		t.Errorf("Revocation.LastEventSeq = %d, want 0", doc.Revocation.LastEventSeq)
+	}
+	if doc.Revocation.LastSyncAt != "" {
+		t.Errorf("Revocation.LastSyncAt = %q, want empty (never synced)", doc.Revocation.LastSyncAt)
+	}
+
+	_, err = conn.KVPut(ctx, revocation.BucketName, "vtx.identity.Revoked1", []byte(`{}`))
+	require.NoError(t, err)
+	hb.SetRevocationConnected(false) // e.g. the consumer paused (§2.6 fail-safe half)
+	syncAt := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	hb.RecordRevocationSync(42, syncAt)
+	hb.emit(ctx, "healthy")
+
+	entry, err = conn.KVGet(ctx, "health-kv", "health.gateway.gw-test-rev")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(entry.Value, &doc))
+
+	if doc.Revocation.ConsumerConnected {
+		t.Error("Revocation.ConsumerConnected = true after SetRevocationConnected(false), want false")
+	}
+	if doc.Revocation.RevokedCount != 1 {
+		t.Errorf("Revocation.RevokedCount = %d, want 1", doc.Revocation.RevokedCount)
+	}
+	if doc.Revocation.LastEventSeq != 42 {
+		t.Errorf("Revocation.LastEventSeq = %d, want 42", doc.Revocation.LastEventSeq)
+	}
+	if doc.Revocation.LastSyncAt != syncAt.Format(time.RFC3339) {
+		t.Errorf("Revocation.LastSyncAt = %q, want %q", doc.Revocation.LastSyncAt, syncAt.Format(time.RFC3339))
 	}
 }
 

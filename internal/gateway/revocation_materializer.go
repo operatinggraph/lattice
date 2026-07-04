@@ -68,7 +68,7 @@ func StartRevocationMaterializer(ctx context.Context, conn *substrate.Conn, hb *
 		Stream:        bootstrap.CoreEventsStreamName,
 		FilterSubject: revocationFilterSubject,
 		DeliverPolicy: substrate.DeliverAll,
-		Handler:       revocationHandler(conn, logger),
+		Handler:       revocationHandler(conn, hb, logger),
 		Classify:      func(error) substrate.FailureClass { return substrate.ClassInfra },
 		Probe:         func(ctx context.Context) error { return conn.KVStatus(ctx, revocation.BucketName) },
 		Health:        &heartbeatIssueSink{hb: hb},
@@ -101,7 +101,7 @@ func StartRevocationMaterializer(ctx context.Context, conn *substrate.Conn, hb *
 // token-revocation bucket. Must be idempotent (at-least-once delivery): a
 // redelivered revoke re-puts the same key, a redelivered unrevoke re-deletes
 // an already-absent key (tolerated below).
-func revocationHandler(conn *substrate.Conn, logger *slog.Logger) substrate.SupervisedHandler {
+func revocationHandler(conn *substrate.Conn, hb *Heartbeater, logger *slog.Logger) substrate.SupervisedHandler {
 	return func(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
 		if len(msg.Body) == 0 {
 			return substrate.Ack, nil
@@ -130,11 +130,13 @@ func revocationHandler(conn *substrate.Conn, logger *slog.Logger) substrate.Supe
 			if _, err := conn.KVPut(ctx, revocation.BucketName, actor, doc); err != nil {
 				return substrate.Nak, fmt.Errorf("gateway: revoke %s: %w", actor, err)
 			}
+			hb.RecordRevocationSync(msg.Sequence, time.Now())
 			return substrate.Ack, nil
 		case "gateway.actorUnrevoked":
 			if err := conn.KVDelete(ctx, revocation.BucketName, actor); err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
 				return substrate.Nak, fmt.Errorf("gateway: unrevoke %s: %w", actor, err)
 			}
+			hb.RecordRevocationSync(msg.Sequence, time.Now())
 			return substrate.Ack, nil
 		default:
 			// FilterSubject scopes delivery to events.gateway.>, so an
@@ -158,12 +160,14 @@ type heartbeatIssueSink struct {
 
 func (s *heartbeatIssueSink) SetActive(context.Context) error {
 	s.hb.ClearIssue(revocationIssueKey)
+	s.hb.SetRevocationConnected(true)
 	return nil
 }
 
 func (s *heartbeatIssueSink) SetPaused(_ context.Context, reason substrate.PauseReason, lastErr string) error {
 	s.hb.SetIssue(revocationIssueKey, severityError, "revocation.consumerDisconnected",
 		"token-revocation consumer paused ("+string(reason)+"): "+lastErr)
+	s.hb.SetRevocationConnected(false)
 	return nil
 }
 
