@@ -120,7 +120,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Gateway | Edge trust boundary: JWT auth, `Lattice-Actor` stamping, read-path enforcement. Gates external actors + the real Edge node. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md) · Fire 1+2 (JWKS live poll/rotation) shipped; Fire 4 (claim-front) needs re-grounding — see [doc](../../../docs/components/gateway.md); next: read-front (behind D1.3) |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | Control-plane Capability authorization (FR30) | Both control planes (Weaver/Refractor `…/control`) should be capability-gated, not open responders. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/control-plane-capability-authz-design.md) · rides D1.2 (shipped) → buildable; deprioritized behind D1 rollout |
-| **System-actor package-op grants absent under capability auth** | A kernel system actor's platform read is the fixed 6-op `cap.<actor>` anchor, so every engine-submitted package op (MarkExpired, CreateTask, DetachObject, RecordShredFinalization) authorizes only under the dev stub (`make up` runs `LATTICE_AUTH_MODE=stub`). | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/system-actor-package-op-grants-design.md) · Fire 1 (union read) shipped `a6cfbfc`; next: Fire 2 (stub-off e2e over the 4 engine paths) |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
@@ -192,6 +191,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-03 · `80daa9b` · [Core] System-actor package-op grants Fire 2 — stub-off e2e over the 4 engine paths (Weaver/Loom/objmgr/privacy), all authorize under real capability auth; `LATTICE_PROCESSOR_AUTH_MODE` opt-in added; item CLOSED
 - 2026-07-03 · `4b5976a` · [Refractor] Personal Lens Fire 1 (PL.1) — `nats_subject` adapter + SYNC stream transport, e2e-proven through the real CDC pipeline; PL.2+ remain
 - 2026-07-03 · `6e0e205` · [Refractor] Retire legacy `simple` engine Fire 3 — engine deleted, full-only selection, `internal/refractor/fixture` + orphaned spike removed
 - 2026-07-03 · `cc2613f` · [Core] `kv.Links` Fire 1 shipped as a primitive; clinic consumer reverted, superseded by write-path slot-claims (`f37bb82`) — stands unconsumed
@@ -215,5 +215,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-02 · `04bcbf0` · [lease-signing] Vault Fire 5b-ii-d — sev-1 fix: ssn presence check always null on real Vault ciphertext, blocking every real applicant from qualifying; regression test added
 - 2026-07-02 · `98cbfe8`+`f69b3e9` · [docs] Arch-review: bridge-and-substrate-doc-refresh — bridge async SPI/poll-timeout/Augur, scheduling @every+bridge-lane, substrate ctx-sigs/6-files/object+publish+stream surfaces/godoc
 - 2026-07-02 · `6ddb1fb` · [docs/control-plane] Arch-review: control-plane-surface-contract — new `docs/components/control-plane.md` (subject grammar, per-plane op vocab, reply envelope, transport+stub auth posture, drift guard) + index row
-- 2026-07-02 · `7eb3330` · [lease-signing/loftspace-app] Vault Fire 5b-ii-c — landlord decisioning moved onto the RLS-enforced read; trusted console's Approve/Decline retired (lead review, FE-only)
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*
