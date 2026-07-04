@@ -16,19 +16,28 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     reasoning call (mirrors augur's CreateAugurReasoningClaim), recording the
 //     requester + intent. No artifact yet — the reasoning call (in the
 //     remaining increments) is what fills it in.
-//   - RecordCapabilityProposal is the op that carries a proposed artifact +
-//     its ALREADY-COMPUTED §5 deterministic-validation verdict (in the full
-//     design, computed by the bridge via pkgmgr.ValidateCapabilityArtifact
-//     before it submits this op — the same "compute client-side, submit a
-//     trusted verdict" split F-004's own install path uses). The script does
-//     NOT re-run cypher parsing or validateAll itself (a Starlark DDL script
-//     has no parser/registry access) — it trusts the payload's validation
-//     verdict from this op's privileged submitter, exactly as RecordProposal
-//     trusts the bridge's status/result. The KERNEL step-8 protected-key guard
-//     at APPLY time (a later increment's F-004 op submission) remains the
-//     authoritative, independent backstop regardless (design §5 point 4) — this
-//     op only ever produces a `pending`-or-`invalid` PROPOSAL, never a write to
-//     any other vertex.
+//   - RecordCapabilityProposal is the bridge replyOp: payload {externalRef,
+//     status, result} — the standard generic reply shape
+//     internal/bridge/dispatch.go's terminal-outcome leg always submits
+//     (mirrors augur's RecordProposal exactly). The proposal id is the bare
+//     handle in externalRef, never a separate payload field. On status=completed
+//     it decodes a single `result` JSON blob for kind/content/target/rationale/
+//     confidence/validation*/provenance*; the `validation` sub-object is the
+//     ALREADY-COMPUTED §5 deterministic-validation verdict (in the full design,
+//     computed by the bridge via pkgmgr.ValidateCapabilityArtifact before it
+//     submits this op — the same "compute client-side, submit a trusted
+//     verdict" split F-004's own install path uses). The script does NOT
+//     re-run cypher parsing or validateAll itself (a Starlark DDL script has no
+//     parser/registry access) — it trusts the decoded verdict from this op's
+//     privileged submitter (the bridge). A decode failure (empty/non-JSON/
+//     non-object result) or status=failed (a modeled refusal) NEVER fail()s the
+//     op — the bridge has already Ack'd the external event, so a reject would
+//     wedge the episode with no record; both store the proposal review.state=
+//     invalid instead (auditable, never dispatchable). The KERNEL step-8
+//     protected-key guard at APPLY time (a later increment's F-004 op
+//     submission) remains the authoritative, independent backstop regardless
+//     (design §5 point 4) — this op only ever produces a `pending`-or-`invalid`
+//     PROPOSAL, never a write to any other vertex.
 //
 // Architectural rules (binding — same known-key discipline as augur /
 // orchestration-base / lease-signing):
@@ -84,43 +93,38 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"verdict). Relationship: requestedBy (proposal→requester identity), a LINK. " +
 			"RequestCapabilityAuthoring mints the proposal vertex write-ahead with the .request aspect + the " +
 			"requestedBy link (no-orphan by construction — the requester is op.actor, the trusted submitting " +
-			"actor). RecordCapabilityProposal (payload carries kind/content/target/rationale/confidence + an " +
-			"ALREADY-COMPUTED validation verdict {state, report, deltaPreview}) requires a live .request aspect " +
-			"(the instanceOp must commit first) and writes review.state=pending only when kind is an enabled " +
-			"artifact kind (increment 1: lens only), the supplied validation.state is 'valid', and confidence is " +
-			"a real 0..1 score; otherwise review.state=invalid with the given report — the proposal is ALWAYS " +
-			"recorded (auditability), never applicable when invalid. The script does not itself run the openCypher " +
-			"parser or validateAll (no parser/registry access from Starlark) — it trusts the validation verdict from " +
-			"this op's privileged submitter (the bridge in the full design), computed by " +
-			"pkgmgr.ValidateCapabilityArtifact before submission; the kernel's F-004 apply-time step-8 guard (a " +
-			"later increment) remains the authoritative, independent backstop regardless.",
+			"actor). RecordCapabilityProposal is the bridge replyOp (payload {externalRef, status, result}, " +
+			"mirroring augur's RecordProposal): the proposal id is the bare handle in externalRef, never a " +
+			"payload field; requires a live .request aspect (the instanceOp must commit first); on " +
+			"status=completed it decodes a single result JSON blob {kind, content, target:{mode, packageName, " +
+			"baseVersion, newVersion}, rationale, confidence, validation:{state, report, deltaPreview}, " +
+			"provenance:{model, promptHash, catalogHash, reasonedAt}} — the ALREADY-COMPUTED §5 verdict travels " +
+			"as validation.state/report. Writes review.state=pending only when kind is an enabled artifact kind " +
+			"(increment 1: lens only), validation.state is 'valid', and confidence is a real 0..1 score; " +
+			"otherwise (including status=failed — a modeled refusal — and an empty/non-JSON/non-object " +
+			"completed result) review.state=invalid with an auditable invalidReason — the proposal is ALWAYS " +
+			"recorded (auditability, never fail()ed post-Ack), never applicable when invalid. The script does " +
+			"not itself run the openCypher parser or validateAll (no parser/registry access from Starlark) — it " +
+			"trusts the decoded validation verdict from this op's privileged submitter (the bridge in the full " +
+			"design), computed by pkgmgr.ValidateCapabilityArtifact before submission; the kernel's F-004 " +
+			"apply-time step-8 guard (a later increment) remains the authoritative, independent backstop " +
+			"regardless.",
 		Script: capabilityProposalDDLScript,
-		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | RecordCapabilityProposal{proposalId,kind,content,targetMode,targetPackageName,targetBaseVersion?,targetNewVersion?,rationale?,confidence,validationState,validationReport?,validationDeltaPreview?,model?,promptHash?,catalogHash?,reasonedAt?}","properties":` +
-			`{"proposalId":{"type":"string","description":"Bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Increment 1: caller-supplied (the auto-minted-by-Loom form lands with the escalation-dispatch increment)."},` +
+		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | RecordCapabilityProposal — the bridge replyOp. The bridge posts {externalRef,status,result}; the artifact/target/rationale/confidence/validation/provenance fields are decoded from a single JSON result blob, never top-level payload fields.","properties":` +
+			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring only — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied (the auto-minted-by-Loom form lands with the escalation-dispatch increment)."},` +
 			`"intent":{"type":"string","description":"RequestCapabilityAuthoring only — the plain-language capability request, e.g. 'a lens listing active providers by specialty'."},` +
 			`"contextRef":{"type":"string","description":"RequestCapabilityAuthoring only — an optional pointer to bounded context the reasoning call hydrates (opaque to this DDL)."},` +
-			`"kind":{"type":"string","description":"RecordCapabilityProposal only — the artifact kind. Increment 1 enables only 'lens'; any other value is stored review.state=invalid (auditable, never a hard reject)."},` +
-			`"content":{"type":"string","description":"RecordCapabilityProposal only — the proposed artifact's declarative content as a JSON string (kind-specific shape; for 'lens': {canonicalName, adapter, bucket, spec})."},` +
-			`"targetMode":{"type":"string","description":"RecordCapabilityProposal only — newPackage or upgradeExisting (design §3.1 .target.mode)."},` +
-			`"targetPackageName":{"type":"string","description":"RecordCapabilityProposal only — the package the artifact would install into or upgrade."},` +
-			`"targetBaseVersion":{"type":"string","description":"RecordCapabilityProposal only — upgradeExisting: the version being upgraded from."},` +
-			`"targetNewVersion":{"type":"string","description":"RecordCapabilityProposal only — the version the apply would install."},` +
-			`"rationale":{"type":"string","description":"RecordCapabilityProposal only — the model's reasoning (audit trail)."},` +
-			`"confidence":{"type":"number","description":"RecordCapabilityProposal only — the model's self-reported 0..1 confidence; out of range stores the proposal invalid."},` +
-			`"validationState":{"type":"string","description":"RecordCapabilityProposal only — the caller-computed §5 verdict: 'valid' or 'invalid' (pkgmgr.ValidateCapabilityArtifact's report, computed BEFORE this op is submitted). Any other value is a caller contract violation and rejects the op (InvalidArgument), not a stored-invalid proposal."},` +
-			`"validationReport":{"type":"string","description":"RecordCapabilityProposal only — the caller-computed validator's per-check report, stored verbatim on .validation.report for the human reviewer."},` +
-			`"validationDeltaPreview":{"type":"string","description":"RecordCapabilityProposal only — optional dry-run create/update/tombstone delta preview, stored verbatim (a later increment computes this; absent today)."},` +
-			`"model":{"type":"string","description":"RecordCapabilityProposal only — the reasoning model identifier (provenance)."},` +
-			`"promptHash":{"type":"string","description":"RecordCapabilityProposal only — provenance: a hash of what was reasoned over."},` +
-			`"catalogHash":{"type":"string","description":"RecordCapabilityProposal only — provenance: a hash of the authoring catalog snapshot reasoned over (stale-proposal detection)."},` +
-			`"reasonedAt":{"type":"string","description":"RecordCapabilityProposal only — provenance: when the model reasoned (RFC3339)."}},` +
+			`"externalRef":{"type":"string","description":"RecordCapabilityProposal only — the bare instanceKey handle of the authoring episode; the proposal vertex is vtx.capabilityproposal.<externalRef> (must match the proposalId a RequestCapabilityAuthoring already minted)."},` +
+			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
+			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables only 'lens' in this increment; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."}},` +
 			`"required":["proposalId"]}`,
 		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated proposal. The recorded review.state (pending|invalid) is read from the proposal's .review aspect, not the op response."}}}`,
 		FieldDescription: map[string]string{
-			"proposalId": "Bare NanoID naming the proposal vertex; must match between RequestCapabilityAuthoring and its RecordCapabilityProposal.",
-			"intent":     "The plain-language capability request (RequestCapabilityAuthoring).",
-			"kind":       "The artifact kind (RecordCapabilityProposal). Increment 1: 'lens' only.",
-			"content":    "The proposed artifact's declarative content, JSON-encoded (RecordCapabilityProposal).",
+			"proposalId":  "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring).",
+			"intent":      "The plain-language capability request (RequestCapabilityAuthoring).",
+			"externalRef": "The bare instanceKey handle naming the proposal vertex; must match a RequestCapabilityAuthoring's proposalId (RecordCapabilityProposal).",
+			"status":      "The bridge's terminal outcome: completed or failed (RecordCapabilityProposal).",
+			"result":      "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -135,15 +139,21 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			{
 				Name: "RecordCapabilityProposal — a valid lens artifact (already §5-validated by the caller)",
 				Payload: map[string]any{
-					"proposalId":      "capPropOneHJKMNPQRST",
-					"kind":            "lens",
-					"content":         `{"canonicalName":"activeProvidersBySpecialty","adapter":"nats-kv","bucket":"active-providers","spec":"MATCH (p:provider) RETURN p.key AS key"}`,
-					"targetMode":      "newPackage",
-					"rationale":       "no existing lens surfaces this projection",
-					"confidence":      0.86,
-					"validationState": "valid",
+					"externalRef": "capPropOneHJKMNPQRST",
+					"status":      "completed",
+					"result": `{"kind":"lens","content":"{\"canonicalName\":\"activeProvidersBySpecialty\",\"adapter\":\"nats-kv\",\"bucket\":\"active-providers\",\"spec\":\"MATCH (p:provider) RETURN p.key AS key\"}",` +
+						`"target":{"mode":"newPackage"},"rationale":"no existing lens surfaces this projection","confidence":0.86,"validation":{"state":"valid"}}`,
 				},
 				ExpectedOutcome: "review.state = pending (dispatchable in a later increment's apply op); the .artifact/.target/.rationale/.confidence/.validation/.provenance aspects are recorded.",
+			},
+			{
+				Name: "RecordCapabilityProposal — a modeled refusal",
+				Payload: map[string]any{
+					"externalRef": "capPropOneHJKMNPQRST",
+					"status":      "failed",
+					"result":      "the requested projection would expose PHI without a masking clause",
+				},
+				ExpectedOutcome: "review.state = invalid, invalidReason = 'model declined to propose (refusal)', .rationale.text carries the result verbatim.",
 			},
 		},
 	}
@@ -213,6 +223,30 @@ def alive(doc):
         return False
     return True
 
+def proposal_string(d, name):
+    if name not in d:
+        return ""
+    v = d[name]
+    if v == None or type(v) != type(""):
+        return ""
+    return v
+
+def proposal_dict(d, name):
+    if name not in d:
+        return {}
+    v = d[name]
+    if v == None or type(v) != type({}):
+        return {}
+    return v
+
+def proposal_number(d, name):
+    if name not in d:
+        return -1.0
+    v = d[name]
+    if v == None or (type(v) != type(0) and type(v) != type(0.0)):
+        return -1.0
+    return v
+
 ENABLED_KINDS = ["lens"]
 
 def execute(state, op):
@@ -243,32 +277,81 @@ def execute(state, op):
         return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
 
     if ot == "RecordCapabilityProposal":
-        proposal_id = required_bare_id(p, "proposalId")
+        # The bridge replyOp: payload {externalRef, status, result} (the standard
+        # generic reply shape internal/bridge/dispatch.go's terminal-outcome leg
+        # always submits — mirrors augur's RecordProposal exactly). The proposal
+        # id is the bare handle in externalRef, never a separate payload field.
+        proposal_id = required_bare_id(p, "externalRef")
         proposal_key = "vtx.capabilityproposal." + proposal_id
 
         request_doc = kv.Read(proposal_key + ".request")
         if not alive(request_doc):
             fail("UnknownCapabilityProposal: no live .request aspect for " + proposal_key + " (RequestCapabilityAuthoring must commit write-ahead)")
 
-        kind = required_string(p, "kind")
-        content = optional_string_attr(p, "content")
-        target_mode = optional_string_attr(p, "targetMode")
-        target_package_name = optional_string_attr(p, "targetPackageName")
-        target_base_version = optional_string_attr(p, "targetBaseVersion")
-        target_new_version = optional_string_attr(p, "targetNewVersion")
-        rationale = optional_string_attr(p, "rationale")
-        confidence = required_number(p, "confidence")
+        status = required_string(p, "status")
 
-        validation_state = required_string(p, "validationState")
-        if validation_state != "valid" and validation_state != "invalid":
-            fail("InvalidArgument: validationState: must be one of valid, invalid; got " + validation_state)
-        validation_report = optional_string_attr(p, "validationReport")
-        validation_delta_preview = optional_string_attr(p, "validationDeltaPreview")
+        review_state = "pending"
+        invalid_reason = ""
+        kind = ""
+        content = ""
+        target_mode = ""
+        target_package_name = ""
+        target_base_version = ""
+        target_new_version = ""
+        rationale = ""
+        confidence = -1.0
+        validation_state = ""
+        validation_report = ""
+        validation_delta_preview = ""
+        model = ""
+        prompt_hash = ""
+        catalog_hash = ""
+        reasoned_at = ""
 
-        model = optional_string_attr(p, "model")
-        prompt_hash = optional_string_attr(p, "promptHash")
-        catalog_hash = optional_string_attr(p, "catalogHash")
-        reasoned_at = optional_string_attr(p, "reasonedAt")
+        if status == "failed":
+            # A modeled refusal is a definitive verdict, NOT a crash: store the
+            # proposal invalid (auditable, never dispatchable) and ride the
+            # adapter's detail on the rationale for the reviewer (mirrors augur's
+            # RecordProposal refusal branch exactly).
+            review_state = "invalid"
+            invalid_reason = "model declined to propose (refusal)"
+            rationale = optional_string_attr(p, "result")
+        elif status == "completed":
+            # Decode with a None default (never raise): an empty / non-JSON /
+            # non-object result on a completed reply is a definitive verdict, NOT
+            # a crash — never fail() the op here (the bridge has already Ack'd
+            # the external event; a reject would wedge the episode with no
+            # record). Mirrors augur's RecordProposal decode exactly.
+            result_str = optional_string_attr(p, "result")
+            proposal = None
+            if len(result_str.strip()) > 0:
+                proposal = json.decode(result_str, None)
+            if type(proposal) != type({}):
+                review_state = "invalid"
+                invalid_reason = "completed reply carried no decodable JSON-object reasoning result"
+                rationale = result_str
+            else:
+                kind = proposal_string(proposal, "kind")
+                content = proposal_string(proposal, "content")
+                target = proposal_dict(proposal, "target")
+                target_mode = proposal_string(target, "mode")
+                target_package_name = proposal_string(target, "packageName")
+                target_base_version = proposal_string(target, "baseVersion")
+                target_new_version = proposal_string(target, "newVersion")
+                rationale = proposal_string(proposal, "rationale")
+                confidence = proposal_number(proposal, "confidence")
+                validation = proposal_dict(proposal, "validation")
+                validation_state = proposal_string(validation, "state")
+                validation_report = proposal_string(validation, "report")
+                validation_delta_preview = proposal_string(validation, "deltaPreview")
+                provenance = proposal_dict(proposal, "provenance")
+                model = proposal_string(provenance, "model")
+                prompt_hash = proposal_string(provenance, "promptHash")
+                catalog_hash = proposal_string(provenance, "catalogHash")
+                reasoned_at = proposal_string(provenance, "reasonedAt")
+        else:
+            review_state = "invalid"
+            invalid_reason = "unrecognized bridge status: " + status
 
         # --- §5 record-time deterministic-validation boundary (the safety core) ---
         # The proposal is ALWAYS stored (auditability); the verdict decides only
@@ -276,18 +359,19 @@ def execute(state, op):
         # dispatchable). kind enablement + confidence range are checked HERE
         # (cheap, self-contained); the heavier artifact-shape checks (cypher
         # parse, validateAll) were already run by the trusted caller via
-        # pkgmgr.ValidateCapabilityArtifact and arrive as validation_state.
-        review_state = "pending"
-        invalid_reason = ""
-        if kind not in ENABLED_KINDS:
-            review_state = "invalid"
-            invalid_reason = "artifact kind not enabled in this increment: " + kind
-        elif confidence < 0.0 or confidence > 1.0:
-            review_state = "invalid"
-            invalid_reason = "confidence out of range [0,1]: " + str(confidence)
-        elif validation_state != "valid":
-            review_state = "invalid"
-            invalid_reason = "materializer validation failed: " + validation_report
+        # pkgmgr.ValidateCapabilityArtifact and arrive as validation.state on the
+        # decoded result. Skipped when the decode itself already failed above —
+        # that verdict already stands.
+        if review_state == "pending":
+            if kind not in ENABLED_KINDS:
+                review_state = "invalid"
+                invalid_reason = "artifact kind not enabled in this increment: " + kind
+            elif confidence < 0.0 or confidence > 1.0:
+                review_state = "invalid"
+                invalid_reason = "confidence out of range [0,1]: " + str(confidence)
+            elif validation_state != "valid":
+                review_state = "invalid"
+                invalid_reason = "materializer validation failed: " + validation_report
 
         mutations = [
             make_aspect(proposal_key, "artifact", "capabilityAuthor.artifact",

@@ -129,9 +129,11 @@ func requestEnv(reqID, proposalID, intent string) *processor.OperationEnvelope {
 	}
 }
 
-// recordEnv builds the RecordCapabilityProposal payload, running the §5
+// recordEnv builds the RecordCapabilityProposal payload in the standard
+// bridge replyOp shape {externalRef, status, result} — running the §5
 // materializer HERE (the caller — exactly as the bridge will in a later
-// increment) before constructing the op.
+// increment) before JSON-encoding its verdict into the result blob exactly as
+// a real completed adapter reply would.
 func recordEnv(t *testing.T, reqID, proposalID, kind string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
 	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{})
@@ -142,18 +144,24 @@ func recordEnv(t *testing.T, reqID, proposalID, kind string, content json.RawMes
 	if report.Valid {
 		validationState = "valid"
 	}
-	payload := map[string]any{
-		"proposalId":      proposalID,
-		"kind":            kind,
-		"content":         string(content),
-		"targetMode":      "newPackage",
-		"rationale":       "reasoned capability authoring proposal",
-		"confidence":      confidence,
-		"validationState": validationState,
-	}
+	validation := map[string]any{"state": validationState}
 	if len(report.Errors) > 0 {
 		b, _ := json.Marshal(report.Errors)
-		payload["validationReport"] = string(b)
+		validation["report"] = string(b)
+	}
+	result := map[string]any{
+		"kind":       kind,
+		"content":    string(content),
+		"target":     map[string]any{"mode": "newPackage"},
+		"rationale":  "reasoned capability authoring proposal",
+		"confidence": confidence,
+		"validation": validation,
+	}
+	resultBytes, _ := json.Marshal(result)
+	payload := map[string]any{
+		"externalRef": proposalID,
+		"status":      "completed",
+		"result":      string(resultBytes),
 	}
 	b, _ := json.Marshal(payload)
 	return &processor.OperationEnvelope{

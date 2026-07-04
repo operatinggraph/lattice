@@ -120,21 +120,19 @@ whoever builds it next, so this re-derivation isn't repeated:**
    writes a create-only `.claim` aspect onto the **same, already-existing** `vtx.capabilityproposal.<id>` (no
    new vertex to mint — unlike Augur, this design already has a separate upfront `RequestCapabilityAuthoring`
    op, so the claim is just the write-ahead-before-the-call marker that closes the lens gap immediately).
-2. **Increment 1's `RecordCapabilityProposal` payload shape needs to change to fit the standard bridge
-   translator — flag this, don't skip it.** The bridge's generic externalTask reply leg
-   (`internal/bridge/dispatch.go`'s terminal-outcome path) always submits the configured `replyOp` with the
-   generic payload `{externalRef, status, result}` (`result` = the adapter's `Result.Detail`, an opaque
-   string) — confirmed on Augur's own `RecordProposal`, which decodes a single JSON `result` blob itself
-   inside the Starlark script rather than receiving `kind`/`content`/`target`/… as separate top-level payload
-   keys. Increment 1's `RecordCapabilityProposal` (as shipped, `ff25188`) was built against a flat
-   caller-supplied-field shape (`proposalId, kind, content, targetMode, …` all top-level) — that was
-   deliberately provisional (see the DDL's own `proposalId` field comment: "Increment 1: caller-supplied…").
-   **This increment must revise the script to accept `{externalRef, status, result}` and decode a single
-   `result` JSON blob for `kind/content/target/rationale/confidence/validation*/provenance*`** (mirroring
-   `packages/augur/ddls.go`'s `RecordProposal` decode exactly), derive `proposalId` from `externalRef` (not a
-   payload field), and update `proposal_test.go` accordingly. Do this revision **before** wiring the Loom
-   pattern, not after — building the pattern against the current (wrong) shape would ship an escalation path
-   that can never actually close.
+2. **✅ DONE — `RecordCapabilityProposal` payload shape revised to fit the standard bridge translator
+   (Steward, 2026-07-04).** `RecordCapabilityProposal` now accepts the standard bridge replyOp shape
+   `{externalRef, status, result}` exactly like augur's `RecordProposal`: `proposalId` is derived from the
+   bare `externalRef` handle (no longer a separate payload field); on `status=completed` the script decodes
+   a single `result` JSON blob for `kind/content/target{mode,packageName,baseVersion,newVersion}/rationale/
+   confidence/validation{state,report,deltaPreview}/provenance{model,promptHash,catalogHash,reasonedAt}`
+   (mirroring `packages/augur/ddls.go`'s `proposal_string`/`proposal_dict`/`proposal_number` decode helpers
+   verbatim); `status=failed` (a modeled refusal) and an undecodable/non-object `result` both store the
+   proposal `review.state=invalid` rather than `fail()`ing the op — the bridge has already Ack'd the
+   external event, so a reject would wedge the episode with no record (same posture as augur). The §5
+   kind/confidence/validation boundary check now runs only when the decode itself didn't already produce a
+   verdict. `proposal_test.go`'s `recordEnv` helper updated to build the new shape; all 6 tests green.
+   **Ready for the next fire's Loom-pattern wiring** against the now-correct shape.
 
 ---
 
