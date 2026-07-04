@@ -33,8 +33,10 @@ surface merged to `main`:
   the §10.8 Planner-extension subsection are **frozen on `main`**. The other four
   `contract-10-weaver-text-reconciliation` drift spots remain on that backlog row.
 
-**Next:** the Lattice Steward builds **Fire 1** (op-DDL `effects` + pkgmgr validation, zero engine
-behavior change) from §8. The pre-Fire-5 adversarial gate (§8) is a standing Steward obligation.
+**Next:** Fires 1–4 shipped (op-DDL `effects`; `__effect` confidence window; the pure `planner` library;
+`mode`/`candidates`/`goal` parsing + shadow compare). The Lattice Steward builds **Fire 5** (`candidates`
+selection dispatch) next from §8. The pre-Fire-5 adversarial gate (§8) is a standing Steward obligation —
+still pending, since Fire 5 is next.
 
 ---
 

@@ -344,3 +344,105 @@ func TestRegistry_AugurBlockRoundTrips(t *testing.T) {
 		t.Fatalf("autoApply not round-tripped: %+v", tgt.Augur.AutoApply)
 	}
 }
+
+// TestValidateTarget_Mode proves the §10.8 Planner-extension `mode` field is
+// install-validated: absent and the two known values pass; anything else
+// rejects the whole target.
+func TestValidateTarget_Mode(t *testing.T) {
+	t.Parallel()
+	base := func(mode string) *Target {
+		return &Target{
+			TargetID: "fixtureMode",
+			Mode:     mode,
+			Gaps:     map[string]GapAction{"missing_a": {Action: actionDirectOp, Operation: "FixA"}},
+		}
+	}
+	for _, mode := range []string{"", targetModeShadow, targetModePlanned} {
+		if err := validateTarget(base(mode)); err != nil {
+			t.Fatalf("mode %q must pass: %v", mode, err)
+		}
+	}
+	err := validateTarget(base("eager"))
+	if err == nil {
+		t.Fatalf("an unknown mode must be rejected")
+	}
+	if !strings.Contains(err.Error(), "not a known planner mode") {
+		t.Fatalf("unexpected rejection reason: %v", err)
+	}
+}
+
+// TestValidateTarget_Candidates proves a gap's `candidates` list is
+// install-validated: each entry needs a non-empty action and a non-negative
+// cost, and a well-formed `pre` guard parses (rejecting a malformed one) —
+// mirroring the op-DDL effects fail-wholesale doctrine.
+func TestValidateTarget_Candidates(t *testing.T) {
+	t.Parallel()
+	valid := &Target{
+		TargetID: "fixtureCandidates",
+		Mode:     targetModeShadow,
+		Gaps: map[string]GapAction{
+			"missing_a": {Candidates: []GapCandidate{
+				{Action: "FixA", Cost: 1},
+				{Action: "FixB", Cost: 2, Pre: json.RawMessage(`{"present":"subject.data.applicant"}`)},
+			}},
+		},
+	}
+	if err := validateTarget(valid); err != nil {
+		t.Fatalf("valid candidates must pass: %v", err)
+	}
+	if got := valid.Gaps["missing_a"].Candidates[1].preGuard; got == nil {
+		t.Fatalf("a well-formed pre guard must be parsed and cached")
+	}
+
+	noAction := &Target{TargetID: "fixtureCandNoAction", Gaps: map[string]GapAction{
+		"missing_a": {Candidates: []GapCandidate{{Cost: 1}}},
+	}}
+	err := validateTarget(noAction)
+	if err == nil || !strings.Contains(err.Error(), "has no action") {
+		t.Fatalf("a candidate with no action must be rejected: %v", err)
+	}
+
+	negCost := &Target{TargetID: "fixtureCandNegCost", Gaps: map[string]GapAction{
+		"missing_a": {Candidates: []GapCandidate{{Action: "FixA", Cost: -1}}},
+	}}
+	err = validateTarget(negCost)
+	if err == nil || !strings.Contains(err.Error(), "must be >= 0") {
+		t.Fatalf("a negative cost must be rejected: %v", err)
+	}
+
+	badPre := &Target{TargetID: "fixtureCandBadPre", Gaps: map[string]GapAction{
+		"missing_a": {Candidates: []GapCandidate{
+			{Action: "FixA", Pre: json.RawMessage(`{"bogus":"x"}`)},
+		}},
+	}}
+	err = validateTarget(badPre)
+	if err == nil {
+		t.Fatalf("a malformed pre guard must reject the whole target")
+	}
+}
+
+// TestValidateTarget_Goal proves a gap's `goal` parses as a well-formed §10.5
+// guard (rejecting a malformed one) and is cached on the parsed target — not
+// yet consumed anywhere (Fire 6).
+func TestValidateTarget_Goal(t *testing.T) {
+	t.Parallel()
+	valid := &Target{
+		TargetID: "fixtureGoal",
+		Gaps: map[string]GapAction{
+			"missing_a": {Goal: json.RawMessage(`{"present":"subject.data.signature"}`)},
+		},
+	}
+	if err := validateTarget(valid); err != nil {
+		t.Fatalf("a well-formed goal must pass: %v", err)
+	}
+	if valid.Gaps["missing_a"].goalGuard == nil {
+		t.Fatalf("a well-formed goal must be parsed and cached")
+	}
+
+	bad := &Target{TargetID: "fixtureBadGoal", Gaps: map[string]GapAction{
+		"missing_a": {Goal: json.RawMessage(`{"bogus":"x"}`)},
+	}}
+	if err := validateTarget(bad); err == nil {
+		t.Fatalf("a malformed goal must reject the whole target")
+	}
+}

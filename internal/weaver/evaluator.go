@@ -166,6 +166,11 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 		ga = esc
 	}
 
+	// Fire 4 shadow comparison (Contract #10 §10.8 Planner extension):
+	// diagnostic-only, never alters what fires below. A no-op unless the
+	// target is mode:"shadow" and this gap declares candidates.
+	e.shadowCompare(ctx, target, targetID, entityID, col, ga, row)
+
 	// The row's substrate per-key revision arrives free on the CDC message
 	// (the backing-stream sequence IS the KV revision) — the op payload's OCC
 	// revision-condition. A zero sequence means JetStream metadata is

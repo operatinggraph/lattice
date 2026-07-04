@@ -101,6 +101,7 @@ type heartbeater struct {
 	marks     *markStore
 	sweep     *sweeper
 	temporal  *temporalStats
+	shadow    *shadowStats
 	logger    *slog.Logger
 
 	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
@@ -118,7 +119,7 @@ type heartbeater struct {
 
 func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every time.Duration,
 	states *healthkv.ConsumerStateCache, issues *issueCache, source *targetSource, marks *markStore,
-	sweep *sweeper, temporal *temporalStats, logger *slog.Logger) *heartbeater {
+	sweep *sweeper, temporal *temporalStats, shadow *shadowStats, logger *slog.Logger) *heartbeater {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -137,6 +138,7 @@ func newHeartbeater(conn *substrate.Conn, healthBucket, instance string, every t
 		marks:                 marks,
 		sweep:                 sweep,
 		temporal:              temporal,
+		shadow:                shadow,
 		logger:                logger,
 		ttlMultiplier:         healthkv.DefaultTTLMultiplier,
 		effectMismatchAlerted: make(map[string]struct{}),
@@ -211,6 +213,11 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		metrics["timersFired"] = h.temporal.fired.Load()
 	}
 	h.flagEffectMismatches(ctx, metrics)
+	if h.shadow != nil {
+		if snap := h.shadow.snapshot(); len(snap) > 0 {
+			metrics["plannerShadow"] = snap
+		}
+	}
 
 	issues := h.issues.snapshot()
 	for name, state := range states {

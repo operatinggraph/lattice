@@ -291,7 +291,7 @@ observed closes** — the loud surface for "dispatches commit but closes never a
 guard, a lens projecting the wrong column, or a remediation that silently no-ops), clearing once a
 close lands or the window ages back below K. `metrics.effectMismatches` carries the live count.
 
-Fires 4–9 (`mode`/`candidates`/`goal` parsing, shadow compare, selection, goal regression,
+Fires 4–9 (`mode`/`candidates`/`goal` parsing + shadow compare, selection, goal regression,
 diagnostics, admission control, the Augur floor) remain — see
 `weaver-planner-mandate-design.md` §8. Fire 2 changes **no** dispatch decision.
 
@@ -319,6 +319,39 @@ then `actionRef` lexicographically) before every search, so the caller's slice o
 result; ties between equal-cost plans break on the lexicographic join of their action-ref sequence.
 `maxDepth` bounds search depth as a backstop against oscillating effects. No dispatch wiring yet — the
 Strategist does not call this package (Fire 5 candidate selection, Fire 6 full synthesis).
+
+---
+
+## `mode`/`candidates`/`goal` parsing + shadow compare (Contract #10 §10.8, Fire 4)
+
+`meta.weaverTarget` gains three optional, install-validated fields (`registry.go`): a target-level
+`mode` (`"shadow" | "planned"`, absent = every target installed before this fire, byte-identical), and
+per-gap `candidates` (`[]GapCandidate` — an alternative-action list, each with `action`/`pattern`/
+`subject`/.../`params`/`reads` mirroring `GapAction`, plus an optional `pre` guard and a `cost`) and
+`goal` (a raw §10.5 guard). `validateTarget` rejects the whole target on a malformed `mode`, a
+candidate with no `action` or a negative `cost`, or a `pre`/`goal` that fails `guardgrammar.Parse` —
+the parsed guards are cached on the registered `Target` (`preGuard`/`goalGuard`) so nothing re-parses
+per dispatch. **Zero dispatch change**: `dispatchGap` still reads `ga.Action` exactly as before; a
+target with none of these fields set behaves identically to pre-Fire-4.
+
+**Shadow compare** (`planner_shadow.go`) is the diagnostic Fire 4 actually runs: for a `mode:"shadow"`
+target whose gap declares `candidates`, `Engine.shadowCompare` independently ranks them — eligible
+first (`pre` evaluated against the row, each column addressed as `subject.data.<column>`, the
+row-is-`planner.State` convention `internal/weaver/planner` already documents), then higher windowed
+close-rate (reading the Fire-2 `__effect` bookkeeping via the new `markStore.effectCloseRate`), then
+lower `cost`, then lexicographic `actionRef` — and compares the pick to `ga.Action` (the table's actual
+dispatch). The comparison runs **after** the real dispatch decision is made and **never feeds back into
+it**: `shadowCompare` reads `ga`, ranks, and records; it has no path to `fireEpisode`. Agree/diverge
+counters and a bounded (`shadowDivergenceHistory` = 10) per-target divergence log are in-memory only
+(`shadowStats`, reset on restart — "diagnostic, not business truth", design §7) and surface on the
+heartbeat as `metrics.plannerShadow.<targetId>.{agree,diverge,recentDivergences}`, present only once a
+target has run at least one comparison. `goal`-based shadow comparison is deliberately **not** run here
+— ranking a synthesized plan needs the installed op-effects catalog, which first exists at runtime with
+Fire 6's engine work; `goal` is parsed + validated now so Fire 6 has nothing left to reject at install
+time.
+
+Fires 5–9 (selection dispatch, goal-regression synthesis + dispatch, diagnostics, admission control, the
+Augur floor) remain — see `weaver-planner-mandate-design.md` §8. Fire 4 changes **no** dispatch decision.
 
 ---
 
@@ -495,7 +528,7 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 | **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
 | **Lane 2 (event-targeted-audit) + `weaver-work`** | ⏳ Phase 3 (§10.3: no durable bucket today). |
 | **Real target Lens via Refractor + playbook package data** | ✅ Shipped — the `lease-signing` reference vertical provides a real convergence target + §10.8 playbook; the engine also runs against test-written §10.2 fixture rows. |
-| **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable, not yet wired to any dispatch decision. Zero engine behavior change through Fire 3 — the Strategist does not read `Effects` or call `planner` yet. Fires 4–9 (shadow mode, selection, synthesis, diagnostics, admission control, Augur floor) remain: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |
+| **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable, not yet wired to any dispatch decision. Fire 4 ✅: `mode`/`candidates`/`goal` install-validated parsing + the shadow-compare diagnostic (see above) — still zero dispatch-decision change; the Strategist's real dispatch reads only `ga.Action`. Fires 5–9 (selection dispatch, synthesis dispatch, diagnostics, admission control, Augur floor) remain: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |
 
 ---
 

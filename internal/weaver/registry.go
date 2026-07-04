@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/asolgan/lattice/internal/guardgrammar"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -37,6 +38,18 @@ const (
 	escalateExhausted   = "exhausted"
 )
 
+// Planner-extension target modes (Contract #10 §10.8 "Planner extension",
+// Fire 4): absent (empty string) is the default — frozen table-only
+// behavior, byte-identical to every target installed before this fire.
+// "shadow" computes the planner's pick for each gap declaring candidates and
+// compares it against the table's actual dispatch (never dispatching it);
+// "planned" is parsed and validated identically but not yet consumed —
+// Fires 5/6 wire its dispatch.
+const (
+	targetModeShadow  = "shadow"
+	targetModePlanned = "planned"
+)
+
 // singleTokenPattern accepts a value usable as a single NATS KV key segment,
 // subject token, and durable-name segment: no dots, no wildcards, no spaces.
 // Applied to targetId and gap-column names at install time and to the engine
@@ -60,6 +73,56 @@ type GapAction struct {
 	// directOp that must read its candidate vertex (e.g. TombstoneObject) routes
 	// the candidate key from the lens row (row.entityKey) into the op's reads.
 	Reads []string `json:"reads,omitempty"`
+
+	// Candidates is the Fire-5 selection surface (§10.8 Planner extension): an
+	// explicit, package-authored set of alternative actions the planner ranks
+	// and picks ONE from — consulted only when Action is empty (the explicit
+	// action always wins). Fire 4 parses + install-validates this list and, on
+	// a mode:"shadow" target, independently ranks it to compare against the
+	// table's actual dispatch (planner_shadow.go); the pick is never dispatched
+	// until Fire 5.
+	Candidates []GapCandidate `json:"candidates,omitempty"`
+	// Goal is the Fire-6 synthesis target (§10.8 Planner extension): bounded
+	// goal regression over the installed op-effects catalog. Parsed +
+	// install-validated here (goalGuard); not yet consumed — the catalog this
+	// needs to plan or shadow-compare against first exists at runtime with
+	// Fire 6's engine work.
+	Goal json.RawMessage `json:"goal,omitempty"`
+
+	// goalGuard is Goal parsed once at install-validation time (nil unless Goal
+	// is set — a valid goal always parses, validateTarget rejects the target
+	// otherwise). Unexported: no engine path reads it yet.
+	goalGuard *guardgrammar.Guard `json:"-"`
+}
+
+// GapCandidate is one playbook-authored alternative in a gap's `candidates`
+// list (§10.8 Planner extension, Fire 5 selection): the same action-contract
+// shape as GapAction (action/pattern/subject/... — a chosen candidate
+// dispatches exactly like an explicit GapAction), plus an optional
+// precondition (Pre) gating eligibility and a Cost the ranking prefers lower.
+type GapCandidate struct {
+	Action    string            `json:"action"`
+	Pattern   string            `json:"pattern,omitempty"`
+	Subject   string            `json:"subject,omitempty"`
+	Adapter   string            `json:"adapter,omitempty"`
+	Operation string            `json:"operation,omitempty"`
+	Assignee  string            `json:"assignee,omitempty"`
+	Target    string            `json:"target,omitempty"`
+	Params    map[string]string `json:"params,omitempty"`
+	Reads     []string          `json:"reads,omitempty"`
+	// Pre gates this candidate's eligibility, evaluated against the §10.2 row
+	// (each row column addressed as subject.data.<column> — the same
+	// row-is-State convention internal/weaver/planner's State documents).
+	// Omitted means always eligible.
+	Pre json.RawMessage `json:"pre,omitempty"`
+	// Cost ranks candidates ascending (cheaper preferred); ties break on Action
+	// lexicographically — the same canonical tie-break internal/weaver/planner
+	// uses.
+	Cost int `json:"cost,omitempty"`
+
+	// preGuard is Pre parsed once at install-validation time (nil = always
+	// eligible). Unexported: read only by the Fire-4 shadow-compare ranking.
+	preGuard *guardgrammar.Guard `json:"-"`
 }
 
 // Target is a parsed meta.weaverTarget body (Contract #10 §10.8): the binding
@@ -74,6 +137,14 @@ type Target struct {
 	// behaves exactly as the frozen contract — an unplannable gap fails closed.
 	// The block redirects that dead-end to the Augur reasoning tier.
 	Augur *AugurPolicy `json:"augur,omitempty"`
+
+	// Mode selects the planner-extension posture (§10.8 Planner extension,
+	// Fire 4): "" (absent, the default — every target installed before this
+	// fire) is frozen table-only behavior, byte-identical; targetModeShadow
+	// computes + records the planner's pick per gap but never dispatches it;
+	// targetModePlanned is parsed and validated identically but not yet
+	// consumed (Fires 5/6 wire its dispatch).
+	Mode string `json:"mode,omitempty"`
 }
 
 // AugurPolicy is a target's parsed `augur` block (Contract #10 §10.8 "Augur
@@ -403,6 +474,9 @@ func validateTarget(t *Target) error {
 		return fmt.Errorf("targetId %q is not a valid single KV-key segment (must match %s)",
 			t.TargetID, singleTokenPattern.String())
 	}
+	if t.Mode != "" && t.Mode != targetModeShadow && t.Mode != targetModePlanned {
+		return fmt.Errorf("mode %q is not a known planner mode (%s | %s)", t.Mode, targetModeShadow, targetModePlanned)
+	}
 	for col, ga := range t.Gaps {
 		if len(col) <= len(gapColumnPrefix) || col[:len(gapColumnPrefix)] != gapColumnPrefix {
 			return fmt.Errorf("gaps key %q does not match the missing_<gap> column convention", col)
@@ -414,11 +488,51 @@ func validateTarget(t *Target) error {
 		if _, reserved := ga.Params["expectedRevision"]; reserved {
 			return fmt.Errorf("gaps key %q: param \"expectedRevision\" is reserved (the engine writes the OCC revision-condition under that payload field)", col)
 		}
+		parsedGa, err := validateGapPlannerFields(col, ga)
+		if err != nil {
+			return err
+		}
+		t.Gaps[col] = parsedGa
 	}
 	if err := validateAugurPolicy(t.Augur); err != nil {
 		return err
 	}
 	return nil
+}
+
+// validateGapPlannerFields runs the §10.8 Planner-extension install-time
+// validations on one gap's optional `candidates`/`goal` (Fire 4): each
+// candidate's `pre`, and the gap's `goal`, must parse as a well-formed §10.5
+// guard (guardgrammar.Parse); a Cost must be non-negative. Parsed guards are
+// cached on the returned copy (preGuard/goalGuard) so the Fire-4 shadow
+// comparison never re-parses per dispatch. A malformed guard rejects the
+// WHOLE target — same fail-wholesale doctrine as op-DDL effects and pattern
+// load.
+func validateGapPlannerFields(col string, ga GapAction) (GapAction, error) {
+	for i, cand := range ga.Candidates {
+		if cand.Action == "" {
+			return ga, fmt.Errorf("gaps key %q: candidates[%d] has no action", col, i)
+		}
+		if cand.Cost < 0 {
+			return ga, fmt.Errorf("gaps key %q: candidates[%d].cost %d must be >= 0", col, i, cand.Cost)
+		}
+		if len(cand.Pre) > 0 {
+			g, err := guardgrammar.Parse(cand.Pre)
+			if err != nil {
+				return ga, fmt.Errorf("gaps key %q: candidates[%d].pre: %w", col, i, err)
+			}
+			cand.preGuard = g
+			ga.Candidates[i] = cand
+		}
+	}
+	if len(ga.Goal) > 0 {
+		g, err := guardgrammar.Parse(ga.Goal)
+		if err != nil {
+			return ga, fmt.Errorf("gaps key %q: goal: %w", col, err)
+		}
+		ga.goalGuard = g
+	}
+	return ga, nil
 }
 
 // validateAugurPolicy runs the §10.8 "Augur escalation" structural validations

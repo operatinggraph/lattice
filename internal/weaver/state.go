@@ -514,6 +514,37 @@ func (m *markStore) recordEffectClose(ctx context.Context, targetID, gapColumn, 
 	return fmt.Errorf("weaver: effect stats %s contended past %d retries", key, dispatchCountCASRetries)
 }
 
+// effectCloseRate reads the (targetID, gapColumn, actionRef) confidence
+// window and returns the fraction of its recorded episodes observed to close
+// (closed / len(Window)), plus the sample size. ok=false means no window
+// exists yet (nothing has ever dispatched this pair) — the Fire-4 shadow
+// ranking treats that as "no data", never as a zero close-rate. A read
+// failure other than key-not-found is returned so the caller can log it
+// without silently ranking on stale data.
+func (m *markStore) effectCloseRate(ctx context.Context, targetID, gapColumn, actionRef string) (rate float64, sampleSize int, ok bool, err error) {
+	entry, gErr := m.conn.KVGet(ctx, m.bucket, effectKey(targetID, gapColumn, actionRef))
+	if gErr != nil {
+		if errors.Is(gErr, substrate.ErrKeyNotFound) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, gErr
+	}
+	var stats effectStats
+	if uErr := json.Unmarshal(entry.Value, &stats); uErr != nil {
+		return 0, 0, false, fmt.Errorf("weaver: unmarshal effect stats %s: %w", effectKey(targetID, gapColumn, actionRef), uErr)
+	}
+	if len(stats.Window) == 0 {
+		return 0, 0, false, nil
+	}
+	closed := 0
+	for _, w := range stats.Window {
+		if w {
+			closed++
+		}
+	}
+	return float64(closed) / float64(len(stats.Window)), len(stats.Window), true, nil
+}
+
 // effectMismatch names one (target, gapColumn, actionRef) confidence window
 // whose last effectWindowSize dispatch episodes recorded ZERO observed
 // closes — the heartbeat-cadence signal for "dispatches commit but closes
