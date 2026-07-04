@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/asolgan/lattice/internal/gateway/revocation"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -29,16 +30,29 @@ const (
 // component is "gateway" (already reserved by Contract #5 §5.1 as a Phase 2+
 // component name).
 type healthDoc struct {
-	Key         string         `json:"key"`
-	Component   string         `json:"component"`
-	Instance    string         `json:"instance"`
-	Version     string         `json:"version"`
-	Status      string         `json:"status"`
-	HeartbeatAt string         `json:"heartbeatAt"`
-	StartedAt   string         `json:"startedAt"`
-	Uptime      string         `json:"uptime"`
-	Metrics     map[string]any `json:"metrics"`
-	Issues      []healthIssue  `json:"issues"`
+	Key         string          `json:"key"`
+	Component   string          `json:"component"`
+	Instance    string          `json:"instance"`
+	Version     string          `json:"version"`
+	Status      string          `json:"status"`
+	HeartbeatAt string          `json:"heartbeatAt"`
+	StartedAt   string          `json:"startedAt"`
+	Uptime      string          `json:"uptime"`
+	Metrics     map[string]any  `json:"metrics"`
+	Issues      []healthIssue   `json:"issues"`
+	Revocation  revocationBlock `json:"revocation"`
+}
+
+// revocationBlock is the token-revocation kill-switch's live-state summary
+// (gateway-token-revocation-activation-design.md §2.6) — the Loupe F11
+// revoke-panel's read surface. consumerConnected reflects the materializer's
+// events.gateway.> consumer; the other three fields describe the local
+// token-revocation bucket it maintains.
+type revocationBlock struct {
+	ConsumerConnected bool   `json:"consumerConnected"`
+	RevokedCount      int    `json:"revokedCount"`
+	LastEventSeq      uint64 `json:"lastEventSeq"`
+	LastSyncAt        string `json:"lastSyncAt"`
 }
 
 type healthIssue struct {
@@ -118,6 +132,16 @@ type Heartbeater struct {
 	startedAt time.Time
 	logger    *slog.Logger
 	now       func() time.Time
+
+	// revocation* track the token-revocation materializer's live state
+	// (§2.6) — set by StartRevocationMaterializer's consumer/health-sink,
+	// read by emit() on every heartbeat. revocationConnected defaults to
+	// true in NewHeartbeater (assumed-connected until proven otherwise);
+	// revocationLastSeq/revocationLastSync default to zero ("never synced")
+	// until the materializer's first fold.
+	revocationConnected atomic.Bool
+	revocationLastSeq   atomic.Uint64
+	revocationLastSync  atomic.Int64 // UnixNano; 0 = never synced
 }
 
 // NewHeartbeater builds a Heartbeater. bucket is the Health KV bucket name
@@ -127,7 +151,7 @@ func NewHeartbeater(conn *substrate.Conn, bucket, instance string, metrics *Metr
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Heartbeater{
+	hb := &Heartbeater{
 		conn:      conn,
 		bucket:    bucket,
 		instance:  instance,
@@ -138,6 +162,14 @@ func NewHeartbeater(conn *substrate.Conn, bucket, instance string, metrics *Metr
 		logger:    logger,
 		now:       time.Now,
 	}
+	// Assumed connected until a materializer's health sink reports otherwise
+	// (mirrors heartbeatIssueSink.Load's "no persisted pause ⇒ active"
+	// default) — the ConsumerSupervisor only calls SetActive/SetPaused on a
+	// state *transition*, never on a steady-state healthy pump, so a
+	// zero-value false default would wrongly read "disconnected" for the
+	// entire life of a materializer that never once failed.
+	hb.revocationConnected.Store(true)
+	return hb
 }
 
 // SetIssue records an active Contract #5 issue under key, surfaced on every
@@ -149,6 +181,45 @@ func (h *Heartbeater) SetIssue(key, severity, code, message string) {
 // ClearIssue removes a previously-set issue; a no-op if key isn't set.
 func (h *Heartbeater) ClearIssue(key string) {
 	h.issues.clear(key)
+}
+
+// SetRevocationConnected records the token-revocation materializer's
+// events.gateway.> consumer connectivity, surfaced in the next heartbeat's
+// revocation.consumerConnected field. Safe for concurrent use with Run.
+func (h *Heartbeater) SetRevocationConnected(connected bool) {
+	h.revocationConnected.Store(connected)
+}
+
+// RecordRevocationSync marks a successful revoke/unrevoke fold at the given
+// backing-stream sequence, surfaced in the next heartbeat's
+// revocation.lastEventSeq/lastSyncAt fields. Safe for concurrent use with Run.
+func (h *Heartbeater) RecordRevocationSync(seq uint64, at time.Time) {
+	h.revocationLastSeq.Store(seq)
+	h.revocationLastSync.Store(at.UnixNano())
+}
+
+// revocationSnapshot builds the current revocation heartbeat block.
+// revokedCount is scanned live off the token-revocation bucket (a compacting,
+// latest-per-actor set — cheap even at heartbeat cadence, mirroring Loom's
+// running-instance heartbeat counter). A scan failure (e.g. the bucket isn't
+// open in a test/degraded process) reports 0 rather than failing the
+// heartbeat — this is an observability field, not the fail-closed check
+// (that stays revocation.Checker's per-request read).
+func (h *Heartbeater) revocationSnapshot(ctx context.Context) revocationBlock {
+	count := 0
+	if keys, err := h.conn.KVListKeys(ctx, revocation.BucketName); err == nil {
+		count = len(keys)
+	}
+	lastSync := ""
+	if ns := h.revocationLastSync.Load(); ns != 0 {
+		lastSync = time.Unix(0, ns).UTC().Format(time.RFC3339)
+	}
+	return revocationBlock{
+		ConsumerConnected: h.revocationConnected.Load(),
+		RevokedCount:      count,
+		LastEventSeq:      h.revocationLastSeq.Load(),
+		LastSyncAt:        lastSync,
+	}
 }
 
 // Run blocks, emitting a heartbeat immediately and then every h.every, until
@@ -185,6 +256,7 @@ func (h *Heartbeater) emit(ctx context.Context, status string) {
 		Uptime:      formatUptime(now.Sub(h.startedAt)),
 		Metrics:     h.metrics.snapshot(),
 		Issues:      issues,
+		Revocation:  h.revocationSnapshot(ctx),
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {

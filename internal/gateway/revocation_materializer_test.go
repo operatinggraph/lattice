@@ -124,6 +124,12 @@ func TestRevocationMaterializer_LiveRevokeThenUnrevoke(t *testing.T) {
 		return err == nil
 	}, 5*time.Second, 20*time.Millisecond, "revoked key never appeared")
 
+	// §2.6: a successful fold must surface in the heartbeat's revocation
+	// state as a non-zero synced sequence.
+	require.Eventually(t, func() bool {
+		return hb.revocationLastSeq.Load() > 0
+	}, 5*time.Second, 20*time.Millisecond, "heartbeat revocation state never reflected the live revoke")
+
 	publishRevocationEvent(t, ctx, conn, "gateway.actorUnrevoked", map[string]any{
 		"actor": targetActor, "at": "2026-07-03T02:00:00Z", "by": "vtx.identity.operator",
 	})
