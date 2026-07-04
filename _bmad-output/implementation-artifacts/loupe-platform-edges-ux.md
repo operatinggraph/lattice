@@ -22,6 +22,20 @@ same conventions; the program's §14 fire table gains F10–F13 (see §7 below).
 > - **Accepted as-is (Winston):** Vault `lateral` render-flag (§1.2); ship the **v1 flow-liveness scrubber**
 >   first, edge-level pulse as the F3-gated upgrade behind the same UI (§4.2).
 
+> **Build checkpoint — F10 SHIPPED 2026-07-03** (`1c77a6c`; in-browser-verify fixes `8170a25` `7165ee6`;
+> 3-layer review fixes `6e6d0f4` — review clean: 0 critical/major, acceptance 19 MET / 3 acceptable
+> deviations / 0 material). Deviations from §1's letter, each serving the clause's intent: the ◇ tag rides
+> its own node line (the head-row tag truncated node labels); object-store sits in its own tier-4 slot
+> right of the (narrowed) lens shelf (inside the scrollable shelf it hid below the fold and the chronicler
+> edge pointed into clipped overflow); the external→gateway edge is unlabelled (the ingress chip carries
+> the text once). Beyond-spec hardening from review: **per-process ever-live memory** — heartbeats TTL out
+> of Health KV, so a deployed-then-crashed design-ahead component now reads honest absent-red instead of
+> reverting to "not yet deployed" (memory resets on Loupe restart — the accepted residual until each flag
+> drops); the component page's pill + empty-state copy agree with the map node; the pulse animation skips
+> design-ahead consumers. Gateway ships `designAhead:true` per §1.5's fallback — **flip it off when ask A
+> (up-full) lands.** Residual accepted: event keys without a heartbeat can contradict the design-ahead
+> label (rare; narrows once ever-live marks the group).
+
 **Why a companion doc, not an append.** The program doc is already ~740 lines and its §14 explicitly
 anticipates cross-linked follow-on fires ("the flagged Loupe-side PG seam ships in F9"). F10–F13 add a new
 *topology dimension* (three components at the edges) and a whole new *leg* (history / the Time Machine),
