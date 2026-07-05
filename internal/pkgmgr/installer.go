@@ -406,6 +406,13 @@ var ErrVersionMismatch = errors.New("pkgmgr: installed package version differs f
 // the install is rejected.
 var ErrCanonicalNameCollision = errors.New("pkgmgr: meta canonicalName already present in the kernel")
 
+// ErrUninstallConflict is returned by Uninstall when a declared key was
+// modified concurrently between this uninstall's read and its commit
+// (F-011 per-key OCC, Contract #8 §8.3). The atomic batch rejects the whole
+// tombstone set, so the package is left fully installed — re-run the
+// uninstall to retry against the current state.
+var ErrUninstallConflict = errors.New("pkgmgr: uninstall conflict — a declared key changed concurrently")
+
 // ErrBootstrapRequired is returned when the core-kv bucket is absent,
 // indicating bootstrap has not been run.
 var ErrBootstrapRequired = errors.New("pkgmgr: core-kv bucket not found — run bootstrap (or make up) before installing packages")
@@ -630,41 +637,52 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 		return nil, fmt.Errorf("pkgmgr: parse %s: %w", manifestKey, err)
 	}
 	declaredRaw, _ := env.Data["declaredKeys"].([]any)
+	seen := make(map[string]struct{}, len(declaredRaw)+2)
 	keys := make([]string, 0, len(declaredRaw)+2)
+	appendKey := func(k string) {
+		if k == "" {
+			return
+		}
+		if _, dup := seen[k]; dup {
+			return
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
 	for _, dk := range declaredRaw {
-		if s, ok := dk.(string); ok && s != "" {
-			keys = append(keys, s)
+		if s, ok := dk.(string); ok {
+			appendKey(s)
 		}
 	}
-	// Manifest aspect (not in declaredKeys — captured before its own key
-	// was added during install) + package vertex itself, tombstoned last.
-	keys = append(keys, manifestKey, ip.Key)
+	// The manifest aspect's own key is never in declaredKeys (captured before
+	// it was added during install); the package vertex itself IS already in
+	// declaredKeys (its addCreate runs before the declaredKeys snapshot) — so
+	// appendKey dedupes it here rather than reading (and OCC-conditioning) the
+	// same key twice in one atomic batch, which would make the batch's own
+	// second tombstone race the first's revision advance and self-conflict.
+	appendKey(manifestKey)
+	appendKey(ip.Key)
 
 	// Build the UninstallPackage payload. Keys that no longer resolve
 	// (already hard-deleted) are skipped — there is nothing to tombstone.
 	//
-	// Uninstall tombstones UNCONDITIONALLY (no per-key expectedRevision).
-	// The UninstallPackage script supports per-key OCC, but the canonical
-	// expectedRevision is the per-SUBJECT sequence the Committer returns in
-	// OperationReply.Revisions (the install reply) — NOT the stream-level
-	// revision KVGet exposes. Threading the install-time committed
-	// revisions through to a later uninstall is heavier than this story
-	// warrants, so OCC is deferred (CAR: per-key-revision uninstall OCC).
-	// Window: a concurrent Processor write to a declared key between this
-	// read and the commit is silently overwritten. The whole batch is
-	// still atomic, so no partial/mixed state can result; the only loss is
-	// the lost-update guarantee on a key being uninstalled — acceptable for
-	// an admin-driven uninstall.
+	// Each surviving key's tombstone is conditioned on the revision this
+	// read just observed (per-key OCC, F-011/Contract #8 §8.3): a
+	// concurrent write to a declared key between this read and the commit
+	// now fails loudly (ErrUninstallConflict) instead of being silently
+	// overwritten. The whole batch is atomic, so a conflict on any one key
+	// leaves the package fully installed — never a partial/mixed state.
 	declaredEntries := make([]map[string]any, 0, len(keys))
 	tombstoned := make([]string, 0, len(keys))
 	for _, k := range keys {
-		if _, err := i.Conn.KVGet(ctx, CoreBucket, k); err != nil {
+		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
 			if errors.Is(err, substrate.ErrKeyNotFound) {
 				continue
 			}
 			return nil, fmt.Errorf("pkgmgr: uninstall read %s: %w", k, err)
 		}
-		declaredEntries = append(declaredEntries, map[string]any{"key": k})
+		declaredEntries = append(declaredEntries, map[string]any{"key": k, "expectedRevision": entry.Revision})
 		tombstoned = append(tombstoned, k)
 	}
 	if len(declaredEntries) == 0 {
@@ -684,6 +702,10 @@ func (i *Installer) Uninstall(ctx context.Context, packageName string) (*Uninsta
 	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
 		return &UninstallResult{PackageName: packageName, Tombstoned: tombstoned}, nil
 	default:
+		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict {
+			return nil, fmt.Errorf("%w: %s (a concurrent write raced this uninstall — re-run)",
+				ErrUninstallConflict, replyError(reply))
+		}
 		return nil, fmt.Errorf("pkgmgr: UninstallPackage rejected: %s", replyError(reply))
 	}
 }

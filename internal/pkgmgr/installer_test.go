@@ -451,6 +451,81 @@ func TestInstaller_Uninstall(t *testing.T) {
 	}
 }
 
+// TestInstaller_Uninstall_RaceOnDeclaredKeyRejected proves the F-011 per-key
+// OCC fix (Contract #8 §8.3): a concurrent write to a declared key between
+// the moment it is read and the moment the tombstone commits is rejected
+// (RevisionConflict), not silently overwritten, and the whole atomic batch
+// leaves the package fully installed — no partial tombstone.
+//
+// A live goroutine race on Installer.Uninstall's internal read-then-submit
+// window isn't observable from a black-box test without a production-code
+// hook; instead this reconstructs the exact interleave Uninstall would hit —
+// capture a declared key's revision (as Uninstall's own read loop does),
+// have a concurrent write bump it, then submit the SAME UninstallPackage op
+// shape Uninstall builds, keyed on the now-stale captured revision — proving
+// the script + Processor honor the OCC condition end-to-end.
+func TestInstaller_Uninstall_RaceOnDeclaredKeyRejected(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	def := sampleDef("0.1.0")
+	res, err := inst.Install(ctx, def)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if len(res.DeclaredKeys) == 0 {
+		t.Fatalf("no declared keys to race against")
+	}
+	raceKey := res.DeclaredKeys[0]
+
+	// Capture the revision Uninstall's own read loop would see right now.
+	entry, err := conn.KVGet(ctx, CoreBucket, raceKey)
+	if err != nil {
+		t.Fatalf("capture revision: %v", err)
+	}
+	staleRev := entry.Revision
+
+	// A concurrent write races in and bumps the key past the captured
+	// revision (simulates another admin action landing in the window
+	// between Uninstall's read and its commit).
+	if _, err := conn.KVUpdate(ctx, CoreBucket, raceKey, entry.Value, staleRev); err != nil {
+		t.Fatalf("simulated concurrent write: %v", err)
+	}
+
+	// Build the exact op shape Uninstall submits, keyed on the now-stale
+	// revision, and submit it directly.
+	requestID := deterministicNanoID(def.Name, def.Version, "race-uninstall-op")
+	payload := map[string]any{
+		"name": def.Name,
+		"declaredKeys": []map[string]any{
+			{"key": raceKey, "expectedRevision": staleRev},
+		},
+	}
+	reply, err := inst.submitOp(ctx, "UninstallPackage", "UninstallPackage", requestID, payload)
+	if err != nil {
+		t.Fatalf("submitOp: %v", err)
+	}
+	if reply.Status != processor.ReplyStatusRejected {
+		t.Fatalf("status = %q, want rejected", reply.Status)
+	}
+	if reply.Error == nil || reply.Error.Code != processor.ErrCodeRevisionConflict {
+		t.Fatalf("error = %+v, want code RevisionConflict", reply.Error)
+	}
+
+	// The package must be left fully installed — nothing tombstoned.
+	after, err := conn.KVGet(ctx, CoreBucket, raceKey)
+	if err != nil {
+		t.Fatalf("post-conflict read: %v", err)
+	}
+	if strings.Contains(string(after.Value), `"isDeleted":true`) {
+		t.Fatalf("key %s was tombstoned despite the OCC rejection", raceKey)
+	}
+
+	// A subsequent, ordinary uninstall (re-reading fresh) succeeds — the
+	// documented retry story.
+	if _, err := inst.Uninstall(ctx, def.Name); err != nil {
+		t.Fatalf("retry Uninstall after conflict: %v", err)
+	}
+}
+
 // contains is a copy of strings.Contains so this test file stays
 // dependency-light (matches the style used in packages/identity-hygiene/package_test.go).
 func contains(haystack, needle string) bool {
