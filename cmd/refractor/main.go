@@ -137,6 +137,12 @@ func main() {
 		os.Exit(1)
 	}
 	controlSvc.SetCapabilityChecker(checker)
+	actorVerifier, err := controlauth.WireActorVerifierFromEnv(ctx, conn, logger)
+	if err != nil {
+		logger.Error("wire control-plane actor verifier", "err", err)
+		os.Exit(1)
+	}
+	controlSvc.SetActorVerifier(actorVerifier)
 
 	// The KeyShredded nullification listener (vault-crypto-shredding-design.md
 	// §2.4, Fire 4a) — the Refractor half of crypto-shredding's async

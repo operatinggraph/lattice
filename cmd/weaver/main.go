@@ -16,6 +16,15 @@
 //	WEAVER_LANE          ops lane for remediation-op submission — a single
 //	                     dot-free subject token, rejected at engine start
 //	                     otherwise (default: system)
+//	LATTICE_AUTH_MODE    control-plane capability auth mode: "capability" (default) or "stub"
+//	LATTICE_CONTROL_JWT_KEYS_DIR       directory of <kid>.pem trusted actor-JWT public keys —
+//	                                   unset (and dev mode off) keeps Fire 1's self-asserted
+//	                                   HeaderActor (control-plane-capability-authz-design.md)
+//	LATTICE_CONTROL_JWT_DEV_MODE       "true" to additionally trust the checked-in Gateway dev
+//	                                   key (dev/CI only; mint a token with `gateway dev-token`)
+//	LATTICE_CONTROL_JWT_DEV_KEY_PATH   override the dev public-key path
+//	LATTICE_CONTROL_JWT_ISSUER         optional; required `iss` claim value
+//	LATTICE_CONTROL_JWT_AUDIENCE       optional; required `aud` claim member
 //
 // Logs to stderr in slog text format. Exits non-zero on any startup failure;
 // graceful shutdown on SIGINT/SIGTERM.
@@ -99,6 +108,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("wire control-plane capability checker: %w", err)
 	}
+	actorVerifier, err := controlauth.WireActorVerifierFromEnv(context.Background(), conn, logger)
+	if err != nil {
+		return fmt.Errorf("wire control-plane actor verifier: %w", err)
+	}
 
 	engine := weaver.NewEngine(conn, weaver.Config{
 		CoreKVBucket:        bootstrap.CoreKVBucket,
@@ -123,6 +136,7 @@ func run(logger *slog.Logger) error {
 	}()
 
 	controlSvc := control.NewService(engine, checker, logger)
+	controlSvc.SetActorVerifier(actorVerifier)
 	if err := controlSvc.StartNATSListener(ctx, conn.NATS()); err != nil {
 		return fmt.Errorf("start control NATS listener: %w", err)
 	}

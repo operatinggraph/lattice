@@ -49,21 +49,37 @@ func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	return cmd
 }
 
-// addActorFlag registers the --actor flag shared by every subcommand,
-// defaulting at RunE time to *defaultActor (the credential file's actorKey)
-// when unset. A resolved-empty actor is NOT an error here (unlike the
-// write-path `op submit`): the control plane's capability gate is not yet
-// enforced (control-plane-capability-authz-design.md Fire 1a — actor on the
-// wire, no enforcement change), so an anonymous request must keep working.
-func addActorFlag(cmd *cobra.Command, actor *string) {
+// addActorFlag registers the --actor and --actor-token flags shared by every
+// subcommand, defaulting --actor at RunE time to *defaultActor (the
+// credential-file actorKey) when unset. A resolved-empty actor is NOT an
+// error here (unlike the write-path `op submit`): in Fire 1 posture (no JWT
+// trust root configured server-side) the capability gate is not enforced, so
+// an anonymous request must keep working. --actor-token carries a signed
+// actor JWT (Fire 2, control-plane-capability-authz-design.md — mint one
+// with `gateway dev-token -sub <identityNanoID>` against a dev-mode server);
+// when set it is stamped in place of --actor and wins if both are given,
+// since presenting a token is the deliberate opt-in to verified-actor mode.
+func addActorFlag(cmd *cobra.Command, actor, actorToken *string) {
 	cmd.Flags().StringVar(actor, "actor", "", "actor key stamped on the control request (defaults to credential file actorKey)")
+	cmd.Flags().StringVar(actorToken, "actor-token", "", "signed actor JWT stamped on the control request (Fire 2 verified-actor mode; overrides --actor)")
 }
 
-// request sends a control-plane request to subject, stamping actor as the
-// Lattice-Actor header when non-empty, and decodes the control.ControlResponse.
-// Connection is via output.Connect's raw *nats.Conn (conn.NATS()) since the
-// loom-control endpoints are plain NATS Services responders, not JetStream.
-func request(natsURL, subject, actor string) (control.ControlResponse, error) {
+// resolveActorHeader picks the control-request HeaderActor value: actorToken
+// wins when non-empty (verified-actor mode), otherwise the raw actor key
+// (Fire 1 self-asserted mode).
+func resolveActorHeader(actor, actorToken string) string {
+	if actorToken != "" {
+		return actorToken
+	}
+	return actor
+}
+
+// request sends a control-plane request to subject, stamping actorHeader as
+// the Lattice-Actor header when non-empty, and decodes the
+// control.ControlResponse. Connection is via output.Connect's raw *nats.Conn
+// (conn.NATS()) since the loom-control endpoints are plain NATS Services
+// responders, not JetStream.
+func request(natsURL, subject, actorHeader string) (control.ControlResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), output.DefaultTimeout)
 	defer cancel()
 
@@ -73,7 +89,7 @@ func request(natsURL, subject, actor string) (control.ControlResponse, error) {
 	}
 	defer conn.Close()
 
-	reply, err := conn.NATS().RequestMsgWithContext(ctx, controlauth.NewActorRequestMsg(subject, actor))
+	reply, err := conn.NATS().RequestMsgWithContext(ctx, controlauth.NewActorRequestMsg(subject, actorHeader))
 	if err != nil {
 		return control.ControlResponse{}, fmt.Errorf("request %s: %w", subject, err)
 	}
@@ -90,6 +106,7 @@ func request(natsURL, subject, actor string) (control.ControlResponse, error) {
 
 func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actor string
+	var actorToken string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List Loom instances (running + retained terminals)",
@@ -97,7 +114,7 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			if actor == "" {
 				actor = *defaultActor
 			}
-			resp, err := request(*natsURL, control.ListSubject(), actor)
+			resp, err := request(*natsURL, control.ListSubject(), resolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -121,12 +138,13 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor)
+	addActorFlag(cmd, &actor, &actorToken)
 	return cmd
 }
 
 func newConsumersCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actor string
+	var actorToken string
 	cmd := &cobra.Command{
 		Use:   "consumers",
 		Short: "List the engine's managed consumers and their pause state",
@@ -134,7 +152,7 @@ func newConsumersCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 			if actor == "" {
 				actor = *defaultActor
 			}
-			resp, err := request(*natsURL, control.ConsumersSubject(), actor)
+			resp, err := request(*natsURL, control.ConsumersSubject(), resolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -156,12 +174,13 @@ func newConsumersCommand(natsURL, outputFmt, defaultActor *string) *cobra.Comman
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor)
+	addActorFlag(cmd, &actor, &actorToken)
 	return cmd
 }
 
 func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actor string
+	var actorToken string
 	cmd := &cobra.Command{
 		Use:   "inspect <instanceId>",
 		Short: "Inspect one Loom instance and its current step",
@@ -177,7 +196,7 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(instanceID, "inspect"), actor)
+			resp, err := request(*natsURL, control.NameSubject(instanceID, "inspect"), resolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -221,12 +240,13 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor)
+	addActorFlag(cmd, &actor, &actorToken)
 	return cmd
 }
 
 func newPauseCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actor string
+	var actorToken string
 	cmd := &cobra.Command{
 		Use:   "pause <consumerName>",
 		Short: "Pause a managed Loom consumer (persists across restart until resume)",
@@ -242,7 +262,7 @@ func newPauseCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(name, "pause"), actor)
+			resp, err := request(*natsURL, control.NameSubject(name, "pause"), resolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -261,12 +281,13 @@ func newPauseCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor)
+	addActorFlag(cmd, &actor, &actorToken)
 	return cmd
 }
 
 func newResumeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	var actor string
+	var actorToken string
 	cmd := &cobra.Command{
 		Use:   "resume <consumerName>",
 		Short: "Resume a paused Loom consumer",
@@ -282,7 +303,7 @@ func newResumeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				}
 				return err
 			}
-			resp, err := request(*natsURL, control.NameSubject(name, "resume"), actor)
+			resp, err := request(*natsURL, control.NameSubject(name, "resume"), resolveActorHeader(actor, actorToken))
 			if err != nil {
 				if *outputFmt == "json" {
 					return output.PrintJSONError("ControlError", err.Error())
@@ -297,6 +318,6 @@ func newResumeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 			return nil
 		},
 	}
-	addActorFlag(cmd, &actor)
+	addActorFlag(cmd, &actor, &actorToken)
 	return cmd
 }

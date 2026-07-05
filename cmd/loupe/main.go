@@ -139,17 +139,25 @@ func run(logger *slog.Logger) error {
 	if operatorActorKey == "" {
 		logger.Warn("no operator actor configured (LOUPE_OPERATOR_ACTOR_KEY unset and no bootstrap admin actor loaded); control-plane requests will carry no Lattice-Actor header")
 	}
+	// operatorActorToken carries a signed actor JWT (Fire 2 verified-actor
+	// mode, control-plane-capability-authz-design.md §3.6/Fire 2) and, when
+	// set, is stamped in place of operatorActorKey. Empty (the default)
+	// keeps Fire 1's self-asserted key — mint one with
+	// `gateway dev-token -sub <identityNanoID>` once the control-plane
+	// servers are running with LATTICE_CONTROL_JWT_* configured.
+	operatorActorToken := os.Getenv("LOUPE_OPERATOR_ACTOR_TOKEN")
 
 	srv := &server{
-		conn:             conn,
-		adminActor:       adminActor,
-		operatorActorKey: operatorActorKey,
-		logger:           logger,
-		natsTimeout:      natsRequestLimit,
-		uploadCap:        uploadCap,
-		pg:               pgPool,
-		pgDSNInvalid:     pgDSNInvalid,
-		bindHost:         bindHost,
+		conn:               conn,
+		adminActor:         adminActor,
+		operatorActorKey:   operatorActorKey,
+		operatorActorToken: operatorActorToken,
+		logger:             logger,
+		natsTimeout:        natsRequestLimit,
+		uploadCap:          uploadCap,
+		pg:                 pgPool,
+		pgDSNInvalid:       pgDSNInvalid,
+		bindHost:           bindHost,
 	}
 
 	mux := http.NewServeMux()

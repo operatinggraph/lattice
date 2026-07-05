@@ -43,8 +43,14 @@ type server struct {
 	// -design.md §3.6). Defaults to adminActor when LOUPE_OPERATOR_ACTOR_KEY
 	// is unset.
 	operatorActorKey string
-	logger           *slog.Logger
-	natsTimeout      time.Duration
+	// operatorActorToken, when non-empty, carries a signed actor JWT (Fire
+	// 2 — verified-actor mode) and is stamped in place of operatorActorKey.
+	// Empty means the control-plane server has not been switched to
+	// verified-actor mode (or Loupe hasn't been given a token yet) — the
+	// Fire 1 self-asserted key stays in effect.
+	operatorActorToken string
+	logger             *slog.Logger
+	natsTimeout        time.Duration
 	// uploadCap bounds a single object upload (OBJECTS_MAX_UPLOAD_BYTES);
 	// substrate.ObjectPut enforces it at the stream layer.
 	uploadCap int64
@@ -456,12 +462,17 @@ func (s *server) controlMutate(w http.ResponseWriter, r *http.Request, comp, nam
 
 // controlRequest issues a PLAIN NATS request (not JetStream) to subject and
 // returns the raw reply bytes. Control planes are micro-services over core
-// NATS. The request carries s.operatorActorKey as the Lattice-Actor header
-// (control-plane-capability-authz-design.md §3.6) — empty when neither
-// LOUPE_OPERATOR_ACTOR_KEY nor the bootstrap admin actor is configured, which
-// the CLI's own unset --actor default also tolerates.
+// NATS. The request carries s.operatorActorToken (Fire 2 verified-actor mode)
+// when configured, else s.operatorActorKey (Fire 1 self-asserted, empty when
+// neither LOUPE_OPERATOR_ACTOR_KEY nor the bootstrap admin actor is
+// configured, which the CLI's own unset --actor default also tolerates) —
+// control-plane-capability-authz-design.md §3.6.
 func (s *server) controlRequest(ctx context.Context, conn *substrate.Conn, subject string) (json.RawMessage, error) {
-	reply, err := conn.NATS().RequestMsgWithContext(ctx, controlauth.NewActorRequestMsg(subject, s.operatorActorKey))
+	actorHeader := s.operatorActorKey
+	if s.operatorActorToken != "" {
+		actorHeader = s.operatorActorToken
+	}
+	reply, err := conn.NATS().RequestMsgWithContext(ctx, controlauth.NewActorRequestMsg(subject, actorHeader))
 	if err != nil {
 		return nil, err
 	}

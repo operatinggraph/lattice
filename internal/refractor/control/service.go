@@ -205,6 +205,10 @@ type Service struct {
 	// StubCapabilityChecker (allow-all + log); SetCapabilityChecker swaps in a
 	// real checker without touching handler bodies.
 	capability CapabilityChecker
+	// actorVerifier lifts HeaderActor from self-asserted to a verified JWT
+	// (Fire 2, control-plane-capability-authz-design.md). nil (the default)
+	// keeps Fire 1 behavior; set via SetActorVerifier.
+	actorVerifier *controlauth.ActorVerifier
 }
 
 // NewService creates a new Service with empty registries. The control plane
@@ -220,6 +224,17 @@ func NewService() *Service {
 		reporters:            make(map[string]*health.Reporter),
 		capability:           NewStubCapabilityChecker(nil),
 	}
+}
+
+// SetActorVerifier wires JWT verification onto the control plane's
+// HeaderActor value (Fire 2). Thread-safe; may be called at any time. A nil
+// verifier (the default) preserves Fire 1's self-asserted-header behavior.
+// dispatchEndpoint reads it under the same lock as capability (both are
+// needed together at that single call site).
+func (s *Service) SetActorVerifier(v *controlauth.ActorVerifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.actorVerifier = v
 }
 
 // SetCapabilityChecker registers the capability checker every control op is
@@ -500,10 +515,17 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 
 	s.mu.Lock()
 	capability := s.capability
+	verifier := s.actorVerifier
 	s.mu.Unlock()
 
 	authCtx, authCancel := context.WithTimeout(context.Background(), authorizeTimeout)
-	authErr := capability.Authorize(authCtx, controlauth.ActorFromRequest(req), op, lensID)
+	actor, actorErr := controlauth.ResolveActor(authCtx, req, verifier)
+	if actorErr != nil {
+		authCancel()
+		s.respondMicro(req, ControlResponse{Error: actorErr.Error()})
+		return
+	}
+	authErr := capability.Authorize(authCtx, actor, op, lensID)
 	authCancel()
 	if authErr != nil {
 		s.respondMicro(req, ControlResponse{Error: authErr.Error()})

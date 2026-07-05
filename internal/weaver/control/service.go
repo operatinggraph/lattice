@@ -104,6 +104,10 @@ type Service struct {
 
 	mu       sync.Mutex
 	microSvc micro.Service // set by StartNATSListener; nil until started
+	// actorVerifier lifts HeaderActor from self-asserted to a verified JWT
+	// (Fire 2, control-plane-capability-authz-design.md). nil (the default)
+	// keeps Fire 1 behavior; set via SetActorVerifier.
+	actorVerifier *controlauth.ActorVerifier
 }
 
 // NewService constructs a Service wrapping engine. capability may be nil —
@@ -117,6 +121,25 @@ func NewService(engine engineControl, capability CapabilityChecker, logger *slog
 		capability = NewStubCapabilityChecker(logger)
 	}
 	return &Service{engine: engine, capability: capability, logger: logger}
+}
+
+// SetActorVerifier wires JWT verification onto the control plane's
+// HeaderActor value (Fire 2). Thread-safe; may be called at any time before
+// or after StartNATSListener. A nil verifier (the default) preserves Fire
+// 1's self-asserted-header behavior.
+func (s *Service) SetActorVerifier(v *controlauth.ActorVerifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.actorVerifier = v
+}
+
+// resolveActor reads the current actorVerifier under lock and resolves req's
+// actor against it (nil verifier = Fire 1 self-asserted passthrough).
+func (s *Service) resolveActor(ctx context.Context, req micro.Request) (string, error) {
+	s.mu.Lock()
+	v := s.actorVerifier
+	s.mu.Unlock()
+	return controlauth.ResolveActor(ctx, req, v)
 }
 
 // StartNATSListener registers the Weaver control plane as a NATS
@@ -184,7 +207,12 @@ func (s *Service) StartNATSListener(ctx context.Context, nc *nats.Conn) error {
 func (s *Service) handleList(req micro.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	if err := s.capability.Authorize(ctx, controlauth.ActorFromRequest(req), opList, ""); err != nil {
+	actor, aerr := s.resolveActor(ctx, req)
+	if aerr != nil {
+		s.respondMicro(req, ControlResponse{Error: aerr.Error()})
+		return
+	}
+	if err := s.capability.Authorize(ctx, actor, opList, ""); err != nil {
 		s.respondMicro(req, ControlResponse{Error: err.Error()})
 		return
 	}
@@ -209,7 +237,12 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
 	defer cancel()
-	if err := s.capability.Authorize(ctx, controlauth.ActorFromRequest(req), op, targetID); err != nil {
+	actor, aerr := s.resolveActor(ctx, req)
+	if aerr != nil {
+		s.respondMicro(req, ControlResponse{Error: aerr.Error()})
+		return
+	}
+	if err := s.capability.Authorize(ctx, actor, op, targetID); err != nil {
 		s.respondMicro(req, ControlResponse{Error: err.Error()})
 		return
 	}
