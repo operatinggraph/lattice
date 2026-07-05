@@ -100,12 +100,11 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now**: **Vault Fire 5b** (★★★ — 5b-ii-c/5b-iii/5b-iii-a/5b-iv all shipped; only
-> the delivery-boundary reset + live e2e remain, and that needs an **attended** fire — destructive to
-> the shared dev stack). D1 (D1.1–D1.5) closed 2026-07-02, clearing three downstream gates: **Gateway
-> Fire 3** (read-front) · **Personal Lens PL.3** (readableAnchors) · **Control-plane-authz Fire 2**
-> (verified-actor) are all now build-ready, not blocked. *Still genuinely gated*: **AI-caps Fire 4**
-> (Andrew sign-off on AI-code-execution, not the sandbox) · **Object crypto-shred** (behind Vault).
+> 🎯 **Build-ready now**: **Object crypto-shred** (Vault shipped 2026-07-05, its gate cleared) ·
+> **Gateway Fire 3** (read-front, D1 closed 2026-07-02) · **Personal Lens PL.3** (readableAnchors, D1 +
+> NATS-account-auth both done) · **Control-plane-authz Fire 2** (verified-actor, D1.2 done) — all four
+> unblocked, none yet picked up. *Still genuinely gated*: **AI-caps Fire 4** (Andrew sign-off on
+> AI-code-execution, not the sandbox).
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -117,9 +116,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Vault + crypto-shredding | Per-identity keys for sensitive aspects (SSN/DOB); right-to-be-forgotten = destroy the key; transient-session-key decrypt. | ★★★ | L | 🏗️ building · [design](../../implementation-artifacts/vault-crypto-shredding-design.md) · secure-lens shred test gate closed (`fb66e7c`); next: delivery-boundary reset + live e2e (needs an attended fire — destructive to shared dev stack) |
 | **[identity-hygiene] Dedup over encrypted PII (duplicateCandidates)** | Post-Vault, the lens's WHERE matching (email/phone equality, name Levenshtein) runs on per-identity-DEK ciphertext → functionally inert; a secure lens can't fix in-engine matching. Needs a design: blind-index/HMAC companion aspect vs sanctioned engine mechanism. | ★★ | M | 📋 needs-design (Designer) · context in the [vault design](../../implementation-artifacts/vault-crypto-shredding-design.md) Fire 5b-i checkpoint |
-| **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · 🚧 behind Vault |
+| **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · Vault shipped — unblocked, build-ready |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -182,6 +180,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-05 · `—` · [Privacy/Vault] Vault + crypto-shredding CLOSED — live delivery-boundary reset + e2e (attended session): real ciphertext at rest, real decrypt for the authorized landlord, real shred nulls contact cols row-intact
 - 2026-07-05 · `cfc65fe` · [Loupe] Chronicler Fire 3 CLOSED — Flows tab (durable Loom-flow history, P5 read + live/orphaned badge), lead-reviewed
 - 2026-07-05 · `1e35cc9` · [Refractor/orchestration-base] Chronicler Fire 2 — `loomFlowHistory` event-sourced lens, first eventStream consumer, 3-layer reviewed
 - 2026-07-05 · `a55a9db` · [Refractor] Chronicler Fire 1 — `eventStream` lens-source primitive (dark; no production lens yet), 3-layer reviewed

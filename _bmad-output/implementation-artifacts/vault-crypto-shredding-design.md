@@ -834,3 +834,20 @@ session — it destroys the current shared dev stack's data (ephemeral by design
 PO-discovery/vertical-exploration fire could be relying on live state at the moment an unattended fire
 picks this up) and its proof is a human-observable one, not a headless gate; same posture as the
 Phase-1 gate-retirement item's "needs an attended fire" flag elsewhere on this board.
+
+**Fire 5b-v CHECKPOINT (2026-07-05, attended session with Andrew) — 5b CLOSED.** Ran the delivery-boundary
+reset live: `make down` (containers + all binaries + `lattice.bootstrap.json` removed) then `make
+up-loftspace` (fresh bootstrap → orchestration tier → all packages incl. `privacy-base` +
+`privacy-operator-grant` → read-path RLS tables reprovisioned → loftspace-app up), no errors. Drove the
+live e2e entirely through the real HTTP surface, not the test harness: created a landlord + an applicant
+(real `email`/`phone`) + a unit + `AssignUnitOwner` + `CreateLeaseApplication` via loftspace-app's
+`/api/op`; `lattice graph read` confirmed Core KV holds only AES-256-GCM ciphertext
+(`{ct,nonce,keyId}`) for the applicant's `.email` — never plaintext; a real landlord JWT (`/api/dev-token`
++ `/api/landlord/applications`) confirmed the Secure Lens projects genuine decrypted
+`applicantName`/`applicantEmail`/`applicantPhone` to the authorized landlord. Submitted a real
+`ShredIdentityKey` (urgent lane) through the same admin actor (confirming the primordial
+`holdsRole→operator` link already carries the `privacy-operator-grant`); `piiKey.shredded` flipped
+synchronously, and the landlord's re-fetched view nulled all three contact columns on next read while
+`unitAddress`/`unitRent`/`unitCurrency`/`unitStatus` and the application row itself stayed fully intact
+— destroy-the-key-not-the-row, proven live on a fresh deployment. **Vault + crypto-shredding is fully
+shipped; no remaining gate.**
