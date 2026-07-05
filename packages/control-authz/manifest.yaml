@@ -1,0 +1,57 @@
+name: control-authz
+version: 0.1.0
+description: |
+  Grants ctrl.<component>.<verb> control-plane permissions (Weaver/Loom/Refractor)
+  to a new control-operator role, declared in the package definition and created
+  in the single install batch (mirrors identity-domain's role-declaring pattern).
+  Deliberately distinct from the kernel-primordial operator role so the
+  control-operator identity stays an ordinary (non-system) rbac actor. Grant-only
+  — the operator identity itself is provisioned by a one-time post-install op
+  sequence, not by this package.
+  control-plane-capability-authz-design.md §3.5 (FR30 Fire 1b).
+depends:
+  - rbac-domain
+declares:
+  permissions:
+    - operationType: ctrl.weaver.read
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.weaver.disable
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.weaver.enable
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.weaver.revoke
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.loom.read
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.loom.pause
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.loom.resume
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.read
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.rebuild
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.pause
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.resume
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.delete
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.register
+      scope: any
+      grantsTo: [control-operator]
+    - operationType: ctrl.refractor.deregister
+      scope: any
+      grantsTo: [control-operator]

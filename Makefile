@@ -72,7 +72,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= stub
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -477,13 +477,15 @@ orchestration:
 	fi
 
 ## install-packages — Install the core Capability Packages into a running
-## deployment, in dependency order: rbac-domain → privacy-base → identity-domain → objects-base.
+## deployment, in dependency order: rbac-domain → control-authz → privacy-base → identity-domain → objects-base.
 ## (lattice-pkg only warns on unmet deps; ordering is the caller's responsibility.)
 install-packages:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
 	@echo "==> Installing rbac-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/rbac-domain
+	@echo "==> Installing control-authz (ctrl.<component>.<verb> grants; FR30 Fire 1b)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/control-authz
 	@echo "==> Installing privacy-base..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/privacy-base
 	@echo "==> Installing privacy-operator-grant (operator → ShredIdentityKey; Loupe F12 crypto-shred proof)..."
@@ -725,6 +727,22 @@ test-crypto-shred:
 .PHONY: test-system-actor-capability
 test-system-actor-capability:
 	go test -tags systemactorcapability ./internal/systemactorcapability/... -run TestSystemActorCapability -v -p 1 -count=1 -timeout 3m
+
+## test-control-plane-authz — FR30 Fire 1b Gate-3 control-plane bypass gate.
+## Self-contained: embedded NATS, boots the REAL Processor under
+## LATTICE_AUTH_MODE=capability + the real Refractor projecting the core
+## `capability` anchor and rbac-domain's `capabilityRoles` lens, installs
+## rbac -> identity -> control-authz, seeds an operator identity (granted
+## control-operator via the real AssignRole op) and an intruder identity (no
+## grant), then drives a real weaver control.Service wired with
+## internal/controlauth.CapabilityKVChecker over a real NATS round-trip:
+## operator disable succeeds, intruder disable denied, anonymous (no
+## Lattice-Actor header) disable denied (design
+## control-plane-capability-authz-design.md §5). Compiled with
+## -tags controlplaneauthz.
+.PHONY: test-control-plane-authz
+test-control-plane-authz:
+	go test -tags controlplaneauthz ./internal/controlplaneauthz/... -run TestControlPlaneAuthz -v -p 1 -count=1 -timeout 3m
 
 ## test-augur-convergence — the Augur (Weaver L3 reasoning tier) escalation gate.
 ## Self-contained: embedded NATS, boots Processor + outbox + Weaver + the live

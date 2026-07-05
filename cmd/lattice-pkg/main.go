@@ -35,6 +35,7 @@ import (
 	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
 	clinicledger "github.com/asolgan/lattice/packages/clinic-ledger"
 	clinicreminders "github.com/asolgan/lattice/packages/clinic-reminders"
+	controlauthz "github.com/asolgan/lattice/packages/control-authz"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	identityhygiene "github.com/asolgan/lattice/packages/identity-hygiene"
 	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
@@ -78,6 +79,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"privacy-base":           privacybase.Package,
 	"privacy-operator-grant": privacyoperatorgrant.Package,
 	"bespoke-contracts":      bespokecontracts.Package,
+	"control-authz":          controlauthz.Package,
 }
 
 func main() {

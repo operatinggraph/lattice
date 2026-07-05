@@ -21,6 +21,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/controlauth"
+	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/capabilityenv"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
@@ -128,6 +130,12 @@ func main() {
 	poolManager := adapter.NewPoolManager()
 	controlSvc := control.NewService()
 	controlSvc.SetPersonalInterestKV(personalInterestKV)
+	checker, err := wireControlChecker(ctx, conn, "refractor", controlauth.RefractorOps, logger)
+	if err != nil {
+		logger.Error("wire control-plane capability checker", "err", err)
+		os.Exit(1)
+	}
+	controlSvc.SetCapabilityChecker(checker)
 
 	// The KeyShredded nullification listener (vault-crypto-shredding-design.md
 	// §2.4, Fire 4a) — the Refractor half of crypto-shredding's async
@@ -817,6 +825,45 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// wireControlChecker builds the control-plane capability checker
+// (control-plane-capability-authz-design.md Fire 1b). Default LATTICE_AUTH_MODE
+// is `capability` — mirrors cmd/processor's step-3 default; `stub` remains
+// available for dev/test behind the same explicit env knob (one knob, no
+// second CTRL-specific one, design §3.3). rbacRolesActive + systemActorKeys
+// mirror the Processor's step-3 platform routing so the checker reads the
+// same key the Processor would for a given actor. Preflight logs+alerts
+// (never blocks startup) if the configured operator actor's grant is
+// unresolvable.
+func wireControlChecker(ctx context.Context, conn *substrate.Conn, component string, ops map[string]controlauth.OpMeta, logger *slog.Logger) (*controlauth.CapabilityKVChecker, error) {
+	mode := controlauth.AuthMode(envOr("LATTICE_AUTH_MODE", string(controlauth.AuthModeCapability)))
+
+	probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
+	rbacInstalled, err := pkgmgr.IsPackageInstalled(probeCtx, conn, "rbac-domain")
+	if err != nil {
+		probeCancel()
+		return nil, fmt.Errorf("probe rbac-domain install state: %w", err)
+	}
+	systemActorKeys, err := bootstrap.SystemActorKeys(probeCtx, conn)
+	probeCancel()
+	if err != nil {
+		return nil, fmt.Errorf("discover system actor keys: %w", err)
+	}
+
+	alerts := controlauth.NewHealthAlertEmitter(conn, healthKVBucket, logger)
+	checker := controlauth.NewCapabilityKVChecker(component, ops, conn, bootstrap.CapabilityKVBucket,
+		systemActorKeys, rbacInstalled, mode, alerts, logger)
+
+	operatorActor := os.Getenv("LATTICE_CONTROL_OPERATOR_ACTOR_KEY")
+	preflightCtx, preflightCancel := context.WithTimeout(ctx, 10*time.Second)
+	controlauth.Preflight(preflightCtx, checker, operatorActor, logger)
+	preflightCancel()
+
+	logger.Info("control-plane checker wired",
+		"component", component, "authMode", string(mode), "rbacRolesActive", rbacInstalled,
+		"systemActors", len(systemActorKeys))
+	return checker, nil
 }
 
 func randHex(n int) string {

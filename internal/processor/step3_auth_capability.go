@@ -308,92 +308,14 @@ func (e *authEntry) deriveKeys(actor string) ([]string, error) {
 	return []string{k}, nil
 }
 
-// readAndMergeDoc GETs each key independently and folds the present docs into
-// one merged CapabilityDoc (mergeCapabilityDocs). A KeyNotFound on one member
-// is an empty skip, not a hard deny — the caller denies with the path's
-// absentKeyCode only when EVERY member is absent (doc == nil, deny-closed).
-// A non-NotFound read error, or a parse failure, aborts immediately: the
-// caller returns it so the commit path naks for redelivery rather than
-// silently degrading the grant set. The returned key is the "+"-joined list
-// of keys that were actually present (a single key, unchanged, for every
-// entry but the union platform read).
+// readAndMergeDoc delegates to internal/capabilitykv.ReadAndMerge — the
+// shared read+route+merge the control-plane capability checker also uses
+// (control-plane-capability-authz-design.md §3.3), so both read the identical
+// projection through the identical key set for a given actor. Behavior is
+// byte-identical to the pre-factor inline implementation (proven by this
+// package's existing step-3 auth tests).
 func (a *CapabilityAuthorizer) readAndMergeDoc(ctx context.Context, keys []string) (*CapabilityDoc, string, error) {
-	var doc *CapabilityDoc
-	var present []string
-	for _, key := range keys {
-		kvEntry, err := a.reader.KVGet(ctx, a.bucket, key)
-		if err != nil {
-			if errors.Is(err, substrate.ErrKeyNotFound) {
-				continue
-			}
-			return nil, "", fmt.Errorf("capability kv read %q: %w", key, err)
-		}
-		parsed, err := ParseCapabilityDoc(kvEntry.Value)
-		if err != nil {
-			// Parse failure indicates a producer / contract drift — should be
-			// caught by conformance tests long before runtime. Surface as
-			// internal error rather than denial so operators see the real
-			// problem.
-			return nil, "", fmt.Errorf("capability kv parse %q: %w", key, err)
-		}
-		present = append(present, key)
-		if doc == nil {
-			doc = parsed
-		} else {
-			doc = mergeCapabilityDocs(doc, parsed)
-		}
-	}
-	if doc == nil {
-		return nil, "", nil
-	}
-	return doc, strings.Join(present, "+"), nil
-}
-
-// mergeCapabilityDocs folds extra's grant-bearing fields into base
-// (deny-closed union — Contract #6 §6.1 system-actor platform-path carve-out).
-// platformPermissions concatenate (the op matcher scans the merged slice: an
-// op is granted iff SOME source grants it); lanes and roles union (dedup).
-// projectedFromRevisions merges for auth-trace provenance (both source keys
-// recorded). base is never mutated; a new doc is returned.
-func mergeCapabilityDocs(base, extra *CapabilityDoc) *CapabilityDoc {
-	merged := *base
-	merged.PlatformPermissions = append(
-		append([]PlatformPermission{}, base.PlatformPermissions...),
-		extra.PlatformPermissions...)
-	merged.Lanes = unionStrings(base.Lanes, extra.Lanes)
-	merged.Roles = unionStrings(base.Roles, extra.Roles)
-	if len(extra.ProjectedFromRevisions) > 0 {
-		merged.ProjectedFromRevisions = make(map[string]uint64, len(base.ProjectedFromRevisions)+len(extra.ProjectedFromRevisions))
-		for k, v := range base.ProjectedFromRevisions {
-			merged.ProjectedFromRevisions[k] = v
-		}
-		for k, v := range extra.ProjectedFromRevisions {
-			merged.ProjectedFromRevisions[k] = v
-		}
-	}
-	return &merged
-}
-
-// unionStrings returns the deduplicated concatenation of a and b, preserving
-// first-seen order.
-func unionStrings(a, b []string) []string {
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, s := range a {
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	for _, s := range b {
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return capabilitykv.ReadAndMerge(ctx, a.reader, a.bucket, keys)
 }
 
 func (a *CapabilityAuthorizer) matchEphemeralGrant(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {
