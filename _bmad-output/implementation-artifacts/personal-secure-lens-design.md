@@ -451,7 +451,19 @@ fire (the one D1-gated step), and confidentiality + hydration extend it. **Depen
 > admits everything — bandwidth-only, never security). e2e-proven through the real CDC pipeline
 > (vertex mutation on a non-actor "lease" → fan-out to a linked identity; a mismatched Interest Set
 > filter suppresses, then deregistering restores delivery). `docs/components/refractor.md` updated.
-> **Next: PL.3** — wire D1's `readableAnchors` (🚧 gated on D1 ratification).
+> **PL.3 shipped** — `internal/refractor/capabilityread` (`IsReadable(actorType, actorID, anchorID)`)
+> GETs the base `cap-read.<actor>` slice + every `cap-read.<domain>.<actor>` slice (discovered via a
+> wildcarded `ListKeysFilter`, since domain names aren't enumerable statically), unions their
+> `readableAnchors[]`, fail-closed on absence/tombstone/no-match. Wired into `personalEnvelopeFn`
+> ahead of the Interest Set check (`InstallPersonalLens` gained `capKV *substrate.KV`; `nil` keeps
+> the PL.1/PL.2 trusted-test posture, `cmd/refractor/main.go` always threads a real handle in
+> production). Gate-3 vectors 1–3 (§5) e2e-proven (security wins over an explicitly-relevant
+> Interest Set; no-entry denies; a revoke stops the stream); vector 4 (stale-lower-seq replay) is
+> D1's own producer-side `projectionSeq` write guard, not re-verified by this consumer-only fire;
+> vector 5 stays PL.5's (Vault-gated). The subject subscribe-ACL (Fork 3, untrusted exposure) is
+> still open — the SYNC stream stays under the trusted-single-identity carve-out for *who may
+> connect*, independent of this fire's *what they'd see if they did*. `docs/components/refractor.md`
+> updated. **Next: PL.4** — the Hydration Hook.
 
 1. **PL.1 — the `nats_subject` adapter + SYNC stream (the "brand-new adapter").** Implement
    `adapter/natssubject.go` (4-method SPI + ciphertext-passthrough), `TargetNATSSubjectConfig` +

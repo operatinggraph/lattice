@@ -65,14 +65,14 @@ Key sub-packages:
 | **Control plane** | `micro.Service` endpoints at `lattice.ctrl.refractor.<lensId>.<op>` | Handles JSON control requests (list lenses, force re-project, etc.) via the NATS Services framework. |
 | **Personal Lens delta envelopes** | Per-recipient NATS subject `<targetConfig.subjectPrefix>.<actor>` (e.g. `lattice.sync.user.<identityId>`) on the backing JetStream stream `targetConfig.stream` | Produced by a `targetType: "nats_subject"` lens (`adapter/natssubject.go`). See below. |
 
-### Personal Lens transport (`nats_subject` target — Fires 1–2: PL.1, PL.2)
+### Personal Lens transport (`nats_subject` target — Fires 1–3: PL.1, PL.2, PL.3)
 
 The **Personal Lens** turns Refractor from a shared read-model warehouse into a per-identity
 *filtered delta stream* — the cloud-side half of the Edge Lattice
-(`personal-secure-lens-design.md`). Fire 1 ships the transport under a **trusted-single-identity
-posture** (no security filter — that's Fire PL.3, gated on D1). Fire 2 adds the cross-vertex
-fan-out and the Interest Set; the recipient is either RETURNed directly by the lens's own cypher
-(PL.1 shape) or injected by the fan-out envelope (PL.2 shape) — never both.
+(`personal-secure-lens-design.md`). Fire 1 ships the transport under a trusted-single-identity
+posture. Fire 2 adds the cross-vertex fan-out and the Interest Set; the recipient is either
+RETURNed directly by the lens's own cypher (PL.1 shape) or injected by the fan-out envelope (PL.2
+shape) — never both. Fire 3 wires D1's read-path Capability KV as the correctness boundary (below).
 
 - **`TargetNATSSubjectConfig`** (`lens/corekv_source.go`): `{ "subjectPrefix": "lattice.sync.user",
   "stream": "SYNC", "personal": false, "key": ["__actor", ...businessKeys] }`. `key` must include
@@ -116,9 +116,19 @@ fan-out and the Interest Set; the recipient is either RETURNed directly by the l
   `lattice.ctrl.refractor.personal.deregister` (`"personal"` is a fixed pseudo-lensId, not a real
   lens) — request body `{identityId, deviceId, types?, anchors?}`, response
   `{personalRegister: {registered: true}}` / `{personalDeregister: {deregistered: true}}`.
-- **Deferred to later PL fires** (`personal-secure-lens-design.md` §7): the D1 `readableAnchors`
-  security gate (PL.3, 🚧 gated on D1 ratification), the Hydration Hook (PL.4), and
-  Vault-ciphertext + transient-key composition (PL.5, 🚧 gated on Vault Phase A).
+- **D1 read-grant security gate (Fire PL.3, `internal/refractor/capabilityread`).** The
+  correctness boundary: before publishing, `IsReadable(actorType, actorID, anchorID)` GETs the
+  actor's base `cap-read.<actor>` slice plus every domain-specific `cap-read.<domain>.<actor>`
+  slice (discovered via a wildcarded key-listing filter, since domain names are package-owned and
+  not enumerable statically) and unions their `readableAnchors[]` (Contract #6 §6.14). Fail-closed
+  throughout: no contributing slice, every slice soft-tombstoned (`isDeleted:true`, §6.8), or the
+  anchor absent from all of them — deny. Runs in `personalEnvelopeFn` *before* the Interest Set
+  relevance filter and wins over it (a device declaring an anchor relevant does not override a
+  missing read grant). Threaded into `InstallPersonalLens` as `capKV`; `nil` disables the gate — a
+  trusted/test-only posture, never a production default (`cmd/refractor/main.go` always opens a
+  real `capability-kv` handle).
+- **Deferred to later PL fires** (`personal-secure-lens-design.md` §7): the Hydration Hook (PL.4)
+  and Vault-ciphertext + transient-key composition (PL.5, 🚧 gated on Vault Phase A).
 
 ### Protected read-model provisioning (read-path authorization, D1.3)
 
@@ -570,7 +580,7 @@ one-cycle spike no longer flaps the heartbeat degraded→healthy.
 
 | Feature | Phase | Notes |
 |---------|-------|-------|
-| Personal Lens / Secure Lens | Fires 1–2 (PL.1 transport, PL.2 fan-out + Interest Set) shipped; PL.3–PL.5 pending | Per-identity security-filtered projection. PL.1's `nats_subject` target adapter + PL.2's `ActorEnumerator` fan-out and Interest Set (above) ship dark under a trusted-single-identity posture; the D1 security gate (PL.3), Hydration (PL.4), and Vault ciphertext (PL.5) remain — security *is* read-path auth (D1), so PL.3 is sequenced behind D1 |
+| Personal Lens / Secure Lens | Fires 1–3 (PL.1 transport, PL.2 fan-out + Interest Set, PL.3 D1 security gate) shipped; PL.4–PL.5 pending | Per-identity security-filtered projection. PL.1's `nats_subject` target adapter + PL.2's `ActorEnumerator` fan-out/Interest Set + PL.3's `capabilityread`-backed D1 gate (above) ship dark, still behind the trusted-single-identity carve-out for the NATS `SUB` boundary itself (Fork 3, subscribe-ACL); Hydration (PL.4) and Vault ciphertext (PL.5) remain |
 | Multi-cell lens routing | Phase 3 | Current pipeline is single-cell |
 | Cross-instance latency aggregation | Phase 3 | Current `LatencyRingBuffer` is per-instance; no cluster-level rollup |
 | Link-envelope tombstone re-projection | Phase 3 | Currently adjacency entries are left in place on tombstone; re-projection on tombstone is not triggered |
