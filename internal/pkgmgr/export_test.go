@@ -53,9 +53,10 @@ func BuildInstallBatchForTest(def Definition) ([]InstallMutationForTest, []strin
 // InstallMutationForTest mirrors the internal installMutation so the external
 // test package can read emitted keys/documents.
 type InstallMutationForTest struct {
-	Op       string
-	Key      string
-	Document map[string]any
+	Op               string
+	Key              string
+	Document         map[string]any
+	ExpectedRevision *uint64
 }
 
 // EntityNanoIDForTest exposes the installer's version-independent entity

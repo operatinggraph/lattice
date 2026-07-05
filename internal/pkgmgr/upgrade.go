@@ -17,6 +17,13 @@ import (
 // requires an existing package vertex to upgrade from.
 var ErrNotInstalled = errors.New("pkgmgr: package not installed — install before upgrading")
 
+// ErrUpgradeConflict is returned by Upgrade when a surviving key's diff-read
+// revision was modified concurrently before the upgrade committed (F-011
+// per-key OCC, Contract #8 §8.6 — the upgrade sibling of ErrUninstallConflict).
+// The atomic batch rejects the whole delta, so the package is left on its
+// prior version — re-run the upgrade to retry against the current state.
+var ErrUpgradeConflict = errors.New("pkgmgr: upgrade conflict — a declared key changed concurrently")
+
 // UpgradeResult summarises an in-place package upgrade.
 type UpgradeResult struct {
 	PackageName string
@@ -154,6 +161,10 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
 		return nil
 	default:
+		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict {
+			return fmt.Errorf("%w: %s (a concurrent write raced this upgrade — re-run)",
+				ErrUpgradeConflict, replyError(reply))
+		}
 		return fmt.Errorf("pkgmgr: UpgradePackage rejected: %s", replyError(reply))
 	}
 }
@@ -172,6 +183,13 @@ type diffSummary struct {
 // a byte-equal logical body are omitted (the body-equality skip). Output order
 // is deterministic: the new-batch order for create/update, sorted keys for
 // tombstones.
+//
+// Every update/tombstone mutation carries the revision this diff's own read
+// just observed as ExpectedRevision (per-key OCC, F-011/Contract #8 §8.6): a
+// concurrent write to a surviving key between this read and the upgrade's
+// commit now fails the whole atomic batch (ErrUpgradeConflict) instead of
+// being silently overwritten. Create mutations are already conditioned
+// create-only and carry no ExpectedRevision.
 func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps []installMutation) ([]installMutation, diffSummary, error) {
 	oldSet := make(map[string]struct{}, len(oldKeys))
 	for _, k := range oldKeys {
@@ -191,7 +209,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 			sum.created++
 			continue
 		}
-		committed, err := i.getCommitted(ctx, op.Key)
+		committed, rev, err := i.getCommitted(ctx, op.Key)
 		if err != nil {
 			return nil, diffSummary{}, err
 		}
@@ -211,7 +229,7 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 				updateDoc[f] = v
 			}
 		}
-		out = append(out, installMutation{Op: "update", Key: op.Key, Document: updateDoc})
+		out = append(out, installMutation{Op: "update", Key: op.Key, Document: updateDoc, ExpectedRevision: &rev})
 		sum.updated++
 	}
 
@@ -230,10 +248,20 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 	}
 	sort.Strings(removed)
 	for _, k := range removed {
+		committed, rev, err := i.getCommitted(ctx, k)
+		if err != nil {
+			return nil, diffSummary{}, err
+		}
+		if committed == nil {
+			// Absent from KV already (a prior partial state) — nothing to
+			// tombstone, nothing to condition.
+			continue
+		}
 		out = append(out, installMutation{
-			Op:       "tombstone",
-			Key:      k,
-			Document: map[string]any{"isDeleted": true, "data": map[string]any{}},
+			Op:               "tombstone",
+			Key:              k,
+			Document:         map[string]any{"isDeleted": true, "data": map[string]any{}},
+			ExpectedRevision: &rev,
 		})
 		sum.tombstoned++
 	}
@@ -268,21 +296,23 @@ func (i *Installer) readDeclaredKeys(ctx context.Context, pkgKey string) ([]stri
 	return keys, nil
 }
 
-// getCommitted reads a key's committed value as a generic map. A missing key
-// returns (nil, nil) so callers can treat it as "absent" rather than an error.
-func (i *Installer) getCommitted(ctx context.Context, key string) (map[string]any, error) {
+// getCommitted reads a key's committed value as a generic map plus the
+// read-time revision (the per-subject OCC token diffManifest conditions its
+// update/tombstone mutations on — F-011/Contract #8 §8.6). A missing key
+// returns (nil, 0, nil) so callers can treat it as "absent" rather than an error.
+func (i *Installer) getCommitted(ctx context.Context, key string) (map[string]any, uint64, error) {
 	entry, err := i.Conn.KVGet(ctx, CoreBucket, key)
 	if err != nil {
 		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, fmt.Errorf("pkgmgr: read %s: %w", key, err)
+		return nil, 0, fmt.Errorf("pkgmgr: read %s: %w", key, err)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(entry.Value, &m); err != nil {
-		return nil, fmt.Errorf("pkgmgr: parse %s: %w", key, err)
+		return nil, 0, fmt.Errorf("pkgmgr: parse %s: %w", key, err)
 	}
-	return m, nil
+	return m, entry.Revision, nil
 }
 
 // logicalDocEqual reports whether the committed entry already carries every

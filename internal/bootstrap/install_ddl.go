@@ -182,7 +182,7 @@ def execute(state, op):
 // The client (internal/pkgmgr) reads the installed package's old declaredKeys,
 // rebuilds the new manifest on version-independent keys (§8.1), diffs by key,
 // and ships the delta in op.payload.mutations. Payload shape:
-// {name, fromVersion, toVersion, mutations: [{op, key, document}, ...]}.
+// {name, fromVersion, toVersion, mutations: [{op, key, document, expectedRevision?}, ...]}.
 //
 // Unlike InstallPackage this is NOT create-only — it carries update/tombstone
 // ops, so it is not safe-by-construction. Protected kernel/auth roots are
@@ -191,7 +191,10 @@ def execute(state, op):
 // rejects the whole op when data.protected == true — path-independent, the
 // same backstop install/uninstall rely on. The script enforces the same
 // key-shape + underscore-aspect guardrails as install (shared helpers) plus
-// the op-vocabulary check (create/update/tombstone only).
+// the op-vocabulary check (create/update/tombstone only). When an update or
+// tombstone mutation carries an integer expectedRevision the mutation asserts
+// it (per-key OCC, F-011/Contract #8 §8.6 — closes the sibling window to
+// UninstallPackageDDLScript's).
 const UpgradePackageDDLScript = installGuardrailHelpers + `
 def execute(state, op):
     p = op.payload
@@ -230,7 +233,13 @@ def execute(state, op):
                 fail("InvalidArgument: underscore-prefixed aspect not allowed: " + key)
         if "document" not in m or type(m["document"]) != type({}):
             fail("InvalidArgument: mutation requires a document dict: " + key)
-        out.append({"op": mop, "key": key, "document": m["document"]})
+        out_mut = {"op": mop, "key": key, "document": m["document"]}
+        if "expectedRevision" in m and m["expectedRevision"] != None:
+            expected = m["expectedRevision"]
+            if type(expected) != type(0):
+                fail("InvalidArgument: expectedRevision must be an integer: " + key)
+            out_mut["expectedRevision"] = expected
+        out.append(out_mut)
         if mop == "create":
             created = created + 1
         elif mop == "update":
@@ -308,7 +317,7 @@ var uninstallPackageExamples = []any{
 	},
 }
 
-const upgradePackageInputSchema = `{"type":"object","required":["name","fromVersion","toVersion","mutations"],"properties":{"name":{"type":"string"},"fromVersion":{"type":"string"},"toVersion":{"type":"string"},"mutations":{"type":"array","items":{"type":"object","required":["op","key","document"],"properties":{"op":{"type":"string","enum":["create","update","tombstone"]},"key":{"type":"string"},"document":{"type":"object"}}}}}}`
+const upgradePackageInputSchema = `{"type":"object","required":["name","fromVersion","toVersion","mutations"],"properties":{"name":{"type":"string"},"fromVersion":{"type":"string"},"toVersion":{"type":"string"},"mutations":{"type":"array","items":{"type":"object","required":["op","key","document"],"properties":{"op":{"type":"string","enum":["create","update","tombstone"]},"key":{"type":"string"},"document":{"type":"object"},"expectedRevision":{"type":"integer"}}}}}}`
 
 // UpgradePackage is multi-key with no single principal entity, so the reply
 // carries no primaryKey. The committed key set is the key set of
@@ -316,13 +325,14 @@ const upgradePackageInputSchema = `{"type":"object","required":["name","fromVers
 const upgradePackageOutputSchema = `{"type":"object","properties":{}}`
 
 var upgradePackageFieldDescription = map[string]any{
-	"name":                 "The Capability Package canonical name to upgrade in place.",
-	"fromVersion":          "The currently-installed version. Combined with name+toVersion to derive a deterministic op requestId so a re-submitted upgrade dedup-short-circuits.",
-	"toVersion":            "The target version. Equal to fromVersion for a dev-mode same-version re-apply (update-only).",
-	"mutations":            "The pre-computed diff delta: create new entities, update changed bodies, tombstone removed entities — applied in one atomic batch.",
-	"mutations[].op":       "One of 'create' / 'update' / 'tombstone'.",
-	"mutations[].key":      "The version-independent Contract #1 key the mutation targets (vtx.* or lnk.*).",
-	"mutations[].document": "The logical document body. Provenance is stamped by the Processor; protected kernel/auth roots are rejected at commit time.",
+	"name":                         "The Capability Package canonical name to upgrade in place.",
+	"fromVersion":                  "The currently-installed version. Combined with name+toVersion to derive a deterministic op requestId so a re-submitted upgrade dedup-short-circuits.",
+	"toVersion":                    "The target version. Equal to fromVersion for a dev-mode same-version re-apply (update-only).",
+	"mutations":                    "The pre-computed diff delta: create new entities, update changed bodies, tombstone removed entities — applied in one atomic batch.",
+	"mutations[].op":               "One of 'create' / 'update' / 'tombstone'.",
+	"mutations[].key":              "The version-independent Contract #1 key the mutation targets (vtx.* or lnk.*).",
+	"mutations[].document":         "The logical document body. Provenance is stamped by the Processor; protected kernel/auth roots are rejected at commit time.",
+	"mutations[].expectedRevision": "Optional NATS revision for OCC on an update/tombstone — the mutation fails if the key was modified since the diff's read.",
 }
 
 var upgradePackageExamples = []any{

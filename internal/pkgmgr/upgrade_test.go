@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
@@ -160,6 +161,193 @@ func TestUpgrade_DiffCreateUpdateTombstone(t *testing.T) {
 	pkg := kvDoc(t, ctx, conn, PackageVertexPrefix+entityNanoID(v1.Name, "package"))
 	if ver, _ := pkg["data"].(map[string]any)["version"].(string); ver != "0.2.0" {
 		t.Fatalf("package version not bumped: got %q", ver)
+	}
+}
+
+// TestUpgrade_DeltaCarriesExpectedRevision proves diffManifest conditions
+// every update/tombstone mutation on the revision its own read observed
+// (F-011 per-key OCC, Contract #8 §8.6); a create mutation carries none (it
+// is already conditioned create-only).
+func TestUpgrade_DeltaCarriesExpectedRevision(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	descKey := metaVertexPrefix + entityNanoID(v1.Name, "ddl:sampleClass") + ".description"
+	permKey := "vtx.permission." + entityNanoID(v1.Name, permTag("SampleOp", "any"))
+	newLensKey := metaVertexPrefix + entityNanoID(v1.Name, "lens:sampleLens2")
+
+	v2 := sampleDef("0.2.0")
+	v2.DDLs[0].Description = "sample upgraded"
+	v2.Lenses = append(v2.Lenses, LensSpec{
+		CanonicalName: "sampleLens2",
+		Class:         "meta.lens",
+		Adapter:       "nats-kv",
+		Bucket:        "sample-bucket-2",
+		Engine:        "full",
+		Spec:          `MATCH (n:sample2) RETURN n.key AS key`,
+	})
+	v2.Permissions = nil
+
+	existing, err := inst.findInstalledPackage(ctx, v1.Name)
+	if err != nil || existing == nil {
+		t.Fatalf("findInstalledPackage: existing=%+v err=%v", existing, err)
+	}
+	mutations, sum, err := inst.computeDeltaAgainst(ctx, existing, v2)
+	if err != nil {
+		t.Fatalf("computeDeltaAgainst: %v", err)
+	}
+	if sum.created == 0 || sum.updated == 0 || sum.tombstoned == 0 {
+		t.Fatalf("want non-zero create/update/tombstone, got %+v", sum)
+	}
+	byKey := make(map[string]installMutation, len(mutations))
+	for _, m := range mutations {
+		byKey[m.Key] = m
+	}
+
+	descEntry, err := conn.KVGet(ctx, CoreBucket, descKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", descKey, err)
+	}
+	descMut, ok := byKey[descKey]
+	if !ok || descMut.Op != "update" {
+		t.Fatalf("expected an update mutation for %s, got %+v", descKey, descMut)
+	}
+	if descMut.ExpectedRevision == nil || *descMut.ExpectedRevision != descEntry.Revision {
+		t.Fatalf("update ExpectedRevision = %v, want %d", descMut.ExpectedRevision, descEntry.Revision)
+	}
+
+	permEntry, err := conn.KVGet(ctx, CoreBucket, permKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", permKey, err)
+	}
+	permMut, ok := byKey[permKey]
+	if !ok || permMut.Op != "tombstone" {
+		t.Fatalf("expected a tombstone mutation for %s, got %+v", permKey, permMut)
+	}
+	if permMut.ExpectedRevision == nil || *permMut.ExpectedRevision != permEntry.Revision {
+		t.Fatalf("tombstone ExpectedRevision = %v, want %d", permMut.ExpectedRevision, permEntry.Revision)
+	}
+
+	createMut, ok := byKey[newLensKey]
+	if !ok || createMut.Op != "create" {
+		t.Fatalf("expected a create mutation for %s, got %+v", newLensKey, createMut)
+	}
+	if createMut.ExpectedRevision != nil {
+		t.Fatalf("create mutation should carry no ExpectedRevision, got %d", *createMut.ExpectedRevision)
+	}
+}
+
+// TestUpgrade_RaceOnUpdatedKeyRejected proves the F-011 per-key OCC fix on the
+// update path (Contract #8 §8.6): a concurrent write to a surviving key
+// between diffManifest's read and the upgrade's commit is rejected
+// (RevisionConflict), not silently overwritten, and the whole atomic batch
+// leaves the key un-updated — no partial upgrade. Mirrors
+// TestInstaller_Uninstall_RaceOnDeclaredKeyRejected's interleave
+// reconstruction: capture the revision the diff would see, have a concurrent
+// write bump it, then submit the exact mutation shape diffManifest builds,
+// keyed on the now-stale revision.
+func TestUpgrade_RaceOnUpdatedKeyRejected(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	descKey := metaVertexPrefix + entityNanoID(v1.Name, "ddl:sampleClass") + ".description"
+
+	entry, err := conn.KVGet(ctx, CoreBucket, descKey)
+	if err != nil {
+		t.Fatalf("capture revision: %v", err)
+	}
+	staleRev := entry.Revision
+
+	if _, err := conn.KVUpdate(ctx, CoreBucket, descKey, entry.Value, staleRev); err != nil {
+		t.Fatalf("simulated concurrent write: %v", err)
+	}
+
+	requestID := deterministicNanoID(v1.Name, "0.1.0->0.2.0", "race-update-op")
+	payload := map[string]any{
+		"name":        v1.Name,
+		"fromVersion": "0.1.0",
+		"toVersion":   "0.2.0",
+		"mutations": []map[string]any{
+			{"op": "update", "key": descKey,
+				"document":         map[string]any{"isDeleted": false, "data": map[string]any{"text": "sample upgraded"}},
+				"expectedRevision": staleRev},
+		},
+	}
+	reply, err := inst.submitOp(ctx, "UpgradePackage", "UpgradePackage", requestID, payload)
+	if err != nil {
+		t.Fatalf("submitOp: %v", err)
+	}
+	if reply.Status != processor.ReplyStatusRejected {
+		t.Fatalf("status = %q, want rejected", reply.Status)
+	}
+	if reply.Error == nil || reply.Error.Code != processor.ErrCodeRevisionConflict {
+		t.Fatalf("error = %+v, want code RevisionConflict", reply.Error)
+	}
+
+	after, err := conn.KVGet(ctx, CoreBucket, descKey)
+	if err != nil {
+		t.Fatalf("post-conflict read: %v", err)
+	}
+	if strings.Contains(string(after.Value), "sample upgraded") {
+		t.Fatalf("key %s was updated despite the OCC rejection", descKey)
+	}
+}
+
+// TestUpgrade_RaceOnTombstonedKeyRejected mirrors the above for the tombstone
+// (removed-key) side of the diff — the whole batch is rejected and the key is
+// left live, not partially tombstoned.
+func TestUpgrade_RaceOnTombstonedKeyRejected(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	permKey := "vtx.permission." + entityNanoID(v1.Name, permTag("SampleOp", "any"))
+
+	entry, err := conn.KVGet(ctx, CoreBucket, permKey)
+	if err != nil {
+		t.Fatalf("capture revision: %v", err)
+	}
+	staleRev := entry.Revision
+
+	if _, err := conn.KVUpdate(ctx, CoreBucket, permKey, entry.Value, staleRev); err != nil {
+		t.Fatalf("simulated concurrent write: %v", err)
+	}
+
+	requestID := deterministicNanoID(v1.Name, "0.1.0->0.2.0", "race-tombstone-op")
+	payload := map[string]any{
+		"name":        v1.Name,
+		"fromVersion": "0.1.0",
+		"toVersion":   "0.2.0",
+		"mutations": []map[string]any{
+			{"op": "tombstone", "key": permKey,
+				"document":         map[string]any{"isDeleted": true, "data": map[string]any{}},
+				"expectedRevision": staleRev},
+		},
+	}
+	reply, err := inst.submitOp(ctx, "UpgradePackage", "UpgradePackage", requestID, payload)
+	if err != nil {
+		t.Fatalf("submitOp: %v", err)
+	}
+	if reply.Status != processor.ReplyStatusRejected {
+		t.Fatalf("status = %q, want rejected", reply.Status)
+	}
+	if reply.Error == nil || reply.Error.Code != processor.ErrCodeRevisionConflict {
+		t.Fatalf("error = %+v, want code RevisionConflict", reply.Error)
+	}
+
+	after, err := conn.KVGet(ctx, CoreBucket, permKey)
+	if err != nil {
+		t.Fatalf("post-conflict read: %v", err)
+	}
+	if strings.Contains(string(after.Value), `"isDeleted":true`) {
+		t.Fatalf("key %s was tombstoned despite the OCC rejection", permKey)
 	}
 }
 

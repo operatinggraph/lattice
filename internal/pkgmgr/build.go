@@ -30,10 +30,16 @@ const metaVertexPrefix = "vtx.meta."
 // installMutation is one entry in the InstallPackage op payload's
 // `mutations` list — a LOGICAL document (no provenance). The Processor
 // stamps createdAt/createdBy/createdByOp at step 8 from the install actor.
+// ExpectedRevision is the per-key OCC token (F-011, Contract #8 §8.6): an
+// upgrade's update/tombstone mutation carries the revision its diff read
+// observed, so a concurrent write racing the upgrade fails the whole batch
+// instead of being silently overwritten. Unset on create (already
+// conditioned create-only) and on every install mutation.
 type installMutation struct {
-	Op       string         `json:"op"`
-	Key      string         `json:"key"`
-	Document map[string]any `json:"document"`
+	Op               string         `json:"op"`
+	Key              string         `json:"key"`
+	Document         map[string]any `json:"document"`
+	ExpectedRevision *uint64        `json:"expectedRevision,omitempty"`
 }
 
 // buildInstallBatch constructs the full mutation manifest for one install
