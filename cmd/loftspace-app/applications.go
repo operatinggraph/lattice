@@ -54,7 +54,8 @@ type protectedApplicationRow struct {
 // app_id for a stable view.
 const selectApplicationsSQL = `
 SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
-       unit_rent, unit_currency, unit_status, signed_at, landlord_decision,
+       unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
+       unit_available_from, signed_at, landlord_decision,
        decline_reason, terms_move_in_date, terms_lease_term_months,
        terms_requested_rent
 FROM read_lease_applications
@@ -94,7 +95,8 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 		if err := rows.Scan(
 			&row.EntityKey, &row.Applicant, &row.UnitKey, &row.UnitAddress,
 			&row.UnitCity, &row.UnitRegion, &row.UnitRent, &row.UnitCurrency,
-			&row.UnitStatus, &row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
+			&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
+			&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 		); err != nil {
 			return nil, err
