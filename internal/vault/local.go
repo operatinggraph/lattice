@@ -262,6 +262,18 @@ func (b *LocalBackend) ShredKey(_ context.Context, identityKey string) error {
 	return nil
 }
 
+// WrapKey implements Vault. It is Encrypt under a key-custody name — see the
+// interface doc for why the two methods share an implementation.
+func (b *LocalBackend) WrapKey(ctx context.Context, identityKey string, envelope Envelope, key []byte) (Ciphertext, error) {
+	return b.Encrypt(ctx, identityKey, envelope, key)
+}
+
+// UnwrapKey implements Vault. It is Decrypt under a key-custody name — see
+// the interface doc for why the two methods share an implementation.
+func (b *LocalBackend) UnwrapKey(ctx context.Context, identityKey string, envelope Envelope, wrapped Ciphertext) ([]byte, error) {
+	return b.Decrypt(ctx, identityKey, envelope, wrapped)
+}
+
 // checkAndDeriveDEK returns the plaintext DEK for identityKey, or
 // ErrKeyShredded / ErrInvalidEnvelope. The shredded-check, DEK-cache lookup,
 // KEK-unwrap, and cache-write all run under one held lock — this is the

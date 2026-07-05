@@ -53,7 +53,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "objects-base",
-	Version:       "0.1.0",
+	Version:       "0.2.0",
 	Description:   "Generic large-object vertex type (object DDL + attach/detach/tombstone ops) + the objectLiveness GC convergence lens + meta.weaverTarget + the objectAttachments display lens (the apps' P5-clean byte-plane read model); the graph side of the off-graph blob plane. Content-addressed, type-agnostic, content metadata in the .content aspect (D5).",
 	Depends:       nil,
 	DDLs:          DDLs(),

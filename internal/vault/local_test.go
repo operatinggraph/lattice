@@ -308,3 +308,59 @@ func TestLocalBackend_CreateIdentityKey_EmptyIdentityRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, vault.ErrInvalidEnvelope))
 }
+
+func TestLocalBackend_WrapUnwrapKeyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	env, err := b.CreateIdentityKey(ctx, "identity-1")
+	require.NoError(t, err)
+
+	cek := make([]byte, 32)
+	_, err = rand.Read(cek)
+	require.NoError(t, err)
+
+	wrapped, err := b.WrapKey(ctx, "identity-1", env, cek)
+	require.NoError(t, err)
+	assert.NotEqual(t, cek, wrapped.CT, "wrapped CEK must not equal the plaintext CEK")
+	assert.Equal(t, "identity-1", wrapped.KeyID)
+
+	got, err := b.UnwrapKey(ctx, "identity-1", env, wrapped)
+	require.NoError(t, err)
+	assert.Equal(t, cek, got)
+}
+
+func TestLocalBackend_UnwrapKey_WrongIdentity_Denied(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	envA, err := b.CreateIdentityKey(ctx, "identity-A")
+	require.NoError(t, err)
+	envB, err := b.CreateIdentityKey(ctx, "identity-B")
+	require.NoError(t, err)
+
+	cek := []byte("0123456789abcdef0123456789abcdef")
+	wrapped, err := b.WrapKey(ctx, "identity-A", envA, cek)
+	require.NoError(t, err)
+
+	_, err = b.UnwrapKey(ctx, "identity-B", envB, wrapped)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, vault.ErrDecryptFailed)
+}
+
+func TestLocalBackend_UnwrapKey_AfterShred_Denied(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	env, err := b.CreateIdentityKey(ctx, "identity-1")
+	require.NoError(t, err)
+	cek := []byte("0123456789abcdef0123456789abcdef")
+	wrapped, err := b.WrapKey(ctx, "identity-1", env, cek)
+	require.NoError(t, err)
+
+	require.NoError(t, b.ShredKey(ctx, "identity-1"))
+
+	_, err = b.UnwrapKey(ctx, "identity-1", env, wrapped)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, vault.ErrKeyShredded)
+}

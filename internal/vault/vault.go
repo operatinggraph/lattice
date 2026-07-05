@@ -100,4 +100,19 @@ type Vault interface {
 	// destruction. ShredKey is idempotent — shredding an already-shredded
 	// (or never-created) identity key is not an error.
 	ShredKey(ctx context.Context, identityKey string) error
+
+	// WrapKey seals a small secret — e.g. a per-object Content Encryption Key
+	// (Contract #3 §3.11) — under the DEK referenced by envelope, binding
+	// identityKey exactly as Encrypt does. It is the same envelope operation
+	// Encrypt already implements, exposed under a name that reads as
+	// key-custody (wrapping a key) rather than aspect-data encryption at the
+	// call site — a caller wrapping a CEK never touches Encrypt directly.
+	// Fails with ErrKeyShredded / ErrInvalidEnvelope on the same conditions
+	// as Encrypt.
+	WrapKey(ctx context.Context, identityKey string, envelope Envelope, key []byte) (Ciphertext, error)
+
+	// UnwrapKey reverses WrapKey, returning the original key bytes. Fails
+	// with ErrKeyShredded / ErrInvalidEnvelope / ErrDecryptFailed on the same
+	// conditions as Decrypt.
+	UnwrapKey(ctx context.Context, identityKey string, envelope Envelope, wrapped Ciphertext) ([]byte, error)
 }

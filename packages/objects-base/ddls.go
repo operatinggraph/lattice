@@ -81,7 +81,7 @@ func objectDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"AttachObject", "DetachObject", "TombstoneObject"},
 		Description: "Large-object vertex DDL — the graph side of the off-graph blob plane. Vertex shape: " +
 			"vtx.object.<oid>, class=object, root data = {linkEpoch, liveLinks} (linkEpoch the link-set version for the reclaim CAS, liveLinks the " +
-				"authoritative live-link count the objectLiveness lens reads in place of the lagging adjacency, both bumped on " +
+			"authoritative live-link count the objectLiveness lens reads in place of the lagging adjacency, both bumped on " +
 			"every attach/detach; otherwise minimal, D5), where oid = " +
 			"crypto.sha256NanoID(\"object:\" + digest) (content-addressed, D2/D3). The content's reference " +
 			"metadata (digest, size, contentType, storeName) lives on the .content aspect; the bytes live in " +
@@ -91,12 +91,17 @@ func objectDDL() pkgmgr.DDLSpec {
 			"the link to a live, non-protected target (type-agnostic, D7); an identical digest dedups to one " +
 			"vertex, a tombstoned object is revived with the fresh upload (CC2), a digest mismatch under an " +
 			"existing oid is rejected (DigestCollision). An optional replaceObjectId tombstones the prior " +
-			"object's link in the same slot (the §8 \"new photo\" update). DetachObject tombstones one link. " +
+			"object's link in the same slot (the §8 \"new photo\" update). A sensitive object (Contract #3 " +
+			"§3.11) is encrypted client-side before this DDL ever runs — AttachObject only records the " +
+			"caller-supplied envelope (sensitive:true + encryption{algo,nonce,wrappedCEK,keyId} + " +
+			"governingIdentity) and identity-salts the oid to crypto.sha256NanoID(\"object:\"+keyId+\":\"+digest), " +
+			"so a sensitive object is never cross-identity content-addressed; digest stays the PLAINTEXT " +
+			"digest (post-decrypt integrity), keyId must equal governingIdentity. DetachObject tombstones one link. " +
 			"TombstoneObject soft-deletes the object vertex + .content under a linkEpoch stale-check (the " +
 			"lens-projected expectedEpoch vs the current one) + a vertex-revision self-OCC, and emits " +
 			"object.tombstoned (the byte-reclaim trigger). Every attach/detach OCC-touches the object vertex " +
 			"and atomically bumps linkEpoch + maintains liveLinks, versioning the link set (the re-link CAS guard, " +
-				"§20) and keeping liveness lag-free (the attach-adjacency-lag reclaim guard, §21).",
+			"§20) and keeping liveness lag-free (the attach-adjacency-lag reclaim guard, §21).",
 		Script: objectDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"digest":{"type":"string","description":"AttachObject: the NATS-computed content digest \"SHA-256=<base64url>\". Derives the content-addressed oid and is stored on .content for integrity."},` +
@@ -107,6 +112,9 @@ func objectDDL() pkgmgr.DDLSpec {
 			`"linkName":{"type":"string","description":"AttachObject/DetachObject: the relationship localName ([a-z][a-zA-Z0-9]*), e.g. photoOf / signedLeaseOf. Caller-supplied, no per-linkName DDL."},` +
 			`"filename":{"type":"string","description":"AttachObject (optional): the attachment filename, stored on the link (attachment-specific, not on the shared object vertex)."},` +
 			`"replaceObjectId":{"type":"string","description":"AttachObject (optional): the bare oid of a prior object whose link in the same slot is tombstoned (the §8 \"new photo\" replace)."},` +
+			`"sensitive":{"type":"boolean","description":"AttachObject (optional, default false): marks the object as client-side encrypted at rest (Contract #3 §3.11). True requires governingIdentity + encryption."},` +
+			`"governingIdentity":{"type":"string","description":"AttachObject, required when sensitive: the full vtx.<type>.<NanoID> of the identity whose erasure right governs this document (the CEK's wrap target). Must equal encryption.keyId. Salts the oid so sensitive objects are never cross-identity content-addressed."},` +
+			`"encryption":{"type":"object","description":"AttachObject, required when sensitive: {algo,nonce,wrappedCEK,keyId} — the envelope the uploader already produced client-side (Vault.WrapKey on the per-object CEK). Stored verbatim on .content; the Processor/DDL never sees key material.","properties":{"algo":{"type":"string"},"nonce":{"type":"string"},"wrappedCEK":{"type":"string"},"keyId":{"type":"string"}}},` +
 			`"oid":{"type":"string","description":"DetachObject/TombstoneObject: the bare object id (the <oid> segment of vtx.object.<oid>)."},` +
 			`"objectKey":{"type":"string","description":"TombstoneObject (alternative to oid): the full vtx.object.<oid> key — what the objectLiveness lens row's entityKey carries, so Weaver's directOp templates it directly into the reclaim op."},` +
 			`"expectedEpoch":{"type":"integer","description":"TombstoneObject (optional): the object's data.linkEpoch the objectLiveness lens projected at orphan-detection. The soft-delete CASes it against the current epoch — a concurrent re-link bumps the epoch and aborts the reclaim (the §20 GC stale-check). The vertex KV-revision is always self-OCC'd in addition."}},` +
@@ -114,17 +122,20 @@ func objectDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"AttachObject/DetachObject: the link key. TombstoneObject: the object vertex key."}}}`,
 		FieldDescription: map[string]string{
-			"digest":           "AttachObject: the NATS-computed content digest in the exact \"SHA-256=<base64url>\" form. The oid is crypto.sha256NanoID(\"object:\" + digest); the full digest is stored on .content for integrity and collision detection.",
-			"size":             "AttachObject: object size in bytes, stored on the .content aspect.",
-			"contentType":      "AttachObject: MIME content type, stored on the .content aspect; the read path streams it back as Content-Type.",
-			"storeName":        "The core-objects Object Store name the bytes were streamed under (a provisional NanoID — content addressing lives at the graph layer, not the store key). Stored on .content (AttachObject) and echoed in the object.tombstoned event (TombstoneObject) so the byte-janitor can reclaim.",
-			"targetKey":        "The full vtx.<type>.<NanoID> key of the owner the object links to. AttachObject validates it is alive and non-protected (never a meta/system or data.protected vertex); the type is whatever the caller supplies (type-agnostic).",
-			"linkName":         "The relationship localName ([a-z][a-zA-Z0-9]*) read from the object: photoOf, signedLeaseOf, etc. Caller-supplied and validated as a delimiter-safe localName; there is no per-linkName DDL.",
-			"filename":         "Optional attachment filename. Stored on the LINK (attachment-specific) — never on the shared, deduped object vertex, since owner A's resume.pdf and owner B's lease.pdf can be identical bytes.",
-			"replaceObjectId":  "Optional bare oid of a prior object whose link in the same (targetKey, linkName) slot is tombstoned in the same batch — the \"here's my new photo\" replace. The old object is reclaimed by the v1b GC if that was its last link.",
-			"oid":              "DetachObject/TombstoneObject: the bare object id — the <oid> segment of vtx.object.<oid>. Loupe learns it from an attach reply's primaryKey link, or derives it Go-side from the digest.",
-			"objectKey":        "TombstoneObject (alternative to oid): the full vtx.object.<oid> key. The objectLiveness lens row's entityKey carries it, so Weaver's directOp templates it (row.entityKey) straight into the reclaim op + its reads.",
-			"expectedEpoch":    "TombstoneObject optional stale-check: the object's data.linkEpoch the objectLiveness lens projected at orphan-detection. The soft-delete CASes it against the current epoch (a concurrent re-link bumps it → abort). The vertex KV-revision is self-OCC'd in addition.",
+			"digest":            "AttachObject: the NATS-computed content digest in the exact \"SHA-256=<base64url>\" form. The oid is crypto.sha256NanoID(\"object:\" + digest); the full digest is stored on .content for integrity and collision detection.",
+			"size":              "AttachObject: object size in bytes, stored on the .content aspect.",
+			"contentType":       "AttachObject: MIME content type, stored on the .content aspect; the read path streams it back as Content-Type.",
+			"storeName":         "The core-objects Object Store name the bytes were streamed under (a provisional NanoID — content addressing lives at the graph layer, not the store key). Stored on .content (AttachObject) and echoed in the object.tombstoned event (TombstoneObject) so the byte-janitor can reclaim.",
+			"targetKey":         "The full vtx.<type>.<NanoID> key of the owner the object links to. AttachObject validates it is alive and non-protected (never a meta/system or data.protected vertex); the type is whatever the caller supplies (type-agnostic).",
+			"linkName":          "The relationship localName ([a-z][a-zA-Z0-9]*) read from the object: photoOf, signedLeaseOf, etc. Caller-supplied and validated as a delimiter-safe localName; there is no per-linkName DDL.",
+			"filename":          "Optional attachment filename. Stored on the LINK (attachment-specific) — never on the shared, deduped object vertex, since owner A's resume.pdf and owner B's lease.pdf can be identical bytes.",
+			"replaceObjectId":   "Optional bare oid of a prior object whose link in the same (targetKey, linkName) slot is tombstoned in the same batch — the \"here's my new photo\" replace. The old object is reclaimed by the v1b GC if that was its last link.",
+			"sensitive":         "Optional, default false. True marks the object as encrypted at rest (Contract #3 §3.11) — the bytes are already ciphertext when streamed; requires governingIdentity + encryption on the same call.",
+			"governingIdentity": "Required when sensitive is true: the full vtx.<type>.<NanoID> of the identity whose ShredIdentityKey call makes this blob permanently unrecoverable. Must equal encryption.keyId. Identity-salts the oid (no cross-identity dedup for sensitive objects).",
+			"encryption":        "Required when sensitive is true: {algo,nonce,wrappedCEK,keyId} — the client-produced envelope (Vault.WrapKey wrapping the per-object CEK under governingIdentity's §3.10 DEK). Stored on .content verbatim; inert without the identity's DEK.",
+			"oid":               "DetachObject/TombstoneObject: the bare object id — the <oid> segment of vtx.object.<oid>. Loupe learns it from an attach reply's primaryKey link, or derives it Go-side from the digest.",
+			"objectKey":         "TombstoneObject (alternative to oid): the full vtx.object.<oid> key. The objectLiveness lens row's entityKey carries it, so Weaver's directOp templates it (row.entityKey) straight into the reclaim op + its reads.",
+			"expectedEpoch":     "TombstoneObject optional stale-check: the object's data.linkEpoch the objectLiveness lens projected at orphan-detection. The soft-delete CASes it against the current epoch (a concurrent re-link bumps it → abort). The vertex KV-revision is self-OCC'd in addition.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -144,6 +155,32 @@ func objectDDL() pkgmgr.DDLSpec {
 					"already have a live object, adds only the link (dedup) and OCC-touches the object vertex. Emits " +
 					"object.attached. Returns primaryKey = the link key. Rejects an absent/protected target or a digest " +
 					"mismatch under an existing oid (DigestCollision).",
+			},
+			{
+				Name: "AttachObject — attach a sensitive (crypto-shreddable) document",
+				Payload: map[string]any{
+					"digest":            "SHA-256=PlaintextDigestExample",
+					"size":              412903,
+					"contentType":       "application/pdf",
+					"storeName":         "<provisional-nanoid>",
+					"targetKey":         "vtx.identity.<applicantNanoID>",
+					"linkName":          "signedLeaseOf",
+					"sensitive":         true,
+					"governingIdentity": "vtx.identity.<applicantNanoID>",
+					"encryption": map[string]any{
+						"algo":       "AES-256-GCM",
+						"nonce":      "<base64-nonce>",
+						"wrappedCEK": "<base64-wrapped-CEK>",
+						"keyId":      "vtx.identity.<applicantNanoID>",
+					},
+				},
+				ExpectedOutcome: "The uploader already AES-256-GCM-encrypted the bytes client-side and wrapped the CEK " +
+					"under governingIdentity's §3.10 DEK before calling this op. Derives the identity-salted oid = " +
+					"crypto.sha256NanoID(\"object:\"+keyId+\":\"+digest); mints vtx.object.<oid> + a .content aspect " +
+					"carrying {digest (plaintext), size, contentType, storeName, sensitive:true, encryption}. " +
+					"ShredIdentityKey(vtx.identity.<applicantNanoID>) later makes this blob's wrappedCEK permanently " +
+					"unwrappable — the same DEK erases both the aspect plane and this blob. Rejects a mismatched " +
+					"encryption.keyId/governingIdentity pair or a missing encryption block.",
 			},
 			{
 				Name: "DetachObject — remove a photo link",
@@ -240,6 +277,27 @@ def optional_int(p, name):
     if type(v) != type(0):
         fail("InvalidArgument: " + name + ": must be an integer")
     return v
+
+def optional_security_flag(p, name):
+    # Default False when absent/null (an opt-in flag), but a PRESENT
+    # wrong-typed value fails closed rather than silently coercing to False —
+    # unlike an ordinary optional field, this gates a security classification
+    # (sensitive:true), so a caller/serialization bug (e.g. "true" the string)
+    # must be a loud rejection, never a silent downgrade to plaintext.
+    if not hasattr(p, name):
+        return False
+    v = getattr(p, name)
+    if v == None:
+        return False
+    if type(v) != type(True):
+        fail("InvalidArgument: " + name + ": must be a boolean")
+    return v
+
+def required_dict_string(d, container_name, field_name):
+    v = d.get(field_name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + container_name + "." + field_name + ": required non-empty string")
+    return v.strip()
 
 # A delimiter-safe bare id: non-empty, carries no key delimiters / wildcards /
 # whitespace, so "vtx.object." + id is a single well-formed 3-segment key. The
@@ -374,6 +432,32 @@ def attach_object(state, p):
     filename = optional_string(p, "filename")
     replace_oid = optional_string(p, "replaceObjectId")
 
+    # Sensitive (Contract #3 §3.11): the bytes were already encrypted client-side
+    # under a per-object CEK, wrapped by the governing identity's §3.10 DEK. The
+    # script never touches key material or the Vault — it only records the
+    # caller-supplied envelope and identity-salts the oid so a sensitive object
+    # is never cross-identity content-addressed (the §4.1 dedup/shred tension).
+    sensitive = optional_security_flag(p, "sensitive")
+    key_id = None
+    encryption_data = None
+    if sensitive:
+        governing_identity = required_string(p, "governingIdentity")
+        gov_type, _ = parts_of(governing_identity, "governingIdentity", "")
+        if gov_type == "meta":
+            fail("ProtectedTarget: governingIdentity cannot be a meta/system vertex: " + governing_identity)
+        if not hasattr(p, "encryption"):
+            fail("InvalidArgument: encryption: required when sensitive is true")
+        enc = getattr(p, "encryption")
+        if type(enc) != type({}):
+            fail("InvalidArgument: encryption: must be an object")
+        algo = required_dict_string(enc, "encryption", "algo")
+        nonce = required_dict_string(enc, "encryption", "nonce")
+        wrapped_cek = required_dict_string(enc, "encryption", "wrappedCEK")
+        key_id = required_dict_string(enc, "encryption", "keyId")
+        if key_id != governing_identity:
+            fail("InvalidArgument: encryption.keyId must equal governingIdentity; got " + key_id + " != " + governing_identity)
+        encryption_data = {"algo": algo, "nonce": nonce, "wrappedCEK": wrapped_cek, "keyId": key_id}
+
     # Target validation (CC7): live, and never a meta/system or protected vertex.
     tgt_type, tgt_id = parts_of(target_key, "targetKey", "")
     if tgt_type == "meta":
@@ -383,13 +467,23 @@ def attach_object(state, p):
     if is_protected(state, target_key):
         fail("ProtectedTarget: target is protected: " + target_key)
 
-    oid = crypto.sha256NanoID("object:" + digest)
+    # Content-addressing (§3.3/§4.1): a sensitive object is identity-salted so
+    # identical plaintext from two identities never converges to one shared
+    # vertex (closes a PII linkage leak); non-sensitive stays content-addressed,
+    # byte-for-byte unchanged.
+    if sensitive:
+        oid = crypto.sha256NanoID("object:" + key_id + ":" + digest)
+    else:
+        oid = crypto.sha256NanoID("object:" + digest)
     obj_key = "vtx.object." + oid
     content_key = obj_key + ".content"
     link_key = "lnk.object." + oid + "." + link_name + "." + tgt_type + "." + tgt_id
 
     content_data = {"digest": digest, "size": size,
                     "contentType": content_type, "storeName": store_name}
+    if sensitive:
+        content_data["sensitive"] = True
+        content_data["encryption"] = encryption_data
     link_data = {}
     if filename != None:
         link_data["filename"] = filename

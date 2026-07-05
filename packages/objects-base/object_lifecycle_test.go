@@ -511,3 +511,245 @@ func TestObject_Lifecycle(t *testing.T) {
 		t.Fatalf("re-attach must restore the link %s", link1)
 	}
 }
+
+// sensitiveAttachPayload builds an AttachObject payload for a sensitive object
+// whose bytes are already client-side ciphertext — the DDL never sees key
+// material, only the caller-supplied envelope (Contract #3 §3.11).
+func sensitiveAttachPayload(digest, target, keyID string) map[string]any {
+	return map[string]any{
+		"digest": digest, "size": 4096, "contentType": "application/pdf",
+		"storeName": "sensitive-store-1", "targetKey": target, "linkName": "signedLeaseOf",
+		"sensitive": true, "governingIdentity": keyID,
+		"encryption": map[string]any{
+			"algo": "AES-256-GCM", "nonce": "test-nonce-b64", "wrappedCEK": "test-wrapped-cek-b64",
+			"keyId": keyID,
+		},
+	}
+}
+
+// TestObject_SensitiveAttach_IdentitySaltedOid proves §3.3/§3.11's identity
+// salting: a sensitive object's oid folds in governingIdentity (== keyId), and
+// the .content aspect carries sensitive:true + the caller's envelope verbatim
+// alongside the ordinary reference metadata — recorded, not decrypted or
+// re-derived (the Processor/DDL never touches key material, §4.3).
+func TestObject_SensitiveAttach_IdentitySaltedOid(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsens", Instance: "objsens-1"})
+
+	applicant := "vtx.identity." + testutil.GenReqID("sensapplicant1")
+	seedIdentity(t, ctx, conn, applicant, false)
+
+	digest := "SHA-256=sensitiveTESTdigestExampleA"
+	oid := substrate.SHA256NanoID("object:" + applicant + ":" + digest)
+	objKey := "vtx.object." + oid
+	contentKey := objKey + ".content"
+
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensattach1"), "AttachObject",
+		sensitiveAttachPayload(digest, applicant, applicant), []string{applicant}, processor.OutcomeAccepted)
+
+	if !liveExists(ctx, conn, objKey) {
+		t.Fatalf("identity-salted object vertex %s not created", objKey)
+	}
+	contentDoc, _ := readDoc(t, ctx, conn, contentKey)
+	cdata, _ := contentDoc["data"].(map[string]any)
+	if sensitive, _ := cdata["sensitive"].(bool); !sensitive {
+		t.Fatalf(".content.sensitive must be true, got %v", cdata["sensitive"])
+	}
+	enc, _ := cdata["encryption"].(map[string]any)
+	if enc == nil {
+		t.Fatalf(".content.encryption missing, got %v", cdata)
+	}
+	if enc["algo"] != "AES-256-GCM" || enc["nonce"] != "test-nonce-b64" ||
+		enc["wrappedCEK"] != "test-wrapped-cek-b64" || enc["keyId"] != applicant {
+		t.Fatalf(".content.encryption envelope wrong: %v", enc)
+	}
+	if cdata["digest"] != digest {
+		t.Fatalf(".content.digest must stay the caller-supplied (plaintext) digest, got %v", cdata["digest"])
+	}
+}
+
+// TestObject_SensitiveAttach_CrossIdentity_NoDedup proves the §4.1 decision:
+// two identities uploading byte-identical sensitive content get DISTINCT
+// object vertices (identity-salted oid) — no shared-ownership PII linkage
+// leak, unlike the non-sensitive content-addressed path.
+func TestObject_SensitiveAttach_CrossIdentity_NoDedup(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensdedup", Instance: "objsensdedup-1"})
+
+	identityA := "vtx.identity." + testutil.GenReqID("sensidentityA")
+	identityB := "vtx.identity." + testutil.GenReqID("sensidentityB")
+	seedIdentity(t, ctx, conn, identityA, false)
+	seedIdentity(t, ctx, conn, identityB, false)
+
+	digest := "SHA-256=sharedPlaintextDigestExample"
+	oidA := substrate.SHA256NanoID("object:" + identityA + ":" + digest)
+	oidB := substrate.SHA256NanoID("object:" + identityB + ":" + digest)
+	if oidA == oidB {
+		t.Fatalf("distinct identities must salt to distinct oids")
+	}
+
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensdedupA"), "AttachObject",
+		sensitiveAttachPayload(digest, identityA, identityA), []string{identityA}, processor.OutcomeAccepted)
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensdedupB"), "AttachObject",
+		sensitiveAttachPayload(digest, identityB, identityB), []string{identityB}, processor.OutcomeAccepted)
+
+	if !liveExists(ctx, conn, "vtx.object."+oidA) {
+		t.Fatalf("identity A's object vertex not created")
+	}
+	if !liveExists(ctx, conn, "vtx.object."+oidB) {
+		t.Fatalf("identity B's object vertex not created")
+	}
+}
+
+// TestObject_SensitiveAttach_KeyIdMismatch_Rejected proves the fail-closed
+// consistency check between the two caller-supplied identity references — a
+// mismatched encryption.keyId/governingIdentity pair is rejected rather than
+// silently trusting one over the other.
+func TestObject_SensitiveAttach_KeyIdMismatch_Rejected(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensmismatch", Instance: "objsensmismatch-1"})
+
+	applicant := "vtx.identity." + testutil.GenReqID("sensmismatch1")
+	other := "vtx.identity." + testutil.GenReqID("sensmismatch2")
+	seedIdentity(t, ctx, conn, applicant, false)
+
+	digest := "SHA-256=mismatchTESTdigestExampleAA"
+	payload := sensitiveAttachPayload(digest, applicant, applicant)
+	payload["encryption"].(map[string]any)["keyId"] = other // governingIdentity=applicant, encryption.keyId=other
+
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensmismatch"), "AttachObject",
+		payload, []string{applicant}, processor.OutcomeRejected)
+}
+
+// TestObject_SensitiveAttach_MissingEncryption_Rejected proves sensitive:true
+// requires the full envelope — a client that forgets to wrap the CEK must not
+// silently mint an unencrypted "sensitive" object.
+func TestObject_SensitiveAttach_MissingEncryption_Rejected(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensnoenc", Instance: "objsensnoenc-1"})
+
+	applicant := "vtx.identity." + testutil.GenReqID("sensnoencrypt1")
+	seedIdentity(t, ctx, conn, applicant, false)
+
+	payload := map[string]any{
+		"digest": "SHA-256=noEncTESTdigestExampleAAA", "size": 10, "contentType": "application/pdf",
+		"storeName": "s-noenc", "targetKey": applicant, "linkName": "signedLeaseOf",
+		"sensitive": true, "governingIdentity": applicant,
+	}
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensnoenc"), "AttachObject",
+		payload, []string{applicant}, processor.OutcomeRejected)
+}
+
+// TestObject_SensitiveAttach_OidGoldenValue pins the identity-salted oid
+// FORMULA itself (not merely "the DDL agrees with Go's own SHA256NanoID"): a
+// hardcoded literal NanoID for a fixed (keyId, digest) pair, so a drift in
+// either the Starlark script's salt string or Go's SHA256NanoID would be
+// caught even if both drifted identically (a self-referential compare would
+// not catch that).
+func TestObject_SensitiveAttach_OidGoldenValue(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensgolden", Instance: "objsensgolden-1"})
+
+	const (
+		goldenKeyID  = "vtx.identity.goCdenidentity1STUVW"
+		goldenDigest = "SHA-256=goldenTESTdigestExampleAAA"
+		goldenOid    = "6MfkrmTEYN5xJsnuiDZT"
+	)
+	seedIdentity(t, ctx, conn, goldenKeyID, false)
+
+	if got := substrate.SHA256NanoID("object:" + goldenKeyID + ":" + goldenDigest); got != goldenOid {
+		t.Fatalf("golden oid drifted: SHA256NanoID(\"object:\"+keyId+\":\"+digest) = %q, want %q", got, goldenOid)
+	}
+
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensgolden"), "AttachObject",
+		sensitiveAttachPayload(goldenDigest, goldenKeyID, goldenKeyID), []string{goldenKeyID}, processor.OutcomeAccepted)
+
+	if !liveExists(ctx, conn, "vtx.object."+goldenOid) {
+		t.Fatalf("object vertex at the golden oid vtx.object.%s not created — the DDL's identity-salt formula drifted", goldenOid)
+	}
+}
+
+// TestObject_SensitiveAttach_NonBoolSensitive_Rejected proves the fail-closed
+// fix for the security-classification flag: a non-bool `sensitive` (e.g. a
+// caller/serialization bug sending the string "true") must be rejected, never
+// silently coerced to false (which would mint a plaintext, non-identity-salted
+// object with no error).
+func TestObject_SensitiveAttach_NonBoolSensitive_Rejected(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensnonbool", Instance: "objsensnonbool-1"})
+
+	applicant := "vtx.identity." + testutil.GenReqID("sensnonbool1")
+	seedIdentity(t, ctx, conn, applicant, false)
+
+	payload := map[string]any{
+		"digest": "SHA-256=nonBoolTESTdigestExampleA", "size": 10, "contentType": "application/pdf",
+		"storeName": "s-nonbool", "targetKey": applicant, "linkName": "signedLeaseOf",
+		"sensitive": "true", "governingIdentity": applicant,
+	}
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensnonbool"), "AttachObject",
+		payload, []string{applicant}, processor.OutcomeRejected)
+}
+
+// TestObject_SensitiveAttach_GoverningIdentityMeta_Rejected mirrors the
+// existing targetKey CC7 guard: governingIdentity must never be a meta/system
+// vertex either.
+func TestObject_SensitiveAttach_GoverningIdentityMeta_Rejected(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensmeta", Instance: "objsensmeta-1"})
+
+	applicant := "vtx.identity." + testutil.GenReqID("sensmetatarget1")
+	metaID := "vtx.meta." + testutil.GenReqID("sensmetagoverns1")
+	seedIdentity(t, ctx, conn, applicant, false)
+
+	payload := sensitiveAttachPayload("SHA-256=metaTESTdigestExampleAAAA", applicant, metaID)
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("sensmeta"), "AttachObject",
+		payload, []string{applicant}, processor.OutcomeRejected)
+}
+
+// TestObject_SensitiveAttach_DedupKeepsFirstEnvelope proves the live→dedup
+// branch's existing behavior (unchanged by this fire, extended coherently to
+// sensitive objects): a SECOND owner attaching to the same (governingIdentity,
+// digest) — an identity-salted dedup, mirroring TestObject_Lifecycle's
+// cross-owner dedup step — does NOT overwrite .content.encryption with the
+// new call's envelope, exactly mirroring how storeName also stays pinned to
+// the first upload. The first envelope is the one that decrypts the bytes
+// actually stored under the first storeName; a second upload's (different,
+// since CEK is random per upload) envelope would reference bytes never
+// referenced by any live link.
+func TestObject_SensitiveAttach_DedupKeepsFirstEnvelope(t *testing.T) {
+	ctx, conn := setupObjectsEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "objsensdedupenv", Instance: "objsensdedupenv-1"})
+
+	governingIdentity := "vtx.identity." + testutil.GenReqID("sensdedupenvgov1")
+	owner1 := "vtx.identity." + testutil.GenReqID("sensdedupenvown1")
+	owner2 := "vtx.identity." + testutil.GenReqID("sensdedupenvown2")
+	seedIdentity(t, ctx, conn, governingIdentity, false)
+	seedIdentity(t, ctx, conn, owner1, false)
+	seedIdentity(t, ctx, conn, owner2, false)
+
+	digest := "SHA-256=dedupEnvTESTdigestExampleA"
+	oid := substrate.SHA256NanoID("object:" + governingIdentity + ":" + digest)
+	objKey := "vtx.object." + oid
+	contentKey := objKey + ".content"
+
+	first := sensitiveAttachPayload(digest, owner1, governingIdentity)
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("dedupenv1"), "AttachObject",
+		first, []string{owner1}, processor.OutcomeAccepted)
+
+	// A second owner attaching the SAME (governingIdentity, digest) dedups to
+	// the same identity-salted oid — but with a DIFFERENT envelope, as a fresh
+	// client-side re-wrap would produce (random CEK/nonce per upload). The
+	// stored .content.encryption must stay the FIRST one.
+	second := sensitiveAttachPayload(digest, owner2, governingIdentity)
+	second["encryption"].(map[string]any)["nonce"] = "second-nonce-b64"
+	second["encryption"].(map[string]any)["wrappedCEK"] = "second-wrapped-cek-b64"
+	submitObj(t, ctx, conn, cp, cons, testutil.GenReqID("dedupenv2"), "AttachObject",
+		second, []string{owner2, objKey, contentKey}, processor.OutcomeAccepted)
+
+	contentDoc, _ := readDoc(t, ctx, conn, contentKey)
+	cdata, _ := contentDoc["data"].(map[string]any)
+	enc, _ := cdata["encryption"].(map[string]any)
+	if enc["nonce"] != "test-nonce-b64" || enc["wrappedCEK"] != "test-wrapped-cek-b64" {
+		t.Fatalf(".content.encryption must stay the FIRST upload's envelope on dedup, got %v", enc)
+	}
+}

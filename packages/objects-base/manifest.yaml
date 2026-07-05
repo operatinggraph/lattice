@@ -1,5 +1,5 @@
 name: objects-base
-version: 0.1.0
+version: 0.2.0
 description: |
   Generic large-object vertex type (the object DDL + lifecycle ops
   AttachObject, DetachObject, TombstoneObject) — the graph side of the
@@ -11,7 +11,12 @@ description: |
   are links (object -<linkName>-> owner). Type-agnostic; depends on nothing.
   Declares the objectLiveness GC convergence lens + its meta.weaverTarget (Loop
   A: an orphaned object dispatches directOp(TombstoneObject)); the only new
-  runtime component is the object-store-manager (Loop B, byte reclaim).
+  runtime component is the object-store-manager (Loop B, byte reclaim). A
+  sensitive object (AttachObject sensitive:true + governingIdentity +
+  encryption{algo,nonce,wrappedCEK,keyId}, Contract #3 §3.11) is client-side
+  encrypted before this DDL runs — it only records the envelope and
+  identity-salts the oid so a sensitive object is never cross-identity
+  content-addressed.
 declares:
   ddls:
     - canonicalName: object

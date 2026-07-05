@@ -41,6 +41,14 @@ func (f *fakeVault) Decrypt(context.Context, string, vault.Envelope, vault.Ciphe
 	panic("fakeVault: Decrypt not used by privacyworker")
 }
 
+func (f *fakeVault) WrapKey(context.Context, string, vault.Envelope, []byte) (vault.Ciphertext, error) {
+	panic("fakeVault: WrapKey not used by privacyworker")
+}
+
+func (f *fakeVault) UnwrapKey(context.Context, string, vault.Envelope, vault.Ciphertext) ([]byte, error) {
+	panic("fakeVault: UnwrapKey not used by privacyworker")
+}
+
 func (f *fakeVault) ShredKey(_ context.Context, identityKey string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
