@@ -36,6 +36,7 @@ Routes are registered in `cmd/loupe/server.go` (`registerRoutes`); each handler 
 | **Core KV browse** | `/api/corekv`, `/api/corekv/entry`, `/api/vertices`, `/api/vertex` | List + inspect Core-KV entries; assemble a vertex's root + aspects + links into a single view (`corekv.go`, `vertex.go`). |
 | **Health dashboard** | `/api/health`, `/api/systemmap` | Read the Health-KV plane (`health.<component>.<instance>`) and compute a per-component status roll-up + a live system map (`health.go`, `systemmap.go`). |
 | **Tasks** | `/api/tasks` | List open orchestration tasks (`tasks.go`). |
+| **Flows** | `/api/flows` | List the Chronicler's `orchestration-history` P5 read model — every Loom instance's lifecycle (pattern, timestamps, failure reason), badging a "running" row live vs orphaned against the live `lattice.ctrl.loom.list` control read (`flows.go`). Unlike Core KV browse, this reads a lens target bucket, not Core KV. |
 | **Control proxy** | `/api/control/…` | Proxy the `lattice.ctrl.<component>.*` micro-services — Refractor / Weaver / Loom: list / inspect / pause / resume / fail an instance or consumer (`server.go`, `control.go`). |
 | **Packages** | `/api/packages` | List installed capability packages; install / uninstall (`server.go`). |
 | **Operation submission** | `/api/ops`, `/api/op` | Enumerate submittable operations (`ops.go`) and submit one (`server.go`). Forms are driven by **DDL self-description** (`inputSchema` / `fieldDescription` / `examples`) — no Loupe-side per-op knowledge. |
@@ -87,7 +88,8 @@ Because it is an auth-less admin handle, the **loopback bind is load-bearing**:
 ## Implementation status
 
 **Built (Phase 3).** The view-and-control web app (`cmd/loupe`): Core-KV browse, the Health / system-map
-dashboard, the tasks view, the Refractor / Weaver / Loom control proxy, package list / install /
+dashboard, the tasks view, the Chronicler's Flows view (durable Loom-flow history — a P5 lens-target
+read, not Core KV), the Refractor / Weaver / Loom control proxy, package list / install /
 uninstall, DDL-driven operation submission, and large-binary upload / view / detach over the substrate
 Object Store. Trusted single-identity, loopback-bound, no auth. Run it with `make run-loupe` (UI alone)
 or `make up-full` (full stack + Loupe at http://127.0.0.1:7777).

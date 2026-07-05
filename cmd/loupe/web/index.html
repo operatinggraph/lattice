@@ -13,6 +13,7 @@
       <a class="tab active" data-tab="systemmap" href="#/map">System Map</a>
       <a class="tab" data-tab="graph" href="#/graph">Graph</a>
       <a class="tab" data-tab="tasks" href="#/tasks">Tasks</a>
+      <a class="tab" data-tab="flows" href="#/flows">Flows</a>
       <a class="tab" data-tab="packages" href="#/packages">Packages</a>
       <a class="tab" data-tab="files" href="#/files">Files</a>
       <a class="tab" data-tab="op" href="#/op">Submit Op</a>
@@ -109,6 +110,27 @@
         operation the assignee must complete (name + instructions, link-sourced from the task's
         <code>forOperation</code>). "Complete →" jumps to Submit Op with that operation pre-selected.</p>
       <div class="cards" id="tasks-cards"></div>
+    </section>
+
+    <!-- Flows -->
+    <section class="panel" id="panel-flows">
+      <div class="panel-controls">
+        <button id="flows-load">Refresh</button>
+        <label class="muted">status
+          <select id="flows-status">
+            <option value="">all</option>
+            <option value="running">running</option>
+            <option value="complete">complete</option>
+            <option value="failed">failed</option>
+          </select>
+        </label>
+        <span class="muted" id="flows-status-msg"></span>
+      </div>
+      <p class="muted small">The Chronicler's durable Loom-flow history — every instance's lifecycle
+        (pattern, timestamps, failure reason), reconstructed from the <code>loom.*</code> event stream. A
+        "running" row is badged <b>live</b> or <b>orphaned</b> against the live control-plane list — an
+        orphaned row is a flow whose terminal event never landed, not a leak.</p>
+      <div class="cards" id="flows-cards"></div>
     </section>
 
     <!-- Component page (drill-through: #/component/<id>) -->

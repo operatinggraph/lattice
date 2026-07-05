@@ -89,6 +89,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events/stream", s.handleEventStream)
 	mux.HandleFunc("/api/lens/", s.handleLens)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/flows", s.handleFlows)
 	mux.HandleFunc("/api/gateway/revocations", s.handleGatewayRevocations)
 	mux.HandleFunc("/api/control/", s.handleControl)
 	mux.HandleFunc("/api/packages", s.handlePackages)

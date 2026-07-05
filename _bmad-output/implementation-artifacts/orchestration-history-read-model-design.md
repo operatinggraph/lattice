@@ -94,6 +94,18 @@
 > get its own dedicated bucket like this one did). No `KeyColumn`/`Output.OutputKeyPattern` mechanism was
 > used either — that machinery is actor-aggregate-only (§6.13), which this lens does not opt into.
 
+> **FIRE 3 AS-BUILT (2026-07-05, Steward) — Loupe "Flows" tab shipped.** `cmd/loupe/flows.go` reads
+> `orchestration-history` over P5 (`KVListKeys`/`KVGet`, mirroring `corekv.go`'s list/get shape) and
+> cross-references the live `lattice.ctrl.loom.list` control read to badge a `running` row. The badge is
+> a **tri-state**, not the boolean §2.7 sketched: `true` (live), `false` (confirmed no matching live
+> instance — orphaned), or **absent** when the control read itself fails — an outage must never render as
+> a false "orphaned" verdict, so the row is left unbadged rather than defaulting to `false`. FE:
+> `web/js/views/flows.js` + a nav tab + panel, mirroring `tasks.js`. Live-verified against the running
+> `make up-full` stack (routing, error-path rendering, no console errors); the stack's bootstrap predates
+> the `orchestration-history` primordial bucket (added in Fire 2) so the live list currently reads
+> "bucket not found" — expected per §2.5's "needs a fresh bootstrap" caveat, not a Fire-3 defect. Full
+> populated-data verification is deferred to the next fresh-bootstrap opportunity.
+
 · Designer fire 2026-06-30 (Winston); reworked at ratification 2026-07-02 · Lattice lane
 **Backlog row:** "Loom / Weaver control-API surfacing" (`backlog/lattice.md` → Refinements & ops) — ★ · M
 
