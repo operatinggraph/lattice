@@ -169,7 +169,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ ratified · [design](../../implementation-artifacts/script-read-posture-design.md) · Fires 1–2 shippable (Contract #2 committed); guard (Fire 3) build + contracts deferred |
 | **Package version upgrade / DDL hot-reload (F-004)** | In-place re-install over an existing version + DDL-migration semantics (install/uninstall existed; upgrade did not). Diff-and-apply (create/update/tombstone) in one atomic Processor batch; version-independent entity keys. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/package-version-upgrade-design.md) · Fires 1a–3 shipped; only an optional Fire-2 live e2e remains (§8.1 + §8.6 committed) |
 | Loom / Weaver control-API surfacing | Operator pause/resume + a durable `loom.*` read model beyond what the Loupe blocker covers. | ★ | M | ✅ ratified (2026-07-02, Fork C: the Chronicler — new event-ledger materializer component) · [design](../../implementation-artifacts/orchestration-history-read-model-design.md) · fires (chronicler-prebuild-regrounding first): component+loom history → weaver history → core-ops archive; display = Loupe **F13** (the Time Machine) |
-| **[bootstrap] Stale `lattice.bootstrap.json` vs. a recreated Core KV silently breaks reads** | `make up`'s reuse branch skips re-bootstrapping when kernel processes are already running, leaving the JSON stale — reads return empty while writes still succeed. Recurred 3× (2026-07-03/04); now proven to break a LIVE vertical too (Clinic staff-wildcard roster) — see [verticals.md](verticals.md). | ★★ | S | 📋 · repro: `lattice bootstrap verify` · fix: freshness check on the reuse path, or a Health-KV signal |
 
 ### Parking lot — very low priority (far, far back)
 
@@ -186,6 +185,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-05 · `109f59a` · [bootstrap] `make up` reuse-branch freshness check — gates reuse on `lattice bootstrap verify`; stale/mismatched JSON forces re-bootstrap instead of silently reading empty
 - 2026-07-05 · `fc41c3b` · [Core] UninstallPackage/UpgradePackage per-key OCC (F-011) CLOSED — Fire 2 (upgrade) per-key `expectedRevision` on update/tombstone, mirrors Fire 1
 - 2026-07-05 · `a2c86b4` · [Core] Atomic-batch size ceiling CLOSED — typed `BatchTooLarge` pre-flight guard (substrate) + step-8 rejection (Processor), no redelivery
 - 2026-07-05 · `744f75d` · [Docs] objmgr-and-bootstrap-component-pages CLOSED — bootstrap/vault/privacyworker component pages + README/architecture-overview updates + survey-rotation slots
