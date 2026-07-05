@@ -2,6 +2,21 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-04 · `4d6df0a` · [Weaver] Planner mandate Fire 3 — pure `internal/weaver/planner` goal-regression library (STRIPS/GOAP UCS, canonical determinism, `ErrNoPlan`); not yet wired to any dispatch decision; Fire 4 next
+- 2026-07-04 · `7b9191b` · [Weaver] Planner mandate Fire 2 — `__effect` confidence-window bookkeeping (both dispatch legs + gap-close path) + heartbeat `LensEffectMismatch` issue; Fire 3 (planner library) next
+- 2026-07-04 · `a673d23` · [Weaver] Planner mandate Fire 1 — op-DDL `Effects` (`internal/guardgrammar` + pkgmgr install validation) + lease-signing declarations; zero engine change; Fires 2-9 remain
+- 2026-07-04 · `d2b6321` · [CI] internal/bridge's 46 tests marked `t.Parallel()` + a fixture ordering-race fixed — package 35s→7s locally, but unit job wall-clock unchanged (~137s, bottleneck is elsewhere)
+- 2026-07-04 · `ff25188` · [AI-native] AI-authored capabilities Fire 1 Increment 1 — capabilityproposal DDL capture pair (lens kind) + the pkgmgr §5 materializer; bridge adapter/Loom dispatch + review/apply remain
+- 2026-07-04 · `e3053cf` · [Refractor] Personal Lens Fire 2 (PL.2) — ActorEnumerator fan-out + Interest Set (personalinterest, personal.register/.deregister control RPCs); PL.3 (D1 readableAnchors) remains, gated
+- 2026-07-04 · `7fbc962` · [Gateway] Token-revocation kill-switch Fire 2 — rich `revocation` heartbeat block (consumerConnected/revokedCount/lastEventSeq/lastSyncAt); item CLOSED, unblocks Loupe F11
+- 2026-07-04 · `967234d` · [Gateway] Token-revocation kill-switch Fire 1 — RevokeActor/UnrevokeActor event-only ops + the Gateway's own events.gateway.> materializer arm the kill-switch fail-closed; Fire 2 (rich heartbeat) remains
+- 2026-07-03 · `80daa9b` · [Core] System-actor package-op grants Fire 2 — stub-off e2e over the 4 engine paths (Weaver/Loom/objmgr/privacy), all authorize under real capability auth; `LATTICE_PROCESSOR_AUTH_MODE` opt-in added; item CLOSED
+- 2026-07-03 · `4b5976a` · [Refractor] Personal Lens Fire 1 (PL.1) — `nats_subject` adapter + SYNC stream transport, e2e-proven through the real CDC pipeline; PL.2+ remain
+- 2026-07-03 · `6e0e205` · [Refractor] Retire legacy `simple` engine Fire 3 — engine deleted, full-only selection, `internal/refractor/fixture` + orphaned spike removed
+- 2026-07-03 · `cc2613f` · [Core] `kv.Links` Fire 1 shipped as a primitive; clinic consumer reverted, superseded by write-path slot-claims (`f37bb82`) — stands unconsumed
+- 2026-07-03 · `fa2b570` · [Health] Bridge/Gateway/objmgr heartbeats aggregate issue severity (arch #8) — no more false-green; objmgr's doc brought to full Contract #5 shape
+- 2026-07-03 · `df75ee9`+`db8beed` · [Security] Retire the Phase-1 destructive security-gate apparatus — gate2/gate3 `make down && up` recipes deleted; 6 vectors promoted, 14 kept as residual
+- 2026-07-03 · `fb66e7c` · [vault] Fire 5b-iv — test-crypto-shred proves Secure-Lens PII scrub through the real async shred chain (5b's last code gate; remaining: attended delivery-boundary reset + live e2e)
 - 2026-07-03 · `0377938` · [natsperm] bridge phantom KV-bucket grants pruned (arch #19, bridge half) — TestBridgeNoPhantomKVGrants added
 - 2026-07-03 · `9972fec` · [natsperm] object-plane-nats-permissions — arch #2 fixed (Winston self-ratified, no fork/contract); first object-plane natsperm vectors
 - 2026-07-03 · `103f878` · [Refractor] Full-engine phantom aggregate row on empty required-MATCH — `projectItems` no longer fabricates a null row; unblocks `landlordLeaseApplicationsRead` and any other unanchored aggregating lens

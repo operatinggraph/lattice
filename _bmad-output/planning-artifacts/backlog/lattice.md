@@ -58,8 +58,9 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 ### Survey log (round-robin rotation)
 
 Rotation memory only — findings are the filed rows; fire narratives live in commits, never here.
-Components: Core · Weaver · Loom · Refractor (+ the cross-cutting feature backlog; Loupe moved to its own
-lane, [loupe.md](loupe.md)). Survey the stalest (`git log -1 --format=%ct -- <path>`), note ONE dated line, rotate.
+Components: Core · Weaver · Loom · Refractor · Bootstrap · object-store-manager (+ the cross-cutting
+feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the stalest
+(`git log -1 --format=%ct -- <path>`), note ONE dated line, rotate.
 
 - 2026-07-01 Core (healthy; filed atomic-batch-size-ceiling + uninstall-per-key-OCC).
 - 2026-07-01 Weaver (healthy, 83%/77% cov, no TODOs; filed registry-cleanup-edge-branches-uncovered).
@@ -70,6 +71,7 @@ lane, [loupe.md](loupe.md)). Survey the stalest (`git log -1 --format=%ct -- <pa
 - 2026-07-02 Refractor (healthy, clean lint; retraction/rollup already tracked; filed capability-pipeline-link-aspect-fanout-untested + natskv-guard-edge-branches).
 - 2026-07-02 Arch-review, all components — filed the intake section below; Refractor findings held for the post-update re-review; root-identity designation → Designer.
 - 2026-07-02 Designer — object-plane-nats-permissions (★★★ arch #2; `$O.core-objects.>` grant fix + first natsperm object vectors; no contract change) (→ 📐).
+- 2026-07-05 objmgr-and-bootstrap-component-pages CLOSED — bootstrap/vault/privacyworker pages written, README+architecture-overview updated, Bootstrap + object-store-manager added to this rotation.
 - **Next:** Core.
 
 ## Arch-review intake — platform hardening & doc/contract truth
@@ -89,7 +91,6 @@ Severity-ordered; same row discipline as component maintenance (shipped rows col
 | **chronicler-prebuild-regrounding** | Pre-F1/F2 corrections to the ratified Chronicler design: F2 consumes `events.weaver.>` but Weaver emits no events — fold the lifecycle-event producer into F2; archive segments carry no object vertices, so objmgr's sweep would GC them — needs a GC-fenced bucket; F1's projection example maps data/committedAt vs the published Event doc's payload/timestamp; loom-state terminal cursors persist — re-ground the deletion premise. | ★★ | M | ✅ ratified · [design](../../implementation-artifacts/orchestration-history-read-model-design.md) |
 | **loom-pattern-source-cold-registry** | loom.md advises a stable `Instance`, but the pattern-source durable derives from it and resumes from its ack floor — a crashed stable-Instance Loom reattaches empty, boots with no pattern registry, and new triggers Nak-loop until a meta vertex is rewritten. Un-armed only while nothing sets LOOM_INSTANCE. Per-boot durable nonce; fix source.go's contradictory comments. | ★★ | S | 📋 |
 | **natsperm-matrix-hygiene** | Refractor's `$KV.>` write is broader than its lens-target set (covers dynamically-named package buckets — narrowing needs a real design, not a mechanical prune). | ★ | S | 📋 · bridge phantom-bucket half shipped `0377938`; remaining: Refractor narrowing needs design |
-| **objmgr-and-bootstrap-component-pages** | object-store-manager + bootstrap are always-on platform binaries with no docs/components page, no README row, no architecture-overview mention, and no Surveyor-rotation slot; vault + privacyworker are built but page-less too. Write the four pages; add the index/README/overview rows; put objmgr + bootstrap in the survey rotation. | ★★ | M | 🏗️ building · objmgr page shipped `2430489` · next: bootstrap/vault/privacyworker pages + overview + survey rotation |
 | **contract7-and-processor-mandate-refresh** | Contract #7 §7.2/§7.7 describe a superseded kernel (5 meta-meta DDLs, processor identity, topology-walk cypher) — stage the alignment edit for Andrew. processor.md/doc.go omit step-6.5 encryption, the §3.2 OCC retry, task auto-completion, and kv.Links; commit_path.go keeps "stubbed 4-10"/"auth (stub)" comments; a bootstrap comment asserts a capability graph-walk that isn't. | ★ | S | 📋 |
 | **fr22-service-denial-structural-fields** | FR22's `DenialDetails` has no service branch — a service-op denial names nothing structural. Fork B: emit `deniedService` (from authContext) + `deniedServiceClass` (one `.class` aspect read at denial time); `availableServiceClasses` is out of scope — what's available is the app's read-model question (P5). Contract #6 §6.12 is the spec. | ★ | S | 📋 · Fork B ratified 2026-07-03 (§6.12 amended) · low-priority |
 | **weaver-exhausted-escalation-and-model** | The ratified augur block accepts `exhausted` as an escalation trigger and parses `augur.model`, but no engine path fires either — a budget-exhausted gap is silently skipped (no escalation, no Health issue) and model is consumed by nothing. Wire the trigger through augurEscalation (threading model), or strike both from the block. | ★ | S | 📋 |
@@ -187,6 +188,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-05 · `744f75d` · [Docs] objmgr-and-bootstrap-component-pages CLOSED — bootstrap/vault/privacyworker component pages + README/architecture-overview updates + survey-rotation slots
 - 2026-07-05 · `e67e073` · [FR28/29] Role-queue + fallback Fire 3 CLOSED — `unroutedTasks` Weaver target (new `surface` GapAction, no dispatch, Health-KV only); §10.8 amendment uncommitted for Andrew
 - 2026-07-05 · `df742d2` · [AI-native] AI-authored capabilities Fire 3 CLOSED — weaverTarget/loomPattern kinds + Starlark-guard record-time gate, 3-layer reviewed
 - 2026-07-05 · `c58ba1c` · [AI-native] AI-authored capabilities Fire 2 CLOSED — `lattice capability list/review` + `lattice-pkg apply-proposal`, 3-layer reviewed
@@ -207,19 +209,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-04 · `b472c91` · [Weaver] Planner mandate Fire 5 — `mode:"planned"` candidate-selection dispatch, mark-pinned across reclaim (first real dispatch-decision change); pre-build gate closed; Fire 6 next
 - 2026-07-04 · `9f6a1f2` · [Vault→Loupe] Surface enablers — health.vault heartbeat + vault.decrypt reachability + privacy-operator-grant package; unblocks loupe F12
 - 2026-07-04 · `6c134d9` · [Weaver] Planner mandate Fire 4 — `mode`/`candidates`/`goal` install-parsing + shadow-compare diagnostic (agree/diverge heartbeat metrics); zero dispatch-decision change; Fire 5 next
-- 2026-07-04 · `4d6df0a` · [Weaver] Planner mandate Fire 3 — pure `internal/weaver/planner` goal-regression library (STRIPS/GOAP UCS, canonical determinism, `ErrNoPlan`); not yet wired to any dispatch decision; Fire 4 next
-- 2026-07-04 · `7b9191b` · [Weaver] Planner mandate Fire 2 — `__effect` confidence-window bookkeeping (both dispatch legs + gap-close path) + heartbeat `LensEffectMismatch` issue; Fire 3 (planner library) next
-- 2026-07-04 · `a673d23` · [Weaver] Planner mandate Fire 1 — op-DDL `Effects` (`internal/guardgrammar` + pkgmgr install validation) + lease-signing declarations; zero engine change; Fires 2-9 remain
-- 2026-07-04 · `d2b6321` · [CI] internal/bridge's 46 tests marked `t.Parallel()` + a fixture ordering-race fixed — package 35s→7s locally, but unit job wall-clock unchanged (~137s, bottleneck is elsewhere)
-- 2026-07-04 · `ff25188` · [AI-native] AI-authored capabilities Fire 1 Increment 1 — capabilityproposal DDL capture pair (lens kind) + the pkgmgr §5 materializer; bridge adapter/Loom dispatch + review/apply remain
-- 2026-07-04 · `e3053cf` · [Refractor] Personal Lens Fire 2 (PL.2) — ActorEnumerator fan-out + Interest Set (personalinterest, personal.register/.deregister control RPCs); PL.3 (D1 readableAnchors) remains, gated
-- 2026-07-04 · `7fbc962` · [Gateway] Token-revocation kill-switch Fire 2 — rich `revocation` heartbeat block (consumerConnected/revokedCount/lastEventSeq/lastSyncAt); item CLOSED, unblocks Loupe F11
-- 2026-07-04 · `967234d` · [Gateway] Token-revocation kill-switch Fire 1 — RevokeActor/UnrevokeActor event-only ops + the Gateway's own events.gateway.> materializer arm the kill-switch fail-closed; Fire 2 (rich heartbeat) remains
-- 2026-07-03 · `80daa9b` · [Core] System-actor package-op grants Fire 2 — stub-off e2e over the 4 engine paths (Weaver/Loom/objmgr/privacy), all authorize under real capability auth; `LATTICE_PROCESSOR_AUTH_MODE` opt-in added; item CLOSED
-- 2026-07-03 · `4b5976a` · [Refractor] Personal Lens Fire 1 (PL.1) — `nats_subject` adapter + SYNC stream transport, e2e-proven through the real CDC pipeline; PL.2+ remain
-- 2026-07-03 · `6e0e205` · [Refractor] Retire legacy `simple` engine Fire 3 — engine deleted, full-only selection, `internal/refractor/fixture` + orphaned spike removed
-- 2026-07-03 · `cc2613f` · [Core] `kv.Links` Fire 1 shipped as a primitive; clinic consumer reverted, superseded by write-path slot-claims (`f37bb82`) — stands unconsumed
-- 2026-07-03 · `fa2b570` · [Health] Bridge/Gateway/objmgr heartbeats aggregate issue severity (arch #8) — no more false-green; objmgr's doc brought to full Contract #5 shape
-- 2026-07-03 · `df75ee9`+`db8beed` · [Security] Retire the Phase-1 destructive security-gate apparatus — gate2/gate3 `make down && up` recipes deleted; 6 vectors promoted, 14 kept as residual
-- 2026-07-03 · `fb66e7c` · [vault] Fire 5b-iv — test-crypto-shred proves Secure-Lens PII scrub through the real async shred chain (5b's last code gate; remaining: attended delivery-boundary reset + live e2e)
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*
