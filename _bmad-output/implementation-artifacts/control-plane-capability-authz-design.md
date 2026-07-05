@@ -494,3 +494,23 @@ Residual items worth a second look at build time: whether the Gate-3 control vec
 the stale-read revocation axis (§5), and whether the operator role should ship pre-split into
 read-only vs mutate from day one (R3 says no demand yet — revisit if an operator's blast radius
 concerns Andrew).
+
+---
+
+**Fire 2 SHIPPED (2026-07-05).** All three control planes (Weaver/Loom/Refractor) now verify a signed
+actor JWT — reusing `internal/gateway/auth.Authenticator` (D1's Verifier + revocation kill-switch) —
+before the capability read, via a new `internal/controlauth.ActorVerifier`/`ResolveActor` seam
+(`controlauth.WireActorVerifierFromEnv` builds one per control-plane binary from
+`LATTICE_CONTROL_JWT_*` env vars, mirroring Gateway's own trust-root loader — factored out as
+`internal/gateway/auth.LoadTrustedKeys` for both to share, Gateway's own bring-up untouched). A
+`nil`/unconfigured verifier keeps Fire 1a/1b/1c's self-asserted-header posture byte-identical — no
+flag day; JWT mode is opt-in per deployment. CLI (`--actor-token`) and Loupe
+(`LOUPE_OPERATOR_ACTOR_TOKEN`) gain the companion client-side token flag alongside the existing raw
+`--actor`/`LOUPE_OPERATOR_ACTOR_KEY`, token taking precedence when both are set. 3-layer adversarial
+review ran; two independent passes converged on the same real gap — an explicitly-configured
+`LATTICE_CONTROL_JWT_KEYS_DIR` that scanned to zero `<kid>.pem` files silently fell back to Fire 1's
+unverified mode instead of erroring (indistinguishable from "never configured") — fixed in
+`LoadTrustedKeys` (a configured-but-empty dir is now a hard error), along with a related `kid`
+collision between a scanned key and the reserved dev key. No contract change (no wire-shape change —
+the `Lattice-Actor` header carries a JWT instead of a raw key when verified mode is on; the `Authorize`
+signature is untouched). Deferred, as scoped: per-operator human identity provisioning (Stream 3).
