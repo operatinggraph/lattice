@@ -64,18 +64,29 @@
 //     scanning Core KV directly — this lens is the non-Loupe equivalent so
 //     the bridge/reasoning adapter never needs Core KV access).
 //
-//   - ReviewCapabilityProposal (Fire 2 Increment 1, design §3.3) — the human
-//     verdict op: a capability-authorized operator flips a PENDING proposal
-//     to approved or rejected, addressed directly by its own proposalId. An
-//     approve re-runs the §5 boundary against the LIVE catalog (the TRUSTED
-//     caller attaches a fresh validation verdict; a missing or non-"valid"
-//     one fail-closes to invalid); a reject needs no re-check.
+//   - ReviewCapabilityProposal (design §3.3) — the human verdict op: a
+//     capability-authorized operator flips a PENDING proposal to approved or
+//     rejected, addressed directly by its own proposalId. An approve re-runs
+//     the §5 boundary against the LIVE catalog (the TRUSTED caller attaches a
+//     fresh validation verdict; a missing or non-"valid" one fail-closes to
+//     invalid); a reject needs no re-check.
+//
+//   - The F-004 apply path + the `applied` flip (design §3.5, closes the
+//     loop): pkgmgr.CapabilityApplyPlanForProposal reads an APPROVED
+//     proposal's stored artifact + target and materializes the SAME
+//     Definition §5 already validated; the operator submits it through the
+//     existing, UNMODIFIED F-004 InstallPackage/UpgradePackage op (a
+//     separate Processor commit — this package does not special-case those
+//     ops); MarkCapabilityProposalApplied then records the applied-flip
+//     (review.state approved→applied, appliedAt/appliedByOp, the appliedAs
+//     link to the resulting vtx.package.<id> vertex). Only an approved
+//     proposal may be marked applied (fail-closed, no double-apply).
 //
 // Deliberately NOT yet built (the fire's remaining checkpoints, see the design
 // doc): the real claude-opus-4-8-backed `capabilityAuthor` bridge adapter (only
 // the deterministic `FakeCapabilityAuthor` ships — the same posture Augur's own
-// adapter is still in); the operator-submitted F-004 apply path + the `applied`
-// flip; the `grant`/`weaverTarget`/`loomPattern`/Starlark kinds.
+// adapter is still in); a Loupe/CLI review-and-apply affordance; the
+// `grant`/`weaverTarget`/`loomPattern`/Starlark kinds.
 //
 // Install via the InstallPackage kernel op. See docs/components/_packages.md
 // and _bmad-output/implementation-artifacts/ai-authored-capabilities-design.md.
@@ -86,8 +97,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "capability-author",
-	Version:       "0.4.0",
-	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, plus Fire 2 Increment 1 review: the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/ReviewCapabilityProposal ops (§5 record-time + approve-time deterministic-validation boundary for the lens kind), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses. The operator-submitted F-004 apply path and the grant/weaverTarget/loomPattern/Starlark kinds land in later increments.",
+	Version:       "0.5.0",
+	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, plus Fire 2 review + apply: the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/ReviewCapabilityProposal/MarkCapabilityProposalApplied ops (§5 record-time + approve-time deterministic-validation boundary for the lens kind, plus the F-004-apply-then-mark-applied loop closer), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses. The grant/weaverTarget/loomPattern/Starlark kinds and a Loupe/CLI review-and-apply affordance land in later increments.",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),
 	Permissions:   Permissions(),

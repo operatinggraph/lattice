@@ -8,11 +8,13 @@ import (
 // DDLs returns the package's DDL meta-vertex declarations.
 //
 // The `capabilityproposal` vertex-type DDL owns the capture pair + the human
-// verdict op for one authoring episode (ai-authored-capabilities-design.md
-// §3.1, §3.3); the `capabilityauthorclaim` vertex-type DDL owns the
-// escalation-dispatch instanceOp (§3.4). Together they carry Fire 1 (capture +
-// dispatch) and Fire 2 Increment 1 (review); the operator-submitted F-004
-// apply path remains (see the design doc's checkpoint).
+// verdict op + the apply-flip for one authoring episode
+// (ai-authored-capabilities-design.md §3.1, §3.3, §3.5); the
+// `capabilityauthorclaim` vertex-type DDL owns the escalation-dispatch
+// instanceOp (§3.4). Together they carry Fire 1 (capture + dispatch) and Fire
+// 2 (review + apply); the grant/weaverTarget/loomPattern kinds and a
+// Loupe/CLI review-and-apply affordance remain (see the design doc's
+// checkpoint).
 //
 //   - RequestCapabilityAuthoring mints the proposal vertex write-ahead of the
 //     reasoning call (mirrors augur's CreateAugurReasoningClaim), recording the
@@ -110,7 +112,7 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "capabilityproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"RequestCapabilityAuthoring", "RecordCapabilityProposal", "ReviewCapabilityProposal"},
+		PermittedCommands: []string{"RequestCapabilityAuthoring", "RecordCapabilityProposal", "ReviewCapabilityProposal", "MarkCapabilityProposalApplied"},
 		Description: "AI-authored capability proposal DDL — Increment 1 (design §3.1/§3.3): the capture " +
 			"pair for one authoring episode. Vertex shape: vtx.capabilityproposal.<id>, class=capabilityproposal, " +
 			"root data = {} (D5); business data in aspects: .request {requesterId, intent, contextRef} (the " +
@@ -150,7 +152,23 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"a pending proposal is reviewable — any other state rejects (InvalidReviewTransition); a " +
 			"redelivered review is collapsed earlier by the Contract #4 requestId tracker. The reviewer is " +
 			"the TRUSTED submitting actor (op.actor, never a payload field) and the stamp is the envelope's " +
-			"authoritative submit time.",
+			"authoritative submit time. MarkCapabilityProposalApplied is the apply-flip op that closes the " +
+			"loop (design §3.5): submitted by the operator AFTER they have separately applied the proposal's " +
+			"materialized artifact through the existing, UNMODIFIED F-004 InstallPackage/UpgradePackage op " +
+			"(pkgmgr.CapabilityApplyPlanForProposal builds the Definition; pkgmgr.Installer.Apply submits the " +
+			"real install/upgrade — a SEPARATE Processor commit, not this one). Only an APPROVED proposal may " +
+			"be marked applied (InvalidApplyTransition otherwise — fail-closed, no double-apply/replay-onto-a-" +
+			"different-state); packageKey is never trusted blind — the script requires a LIVE installed " +
+			"package (its .manifest aspect, written only by a real F-004 install/upgrade) whose recorded name " +
+			"matches THIS proposal's own .target.packageName (PackageMismatch/UnknownPackage otherwise), so a " +
+			"caller cannot mark a proposal applied against a nonexistent, tombstoned, or unrelated package. On " +
+			"success it flips review.state approved→applied, stamps appliedAt (op.submittedAt) + appliedByOp " +
+			"(the caller-supplied audit pointer to the install/upgrade that ran), and creates the appliedAs " +
+			"link from the proposal to the verified vtx.package.<id> vertex. A crash between the real " +
+			"install/upgrade committing and this op committing leaves a harmless, recoverable inconsistency " +
+			"(the package is live but the proposal still reads approved) — not a safety gap, since the §5 " +
+			"validation + human-approval invariant already held before either op ran; a redelivered " +
+			"MarkCapabilityProposalApplied is collapsed by the Contract #4 requestId tracker like any other op.",
 		Script: capabilityProposalDDLScript,
 		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | RecordCapabilityProposal — the bridge replyOp {externalRef,status,result} — | ReviewCapabilityProposal{proposalId,verdict,validation?}. The artifact/target/rationale/confidence/validation/provenance fields on a RecordCapabilityProposal are decoded from a single JSON result blob, never top-level payload fields.","properties":` +
 			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring or ReviewCapabilityProposal — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied."},` +
@@ -160,17 +178,21 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
 			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables only 'lens' in this increment; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."},` +
 			`"verdict":{"type":"string","description":"ReviewCapabilityProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary via the fresh validation payload field, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field."},` +
-			`"validation":{"type":"object","description":"ReviewCapabilityProposal, approve verdict only — the FRESH §5 verdict {state,report?} the caller computed by re-running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (record-time and approve-time can drift). state must be exactly 'valid' or the approve fail-closes to invalid; ignored on a reject verdict."}},` +
+			`"validation":{"type":"object","description":"ReviewCapabilityProposal, approve verdict only — the FRESH §5 verdict {state,report?} the caller computed by re-running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (record-time and approve-time can drift). state must be exactly 'valid' or the approve fail-closes to invalid; ignored on a reject verdict."},` +
+			`"packageKey":{"type":"string","description":"MarkCapabilityProposalApplied only — the vtx.package.<id> the caller's separate F-004 Installer.Apply produced (pkgmgr.ApplyResult.PackageKey). Verified live (a .manifest aspect must exist) and its recorded name must match this proposal's own target.packageName before it is recorded as the appliedAs link target."},` +
+			`"installRequestId":{"type":"string","description":"MarkCapabilityProposalApplied only — a caller-supplied audit pointer to the install/upgrade op that applied the artifact (opaque to this DDL). Stored verbatim as appliedByOp."}},` +
 			`"required":["proposalId"]}`,
-		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated/reviewed proposal. The recorded review.state (pending|invalid|approved|rejected) is read from the proposal's .review aspect, not the op response."}}}`,
+		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated/reviewed/applied proposal. The recorded review.state (pending|invalid|approved|rejected|applied) is read from the proposal's .review aspect, not the op response."}}}`,
 		FieldDescription: map[string]string{
-			"proposalId":  "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, ReviewCapabilityProposal).",
-			"intent":      "The plain-language capability request (RequestCapabilityAuthoring).",
-			"externalRef": "The bare Loom instanceKey handle CreateAuthoringClaim minted; resolved to the real proposal vertex via the claim's .target aspect (RecordCapabilityProposal).",
-			"status":      "The bridge's terminal outcome: completed or failed (RecordCapabilityProposal).",
-			"result":      "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
-			"verdict":     "The operator's verdict on a pending proposal: approve or reject (ReviewCapabilityProposal).",
-			"validation":  "The fresh §5 re-validation verdict {state,report?} computed by the caller before submission; required for an approve to succeed (ReviewCapabilityProposal).",
+			"proposalId":       "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, ReviewCapabilityProposal, MarkCapabilityProposalApplied).",
+			"intent":           "The plain-language capability request (RequestCapabilityAuthoring).",
+			"externalRef":      "The bare Loom instanceKey handle CreateAuthoringClaim minted; resolved to the real proposal vertex via the claim's .target aspect (RecordCapabilityProposal).",
+			"status":           "The bridge's terminal outcome: completed or failed (RecordCapabilityProposal).",
+			"result":           "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
+			"verdict":          "The operator's verdict on a pending proposal: approve or reject (ReviewCapabilityProposal).",
+			"validation":       "The fresh §5 re-validation verdict {state,report?} computed by the caller before submission; required for an approve to succeed (ReviewCapabilityProposal).",
+			"packageKey":       "The vtx.package.<id> the caller's separate F-004 apply produced; verified live + name-matched against target.packageName before being recorded as the appliedAs link target (MarkCapabilityProposalApplied).",
+			"installRequestId": "A caller-supplied audit pointer to the install/upgrade op that applied the artifact; stored verbatim as appliedByOp (MarkCapabilityProposalApplied).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -218,6 +240,17 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 					"verdict":    "reject",
 				},
 				ExpectedOutcome: "review.state: pending → rejected; no re-validation performed (a reject is always permitted).",
+			},
+			{
+				Name: "MarkCapabilityProposalApplied — the operator closes the loop after a real F-004 apply",
+				Payload: map[string]any{
+					"proposalId":       "capPropOneHJKMNPQRST",
+					"packageKey":       "vtx.package.aiLensPkgHJKMNPQRST",
+					"installRequestId": "install:activeProvidersBySpecialty@0.1.0",
+				},
+				ExpectedOutcome: "review.state: approved → applied; appliedAt + appliedByOp stamped on .review; an appliedAs " +
+					"link from the proposal to vtx.package.aiLensPkgHJKMNPQRST is created. Rejected (InvalidApplyTransition) " +
+					"if the proposal is not currently approved.",
 			},
 		},
 	}
@@ -539,7 +572,7 @@ def execute(state, op):
         # Unconditioned update preserving the aspect's full shape (D5; the
         # pending-only guard above is the single-transition guarantee, same
         # posture as augur's ReviewProposal flip). appliedAt/appliedByOp stay
-        # empty — the apply path is a later increment.
+        # empty here — only MarkCapabilityProposalApplied (below) ever sets them.
         reviewedby_lnk = "lnk.capabilityproposal." + proposal_id + ".reviewedBy." + reviewer_type + "." + reviewer_id
         mutations = [
             {"op": "update", "key": proposal_key + ".review",
@@ -554,6 +587,84 @@ def execute(state, op):
             {"class": "capabilityAuthor.proposalReviewed",
              "data": {"proposalKey": proposal_key, "reviewState": new_state,
                       "reviewer": reviewer, "verdict": verdict}},
+        ]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
+
+    if ot == "MarkCapabilityProposalApplied":
+        # The apply-flip (design §3.5): the operator submits this AFTER
+        # separately applying the proposal's materialized artifact through the
+        # existing, UNMODIFIED F-004 InstallPackage/UpgradePackage op (a
+        # SEPARATE Processor commit — pkgmgr.CapabilityApplyPlanForProposal +
+        # pkgmgr.Installer.Apply). This op only records that it happened: only
+        # an APPROVED proposal may be marked applied (fail-closed — no
+        # double-apply, no marking a pending/rejected/invalid proposal
+        # applied); a redelivered op is collapsed by the Contract #4 requestId
+        # tracker before this script even runs a second time.
+        proposal_id = required_bare_id(p, "proposalId")
+        proposal_key = "vtx.capabilityproposal." + proposal_id
+        package_key = required_string(p, "packageKey")
+        install_request_id = required_string(p, "installRequestId")
+
+        package_type, package_id = parts_of(package_key, "packageKey")
+        if package_type != "package":
+            fail("InvalidArgument: packageKey: required vtx.package.<NanoID>; got " + package_key)
+
+        review_doc = kv.Read(proposal_key + ".review")
+        if not alive(review_doc):
+            fail("UnknownCapabilityProposal: no recorded review for " + proposal_key)
+        rd = review_doc.data
+        cur_state = ""
+        reviewed_at = ""
+        if rd != None:
+            if "state" in rd:
+                cur_state = rd["state"]
+            if "reviewedAt" in rd:
+                reviewed_at = rd["reviewedAt"]
+        if cur_state != "approved":
+            fail("InvalidApplyTransition: proposal " + proposal_key + " is '" + cur_state + "', only an approved proposal may be applied")
+
+        # packageKey is caller-supplied — never trust it blind. Bind it to a
+        # LIVE installed package (its .manifest aspect, written only by a real
+        # F-004 install/upgrade) AND cross-check that package's own recorded
+        # name against THIS proposal's own .target.packageName — closing the
+        # gap a shape-only check (parts_of above) would leave open: a
+        # syntactically valid but nonexistent/tombstoned/unrelated packageKey
+        # could otherwise mark this proposal applied with no server-side proof
+        # it names the package the proposal actually targeted.
+        target_doc = kv.Read(proposal_key + ".target")
+        if not alive(target_doc):
+            fail("UnknownCapabilityProposal: no recorded target for " + proposal_key)
+        td = target_doc.data
+        target_package_name = ""
+        if td != None and "packageName" in td:
+            target_package_name = td["packageName"]
+
+        manifest_doc = kv.Read(package_key + ".manifest")
+        if not alive(manifest_doc):
+            fail("UnknownPackage: " + package_key + " is not a live installed package")
+        md = manifest_doc.data
+        manifest_package_name = ""
+        if md != None and "name" in md:
+            manifest_package_name = md["name"]
+
+        if manifest_package_name == "" or manifest_package_name != target_package_name:
+            fail("PackageMismatch: " + package_key + " (installed name '" + manifest_package_name + "') does not match proposal " + proposal_key + "'s target.packageName '" + target_package_name + "'")
+
+        applied_at = op.submittedAt
+        appliedas_lnk = "lnk.capabilityproposal." + proposal_id + ".appliedAs." + package_type + "." + package_id
+
+        mutations = [
+            {"op": "update", "key": proposal_key + ".review",
+             "document": {"class": "capabilityAuthor.review", "isDeleted": False,
+                          "vertexKey": proposal_key, "localName": "review",
+                          "data": {"state": "applied", "invalidReason": "",
+                                   "reviewedAt": reviewed_at, "appliedAt": applied_at, "appliedByOp": install_request_id}}},
+            make_link(appliedas_lnk, proposal_key, package_key, "appliedAs", "appliedAs",
+                      {"appliedAt": applied_at, "installRequestId": install_request_id}),
+        ]
+        events = [
+            {"class": "capabilityAuthor.proposalApplied",
+             "data": {"proposalKey": proposal_key, "packageKey": package_key, "installRequestId": install_request_id}},
         ]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
 

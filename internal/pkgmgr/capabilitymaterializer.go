@@ -158,7 +158,24 @@ func validateLensArtifact(lc LensArtifactContent, parser CypherParser) ArtifactV
 		errs = append(errs, fmt.Sprintf("cypher spec does not parse: %v", err))
 	}
 
-	def := Definition{
+	def := lensArtifactDefinition(lc, "", "")
+	if err := def.validateAll(); err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	return ArtifactValidationReport{Valid: len(errs) == 0, Errors: errs}
+}
+
+// lensArtifactDefinition is the single shape both record-time validation
+// (validateLensArtifact, a throwaway unnamed Definition) and apply-time
+// materialization (DefinitionForCapabilityArtifact, a real named/versioned
+// Definition — Fire 2, design §3.5) build from a LensArtifactContent — the
+// reason an installed lens is guaranteed byte-for-byte identical to what §5
+// validated.
+func lensArtifactDefinition(lc LensArtifactContent, name, version string) Definition {
+	return Definition{
+		Name:    name,
+		Version: version,
 		Lenses: []LensSpec{{
 			CanonicalName: lc.CanonicalName,
 			Class:         "meta.lens",
@@ -169,9 +186,30 @@ func validateLensArtifact(lc LensArtifactContent, parser CypherParser) ArtifactV
 			Spec:          lc.Spec,
 		}},
 	}
-	if err := def.validateAll(); err != nil {
-		errs = append(errs, err.Error())
-	}
+}
 
-	return ArtifactValidationReport{Valid: len(errs) == 0, Errors: errs}
+// DefinitionForCapabilityArtifact builds the pkgmgr.Definition an APPROVED
+// proposal's artifact materializes to (design §3.5, the Fire 2 apply step) —
+// named/versioned for a real package Install/Upgrade, unlike
+// ValidateCapabilityArtifact's throwaway unnamed check. kind must already be
+// one of EnabledArtifactKinds: by construction a proposal can only reach
+// review.state=approved if RecordCapabilityProposal's §5 gate already
+// accepted its kind, so an unrecognized kind here is a caller-contract
+// violation (a proposal applied out of order), never a model-authored
+// defect.
+func DefinitionForCapabilityArtifact(kind string, content json.RawMessage, name, version string) (Definition, error) {
+	if !EnabledArtifactKinds[kind] {
+		return Definition{}, fmt.Errorf("pkgmgr: capability apply: artifact kind %q is not enabled", kind)
+	}
+	switch kind {
+	case "lens":
+		var lc LensArtifactContent
+		if err := json.Unmarshal(content, &lc); err != nil {
+			return Definition{}, fmt.Errorf("pkgmgr: capability apply: malformed lens artifact content: %w", err)
+		}
+		return lensArtifactDefinition(lc, name, version), nil
+	default:
+		// Unreachable: EnabledArtifactKinds gates every case above.
+		return Definition{}, fmt.Errorf("pkgmgr: capability apply: unhandled enabled kind %q", kind)
+	}
 }

@@ -22,6 +22,10 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //   - ReviewCapabilityProposal — a human operator submits the verdict that
 //     flips a pending proposal to approved/rejected (design §3.3), mirroring
 //     augur's ReviewProposal.
+//   - MarkCapabilityProposalApplied — the operator submits this after
+//     separately applying the proposal through the existing F-004
+//     InstallPackage/UpgradePackage op (design §3.5); it only records the
+//     applied-flip, never installs/upgrades anything itself.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -48,6 +52,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Authorizes a human operator to approve or reject a pending capability proposal (design §3.3).",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "MarkCapabilityProposalApplied",
+			Scope:         "any",
+			Note:          "Authorizes a human operator to record that an approved proposal has been applied via a separate F-004 install/upgrade (design §3.5).",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }
 
@@ -62,5 +72,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "CreateAuthoringClaim"},
 		{OperationType: "RecordCapabilityProposal"},
 		{OperationType: "ReviewCapabilityProposal"},
+		{OperationType: "MarkCapabilityProposalApplied"},
 	}
 }
