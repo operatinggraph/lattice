@@ -50,6 +50,12 @@ type Server struct {
 	logger     Logger
 	reqTimeout time.Duration
 	metrics    *Metrics
+
+	// pgPool + readModels back the read-path front (Fire 3, ConfigureReadModels).
+	// Both are nil until configured — a Server with neither still serves
+	// /v1/operations exactly as before.
+	pgPool     PgPool
+	readModels map[string]ReadModel
 }
 
 // Logger is the minimal logging surface Server needs (satisfied by *slog.Logger).
@@ -92,9 +98,19 @@ func NewServer(authn *auth.Authenticator, conn *substrate.Conn, metrics *Metrics
 	}
 }
 
-// RegisterRoutes mounts the Gateway's HTTP surface on mux.
+// RegisterRoutes mounts the Gateway's HTTP surface on mux — the write-path
+// keystone plus one GET /v1/<name> route per read-model configured via
+// ConfigureReadModels (call it before RegisterRoutes; routes are mounted
+// once, from whatever is configured at this call).
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/operations", s.handleOperations)
+	for name, model := range s.readModels {
+		if !ValidReadModelName(name) {
+			s.logger.Error("gateway: skipping invalid read-model name", "name", name)
+			continue
+		}
+		mux.HandleFunc("/v1/"+name, s.handleReadModel(name, model))
+	}
 }
 
 // operationRequest is the POST /v1/operations body. There is no `actor`

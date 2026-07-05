@@ -109,6 +109,8 @@ type Metrics struct {
 	requestsTotal     atomic.Int64
 	authFailuresTotal atomic.Int64
 	opsSubmittedTotal atomic.Int64
+	readsTotal        atomic.Int64
+	readFailuresTotal atomic.Int64
 }
 
 func (m *Metrics) snapshot() map[string]any {
@@ -116,6 +118,8 @@ func (m *Metrics) snapshot() map[string]any {
 		"requests_total":      m.requestsTotal.Load(),
 		"auth_failures_total": m.authFailuresTotal.Load(),
 		"ops_submitted_total": m.opsSubmittedTotal.Load(),
+		"reads_total":         m.readsTotal.Load(),
+		"read_failures_total": m.readFailuresTotal.Load(),
 	}
 }
 

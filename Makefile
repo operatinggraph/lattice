@@ -28,6 +28,14 @@ CLINIC_APP_PG_DSN ?= postgres://clinic_app:clinic_app_dev@localhost:5432/lattice
 # role's DSN. Empty by default — until the role is provisioned (lattice-lane
 # item), Loupe renders postgres lens contents as pg-pending.
 LOUPE_PG_DSN ?=
+# The Gateway read-path front's DSN (gateway-external-trust-boundary-design.md
+# Fire 3), same NON-superuser SELECT-only posture as LOFTSPACE_APP_PG_DSN /
+# CLINIC_APP_PG_DSN. See provision-gateway-role.
+GATEWAY_PG_DSN ?= postgres://gateway:gateway_dev@localhost:5432/lattice?sslmode=disable
+# Directory of <name>.sql read-model files (Fire 3); each becomes a
+# GET /v1/<name> route. See internal/gateway/read.go / cmd/gateway's
+# GATEWAY_READ_MODELS_DIR doc comment.
+GATEWAY_READ_MODELS_DIR ?= $(abspath ./deploy/gateway-read-models)
 
 # Per-component dev NKey seeds (NATS account-level write restriction, Path A —
 # deploy/nats-server.conf's permission matrix). Each binary's NATS_NKEY points at
@@ -72,7 +80,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= stub
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -446,6 +454,22 @@ provision-clinic-role:
 		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO clinic_app;" \
 		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO clinic_app;"
 
+## provision-gateway-role — Provision the Gateway's non-superuser SELECT-only
+## Postgres role for the read-path front (Fire 3), same posture as
+## provision-loftspace-role / provision-clinic-role — a superuser/BYPASSRLS
+## role would skip RLS and leak every actor's rows.
+provision-gateway-role:
+	@echo "==> Provisioning gateway non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='gateway') THEN \
+		    CREATE ROLE gateway LOGIN PASSWORD 'gateway_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO gateway;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO gateway;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO gateway;"
+
 ## orchestration — Build + start the orchestration tier (Loom, Weaver, Bridge,
 ## object-store-manager) in the background. Requires a running deployment
 ## (make up). object-store-manager needs no actor key; the rest load the admin
@@ -620,11 +644,18 @@ run-loupe:
 ## FOREGROUND, DEV MODE (trusts the checked-in dev JWT key — never for prod).
 ## Listens on :8080. Mint a token: ./bin/gateway dev-token -sub <identityNanoID>.
 ## Requires a running deployment (make up / up-full).
+## run-gateway — Build + run the Gateway in the FOREGROUND. The read-path
+## front (Fire 3) serves from GATEWAY_PG_DSN + GATEWAY_READ_MODELS_DIR;
+## `make provision-gateway-role` provisions the role once against a live
+## Postgres. Unprovisioned/unreachable Postgres is non-fatal — GET
+## /v1/<name> 502s "read model unavailable" until it is.
 run-gateway:
 	@echo "==> Building gateway binary..."
 	go build -o bin/gateway ./cmd/gateway
 	@echo "==> Gateway on :8080, GATEWAY_DEV_MODE=true (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true ./bin/gateway
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true \
+		GATEWAY_PG_DSN=$(GATEWAY_PG_DSN) GATEWAY_READ_MODELS_DIR=$(GATEWAY_READ_MODELS_DIR) \
+		./bin/gateway
 
 ## run-loftspace-app — Build + run the LoftSpace applicant app in the FOREGROUND.
 ## Open http://127.0.0.1:7788. Requires a running deployment with the LoftSpace

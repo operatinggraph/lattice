@@ -26,9 +26,11 @@ actor can fabricate a Core-KV write and bypass the ledger; live via `#75` Fire 2
 KV writes*, **not** on `core-operations` publish — every sanctioned actor (the engines, the vertical
 apps, the CLI, Loupe) submits ops; the Gateway is the external door, not the sole ops publisher.
 
-**In scope for Fire 1:** the write-path translator only. Internal service actors (Loom / Weaver /
-Bridge / object-store-manager / admin tooling / Loupe) keep their sanctioned direct-submit path — the
-Gateway is the external door, not a re-route for internal traffic.
+**In scope:** the write-path translator (`POST /v1/operations`, Fire 1) plus the read-path front
+(`GET /v1/<name>`, Fire 3) — one binary, one auth+revocation seam, two directions of the same trust
+boundary. Internal service actors (Loom / Weaver / Bridge / object-store-manager / admin tooling /
+Loupe) keep their sanctioned direct-submit path — the Gateway is the external door, not a re-route for
+internal traffic.
 
 ---
 
@@ -61,6 +63,46 @@ HTTP POST /v1/operations        1. Bearer-authenticate (auth.Authenticator)
 - Auth failures: missing/malformed `Authorization` header, an unverifiable token (bad signature, wrong
   `kid`, unsupported algorithm, expired, wrong issuer/audience) → **401**. A structurally-valid but
   **revoked** actor → **403**.
+
+---
+
+## Read path — `GET /v1/<name>`
+
+The read-front (Fire 3) fronts a **protected Postgres read model** (Contract #6 §6.14, D1.3's
+`actor_read_grants` + FORCE-RLS enforcement) for external callers, the read-side sibling of the write
+path's same auth+stamp discipline: authenticate, then let RLS do the filtering.
+
+```
+external client                 Gateway                                  read_<x> (RLS-protected)
+──────────────                  ───────                                  ───────────────────────
+GET /v1/<name>                  1. Bearer-authenticate (auth.Authenticator)
+  Authorization: Bearer <JWT>      → verified actor, or 401/403
+                                 2. BEGIN; set_config('lattice.actor_id',
+                                    <verified actor.Subject>, true)      ──▶
+                                 3. run the registered SELECT (no WHERE —
+                                    RLS scopes every row)                ──▶
+                                 4. COMMIT (discards the txn-local var)  ◀── rows
+                                 5. serve {rows: […], count: N}
+```
+
+- **Every read-model is operator-configured, not compiled.** `GATEWAY_READ_MODELS_DIR` points at a
+  directory of `<name>.sql` files; each file's base name becomes the `GET /v1/<name>` path segment and
+  its trimmed content is the **fixed** SELECT that model runs — no caller-supplied predicate, ever. The
+  Gateway carries no compiled knowledge of any vertical's row shape (mirrors the bridge's type-agnostic
+  adapter seam, D5): rows are scanned by column name (`pgx` `FieldDescriptions()`+`Values()`) and served
+  as JSON verbatim — `internal/gateway/read.go`. `deploy/gateway-read-models/landlordApplications.sql`
+  is the first registered model (the D1.3 landlord/property-manager view,
+  `read_landlord_lease_applications`).
+- **RLS does the authorization; the Gateway does none.** The handler never adds a `WHERE`, never
+  filters, never 403s a query — a non-landlord-role subject reading `landlordApplications` gets `200`
+  with zero rows (no 403-vs-404 authorization oracle), identically to `cmd/loftspace-app`'s own
+  authenticated read boundary, which serves the same underlying protected table today.
+- **`GATEWAY_PG_DSN`** is a **non-superuser, SELECT-only** role (`make provision-gateway-role`) — a
+  superuser/BYPASSRLS connection would silently skip RLS and leak every actor's rows. Unset/unreachable
+  Postgres is non-fatal: every `GET /v1/<name>` 502s "read model unavailable" rather than the Gateway
+  refusing to start (mirrors the write path's requireConn discipline).
+- Auth failures mirror the write path: missing/malformed Bearer → 401; unverifiable/expired/wrong-`kid`
+  token → 401; revoked actor → 403 (via `mapAuthError`, shared with `/v1/operations`).
 
 ---
 
@@ -122,9 +164,10 @@ token expires. The kill-switch (`internal/gateway/revocation.Checker`, consulted
 
 The Gateway writes a Contract #5 §5.2 heartbeat to `health.gateway.<instance>` every 10s
 (`internal/gateway.Heartbeater`) with `requests_total` / `auth_failures_total` / `ops_submitted_total`
-metrics, plus a `revocation` block (`consumerConnected`, `revokedCount`, `lastEventSeq`, `lastSyncAt` —
-the token-revocation kill-switch's live state, `health-kv-schema.md`) — Loupe's system-map / health
-dashboard picks it up like every other component.
+(write path) and `reads_total` / `read_failures_total` (read path, Fire 3) metrics, plus a `revocation`
+block (`consumerConnected`, `revokedCount`, `lastEventSeq`, `lastSyncAt` — the token-revocation
+kill-switch's live state, `health-kv-schema.md`) — Loupe's system-map / health dashboard picks it up
+like every other component.
 
 ---
 
@@ -158,9 +201,17 @@ fail-closed startup, replacing the old best-effort nil-checker path); the Gatewa
 (`RecordRevocationSync`) and health sink (`SetRevocationConnected`). Unblocks Loupe F11 (the revoke
 console) — done.
 
+**Built (Fire 3).** `internal/gateway/read.go` (the generic `GET /v1/<name>` handler: `PgPool`/
+`ReadModel`/`ConfigureReadModels`, the txn-local `set_config('lattice.actor_id', …)` scan, generic
+column-name JSON scanning) + `cmd/gateway` (`GATEWAY_PG_DSN`, `GATEWAY_READ_MODELS_DIR` directory
+loader) + `deploy/gateway-read-models/landlordApplications.sql` (the first registered model) +
+`make provision-gateway-role`. Sequenced behind D1.3's first live protected Postgres read-model
+(landlord/property-manager applications, shipped) — chain-grounded, not dead scaffolding. Proven against
+a real non-superuser RLS reader role (`internal/gateway/read_rls_test.go`,
+`POSTGRES_TEST_DSN`-gated): per-actor row scoping, revoked-grant denial, no pooled-connection actor-var
+leak, unauthenticated 401.
+
 **Deferred (follow-up fires, per the design's decomposition):**
-- **Fire 3** — the read-path front (`GET /v1/<readmodel>`), sequenced behind D1.3's first live
-  protected Postgres read-model (chain-grounding — not dead scaffolding).
 - **Fire 4 — retired as originally conceived; re-grounded 2026-07-04.** The design assumed an
   *unauthenticated* `POST /v1/claim` front for `CreateUnclaimedIdentity`/`ClaimIdentity`. Grounding
   (`gateway-claim-flow-identity-provisioning-design.md`) found this would not have fixed anything:

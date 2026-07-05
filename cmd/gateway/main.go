@@ -49,6 +49,11 @@
 //	GATEWAY_DEV_MODE          "true" to additionally trust the checked-in dev key + allow a non-https JWKS URL (dev/CI only)
 //	GATEWAY_DEV_KEY_PATH      override the dev public-key path (default: deploy/gateway-dev-key/dev-public.pem)
 //	HEALTH_KV_BUCKET          Health KV bucket name (default: health-kv)
+//	GATEWAY_PG_DSN            read-path front (Fire 3): a non-superuser, SELECT-only Postgres DSN
+//	                          (`make provision-gateway-role`); unset ⇒ every GET /v1/<name> 502s
+//	GATEWAY_READ_MODELS_DIR   directory of <name>.sql files, each a fixed SELECT with no
+//	                          caller-supplied predicate (RLS scopes rows); name becomes the
+//	                          GET /v1/<name> path segment. Unset/empty ⇒ no read-model routes.
 //
 // Logs to stderr in slog text format.
 package main
@@ -72,6 +77,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/gateway"
@@ -204,6 +210,21 @@ func run(logger *slog.Logger) error {
 	metrics := &gateway.Metrics{}
 	srv := gateway.NewServer(authn, conn, metrics, logger)
 
+	readModels, err := loadReadModels(os.Getenv("GATEWAY_READ_MODELS_DIR"))
+	if err != nil {
+		return fmt.Errorf("load read models: %w", err)
+	}
+	pgPool, err := connectReadModelPool(os.Getenv("GATEWAY_PG_DSN"), logger)
+	if err != nil {
+		return fmt.Errorf("connect read-model Postgres pool: %w", err)
+	}
+	if pgPool != nil {
+		defer pgPool.Close()
+		srv.ConfigureReadModels(pgPool, readModels)
+	} else {
+		srv.ConfigureReadModels(nil, readModels)
+	}
+
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 
@@ -313,6 +334,69 @@ func loadTrustedKeys(devMode bool, logger *slog.Logger) (map[string]crypto.Publi
 	}
 
 	return keys, nil
+}
+
+// loadReadModels builds the Fire 3 read-model registry from a directory of
+// <name>.sql files (mirrors loadTrustedKeys' <kid>.pem idiom): each file's
+// base name (minus ".sql") becomes the GET /v1/<name> path segment, and its
+// trimmed content is the fixed SELECT that model runs — no caller-supplied
+// predicate; Postgres RLS scopes every row (Contract #6 §6.14). dir == ""
+// yields an empty registry (no read-model routes), not an error — the
+// write-path surface has no dependency on this configuration existing.
+func loadReadModels(dir string) (map[string]gateway.ReadModel, error) {
+	models := make(map[string]gateway.ReadModel)
+	if dir == "" {
+		return models, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read GATEWAY_READ_MODELS_DIR %q: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".sql")
+		if !gateway.ValidReadModelName(name) {
+			return nil, fmt.Errorf("read-model file %q: %q is not a valid read-model name", e.Name(), name)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read %q: %w", e.Name(), err)
+		}
+		query := strings.TrimSpace(string(raw))
+		if query == "" {
+			return nil, fmt.Errorf("read-model file %q is empty", e.Name())
+		}
+		models[name] = gateway.ReadModel{Query: query}
+	}
+	return models, nil
+}
+
+// connectReadModelPool opens the Fire 3 read-model Postgres pool. dsn == ""
+// returns (nil, nil) — every GET /v1/<name> then 502s "read model
+// unavailable" rather than the Gateway refusing to start (the read front is
+// additive; the write path has no Postgres dependency). pgxpool.New is lazy
+// (no connection yet); a ping failure is logged, not fatal, so the pool can
+// recover once Postgres becomes reachable — mirrors loftspace-app's startup
+// posture for the same read-model DSN pattern.
+func connectReadModelPool(dsn string, logger *slog.Logger) (*pgxpool.Pool, error) {
+	if strings.TrimSpace(dsn) == "" {
+		logger.Warn("GATEWAY_PG_DSN unset; GET /v1/<readmodel> will report the read model as unavailable")
+		return nil, nil
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		return nil, err
+	}
+	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		logger.Warn("read-model Postgres pool configured but unreachable at startup; GET /v1/<readmodel> will 502 until Postgres is reachable", "error", err)
+	} else {
+		logger.Info("read-model Postgres pool configured")
+	}
+	return pool, nil
 }
 
 func loadPublicKeyPEM(path string) (crypto.PublicKey, error) {
