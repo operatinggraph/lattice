@@ -21,8 +21,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
 	augur "github.com/asolgan/lattice/packages/augur"
 	bespokecontracts "github.com/asolgan/lattice/packages/bespoke-contracts"
@@ -137,6 +142,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "uninstall failed: %v\n", err)
 			os.Exit(1)
 		}
+	case "apply-proposal":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "apply-proposal requires <capability-proposal-id>")
+			os.Exit(2)
+		}
+		if err := runApplyProposal(args[0], natsURL, bootstrapPath, logger); err != nil {
+			fmt.Fprintf(os.Stderr, "apply-proposal failed: %v\n", err)
+			os.Exit(1)
+		}
 	case "list":
 		if err := runList(natsURL, bootstrapPath, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "list failed: %v\n", err)
@@ -156,6 +170,7 @@ Usage:
   lattice-pkg upgrade [--dry-run] <path-to-package-dir>
   lattice-pkg uninstall <package-canonical-name>
   lattice-pkg list
+  lattice-pkg apply-proposal <capability-proposal-id>
 
 install dispatches on installed state:
   not installed        → fresh install
@@ -163,6 +178,10 @@ install dispatches on installed state:
   different version    → in-place upgrade (diff-apply)
 upgrade is the explicit in-place diff-apply (errors if not installed).
 --dry-run previews the create/update/tombstone delta without submitting.
+
+apply-proposal materializes an APPROVED AI-authored capability proposal
+(see "lattice capability review") into a Definition and installs/upgrades
+it through this same Apply path, then records MarkCapabilityProposalApplied.
 
 Environment:
   NATS_URL              default nats://localhost:4222
@@ -295,6 +314,145 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 		"note", res.Note,
 	)
 	return nil
+}
+
+// runApplyProposal materializes an APPROVED capability-author proposal
+// (ai-authored-capabilities-design.md §3.5) into a Definition
+// (pkgmgr.CapabilityApplyPlanForProposal — the SAME Definition §5 already
+// validated at record/approve time) and installs/upgrades it through the
+// existing, unmodified Apply dispatcher, then submits
+// MarkCapabilityProposalApplied to close the loop. Two separate Processor
+// commits, exactly as the DDL's own doc comment requires — this function
+// never itself flips review.state.
+func runApplyProposal(proposalID, natsURL, bootstrapPath string, logger *slog.Logger) error {
+	if err := validateBareProposalID(proposalID); err != nil {
+		return fmt.Errorf("proposal id: %w", err)
+	}
+
+	bs, adminActor, err := loadBootstrap(bootstrapPath)
+	if err != nil {
+		return err
+	}
+
+	conn, err := substrate.Connect(context.Background(), substrate.ConnectOpts{
+		URL:          natsURL,
+		Name:         "lattice-pkg",
+		NKeySeedFile: envOrDefault("NATS_NKEY", ""),
+		CredsFile:    envOrDefault("NATS_CREDS", ""),
+	})
+	if err != nil {
+		return fmt.Errorf("substrate open: %w", err)
+	}
+	defer conn.Close()
+
+	ctx := context.Background()
+	proposalKey := "vtx.capabilityproposal." + proposalID
+	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
+	if err != nil {
+		return fmt.Errorf("build apply plan: %w", err)
+	}
+
+	inst := pkgmgr.NewInstaller(conn, adminActor)
+	inst.RoleIDs = roleIDsFromBootstrap(bs)
+	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
+	if err != nil {
+		return fmt.Errorf("apply %s: %w", plan.PackageName, err)
+	}
+	logApplyResult("apply-proposal", res, logger)
+
+	installRequestID := res.Action + ":" + res.PackageName + "@" + res.ToVersion
+	markCtx, markCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer markCancel()
+	reply, err := submitMarkApplied(markCtx, conn, adminActor, proposalID, res.PackageKey, installRequestID)
+	if err != nil {
+		return fmt.Errorf("MarkCapabilityProposalApplied: %w (the package IS already applied — packageKey=%s, installRequestId=%s; retry MarkCapabilityProposalApplied alone rather than re-running apply-proposal)", err, res.PackageKey, installRequestID)
+	}
+	if reply.Status == processor.ReplyStatusRejected {
+		return fmt.Errorf("MarkCapabilityProposalApplied rejected: %s — %s", reply.Error.Code, reply.Error.Message)
+	}
+	logger.Info("capability proposal applied",
+		"proposalId", proposalID,
+		"packageKey", res.PackageKey,
+		"installRequestId", installRequestID,
+	)
+	return nil
+}
+
+// validateBareProposalID rejects a proposal id carrying key-shape
+// metacharacters — the same bare-id discipline the capabilityproposal DDL
+// script itself enforces (required_bare_id in
+// packages/capability-author/ddls.go). Without this, an id containing "."
+// would silently address a different (or malformed) vtx.capabilityproposal
+// key instead of failing with a clear message.
+func validateBareProposalID(id string) error {
+	if id == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	for _, bad := range []string{".", "*", ">", " ", "\t", "\n"} {
+		if strings.Contains(id, bad) {
+			return fmt.Errorf("must carry no dots / key segments, wildcards, or whitespace; got %q", id)
+		}
+	}
+	return nil
+}
+
+// submitMarkApplied publishes MarkCapabilityProposalApplied via JetStream,
+// carrying the reply inbox in a header (mirrors cmd/lattice/output.SubmitOp
+// — a plain NATS Request() would receive only the JetStream publish-ack,
+// since ops.<lane> is consumed by JetStream pull consumers).
+func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposalID, packageKey, installRequestID string) (*processor.OperationReply, error) {
+	requestID, err := substrate.NewNanoID()
+	if err != nil {
+		return nil, fmt.Errorf("generate requestId: %w", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"proposalId":       proposalID,
+		"packageKey":       packageKey,
+		"installRequestId": installRequestID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	env := &processor.OperationEnvelope{
+		RequestID:     requestID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MarkCapabilityProposalApplied",
+		Actor:         actor,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Payload:       json.RawMessage(payload),
+	}
+	envBytes, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("marshal envelope: %w", err)
+	}
+
+	const replyInboxHeader = "Lattice-Reply-Inbox"
+	inbox := nats.NewInbox()
+	sub, err := conn.NATS().SubscribeSync(inbox)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe inbox: %w", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	subject := "ops." + string(env.Lane)
+	msg := &nats.Msg{
+		Subject: subject,
+		Data:    envBytes,
+		Header:  nats.Header{replyInboxHeader: []string{inbox}},
+	}
+	if _, err := conn.JetStream().PublishMsg(ctx, msg); err != nil {
+		return nil, fmt.Errorf("publish to %s: %w", subject, err)
+	}
+
+	replyMsg, err := sub.NextMsgWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait for reply: %w", err)
+	}
+	var reply processor.OperationReply
+	if err := json.Unmarshal(replyMsg.Data, &reply); err != nil {
+		return nil, fmt.Errorf("parse reply: %w", err)
+	}
+	return &reply, nil
 }
 
 func runList(natsURL, bootstrapPath string, logger *slog.Logger) error {

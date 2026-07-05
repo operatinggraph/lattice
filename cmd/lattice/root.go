@@ -11,6 +11,7 @@ import (
 	"github.com/asolgan/lattice/cmd/lattice/authtrace"
 	"github.com/asolgan/lattice/cmd/lattice/bootstrap"
 	"github.com/asolgan/lattice/cmd/lattice/candidates"
+	"github.com/asolgan/lattice/cmd/lattice/capability"
 	"github.com/asolgan/lattice/cmd/lattice/config"
 	"github.com/asolgan/lattice/cmd/lattice/creds"
 	"github.com/asolgan/lattice/cmd/lattice/graph"
@@ -66,7 +67,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "config file (env: LATTICE_CONFIG, default ~/.lattice/config.json)")
 	rootCmd.PersistentFlags().StringVarP(&flagOutput, "output", "o", "", "output format: json (default: human-readable table)")
 
-	// Register all 11 command groups.
+	// Register all 12 command groups.
 	rootCmd.AddCommand(config.NewCommand(&flagNATSURL, &flagOutput))
 	rootCmd.AddCommand(op.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(graph.NewCommand(&flagNATSURL, &flagOutput))
@@ -75,6 +76,7 @@ func init() {
 	rootCmd.AddCommand(health.NewCommand(&flagNATSURL, &flagOutput))
 	rootCmd.AddCommand(identity.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(candidates.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
+	rootCmd.AddCommand(capability.NewCommand(&flagNATSURL, &flagOutput, &flagActorKey))
 	rootCmd.AddCommand(authtrace.NewCommand(&flagNATSURL, &flagOutput))
 	rootCmd.AddCommand(bootstrap.NewCommand(&flagNATSURL, &flagOutput))
 	rootCmd.AddCommand(weaver.NewCommand(&flagNATSURL, &flagOutput))

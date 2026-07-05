@@ -29,6 +29,7 @@ func TestCLI_HelpExits0(t *testing.T) {
 		"lattice health",
 		"lattice identity",
 		"lattice candidates",
+		"lattice capability",
 		"lattice auth-trace",
 		"lattice bootstrap",
 	}
