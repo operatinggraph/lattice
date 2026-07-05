@@ -16,6 +16,7 @@ import (
 var _ Adapter = (*NatsKVAdapter)(nil)
 var _ Truncater = (*NatsKVAdapter)(nil)
 var _ KeyLister = (*NatsKVAdapter)(nil)
+var _ RowReader = (*NatsKVAdapter)(nil)
 
 // guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
 // runs when a concurrent writer (the retry-queue goroutine) collides on the
@@ -316,6 +317,39 @@ func (a *NatsKVAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) 
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// GetRow reads back the row previously written at keys, stripped of the
+// guard's internal projectionSeq bookkeeping field (callers merge this into a
+// freshly computed partial row — projectionSeq is re-added by the next
+// Upsert's own guard, never carried by the caller). Returns (nil, false, nil)
+// when the key does not exist or holds a soft-delete tombstone (isDeleted) —
+// both read as "no row to carry forward from," the same posture Upsert's own
+// absent-key branch takes.
+func (a *NatsKVAdapter) GetRow(ctx context.Context, keys map[string]any) (map[string]any, bool, error) {
+	key, err := a.buildKey(keys)
+	if err != nil {
+		return nil, false, fmt.Errorf("natskv get row: %w", err)
+	}
+	entry, err := a.kv.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("natskv get row: get %s: %w", key, err)
+	}
+	if len(entry.Value) == 0 {
+		return nil, false, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		return nil, false, fmt.Errorf("natskv get row: unmarshal %s: %w", key, err)
+	}
+	if isDeleted, _ := doc["isDeleted"].(bool); isDeleted {
+		return nil, false, nil
+	}
+	delete(doc, projectionSeqField)
+	return doc, true, nil
 }
 
 // Truncate clears the bucket by purging every key, so a rebuild's stream replay

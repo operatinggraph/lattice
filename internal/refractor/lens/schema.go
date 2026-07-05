@@ -166,6 +166,12 @@ type Rule struct {
 	// metadata; zero until the rule is received from the stream.
 	// Not from YAML — the yaml:"-" tag prevents accidental unmarshalling.
 	Sequence uint64 `yaml:"-"`
+
+	// Source mirrors LensSpec.Source: nil for every coreKv lens (cypher over
+	// Core-KV CDC, unchanged); non-nil for an eventStream lens, which
+	// startPipeline routes to the eventlens runner instead of the cypher
+	// engine. Not from YAML.
+	Source *SourceConfig `yaml:"-"`
 }
 
 // Parse decodes a rule YAML payload and validates required fields.

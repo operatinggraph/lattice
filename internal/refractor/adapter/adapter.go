@@ -41,3 +41,15 @@ type Truncater interface {
 type KeyLister interface {
 	ListKeys(ctx context.Context) ([]map[string]any, error)
 }
+
+// RowReader is an optional interface for adapters that support reading back
+// one row by its composite key. Implemented by NatsKVAdapter for the
+// eventStream lens runtime (internal/refractor/eventlens): a single lifecycle
+// event only ever carries a SUBSET of a row's columns (e.g. a
+// loom.patternCompleted event carries no patternRef/subjectKey), so the
+// runtime reads the previously stored row and merges the event's partial
+// projection onto it before writing — carrying forward columns this event
+// didn't touch. Returns (nil, false, nil) when the row does not exist yet.
+type RowReader interface {
+	GetRow(ctx context.Context, keys map[string]any) (row map[string]any, ok bool, err error)
+}

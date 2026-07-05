@@ -356,6 +356,57 @@ func TestNatsKVAdapter_Unguarded_IgnoresProjectionSeq(t *testing.T) {
 // force-truncate correctness depends on: after Truncate purges a key, a
 // subsequent Get returns ErrKeyNotFound (so a guarded rebuild takes the
 // absent→Create path and never reads a stale watermark).
+func TestNatsKVAdapter_GetRow_AbsentKey(t *testing.T) {
+	kv := startKV(t)
+	a := newAdapter(t, kv, []string{"key"})
+	row, ok, err := a.GetRow(context.Background(), map[string]any{"key": "flow.abc"})
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, row)
+}
+
+func TestNatsKVAdapter_GetRow_RoundTripsUnguardedRow(t *testing.T) {
+	kv := startKV(t)
+	a := newAdapter(t, kv, []string{"key"})
+	ctx := context.Background()
+	keys := map[string]any{"key": "flow.abc"}
+	require.NoError(t, a.Upsert(ctx, keys, map[string]any{"status": "running"}, 0))
+
+	row, ok, err := a.GetRow(ctx, keys)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "running", row["status"])
+}
+
+func TestNatsKVAdapter_GetRow_StripsProjectionSeqFromGuardedRow(t *testing.T) {
+	kv := startKV(t)
+	a := guardedAdapter(t, kv, []string{"key"})
+	ctx := context.Background()
+	keys := map[string]any{"key": "flow.abc"}
+	require.NoError(t, a.Upsert(ctx, keys, map[string]any{"status": "running"}, 5))
+
+	row, ok, err := a.GetRow(ctx, keys)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "running", row["status"])
+	_, hasSeq := row["projectionSeq"]
+	assert.False(t, hasSeq, "GetRow must strip the guard's internal projectionSeq bookkeeping field")
+}
+
+func TestNatsKVAdapter_GetRow_TombstoneReadsAsAbsent(t *testing.T) {
+	kv := startKV(t)
+	a := guardedAdapter(t, kv, []string{"key"})
+	ctx := context.Background()
+	keys := map[string]any{"key": "flow.abc"}
+	require.NoError(t, a.Upsert(ctx, keys, map[string]any{"status": "running"}, 5))
+	require.NoError(t, a.Delete(ctx, keys, 8))
+
+	row, ok, err := a.GetRow(ctx, keys)
+	require.NoError(t, err)
+	require.False(t, ok, "a soft-delete tombstone must read as absent, not as a live row")
+	require.Nil(t, row)
+}
+
 func TestNatsKVAdapter_ListKeys_CompositeKey(t *testing.T) {
 	kv := startKV(t)
 	a := newAdapter(t, kv, []string{"app_id", "landlord_id"})

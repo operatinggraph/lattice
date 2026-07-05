@@ -27,6 +27,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/capabilityenv"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
 	"github.com/asolgan/lattice/internal/refractor/control"
+	"github.com/asolgan/lattice/internal/refractor/eventlens"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/keyshredded"
 	"github.com/asolgan/lattice/internal/refractor/lens"
@@ -400,7 +401,71 @@ func main() {
 		return entry.Revision
 	}
 
+	// startEventStreamPipeline activates an eventStream-kind lens (the
+	// Chronicler's `eventStream` lens-source primitive, Fire 1): no cypher
+	// engine, no Core-KV read — a durable core-events consumer decodes each
+	// delivery, applies the lens's declarative EventProjection, and upserts
+	// through a guarded nats_kv adapter. lens.translateEventStreamSpec already
+	// enforced targetType=nats_kv + exactly one key column + exactly one
+	// subject at load time, so the type assertion below cannot fail.
+	// Dark in Fire 1: wired into startPipeline's dispatch so any eventStream
+	// lens loaded from Core-KV activates, but no production lens installs one
+	// yet (Fire 2 is orchestration-base's loomFlowHistory lens). Health-KV
+	// visibility mirrors every other lens (SetActive/RecordError); full
+	// control-plane list/rebuild/pause parity is a Fire 2/3 follow-on, not
+	// needed for a lens with no operator-facing consumer yet.
+	startEventStreamPipeline := func(r *lens.Rule) {
+		adpt, err := buildAdapter(r)
+		if err != nil {
+			logger.Error("build adapter", "lensId", r.ID, "err", err)
+			return
+		}
+		nkv, ok := adpt.(*adapter.NatsKVAdapter)
+		if !ok {
+			logger.Error("eventStream lens adapter is not *adapter.NatsKVAdapter", "lensId", r.ID, "target", r.Into.Target)
+			return
+		}
+		nkv.SetGuarded(true)
+
+		reporter := health.New(healthKVHandle, r.ID)
+		reporter.SetRuleSequence(r.Sequence)
+		if err := reporter.SetActive(ctx); err != nil {
+			logger.Warn("eventStream lens: report active failed", "lensId", r.ID, "err", err)
+		}
+
+		mgr, err := eventlens.New(eventlens.Config{
+			Conn:         conn,
+			EventsStream: bootstrap.CoreEventsStreamName,
+			Subject:      r.Source.Subjects[0],
+			Durable:      "refractor-" + r.ID,
+			KeyField:     r.Into.Key[0],
+			Project:      r.Source.Project,
+			Adapter:      nkv,
+			Logger:       logger,
+		})
+		if err != nil {
+			logger.Error("construct eventlens manager", "lensId", r.ID, "err", err)
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("eventlens manager exited", "lensId", r.ID, "err", err)
+				if rerr := reporter.RecordError(ctx, err.Error()); rerr != nil {
+					logger.Warn("eventStream lens: record error failed", "lensId", r.ID, "err", rerr)
+				}
+			}
+		}()
+		logger.Info("eventStream lens activated",
+			"lensId", r.ID, "canonicalName", r.CanonicalName, "subject", r.Source.Subjects[0])
+	}
+
 	startPipeline := func(r *lens.Rule) {
+		if r.Source != nil && r.Source.Kind == "eventStream" {
+			startEventStreamPipeline(r)
+			return
+		}
 		// A Secure Lens needs the Vault before anything else is built —
 		// refusing here leaves no half-constructed state behind.
 		if len(r.Into.SecureColumns) > 0 && vaultBackend == nil {
@@ -599,6 +664,21 @@ func main() {
 	}
 
 	updateCB := func(old, newLens *lens.Rule, kind lens.UpdateKind) {
+		// An eventStream lens is not tracked in registry (it has no
+		// pipeline.Pipeline instance — see startEventStreamPipeline) and is not
+		// hot-reloadable in Fire 1: ClassifyUpdate always reports IntoOnly for
+		// it (Match is always empty on an event lens, so old.Match==new.Match
+		// trivially), which would otherwise fall through to registry's
+		// generic "update on unknown lens" warn and silently keep the OLD
+		// eventlens.Manager goroutine running forever on its stale Subject/
+		// Project/KeyField. Fail loud instead: an operator must restart the
+		// process to pick up a changed eventStream lens spec until Fire 2/3
+		// adds real hot-reload/control-plane parity for this mode.
+		if newLens.Source != nil && newLens.Source.Kind == "eventStream" {
+			logger.Error("eventStream lens spec changed — hot-reload not supported; restart refractor to pick up the change",
+				"lensId", newLens.ID)
+			return
+		}
 		switch kind {
 		case lens.IntoOnly:
 			mu.Lock()
