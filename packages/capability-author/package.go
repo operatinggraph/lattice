@@ -50,9 +50,10 @@
 //     package-authoring path uses (reused, not duplicated).
 //
 //   - Permissions granting RequestCapabilityAuthoring + CreateAuthoringClaim +
-//     RecordCapabilityProposal to `operator` (the human requester / Loom's
-//     relay actor / the trusted bridge-equivalent submitter — the same
-//     operator-equivalent idiom augur's + lease-signing's capture pairs use).
+//     RecordCapabilityProposal + ReviewCapabilityProposal to `operator` (the
+//     human requester / Loom's relay actor / the trusted bridge-equivalent
+//     submitter / the human reviewer — the same operator-equivalent idiom
+//     augur's + lease-signing's capture pairs use).
 //
 //   - Two P5 read-model lenses (the operator/reasoning-model query surface,
 //     lattice-architecture.md P5): `capabilityProposals` (flat, one row per
@@ -63,11 +64,18 @@
 //     scanning Core KV directly — this lens is the non-Loupe equivalent so
 //     the bridge/reasoning adapter never needs Core KV access).
 //
+//   - ReviewCapabilityProposal (Fire 2 Increment 1, design §3.3) — the human
+//     verdict op: a capability-authorized operator flips a PENDING proposal
+//     to approved or rejected, addressed directly by its own proposalId. An
+//     approve re-runs the §5 boundary against the LIVE catalog (the TRUSTED
+//     caller attaches a fresh validation verdict; a missing or non-"valid"
+//     one fail-closes to invalid); a reject needs no re-check.
+//
 // Deliberately NOT yet built (the fire's remaining checkpoints, see the design
 // doc): the real claude-opus-4-8-backed `capabilityAuthor` bridge adapter (only
 // the deterministic `FakeCapabilityAuthor` ships — the same posture Augur's own
-// adapter is still in); ReviewCapabilityProposal + the F-004 apply path; the
-// `grant`/`weaverTarget`/`loomPattern`/Starlark kinds.
+// adapter is still in); the operator-submitted F-004 apply path + the `applied`
+// flip; the `grant`/`weaverTarget`/`loomPattern`/Starlark kinds.
 //
 // Install via the InstallPackage kernel op. See docs/components/_packages.md
 // and _bmad-output/implementation-artifacts/ai-authored-capabilities-design.md.
@@ -78,8 +86,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:          "capability-author",
-	Version:       "0.3.0",
-	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models: the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal ops (§5 record-time deterministic-validation boundary for the lens kind), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses. The review/apply ops and the grant/weaverTarget/loomPattern/Starlark kinds land in later increments.",
+	Version:       "0.4.0",
+	Description:   "AI-authored capabilities — Fire 1 capture + escalation dispatch + P5 read models, plus Fire 2 Increment 1 review: the capabilityproposal + capabilityauthorclaim vertex types, the RequestCapabilityAuthoring/CreateAuthoringClaim/RecordCapabilityProposal/ReviewCapabilityProposal ops (§5 record-time + approve-time deterministic-validation boundary for the lens kind), the capabilityAuthorPending weaver-target lens, the capabilityAuthor Loom pattern, and the capabilityProposals/capabilityAuthorContext review + catalog lenses. The operator-submitted F-004 apply path and the grant/weaverTarget/loomPattern/Starlark kinds land in later increments.",
 	Depends:       []string{"orchestration-base"},
 	DDLs:          DDLs(),
 	Permissions:   Permissions(),

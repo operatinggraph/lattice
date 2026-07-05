@@ -7,12 +7,12 @@ import (
 
 // DDLs returns the package's DDL meta-vertex declarations.
 //
-// The `capabilityproposal` vertex-type DDL owns the two-op capture pair that
-// records one authoring episode (ai-authored-capabilities-design.md §3.1,
-// §3.3); the `capabilityauthorclaim` vertex-type DDL owns the escalation
-// -dispatch instanceOp (§3.4). Together they
-// carry Fire 1 through capture + dispatch; the review/apply ops and the
-// catalog/review lenses remain (see the design doc's checkpoint).
+// The `capabilityproposal` vertex-type DDL owns the capture pair + the human
+// verdict op for one authoring episode (ai-authored-capabilities-design.md
+// §3.1, §3.3); the `capabilityauthorclaim` vertex-type DDL owns the
+// escalation-dispatch instanceOp (§3.4). Together they carry Fire 1 (capture +
+// dispatch) and Fire 2 Increment 1 (review); the operator-submitted F-004
+// apply path remains (see the design doc's checkpoint).
 //
 //   - RequestCapabilityAuthoring mints the proposal vertex write-ahead of the
 //     reasoning call (mirrors augur's CreateAugurReasoningClaim), recording the
@@ -52,6 +52,14 @@ import (
 //     submission) remains the authoritative, independent backstop regardless
 //     (design §5 point 4) — this op only ever produces a `pending`-or-`invalid`
 //     PROPOSAL, never a write to any other vertex.
+//   - ReviewCapabilityProposal is the human verdict op (design §3.3): a
+//     capability-authorized operator flips a PENDING proposal to approved or
+//     rejected, addressed directly by its proposalId (no claim indirection).
+//     A reject needs no re-check; an approve re-runs the §5 boundary against
+//     the LIVE catalog via a fresh validation verdict the TRUSTED caller
+//     attaches to the payload (same compute-client-side split as
+//     RecordCapabilityProposal) — missing or non-"valid" fail-closes to
+//     invalid. Only a pending proposal is reviewable.
 //
 // Architectural rules (binding — same known-key discipline as augur /
 // orchestration-base / lease-signing):
@@ -80,16 +88,17 @@ import (
 //	  .confidence  { score }                                      RecordCapabilityProposal
 //	  .validation  { state, report, deltaPreview, checkedAt }     RecordCapabilityProposal
 //	  .provenance  { model, promptHash, catalogHash, reasonedAt } RecordCapabilityProposal
-//	  .review      { state, reviewedAt, appliedAt, appliedByOp }  RecordCapabilityProposal (state only, this increment)
+//	  .review      { state, invalidReason, reviewedAt, appliedAt, appliedByOp }  RecordCapabilityProposal + ReviewCapabilityProposal (appliedAt/appliedByOp remain empty until the apply increment)
 //	lnk.capabilityproposal.<id>.requestedBy.<type>.<requesterId>  proposal requestedBy requester
+//	lnk.capabilityproposal.<id>.reviewedBy.<type>.<reviewerId>    proposal reviewedBy reviewer (ReviewCapabilityProposal)
 //
 //	vtx.capabilityauthorclaim.<handle>   root data = {}   CreateAuthoringClaim
 //	  .target  { proposalKey }   the back-pointer to the real vtx.capabilityproposal.<id>
 //
-// review.state ∈ {pending, invalid} in this increment (approved/rejected/
-// applied/superseded arrive with the review + apply ops). Absence of
-// .artifact/.review = the request is recorded but not yet authored (mirrors
-// augur's claim-in-flight — absence of .proposed/.review).
+// review.state ∈ {pending, invalid, approved, rejected} (applied/superseded
+// arrive with the apply increment). Absence of .artifact/.review = the
+// request is recorded but not yet authored (mirrors augur's claim-in-flight —
+// absence of .proposed/.review).
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		capabilityProposalDDL(),
@@ -101,7 +110,7 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "capabilityproposal",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"RequestCapabilityAuthoring", "RecordCapabilityProposal"},
+		PermittedCommands: []string{"RequestCapabilityAuthoring", "RecordCapabilityProposal", "ReviewCapabilityProposal"},
 		Description: "AI-authored capability proposal DDL — Increment 1 (design §3.1/§3.3): the capture " +
 			"pair for one authoring episode. Vertex shape: vtx.capabilityproposal.<id>, class=capabilityproposal, " +
 			"root data = {} (D5); business data in aspects: .request {requesterId, intent, contextRef} (the " +
@@ -129,23 +138,39 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"trusts the decoded validation verdict from this op's privileged submitter (the bridge in the full " +
 			"design), computed by pkgmgr.ValidateCapabilityArtifact before submission; the kernel's F-004 " +
 			"apply-time step-8 guard (a later increment) remains the authoritative, independent backstop " +
-			"regardless.",
+			"regardless. ReviewCapabilityProposal is the human verdict op (design §3.3, mirrors augur's " +
+			"ReviewProposal): a capability-authorized operator flips a PENDING proposal to approved or " +
+			"rejected, addressed directly by its own proposalId (no claim indirection — unlike " +
+			"RecordCapabilityProposal's Loom-minted opaque handle, a human reviewer already names the real " +
+			"proposal). A reject is always permitted with no re-check. An approve re-runs the §5 boundary " +
+			"against the LIVE catalog/registry (record-time and approve-time can drift): the script has no " +
+			"parser/registry access, so the TRUSTED caller supplies a FRESH validation verdict in the payload " +
+			"(the same compute-client-side-submit-a-trusted-verdict split RecordCapabilityProposal's own " +
+			"verdict rides); a missing or non-'valid' fresh verdict fail-closes the approve to invalid. Only " +
+			"a pending proposal is reviewable — any other state rejects (InvalidReviewTransition); a " +
+			"redelivered review is collapsed earlier by the Contract #4 requestId tracker. The reviewer is " +
+			"the TRUSTED submitting actor (op.actor, never a payload field) and the stamp is the envelope's " +
+			"authoritative submit time.",
 		Script: capabilityProposalDDLScript,
-		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | RecordCapabilityProposal — the bridge replyOp. The bridge posts {externalRef,status,result}; the artifact/target/rationale/confidence/validation/provenance fields are decoded from a single JSON result blob, never top-level payload fields.","properties":` +
-			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring only — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied (the auto-minted-by-Loom form lands with the escalation-dispatch increment)."},` +
+		InputSchema: `{"type":"object","description":"RequestCapabilityAuthoring{proposalId,intent,contextRef?} | RecordCapabilityProposal — the bridge replyOp {externalRef,status,result} — | ReviewCapabilityProposal{proposalId,verdict,validation?}. The artifact/target/rationale/confidence/validation/provenance fields on a RecordCapabilityProposal are decoded from a single JSON result blob, never top-level payload fields.","properties":` +
+			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring or ReviewCapabilityProposal — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied."},` +
 			`"intent":{"type":"string","description":"RequestCapabilityAuthoring only — the plain-language capability request, e.g. 'a lens listing active providers by specialty'."},` +
 			`"contextRef":{"type":"string","description":"RequestCapabilityAuthoring only — an optional pointer to bounded context the reasoning call hydrates (opaque to this DDL)."},` +
 			`"externalRef":{"type":"string","description":"RecordCapabilityProposal only — the bare Loom instanceKey handle CreateAuthoringClaim minted; the op resolves the real proposal vertex via vtx.capabilityauthorclaim.<externalRef>.target (never treated as the proposal's own id)."},` +
 			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
-			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables only 'lens' in this increment; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."}},` +
+			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables only 'lens' in this increment; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."},` +
+			`"verdict":{"type":"string","description":"ReviewCapabilityProposal only — the operator's verdict on a pending proposal: 'approve' (re-validated against the §5 boundary via the fresh validation payload field, fail-closing to invalid if it no longer validates) or 'reject'. The reviewer is the trusted submitting actor (op.actor) and the stamp is the envelope submit time; neither is a payload field."},` +
+			`"validation":{"type":"object","description":"ReviewCapabilityProposal, approve verdict only — the FRESH §5 verdict {state,report?} the caller computed by re-running pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog/registry immediately before submitting (record-time and approve-time can drift). state must be exactly 'valid' or the approve fail-closes to invalid; ignored on a reject verdict."}},` +
 			`"required":["proposalId"]}`,
-		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated proposal. The recorded review.state (pending|invalid) is read from the proposal's .review aspect, not the op response."}}}`,
+		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> of the created/updated/reviewed proposal. The recorded review.state (pending|invalid|approved|rejected) is read from the proposal's .review aspect, not the op response."}}}`,
 		FieldDescription: map[string]string{
-			"proposalId":  "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring).",
+			"proposalId":  "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring, ReviewCapabilityProposal).",
 			"intent":      "The plain-language capability request (RequestCapabilityAuthoring).",
 			"externalRef": "The bare Loom instanceKey handle CreateAuthoringClaim minted; resolved to the real proposal vertex via the claim's .target aspect (RecordCapabilityProposal).",
 			"status":      "The bridge's terminal outcome: completed or failed (RecordCapabilityProposal).",
 			"result":      "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
+			"verdict":     "The operator's verdict on a pending proposal: approve or reject (ReviewCapabilityProposal).",
+			"validation":  "The fresh §5 re-validation verdict {state,report?} computed by the caller before submission; required for an approve to succeed (ReviewCapabilityProposal).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -175,6 +200,24 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 					"result":      "the requested projection would expose PHI without a masking clause",
 				},
 				ExpectedOutcome: "review.state = invalid, invalidReason = 'model declined to propose (refusal)', .rationale.text carries the result verbatim.",
+			},
+			{
+				Name: "ReviewCapabilityProposal — a human operator approves a pending proposal",
+				Payload: map[string]any{
+					"proposalId": "capPropOneHJKMNPQRST",
+					"verdict":    "approve",
+					"validation": map[string]any{"state": "valid"},
+				},
+				ExpectedOutcome: "review.state: pending → approved; reviewedBy link recorded (reviewer = op.actor, verdict = approve). " +
+					"An approve with a stale/missing/non-'valid' fresh validation verdict fail-closes to invalid instead.",
+			},
+			{
+				Name: "ReviewCapabilityProposal — a human operator rejects a pending proposal",
+				Payload: map[string]any{
+					"proposalId": "capPropOneHJKMNPQRST",
+					"verdict":    "reject",
+				},
+				ExpectedOutcome: "review.state: pending → rejected; no re-validation performed (a reject is always permitted).",
 			},
 		},
 	}
@@ -423,6 +466,94 @@ def execute(state, op):
         events = [
             {"class": "capabilityAuthor.proposalRecorded",
              "data": {"proposalKey": proposal_key, "kind": kind, "reviewState": review_state}},
+        ]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
+
+    if ot == "ReviewCapabilityProposal":
+        # The human verdict (design §3.3, mirrors augur's ReviewProposal
+        # exactly): an operator flips a PENDING proposal to approved | rejected.
+        # Addressed directly by the proposal's own proposalId — unlike
+        # RecordCapabilityProposal, there is no claim indirection to resolve
+        # (a human reviewer already names the real proposal they are
+        # reviewing). The reviewer is the TRUSTED submitting actor (op.actor,
+        # capability-authorized, never a payload field); the stamp is the
+        # envelope's authoritative submit time (op.submittedAt). Only a
+        # pending proposal is reviewable — any other state rejects (terminal-
+        # state guard: invalid / already-reviewed cannot be re-reviewed; a
+        # redelivered op is collapsed earlier by the Contract #4 requestId
+        # tracker).
+        proposal_id = required_bare_id(p, "proposalId")
+        proposal_key = "vtx.capabilityproposal." + proposal_id
+        verdict = required_string(p, "verdict")
+        if verdict != "approve" and verdict != "reject":
+            fail("InvalidArgument: verdict: must be one of approve, reject; got " + verdict)
+
+        review_doc = kv.Read(proposal_key + ".review")
+        if not alive(review_doc):
+            fail("UnknownCapabilityProposal: no recorded review for " + proposal_key + " (RecordCapabilityProposal must commit a verdict before review)")
+        rd = review_doc.data
+        cur_state = ""
+        if rd != None and "state" in rd:
+            cur_state = rd["state"]
+        if cur_state != "pending":
+            fail("InvalidReviewTransition: proposal " + proposal_key + " is '" + cur_state + "', only a pending proposal is reviewable")
+
+        reviewer = op.actor
+        reviewer_type, reviewer_id = parts_of(reviewer, "actor")
+        reviewed_at = op.submittedAt
+
+        new_state = "approved"
+        invalid_reason = ""
+        if verdict == "reject":
+            # A reject is always permitted — no re-validation; the operator
+            # declines the proposal regardless of whether it would still validate.
+            new_state = "rejected"
+        else:
+            # Re-run the §5 boundary against the LIVE catalog/registry (design
+            # §5 point 3 — record-time and approve-time can drift). This script
+            # has no parser/registry access, so — exactly like
+            # RecordCapabilityProposal's own verdict — the TRUSTED caller (the
+            # operator's Loupe/CLI submission path, which reruns
+            # pkgmgr.ValidateCapabilityArtifact against the CURRENT catalog
+            # immediately before submitting this op) supplies the fresh verdict
+            # in the payload. Missing/non-"valid" fresh validation on an
+            # approve fail-closes to invalid — an approve is never trusted blind.
+            # Type-checked exactly like RecordCapabilityProposal's own nested-
+            # object fields (proposal_dict): a non-object validation payload
+            # (a string/list/number) falls back to {} rather than reaching
+            # proposal_string with a non-dict, which fails closed to invalid
+            # via the empty-dict "state" lookup below instead of risking a
+            # Starlark runtime error on a malformed caller payload.
+            validation = {}
+            if hasattr(p, "validation") and p.validation != None and type(p.validation) == type({}):
+                validation = p.validation
+            fresh_state = proposal_string(validation, "state")
+            fresh_report = proposal_string(validation, "report")
+            if fresh_state != "valid":
+                new_state = "invalid"
+                if fresh_report != "":
+                    invalid_reason = "re-validation at approval failed: " + fresh_report
+                else:
+                    invalid_reason = "re-validation at approval failed: no valid verdict supplied"
+
+        # Unconditioned update preserving the aspect's full shape (D5; the
+        # pending-only guard above is the single-transition guarantee, same
+        # posture as augur's ReviewProposal flip). appliedAt/appliedByOp stay
+        # empty — the apply path is a later increment.
+        reviewedby_lnk = "lnk.capabilityproposal." + proposal_id + ".reviewedBy." + reviewer_type + "." + reviewer_id
+        mutations = [
+            {"op": "update", "key": proposal_key + ".review",
+             "document": {"class": "capabilityAuthor.review", "isDeleted": False,
+                          "vertexKey": proposal_key, "localName": "review",
+                          "data": {"state": new_state, "invalidReason": invalid_reason,
+                                   "reviewedAt": reviewed_at, "appliedAt": "", "appliedByOp": ""}}},
+            make_link(reviewedby_lnk, proposal_key, reviewer, "reviewedBy", "reviewedBy",
+                      {"reviewedAt": reviewed_at, "verdict": verdict}),
+        ]
+        events = [
+            {"class": "capabilityAuthor.proposalReviewed",
+             "data": {"proposalKey": proposal_key, "reviewState": new_state,
+                      "reviewer": reviewer, "verdict": verdict}},
         ]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
 

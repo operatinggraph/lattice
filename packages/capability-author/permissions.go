@@ -19,6 +19,9 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //   - RecordCapabilityProposal — the trusted submitter that has already run the
 //     §5 materializer (the bridge, in the full design); modeled here as
 //     operator-equivalent, mirroring augur's RecordProposal.
+//   - ReviewCapabilityProposal — a human operator submits the verdict that
+//     flips a pending proposal to approved/rejected (design §3.3), mirroring
+//     augur's ReviewProposal.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -39,6 +42,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Authorizes the trusted submitter that has already run the §5 deterministic-validation materializer (the bridge, in the full design) to record a capability proposal verdict.",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "ReviewCapabilityProposal",
+			Scope:         "any",
+			Note:          "Authorizes a human operator to approve or reject a pending capability proposal (design §3.3).",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }
 
@@ -52,5 +61,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "RequestCapabilityAuthoring"},
 		{OperationType: "CreateAuthoringClaim"},
 		{OperationType: "RecordCapabilityProposal"},
+		{OperationType: "ReviewCapabilityProposal"},
 	}
 }
