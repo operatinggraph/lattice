@@ -31,7 +31,7 @@ func TestVerifyProtectedTable_Pass(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_verify_ok_" + sanitize(t.Name())
 	body := []ColumnDef{{Name: "status", Type: "text"}}
@@ -51,7 +51,7 @@ func TestVerifyProtectedTable_ForceRLSOff_Fails(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_verify_noforce_" + sanitize(t.Name())
 	body := []ColumnDef{{Name: "status", Type: "text"}}
@@ -78,7 +78,7 @@ func TestVerifyProtectedTable_EnableOff_Fails(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_verify_noenable_" + sanitize(t.Name())
 	body := []ColumnDef{{Name: "status", Type: "text"}}
@@ -105,7 +105,7 @@ func TestVerifyProtectedTable_PermissivePolicy_Fails(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_verify_permissive_" + sanitize(t.Name())
 	body := []ColumnDef{{Name: "status", Type: "text"}}
@@ -154,7 +154,7 @@ func TestVerifyProtectedTable_MissingColumn_Fails(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_verify_missingcol_" + sanitize(t.Name())
 	clean := func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS "`+tbl+`"`) }
@@ -178,7 +178,7 @@ func TestVerifyProtectedTable_NoPolicy_Fails(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	tbl := "rls_verify_nopolicy_" + sanitize(t.Name())
 	body := []ColumnDef{{Name: "status", Type: "text"}}

@@ -163,7 +163,7 @@ func TestRLS_GrantSeqGuard_Integration(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	w := provisionGrantWriter(t, pool)
 
@@ -229,7 +229,7 @@ func TestRLS_ForceRLS_DenyAll_Integration(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	w := provisionGrantWriter(t, pool)
 
