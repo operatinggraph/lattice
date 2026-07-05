@@ -527,9 +527,25 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
   (2) `DefinitionForCapabilityArtifact` (apply-time materializer) never re-checks scope — a TOCTOU window
   between approval and apply if the requester's authority is revoked in between. **Loupe/CLI review-and-apply
   affordance remains** (next).
-- **Fire 3 — Declarative orchestration kinds.** The **weaverTarget** + **loomPattern** kinds in the
-  materializer (`validateWeaverTargets`/`validateGapAction`/`validateLoomPatterns`). **Ships:** an AI can
-  author convergence targets + orchestration patterns over already-installed ops. *(M.)* — full 3-layer.
+- **Fire 3 — Declarative orchestration kinds.** The **weaverTarget** + **loomPattern** kinds in
+  the materializer (`validateWeaverTargets`/`validateGapAction`/`validateLoomPatterns`, reused verbatim — plus
+  one check *stronger* than the hand-authored path: a loomPattern step's `Guard` is run through the shared
+  §10.5 `guardgrammar.Parse`, rejecting the reserved Starlark escape hatch at record time rather than leaving
+  it to fail later at CDC load). Both kinds also gain a top-level unknown-field allow-list (mirrors lens/grant);
+  `weaverTarget` additionally excludes the `augur` escalation-policy block (out of scope — an AI proposing its
+  own reasoning-escalation policy, including the still-unratified `autoApply`, is not this increment's concern).
+  **Ships:** an AI can author convergence targets + orchestration patterns over already-installed ops. *(M.)* —
+  full 3-layer adversarial review run (capability plane); the point below is what it found.
+  **One thing this fire deliberately does NOT solve** (found in review, shared structurally with any
+  hand-authored weaverTarget/loomPattern, not weakened by this fire): unlike the **grant** kind, neither
+  `validateGapAction` nor `validateLoomPatterns` scope-checks *what op a gap action or step names* — once an
+  approved target/pattern is installed, Weaver/Loom dispatch a `directOp`/`assignTask`/`systemOp` naming any
+  already-installed op (e.g. `GrantPermission`) under the **engine's own broad service-actor authority**
+  (`scope: any`), not the reviewing operator's held scope. The grant kind's scope-check has no analogue here.
+  This is *not worse* than a hand-authored weaverTarget/loomPattern (same posture, same review-is-the-only-gate
+  reality) — flagged so a future increment doesn't assume Fire 3 closed it. Closing it for real needs either a
+  Weaver/Loom-side per-target auth-anchor scope check or an operation-sensitivity allow-list — out of scope for
+  a materializer-only fire.
 - **Fire 4 — Starlark-bearing kinds (GATED on the verified-pure Starlark sandbox + a separate
   ratification).** The **vertexTypeDDL/opMeta** kinds, validated by static checks + `validateOpMetas` + the
   verified-pure Starlark sandbox dry-run. **Ships dark / sequenced** behind the "Starlark guards" backlog
@@ -547,7 +563,8 @@ kinds) and 4 (Starlark, gated on ⑥'s sandbox + a separate ratification) unchan
 |---|---|
 | **The model authors a harmful capability** (a lens that over-projects PII; a grant that widens authority; an artifact touching a protected root). | The §5 four-point boundary: schema constraint → record-time `validateAll`+parser+lint+**scope-check**+sandbox dry-run → approve-time re-validate → **the kernel step-8 protected-key guard at apply** (independent, authoritative). Under Option A it *cannot* apply without a human. The AI gains **no new authority** (Item 4 — it holds only `RequestCapabilityAuthoring`; the apply op runs under the operator). Adversarial test proves DEFENDED. |
 | **A lens over-projects protected data** (a read-path leak). | A lens is *pure projection*; the **read-auth boundary is D1/RLS**, not the lens (D1 §6.14 — protected-by-default; a `protected:true` model must target Postgres-RLS). The §5 P5 lint forbids a Core-KV-target lens; an AI-authored protected lens still lands behind D1's read enforcement. (Noted as the reason lens is the *lowest*-risk kind despite "projecting data".) |
-| **Generated Starlark executes arbitrary logic on the write path.** | Starlark authoring is **gated** (Fire 4) behind the verified-pure Starlark sandbox (a separate planned item) **and** a separate ratification — it is *out of the initial scope* precisely because it can't be statically validated. The first four kinds carry no executable AI code. |
+| **Generated Starlark executes arbitrary logic on the write path.** | Starlark authoring is **gated** (Fire 4) behind the verified-pure Starlark sandbox (a separate planned item) **and** a separate ratification — it is *out of the initial scope* precisely because it can't be statically validated. The first four kinds carry no executable AI code. A loomPattern step's `Guard` field could otherwise carry the reserved §10.5 Starlark escape hatch (`{reads, starlark}`) — well-formed JSON that the structural step validators don't parse — so Fire 3 additionally runs every step `Guard` through `guardgrammar.Parse` at record time, rejecting the reserved shape rather than deferring the rejection to CDC load. |
+| **An AI-authored weaverTarget/loomPattern dispatches a sensitive op under the engine's own broad authority, not the reviewing operator's.** | Unlike **grant**, neither kind has a scope-check on *which* op a gap action/step names — a `directOp`/`assignTask`/`systemOp` naming e.g. `GrantPermission` validates and, once approved+applied, Weaver/Loom dispatch it under the engine's `scope: any` service-actor identity. **Not worse than a hand-authored weaverTarget/loomPattern** (same posture) — the human review of the artifact's named op is the only gate, same as reviewing a hand-authored package. Flagged (Fire 3 review) as a known gap, not closed: closing it needs a Weaver/Loom-side per-target auth-anchor scope check or an operation-sensitivity allow-list, out of scope for a materializer-only fire. |
 | **Cost / runaway authoring storm.** | The escalation is a standard externalTask → anti-storm mark + bridge `idempotencyKey` ⇒ **at most one billed model call per authoring episode**. `RequestCapabilityAuthoring` is a capability-gated op (not auto-fired by CDC). Health metric `authoringRequests` makes spend operator-visible. |
 | **Stale proposal (catalog/registry drifts between propose → approve → apply).** | `provenance.catalogHash` records what was reasoned over; **re-validation at approve and the authoritative kernel guard at apply** fail-closed if the artifact no longer resolves/validates. A newer proposal for the same `(requester, intentKey)` **supersedes** the older. |
 | **Non-determinism / replay.** | The model call sits behind the bridge's `requestId` + `idempotencyKey`; `RecordCapabilityProposal` collapses on a deterministic proposal id ⇒ redelivery never duplicates. The *artifact content* is non-deterministic (LLM) but **inert until validated + approved + applied**, so non-determinism never reaches state unreviewed. |
