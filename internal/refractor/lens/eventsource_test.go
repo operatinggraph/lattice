@@ -1,6 +1,7 @@
 package lens
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,56 @@ func TestTranslateSpec_EventStream_RejectsCypherBody(t *testing.T) {
 	_, err := translateSpec(spec)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cypherRule must be empty")
+}
+
+// TestColumnMapping_MarshalJSON_RoundTrip pins ColumnMapping.MarshalJSON
+// against its UnmarshalJSON counterpart for all three shapes. Without a
+// MarshalJSON method, Go's default reflection-based encoding serializes the
+// untagged `Path` field verbatim (key "Path"), which UnmarshalJSON's object
+// arm does not recognize — silently losing a bare-path column's value on
+// any encode→decode round-trip (exactly what installing a Go-literal
+// LensSpec as aspect-data JSON does).
+func TestColumnMapping_MarshalJSON_RoundTrip(t *testing.T) {
+	cases := map[string]ColumnMapping{
+		"bare path": {Path: "payload.instanceId"},
+		"from/map": {From: "eventType", Map: map[string]string{
+			"loom.patternStarted": "running", "loom.patternCompleted": "complete",
+		}},
+		"when/value": {When: []string{"loom.patternStarted", "loom.patternCompleted"}, Value: "timestamp"},
+	}
+	for name, cm := range cases {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(cm)
+			require.NoError(t, err)
+			var got ColumnMapping
+			require.NoError(t, json.Unmarshal(data, &got))
+			assert.Equal(t, cm, got)
+		})
+	}
+}
+
+// TestTranslateSpec_EventStream_SurvivesJSONRoundTrip proves the install
+// path end-to-end: a LensSpec constructed as a Go literal (a package's
+// LensSpec, e.g. orchestration-base's loomFlowHistory lens) is marshaled to
+// JSON exactly as pkgmgr.lensSpecBody emits the aspect data an installed
+// lens is stored as, then re-parsed exactly as CoreKVSource loads it back
+// from Core KV. Before ColumnMapping.MarshalJSON existed, this round-trip
+// silently dropped every bare-path column.
+func TestTranslateSpec_EventStream_SurvivesJSONRoundTrip(t *testing.T) {
+	spec := validEventStreamSpec(t)
+	data, err := json.Marshal(spec.Source)
+	require.NoError(t, err)
+	var roundTripped SourceConfig
+	require.NoError(t, json.Unmarshal(data, &roundTripped))
+	spec.Source = &roundTripped
+
+	r, err := translateSpec(spec)
+	require.NoError(t, err)
+	require.NotNil(t, r.Source)
+	assert.Equal(t, "payload.instanceId", r.Source.Project.Columns["instance_id"].Path)
+	assert.Equal(t, "message.sequence", r.Source.Project.Columns["last_event_seq"].Path)
+	assert.Equal(t, "eventType", r.Source.Project.Columns["status"].From)
+	assert.Equal(t, "running", r.Source.Project.Columns["status"].Map["loom.patternStarted"])
 }
 
 func TestTranslateSpec_UnknownSourceKind(t *testing.T) {

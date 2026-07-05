@@ -20,13 +20,20 @@ import (
 
 const (
 	// KV bucket names.
-	CoreKVBucket         = "core-kv"
-	HealthKVBucket       = "health-kv"
-	CapabilityKVBucket   = "capability-kv"
-	WeaverStateBucket    = "weaver-state"
-	LoomStateBucket      = "loom-state"          // Loom's per-instance cursor store (Contract #10 §10.3)
-	WeaverTargetsBucket  = "weaver-targets"      // shared target-Lens projection bucket (Contract #10 §10.2)
-	RefractorAdjacencyKV = "refractor-adjacency" // Refractor's internal adjacency store (private, not a Lens target)
+	CoreKVBucket        = "core-kv"
+	HealthKVBucket      = "health-kv"
+	CapabilityKVBucket  = "capability-kv"
+	WeaverStateBucket   = "weaver-state"
+	LoomStateBucket     = "loom-state"     // Loom's per-instance cursor store (Contract #10 §10.3)
+	WeaverTargetsBucket = "weaver-targets" // shared target-Lens projection bucket (Contract #10 §10.2)
+	// OrchestrationHistoryBucket is the Chronicler's durable Loom-flow history
+	// read model (orchestration-history-read-model-design.md §2.6) — an
+	// eventStream lens target (Refractor projects `events.loom.>` into it),
+	// not Core KV. Primordial like WeaverTargetsBucket/LoomStateBucket: a
+	// durable read-model bucket every deployment needs, not a per-install
+	// package artifact.
+	OrchestrationHistoryBucket = "orchestration-history"
+	RefractorAdjacencyKV       = "refractor-adjacency" // Refractor's internal adjacency store (private, not a Lens target)
 	// PersonalLensInterestKV is the Refractor's per-device Personal Lens
 	// Interest Set registry (personal-secure-lens-design.md §3.3, Fire PL.2):
 	// operational subscription state, not business truth (P1) — keyed
@@ -100,6 +107,9 @@ func (s *Seeder) ProvisionBuckets(ctx context.Context) error {
 		// live here (TTL-leased marks live in weaver-state). History stays the KV
 		// default 1, which is what DeliverLastPerSubject CDC consumers expect.
 		{WeaverTargetsBucket, "Lattice Weaver Targets KV — shared target-Lens projection bucket", false},
+		// orchestration-history is a guarded eventStream Lens target (monotonic
+		// last_event_seq CAS, not per-key TTL) — history stays the KV default 1.
+		{OrchestrationHistoryBucket, "Lattice Orchestration History KV — Chronicler durable Loom-flow read model", false},
 		{RefractorAdjacencyKV, "Refractor internal adjacency store (private)", false},
 		{PersonalLensInterestKV, "Refractor Personal Lens Interest Set registry (private)", false},
 		// token-revocation is a compacting latest-per-actor set (put on revoke,

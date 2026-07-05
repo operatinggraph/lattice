@@ -114,6 +114,126 @@ func TestLensSpecBody_IntoKey_DefaultsToKey(t *testing.T) {
 	}
 }
 
+// TestLensSpecBody_EventStream_EmitsSource pins the Chronicler Fire 2 seam:
+// a LensSpec with Source set must emit spec["source"] (the aspect data
+// Refractor's CoreKVSource unmarshals into lens.SourceConfig), and must
+// leave cypherRule empty (an event lens has no Core-KV vertex to MATCH).
+func TestLensSpecBody_EventStream_EmitsSource(t *testing.T) {
+	body := lensSpecBody("lens-id-ev", LensSpec{
+		CanonicalName: "loomFlowHistory",
+		Adapter:       "nats-kv",
+		Bucket:        "orchestration-history",
+		IntoKey:       []string{"instance_id"},
+		Source: &SourceConfig{
+			Kind:     "eventStream",
+			Subjects: []string{"events.loom.>"},
+			Project: &EventProjection{
+				Key: "payload.instanceId",
+				Columns: map[string]ColumnMapping{
+					"instance_id": {Path: "payload.instanceId"},
+				},
+			},
+		},
+	})
+	if got := body["cypherRule"]; got != "" {
+		t.Errorf("cypherRule: want empty for an eventStream lens, got %q", got)
+	}
+	src, ok := body["source"].(*SourceConfig)
+	if !ok {
+		t.Fatalf("source: not *SourceConfig, got %T", body["source"])
+	}
+	if src.Kind != "eventStream" {
+		t.Errorf("source.kind: want eventStream, got %q", src.Kind)
+	}
+}
+
+func TestLensSpecBody_NoSource_OmitsSourceKey(t *testing.T) {
+	body := lensSpecBody("lens-id-nosrc", LensSpec{
+		CanonicalName: "myLens",
+		Adapter:       "nats-kv",
+		Bucket:        "bucket",
+		Engine:        "full",
+		Spec:          "MATCH (n) RETURN n.key AS key",
+	})
+	if _, has := body["source"]; has {
+		t.Error("source: must be absent when LensSpec.Source is nil (every existing lens byte-for-byte unchanged)")
+	}
+}
+
+// TestColumnMapping_MarshalJSON_WireShape asserts each of the three shapes
+// encodes to what internal/refractor/lens.ColumnMapping.UnmarshalJSON
+// expects — the two ColumnMapping types are independent (pkgmgr cannot
+// import internal/refractor/lens without a cycle) but must agree on JSON
+// shape across that package boundary.
+func TestColumnMapping_MarshalJSON_WireShape(t *testing.T) {
+	cases := map[string]ColumnMapping{
+		"bare path": {Path: "payload.instanceId"},
+		"from/map": {From: "eventType", Map: map[string]string{
+			"loom.patternStarted": "running", "loom.patternCompleted": "complete",
+		}},
+		"when/value": {When: []string{"loom.patternStarted", "loom.patternCompleted"}, Value: "timestamp"},
+	}
+	for name, cm := range cases {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(cm)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			// pkgmgr.ColumnMapping has no custom UnmarshalJSON (pkgmgr never
+			// reads this back — it only ever marshals for the install-op
+			// payload); internal/refractor/lens.ColumnMapping is the reader,
+			// exercised by that package's own round-trip test
+			// (TestColumnMapping_MarshalJSON_RoundTrip in eventsource_test.go)
+			// and by the cross-package install-path test
+			// (TestManager_LoomFlowHistoryLens_E2E). Here, just assert this
+			// package's wire shape is what that reader's UnmarshalJSON expects.
+			var wire any
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatalf("decode wire shape: %v", err)
+			}
+			switch {
+			case cm.Path != "":
+				if wire != cm.Path {
+					t.Errorf("bare path: wire = %v, want %q", wire, cm.Path)
+				}
+			case cm.From != "" || len(cm.Map) > 0:
+				obj, ok := wire.(map[string]any)
+				if !ok || obj["from"] != cm.From {
+					t.Errorf("from/map: wire = %v", wire)
+				}
+			default:
+				obj, ok := wire.(map[string]any)
+				if !ok || obj["value"] != cm.Value {
+					t.Errorf("when/value: wire = %v", wire)
+				}
+			}
+		})
+	}
+}
+
+// TestColumnMapping_MarshalJSON_RejectsMixedShapes pins the mutual-
+// exclusivity guard added alongside the Chronicler Fire 2 round-trip fix:
+// a malformed literal (e.g. a copy-paste mistake authoring a package's
+// Lenses()) must fail loudly, not silently keep only the first-matched
+// shape and drop the rest.
+func TestColumnMapping_MarshalJSON_RejectsMixedShapes(t *testing.T) {
+	cases := map[string]ColumnMapping{
+		"path + from/map":   {Path: "payload.instanceId", From: "eventType", Map: map[string]string{"a": "b"}},
+		"path + when/value": {Path: "payload.instanceId", When: []string{"a"}, Value: "timestamp"},
+		"from/map + when/value": {
+			From: "eventType", Map: map[string]string{"a": "b"},
+			When: []string{"a"}, Value: "timestamp",
+		},
+	}
+	for name, cm := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := json.Marshal(cm); err == nil {
+				t.Error("expected an error for a mixed-shape ColumnMapping, got nil")
+			}
+		})
+	}
+}
+
 func TestLensSpecBody_Postgres_Protected(t *testing.T) {
 	body := lensSpecBody("lens-id-p", LensSpec{
 		CanonicalName: "leaseApplications",

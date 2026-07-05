@@ -1,5 +1,5 @@
 name: orchestration-base
-version: 0.4.0
+version: 0.5.0
 description: |
   Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability,
   FR28 role-queue + fallback: assignee-or-queue routing gated on the
@@ -9,7 +9,11 @@ description: |
   including the FR28 role-queue fan-out (Contract #6 §6.6 / Contract #10
   §10.1 / §10.7), plus the FR29 unroutedTasks Weaver convergence target
   (surface-only — an unclaimed role-queued task past its own expiresAt rolls
-  a Health-KV issue, no remediation dispatched).
+  a Health-KV issue, no remediation dispatched), plus the Chronicler's
+  loomFlowHistory event-sourced lens — a durable read model of every Loom
+  flow's lifecycle (status/reason/timestamps), projected from
+  `events.loom.>` into the orchestration-history bucket
+  (orchestration-history-read-model-design.md Fire 2).
 depends:
   - identity-domain
 declares:
@@ -35,6 +39,9 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: loomFlowHistory
+      adapter: nats-kv
+      bucket: orchestration-history
   weaverTargets:
     - targetId: unroutedTasks
       lensRef: unroutedTasks

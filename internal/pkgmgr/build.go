@@ -388,6 +388,9 @@ func lensSpecBody(lensID string, l LensSpec) map[string]any {
 	if l.Output != nil {
 		spec["output"] = l.Output
 	}
+	if l.Source != nil {
+		spec["source"] = l.Source
+	}
 	return spec
 }
 

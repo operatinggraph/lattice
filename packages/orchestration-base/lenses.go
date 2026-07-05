@@ -74,7 +74,64 @@ func Lenses() []pkgmgr.LensSpec {
 				KeyColumn:        "entityId",
 			},
 		},
+		{
+			CanonicalName: "loomFlowHistory",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        "orchestration-history",
+			IntoKey:       []string{"instance_id"},
+			Source:        loomFlowHistorySource,
+		},
 	}
+}
+
+// loomFlowHistorySource is the Chronicler's durable Loom-flow history read
+// model (orchestration-history-read-model-design.md §2.2/§2.6, Fire 2 — the
+// first consumer of the Fire 1 `eventStream` lens-source primitive): an
+// event-sourced projection of `events.loom.>` (the loomLifecycle DDL's
+// patternStarted/Completed/Failed events, loom_lifecycle.go) into one row
+// per Loom instance. There is no Core-KV vertex to MATCH (P1) — the event
+// payload is the only data, so this lens carries no cypher (Spec left empty
+// on the LensSpec above).
+//
+// Each lifecycle event only ever carries a subset of the row's columns (a
+// patternCompleted/Failed event has no patternRef/subjectKey); the
+// eventlens runtime merges each projected partial onto the previously
+// stored row (carry-forward), so status/timestamps accumulate correctly
+// across a flow's Started→Completed|Failed lifecycle. last_event_seq is the
+// JetStream stream sequence of the projecting delivery — the monotonic
+// ordering token that makes an out-of-order replay converge (design §2.4):
+// a replayed lower-seq patternStarted cannot clobber an already-applied
+// higher-seq terminal event.
+var loomFlowHistorySource = &pkgmgr.SourceConfig{
+	Kind:     "eventStream",
+	Subjects: []string{"events.loom.>"},
+	Project: &pkgmgr.EventProjection{
+		Key: "payload.instanceId",
+		Columns: map[string]pkgmgr.ColumnMapping{
+			"instance_id": {Path: "payload.instanceId"},
+			"pattern_ref": {Path: "payload.patternRef"},
+			"subject_key": {Path: "payload.subjectKey"},
+			"status": {
+				From: "eventType",
+				Map: map[string]string{
+					"loom.patternStarted":   "running",
+					"loom.patternCompleted": "complete",
+					"loom.patternFailed":    "failed",
+				},
+			},
+			"failure_reason": {Path: "payload.reason"},
+			"started_at": {
+				When:  []string{"loom.patternStarted"},
+				Value: "timestamp",
+			},
+			"ended_at": {
+				When:  []string{"loom.patternCompleted", "loom.patternFailed"},
+				Value: "timestamp",
+			},
+			"last_event_seq": {Path: "message.sequence"},
+		},
+	},
 }
 
 // unroutedTasksSpec is FR29's convergence target (Contract #10 §10.1 "unrouted

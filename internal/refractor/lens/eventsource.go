@@ -79,10 +79,10 @@ func (c *ColumnMapping) UnmarshalJSON(data []byte) error {
 	// The object form's `when` may be a bare string or an array; decode into
 	// a tolerant shape then normalize to []string.
 	var obj struct {
-		From  string          `json:"from"`
+		From  string            `json:"from"`
 		Map   map[string]string `json:"map"`
-		When  json.RawMessage `json:"when"`
-		Value string          `json:"value"`
+		When  json.RawMessage   `json:"when"`
+		Value string            `json:"value"`
 	}
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return fmt.Errorf("column mapping: must be a string or an object: %w", err)
@@ -103,6 +103,39 @@ func (c *ColumnMapping) UnmarshalJSON(data []byte) error {
 		}
 	}
 	return nil
+}
+
+// MarshalJSON is the mirror image of UnmarshalJSON: a bare-path mapping
+// encodes as a JSON string, the two structured shapes as objects. Needed so
+// a ColumnMapping constructed as a Go literal (a package's LensSpec, e.g.
+// orchestration-base's loomFlowHistory lens) round-trips correctly through
+// the aspect-data JSON the installed lens definition is stored as — without
+// this, the default reflection-based encoding would serialize the untagged
+// `Path` field verbatim (as key "Path"), which UnmarshalJSON's object arm
+// does not recognize, silently losing every bare-path column on install.
+func (c ColumnMapping) MarshalJSON() ([]byte, error) {
+	switch {
+	case c.Path != "":
+		if c.isFromMap() || c.isConditional() {
+			return nil, fmt.Errorf("column mapping: a bare path cannot also carry from/map/when/value")
+		}
+		return json.Marshal(c.Path)
+	case c.isFromMap():
+		if c.isConditional() {
+			return nil, fmt.Errorf("column mapping: from/map and when/value are mutually exclusive")
+		}
+		return json.Marshal(struct {
+			From string            `json:"from"`
+			Map  map[string]string `json:"map"`
+		}{From: c.From, Map: c.Map})
+	case c.isConditional():
+		return json.Marshal(struct {
+			When  []string `json:"when"`
+			Value string   `json:"value"`
+		}{When: c.When, Value: c.Value})
+	default:
+		return nil, fmt.Errorf("column mapping: empty mapping cannot be marshaled")
+	}
 }
 
 // isFromMap reports whether this mapping is the {from,map} shape.

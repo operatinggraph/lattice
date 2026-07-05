@@ -80,6 +80,19 @@
 >    (e.g. a new primordial `chronicler-archive` Object Store, provisioned in `internal/bootstrap/primordial.go`
 >    exactly like `core-objects` is) rather than sharing `core-objects` — no new exemption/fencing code in
 >    objmgr is needed. Note this for F3's design when that fire is scoped; it does not affect F1/F2.
+>
+> **FIRE 2 AS-BUILT (2026-07-05, Steward) — row key simplified from the originally-drafted
+> `flow.<instanceId>` to a bare `<instanceId>` value** (§2.6/§3 below already reflect this). The shipped
+> `loomFlowHistory` lens (`packages/orchestration-base/lenses.go`) keys rows by the bare instance NanoID.
+> Reason: the `eventStream` primitive's `EventProjection.Key` (§2.2) is a plain dot-path
+> resolution — one of the three `ColumnMapping` shapes (bare path / `{from,map}` / `{when,value}`), none
+> of which can concatenate a literal string prefix onto a resolved value. Producing a real `flow.` prefix
+> would mean extending the Fire-1 primitive with new templating machinery (a `KeyPrefix`-shaped field) for
+> a single-purpose bucket that, as of this fire, only `loomFlowHistory` ever writes to — no other entity
+> shares `orchestration-history`, so the prefix buys no disambiguation today. Revisit only if a second
+> `eventStream` lens is ever pointed at this same bucket (not currently planned; Weaver history, §7, would
+> get its own dedicated bucket like this one did). No `KeyColumn`/`Output.OutputKeyPattern` mechanism was
+> used either — that machinery is actor-aggregate-only (§6.13), which this lens does not opt into.
 
 · Designer fire 2026-06-30 (Winston); reworked at ratification 2026-07-02 · Lattice lane
 **Backlog row:** "Loom / Weaver control-API surfacing" (`backlog/lattice.md` → Refinements & ops) — ★ · M
@@ -326,7 +339,7 @@ A `meta.lens` definition (package data — **not** engine code; Decision #10), i
 | `targetType` | `nats_kv` (v1 — see §6 alternatives for Postgres) |
 | `targetConfig.bucket` | `orchestration-history` (joins the primordial bucket create list, like `weaver-targets` §10.2 / `loom-state` §10.3 — a **code** change in `internal/bootstrap/primordial.go`, not a contract change) |
 | `targetConfig.guarded` | `true` (the §2.4 seq guard) |
-| row key | `flow.<instanceId>` |
+| row key | bare `<instanceId>` (as-built; see the Fire 2 as-built note above — the primitive's `Key` has no prefix-templating) |
 | row columns | `instance_id, pattern_ref, subject_key, status, started_at, ended_at, failure_reason, last_event_seq` |
 
 ### 2.7 Loupe surfacing (P5)
@@ -342,10 +355,11 @@ range). It is read-only; no new control-plane op. Cross-reference the live `latt
 
 ## 3. Naming & key-shape conformance (Contract #1)
 
-- The read-model **row key** `flow.<instanceId>` lives in a **lens target bucket** (`orchestration-history`)
-  — a derived read model, **not** Core KV — so it is *not* governed by the `vtx.`/`lnk.`/`asp.` key-shape
-  rules (those govern Core KV; lens targets use their own row keys, exactly as `weaver-targets` rows are
-  keyed by `<targetId>.<entityId>.<gapColumn>` per §10.2, not a `vtx.` shape). No Contract #1 surface.
+- The read-model **row key** (the bare `<instanceId>`, as-built — see the Fire 2 note above) lives in a
+  **lens target bucket** (`orchestration-history`) — a derived read model, **not** Core KV — so it is *not*
+  governed by the `vtx.`/`lnk.`/`asp.` key-shape rules (those govern Core KV; lens targets use their own row
+  keys, exactly as `weaver-targets` rows are keyed by `<targetId>.<entityId>.<gapColumn>` per §10.2, not a
+  `vtx.` shape). No Contract #1 surface.
 - No new vertices/aspects/links are introduced (the flow has no Core-KV footprint — that is the whole point).
   The lens-def meta-vertex is an ordinary `vtx.meta.<NanoID>` + `.spec` aspect (4-segment), seeded by a
   `CreateMetaVertex` op like every other lens (refractor.md "Lens definitions live in Core KV vertices").

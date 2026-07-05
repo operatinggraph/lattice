@@ -408,8 +408,25 @@ type LensSpec struct {
 	// Class is typically `meta.lens`.
 	Class string
 
-	// Spec is the cypher source for the lens body.
+	// Spec is the cypher source for the lens body. Empty for an eventStream
+	// lens (Source non-nil) — an event lens has no Core-KV vertex to MATCH;
+	// the event payload is the only data.
 	Spec string
+
+	// Source is the optional lens-source descriptor (the Chronicler's
+	// `eventStream` primitive, orchestration-history-read-model-design.md
+	// §2.2). Nil ⇒ {kind: "coreKv"} — every existing lens is byte-for-byte
+	// unchanged, re-executing Spec's cypher over Core-KV CDC. Non-nil with
+	// Kind "eventStream" sources a durable core-events subject instead: Spec
+	// must be left empty.
+	//
+	// SourceConfig mirrors internal/refractor/lens.SourceConfig's JSON shape
+	// (NOT the same Go type — pkgmgr must not import internal/refractor/lens;
+	// it depends on internal/refractor/ruleengine/full, which a full-engine
+	// test imports packages/orchestration-base from, so importing lens here
+	// would cycle). Exactly the same mirror-by-JSON-shape convention
+	// OutputDescriptorSpec below already uses.
+	Source *SourceConfig
 
 	// Adapter is the projection-output adapter — `"nats-kv"` or `"postgres"`.
 	Adapter string
@@ -516,6 +533,76 @@ type SecureColumn struct {
 	Column            string
 	IdentityKeyColumn string
 	Field             string
+}
+
+// SourceConfig mirrors the on-wire lens-source descriptor (the Chronicler's
+// `eventStream` primitive, orchestration-history-read-model-design.md §2.2).
+// Field shape matches the Refractor-side lens.SourceConfig — a separate Go
+// type by necessity (see LensSpec.Source's doc comment), kept in sync by
+// hand like OutputDescriptorSpec below.
+type SourceConfig struct {
+	Kind     string           `json:"kind"`
+	Subjects []string         `json:"subjects,omitempty"`
+	Project  *EventProjection `json:"project,omitempty"`
+}
+
+// EventProjection mirrors the on-wire lens.EventProjection: a pure, total
+// `event → row` mapping (no cypher, no Adjacency, no Core-KV read — an event
+// lens's only data is the event body).
+type EventProjection struct {
+	Key     string                   `json:"key"`
+	Columns map[string]ColumnMapping `json:"columns"`
+}
+
+// ColumnMapping mirrors the on-wire lens.ColumnMapping's three shapes: a
+// bare dot-path string, {from,map}, or {when,value} — see
+// internal/refractor/lens/eventsource.go for the full doctrine. MarshalJSON
+// picks the shape by which fields are populated (the mirror image of
+// lens.ColumnMapping.UnmarshalJSON, which Refractor applies when it reads
+// this back off the installed lens's aspect data).
+type ColumnMapping struct {
+	// Path is set for a bare dot-path mapping (mutually exclusive with the
+	// two structured shapes below).
+	Path string
+
+	From string
+	Map  map[string]string
+
+	When  []string
+	Value string
+}
+
+// MarshalJSON encodes a bare-path mapping as a JSON string and the two
+// structured shapes as objects. Mirrors the mutual-exclusivity guards
+// internal/refractor/lens.ColumnMapping.MarshalJSON enforces on the same
+// three shapes — a malformed literal (e.g. Path set alongside From/Map from
+// a copy-paste mistake authoring a package's Lenses()) fails loudly here
+// too, instead of silently keeping only the first-matched shape.
+func (c ColumnMapping) MarshalJSON() ([]byte, error) {
+	isFromMap := c.From != "" || len(c.Map) > 0
+	isConditional := len(c.When) > 0 || c.Value != ""
+	switch {
+	case c.Path != "":
+		if isFromMap || isConditional {
+			return nil, fmt.Errorf("pkgmgr: column mapping: a bare path cannot also carry from/map/when/value")
+		}
+		return json.Marshal(c.Path)
+	case isFromMap:
+		if isConditional {
+			return nil, fmt.Errorf("pkgmgr: column mapping: from/map and when/value are mutually exclusive")
+		}
+		return json.Marshal(struct {
+			From string            `json:"from"`
+			Map  map[string]string `json:"map"`
+		}{From: c.From, Map: c.Map})
+	case isConditional:
+		return json.Marshal(struct {
+			When  []string `json:"when"`
+			Value string   `json:"value"`
+		}{When: c.When, Value: c.Value})
+	default:
+		return nil, fmt.Errorf("pkgmgr: column mapping: empty mapping (expected a path, {from,map}, or {when,value})")
+	}
 }
 
 // OutputDescriptorSpec mirrors the on-wire §6.13 Output descriptor a package
