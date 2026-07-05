@@ -1184,8 +1184,8 @@ func (p *Pipeline) drainAdjWatch(ctx context.Context, updates <-chan substrate.K
 
 // handleAdjUpdate processes one adjacency KV change keyed by adjKey. It strips
 // the "adj." prefix to recover the Core KV node key, fetches the node value
-// directly (read-only), and re-evaluates it through the normal
-// evaluate-and-write path.
+// directly (read-only), and hands off to handleAdjNode for parsing,
+// re-evaluation, and write.
 func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjKey string) {
 	const adjPrefix = "adj."
 	nodeKey := strings.TrimPrefix(adjKey, adjPrefix)
@@ -1217,6 +1217,14 @@ func (p *Pipeline) handleAdjUpdate(ctx context.Context, adjKey string) {
 		return
 	}
 
+	p.handleAdjNode(ctx, nodeKey, data)
+}
+
+// handleAdjNode parses a Core KV node body fetched by handleAdjUpdate and
+// re-evaluates it through the normal evaluate-and-write path. Split out of
+// handleAdjUpdate so the parse/evaluate/write arms below are reachable
+// without a seeded Core KV read.
+func (p *Pipeline) handleAdjNode(ctx context.Context, nodeKey string, data []byte) {
 	label, _, ok := substrate.ParseVertexKey(nodeKey)
 	if !ok {
 		return
