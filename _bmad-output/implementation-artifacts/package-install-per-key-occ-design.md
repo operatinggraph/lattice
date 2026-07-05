@@ -1,6 +1,6 @@
 # Design — Package-install per-key OCC (F-011): condition uninstall/upgrade tombstones on the read-time `KVGet` revision
 
-**Status: ✅ Andrew-ratified 2026-07-01 (design signed off; build pending — Lattice Steward). Contract #8 §8.3/§8.6/§8.7 edits committed on ratification.**
+**Status: ✅ CLOSED 2026-07-05 — both fires shipped (Fire 1 uninstall `1a9b2e5`, Fire 2 upgrade `fc41c3b`). Contract #8 §8.3/§8.6/§8.7 edits committed on ratification (`28a9263`).**
 **Author: Winston (Designer fire, 2026-07-01)**
 **Backlog row:** `planning-artifacts/backlog/lattice.md` → *Component maintenance* → "[Core] UninstallPackage tombstones unconditionally (F-011 per-key OCC follow-up)".
 **Grounded demand:** the F-011 follow-up filed in `cmd/processor/CONTRACT-AMENDMENT-REQUEST.md` §"UninstallPackage per-key OCC (F-011 follow-up)" (raised by the Story 1.5.5 implementation agent, 2026-05-30, status OPEN). Contract #8 §8.3 documents the current unconditional-tombstone window; §8.6 (OCC) + §8.7 (Out of scope) document the identical window on the in-place **upgrade** path.
