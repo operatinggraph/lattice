@@ -1,26 +1,40 @@
 package capabilityauthor
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import (
+	"github.com/asolgan/lattice/internal/pkgmgr"
+	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+)
 
 // DDLs returns the package's DDL meta-vertex declarations.
 //
-// A single `capabilityproposal` vertex-type DDL owns the two-op capture pair
-// that records one authoring episode (ai-authored-capabilities-design.md §3.1,
-// §3.3). This is Increment 1 of Fire 1 — the COMPLETE lens-kind loop's capture
-// half (propose → deterministically validate → record); the escalation
-// dispatch (triggerLoom → externalTask → the capabilityAuthor bridge adapter),
-// the review/apply ops, and the catalog/review lenses are the fire's remaining
-// increments (see the design doc's checkpoint).
+// The `capabilityproposal` vertex-type DDL owns the two-op capture pair that
+// records one authoring episode (ai-authored-capabilities-design.md §3.1,
+// §3.3); the `capabilityauthorclaim` vertex-type DDL owns the escalation
+// -dispatch instanceOp (§3.4). Together they
+// carry Fire 1 through capture + dispatch; the review/apply ops and the
+// catalog/review lenses remain (see the design doc's checkpoint).
 //
 //   - RequestCapabilityAuthoring mints the proposal vertex write-ahead of the
 //     reasoning call (mirrors augur's CreateAugurReasoningClaim), recording the
-//     requester + intent. No artifact yet — the reasoning call (in the
-//     remaining increments) is what fills it in.
+//     requester + intent. No artifact yet — the escalation dispatch (below) is
+//     what triggers the reasoning call that fills it in.
+//   - CreateAuthoringClaim (capabilityauthorclaim DDL) is the externalTask
+//     instanceOp the capabilityAuthor Loom pattern submits: it mints a small
+//     correlation-claim vertex vtx.capabilityauthorclaim.<handle> keyed by
+//     Loom's opaque instanceKey (never the proposal's own id — the two are
+//     independent by construction, Contract #10 §10.3/§10.5), records a
+//     .target aspect pointing back at the real proposal vertex, writes a
+//     create-only .claim aspect onto the PROPOSAL vertex itself (closing the
+//     capabilityAuthorPending lens's missing_authoring gap immediately), and
+//     emits the external.capabilityAuthor event.
 //   - RecordCapabilityProposal is the bridge replyOp: payload {externalRef,
 //     status, result} — the standard generic reply shape
 //     internal/bridge/dispatch.go's terminal-outcome leg always submits
-//     (mirrors augur's RecordProposal exactly). The proposal id is the bare
-//     handle in externalRef, never a separate payload field. On status=completed
+//     (mirrors augur's RecordProposal exactly). externalRef is the Loom
+//     instanceKey CreateAuthoringClaim minted; the op resolves the real
+//     proposal vertex by reading the claim's .target aspect (a single
+//     known-key read, no scan) — never by treating externalRef itself as the
+//     proposal id. On status=completed
 //     it decodes a single `result` JSON blob for kind/content/target/rationale/
 //     confidence/validation*/provenance*; the `validation` sub-object is the
 //     ALREADY-COMPUTED §5 deterministic-validation verdict (in the full design,
@@ -59,6 +73,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //
 //	vtx.capabilityproposal.<id>   root data = {}
 //	  .request     { requesterId, intent, contextRef }            RequestCapabilityAuthoring
+//	  .claim       { claimedAt, claimKey }                        CreateAuthoringClaim (write-ahead marker)
 //	  .artifact    { kind, content }                              RecordCapabilityProposal
 //	  .target      { mode, packageName, baseVersion, newVersion } RecordCapabilityProposal
 //	  .rationale   { text }                                       RecordCapabilityProposal
@@ -68,6 +83,9 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //	  .review      { state, reviewedAt, appliedAt, appliedByOp }  RecordCapabilityProposal (state only, this increment)
 //	lnk.capabilityproposal.<id>.requestedBy.<type>.<requesterId>  proposal requestedBy requester
 //
+//	vtx.capabilityauthorclaim.<handle>   root data = {}   CreateAuthoringClaim
+//	  .target  { proposalKey }   the back-pointer to the real vtx.capabilityproposal.<id>
+//
 // review.state ∈ {pending, invalid} in this increment (approved/rejected/
 // applied/superseded arrive with the review + apply ops). Absence of
 // .artifact/.review = the request is recorded but not yet authored (mirrors
@@ -75,6 +93,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		capabilityProposalDDL(),
+		capabilityAuthorClaimDDL(),
 	}
 }
 
@@ -94,8 +113,10 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			"RequestCapabilityAuthoring mints the proposal vertex write-ahead with the .request aspect + the " +
 			"requestedBy link (no-orphan by construction — the requester is op.actor, the trusted submitting " +
 			"actor). RecordCapabilityProposal is the bridge replyOp (payload {externalRef, status, result}, " +
-			"mirroring augur's RecordProposal): the proposal id is the bare handle in externalRef, never a " +
-			"payload field; requires a live .request aspect (the instanceOp must commit first); on " +
+			"mirroring augur's RecordProposal): externalRef is the Loom instanceKey CreateAuthoringClaim minted " +
+			"(never the proposal's own id); the op resolves the real proposal vertex via the claim's .target " +
+			"aspect (vtx.capabilityauthorclaim.<externalRef>.target); requires a live .request aspect on the " +
+			"resolved proposal (the instanceOp must commit first); on " +
 			"status=completed it decodes a single result JSON blob {kind, content, target:{mode, packageName, " +
 			"baseVersion, newVersion}, rationale, confidence, validation:{state, report, deltaPreview}, " +
 			"provenance:{model, promptHash, catalogHash, reasonedAt}} — the ALREADY-COMPUTED §5 verdict travels " +
@@ -114,7 +135,7 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			`{"proposalId":{"type":"string","description":"RequestCapabilityAuthoring only — bare NanoID (no dots/wildcards/whitespace) naming vtx.capabilityproposal.<proposalId>. Caller-supplied (the auto-minted-by-Loom form lands with the escalation-dispatch increment)."},` +
 			`"intent":{"type":"string","description":"RequestCapabilityAuthoring only — the plain-language capability request, e.g. 'a lens listing active providers by specialty'."},` +
 			`"contextRef":{"type":"string","description":"RequestCapabilityAuthoring only — an optional pointer to bounded context the reasoning call hydrates (opaque to this DDL)."},` +
-			`"externalRef":{"type":"string","description":"RecordCapabilityProposal only — the bare instanceKey handle of the authoring episode; the proposal vertex is vtx.capabilityproposal.<externalRef> (must match the proposalId a RequestCapabilityAuthoring already minted)."},` +
+			`"externalRef":{"type":"string","description":"RecordCapabilityProposal only — the bare Loom instanceKey handle CreateAuthoringClaim minted; the op resolves the real proposal vertex via vtx.capabilityauthorclaim.<externalRef>.target (never treated as the proposal's own id)."},` +
 			`"status":{"type":"string","description":"RecordCapabilityProposal only — the adapter's terminal outcome: completed (the model proposed an artifact) or failed (a modeled refusal — stored invalid, never dispatchable)."},` +
 			`"result":{"type":"string","description":"RecordCapabilityProposal only — the model's structured-output proposal as a JSON string {kind, content, target:{mode,packageName,baseVersion?,newVersion?}, rationale, confidence, validation:{state,report?,deltaPreview?}, provenance:{model?,promptHash?,catalogHash?,reasonedAt?}} — the opaque adapter Detail. Required when status=completed; carried verbatim as the rationale on a refusal. validation.state is the ALREADY-COMPUTED §5 verdict (pkgmgr.ValidateCapabilityArtifact, run by the trusted caller before submission — the script does not itself re-run the parser/validateAll). kind enables only 'lens' in this increment; any other value, or a validation.state other than 'valid', or an out-of-range confidence, or an undecodable result stores the proposal review.state=invalid (auditable, never a hard reject)."}},` +
 			`"required":["proposalId"]}`,
@@ -122,7 +143,7 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"proposalId":  "Bare NanoID naming the proposal vertex (RequestCapabilityAuthoring).",
 			"intent":      "The plain-language capability request (RequestCapabilityAuthoring).",
-			"externalRef": "The bare instanceKey handle naming the proposal vertex; must match a RequestCapabilityAuthoring's proposalId (RecordCapabilityProposal).",
+			"externalRef": "The bare Loom instanceKey handle CreateAuthoringClaim minted; resolved to the real proposal vertex via the claim's .target aspect (RecordCapabilityProposal).",
 			"status":      "The bridge's terminal outcome: completed or failed (RecordCapabilityProposal).",
 			"result":      "The model's proposal as a JSON string, decoded for kind/content/target/rationale/confidence/validation*/provenance* (RecordCapabilityProposal).",
 		},
@@ -139,17 +160,17 @@ func capabilityProposalDDL() pkgmgr.DDLSpec {
 			{
 				Name: "RecordCapabilityProposal — a valid lens artifact (already §5-validated by the caller)",
 				Payload: map[string]any{
-					"externalRef": "capPropOneHJKMNPQRST",
+					"externalRef": "<claimHandle>",
 					"status":      "completed",
 					"result": `{"kind":"lens","content":"{\"canonicalName\":\"activeProvidersBySpecialty\",\"adapter\":\"nats-kv\",\"bucket\":\"active-providers\",\"spec\":\"MATCH (p:provider) RETURN p.key AS key\"}",` +
 						`"target":{"mode":"newPackage"},"rationale":"no existing lens surfaces this projection","confidence":0.86,"validation":{"state":"valid"}}`,
 				},
-				ExpectedOutcome: "review.state = pending (dispatchable in a later increment's apply op); the .artifact/.target/.rationale/.confidence/.validation/.provenance aspects are recorded.",
+				ExpectedOutcome: "Resolves the real proposal via vtx.capabilityauthorclaim.<claimHandle>.target; review.state = pending (dispatchable in a later increment's apply op); the .artifact/.target/.rationale/.confidence/.validation/.provenance aspects are recorded.",
 			},
 			{
 				Name: "RecordCapabilityProposal — a modeled refusal",
 				Payload: map[string]any{
-					"externalRef": "capPropOneHJKMNPQRST",
+					"externalRef": "<claimHandle>",
 					"status":      "failed",
 					"result":      "the requested projection would expose PHI without a masking clause",
 				},
@@ -279,10 +300,18 @@ def execute(state, op):
     if ot == "RecordCapabilityProposal":
         # The bridge replyOp: payload {externalRef, status, result} (the standard
         # generic reply shape internal/bridge/dispatch.go's terminal-outcome leg
-        # always submits — mirrors augur's RecordProposal exactly). The proposal
-        # id is the bare handle in externalRef, never a separate payload field.
-        proposal_id = required_bare_id(p, "externalRef")
-        proposal_key = "vtx.capabilityproposal." + proposal_id
+        # always submits — mirrors augur's RecordProposal exactly). externalRef is
+        # the Loom instanceKey CreateAuthoringClaim minted — an opaque handle
+        # independent of the proposal's own id (Contract #10 §10.3/§10.5) — so the
+        # real proposal vertex is resolved via the claim's .target aspect (a
+        # single known-key read), never by treating externalRef as the proposal id.
+        claim_handle = required_bare_id(p, "externalRef")
+        claim_target_doc = kv.Read("vtx.capabilityauthorclaim." + claim_handle + ".target")
+        if not alive(claim_target_doc):
+            fail("UnknownCapabilityAuthorClaim: no live claim for externalRef " + claim_handle)
+        proposal_key = claim_target_doc.data.get("proposalKey")
+        if proposal_key == None or type(proposal_key) != type(""):
+            fail("CorruptCapabilityAuthorClaim: " + claim_handle + " has no proposalKey")
 
         request_doc = kv.Read(proposal_key + ".request")
         if not alive(request_doc):
@@ -398,4 +427,153 @@ def execute(state, op):
         return {"mutations": mutations, "events": events, "response": {"primaryKey": proposal_key}}
 
     fail("capabilityproposal DDL: unknown operationType: " + ot)
+`
+
+// capabilityAuthorClaimDDL declares the CreateAuthoringClaim instanceOp
+// (design §3.4) — the externalTask instanceOp
+// the capabilityAuthor Loom pattern submits. The claim vertex's envelope
+// class (capabilityauthorclaim) matches this DDL's own CanonicalName exactly,
+// so the step-6 write-gate resolves it by direct class match (Contract #1
+// §1.5 step-3 path) — no instanceOf link needed, mirroring how
+// capabilityproposal's own root resolves (unlike lease-signing's
+// service.<family>.instance, which needs the instanceOf indirection because
+// its fine-grained class never matches a DDL name).
+func capabilityAuthorClaimDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "capabilityauthorclaim",
+		Class:             "meta.ddl.vertexType",
+		PermittedCommands: []string{"CreateAuthoringClaim"},
+		Description: "ExternalTask instanceOp DDL (Contract #10 §10.5) for the AI-authored-capabilities " +
+			"escalation dispatch. The op the capabilityAuthor Loom pattern submits: payload {instanceKey (the " +
+			"bare handle Loom minted), subjectKey (the vtx.capabilityproposal.<id> the pattern runs over), " +
+			"adapter, replyOp, params:{requesterId, intent, contextRef} (subject-templated tokens Loom declared " +
+			"the read-set for; resolved here via orchestration-base's resolve_subject_params against the " +
+			"subject's own .request aspect)}. Mints vtx.capabilityauthorclaim.<handle> (root data {} — D5) with " +
+			"a .target aspect {proposalKey} pointing back at the subject — the indirection that lets " +
+			"RecordCapabilityProposal resolve the real proposal from the Loom-minted (and therefore " +
+			"proposal-id-independent) externalRef. Also writes a create-only .claim aspect onto the SUBJECT " +
+			"proposal vertex itself (no new vertex for that half — the subject already exists), which closes " +
+			"the capabilityAuthorPending lens's missing_authoring gap immediately. Emits the " +
+			"external.capabilityAuthor event via its own transactional outbox.",
+		Script: capabilityAuthorClaimDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"instanceKey":{"type":"string","description":"The BARE instance handle Loom minted (no dots / key segments / wildcards); the op prepends vtx.capabilityauthorclaim. Required."},` +
+			`"subjectKey":{"type":"string","description":"vtx.capabilityproposal.<id> the pattern runs over (the pattern's own subject) — required, shape-validated (exactly vtx.capabilityproposal.<NanoID>) and validated alive."},` +
+			`"adapter":{"type":"string","description":"The external adapter name (capabilityAuthor), carried into the external.<adapter> event. Required."},` +
+			`"replyOp":{"type":"string","description":"The result-op the bridge posts back (RecordCapabilityProposal), carried into the external event. Required."},` +
+			`"params":{"type":"object","description":"Subject-templated adapter params (subject.request.data.{requesterId,intent,contextRef}), resolved against the subject's own .request aspect before emission."}},` +
+			`"required":["instanceKey","subjectKey","adapter","replyOp"]}`,
+		OutputSchema: `{"type":"object","properties":{"primaryKey":{"type":"string","description":"vtx.capabilityproposal.<id> — the subject the claim was recorded against (the operation's principal key)."}}}`,
+		FieldDescription: map[string]string{
+			"instanceKey": "The bare instance handle Loom minted for this externalTask. Echoed back as the reply op's externalRef and the bridge's adapter dedup key. Required.",
+			"subjectKey":  "Full vtx.capabilityproposal.<id> key of the proposal the escalation is for. Shape-validated (rejects any other vertex type) and validated alive; the .claim aspect is written here. Required.",
+			"adapter":     "The registered bridge adapter name (capabilityAuthor). Required.",
+			"replyOp":     "The result-op type the bridge posts back (RecordCapabilityProposal). Required.",
+			"params":      "Subject-templated params resolved against the subject's own .request aspect before the external event is emitted.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name: "CreateAuthoringClaim — dispatch the reasoning call for a pending request",
+				Payload: map[string]any{
+					"instanceKey": "<bareHandle>",
+					"subjectKey":  "vtx.capabilityproposal.capPropOneHJKMNPQRST",
+					"adapter":     "capabilityAuthor",
+					"replyOp":     "RecordCapabilityProposal",
+					"params": map[string]any{
+						"requesterId": "subject.request.data.requesterId",
+						"intent":      "subject.request.data.intent",
+						"contextRef":  "subject.request.data.contextRef",
+					},
+				},
+				ExpectedOutcome: "Validates the proposal is alive. Atomically commits vtx.capabilityauthorclaim.<handle> " +
+					"(root {} — D5) + its .target aspect {proposalKey: subjectKey}, and a create-only .claim aspect on " +
+					"the proposal itself. Emits the external.capabilityAuthor event (body {instanceKey, adapter, replyOp, " +
+					"params (resolved), externalRef, idempotencyKey}) off the op's outbox. Returns primaryKey (the " +
+					"proposal key). Rejects with ScriptError if the proposal is absent or the handle is malformed.",
+			},
+		},
+	}
+}
+
+// capabilityAuthorClaimDDLScript handles CreateAuthoringClaim. Known-key
+// reads only (kv.Read of the subject root + its .request aspect via
+// resolve_subject_params).
+const capabilityAuthorClaimDDLScript = `
+` + orchestrationbase.ResolveSubjectParamsHelper + `
+def make_vtx(key, cls, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False, "data": data}}
+
+def make_aspect(vtx_key, local_name, cls, data):
+    return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def required_string(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": required non-empty string")
+    return v.strip()
+
+def required_bare_handle(p, name):
+    v = required_string(p, name)
+    for bad in [".", "*", ">", " ", "\t", "\n"]:
+        if bad in v:
+            fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
+    return v
+
+def required_vertex_key(p, name, want_type):
+    v = required_string(p, name)
+    parts = v.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID> (exactly 3 segments); got " + v)
+    return v
+
+def alive(doc):
+    if doc == None:
+        return False
+    if hasattr(doc, "isDeleted") and doc.isDeleted:
+        return False
+    return True
+
+def execute(state, op):
+    ot = op.operationType
+    p = op.payload
+
+    if ot == "CreateAuthoringClaim":
+        handle = required_bare_handle(p, "instanceKey")
+        subject_key = required_vertex_key(p, "subjectKey", "capabilityproposal")
+        adapter = required_string(p, "adapter")
+        reply_op = required_string(p, "replyOp")
+
+        subject_doc = kv.Read(subject_key)
+        if not alive(subject_doc):
+            fail("UnknownCapabilityProposal: " + subject_key)
+
+        claim_key = "vtx.capabilityauthorclaim." + handle
+
+        params = {}
+        if hasattr(p, "params") and p.params != None:
+            params = p.params
+        resolved_params = resolve_subject_params(params, subject_key)
+
+        mutations = [
+            make_vtx(claim_key, "capabilityauthorclaim", {}),
+            make_aspect(claim_key, "target", "capabilityAuthorClaim.target", {"proposalKey": subject_key}),
+            make_aspect(subject_key, "claim", "capabilityAuthor.claim", {"claimedAt": op.submittedAt, "claimKey": claim_key}),
+        ]
+        event_data = {
+            "instanceKey":    handle,
+            "adapter":        adapter,
+            "replyOp":        reply_op,
+            "externalRef":    handle,
+            "idempotencyKey": handle,
+            "params":         resolved_params,
+        }
+        events = [{"class": "external." + adapter, "data": event_data}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": subject_key}}
+
+    fail("capabilityauthorclaim DDL: unknown operationType: " + ot)
 `

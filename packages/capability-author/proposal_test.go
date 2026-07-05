@@ -1,16 +1,20 @@
-// AI-authored-capabilities Increment 1 (Fire 1) capture-pair integration tests —
+// AI-authored-capabilities Fire 1 capture + dispatch integration tests —
 // exercised end-to-end through the real Processor across the
-// RequestCapabilityAuthoring → RecordCapabilityProposal flow.
+// RequestCapabilityAuthoring → CreateAuthoringClaim → RecordCapabilityProposal
+// flow.
 //
 // RequestCapabilityAuthoring mints the proposal vertex write-ahead with the
-// requester + intent; RecordCapabilityProposal carries a proposed artifact +
-// its ALREADY-COMPUTED §5 deterministic-validation verdict (computed here via
-// pkgmgr.ValidateCapabilityArtifact, exactly as the bridge will in a later
-// increment) and stores review.state = pending | invalid. The tests prove: a
-// validated lens artifact → pending; a disabled kind / out-of-range confidence
-// / a validator-rejected artifact → invalid (auditable, never dispatchable); a
-// record with no prior request is rejected (a proposal can never be
-// fabricated with no request).
+// requester + intent; CreateAuthoringClaim (the externalTask instanceOp the
+// capabilityAuthor Loom pattern submits) mints the correlation-claim vertex
+// the bridge's reply resolves through; RecordCapabilityProposal carries a
+// proposed artifact + its ALREADY-COMPUTED §5 deterministic-validation
+// verdict (computed here via pkgmgr.ValidateCapabilityArtifact, exactly as
+// the bridge will in the full design) and stores review.state =
+// pending | invalid. The tests prove: a validated lens artifact → pending; a
+// disabled kind / out-of-range confidence / a validator-rejected artifact →
+// invalid (auditable, never dispatchable); a record against an externalRef
+// with no live claim is rejected (a proposal can never be resolved, let alone
+// fabricated, with no claim).
 //
 // These tests live in an external test package (capabilityauthor_test) so they
 // exercise the public Lattice surface a real Capability Package sees: seed the
@@ -53,8 +57,9 @@ func (fullCypherParser) Parse(ruleBody string) error {
 }
 
 // staffCapDoc grants the staff actor RequestCapabilityAuthoring +
-// RecordCapabilityProposal — modeled here as an operator-equivalent staff
-// actor, mirroring augur's staffCapDoc.
+// CreateAuthoringClaim + RecordCapabilityProposal — modeled here as an
+// operator-equivalent staff actor standing in for both the human requester
+// and Loom's relay actor, mirroring augur's staffCapDoc.
 func staffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -66,6 +71,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "RequestCapabilityAuthoring", Scope: "any"},
+			{OperationType: "CreateAuthoringClaim", Scope: "any"},
 			{OperationType: "RecordCapabilityProposal", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
@@ -129,12 +135,43 @@ func requestEnv(reqID, proposalID, intent string) *processor.OperationEnvelope {
 	}
 }
 
+// claimEnv builds the CreateAuthoringClaim payload the capabilityAuthor Loom
+// pattern's externalTask step submits — subject-templated params exactly as
+// packages/capability-author/patterns.go declares them, proving
+// orchestration-base's resolve_subject_params resolution against the
+// subject's own .request aspect end-to-end.
+func claimEnv(reqID, handle, proposalKey string) *processor.OperationEnvelope {
+	payload := map[string]any{
+		"instanceKey": handle,
+		"subjectKey":  proposalKey,
+		"adapter":     "capabilityAuthor",
+		"replyOp":     "RecordCapabilityProposal",
+		"params": map[string]any{
+			"requesterId": "subject.request.data.requesterId",
+			"intent":      "subject.request.data.intent",
+			"contextRef":  "subject.request.data.contextRef",
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateAuthoringClaim",
+		Actor:         capStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "capabilityauthorclaim",
+		Payload:       json.RawMessage(b),
+	}
+}
+
 // recordEnv builds the RecordCapabilityProposal payload in the standard
-// bridge replyOp shape {externalRef, status, result} — running the §5
-// materializer HERE (the caller — exactly as the bridge will in a later
-// increment) before JSON-encoding its verdict into the result blob exactly as
-// a real completed adapter reply would.
-func recordEnv(t *testing.T, reqID, proposalID, kind string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
+// bridge replyOp shape {externalRef, status, result} — externalRef is the
+// CLAIM HANDLE a prior CreateAuthoringClaim minted (never the proposal's own
+// id — the op resolves the real proposal via the claim's .target aspect).
+// Running the §5 materializer HERE (the caller — exactly as the bridge will
+// in the full design) before JSON-encoding its verdict into the result blob
+// exactly as a real completed adapter reply would.
+func recordEnv(t *testing.T, reqID, handle, kind string, content json.RawMessage, confidence float64) *processor.OperationEnvelope {
 	t.Helper()
 	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{})
 	if err != nil {
@@ -159,7 +196,7 @@ func recordEnv(t *testing.T, reqID, proposalID, kind string, content json.RawMes
 	}
 	resultBytes, _ := json.Marshal(result)
 	payload := map[string]any{
-		"externalRef": proposalID,
+		"externalRef": handle,
 		"status":      "completed",
 		"result":      string(resultBytes),
 	}
@@ -197,7 +234,10 @@ func reviewState(t *testing.T, ctx context.Context, conn *substrate.Conn, propos
 	return s
 }
 
-// Per-scenario proposal ids. Each is a valid 20-char bare NanoID.
+// Per-scenario proposal ids + claim handles. Each is a valid 20-char bare
+// NanoID. The handle is deliberately a DIFFERENT id than the proposal (as a
+// real Loom-minted instanceKey always is — Contract #10 §10.3/§10.5) so the
+// tests exercise the claim indirection, not an accidental id coincidence.
 const (
 	capIDPending = "CAcapPendingHJKMNPQR"
 	capIDBadKind = "CAcapBadKindHJKMNPQR"
@@ -205,6 +245,12 @@ const (
 	capIDBadSpec = "CAcapBadSpecHJKMNPQR"
 	capIDNoClaim = "CAcapNoreqHJKMNPQRST"
 	capIDReplay  = "CAcapRedoHJKMNPQRSTU"
+
+	capHandlePending = "CAHNDPendingHJKMNPQR"
+	capHandleBadKind = "CAHNDBadKindHJKMNPQR"
+	capHandleBadConf = "CAHNDBadConfHJKMNPQR"
+	capHandleBadSpec = "CAHNDBadSpecHJKMNPQR"
+	capHandleReplay  = "CAHNDRedoHJKMNPQRSTU"
 )
 
 // TestCapAuthor_ValidLens_Pending: a well-formed, deterministically-validated
@@ -219,7 +265,11 @@ func TestCapAuthor_ValidLens_Pending(t *testing.T) {
 	testutil.PublishOp(t, conn, req)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	rec := recordEnv(t, testutil.GenReqID("CARecord"), capIDPending, "lens", validLensContent(t, "providersBySpecialty"), 0.86)
+	claim := claimEnv(testutil.GenReqID("CAClaim"), capHandlePending, proposalKey)
+	testutil.PublishOp(t, conn, claim)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	rec := recordEnv(t, testutil.GenReqID("CARecord"), capHandlePending, "lens", validLensContent(t, "providersBySpecialty"), 0.86)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -248,6 +298,19 @@ func TestCapAuthor_ValidLens_Pending(t *testing.T) {
 	if got, _ := lnk["sourceVertex"].(string); got != proposalKey {
 		t.Fatalf("requestedBy link sourceVertex = %q, want %q (proposal is source)", got, proposalKey)
 	}
+	// CreateAuthoringClaim wrote the .claim aspect on the PROPOSAL itself
+	// (closing the capabilityAuthorPending lens's missing_authoring gap) and
+	// the claim vertex's .target back-pointer resolves to this same proposal.
+	claimDoc := readDoc(t, ctx, conn, proposalKey+".claim")
+	cd, _ := claimDoc["data"].(map[string]any)
+	if got, _ := cd["claimedAt"].(string); got == "" {
+		t.Fatalf(".claim.claimedAt is empty, want a timestamp")
+	}
+	targetDoc := readDoc(t, ctx, conn, "vtx.capabilityauthorclaim."+capHandlePending+".target")
+	td, _ := targetDoc["data"].(map[string]any)
+	if got, _ := td["proposalKey"].(string); got != proposalKey {
+		t.Fatalf("claim .target.proposalKey = %q, want %q", got, proposalKey)
+	}
 }
 
 // TestCapAuthor_DisabledKind_Invalid: a kind outside this increment's enabled
@@ -262,7 +325,11 @@ func TestCapAuthor_DisabledKind_Invalid(t *testing.T) {
 	testutil.PublishOp(t, conn, req)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	rec := recordEnv(t, testutil.GenReqID("CARecord"), capIDBadKind, "grant", json.RawMessage(`{}`), 0.9)
+	claim := claimEnv(testutil.GenReqID("CAClaim"), capHandleBadKind, proposalKey)
+	testutil.PublishOp(t, conn, claim)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	rec := recordEnv(t, testutil.GenReqID("CARecord"), capHandleBadKind, "grant", json.RawMessage(`{}`), 0.9)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -282,7 +349,11 @@ func TestCapAuthor_ConfidenceOutOfRange_Invalid(t *testing.T) {
 	testutil.PublishOp(t, conn, req)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	rec := recordEnv(t, testutil.GenReqID("CARecord"), capIDBadConf, "lens", validLensContent(t, "overconfident"), 1.5)
+	claim := claimEnv(testutil.GenReqID("CAClaim"), capHandleBadConf, proposalKey)
+	testutil.PublishOp(t, conn, claim)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	rec := recordEnv(t, testutil.GenReqID("CARecord"), capHandleBadConf, "lens", validLensContent(t, "overconfident"), 1.5)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -303,6 +374,10 @@ func TestCapAuthor_MaterializerRejected_Invalid(t *testing.T) {
 	testutil.PublishOp(t, conn, req)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
+	claim := claimEnv(testutil.GenReqID("CAClaim"), capHandleBadSpec, proposalKey)
+	testutil.PublishOp(t, conn, claim)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
 	badContent, err := json.Marshal(pkgmgr.LensArtifactContent{
 		CanonicalName: "brokenLens",
 		Adapter:       "nats-kv",
@@ -312,7 +387,7 @@ func TestCapAuthor_MaterializerRejected_Invalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	rec := recordEnv(t, testutil.GenReqID("CARecord"), capIDBadSpec, "lens", badContent, 0.9)
+	rec := recordEnv(t, testutil.GenReqID("CARecord"), capHandleBadSpec, "lens", badContent, 0.9)
 	testutil.PublishOp(t, conn, rec)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
@@ -322,9 +397,9 @@ func TestCapAuthor_MaterializerRejected_Invalid(t *testing.T) {
 }
 
 // TestCapAuthor_RecordWithNoPriorRequest_Rejected: RecordCapabilityProposal
-// against a proposal id with no prior RequestCapabilityAuthoring is rejected —
-// a proposal can never be fabricated with no request (no-orphan, mirrors
-// augur's UnknownAugurClaim).
+// against an externalRef with no prior CreateAuthoringClaim is rejected — a
+// proposal can never be resolved (let alone fabricated) with no live claim
+// (no-orphan, mirrors augur's UnknownAugurClaim).
 func TestCapAuthor_RecordWithNoPriorRequest_Rejected(t *testing.T) {
 	ctx, conn := setupCapAuthorEnv(t)
 	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-noclaim")
@@ -341,19 +416,24 @@ func TestCapAuthor_RedeliveredRecord_Collapses(t *testing.T) {
 	ctx, conn := setupCapAuthorEnv(t)
 	cp, cons := newCapAuthorPipeline(t, ctx, conn, "ca-replay")
 
+	proposalKey := "vtx.capabilityproposal." + capIDReplay
 	req := requestEnv(testutil.GenReqID("CARequest"), capIDReplay, "a lens listing active providers")
 	testutil.PublishOp(t, conn, req)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
+	claim := claimEnv(testutil.GenReqID("CAClaim"), capHandleReplay, proposalKey)
+	testutil.PublishOp(t, conn, claim)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
 	reqID := testutil.GenReqID("CARecord")
 	content := validLensContent(t, "replayed")
-	rec1 := recordEnv(t, reqID, capIDReplay, "lens", content, 0.8)
+	rec1 := recordEnv(t, reqID, capHandleReplay, "lens", content, 0.8)
 	testutil.PublishOp(t, conn, rec1)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	// Same requestId redelivered: the Contract #4 tracker collapses it before
 	// the DDL script even runs a second time.
-	rec2 := recordEnv(t, reqID, capIDReplay, "lens", content, 0.8)
+	rec2 := recordEnv(t, reqID, capHandleReplay, "lens", content, 0.8)
 	testutil.PublishOp(t, conn, rec2)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeDuplicate)
 }
