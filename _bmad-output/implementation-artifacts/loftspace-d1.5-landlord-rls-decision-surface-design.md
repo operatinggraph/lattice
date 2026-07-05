@@ -1,6 +1,8 @@
 # LoftSpace D1.5 — the per-landlord RLS read as the rich decision surface
 
-**Status:** ✅ Winston-ratified — build-ready (Recommendation C, §4). The §4 fork is an internal
+**Status:** ✅ built — fully shipped (2026-07-05; see §5 "Deferred-to-Vault items, now shipped"). Board
+row CLOSED (was misread as `blocked-on Vault Fire 5` after Vault landed; verticals.md Done log, `7eb3330`).
+Recommendation C, §4. The §4 fork is an internal
 engineering tradeoff (duplicate a load-bearing aggregation vs. stay display-only) — not a trust-boundary /
 topology / security-posture fork on the named strategic-fork list (Gateway, read-path auth D1, Vault,
 multi-cell, HA-NATS), so it is Winston's to ratify per the steward's decide-don't-defer rule. C is

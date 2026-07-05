@@ -17,9 +17,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| LoftSpace — per-landlord RLS view as the rich decision surface (D1.5 landlord cutover) | The protected `/api/landlord/applications` RLS read shows only a scope-count banner; the rich decision view is still the trusted-all-units console (§10.2). Project signals into `landlordLeaseApplicationsRead`, retiring the console. | LoftSpace | pkg + FE | ★★ | M | 🚧 seq Vault Fire 5 (Vault 🎯 build-next in [lattice](lattice.md)) · Rec C shipped ([design](../../implementation-artifacts/loftspace-d1.5-landlord-rls-decision-surface-design.md)) · readiness clone = fallback if Vault stalls |
-| LoftSpace — applicant contact (email/phone) captured but never projected to the landlord | `CreateUnclaimedIdentity` stores `.email`/`.phone`, but neither the `/api/identities` picker nor the landlord `unit-applications` disposition surfaces them — a landlord deciding on an applicant has no way to contact them. | LoftSpace | pkg + FE | ★★ | S | 🚧 blocked-on Vault 5b attended reset, same as row above ([plan](../../implementation-artifacts/vault-crypto-shredding-design.md) 5b-iv checkpoint) — lens-side columns already built |
-| Clinic — Book UI's patient picker always empty, blocking booking end-to-end | `/api/staff/patients` returns `count:0` right after creating a patient — live-verified the vertex/aspect/link all exist; only the staff-wildcard RLS read is empty. Self-anchored `/api/my-appointments`/`/api/my-schedule` are fine. | Clinic | platform | ★★★ | — | 🚧 blocked-on [bootstrap staleness](lattice.md) — no vertical code change needed, self-heals on the platform fix |
 | LoftSpace — My Applications card always blank for bedrooms/bathrooms/move-in | `read_lease_applications` has `unit_bedrooms`/`unit_bathrooms`/`unit_available_from` populated (live-verified via Postgres); `selectApplicationsSQL` in `cmd/loftspace-app/applications.go` omits all three from its SELECT, so `/api/applications` always returns them null and the FE's beds/baths/move-in line renders blank. | LoftSpace | FE | ★★ | XS | 📋 ready — add the 3 columns to `selectApplicationsSQL` + `queryApplications` Scan (mirrors `selectApplicationByKeySQL`, which already selects them) |
 | LoftSpace — lease renewal (first goal-authored Weaver target) | No renewal surface exists; trigger derivable (`.listing` availableFrom+leaseTermMonths; freshUntil precedent). Per-tenant chain — fresh bgcheck if stale, guarantor re-verify if present, rent adjustment (new op), signature — author goal-first (`goal` + op `effects` + the §10.8 doctrine rider). | LoftSpace | pkg + FE | ★★★ | L | 📋 needs-design (Designer; Andrew-routed 2026-07-05) · builds WITH [lattice](lattice.md) Fire 6 Inc3 · [planner design](../../implementation-artifacts/weaver-planner-mandate-design.md) |
 
@@ -30,13 +27,16 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 - **Rotation to date:** LoftSpace ×11, Clinic ×8 (last: LoftSpace 2026-07-04, drove the full apply→sign→approve flow live end-to-end; filed a My-Applications SELECT-omission bug).
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. Both apps exist + are exercisable live (`:7788` / `:7799`).
-- **Live-stack note:** before assuming a product bug on empty reads, run `lattice bootstrap verify` — a stale bootstrap JSON vs. a recreated Core KV is a known recurring dev-loop trap (2026-07-03, 2026-07-04), tracked in [lattice.md](lattice.md).
+- **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-05 · `7eb3330` · LoftSpace D1.5 landlord RLS decision surface CLOSED — stale block label; already fully built (5b-ii/-ii-b/-ii-c) — [design](../../implementation-artifacts/loftspace-d1.5-landlord-rls-decision-surface-design.md)
+- 2026-07-05 · `a710c7a` · LoftSpace applicant email/phone to landlord CLOSED — stale block (was `blocked-on Vault 5b`); subsumed by the same Secure-Lens columns, live-verified in the RLS card's contact line
+- 2026-07-05 · `109f59a` · Clinic patient picker empty CLOSED — stale block (was `blocked-on bootstrap staleness`); fix shipped Lattice-side, live re-verified: fresh install + CreatePatient + staff-wildcard read now returns it
 - 2026-07-03 · `3e05e2f` · Clinic patient/provider self-service reads CLOSED — `cap-read.clinic.{patient,provider}` GrantTable self-anchor lenses; fixes My Appointments + My Schedule + Visit Series
 - 2026-07-03 · `29def5e` · Clinic identity cross-patient claim guard CLOSED — `identityKey` now globally exclusive (`identityPatientClaim` CreateOnly aspect)
 - 2026-07-03 · `ce15916` · Steward continuous-improvement (doc sweep) — loftspace-ledger + clinic-ledger package READMEs, stale defect-comment fix (both demand rows still blocked-on Vault 5b)
