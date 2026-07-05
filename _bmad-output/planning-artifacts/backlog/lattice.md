@@ -148,7 +148,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### AI-native
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| AI-authored capabilities | A Lattice-aware agent proposes DDL/Starlark/lenses/workflows through human review + deterministic validation + rollback. | ★★–★★★ | L | 🏗️ building · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) · escalation dispatch (`4be8066`) shipped; next: review/apply lens + ReviewCapabilityProposal + F-004 apply |
+| AI-authored capabilities | A Lattice-aware agent proposes DDL/Starlark/lenses/workflows through human review + deterministic validation + rollback. | ★★–★★★ | L | 🏗️ building · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) · P5 read models (`fc4094e`) shipped; next: ReviewCapabilityProposal + F-004 apply |
 | **The Augur** (AI reasoning tier — L3 evaluator) | Weaver's AI-assisted reasoning tier for ambiguous/novel convergence gaps. The marquee AI-native feature. | ★★ | M–L | ✅ Fires 1+2a+2b shipped (loop closes: escalate→review→dispatch) · [design](../../implementation-artifacts/augur-design.md) + [dispatch design](../../implementation-artifacts/augur-dispatch-pickup-design.md) · 🚧 Fire 3 autoApply Andrew-gated; follow-up: mid-flight-kill + drift-invalid e2e (§6 residual) |
 | Starlark guards (Loom) | The reserved `{reads, starlark}` guard escape hatch needs a verified-pure sandbox. | ★ | M | ✅ ratified (split) · [design](../../implementation-artifacts/loom-starlark-guards-design.md) · 🚧 Loom-side held (ships with first consumer) |
 | **Weaver planner mandate (dispatcher → solver)** | Remediation stops being a static gap→action lookup: deterministic planner (per-gap candidate selection, then goal-regression synthesis over op-declared effects) executed as content-addressed pinned Loom patterns, plus contraction/oscillation diagnostics and fleet admission control; shadow mode + per-target cutover; the Augur stays the AI boundary. | ★★★ | XL | 🏗️ building · [design](../../implementation-artifacts/weaver-planner-mandate-design.md) · Fires 1-5+6 Inc1-2 done; Inc3 HELD (no real multi-op gap) |
@@ -189,6 +189,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-05 · `fc4094e` · [AI-native] AI-authored capabilities — capabilityProposals + capabilityAuthorContext P5 read models; manifest drift fix + drift test; ReviewCapabilityProposal/apply remains
 - 2026-07-04 · `4be8066` · [AI-native] AI-authored capabilities Fire 1 — escalation dispatch (capabilityauthorclaim DDL, capabilityAuthor Loom pattern, self-anchored weaver-target lens, FakeCapabilityAuthor); review/apply remains
 - 2026-07-04 · `25b85a9` · [Health-KV] Fire 3 — consumer pause-state re-keyed off instance (`NewConsumerSink` drops the instance param); item CLOSED
 - 2026-07-04 · `244ebfa` · [AI-native] AI-authored capabilities — RecordCapabilityProposal revised to the standard bridge {externalRef,status,result} shape (was flat/caller-supplied); unblocks Loom-pattern wiring
