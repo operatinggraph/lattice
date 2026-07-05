@@ -108,7 +108,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > the delivery-boundary reset + live e2e remain, and that needs an **attended** fire — destructive to
 > the shared dev stack). *Dependency-sequenced ratified items, unblocked in the meantime*: **Personal
 > Lens** (L, 🏗️ building — PL.2 shipped, PL.3 gated on D1) · **Object crypto-shred** (behind Vault). Current fire/park state for
-> Gateway · FR28 · Augur · Control-plane-authz lives on their rows below.
+> Gateway · Augur · Control-plane-authz lives on their rows below.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -168,7 +168,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[CI/Refractor] Hello-Lattice NFR-P3 latency flake** | The capability-projection probe fails-then-passes on the shared CI runner — re-scoped to a 1000ms regression guard (Andrew-ratified; reported SLA unchanged), but the runner floor has drifted to ~1.1s. | ★★ | M | ✅ fixed 2026-07-03 (`94c8224`, deadline 1000ms→2000ms) — re-examine if it recurs |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ ratified · [design](../../implementation-artifacts/script-read-posture-design.md) · Fires 1–2 shippable (Contract #2 committed); guard (Fire 3) build + contracts deferred |
-| **FR28 — role-queue + fallback** (+ FR29 unrouted surfacing) | A `queuedFor.role` link + `ClaimTask` op + `CreateTask` routing (named → role-queue → loud `RoutingFailed`); grant/inbox fan out to role-holders; an empty queue is surfaced post-hoc by a new `unroutedTasks` Weaver target. | ★ | M | 🏗️ building · [design](../../implementation-artifacts/fr28-role-queue-fallback-design.md) (`9495081`,`12fc79b`) · next: Fire 3 unrouted surfacing |
 | **Package version upgrade / DDL hot-reload (F-004)** | In-place re-install over an existing version + DDL-migration semantics (install/uninstall existed; upgrade did not). Diff-and-apply (create/update/tombstone) in one atomic Processor batch; version-independent entity keys. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/package-version-upgrade-design.md) · Fires 1a–3 shipped; only an optional Fire-2 live e2e remains (§8.1 + §8.6 committed) |
 | Loom / Weaver control-API surfacing | Operator pause/resume + a durable `loom.*` read model beyond what the Loupe blocker covers. | ★ | M | ✅ ratified (2026-07-02, Fork C: the Chronicler — new event-ledger materializer component) · [design](../../implementation-artifacts/orchestration-history-read-model-design.md) · fires (chronicler-prebuild-regrounding first): component+loom history → weaver history → core-ops archive; display = Loupe **F13** (the Time Machine) |
 | **[bootstrap] Stale `lattice.bootstrap.json` vs. a recreated Core KV silently breaks reads** | `make up`'s reuse branch skips re-bootstrapping when kernel processes are already running, leaving the JSON stale — reads return empty while writes still succeed. Recurred 3× (2026-07-03/04); now proven to break a LIVE vertical too (Clinic staff-wildcard roster) — see [verticals.md](verticals.md). | ★★ | S | 📋 · repro: `lattice bootstrap verify` · fix: freshness check on the reuse path, or a Health-KV signal |
@@ -188,6 +187,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-05 · `e67e073` · [FR28/29] Role-queue + fallback Fire 3 CLOSED — `unroutedTasks` Weaver target (new `surface` GapAction, no dispatch, Health-KV only); §10.8 amendment uncommitted for Andrew
 - 2026-07-05 · `df742d2` · [AI-native] AI-authored capabilities Fire 3 CLOSED — weaverTarget/loomPattern kinds + Starlark-guard record-time gate, 3-layer reviewed
 - 2026-07-05 · `c58ba1c` · [AI-native] AI-authored capabilities Fire 2 CLOSED — `lattice capability list/review` + `lattice-pkg apply-proposal`, 3-layer reviewed
 
