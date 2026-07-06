@@ -72,8 +72,8 @@ Each event declares a business event to publish to `core-events` JetStream.
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `class` | yes | Event type. MUST be `<domain>.<eventName>` — a **domain segment is required** (the first dot-segment), `eventName` in lowerCamelCase (e.g. `identity.created`, `orchestration.taskCompleted`, `rbac.roleAssigned`). The domain segment is validated at commit step 7; a dot-free class (no domain) is rejected. Must also match `canonicalName` of a registered event-type DDL (`class: "meta.ddl.eventType"`) where one is registered. Events are a typed contract; consumers (Loom, Weaver) depend on schema knowledge, and the **domain** is the partition key those consumers subscribe on (`events.<domain>.>`). |
-| `data` | yes | Event payload. Validated against the event DDL's schema at commit step 7. May be `{}` for parameterless events. |
+| `class` | yes | Event type. MUST be `<domain>.<eventName>` — a **domain segment is required** (the first dot-segment), `eventName` in lowerCamelCase (e.g. `identity.created`, `orchestration.taskCompleted`, `rbac.roleAssigned`). The domain segment is validated at commit step 7; a dot-free class (no domain) is rejected. Event-type DDLs (`class: "meta.ddl.eventType"`) are a **package-owned** typed contract consumers rely on, but the Processor does **not** resolve or schema-validate a class against a registered event-type DDL at commit — step 7 enforces the `<domain>.<eventName>` shape only. Events are a typed contract; consumers (Loom, Weaver) depend on schema knowledge, and the **domain** is the partition key those consumers subscribe on (`events.<domain>.>`). |
+| `data` | yes | Event payload. May be `{}` for parameterless events. The Processor does **not** schema-validate `event.data` against the event DDL at commit (see the `class` note — event schemas are a package-owned contract). |
 
 **Event domain.** Every event class names a `<domain>` as its first segment. The Processor sets a discrete **`domain`** field on the published Event document (`internal/processor/step7_events.go` `Event.domain`) from the class's first segment — the class is the single source of truth, producers do not pass `domain` separately. The subject the outbox publishes on is `events.<domain>.<eventName>`, so the domain appears in both the subject and the document. Per-domain consumers (Loom) subscribe `events.<domain>.>`; because every class carries a domain, that filter always matches.
 
@@ -81,15 +81,11 @@ Each event declares a business event to publish to `core-events` JetStream.
 
 ### 3.5 Batch-Internal Consistency Rules
 
-The Processor enforces internal consistency of the MutationBatch at commit step 6, before any KV writes occur:
+Batch-internal referential integrity — link endpoints and aspect host vertices — is the responsibility of the operation's **DDL script**, enforced through the known-key-reads write-path (§2.5), **not** a separate platform step-6 resolution pass:
 
-**Endpoint resolution for link mutations:** A `create` mutation on a link key (`lnk.<t1>.<id1>.<name>.<t2>.<id2>`) requires both endpoint vertex keys to resolve. An endpoint resolves if:
-- The vertex exists in Core KV (read during hydration, or detected via independent lookup), AND its `isDeleted` is `false`, OR
-- The vertex is being created by another mutation in the same MutationBatch
+**Endpoint/host validation is script-declared.** A `create` on a link key (`lnk.<t1>.<id1>.<name>.<t2>.<id2>`) or an aspect (`vtx.<type>.<id>.<localName>`) that must guarantee its endpoints / host vertex exist declares those vertices in `contextHint.reads`; the Processor hydrates them at step 4, and the script validates each (correct class, `isDeleted == false`, endpoint-touch) before emitting the mutation. An endpoint or host created by another mutation in the **same** MutationBatch is likewise the script's to sequence.
 
-If either endpoint fails to resolve, the entire operation is rejected with `SchemaViolation: DanglingReference`.
-
-**Vertex resolution for aspect mutations:** Same rule — an aspect at `vtx.<type>.<id>.<localName>` requires the host vertex (`vtx.<type>.<id>`) to exist or to be created in the same batch.
+The Processor performs **no** independent step-6 endpoint/host resolution and emits no dangling-reference error code. A dangling link is low-harm — readers filter `isDeleted`, and an absent endpoint reads as nothing — and convergence gaps are the Weaver's detect-and-recover domain, not a fail-closed platform reject.
 
 **Tombstoning vertices with active aspects/links:** Tombstoning a vertex does NOT automatically tombstone its aspects or links. The Processor does not cascade. If a script wants cascade behavior, it explicitly includes tombstone mutations for the dependent aspects and links in the same batch. **Why:** cascade semantics are business-logic concerns (a vertex tombstone may want to retain historical aspects for audit), and the platform refuses to make that choice on the script's behalf. Readers filter on `isDeleted` independently; tombstoning a vertex makes its key invisible to most queries even if its aspects remain.
 
@@ -159,8 +155,8 @@ This is the architectural boundary that makes Starlark execution deterministic a
 **For the AI agent implementing Story 1.7 (Processor — DDL Validation & Atomic Batch):**
 
 - At step 6: for each mutation in the batch, resolve DDL by class (per Contract #1 §1.5), validate `document.data` against DDL schema, enforce `permittedCommands` (Story 1.10/FR57), apply sensitivity constraints. Inject provenance fields (`createdAt`, `createdBy`, `createdByOp`, `lastModifiedAt`, `lastModifiedBy`, `lastModifiedByOp`).
-- At step 6 batch-internal consistency: resolve all link endpoints and aspect host vertices; reject the entire operation with `SchemaViolation: DanglingReference` on any unresolved reference.
-- At step 7: reject any event whose `class` is not `<domain>.<eventName>` (no dot, or an empty domain/eventName segment) — a domain segment is required. Set the Event document's `domain` field to the class's first segment. For each event, resolve event-type DDL by `event.class`; events without registered DDL fail with `EventSchemaViolation: UndeclaredEventType`. Validate `event.data` against schema.
+- At step 6 batch-internal consistency: **no separate platform pass** — link-endpoint / aspect-host integrity is the DDL script's responsibility via declared reads (§3.5), with Weaver detect-and-recover as the convergence backstop; the Processor emits no `DanglingReference` code.
+- At step 7: reject any event whose `class` is not `<domain>.<eventName>` (no dot, or an empty domain/eventName segment) — a domain segment is required. Set the Event document's `domain` field to the class's first segment. The Processor does **not** resolve an event-type DDL or schema-validate `event.data` at commit — event schemas are a package-owned contract; there is no `UndeclaredEventType` / `EventSchemaViolation` reject.
 - At step 8: construct the NATS atomic batch with revision conditions per `mutation.op`:
   - `create` → revision condition = 0 (create-if-absent)
   - `update` → revision condition = `expectedRevision` if provided, else hydrated revision
