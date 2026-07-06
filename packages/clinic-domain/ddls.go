@@ -1288,6 +1288,8 @@ def enforce_hours(provider, starts_at, ends_at):
     # [start, end] must sit inside ONE window on its UTC weekday. Times are exact
     # integers (time.weekday 0=Sun..6=Sat, time.seconds_of_day 0..86399) so the
     # membership test is integer arithmetic — no mixed-width string-compare hazard.
+    # read-posture: (c) config — deliberately unsnapshotted (out of OCC so an
+    # hours edit never conflicts a concurrent booking commit)
     hours = kv.Read(provider + ".hours")
     if hours == None or hours.isDeleted:
         return
@@ -1323,6 +1325,8 @@ def enforce_time_off(provider, starts_at, ends_at):
     # (a.start < b.end AND b.start < a.end) — back-to-back (appt ending exactly at a
     # range's from, or starting exactly at its to) does NOT overlap, so a booking up
     # to the start of a blackout (or from its end) is allowed.
+    # read-posture: (c) config — deliberately unsnapshotted (out of OCC so a
+    # time-off edit never conflicts a concurrent booking commit)
     off = kv.Read(provider + ".timeOff")
     if off == None or off.isDeleted:
         return

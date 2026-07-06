@@ -47,6 +47,23 @@
 //     instanceOf-chain resolver (Contract #1 §1.5). The signal is anchored on the
 //     Starlark aspect-emit helper, so a discriminator word used as a CLI flag, a
 //     string-slice element, or an aspect's `cls` arg is not flagged.
+//   - Read-posture classification (Contract #2 §2.5; ADVISORY — warns, never
+//     fails --strict: the check lands warn-first per the script-read-posture
+//     design §7). Every script `kv.Read(` / `kv.Links(` call site in a
+//     packages/ non-test file must carry a `# read-posture: (c|d|e)` Starlark
+//     annotation on the call line or within the preceding lines:
+//     (c) deliberately-unsnapshotted config read (annotate why);
+//     (d) absence-tolerant read declared in contextHint.optionalReads by the
+//     dispatcher (read-before-create / dedup);
+//     (e) bounded kv.Links enumeration — the annotation names `relation=` and
+//     records `epoch=` (the companion class-(a) serialization key an
+//     enumerate-then-write contends, or an explicit `epoch=none (…)`
+//     acceptance — best-effort; Weaver detect+recover enforces);
+//     a per-element follow-up kv.Read off an enumeration is also (e).
+//     An UNANNOTATED call is flagged class-(b) — a declarable-but-undeclared
+//     lazy read, the read posture's only debt class. Same posture as
+//     TestPackage_NoScans, extended from "no raw scans" to "declare (or
+//     classify) your declarable reads".
 //
 // Markdown/docs are intentionally out of scope: they discuss the conventions
 // (e.g. "never an asp.* prefix") and would false-positive. The 6-segment link
@@ -79,7 +96,19 @@ var (
 	// literal, regardless of whether the helper takes the vertex key as one arg or
 	// two (make_aspect, make_aspect_upsert(_occ), make_update_aspect).
 	p7Discriminator = regexp.MustCompile(`make_(aspect|update_aspect|aspect_upsert|aspect_upsert_occ)\(.*"(class|family|kind)",\s*"`)
+	// Read-posture classification (Contract #2 §2.5). kvCall anchors a script
+	// kv.Read/kv.Links CALL (a paren after the name), so prose mentions in
+	// comments don't match; readPosture is the classification annotation the
+	// call must carry on its line or within the preceding window.
+	kvCall        = regexp.MustCompile(`kv\.(Read|Links)\(`)
+	kvLinksCall   = regexp.MustCompile(`kv\.Links\(`)
+	readPosture   = regexp.MustCompile(`#\s*read-posture:\s*\(([cde])\)`)
+	scriptMutates = regexp.MustCompile(`"op":\s*"(create|update|tombstone)"|make_(vtx|link|aspect|update)`)
 )
+
+// readPostureWindow is how many lines above a kv.Read/kv.Links call the
+// `# read-posture:` annotation may sit (the call's own comment block).
+const readPostureWindow = 8
 
 // platformCmds are the platform / admin / debug-inspector binaries that
 // legitimately touch Core KV — the platform components ARE the system, and P5
@@ -115,6 +144,10 @@ type finding struct {
 	file string
 	line int
 	msg  string
+	// warn marks an advisory finding (the read-posture checks, which land
+	// warn-first per script-read-posture-design §7): printed, surfaced in the
+	// hook, but never fails --strict.
+	warn bool
 }
 
 func main() {
@@ -144,15 +177,22 @@ func main() {
 		findings = append(findings, scanFile(f)...)
 	}
 
+	var issues, warnings int
 	for _, fd := range findings {
+		if fd.warn {
+			warnings++
+			fmt.Printf("%s:%d: warn: %s\n", fd.file, fd.line, fd.msg)
+			continue
+		}
+		issues++
 		fmt.Printf("%s:%d: %s\n", fd.file, fd.line, fd.msg)
 	}
 	if len(findings) == 0 {
 		fmt.Println("lint-conventions: 0 issues")
 		return
 	}
-	fmt.Printf("lint-conventions: %d issue(s)\n", len(findings))
-	if strict {
+	fmt.Printf("lint-conventions: %d issue(s), %d advisory warning(s)\n", issues, warnings)
+	if strict && issues > 0 {
 		os.Exit(1)
 	}
 }
@@ -214,6 +254,15 @@ func scanFile(path string) []finding {
 	var out []finding
 	app := verticalAppCmd(path)
 	isTest := strings.HasSuffix(path, "_test.go")
+	slash := filepath.ToSlash(path)
+	// Read-posture classification applies to shipped package scripts only:
+	// packages/ non-test .go files (Starlark sources live there as Go string
+	// constants). Tests, engines, and harnesses are out of scope.
+	postureScoped := !isTest && (strings.HasPrefix(slash, "packages/") || strings.Contains(slash, "/packages/"))
+	fileMutates := postureScoped && scriptMutates.Match(data)
+	// window holds the last readPostureWindow raw lines, for locating a
+	// `# read-posture:` annotation in the call's own comment block.
+	var window []string
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	ln := 0
@@ -221,16 +270,78 @@ func scanFile(path string) []finding {
 		ln++
 		line := sc.Text()
 		if historyComment.MatchString(line) {
-			out = append(out, finding{path, ln, "history/changelog comment — git blame + the commit message are the record"})
+			out = append(out, finding{file: path, line: ln, msg: "history/changelog comment — git blame + the commit message are the record"})
 		}
 		if aspPrefix.MatchString(line) {
-			out = append(out, finding{path, ln, "`asp.` key prefix — aspects are 4-segment vtx.<type>.<id>.<localName> (Contract #1)"})
+			out = append(out, finding{file: path, line: ln, msg: "`asp.` key prefix — aspects are 4-segment vtx.<type>.<id>.<localName> (Contract #1)"})
 		}
 		if app != "" && coreKVRead.MatchString(line) {
-			out = append(out, finding{path, ln, "P5 violation — application cmd/" + app + " reads Core KV directly; an application reads lens projections, never Core KV (lattice-architecture.md P5)"})
+			out = append(out, finding{file: path, line: ln, msg: "P5 violation — application cmd/" + app + " reads Core KV directly; an application reads lens projections, never Core KV (lattice-architecture.md P5)"})
 		}
 		if !isTest && p7Discriminator.MatchString(line) {
-			out = append(out, finding{path, ln, "P7 violation — discriminator aspect (.class/.family/.kind) shadows the envelope class; the type belongs on the vertex class field, resolved behind a fine-grained class by the step-6 instanceOf chain (lattice-architecture.md P7, Contract #1 §1.5)"})
+			out = append(out, finding{file: path, line: ln, msg: "P7 violation — discriminator aspect (.class/.family/.kind) shadows the envelope class; the type belongs on the vertex class field, resolved behind a fine-grained class by the step-6 instanceOf chain (lattice-architecture.md P7, Contract #1 §1.5)"})
+		}
+		if postureScoped {
+			out = append(out, checkReadPosture(path, ln, line, window, fileMutates)...)
+		}
+		window = append(window, line)
+		if len(window) > readPostureWindow {
+			window = window[1:]
+		}
+	}
+	return out
+}
+
+// checkReadPosture classifies one script kv.Read/kv.Links call line against
+// the Contract #2 §2.5 read posture (all findings ADVISORY — warn:true).
+// window is the preceding raw lines; the annotation may sit there or on the
+// call line itself. Comment lines (Go `//` or Starlark `#`) are skipped —
+// prose ABOUT kv.Read is not a call.
+func checkReadPosture(path string, ln int, line string, window []string, fileMutates bool) []finding {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+		return nil
+	}
+	if !kvCall.MatchString(line) {
+		return nil
+	}
+	// Locate the nearest annotation: the call line first, then the window
+	// bottom-up (the closest preceding comment wins).
+	var class string
+	var annotated string
+	if m := readPosture.FindStringSubmatch(line); m != nil {
+		class, annotated = m[1], line
+	} else {
+		for i := len(window) - 1; i >= 0; i-- {
+			if m := readPosture.FindStringSubmatch(window[i]); m != nil {
+				class, annotated = m[1], window[i]
+				break
+			}
+		}
+	}
+	isLinks := kvLinksCall.MatchString(line)
+	if class == "" {
+		call := "kv.Read"
+		if isLinks {
+			call = "kv.Links"
+		}
+		return []finding{{file: path, line: ln, warn: true,
+			msg: "read-posture: unclassified " + call + " — class-(b) debt (Contract #2 §2.5). Declare the key in contextHint reads/optionalReads (class a/d) or annotate the call: `# read-posture: (c) <why>` (config, deliberately live), `(d) <declared-by>` (declared optionalReads), or `(e) relation=<rel> epoch=<key|none (…)>` (bounded enumeration / its follow-up read)"}}
+	}
+	var out []finding
+	if isLinks {
+		if class != "e" {
+			out = append(out, finding{file: path, line: ln, warn: true,
+				msg: "read-posture: kv.Links must be class (e) — a bounded paged enumeration, declared as contextHint.enumerations metadata (Contract #2 §2.5)"})
+		} else {
+			if !strings.Contains(annotated, "relation=") {
+				out = append(out, finding{file: path, line: ln, warn: true,
+					msg: "read-posture: a class-(e) kv.Links annotation must name `relation=<rel>` (matches the dispatcher's contextHint.enumerations declaration, Contract #2 §2.5)"})
+			}
+			if fileMutates && !strings.Contains(annotated, "epoch=") {
+				out = append(out, finding{file: path, line: ln, warn: true,
+					msg: "read-posture: enumerate-then-write without a companion epoch — record `epoch=<key>` (a class-(a) serialization key every mutator of the relation bumps, declared in reads) or an explicit `epoch=none (<accepted-risk>)`; best-effort contention reduction, Weaver detect+recover enforces (Contract #2 §2.5)"})
+			}
 		}
 	}
 	return out

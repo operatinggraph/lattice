@@ -150,10 +150,15 @@ def identity_has_open_tasks(identity_key):
     # blocks.
     cursor = None
     for _page in range(MAX_IDENTITY_TASK_PAGES):
+        # read-posture: (e) relation=assignedTo epoch=none (read-only guard:
+        # a task queued concurrently with the tombstone slips past — accepted;
+        # Weaver detect+recover is the orphan-task enforcer)
         links, cursor = kv.Links(identity_key, "assignedTo", "in", cursor, IDENTITY_TASK_PAGE_LIMIT)
         for lk in links:
             if lk.isDeleted:
                 continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key)
             task = kv.Read(lk.sourceVertex)
             if task == None or task.isDeleted:
                 continue

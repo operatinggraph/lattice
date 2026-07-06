@@ -204,10 +204,15 @@ def role_has_open_tasks(role_key):
     # vertex is read and only a still-"open" task blocks.
     cursor = None
     for _page in range(MAX_ROLE_TASK_PAGES):
+        # read-posture: (e) relation=queuedFor epoch=none (read-only guard:
+        # a task queued concurrently with the tombstone slips past — accepted;
+        # Weaver detect+recover is the orphan-task enforcer)
         links, cursor = kv.Links(role_key, "queuedFor", "in", cursor, ROLE_TASK_PAGE_LIMIT)
         for lk in links:
             if lk.isDeleted:
                 continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key)
             task = kv.Read(lk.sourceVertex)
             if task == None or task.isDeleted:
                 continue

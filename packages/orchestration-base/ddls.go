@@ -292,6 +292,8 @@ def execute(state, op):
             # lazy on-demand for callers that don't declare it. Absent aspect
             # == available, so a caller that never calls SetAvailability sees
             # byte-identical Fire-1 routing.
+            # read-posture: (d) declared in contextHint.optionalReads by the
+            # engine dispatchers (Loom userTaskOptionalReads, Weaver assignTask)
             availability_doc = kv.Read(assignee + ".availability")
             is_available = True
             if availability_doc != None and not availability_doc.isDeleted:
@@ -341,6 +343,8 @@ def execute(state, op):
         # a logically-deleted one — either means the gap still needs its task, so
         # absent OR deleted falls through to create (self-heal); only a live task
         # suppresses.
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # engine dispatchers (see the dedup note above)
         existing = kv.Read(task_key)
         if existing != None and not existing.isDeleted:
             return {"mutations": [], "events": []}
@@ -395,6 +399,9 @@ def execute(state, op):
         # and it is NOT a declared contextHint.reads key: the caller cannot
         # know the role in advance, and the link may legitimately already be
         # gone (claimed by someone else, or never queued).
+        # read-posture: (e) relation=queuedFor epoch=task root (the claim's
+        # own OCC-asserted update below — every queuedFor mutator commits
+        # through the task root, so concurrent claimers serialise on it)
         queued_page, _ = kv.Links(task_key, "queuedFor", "out")
         queued_link = None
         for lk in queued_page:

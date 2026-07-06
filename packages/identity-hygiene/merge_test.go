@@ -77,7 +77,16 @@ func TestMerge_HappyPath(t *testing.T) {
 		SubmittedAt:   "2026-05-23T10:00:00Z",
 		Class:         "identityHygiene",
 		Payload:       mergePayload(primaryKey, secondaryKey, edges),
-		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			// The op's one kv.Links call (the secondary-has-open-tasks
+			// guard), declared as class-(e) metadata (Contract #2 §2.5:
+			// bounded + paged, never hydrated — the declaration feeds the
+			// Edge mirror-coverage gate + the read-posture lint).
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
