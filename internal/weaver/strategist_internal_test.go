@@ -95,7 +95,7 @@ func TestBuildPlan_AssignTask_OptionalReadsMatchPayload(t *testing.T) {
 	}
 	got := pl.optionalReads(claimID)
 	want := map[string]bool{
-		"vtx.task." + taskID: true,
+		"vtx.task." + taskID:                             true,
 		"vtx.identity.AAassignHJKMNPQRSTUV.availability": true,
 	}
 	if len(got) != len(want) {
