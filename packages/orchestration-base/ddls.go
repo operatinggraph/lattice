@@ -22,11 +22,14 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     at a non-existent identity/role is never committed. forOperation +
 //     scopedTo endpoints are validated likewise.
 //   - Fire 2 (Contract #10 §10.1): CreateTask's routing additionally gates
-//     on the assignee's `availability` aspect (a single on-demand known-key
-//     kv.Read — the aspect may legitimately never have been set, so it is
-//     NOT a ContextHint.Reads key; absent aspect == available, byte-
-//     compatible with pre-Fire-2 callers). A given+alive but unavailable
-//     assignee falls back to a given+alive queue instead of assignedTo.
+//     on the assignee's `availability` aspect via kv.Read — the aspect may
+//     legitimately never have been set, so it is NOT a ContextHint.Reads
+//     key (a miss there is a fatal HydrationMiss); callers declare it in
+//     ContextHint.OptionalReads instead (Contract #2 §2.5 class (d): the
+//     read resolves at the step-4 snapshot, absent → None). Absent aspect
+//     == available, byte-compatible with pre-Fire-2 callers; an undeclared
+//     caller still works via the lazy on-demand fallback. A given+alive but
+//     unavailable assignee falls back to a given+alive queue.
 //
 // Task shape (Contract #10 §10.1 — scalars + links only, NO aspects):
 //
@@ -55,9 +58,12 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // assignedTo checks are on-demand kv.Read (may legitimately be absent).
 //
 // SetAvailability needs only `identity` declared (the aspect it writes is
-// not itself a read). CreateTask's own availability check reads the
-// assignee's `.availability` aspect via on-demand kv.Read, NOT
-// ContextHint.Reads (§2.5) -- it may legitimately never have been set.
+// not itself a read). CreateTask's absence-tolerant kv.Read keys — the task
+// dedup key and the assignee's `.availability` aspect — belong in
+// ContextHint.OptionalReads (§2.5 class (d)), never in Reads: both may
+// legitimately not exist, and a declared-but-absent Reads key faults. The
+// engine dispatchers declare them (Loom userTaskOptionalReads, Weaver's
+// assignTask plan); an undeclared caller falls back to lazy on-demand reads.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		taskDDL(),
@@ -279,10 +285,13 @@ def execute(state, op):
             _, assignee_id = parts_of(assignee, "assignee", "identity")
             if not vertex_alive(state, assignee):
                 fail("UnknownAssignee: " + assignee)
-            # Fire 2 availability gate: a single on-demand known-key kv.Read
-            # (not ContextHint.Reads -- the aspect may legitimately never
-            # have been set). Absent aspect == available, so a caller that
-            # never calls SetAvailability sees byte-identical Fire-1 routing.
+            # Fire 2 availability gate: a known-key kv.Read whose absence is
+            # a legitimate branch -- declared in ContextHint.OptionalReads by
+            # the engine dispatchers (Contract #2 §2.5: present → hydrated,
+            # absent → snapshot None; never in Reads, where a miss faults),
+            # lazy on-demand for callers that don't declare it. Absent aspect
+            # == available, so a caller that never calls SetAvailability sees
+            # byte-identical Fire-1 routing.
             availability_doc = kv.Read(assignee + ".availability")
             is_available = True
             if availability_doc != None and not availability_doc.isDeleted:
@@ -318,10 +327,13 @@ def execute(state, op):
         # assignTask path: Weaver's op requestId is EPISODE-scoped (changes per
         # reclaim), so the Contract #4 vtx.op.<requestId> tracker collapses only a
         # same-episode re-fire, NOT a mark-lease reclaim — the durable guard is
-        # this read at the task key. Read it on demand — kv.Read, NOT a contextHint
-        # read: the key
-        # may legitimately not exist yet, and a declared-but-absent read faults
-        # (HydrationMiss), which is exactly what kv.Read avoids. A present, ALIVE
+        # this read at the task key. kv.Read — with the key declared in
+        # contextHint.optionalReads by the engine dispatchers (Contract #2 §2.5:
+        # the key may legitimately not exist yet, so it can never sit in reads,
+        # where a miss faults HydrationMiss; declared-optional it resolves at the
+        # step-4 snapshot — absent → None, with a lost create race absorbed by the
+        # Processor's CreateOnly-backstop retry). Undeclared callers still get the
+        # lazy on-demand read. A present, ALIVE
         # task here means a duplicate dispatch: return empty mutations AND empty
         # events — a coherent no-op (the CreateOnly mutation below still guards the
         # same-commit concurrent race). Branch on isDeleted too: kv.Read yields

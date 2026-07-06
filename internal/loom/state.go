@@ -100,6 +100,13 @@ type outboxRecord struct {
 	// envelope, exactly as before. NO `.state` suffixes — the DDLs read bare
 	// keys; a non-existent `.state` would be a HydrationMiss.
 	Reads []string `json:"reads,omitempty"`
+	// OptionalReads is the dispatched op's ContextHint.OptionalReads (Contract
+	// #2 §2.5 — declared absence-tolerant reads): keys the DDL script reads via
+	// kv.Read whose absence is a legitimate branch (CreateTask's dedup key +
+	// the assignee's availability aspect). Hydrated when present, recorded
+	// known-absent when missing — never a HydrationMiss. Same additive
+	// backward-compat as Reads.
+	OptionalReads []string `json:"optionalReads,omitempty"`
 }
 
 // deadlineMark is the thin value stored under deadline.<instanceId> (Contract

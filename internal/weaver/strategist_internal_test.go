@@ -57,3 +57,53 @@ func TestBuildPlan_DirectOp_MissingReadColumn(t *testing.T) {
 		t.Fatalf("expected a planError for a read referencing an absent row column")
 	}
 }
+
+// TestBuildPlan_AssignTask_OptionalReadsMatchPayload pins the Contract #2 §2.5
+// optionalReads set an assignTask dispatch declares: exactly the stable task
+// dedup key and the assignee's `.availability` routing aspect — and, load-
+// bearing, the task key in optionalReads is derived from the SAME claimId-
+// seeded id the payload carries as taskId. If the two derivations ever drift,
+// the declared dedup read would snapshot the wrong key and the CreateTask
+// script's kv.Read would silently fall back to a lazy live GET.
+func TestBuildPlan_AssignTask_OptionalReadsMatchPayload(t *testing.T) {
+	t.Parallel()
+	src := &targetSource{opMetaByType: map[string]string{
+		"ApproveLeaseApplication": "vtx.meta.AAopMetaHJKMNPQRSTUV",
+	}}
+	ga := GapAction{
+		Action:    "assignTask",
+		Operation: "ApproveLeaseApplication",
+		Assignee:  "row.assignee",
+		Target:    "row.entityKey",
+	}
+	row := map[string]any{
+		"assignee":  "vtx.identity.AAassignHJKMNPQRSTUV",
+		"entityKey": "vtx.leaseApplication.AAleaseHJKMNPQRSTUV",
+	}
+	pl, perr := buildPlan(src, "leaseApproval", "AAleaseHJKMNPQRSTUV", "missing_approval", ga, row, 7)
+	if perr != nil {
+		t.Fatalf("buildPlan: %v", perr)
+	}
+	const claimID = "AAclaimHJKMNPQRSTUVW"
+	payload := pl.payload(claimID)
+	taskID, _ := payload["taskId"].(string)
+	if taskID == "" {
+		t.Fatalf("assignTask payload carries no taskId: %v", payload)
+	}
+	if pl.optionalReads == nil {
+		t.Fatalf("assignTask plan declares no optionalReads (dedup key + availability must be declared)")
+	}
+	got := pl.optionalReads(claimID)
+	want := map[string]bool{
+		"vtx.task." + taskID: true,
+		"vtx.identity.AAassignHJKMNPQRSTUV.availability": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("optionalReads = %v, want the task dedup key + the assignee availability aspect", got)
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Fatalf("unexpected optionalReads key %q (set: %v)", k, got)
+		}
+	}
+}

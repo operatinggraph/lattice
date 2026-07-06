@@ -37,7 +37,8 @@ type opEnvelope struct {
 }
 
 type contextHint struct {
-	Reads []string `json:"reads,omitempty"`
+	Reads         []string `json:"reads,omitempty"`
+	OptionalReads []string `json:"optionalReads,omitempty"`
 }
 
 type authContext struct {
@@ -69,8 +70,10 @@ func newActuator(conn *substrate.Conn, lane, actor string, logger *slog.Logger) 
 
 // submit publishes one remediation op under Weaver's service-actor authority.
 // reads is the dispatched op's ContextHint.Reads (the bare vertex keys its DDL
-// hydrates); empty for read-free ops.
-func (a *actuator) submit(ctx context.Context, requestID, operationType string, payload map[string]any, authTarget string, reads []string) error {
+// hydrates); empty for read-free ops. optionalReads is its
+// ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
+// reads, e.g. assignTask's stable task dedup key); empty when the op reads none.
+func (a *actuator) submit(ctx context.Context, requestID, operationType string, payload map[string]any, authTarget string, reads, optionalReads []string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("weaver: marshal op payload: %w", err)
@@ -83,8 +86,8 @@ func (a *actuator) submit(ctx context.Context, requestID, operationType string, 
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       body,
 	}
-	if len(reads) > 0 {
-		env.ContextHint = &contextHint{Reads: reads}
+	if len(reads) > 0 || len(optionalReads) > 0 {
+		env.ContextHint = &contextHint{Reads: reads, OptionalReads: optionalReads}
 	}
 	if authTarget != "" {
 		env.AuthContext = &authContext{Target: authTarget}

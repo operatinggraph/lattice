@@ -100,6 +100,12 @@ type plan struct {
 	// the op touches. Empty for read-free ops (StartLoomPattern, MarkExpired,
 	// most directOps). NO `.state` suffixes — the DDLs read bare keys.
 	reads []string
+	// optionalReads, when non-nil, yields the dispatched op's
+	// ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
+	// reads) for the episode's claimID. A closure, like payload, because the
+	// assignTask dedup key derives from the claimId-seeded stable taskId. Nil
+	// for ops that read no absence-tolerant keys.
+	optionalReads func(claimID string) []string
 	// requestID, when non-nil, overrides the ordinary episode-scoped
 	// deriveEpisodeRequestID derivation for this op (Fire 2b's proposedOp
 	// dispatch: the proposed remediation's requestId must be PROPOSAL-scoped,
@@ -198,6 +204,18 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 			// a HydrationMiss). Cross-checked against the script by
 			// TestCreateTaskReads_MatchDDLScript.
 			reads: []string{assignee, forOperation, taskTarget},
+			// The two absence-tolerant kv.Read keys the CreateTask script
+			// branches on (Contract #2 §2.5 optionalReads): the stable task key
+			// (the cross-reclaim dedup read — absent → create, present+alive →
+			// no-op, resolved at the step-4 snapshot with the lost race absorbed
+			// by the Processor's CreateOnly-backstop retry) and the assignee's
+			// `.availability` routing aspect (absent == available).
+			optionalReads: func(claimID string) []string {
+				return []string{
+					"vtx.task." + deriveStableTaskID(targetID, entityID, gapColumn, claimID),
+					assignee + ".availability",
+				}
+			},
 			payload: func(claimID string) map[string]any {
 				return map[string]any{
 					"assignee":     assignee,

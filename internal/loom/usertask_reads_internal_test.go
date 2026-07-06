@@ -73,3 +73,31 @@ func TestUserTaskReads_CoverEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// TestUserTaskOptionalReads_CoverDedupAndAvailability locks the Contract #2
+// §2.5 optionalReads set Loom declares on a userTask CreateTask: exactly the
+// two absence-tolerant keys the task DDL reads via kv.Read — the task key (the
+// cross-retry dedup read) and the assignee's `.availability` routing aspect
+// (assignee == subject, the §10.5 invariant). Neither may migrate into Reads
+// (a miss there would HydrationMiss an op whose absence branch is legitimate),
+// and dropping either silently demotes a declared snapshot read back to a
+// lazy live GET — the class-(b) debt the read posture exists to prevent.
+func TestUserTaskOptionalReads_CoverDedupAndAvailability(t *testing.T) {
+	t.Parallel()
+	const subjectKey = "vtx.identity.BBsubjectHJKMNPQRST"
+	const taskKey = "vtx.task.BBtaskIdHJKMNPQRSTU"
+
+	got := userTaskOptionalReads(taskKey, subjectKey)
+	want := []string{subjectKey + ".availability", taskKey}
+	sorted := append([]string(nil), got...)
+	sort.Strings(sorted)
+	sort.Strings(want)
+	if len(sorted) != len(want) {
+		t.Fatalf("optionalReads = %v, want exactly %v", got, want)
+	}
+	for i := range want {
+		if sorted[i] != want[i] {
+			t.Fatalf("optionalReads = %v, want %v (task dedup key + subject availability aspect)", got, want)
+		}
+	}
+}

@@ -36,7 +36,8 @@ type opEnvelope struct {
 }
 
 type contextHint struct {
-	Reads []string `json:"reads,omitempty"`
+	Reads         []string `json:"reads,omitempty"`
+	OptionalReads []string `json:"optionalReads,omitempty"`
 }
 
 type authContext struct {
@@ -96,8 +97,8 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       rec.Payload,
 	}
-	if len(rec.Reads) > 0 {
-		env.ContextHint = &contextHint{Reads: rec.Reads}
+	if len(rec.Reads) > 0 || len(rec.OptionalReads) > 0 {
+		env.ContextHint = &contextHint{Reads: rec.Reads, OptionalReads: rec.OptionalReads}
 	}
 	if rec.Target != "" {
 		env.AuthContext = &authContext{Target: rec.Target}
@@ -123,19 +124,22 @@ func (r *relay) handle(ctx context.Context, msg substrate.Message) (substrate.De
 // buildOutbox constructs the outbox record the engine writes into a transition
 // batch (the op the relay will submit). payload is the op's payload object;
 // reads is the dispatched op's ContextHint.Reads (the bare vertex keys its DDL
-// hydrates), nil/empty for read-free ops.
-func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads []string) (*outboxRecord, error) {
+// hydrates), nil/empty for read-free ops; optionalReads is its
+// ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
+// reads, e.g. CreateTask's dedup key), nil/empty when the op reads none.
+func buildOutbox(requestID, operation string, payload map[string]any, target, lane, actor string, reads, optionalReads []string) (*outboxRecord, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("loom: marshal op payload: %w", err)
 	}
 	return &outboxRecord{
-		RequestID: requestID,
-		Operation: operation,
-		Payload:   body,
-		Target:    target,
-		Lane:      lane,
-		Actor:     actor,
-		Reads:     reads,
+		RequestID:     requestID,
+		Operation:     operation,
+		Payload:       body,
+		Target:        target,
+		Lane:          lane,
+		Actor:         actor,
+		Reads:         reads,
+		OptionalReads: optionalReads,
 	}, nil
 }

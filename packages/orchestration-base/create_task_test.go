@@ -257,3 +257,80 @@ func TestInstall_Idempotent(t *testing.T) {
 	_ = identitydomain.Package
 	_ = rbacdomain.Package
 }
+
+// TestCreateTask_DeclaredOptionalReads_CreateThenDedup is the Fire-1 declared
+// posture end-to-end (Contract #2 §2.5 / script-read-posture design §3.1):
+// the dispatcher declares the DDL's two absence-tolerant kv.Read keys — the
+// task dedup key and the assignee's `.availability` aspect — in
+// contextHint.optionalReads, exactly as Loom's userTaskOptionalReads and
+// Weaver's assignTask plan now do.
+//
+//  1. First dispatch: BOTH declared keys are absent → hydration records them
+//     known-absent (no HydrationMiss), kv.Read branches on the snapshot None,
+//     and the task is created.
+//  2. Re-dispatch (new requestId, SAME taskId — the Weaver reclaim shape):
+//     the dedup key is now PRESENT → hydrated at step 4, kv.Read serves the
+//     snapshot doc, and the script no-ops (no duplicate task, links intact).
+func TestCreateTask_DeclaredOptionalReads_CreateThenDedup(t *testing.T) {
+	ctx, conn := setupOrchEnv(t)
+	cp, cons := newTaskPipeline(t, ctx, conn, "ct-declared-dedup")
+
+	assigneeID := "BBassigneeHJKMNPQRST"
+	assigneeKey := "vtx.identity." + assigneeID
+	opID := "BBapproveBpHJKMNPQRS"
+	opKey := "vtx.meta." + opID
+	targetID := "BBease4ppHJKMNPQRSTU"
+	targetKey := "vtx.leaseapp." + targetID
+	seedVertex(t, ctx, conn, assigneeKey, "identity", map[string]any{"state": "claimed"})
+	seedVertex(t, ctx, conn, opKey, "meta", map[string]any{"operationType": "ApproveLeaseApplication"})
+	seedVertex(t, ctx, conn, targetKey, "leaseapp", map[string]any{"state": "pending"})
+
+	const suppliedID = "BBdecaredXHJKMNPQRST"
+	taskKey := "vtx.task." + suppliedID
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	payload := json.RawMessage(`{"assignee":"` + assigneeKey + `","forOperation":"` + opKey +
+		`","scopedTo":"` + targetKey + `","expiresAt":"` + expiresAt + `","taskId":"` + suppliedID + `"}`)
+	hint := &processor.ContextHint{
+		Reads:         []string{assigneeKey, opKey, targetKey},
+		OptionalReads: []string{taskKey, assigneeKey + ".availability"},
+	}
+
+	dispatch := func(label string) {
+		t.Helper()
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateTask",
+			Actor:         otStaffActorKey,
+			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			Class:         "task",
+			Payload:       payload,
+			ContextHint:   hint,
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	}
+
+	// 1. Absent declared keys → created, not HydrationMiss.
+	dispatch("CTDeclared001")
+	taskDoc := readDoc(t, ctx, conn, taskKey)
+	data, _ := taskDoc["data"].(map[string]any)
+	if got, _ := data["status"].(string); got != "open" {
+		t.Fatalf("task status = %q, want open (created off the known-absent snapshot)", got)
+	}
+	firstEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, taskKey)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", taskKey, err)
+	}
+
+	// 2. Same taskId, new requestId, dedup key now hydrated-present → no-op.
+	dispatch("CTDeclared002")
+	secondEntry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, taskKey)
+	if err != nil {
+		t.Fatalf("KVGet %s after re-dispatch: %v", taskKey, err)
+	}
+	if secondEntry.Revision != firstEntry.Revision {
+		t.Fatalf("re-dispatch touched the task (rev %d → %d); declared dedup must no-op",
+			firstEntry.Revision, secondEntry.Revision)
+	}
+}

@@ -300,7 +300,7 @@ func (e *Engine) handleFiredTimer(ctx context.Context, msg substrate.Message) su
 	// write itself stays an UNCONDITIONED update (no expectedRevision); the read
 	// is a parent-existence guard, not OCC on the marker.
 	reads := []string{p.EntityKey}
-	if err := e.act.submit(ctx, requestID, opMarkExpired, payload, "", reads); err != nil {
+	if err := e.act.submit(ctx, requestID, opMarkExpired, payload, "", reads, nil); err != nil {
 		// Retryable publish failure (core-operations degraded): NakWithDelay on
 		// a bounded cadence, never a hot loop. The redelivery re-derives the
 		// same deterministic requestId, which collapses on the Contract #4

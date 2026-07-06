@@ -863,7 +863,7 @@ func (e *Engine) submitSystemOp(ctx context.Context, inst *Instance, pattern *Pa
 	// ops are event-only — empty mutations, no vertex_alive), so no
 	// ContextHint.Reads is declared. A future systemOp that reads would set its
 	// own read-set here from the step's known target.
-	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, nil)
+	ob, err := buildOutbox(token, step.Operation, payload, target, e.cfg.Lane, e.cfg.ActorKey, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -889,6 +889,24 @@ func userTaskReads(subjectKey, forOperation string) []string {
 	// assignee == subjectKey, scopedTo == subjectKey (the userTask invariant) →
 	// the assignee/scopedTo endpoints are the same key; forOperation is distinct.
 	return []string{subjectKey, forOperation}
+}
+
+// userTaskOptionalReads is the ContextHint.OptionalReads set for a userTask's
+// CreateTask (Contract #2 §2.5 — declared absence-tolerant reads). The task DDL
+// reads two keys via kv.Read whose absence is a legitimate branch, so they can
+// never sit in Reads (a miss there is a fatal HydrationMiss):
+//   - the task key itself — the cross-retry dedup read (absent → create,
+//     present+alive → no-op). Declaring it resolves the dedup at the step-4
+//     snapshot; the lost-race case is absorbed by the Processor's re-hydrate
+//     retry off the CreateOnly backstop.
+//   - the assignee's `.availability` aspect — the routing gate (absent ==
+//     available; may legitimately never have been set).
+//
+// The assignee is the instance subject (the §10.5 invariant userTaskReads
+// encodes), so the availability key derives from subjectKey. Guarded by
+// TestUserTaskOptionalReads_CoverDedupAndAvailability.
+func userTaskOptionalReads(taskKey, subjectKey string) []string {
+	return []string{taskKey, subjectKey + ".availability"}
 }
 
 // submitUserTask submits a CreateTask assigning the step's bound op to the
@@ -943,7 +961,8 @@ func (e *Engine) submitUserTask(ctx context.Context, inst *Instance, pattern *Pa
 	// orchestration-base's TestCreateTaskReads_MatchDDLScript, which checks Weaver's
 	// un-deduped 3-key set, not Loom's deduped 2-key set.
 	reads := userTaskReads(inst.SubjectKey, forOperation)
-	ob, err := buildOutbox(opRequestID, opCreateTask, payload, inst.SubjectKey, e.cfg.Lane, e.cfg.ActorKey, reads)
+	ob, err := buildOutbox(opRequestID, opCreateTask, payload, inst.SubjectKey, e.cfg.Lane, e.cfg.ActorKey, reads,
+		userTaskOptionalReads(taskKey, inst.SubjectKey))
 	if err != nil {
 		return err
 	}
@@ -1017,7 +1036,7 @@ func (e *Engine) submitExternalTask(ctx context.Context, inst *Instance, pattern
 	if err != nil {
 		return err
 	}
-	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads)
+	ob, err := buildOutbox(opRequestID, step.InstanceOp, payload, target, e.cfg.Lane, e.cfg.ActorKey, reads, nil)
 	if err != nil {
 		return err
 	}
@@ -1048,7 +1067,7 @@ func (e *Engine) complete(ctx context.Context, inst *Instance, pattern *Pattern,
 	requestID := deriveRequestID(inst.InstanceID, lifecycleCursor)
 	// CompletePattern is event-only (no mutations, no reads) — read-free envelope.
 	ob, err := buildOutbox(requestID, opCompletePattern,
-		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil)
+		map[string]any{"instanceId": inst.InstanceID}, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1078,7 +1097,7 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 		payload["reason"] = reason
 	}
 	// FailPattern is event-only (no mutations, no reads) — read-free envelope.
-	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil)
+	ob, err := buildOutbox(requestID, opFailPattern, payload, "", e.cfg.Lane, e.cfg.ActorKey, nil, nil)
 	if err != nil {
 		return err
 	}
