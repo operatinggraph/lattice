@@ -99,17 +99,8 @@ func TestConformance_OperationReply_NoDetailAcrossAllBuilders(t *testing.T) {
 // TestConformance_ErrorCode_ClosedEnum asserts the rejected-reply error code is
 // always a member of the closed ErrorCode enum.
 func TestConformance_ErrorCode_ClosedEnum(t *testing.T) {
-	closed := map[ErrorCode]bool{
-		ErrCodeEnvelopeMalformed: true, ErrCodeLaneUnauthorized: true,
-		ErrCodeAuthDenied: true, ErrCodeAuthContextMismatch: true,
-		ErrCodeInternalError: true, ErrCodeHydrationFailed: true,
-		ErrCodeScriptFailed: true, ErrCodeDDLViolation: true,
-		ErrCodeRevisionConflict: true, ErrCodeProtectedKey: true,
-		ErrCodeAuthInfrastructureFailure: true, ErrCodeClaimKeyInvalid: true,
-		ErrCodeBatchTooLarge: true,
-	}
 	r := BuildRejectedReply(testNanoID1, ErrCodeDDLViolation, "x", nil)
-	if r.Error == nil || !closed[r.Error.Code] {
+	if r.Error == nil || !emittedErrorCodes[r.Error.Code] {
 		t.Fatalf("rejected reply error.code %q not in closed ErrorCode enum", r.Error.Code)
 	}
 }

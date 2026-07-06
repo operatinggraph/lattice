@@ -228,27 +228,28 @@ This is the **one sanctioned relaxation** of the otherwise known-key-reads-only 
 
 ### 2.6 Error Code Enumeration (Initial Set)
 
-The reply envelope's `error.code` is one of a closed enumeration. Phase 1 codes:
+The reply envelope's `error.code` is one of a closed enumeration (the `ErrorCode` type in `package envelope`). The shipped set, by commit step:
 
 | Code | Meaning | Commit Step |
 |------|---------|-------------|
 | `EnvelopeMalformed` | Operation envelope failed schema validation (missing required field, invalid type, etc.) | Pre-step-1 (Processor entry) |
+| `AuthInfrastructureFailure` | The step-3 capability read failed (NATS / Capability KV outage) — the auth plane is unavailable, kept distinct from `InternalError` so callers can tell "auth-plane broken" from other internal failures | Step 3 |
 | `LaneUnauthorized` | Actor lacks capability to submit to declared lane | Step 3 |
 | `AuthDenied` | Actor lacks capability for operationType on target entities | Step 3 |
-| `AuthContextMismatch` | `authContext` declared an auth path that doesn't match actor's capability projection (e.g., `service` set but service not in `serviceAccess[]`; `task` set but task not in `ephemeralGrants[]` or target mismatch) | Step 3 |
-| `StarlarkExecutionFailed` | Script raised an error or attempted forbidden I/O | Step 5 |
-| `StarlarkExecutionTimeout` | Script exceeded execution time budget (NFR-P4) | Step 5 |
-| `SchemaViolation` | MutationBatch failed DDL JSON Schema validation | Step 6 |
-| `WriteScopeViolation` | Mutation outside declared `permittedCommands` for affected DDL | Step 6 |
-| `SensitivityViolation` | Sensitive aspect attached to non-identity-anchored vertex | Step 6 |
-| `EventSchemaViolation` | EventList contained event failing event DDL validation | Step 7 |
+| `AuthContextMismatch` | `authContext` declared an auth path that doesn't match the actor's capability projection (e.g., `service` set but service not in `serviceAccess[]`; `task` set but task not in `ephemeralGrants[]` or target mismatch) | Step 3 |
+| `HydrationFailed` | A declared read could not be resolved while hydrating operation state (`details`: `code`, `missingKey`) | Step 4 |
+| `ScriptFailed` | The operation script raised an error, attempted forbidden I/O, or exceeded its execution budget (NFR-P4) | Step 5 |
+| `ClaimKeyInvalid` | Generic `ClaimIdentity` rejection — wrong-key / wrong-state / already-bound / merged all map to this single code (NFR-S6 anti-enumeration); the specific outcome surfaces only via Health KV | Step 5 (ClaimIdentity) |
+| `DDLViolation` | A mutation failed DDL validation — JSON-Schema, write-scope (a mutation outside the affected DDL's `permittedCommands`), or sensitive-aspect anchoring | Step 6 |
+| `ProtectedKey` | An update or tombstone whose root document carries `data.protected == true`, rejected at commit — the path-independent kernel/auth bricking guard | Step 8 |
 | `RevisionConflict` | Atomic batch rejected due to concurrent revision change; retries exhausted | Step 8 |
 | `BatchTooLarge` | A single operation's atomic batch exceeded the message-count ceiling (>998 business mutations) or a mutation value exceeded the payload ceiling (`max_payload`). Terminal — no redelivery. `details`: `reason` (`mutationCount`\|`valueSize`), `limit`, `actual`, `key` (valueSize only). See Contract #3 §3.9.1. | Step 8 |
-| `MetaLaneCollision` | DDL change conflicts with concurrent meta-lane mutation | Step 8 (meta lane only) |
-| `CellMoved` | Multi-cell (Phase 3): the target vertex has been migrated to another cell and this cell has drained it; the write was not applied. `details.newCell` carries the cell the caller must refresh the routing index to and re-route through. The `410 Gone`-equivalent stray-write rejection (no data is lost — the caller re-submits to the correct cell). | Pre-step-1 (cell-router check); migration drain window only |
 | `InternalError` | Unrecoverable Processor failure not covered by above codes | Any step |
+| `CellMoved` | **Reserved (Multi-cell, Phase 3 — not yet emitted):** the target vertex has migrated to another cell and this cell has drained it; the write was not applied. `details.newCell` carries the cell the caller must re-route through — a `410 Gone`-equivalent stray-write rejection (no data lost; the caller re-submits to the correct cell). | Pre-step-1 (cell-router check) |
 
-Each code is paired with a human-readable `message` and structured `details` appropriate to the failure mode. The enumeration is extensible — Phase 2+ may add codes; existing codes are immutable contract.
+> **Reconciled to the shipped enum.** `ScriptFailed` subsumes the former split `StarlarkExecutionFailed`/`StarlarkExecutionTimeout`; `DDLViolation` subsumes the former split `SchemaViolation`/`WriteScopeViolation`/`SensitivityViolation`. The former `EventSchemaViolation` and `MetaLaneCollision` are not wire-emitted (event-DDL validation and meta-lane-collision detection are unbuilt — cf. Contract #3 §3.4/§3.8) and are dropped from the closed set. `CellMoved` is documented but reserved for Phase-3 multi-cell (not yet emitted). A conformance test (`internal/processor` `TestConformance_ErrorCodeTable_MatchesWire`) parses this table and fails if it drifts from the emitted `ErrorCode` set again.
+
+Each code is paired with a human-readable `message` and structured `details` appropriate to the failure mode. The enumeration is extensible — Phase 2+ may add codes; a shipped (wire-emitted) code is immutable contract.
 
 ### 2.8 Auth Context
 
@@ -368,7 +369,7 @@ reads the path-specific disjoint key via the registered hook. Full shape: Contra
 
 **For the AI agent implementing Story 1.5 (`internal/substrate`):**
 
-- `package envelope` — Go struct definitions for `OperationEnvelope` and `OperationReply`, including the enumerated `Lane` and `Status` types and the `ErrorCode` enum. JSON marshaling with strict required-field validation (rejects unknown fields).
+- `package envelope` — Go struct definitions for `OperationEnvelope` and `OperationReply`, including the enumerated `Lane` and `Status` types and the `ErrorCode` enum. JSON parsing validates required fields but is **lenient on unknown fields** — they are ignored, not rejected (`ParseEnvelope` uses a standard decoder without `DisallowUnknownFields`), so an envelope carrying a newer optional field stays forward-compatible.
 - Envelope JSON Schema file committed alongside Go types — used by SDK validation and by Processor's pre-step-1 envelope check.
 
 **For the AI agent implementing Story 1.4 (Processor — Consume, Dedup, Auth Stub):**
