@@ -36,6 +36,10 @@ choices live HERE. Per-package capability definitions live under
   work stream, and triggerLoom / assignTask / directOp remediation.
 - [Bridge](./bridge.md) — the external-I/O egress: a durable `events.external.>`
   consumer, the adapter registry, and idempotent result-op submission.
+- [The Chronicler](./chronicler.md) — the event-ledger materializer: tails platform event / ledger
+  streams (`events.loom.>`, later `events.weaver.>`, the intent ledger) into append-only history read
+  models (`orchestration-history`) + verbatim archives — the history counterpart to Refractor's
+  present-state projection. A separate binary by charter (event streams stay out of Refractor).
 
 **Cross-cutting**
 
@@ -49,7 +53,8 @@ choices live HERE. Per-package capability definitions live under
   request/reply surface (pause / resume / inspect / retire) the three engines expose and
   Loupe + the CLI drive.
 - [Refractor failure tiers](./refractor-failure-tiers.md) — the four-tier failure
-  model and the designed-but-not-built privacy / security supersession tiers.
+  model plus the privacy / security supersession tiers (Capability-Lens alert + the
+  privacy-critical crypto-shred tier).
 - [Object-store-manager](./object-store-manager.md) — the always-on byte-janitor of the
   off-graph blob plane: Loop B tombstone reclaim, the never-attached crash-orphan reconcile,
   and the owner-tombstone-cascade.
@@ -94,6 +99,7 @@ between page and code is treated as a documentation bug.
 | Loupe — operator view-and-control console (trusted single-identity, loopback, no auth) | ✅ Built (Phase 3) |
 | Gateway — JWT auth, `Lattice-Actor` stamping | ✅ Built (Phase 3) — write-path (Fires 1+2: JWT verify + actor stamping + live JWKS); read-path enforcement in progress |
 | Vault, Privacy-worker — per-identity keys, crypto-shredding | ✅ Built (Phase 3) — encrypt-on-write/decrypt-on-read + `ShredIdentityKey`; per-vertical fires ongoing |
+| The Chronicler — event-ledger materializer (durable orchestration history) | ✅ Ratified (Fork C) — PROJECT mode + `loomFlowHistory` shipped, host extraction to `cmd/chronicler` pending |
 
 Each page's own *Implementation status* / *What's deferred* section is the
 authoritative, fine-grained record for that component.

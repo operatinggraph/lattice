@@ -2,6 +2,19 @@
 
 **Status: ✅ Andrew-ratified (2026-07-02) — Fork C: a NEW COMPONENT (neither Fork A/Refractor nor Fork B).**
 
+> ## RE-RATIFICATION (2026-07-06, Andrew) — Fork C stands; the in-Refractor build is a deviation to unwind
+>
+> Fires 1–2 shipped the projection logic **into the Refractor binary** (`internal/refractor/eventlens` +
+> `internal/refractor/lens/eventsource.go`, wired at `cmd/refractor/main.go`) — against the Fork-C banner
+> below. Andrew re-affirmed Fork C explicitly: the Chronicler is a **separate component** with **its own
+> component doc page** ([docs/components/chronicler.md](../../docs/components/chronicler.md)) and its own
+> **Contract #5 heartbeat at `health.chronicler.<instance>`** — the standard Health-KV signal Loupe's
+> system-map `chronicler` node (`cmd/loupe/systemmap.go`, currently `designAhead`) and `componentLiveness`
+> already expect (the node flips live once the heartbeat appears). **Correction:** extract the event→row
+> host into `cmd/chronicler` + `internal/chronicler` (the projection model, definitions, read models, and
+> P5 read path all carry over verbatim — only the host moves; Refractor keeps no `LensSpec.Source`).
+> Tracked on the board as `chronicler-host-reconciliation` (now a ratified build, not a flag-for-Andrew).
+
 > ## RATIFICATION REWORK (2026-07-02) — supersedes the Fork-A/B framing below
 >
 > Every body mention of "extend Refractor / LensSpec / the pipeline" is **superseded**: the event→row

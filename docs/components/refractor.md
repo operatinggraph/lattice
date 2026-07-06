@@ -43,7 +43,7 @@ Key sub-packages:
 | `capabilityread/` | Reads D1's `cap-read.*` read-path Capability KV to answer "may this actor read this anchor?" — the Personal Lens's fail-closed read-grant gate (§6.14, Fire PL.3) |
 | `personalinterest/` | Per-device Interest Set in the `personal-lens-interest` bucket — a bandwidth relevance filter, never a security control (Fire PL.2) |
 | `keyshredded/` | Durable `events.privacy.keyShredded` listener that nullifies a shredded identity's projected rows (brainstorm #62 — the one sanctioned event-stream listener in Refractor's charter); records `RecordShredFinalization{projectionsNullified}` |
-| `eventlens/` | Event-sourced lens projection over the `core-events` stream (Chronicler). **Host placement under review** — the Chronicler was ratified as a separate component; see backlog `chronicler-host-reconciliation` |
+| `eventlens/` | Event-sourced lens projection over the `core-events` stream (Chronicler PROJECT mode). **Being extracted** to the standalone `cmd/chronicler` component (Fork C re-ratified 2026-07-06); see [chronicler.md](./chronicler.md) + backlog `chronicler-host-reconciliation` |
 
 ---
 
