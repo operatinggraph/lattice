@@ -29,9 +29,9 @@ const (
 	CatStructural
 	// CatPrivacyCritical errors indicate a shredded identity's projected row could not
 	// be nullified — a confidentiality-relevant failure (refractor-failure-tiers.md
-	// "Designed-but-not-built: privacy / security supersession tiers"). The rule is
-	// paused immediately, alerted, and never auto-retried: a row that should have been
-	// scrubbed on shred must not be silently left in place while the pipeline keeps running.
+	// "Privacy / security supersession tiers"). The rule is paused immediately, alerted,
+	// and never auto-retried: a row that should have been scrubbed on shred must not be
+	// silently left in place while the pipeline keeps running.
 	CatPrivacyCritical
 )
 

@@ -192,15 +192,14 @@ func BuildProtectedTableDDL(table string, keyCols []string, body []ColumnDef) ([
 // canonical name) keeps producers disjoint so a revoke from one package never
 // wipes another's coexisting grant.
 //
-// Unlike the contract's illustrative four-column shape, the table carries an
-// is_deleted tombstone column: §6.14 mandates that a delete "applies only when
-// its incoming projectionSeq exceeds the stored one" and that "a stale CDC
-// replay cannot resurrect a revoked grant" — both require the revoked row's
-// projection_seq to be RETAINED, which a hard DELETE discards (a later stale
-// re-insert would then resurrect the grant). Revocation is therefore a
-// seq-guarded soft tombstone; the RLS policy and the membership lookup filter
-// NOT is_deleted. This reuses the existing Postgres soft-delete convention
-// (DeleteModeSoft). (Staged §6.14 schema clarification — flagged for Andrew.)
+// The table carries an is_deleted tombstone column (§6.14's five-column grant
+// schema): §6.14 mandates that a delete "applies only when its incoming
+// projectionSeq exceeds the stored one" and that "a stale CDC replay cannot
+// resurrect a revoked grant" — both require the revoked row's projection_seq to
+// be RETAINED, which a hard DELETE discards (a later stale re-insert would then
+// resurrect the grant). Revocation is therefore a seq-guarded soft tombstone;
+// the RLS policy and the membership lookup filter NOT is_deleted. This reuses
+// the existing Postgres soft-delete convention (DeleteModeSoft).
 func BuildGrantTableDDL() []string {
 	return []string{
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n"+

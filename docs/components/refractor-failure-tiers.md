@@ -28,8 +28,9 @@ Refractor inherits the 4-tier failure model from Materializer
 
 - Per-instance heartbeat: `health.refractor.<instance>` every 10s
   (`internal/refractor/health/lattice_heartbeater.go`), TTL-purged (NFR-O1).
-- Per-lens latency: `health.refractor.<instance>.lens.<canonicalName>` —
-  p95/p99/mean/count from the `LatencyRingBuffer` (NFR-P3 instrument).
+- Per-lens latency: emitted inline on the `health.refractor.<instance>` heartbeat
+  under `metrics.lensLatency` (keyed by lens `canonicalName`) — p95/p99/mean/count
+  from the `LatencyRingBuffer` (NFR-P3 instrument).
 - Consumer lag: `NumPending` on the lens consumer, polled by `health.LagPoller`
   and surfaced both on `lattice.refractor.metrics.<lensId>` and as the
   `consumerLag` field on the per-lens health entry.
@@ -58,37 +59,39 @@ comparison exists on this plane that would require a tombstone to survive. Hard
 delete is the contract-aligned semantics and avoids indefinite tombstone
 accumulation in the capability KV.
 
-## Control-plane authorization (currently stubbed)
+## Control-plane authorization
 
-The control service authorizes control-plane operations (list lenses, force
-re-project) through a `CapabilityChecker` interface
-(`internal/refractor/control/capability.go`). The default implementation is
-`StubCapabilityChecker` (allow-all + log). Real control-plane authorization —
-checking the actor's Capability KV entry before honoring a control op — is
-🔭 Designed (FR30, ratified 2026-06-27, build-pending): a shared checker across all
-three control planes (Refractor / Weaver / Loom), the control op modeled as a §6.4
-platform permission, sequenced behind read-path auth (D1) whose JWT actor-identity
-seam it reuses. The data-plane Capability **Lens** that feeds Processor write-path
-auth is unrelated and is live.
+The control service capability-gates every control-plane operation (`validate`,
+`rebuild`, `pause`, `resume`, `delete`, `register`, `deregister`, health) through a
+shared `controlauth.CapabilityKVChecker`: it reads the acting actor's Capability KV
+entry and verifies the actor's JWT identity before honoring a control op. This is
+default-on (`AuthModeCapability`) and shared across all three control planes
+(Refractor / Weaver / Loom) behind the shipped NATS trust floor (FR30). The
+data-plane Capability **Lens** that feeds Processor write-path auth is a separate
+mechanism and is also live.
 
-## Designed-but-not-built: privacy / security supersession tiers
+## Privacy / security supersession tiers
 
-Two supersession classifications sit above the four base tiers in the design but
-have **no implementation today** — no alert subject is emitted and no listener
-exists. They are recorded here so the structure is ready when their
-dependencies land.
+Two supersession classifications sit above the four base tiers — both now built.
 
-- **Security-critical — Capability Lens failure.** If the projection that feeds
-  Capability KV breaks, downstream authz could fail open, so a Capability-Lens
-  failure should halt the lens and page on-call rather than route through the
-  base tiers. Today the Capability Lens emits only the generic per-lens health
-  signals above; there is **no Capability-Lens-aware alert** (the same gap noted
-  in [refractor.md](./refractor.md#capability-lens-health-operational-backstop)).
+- **Security-critical — Capability Lens failure.** A projection that feeds
+  Capability KV and breaks could let downstream authz fail open, so a
+  Capability-Lens failure halts the lens and raises a distinct Health-KV alert
+  rather than routing through the base tiers. The `LatticeHeartbeater` raises
+  `CapabilityLensPaused` (severity `error` ⇒ instance `unhealthy`) when a
+  capability lens is paused and `CapabilityLensLagging` (severity `warning` ⇒
+  `degraded`, debounced with a clear-threshold band) when an active one lags past
+  the configured threshold — see the "Capability-Lens health" section of
+  [refractor.md](./refractor.md). Its generalized sibling
+  (`LensProjectionPaused` / `LensProjectionLagging`, warning-only) covers every
+  non-auth-plane business lens.
 
-- **Privacy-critical — crypto-shred failure.** When Vault key-shred handling
-  exists, a row whose encryption key has been shredded but whose
-  projection still surfaces decrypted values is a confidentiality breach: the
-  affected lens must halt with no automatic retry and page on-call. Vault /
-  crypto-shredding is 🔭 Designed (ratified 2026-06-27, build-pending — sequenced
-  behind read-path auth, D1), so neither the `KeyShredded` listener nor this tier is
-  built yet.
+- **Privacy-critical — crypto-shred failure (`CatPrivacyCritical`).** A row whose
+  encryption key has been shredded but whose projection still surfaces its values
+  is a confidentiality breach. When `internal/refractor/keyshredded` cannot nullify
+  a shredded identity's projected row, `failure.Classify` routes the error to
+  `CatPrivacyCritical`: the lens is paused immediately, alerted, and **never**
+  auto-retried. Vault + crypto-shredding is live; the listener consumes
+  `events.privacy.keyShredded` — the one sanctioned event-stream listener in
+  Refractor's charter (brainstorm #62), distinct from the Vault key-destruction
+  worker that runs co-located with the Processor.

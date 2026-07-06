@@ -20,7 +20,7 @@ signals, and audit/metrics subjects.
 
 | Path | Role |
 |------|------|
-| `internal/refractor/` | All projection engine sub-packages (13 packages) |
+| `internal/refractor/` | All projection engine sub-packages (17 packages) |
 | `cmd/refractor/` | Binary entry point; wires engine, consumer, pipeline, adapter, control, health |
 
 Key sub-packages:
@@ -39,6 +39,11 @@ Key sub-packages:
 | `subjects/` | Centralizes all subject name construction (`lattice.refractor.*`, `lattice.ctrl.refractor.*`) |
 | `config/` | Configuration types |
 | `capabilityenv/` | Wraps executor RETURN rows into Contract #6 §6.2 Capability KV envelopes |
+| `projection/` | Actor-aggregate projection-plan compiler (plan-as-data: Execution + Output, `EnvelopeFn`/`BuildKey`, §6.3 freshness, personal-lens install) — the Epic-12 capability projection driver |
+| `capabilityread/` | Reads D1's `cap-read.*` read-path Capability KV to answer "may this actor read this anchor?" — the Personal Lens's fail-closed read-grant gate (§6.14, Fire PL.3) |
+| `personalinterest/` | Per-device Interest Set in the `personal-lens-interest` bucket — a bandwidth relevance filter, never a security control (Fire PL.2) |
+| `keyshredded/` | Durable `events.privacy.keyShredded` listener that nullifies a shredded identity's projected rows (brainstorm #62 — the one sanctioned event-stream listener in Refractor's charter); records `RecordShredFinalization{projectionsNullified}` |
+| `eventlens/` | Event-sourced lens projection over the `core-events` stream (Chronicler). **Host placement under review** — the Chronicler was ratified as a separate component; see backlog `chronicler-host-reconciliation` |
 
 ---
 
@@ -62,17 +67,17 @@ Key sub-packages:
 | **Health KV signals** (Contract #5) | Health KV `health.refractor.<instance>.lens.<canonicalName>` | Per-lens latency snapshots (p95, p99, mean, count from `LatencyRingBuffer`); consumer lag; per-instance heartbeat every 10s. |
 | **Audit subjects** | `lattice.refractor.audit.<lensId>` | One `AuditEntry` per projection. |
 | **Metrics subjects** | `lattice.refractor.metrics.<lensId>` | Consumer lag on `LagPoller` interval. |
-| **Control plane** | `micro.Service` endpoints at `lattice.ctrl.refractor.<lensId>.<op>` | Handles JSON control requests (list lenses, force re-project, etc.) via the NATS Services framework. |
+| **Control plane** | `micro.Service` endpoints at `lattice.ctrl.refractor.<lensId>.<op>` | Handles JSON control requests (`validate`, `rebuild`, `pause`, `resume`, `delete`, `register`, `deregister`, health) via the NATS Services framework; capability-gated (FR30). |
 | **Personal Lens delta envelopes** | Per-recipient NATS subject `<targetConfig.subjectPrefix>.<actor>` (e.g. `lattice.sync.user.<identityId>`) on the backing JetStream stream `targetConfig.stream` | Produced by a `targetType: "nats_subject"` lens (`adapter/natssubject.go`). See below. |
 
-### Personal Lens transport (`nats_subject` target — Fires 1–3: PL.1, PL.2, PL.3)
+### Personal Lens transport (`nats_subject` target)
 
 The **Personal Lens** turns Refractor from a shared read-model warehouse into a per-identity
 *filtered delta stream* — the cloud-side half of the Edge Lattice
-(`personal-secure-lens-design.md`). Fire 1 ships the transport under a trusted-single-identity
-posture. Fire 2 adds the cross-vertex fan-out and the Interest Set; the recipient is either
-RETURNed directly by the lens's own cypher (PL.1 shape) or injected by the fan-out envelope (PL.2
-shape) — never both. Fire 3 wires D1's read-path Capability KV as the correctness boundary (below).
+(`personal-secure-lens-design.md`). The transport runs under a trusted-single-identity posture; a
+cross-vertex fan-out + Interest Set sits on top, and D1's read-path Capability KV is the correctness
+boundary (below). The recipient is either RETURNed directly by the lens's own cypher (the **PL.1
+shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both.
 
 - **`TargetNATSSubjectConfig`** (`lens/corekv_source.go`): `{ "subjectPrefix": "lattice.sync.user",
   "stream": "SYNC", "personal": false, "key": ["__actor", ...businessKeys] }`. `key` must include
@@ -236,9 +241,7 @@ Refractor has one engine implementation, the full openCypher engine.
 Selection logic lives in `internal/refractor/ruleengine/`
 (`Registry.SelectForLens`) — every lens declares `engine: "full"` (or leaves
 it absent, which resolves to `"full"`); any other value fails lens
-validation. The legacy v1 Materializer-derived "simple" recursive-descent
-engine was retired once every lens had migrated to the full engine (git
-history: `retire-simple-engine-design.md`).
+validation. The full openCypher engine is the only rule engine Refractor runs.
 
 ### Full engine (`ruleengine/full/`)
 
@@ -334,7 +337,7 @@ never-matched anchor emits an idempotent Delete against an absent key — a no-o
 NATS-KV/Postgres row target (pinned by test); on a **GrantTable** target the
 `RevokeGrant` write deliberately inserts a seq-stamped tombstone row for a
 never-granted key (deny-direction, ≤1 row per actor — it also makes a `protected`
-flag flipping false promptly revoke the wildcard grant, which previously lingered).
+flag flipping false promptly revoke the wildcard grant).
 Convergence (`violating`-flag) lenses are unaffected: they anchor-match every
 candidate unconditionally, so the presence check never fires for them — an authoring
 invariant (a future convergence lens with a filtering `WHERE` would retract rows
@@ -361,7 +364,7 @@ backstop: a lens that references `$actorKey` anywhere fails to activate rather t
 mass-retracting every other live anchor's rows on its first event — the diff's
 soundness rests entirely on that invariant. `read_landlord_lease_applications`
 (`(app_id, landlord_id)`, D1.3 Increment 2, Vault 5b's manages-unassign consumer) is the
-first and, as of this writing, only live `DiffRetraction` lens; a convergence
+first and only live `DiffRetraction` lens; a convergence
 (`violating`-flag) lens never opts in, so its never-retract contract is untouched.
 
 ### Property model (how lens cypher reads a node)
@@ -421,8 +424,8 @@ near-duplicate identities.
 5. **The pipeline's `substrate.ConsumerSupervisor`** (built in `pipeline.Pipeline.RunOn`, configured from `cmd/refractor/main.go`) creates a durable JetStream consumer (durable name `refractor-<ruleID>`) on the `KV_core-kv` backing stream filtered to the lens's source-key prefix
 6. **Each CDC event** → `pipeline.Pipeline.HandleMessage` → engine evaluates → projection row(s) emitted → `EnvelopeFn` wraps row → adapter writes to target
 7. **Latency** tracked in `pipeline.LatencyRingBuffer` (128-sample ring buffer, thread-safe). Per-mutation health signals via `LatticeHeartbeater.LensLatencyProvider`
-8. **Lens spec update** → `CoreKVSource.updateCB` fires; `ClassifyUpdate` determines whether a hot-swap (query change only) or full pipeline restart is required
-9. **Lens tombstone** (parent vertex deleted or `.spec` deleted) → pipeline drained, consumer removed, adjacency entries left in place (tombstone re-projection is a Phase 3 carry)
+8. **Lens spec update** → `CoreKVSource.updateCB` fires; `ClassifyUpdate` determines the reload: an `INTO`-only change hot-reloads the adapter in place (`IntoOnly`), while a `MATCH` (query) change requires a full pipeline rebuild (`MatchChange`)
+9. **Lens tombstone** (parent vertex deleted or `.spec` deleted) → `CoreKVSource` purges its spec-tracking maps and logs the removal; the running pipeline's durable consumer is **not** torn down by the tombstone itself (an operator `delete` control op, or a process restart, removes it). Adjacency entries are left in place (tombstone re-projection is a Phase 3 carry)
 
 ---
 
@@ -542,7 +545,7 @@ it emits:
 |--------|--------|---------------|-----------|
 | Per-lens status | `health.Reporter` | Health KV, keyed by the lens `ruleID` | `active` / `paused` / `rebuilding`, plus `errorCount`, `activeSequence`, `pauseReason`, `lastError`. Updated on lifecycle transitions and `RecordError`. |
 | Consumer lag | `health.LagPoller` → `Reporter.SetConsumerLag` | `lattice.refractor.metrics.<lensId>` + the `consumerLag` field on the per-lens health entry | `NumPending` on the lens consumer, polled on an interval. |
-| Per-lens latency | `pipeline.LatencyRingBuffer` → `LatticeHeartbeater.LensLatencyProvider` | `health.refractor.<instance>.lens.<canonicalName>` | p95 / p99 / mean / count of per-event projection latency (NFR-P3 instrument). |
+| Per-lens latency | `pipeline.LatencyRingBuffer` → `LatticeHeartbeater.LensLatencyProvider` | `health.refractor.<instance>` heartbeat — inline `metrics.lensLatency` (keyed by `canonicalName`) | p95 / p99 / mean / count of per-event projection latency (NFR-P3 instrument). |
 | Instance heartbeat | `LatticeHeartbeater` | `health.refractor.<instance>` | 10s heartbeat with TTL purge (NFR-O1). |
 | **Capability-Lens liveness alert** | `LatticeHeartbeater.CapabilityLensProvider` → threshold eval | `health.refractor.<instance>` — `metrics.capabilityLens.<canonicalName>` `{status, consumerLag, alert}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded/unhealthy `status` when anomalous | A **paused** capability lens raises `CapabilityLensPaused` (`severity: error` ⇒ `status: unhealthy`): the authz read-model is frozen. An **active** lens with `consumerLag` over the threshold (default 100, deployment-overridable) raises `CapabilityLensLagging` (`severity: warning` ⇒ `status: degraded`) — **debounced**: it raises only after the lens stays over threshold for N consecutive heartbeats (default 3 ≈ 30s sustained) and clears once lag falls to/below a lower clear-threshold band, so a one-cycle spike does not flap. `rebuilding` and within-threshold are `ok`. The issue's `since` persists across heartbeats and the issue is dropped when it resolves. Read-only — it observes the lens reporter + supervised consumer; no authz path, Core KV, or projection is touched. |
 | **Per-lens projection liveness (all lenses)** | `Pipeline.Progress()` (in-process `lastAppliedSeq`/`lastProjectedAt`) → `health.Reporter.SetProjectionProgress` (5s cycle) → `LatticeHeartbeater.LensProvider` → threshold eval | `<lensId>` entry — `lastProjectedAt`/`projectionLag`; `health.refractor.<instance>` — `metrics.lensLiveness.<canonicalName>` `{status, projectionLag, lastProjectedAt, alert}` (always emitted) + a Contract #5 §5.5 `issues[]` entry and degraded `status` when anomalous | The generalized sibling of the Capability-Lens backstop above, widened to **every** non-auth-plane (business) lens (lens-projection-liveness-design.md). `lastProjectedAt` (advances only on a real target write, so a caught-up-but-no-op consumer leaves it frozen even while `lastAppliedSeq` moves) gives an operator a real freshness clock; the same raise-after-N / clear-band debounce as the cap path auto-alerts a wedged consumer via `LensProjectionLagging`, and a paused business lens raises `LensProjectionPaused` — both `severity: warning` (⇒ `status: degraded`), **never** `error`/`unhealthy`: a single frozen business lens is a real outage for that vertical but must not fail the whole Refractor instance. Auth-plane lenses are excluded (the Capability-Lens path above stays canonical for them) — separate debounce/issue state, zero regression surface on that security-critical path. |
@@ -553,16 +556,14 @@ a dead or lagging Capability projector now degrades the Refractor heartbeat with
 distinct, machine-readable issue the **Lamplighter** classifies and surfaces,
 rather than requiring an operator to read generic signals and apply judgment.
 
-**Residual follow-ups (not gaps in the alert itself):** the Gateway
+**Residual follow-up (not a gap in the alert itself):** the Gateway
 token-revocation **hard** control — a paused/lagging capability lens degrades
 health but cannot itself force-revoke a stale token — remains future work, landing
-with the Gateway / read-path authorization (D1). The earlier
-Loupe-reads-freshness-only and lag-threshold-hysteresis residuals have **both
-shipped**: Loupe's `componentLiveness` now fuses heartbeat freshness with the §5.4
-`status` and the worst §5.5 `issues[]` severity on its component cards and
-system-map nodes, and the lag alert now **debounces** (raise only after several
-consecutive over-threshold heartbeats, with a lower clear-threshold band) so a
-one-cycle spike no longer flaps the heartbeat degraded→healthy.
+with the Gateway / read-path authorization (D1). (Loupe's `componentLiveness` fuses
+heartbeat freshness with the §5.4 `status` and the worst §5.5 `issues[]` severity on
+its component cards and system-map nodes; the lag alert debounces — raising only
+after several consecutive over-threshold heartbeats, with a lower clear-threshold
+band — so a one-cycle spike does not flap the heartbeat.)
 
 ---
 
@@ -584,4 +585,4 @@ one-cycle spike no longer flaps the heartbeat degraded→healthy.
 | Multi-cell lens routing | Phase 3 | Current pipeline is single-cell |
 | Cross-instance latency aggregation | Phase 3 | Current `LatencyRingBuffer` is per-instance; no cluster-level rollup |
 | Link-envelope tombstone re-projection | Phase 3 | Currently adjacency entries are left in place on tombstone; re-projection on tombstone is not triggered |
-| Substrate-level write restriction on lens target buckets | 🔭 Designed (ratified 2026-06-27) | Today the defense against fabricated lens-target writes is overwrite-by-reprojection only; the **NATS account write-restriction** design scopes per-component NKey publish permissions so only Refractor writes the lens/auth buckets (Fire 1 — credential seam — shipped `75e9acc`; enforcement pending) |
+| Substrate-level write restriction on lens target buckets | 🔭 Designed (ratified 2026-06-27) | Today the defense against fabricated lens-target writes is overwrite-by-reprojection only; the **NATS account write-restriction** design scopes per-component NKey publish permissions so only Refractor writes the lens/auth buckets (credential seam shipped; enforcement pending) |
