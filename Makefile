@@ -5,6 +5,7 @@
 #   make up              — start the kernel (NATS + Postgres, bootstrap, refractor, processor)
 #   make up LATTICE_PROCESSOR_AUTH_MODE=capability — same, Processor under real capability auth (stub off)
 #   make up-full         — full stack on latest: kernel + orchestration tier + core packages + Loupe
+#   make up-full-capability — up-full, Processor under real capability auth (stub off) + a dev-seeded staff identity
 #   make install-loftspace — add the LoftSpace lease-app vertical onto a running up-full
 #   make refresh-clinic  — dev-loop: diff-apply edited clinic packages + restart clinic-app (no teardown)
 #   make reinstall-package PKG=packages/<dir> — diff-apply one edited package in place
@@ -81,7 +82,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= stub
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-full-capability dev-seed-staff up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -363,6 +364,61 @@ up-full:
 	@sleep 1
 	@echo "==> Full Lattice ready. Loupe http://127.0.0.1:7777 · Gateway :8080 (dev-mode)."
 	@echo "==> Logs: loupe.log gateway.log loom.log weaver.log bridge.log objmgr.log chronicler.log refractor.log processor.log"
+
+## up-full-capability — up-full, then the Processor under REAL CapabilityAuthorizer
+## auth (stub OFF): the real-actor-write-auth-e2e proving lane (design §4 Phase 1
+## item 3). `make up`'s reuse-detection only checks liveness, not auth mode, so a
+## stub Processor left running by a prior `make up`/`up-full` would otherwise go
+## unnoticed under this target — so this restarts ONLY the Processor, standalone,
+## under LATTICE_AUTH_MODE=capability; NATS/Postgres/refractor/orchestration/
+## packages/Gateway/Loupe are all reused as-is via up-full. Also dev-seeds ONE
+## staff identity holding `operator` (design §3.3) so a real staff actor exists for
+## the allow side of the proof — a real consumer instead comes from the Gateway's
+## ProvisionConsumerIdentity pre-flight on first authenticated touch (no seed
+## needed). Stub `make up-full` is untouched. To go back to stub, restart the
+## Processor again with `make up` (LATTICE_PROCESSOR_AUTH_MODE defaults to stub).
+up-full-capability:
+	@$(MAKE) up-full
+	@echo "==> Restarting the Processor under LATTICE_AUTH_MODE=capability (stub OFF; real-actor-write-auth-e2e proving lane)..."
+	-pkill -f "bin/processor" 2>/dev/null || true
+	@sleep 1
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_PROCESSOR) PROCESSOR_FILTER=ops.default,ops.urgent,ops.system,ops.meta LATTICE_AUTH_MODE=capability LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) ./bin/processor >processor.log 2>&1 </dev/null &
+	@sleep 1
+	@$(MAKE) dev-seed-staff
+	@echo "==> up-full-capability ready: Processor running under the REAL CapabilityAuthorizer (stub OFF). Loupe http://127.0.0.1:7777 · Gateway :8080 (dev-mode)."
+
+## dev-seed-staff — Dev-seed ONE staff identity holding `operator`, for the
+## real-actor-write-auth-e2e proving lane (design §3.3). Submits
+## CreateUnclaimedIdentity as the bootstrap admin actor (already operator via the
+## primordial holdsRole seed), then AssignRole to grant `operator` — the same
+## kernel role every internal service actor holds; today every loftspace/clinic op
+## is operator-only (design §3.4), so this is the one role that lets a real staff
+## actor exercise the allow side of the proof. Reads roleOperator/bootstrapIdentity
+## straight out of $(BOOTSTRAP_JSON) (per-deployment, not hard-coded — see
+## internal/bootstrap/nanoid.go). Not idempotent across repeat runs (mints a fresh
+## identity each time, no dedup key) — fine for the dev proving lane.
+dev-seed-staff:
+	@go build -o bin/lattice ./cmd/lattice
+	@ADMIN_ID=$$(jq -r '.primordialIDs.bootstrapIdentity' $(BOOTSTRAP_JSON)); \
+	 ROLE_ID=$$(jq -r '.primordialIDs.roleOperator' $(BOOTSTRAP_JSON)); \
+	 ADMIN_KEY="vtx.identity.$$ADMIN_ID"; \
+	 ROLE_KEY="vtx.role.$$ROLE_ID"; \
+	 echo "==> Creating dev staff identity (actor=$$ADMIN_KEY)..."; \
+	 CREATE_OUT=$$(NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) ./bin/lattice identity create-unclaimed \
+		--actor "$$ADMIN_KEY" --output json \
+		--payload '{"name":"Dev Staff","email":"staff@dev.lattice.local"}'); \
+	 echo "$$CREATE_OUT"; \
+	 STAFF_KEY=$$(echo "$$CREATE_OUT" | jq -r '.data.primaryKey'); \
+	 if [ -z "$$STAFF_KEY" ] || [ "$$STAFF_KEY" = "null" ]; then \
+		echo "==> ERROR: could not determine staff identity key from create-unclaimed output"; exit 1; \
+	 fi; \
+	 STAFF_ID=$${STAFF_KEY#vtx.identity.}; \
+	 echo "==> Assigning operator role to $$STAFF_KEY..."; \
+	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) ./bin/lattice op submit \
+		--operation-type AssignRole --actor "$$ADMIN_KEY" --output json \
+		--payload "{\"actorKey\":\"$$STAFF_KEY\",\"roleKey\":\"$$ROLE_KEY\"}" \
+		--context-hint-reads "$$STAFF_KEY,$$ROLE_KEY"; \
+	 echo "==> Dev staff identity ready: $$STAFF_KEY holds operator. Mint a token: ./bin/gateway dev-token -sub $$STAFF_ID"
 
 ## up-loftspace — Full stack + the LoftSpace vertical + the applicant app on :7788.
 ## Runs up-full, installs the LoftSpace vertical (orchestration-base → location-domain
