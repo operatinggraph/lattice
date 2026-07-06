@@ -110,7 +110,12 @@ var matrix = []component{
 		// not the standard Msg.Reply request-reply protocol allow_responses covers —
 		// so the dynamic reply-authorization mechanism doesn't apply here and an
 		// explicit grant is required (verified against the live stack, Fire 2).
-		pubAllow: []string{"$KV.core-kv.>", bootstrap.EventsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>", "_INBOX.>"},
+		// ops.> — internal/privacyworker (the async half of crypto-shredding) runs
+		// on the Processor's own connection (cmd/processor/main.go) and submits
+		// RecordShredFinalization to ops.system; a sanctioned op-submit exception,
+		// the same shape every other op-submitting component already carries
+		// (refractor-publish-acl-gap).
+		pubAllow: []string{"$KV.core-kv.>", bootstrap.EventsWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>", "_INBOX.>", bootstrap.OpsWildcardSubject},
 		// Owns core-kv; denied the destructive verbs on the capability stream it
 		// does not own (Refractor is the sole capability-kv writer).
 		pubDeny: denyProtected([]string{"$KV.capability-kv.>"}, capabilityKVStream),
@@ -122,7 +127,13 @@ var matrix = []component{
 		// dynamically-named package buckets) and health-kv without enumeration.
 		// lattice.refractor.> covers the per-lens dlq/metrics/audit subjects
 		// (internal/refractor/subjects.go) — verified against the live stack, Fire 2.
-		pubAllow:       []string{"$KV.>", "$JS.API.>", "$JS.ACK.>", "lattice.refractor.>"},
+		// ops.> — internal/refractor/keyshredded submits RecordShredFinalization to
+		// ops.system (a sanctioned op-submit exception, mirroring every other
+		// op-submitting component). lattice.sync.> — the Personal Lens nats_subject
+		// adapter's per-actor delta publish (lattice.sync.user.<actor>); latent
+		// today (no lens installs it yet) but transport-reachable in code
+		// (refractor-publish-acl-gap).
+		pubAllow:       []string{"$KV.>", "$JS.API.>", "$JS.ACK.>", "lattice.refractor.>", bootstrap.OpsWildcardSubject, "lattice.sync.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>"}, coreKVStream),
 		allowResponses: true, // control responder (lattice.ctrl.refractor.>)
 	},

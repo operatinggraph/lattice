@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 	"github.com/nats-io/nats-server/v2/server"
@@ -103,6 +104,36 @@ func provisionObjectStore(t *testing.T, c *substrate.Conn, bucket string) {
 	defer cancel()
 	if _, err := c.JetStream().CreateObjectStore(ctx, jetstream.ObjectStoreConfig{Bucket: bucket}); err != nil {
 		t.Fatalf("provision object store %q as bootstrap: %v", bucket, err)
+	}
+}
+
+// provisionStream creates a plain JetStream stream (not a KV/Object bucket) as
+// the bootstrap provisioner — mirroring provision/provisionObjectStore for the
+// plain-subject plane (ops.> lanes, the Personal Lens sync stream).
+func provisionStream(t *testing.T, c *substrate.Conn, name string, subjects []string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.JetStream().CreateStream(ctx, jetstream.StreamConfig{Name: name, Subjects: subjects}); err != nil {
+		t.Fatalf("provision stream %q: %v", name, err)
+	}
+}
+
+// assertDeniedPublish is assertDeniedPuts' plain-subject analogue: asserts none
+// of components can JetStream-publish to subject.
+func assertDeniedPublish(t *testing.T, url, subject string, components []string) {
+	t.Helper()
+	for _, component := range components {
+		component := component
+		t.Run("denied/"+subject+"/"+component, func(t *testing.T) {
+			t.Parallel()
+			c := connectAs(t, url, component)
+			ctx, cancel := context.WithTimeout(context.Background(), deniedTimeout)
+			defer cancel()
+			if err := c.Publish(ctx, subject, []byte("forged"), nil); err == nil {
+				t.Errorf("%s Publish %q: want transport denial, got success", component, subject)
+			}
+		})
 	}
 }
 
@@ -223,6 +254,59 @@ func TestLensTargetWriteIsolation(t *testing.T) {
 	}
 
 	assertDeniedPuts(t, url, "weaver-targets", []string{"loom", "loupe", "lattice", "gateway"})
+}
+
+// TestOpsSystemPublishAccess: refractor's keyshredded manager
+// (internal/refractor/keyshredded, wired in cmd/refractor) and processor's
+// co-located privacy-worker (internal/privacyworker, wired on the Processor's
+// own connection in cmd/processor/main.go) both submit RecordShredFinalization
+// to ops.system — a JetStream publish through the core-operations stream, so a
+// transport denial surfaces as a store-ack timeout exactly like a denied
+// KVPut. Neither grant existed before this fix (refractor-publish-acl-gap).
+// chronicler is the pinned negative: its own matrix comment declares it
+// "submits no ops" (P2 — a pure read-model materializer).
+func TestOpsSystemPublishAccess(t *testing.T) {
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provisionStream(t, boot, bootstrap.CoreOpsStreamName, []string{bootstrap.OpsWildcardSubject})
+
+	for _, component := range []string{"refractor", "processor"} {
+		component := component
+		t.Run("allowed/"+component, func(t *testing.T) {
+			c := connectAs(t, url, component)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := c.Publish(ctx, "ops.system", []byte("{}"), nil); err != nil {
+				t.Fatalf("%s Publish ops.system: want success, got %v", component, err)
+			}
+		})
+	}
+
+	assertDeniedPublish(t, url, "ops.system", []string{"chronicler"})
+}
+
+// TestPersonalSyncPublishAccess: refractor's nats_subject Personal Lens
+// adapter (internal/refractor/adapter/natssubject.go) publishes delta
+// envelopes to lattice.sync.user.<actor> — latent (no lens installs one yet)
+// but transport-reachable in code, and denied before this fix
+// (refractor-publish-acl-gap). Only Refractor's Personal Lens pipeline ever
+// publishes here.
+func TestPersonalSyncPublishAccess(t *testing.T) {
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provisionStream(t, boot, "SYNC", []string{"lattice.sync.user.>"})
+
+	ref := connectAs(t, url, "refractor")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ref.Publish(ctx, "lattice.sync.user.test-actor", []byte("{}"), nil); err != nil {
+		t.Fatalf("refractor Publish lattice.sync.user.test-actor: want success, got %v", err)
+	}
+
+	assertDeniedPublish(t, url, "lattice.sync.user.test-actor", []string{"processor", "loom", "weaver", "bridge",
+		"loupe", "lattice", "gateway", "loftspace-app", "clinic-app", "object-store-manager", "chronicler"})
 }
 
 // TestObjectStoreWriteAccess: the three legitimate object-plane writers
