@@ -49,7 +49,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] Registry cleanup edge branches uncovered** | `targetSource.removeOwnedTargetLocked` (targetId-rename removal, 33%), `removePatternLocked` + `removeOpMetaLocked` (pattern/op-meta vertex deletion index cleanup, 50%) — untested paths that keep the in-memory dispatch-resolution indices (`patternMeta`, `opMetaByType`) from leaking stale entries when a referenced `meta.loomPattern`/op meta-vertex is deleted or a target's `targetId` is renamed. | ★ | XS–S | 📋 · `internal/weaver/registry.go:372,586,640` |
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Loom] Redelivery/deadline-recovery edge branches uncovered** | `engine.go:resumeStepZero` (41.7% — redelivered trigger whose `createInstance` batch committed but step 0 never submitted, incl. the pattern-pin-missing→fail branch) + `state.go:disarmDeadline` (33.3% — KVGet/KVDelete error arms + the already-disarmed no-op that breaks the deadline-watcher re-entry loop) sit untested by any direct unit test. | ★ | XS–S | 📋 · `internal/loom/engine.go:460`, `internal/loom/state.go:451` |
-| **[Refractor] Capability-pipeline link/aspect fan-out dispatch untested** | `evalLinkFanOut`/`evalAspectFanOut` (0%) — the actor-aware pipeline's CDC dispatch for `holdsRole`/`grantedBy` link + aspect events that recompute authz on role grant/revoke — has no test at any level; no test references `evaluateLinkFanOut`/`evaluateAspectFanOut` either. | ★★ | S–M | 📋 · `internal/refractor/pipeline/pipeline.go:577,609`, `evaluate.go:319,348,411` |
 | **[Refractor] NatsKVAdapter guarded-write CAS-contention + malformed-watermark edge branches uncovered** | `guardedWrite`'s revision-conflict retry loop + CAS-exhaustion path (53.8%) and `storedProjectionSeq`'s `json.Number`/malformed-doc branches (46.7%) — the H4 no-resurrect guard's contention/legacy-doc handling — untested. | ★ | XS–S | 📋 · `internal/refractor/adapter/natskv.go:190,250` |
 | **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 · `internal/weaver/evaluator.go` (`staleMark`) |
 
@@ -70,13 +69,14 @@ feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the 
 - 2026-07-02 Arch-review, all components — filed the intake section below; Refractor findings held for the post-update re-review; root-identity designation → Designer.
 - 2026-07-02 Designer — object-plane-nats-permissions (★★★ arch #2; `$O.core-objects.>` grant fix + first natsperm object vectors; no contract change) (→ 📐).
 - 2026-07-05 objmgr-and-bootstrap-component-pages CLOSED — bootstrap/vault/privacyworker pages written, README+architecture-overview updated, Bootstrap + object-store-manager added to this rotation.
+- 2026-07-06 Arch-review — Refractor deferred re-review filed ([report](../../../docs/reviews/arch-review-2026-07-06.md)): verdict drifted; 9 rows filed (chronicler-host ★★★, publish-acl ★★★, protected-by-default ★★★); doc/marker truth-up done.
 - **Next:** Core.
 
 ## Arch-review intake — platform hardening & doc/contract truth
 
 Open corrections from the [2026-07-02 full-platform review](../../../docs/reviews/arch-review-2026-07-02.md)
 — per-finding `file:line` evidence and per-component verdicts live there; the What-cells here are abridged.
-**Refractor findings are deliberately absent**: that component is mid-update and Andrew re-reviews it after.
+Refractor's deferred re-review is now filed as its own subsection below (2026-07-06).
 Severity-ordered; same row discipline as component maintenance (shipped rows collapse to the Done log).
 
 | Item | What it is | Imp | Size | State |
@@ -89,6 +89,24 @@ Severity-ordered; same row discipline as component maintenance (shipped rows col
 | **contract7-7.3-config-example-refresh** | §7.3's bootstrap.json example still lists `processorIdentityKey` + a 5-key `metaMetaDDLKeys` block (same drift §7.2 items 1/7 fixed) — reconcile to the as-built config struct (no processor identity; one self-describing root DDL). Needs a read of the bootstrap config struct first. | ★ | XS | 📋 |
 | **fr22-service-denial-structural-fields** | FR22's `DenialDetails` has no service branch — a service-op denial names nothing structural. Fork B: emit `deniedService` (from authContext) + `deniedServiceClass` (one `.class` aspect read at denial time); `availableServiceClasses` is out of scope — what's available is the app's read-model question (P5). Contract #6 §6.12 is the spec. | ★ | S | 📋 · Fork B ratified 2026-07-03 (§6.12 amended) · low-priority |
 | **weaver-exhausted-escalation-and-model** | The augur block validates `exhausted` + parses `augur.model` but no engine path fires either — a spent-budget gap is silently skipped (evaluator `continue`, no escalation); this now contradicts §10.8's promised standing Health issue at the suppression site (code raises none) — a live code-vs-frozen-contract divergence — and `model` is consumed by nothing. Wire `exhausted` through augurEscalation + raise the Health issue (threading model), or strike both from the block and the §10.8 sentence. | ★★ | S | 📋 |
+
+### Refractor re-review (2026-07-06)
+
+The deferred post-update re-review the 2026-07-02 pass held back — verdict **drifted**; full evidence in
+[arch-review-2026-07-06.md](../../../docs/reviews/arch-review-2026-07-06.md). The docs-refresh, vendors-row,
+and stale-marker corrections were applied in the filing commit (Done log); these are the open builds.
+
+| Item | What it is | Imp | Size | State |
+|---|---|---|---|---|
+| **chronicler-host-reconciliation** | Chronicler Fires 1–2 built the banner-superseded Fork-A shape (`eventStream` on `LensSpec` + `eventlens` inside `cmd/refractor`, durable on `events.loom.>`) after the design ratified Fork C: a separate small binary; no host re-adjudication recorded. Extract to the F1 binary per the banner, or record an explicit host re-ratification in the design + charter. | ★★★ | M | 🔭 flag-for-Andrew |
+| **refractor-publish-acl-gap** | The deployed NKey allow-list misses `ops.system` (keyshredded finalization submit — Naks unbounded in the perm-enforced stack; live via `privacy-base`) and `lattice.sync.>` (Personal Lens deltas — latent). Add the grants + extend the `natsperm` proof vectors; record the shred-finalization op-submit as a sanctioned exception. Distinct from (and complements) `natsperm-matrix-hygiene`'s `$KV.>`-narrowing. | ★★★ | S | 📋 |
+| **refractor-protected-by-default-gate** | §6.14 mandates a Postgres business lens declaring neither `protected` nor `public` fails closed (activation + lint) — neither exists: an undeclared lens activates as a plain unguarded LWW table. Add the declare-one requirement at `translateSpec` + the `lint-conventions` gate; migrate existing plain lenses to explicit `public:true`. | ★★★ | S | 📋 |
+| **refractor-6-14-postgres-seam-truthup** | Close the remaining §6.14 seams: seq-guard the protected `Delete` (stale-replay resurrection window); stage the M5 wildcard-anchor contract edit the shipped RLS policy already enforces (reconcile the `rls.go`/`capabilityread.go` §6.14 citations with it); decide auth-plane vs warning severity for a paused grant/protected lens; fix the `int64(MaxUint64)` wrap in the shred→grant-table seq stamp. Supersedes the protected-Postgres-LWW row. | ★★ | S | 📋 |
+| **refractor-failure-tier-backhalf** | `cmd/refractor` never wires `SetRetryQueue`/`SetAuditWriter`: no deferred retry, no DLQ routing, no audit emission. Wire the shipped libraries, or ratify the Nak-only posture and rewrite the failure-tier Route column. | ★★ | S | 📋 |
+| **lens-target-reserved-bucket-guard** | `pkgmgr` denies only the `"capability"` alias; Refractor auto-creates any bucket a lens names and rebuild `Truncate` purges it — a mis-authored lens can wipe `health-kv`/`refractor-adjacency`; ACL-less dev runs have no backstop. Add a reserved-bucket denylist in `pkgmgr` + a fail-closed mirror at Refractor activation. | ★★ | S | 📋 |
+| **section-6-13-invalidation-amendment** | §6.13's frozen text specifies an `Invalidation` plan member + fails-activation rule that retire-simple-engine deliberately deleted (code: broad-BFS enumerator, warn-and-proceed). Stage the in-place contract edit reconciling §6.13 to the as-ratified reality, uncommitted for Andrew. | ★★ | S | 🔭 flag-for-Andrew |
+| **capabilityread-error-arm-tests** | Pin the D1 gate's fail-closed *error* posture: `(false, error)` on KV Get failure, malformed slice JSON, and list-keys failure is unpinned and free to rot. | ★★ | S | 📋 |
+| **refractor-health-contract-minors** | Align the heartbeat `version` (`"0.1.0"`→`"1.0"`) and status (`"shutdown"`→`shuttingDown`) to Contract #5 (Processor already conforms; update the observability schema doc); add a `pendingSpecs` spec-before-parent ordering test. | ★ | S | 📋 |
 
 ## Lattice feature backlog — the Phase-3 build queue
 
@@ -147,7 +165,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | **[Refractor/deploy] Loupe read-only PG role (`provision-loupe-role`)** | Loupe's shipped F9 seam reads postgres lens targets via `LOUPE_PG_DSN` — needs a SELECT-only role (mirror `provision-loftspace-role`) + an inspector posture over FORCE-RLS tables: BYPASSRLS (recommended) vs wildcard `actor_read_grants` grant. Until then, postgres lens contents render pg-pending. | ★★ | S | 📋 · unblocks loupe F9 full value |
 | **[Refractor] Convergence-lens filtering-WHERE activation guard** | Filter-retraction relies on convergence (`violating`) lenses never carrying a filtering WHERE (a retracted row reads to Weaver as entity deletion) — true for every live lens but unenforced at activation. | ★ | XS–S | 📋 review carry-out · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) §Fires-1+2-checkpoint |
-| **[Refractor] Protected/plain Postgres adapter is unguarded last-writer-wins** | The plain/protected `PostgresAdapter` ignores `projectionSeq` (unconditional LWW) — a stale replay can transiently reorder a security-relevant row. Posture accepted 2026-07-02 (the D1 M3 CDC-lag analog); this row is the follow-up hardening: extend the seq-guard to protected targets. | ★ | S–M | 📋 |
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — first consumer (LoftSpace FTS unified search) filed on verticals; the OpenSearch adapter builds only on search-engine-scale demand |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
 
@@ -175,6 +192,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-06 · `a865692` · [Refractor/docs] arch-review 2026-07-06 re-review filed + doc/marker truth-up (failure-tiers now-built sections, refractor.md 17-pkgs/step8-9/health-key, vendors ANTLR row, classify/rls stale markers)
 - 2026-07-06 · `8fa743c` · [Contract #3] §3.5/§3.4/§3.8 amended to as-built — referential integrity is script + Weaver's job (no step-6 dangling-ref pass); event schemas package-owned (no step-7 event-DDL check); arch item 5
 - 2026-07-06 · `3884f01` · [Contract #10] loom async-deadline paragraph reconciled to §10.6 — deadline bounds instanceOp submission (disarms at commit); bridge give-up timeout is the dead-call backstop (arch item 12)
 - 2026-07-06 · `6d2b4c5` · [Weaver] External-gap stale-mark reclaim — prompt fresh-instance retry after a failed call, per Contract #10 §10.3; 3-layer reviewed, fixed forward (vacuous confirmedConcluded signal)
