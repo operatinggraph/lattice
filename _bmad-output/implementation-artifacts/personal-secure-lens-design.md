@@ -529,8 +529,10 @@ fire (the one D1-gated step), and confidentiality + hydration extend it. **Depen
 posture. PL.3 gates on **D1**; PL.5 gates on **Vault Phase A**. The Steward can advance the platform
 (adapter, fan-out, hydration) immediately on ratification of *this* design, then close the security +
 confidentiality gates as D1 + Vault ratify. **D1 and Vault Phase A have both since shipped
-(2026-07-05)** — PL.3's gate is closed (above) and PL.5 is now unblocked too; it remains the one open
-fire.
+(2026-07-05)** — PL.3's gate is closed (above) and **PL.5 shipped 2026-07-06** (`88815a8` — Vault
+`IssueSessionKey` RPC + the adapter's ciphertext-passthrough marking, Gate-3 vector 5 proven e2e). All
+five fires are closed; PL.6 (shared-subject multicast dedup, WebSocket/push-bridge) stays deferred per
+§7 item 6 — no Edge Lattice client exists yet to consume it.
 
 ---
 

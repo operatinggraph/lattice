@@ -147,7 +147,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses (the path Loupe grows into)
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/personal-secure-lens-design.md) · PL.4 (Hydration Hook) shipped — next: PL.5 (Vault ciphertext, now unblocked) |
+| Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
 | NATS-subject publish-events adapter | A Refractor target adapter publishing projection deltas to `lattice.sync.user.<id>` — required for Personal Lens. | ★★ | S–M | 📐 subsumed → Personal Lens Fire 1 |
 | Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. | ★★ | XL | ✅ ratified · [design](../../implementation-artifacts/edge-lattice-full-design.md) · 🚧 seq (far) |
 
@@ -191,6 +191,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-06 · `88815a8` · [Vault/Refractor] Personal Lens Fire PL.5 CLOSED — IssueSessionKey transient-key RPC + ciphertext passthrough marking; Gate-3 vector 5 e2e; 3-layer reviewed, fixed forward (rowHasCiphertext false-positive)
 - 2026-07-06 · `512ce42` · [Chronicler] chronicler-host-reconciliation CLOSED — live cutover done (attended): refractor/chronicler cycled, health green, no cypherRule errors; NATS container needed a restart (torn bind-mount)
 - 2026-07-06 · `0ae926a` · [Refractor/Processor] refractor-publish-acl-gap — ops.system + lattice.sync.> NATS grants (refractor + processor, co-located privacyworker); 2 natsperm proof vectors; 3-layer reviewed, clean
 - 2026-07-06 · `b0530b8` · [Weaver] Registry cleanup edge branches — targetId-rename + pattern-alias-reassignment coverage (33%→89%, 50%→100%); test-only, lead-reviewed
