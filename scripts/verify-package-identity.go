@@ -5,27 +5,28 @@
 // Connects to a running Lattice NATS instance and checks that the
 // identity-domain package has been correctly installed. Asserts:
 //
-//  1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//  8 DDL aspects: .canonicalName=identity, .permittedCommands (4 ops),
-//                 .description, .script,
-//                 .inputSchema, .outputSchema, .fieldDescription, .examples
-//    Each aspect also validated for correct vertexKey + localName envelope fields.
-//  7 sensitive aspect-type DDLs (ssn, dob, name, email, phone, claimKey,
-//    credentialBinding): class=meta.ddl.aspectType, each carrying a .sensitive
-//    aspect with value=true
-//  4 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
-//    UpdateIdentityState, ClaimIdentity, RecordIdentityPII
-//  6 grantedBy link keys:
-//    CreateUnclaimedIdentity → operator, frontOfHouse, backOfHouse
-//    UpdateIdentityState     → operator
-//    ClaimIdentity           → consumer
-//    RecordIdentityPII       → operator, frontOfHouse, backOfHouse
-//  3 user-facing role vertices (consumer, frontOfHouse, backOfHouse)
-//    seeded by PreInstall hook (vtx.role.<NanoID>)
-//  1 package vertex (vtx.package.<NanoID>)
-//  1 package manifest aspect with name=identity-domain
+//	1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
+//	8 DDL aspects: .canonicalName=identity, .permittedCommands (5 ops),
+//	               .description, .script,
+//	               .inputSchema, .outputSchema, .fieldDescription, .examples
+//	  Each aspect also validated for correct vertexKey + localName envelope fields.
+//	7 sensitive aspect-type DDLs (ssn, dob, name, email, phone, claimKey,
+//	  credentialBinding): class=meta.ddl.aspectType, each carrying a .sensitive
+//	  aspect with value=true
+//	5 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
+//	  UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity
+//	8 grantedBy link keys:
+//	  CreateUnclaimedIdentity   → operator, frontOfHouse, backOfHouse
+//	  UpdateIdentityState       → operator
+//	  ClaimIdentity             → consumer
+//	  RecordIdentityPII         → operator, frontOfHouse, backOfHouse
+//	  ProvisionConsumerIdentity → identityProvisioner, operator
+//	4 role vertices (consumer, frontOfHouse, backOfHouse — user-facing;
+//	  identityProvisioner — system-only) seeded by PreInstall hook (vtx.role.<NanoID>)
+//	1 package vertex (vtx.package.<NanoID>)
+//	1 package manifest aspect with name=identity-domain
 //
-// Total target: ~55 OK lines.
+// Total target: ~62 OK lines.
 //
 // Exit 0: all assertions pass.
 // Exit 1: one or more assertions failed.
@@ -55,10 +56,11 @@ const (
 
 // grantTarget maps operationType → expected grantee canonical names.
 var identityGrantTargets = map[string][]string{
-	"CreateUnclaimedIdentity": {"operator", "frontOfHouse", "backOfHouse"},
-	"UpdateIdentityState":     {"operator"},
-	"ClaimIdentity":           {"consumer"},
-	"RecordIdentityPII":       {"operator", "frontOfHouse", "backOfHouse"},
+	"CreateUnclaimedIdentity":   {"operator", "frontOfHouse", "backOfHouse"},
+	"UpdateIdentityState":       {"operator"},
+	"ClaimIdentity":             {"consumer"},
+	"RecordIdentityPII":         {"operator", "frontOfHouse", "backOfHouse"},
+	"ProvisionConsumerIdentity": {"identityProvisioner", "operator"},
 }
 
 var identityExpectedOps = []string{
@@ -66,17 +68,24 @@ var identityExpectedOps = []string{
 	"UpdateIdentityState",
 	"ClaimIdentity",
 	"RecordIdentityPII",
+	"ProvisionConsumerIdentity",
 }
 
 var identityOpScopes = map[string]string{
-	"CreateUnclaimedIdentity": "any",
-	"UpdateIdentityState":     "any",
-	"ClaimIdentity":           "self",
-	"RecordIdentityPII":       "any",
+	"CreateUnclaimedIdentity":   "any",
+	"UpdateIdentityState":       "any",
+	"ClaimIdentity":             "self",
+	"RecordIdentityPII":         "any",
+	"ProvisionConsumerIdentity": "any",
 }
 
 // userFacingRoles are seeded by identity-domain's PreInstall hook.
 var identityUserFacingRoles = []string{"consumer", "frontOfHouse", "backOfHouse"}
+
+// identitySystemRoles are declared alongside the user-facing roles but are
+// not user-facing (identityProvisioner is granted only to the Gateway's own
+// bootstrap identity via a one-time ops action, never to a human).
+var identitySystemRoles = []string{"identityProvisioner"}
 
 func main() {
 	natsURL := pkgverify.EnvOrDefault("NATS_URL", nats.DefaultURL)
@@ -350,9 +359,10 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// 8. Assert 3 user-facing role vertices seeded by PreInstall.
+	// 8. Assert 3 user-facing role vertices seeded by PreInstall, plus the
+	// identityProvisioner system role.
 	// -------------------------------------------------------------------------
-	for _, roleName := range identityUserFacingRoles {
+	for _, roleName := range append(append([]string{}, identityUserFacingRoles...), identitySystemRoles...) {
 		roleID, found := roleIDByCanonical[roleName]
 		if !found {
 			fail("vtx.role.*[canonicalName="+roleName+"]", "not found in Core KV")
