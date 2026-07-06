@@ -263,7 +263,7 @@ func (s *Seeder) provisionStreams(ctx context.Context) error {
 //     TombstoneMetaVertex), all scope=any
 //   - 3 grantedBy links (each meta-permission → operator)
 //   - 1 admin→operator holdsRole link
-//   - 3 service-actor→operator holdsRole links (Loom + Weaver + Bridge)
+//   - 5 service-actor→operator holdsRole links (Loom + Weaver + Bridge + object-store-manager + privacy)
 //
 // Total ≈ 75 Core KV entries. See `scripts/verify-kernel.go`.
 //
@@ -614,10 +614,12 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	// PRODUCER (Contract #6 §6.14, D1 design §3.4 M5). The wildcard sibling of
 	// 5c: grants the reserved WildcardAnchor ("*") to the same fixed,
 	// kernel-seeded root-equivalent identities the write-path capability lens
-	// (5) special-cases, so an all-access read (e.g. a clinic staff/admin
-	// worklist) still passes through the §6.14 set-membership RLS policy —
-	// never a bypass. `identity.data.protected = true` is a literal predicate,
-	// not a graph walk, so core references no rbac vocabulary.
+	// (5) grants root to — those holding the primordial `operator` role via
+	// `holdsRole` (Contract #7 §7.7 / #6 §6.1) — so an all-access read (e.g. a
+	// clinic staff/admin worklist) still passes through the §6.14 set-membership
+	// RLS policy — never a bypass. Selection is the same bounded
+	// `holdsRole → operator` existence check; `data.protected` is retired as a
+	// capability designator (anti-brick only, Fork A 2026-07-02).
 	capReadWildcardGrantsLens := CapabilityReadWildcardGrantsLensDefinition()
 	capReadWildcardGrantsLensVal, capReadWildcardGrantsLensErr := MakeVertexEnvelope(CapabilityReadWildcardGrantsLensKey, "meta.lens", map[string]any{"protected": true})
 	if err := add(CapabilityReadWildcardGrantsLensKey, capReadWildcardGrantsLensVal, capReadWildcardGrantsLensErr); err != nil {
@@ -746,11 +748,11 @@ func buildPrimordialEntries() ([]kvEntry, error) {
 	// target. Reads as the sentence "<service> holdsRole operator". This edge
 	// establishes root-equivalence topologically (Contract #7 §7.7) — no new
 	// role, permission, grantedBy link, cypher branch, or step-3 code. The
-	// `cap.identity.<id>` doc itself is projected by the Capability Lens
-	// primordial-identity anchor, which grants the fixed kernel op set to
-	// every `data.protected = true` identity as a literal, NOT a graph walk
-	// (post-12.6 decomposition — see lenses.go CapabilityLensDefinition;
-	// role-derived package grants project to the disjoint cap.roles.<actor>).
+	// `cap.<actor>` doc itself is projected by the write-path Capability Lens
+	// by walking this very `holdsRole → operator` edge (Contract #7 §7.7 /
+	// #6 §6.1). `data.protected` is retired as a capability designator — it
+	// carries only its anti-brick (immutability) meaning now (Fork A, 2026-07-02).
+	// Role-derived package grants project to the disjoint `cap.roles.<actor>`.
 	loomHoldsVal, loomHoldsErr := MakeLinkEnvelope(
 		LoomHoldsRoleLinkKey,
 		"vtx.identity."+LoomIdentityID,

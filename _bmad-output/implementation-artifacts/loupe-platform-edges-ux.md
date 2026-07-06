@@ -649,7 +649,34 @@ control on the existing map, not a separate page. The ledger browser (L3) is `#/
 | `#/history/ledger` | Ledger browser (archive-mode segments) | L3 |
 | `#/history/ledger/<segmentId>` | One archived segment (ops verbatim, hash-chained) | L3 |
 
-### 4.1 Layer 1 — Flow history ("what happened")
+### 4.1 Layer 1 — Flow history ("what happened") — RECONCILED against the shipped Flows tab
+
+> **Reconciliation (Winston, 2026-07-06).** Chronicler Fire 3 (lattice, `cfc65fe`) independently shipped a
+> Flows tab into `cmd/loupe` — `#/flows` + `GET /api/flows?status=` — covering this layer's core value
+> (list every flow instance off `orchestration-history`, live-vs-orphaned badge cross-referenced against
+> `lattice.ctrl.loom.list`) before this doc's build reached it. Rather than build a second, parallel
+> `#/history` browser reading the same bucket, **L1 is satisfied in substance by the shipped Flows tab**;
+> the deltas below are accepted as-is, not queued rework:
+> - **Route/endpoint naming** (`#/flows` / `/api/flows`, not `#/history` / `/api/history/flows`) stays as
+>   shipped — renaming a working, tested surface for naming parity alone is churn, not value.
+> - **Card list, not the two-pane faceted idiom** — right-sized for today's flow volume; a facet-rail +
+>   paging upgrade is a **when-needed follow-on** (this doc's spec below stays the reference for it), not
+>   a debt.
+> - **No separate `#/history/flow/<instanceId>` timeline page.** The Chronicler design's own §2.6 v1 row is
+>   *flat* (no per-step events) — the "lifecycle summary" this doc specs for that page is exactly the set
+>   of fields the Flows card already renders (patternRef, status, live/orphaned, instanceId, subjectKey
+>   link, started/ended, failureReason). A dedicated route would show the same facts with no more depth;
+>   it earns its keep only once a step-event history lens exists (the "per-step detail — pending a
+>   step-event history lens" slot this doc already designed for it, §4.1 below).
+>
+> This resolves the loupe.md board's "L1 overlaps the Flows tab — reconcile before building `#/history`"
+> note. **L2 (the map scrubber, §4.2) is unblocked**: it reads the same `orchestration-history` bucket the
+> Flows tab already proves live, so the v1 scrubber needs nothing this reconciliation withholds.
+>
+> **§4.2 L2 v1 SHIPPED same-fire (`c5e1c80`):** `GET /api/history/timeline?from=&to=` +
+> `logic/scrubber.js`'s `framesFromFlows` + the `#sysmap-scrubber` strip on `#/map`. Flow-liveness replay
+> only (list/count of flows live at the scrubbed instant) — edge-level pulse fidelity stays the F3
+> (archive-mode)-gated upgrade this doc already specced, not built here.
 
 Rides Chronicler F1/F2 (`loomFlowHistory` + Weaver history read-models). Today a Loom flow vanishes at
 terminal (`loom-state` deletes its cursor), so "why did the 3am onboarding fail?" is unanswerable. The
