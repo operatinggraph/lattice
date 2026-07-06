@@ -1,8 +1,16 @@
 # Scoped privileged-lane grants — a middle tier between ordinary and root (design)
 
-**Status:** 📐 **awaiting-Andrew (ratification)** · Designer fire (Winston, 2026-07-06) · Lattice lane
-(Security & trust boundary) · **the "C" of** `loupe-operator-auth-lift-design.md` §4 (Andrew ratified
-"C, built after B" 2026-07-06) · **sequenced after** B (the scoped `consoleOperator` role)
+**Status:** ✅ **Andrew-ratified (2026-07-06) — mechanism C1.** Designer fire (Winston, 2026-07-06) ·
+Lattice lane (Security & trust boundary) · **the "C" of** `loupe-operator-auth-lift-design.md` §4 ·
+**sequenced after** B (the scoped `consoleOperator` role).
+
+> **Ratification (Andrew, 2026-07-06): C1** — per-op `lanes` on the grant + a **core-owned allowlist** of
+> grantable `{op→privileged-lane}` (v1 = the pkg-lifecycle trio at `meta`); `consoleOperator` stays an
+> **ordinary** `cap.roles` actor (no anchor, no `SystemActorKeys` snapshot), so it also **fixes the
+> boot-snapshot staleness finding**. C2 (curated intermediate anchor) rejected as analyzed (§4). Build
+> sequenced after B, behind `real-actor-write-auth` Phase 1. **Contract #6 §6.4 edit** (§5): staged
+> uncommitted when C's build is the next fire (specified now to avoid a days-long dangling edit in the
+> shared tree).
 
 ---
 
