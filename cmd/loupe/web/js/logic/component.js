@@ -36,6 +36,12 @@ function metricsLine(comp, doc) {
       " · ops submitted " + num(m.ops_submitted_total) +
       " · auth failures " + num(m.auth_failures_total);
   }
+  if (comp === "vault") {
+    return "DEK cache " + num(m.dek_cache_size) +
+      " · vault calls " + num(m.vault_calls_total) +
+      " · shreds handled " + num(m.keyshredded_handled_total) +
+      " · backend " + num(m.backend);
+  }
   if (comp === "refractor") {
     var lags = m.lensLags;
     if (!lags || typeof lags !== "object") return "";

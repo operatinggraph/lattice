@@ -10,6 +10,7 @@ import { replaceRoute } from "../router.js";
 import { designAheadCopy, designAheadPointer, issueClass, lensStateDot, lensStateGlyph, pendingReadpathCopy } from "../logic/status.js";
 import { metricsLine, eventSummary, controlSurface } from "../logic/component.js";
 import { authFailureRate, pctLabel, jwksRows, revocationStatus, revokeActorValid, revokeConfirmReady } from "../logic/gateway.js";
+import { shredFleetSummary, shredFinalizationLine, shredInFlight } from "../logic/shred.js";
 import { renderDoc, keyLinkEl } from "../render.js";
 
 const state = { id: null, modal: null, revokeTimers: [] };
@@ -218,6 +219,36 @@ function renderGatewaySecurity(col, page) {
   }
 }
 
+// renderVaultInfo fills the Vault page's right column with the shred-status
+// fleet view: Vault custody is not operator-mutable (loupe-platform-edges-
+// ux.md §3.1), so this column is the shred ledger's summary, not a control
+// surface — every in-flight identity links into the Graph explorer.
+function renderVaultInfo(col) {
+  col.appendChild(el("p", "muted small",
+    "Vault custody is not operator-mutable — the shred surface is per-identity, in the Graph explorer."));
+  col.appendChild(el("h4", "comp-subsection", "Shred status"));
+  const box = el("div");
+  col.appendChild(box);
+  loadVaultShreds(box);
+}
+
+// loadVaultShreds fetches the privacy-shreds bucket rows and renders the
+// fleet summary plus every still-finalizing identity.
+async function loadVaultShreds(box) {
+  box.appendChild(el("div", "muted small", "loading…"));
+  const body = await api("/api/vault/shreds");
+  box.innerHTML = "";
+  if (body.error) { box.appendChild(el("div", "error-text small", body.error)); return; }
+  const rows = body.shreds || [];
+  box.appendChild(el("div", "comp-metrics", shredFleetSummary(rows)));
+  rows.filter(shredInFlight).forEach((r) => {
+    const line = el("div", "control-item");
+    line.appendChild(keyLinkEl(r.identityKey, "cid"));
+    line.appendChild(el("span", "muted small", shredFinalizationLine(r)));
+    box.appendChild(line);
+  });
+}
+
 // replyBox builds the column's persistent reply area: a collapsible details
 // block that stays put while rows re-render around it.
 function replyBox() {
@@ -244,6 +275,7 @@ function renderControl(col, page) {
   col.appendChild(el("h3", "comp-section", "Control"));
   if (surface === "none") {
     col.appendChild(el("p", "muted small", "No operator control plane — state is above."));
+    if (page.component === "vault") renderVaultInfo(col);
     return;
   }
   if (surface === "events") {
