@@ -124,9 +124,12 @@ above with no change to the completion model — the bridge posts `replyOp` (hen
 analogous to the `.outcome` aspect (D5) — and drives **re-poll + a give-up timeout** through its §10.4
 schedule lane (`schedule.bridge.>`). A timeout posts a terminal `replyOp` with a `failed` status, so a
 never-answered call **converges** rather than parking forever. The §10.6 step `deadline.<instanceId>`
-TTL — the off-stream backstop — is sized to the external SLA (per-adapter) and the bridge's give-up
-timeout fires **before** it: the normal path is a clean bridge-posted outcome, and the Loom deadline
-catches only a genuinely dead bridge. A synchronous adapter (today's fakes) is unchanged — it resolves
+TTL bounds the **`instanceOp` submission only** — it **disarms at `instanceOp` commit** (§10.6), so it
+never survives to see the external round-trip and does **not** catch a dead bridge. The dead-call backstop
+is the **bridge's own give-up timeout** (its §10.4 `schedule.bridge.>` lane, above), which posts a terminal
+`failed` `replyOp`; a genuinely dead bridge surfaces on the **bridge's** Contract #5 Health, not a
+per-instance Loom timeout. (A single global `CallDeadline` on the unbounded bridge wait is deferred until
+real, slow adapters exist — today's fakes resolve inline.) A synchronous adapter (today's fakes) is unchanged — it resolves
 inline and posts `replyOp` immediately, writing no pending marker.
 
 **Guards — pure predicate over the subject's current state.** Absent guard = step always runs.
