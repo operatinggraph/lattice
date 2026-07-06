@@ -12,12 +12,7 @@ This is the critical design principle: every actor's auth traces back to graph t
 
 `make up` writes the following directly to Core KV at first initialization (the sole sanctioned non-Processor write path **into Core KV**, and only during bootstrap). One other non-Processor write path exists, and it is deliberately **not** a Core KV path: trusted clients stream binary blob **bytes** directly into the `core-objects` Object Store — the off-graph blob plane, parallel to Health-KV being a non-Processor *state* plane (Decision #4). Those byte writes carry no graph state and never touch the Capability Lens; the **graph** record of an object (its `vtx.object.<oid>` vertex + `.content` aspect + links) is still written through the Processor like any other state. See the large-file/binary design.
 
-**1. Meta-meta DDLs** — DDLs describing how DDL is described. Each is a `vtx.meta.<NanoID>` vertex with appropriate aspects:
-- DDL for `meta.ddl.vertexType` (the DDL that describes what a vertex-type DDL looks like)
-- DDL for `meta.ddl.aspectType`
-- DDL for `meta.ddl.linkType`
-- DDL for `meta.ddl.eventType`
-- DDL for `meta.lens` (the DDL describing what a Lens definition looks like)
+**1. Meta-meta root DDL** — the kernel's **sole** DDL: one `vtx.meta.<NanoID>` vertex (`canonicalName: "root"`, `class: "meta.ddl.vertexType"`) that governs **all** `vtx.meta.*` mutations via `CreateMetaVertex` / `UpdateMetaVertex` / `TombstoneMetaVertex`, dispatching on `op.payload.targetClass` (one of `meta.ddl.vertexType` / `aspectType` / `linkType` / `eventType` / `meta.lens`). It is self-describing (a `meta.ddl.vertexType` that itself governs meta-vertices). The former five separate per-class meta-meta DDLs collapsed into this one root DDL, plus the reserved aspect-type DDLs (item 3) and the package-lifecycle DDLs (`InstallPackage` / `UninstallPackage` / `UpgradePackage`).
 
 **2. Reserved type DDLs** — DDLs for the platform's foundational vertex types:
 - `meta` type DDL (used by all meta-vertices)
@@ -48,24 +43,25 @@ This is the critical design principle: every actor's auth traces back to graph t
 - `targetBucket: "capability"`
 - `outputSchema`: JSON Schema for the Capability KV document (Contract #6 §6.2)
 
-**6. Root role and root permission vertices** — the topology that produces root-equivalent capability when projected:
-- One or more `vtx.role.<NanoID>` vertices with `canonicalName: "systemRoot"` (or similar)
-- Permission vertices granting `scope: "any"` on all platform operation types
-- Links: `grantedBy` from each permission vertex to the root role (link direction is `permission → role`; reads as "permission granted by role")
+**6. Operator role + kernel permission vertices** — the topology that produces root-equivalent capability when projected. The **only** primordial role is `operator` (one `vtx.role.<NanoID>`, `canonicalName: "operator"`). The kernel seeds the meta-permission vertices (`CreateMetaVertex` / `UpdateMetaVertex` / `TombstoneMetaVertex`, `scope: "any"`) and the package-lifecycle permissions, each linked `grantedBy` → operator (link direction `permission → role`; reads "permission granted by role"). An identity holding the operator role via `holdsRole` (item 8) projects to root-equivalent capability — this bounded single-link existence check **is** the root designation (Contract #6 §6.1 / #7 §7.7), **not** a `data.protected` flag (`protected` carries only anti-brick immutability).
 
-**7. System identity vertices:**
-- `vtx.identity.<NanoID>` with `class: "identity.system.bootstrap"` — the identity used to author all primordial entries' provenance fields
-- `vtx.identity.<NanoID>` with `class: "identity.system.processor"` — the Processor's internal service actor identity
+**7. System identity vertices** (six kernel actors, each carrying `data.protected: true` for anti-brick immutability — per §6.1, `protected` is *not* a capability designator):
+- The **primordial admin identity** (`vtx.identity.<NanoID>`, `class: "identity"`) — authors all primordial entries' provenance.
+- **Five internal service-actor identities** — Loom, Weaver, the Bridge, object-store-manager, and the privacy worker (`class: "identity.system.<component>"`). **There is no `identity.system.processor`**: the Processor is the sole Core-KV *writer* (P2), not an actor that submits operations, so it needs no seeded actor identity.
 
-**8. Topology links from system identities to root role:**
-- `lnk.identity.<bootstrap-id>.holdsRole.role.<root-role-id>`
-- `lnk.identity.<processor-id>.holdsRole.role.<root-role-id>`
+Each of the six holds the operator role (item 8), which is what projects its root-equivalent capability.
+
+**8. Topology links — each of the six system identities `holdsRole` the operator role:**
+- `lnk.identity.<admin-id>.holdsRole.role.<operator-role-id>`
+- one `holdsRole` → operator edge per service actor (Loom / Weaver / Bridge / object-store-manager / privacy)
+
+This `holdsRole → operator` topology **is** how the Capability Lens designates root-equivalence (Contract #6 §6.1 / #7 §7.7) — a bounded single-link existence check, not a class and not a `data.protected` flag.
 
 (Additional internal service actor identities for Loom, Weaver, etc. are seeded by their respective stream's bootstrap procedures in Phase 2+, following the same pattern.)
 
 **9. Bootstrap operation tracker** — a synthetic `vtx.op.<NanoID>` representing platform genesis. This tracker has **no TTL** (it's a permanent record, not subject to the 24h idempotency horizon). All primordial entities reference this tracker in their `createdByOp` field, making the entire bootstrap a "single operation" in the provenance audit trail.
 
-**Direct Capability KV writes from `make up`:** **None.** The Capability Lens, once Refractor starts, projects `cap.identity.<bootstrap-id>` and `cap.identity.<processor-id>` from the topology above.
+**Direct Capability KV writes from `make up`:** **None.** Once Refractor starts, the Capability Lens projects `cap.<actor>` for each of the six kernel identities by walking its `holdsRole → operator` topology above — no `cap.*` document is directly seeded.
 
 ### 7.3 NanoID Generation and Bootstrap Config
 
@@ -140,7 +136,7 @@ Several things deliberately stay out of `make up`:
 
 **No business DDLs.** The bootstrap seeds only the meta-meta layer and platform-essential types (`meta`, `op`, `identity`, `role`, `permission`). Business types (`lease`, `unit`, `building`, `service`, etc.) are authored by operators (or by AI agents in self-improvement flows) after bootstrap completes, via the standard write path (`ops.meta.>` lane).
 
-**No user identities.** The only identities at bootstrap are the system identities (`identity.system.bootstrap` and `identity.system.processor`). Human and AI agent identities are created post-bootstrap through the standard `CreateIdentity` flow.
+**No user identities.** The only identities at bootstrap are the six kernel actors (the primordial admin `identity` plus the Loom / Weaver / Bridge / object-store-manager / privacy service actors — §7.2 item 7). Human and AI agent identities are created post-bootstrap through the standard `CreateIdentity` flow.
 
 **No Lens projections beyond Capability.** Other Lenses (business projections, query surfaces) are authored after bootstrap and activate via CDC.
 
