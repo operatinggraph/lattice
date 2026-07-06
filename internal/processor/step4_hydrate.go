@@ -191,6 +191,11 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			if _, ok := hydrated[key]; ok {
 				continue
 			}
+			// A duplicate optionalReads entry already probed absent: skip the
+			// second live GET (nil-map read is safe).
+			if _, ok := knownAbsent[key]; ok {
+				continue
+			}
 			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
 			if err != nil {
 				if errors.Is(err, substrate.ErrKeyNotFound) {

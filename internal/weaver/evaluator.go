@@ -560,6 +560,15 @@ func (e *Engine) bumpOscillation(ctx context.Context, targetID, actionRef string
 	}
 }
 
+// planOptionalReads resolves a plan's optional-read closure for one episode's
+// claimID (nil-safe — most plans declare none).
+func planOptionalReads(pl *plan, claimID string) []string {
+	if pl.optionalReads == nil {
+		return nil
+	}
+	return pl.optionalReads(claimID)
+}
+
 // fire materializes one episode's op and fire-and-forget publishes it. A
 // publish failure Naks: the mark already exists, so the redelivery re-derives
 // the SAME requestId and re-publishes (idempotent at the Processor). The op's
@@ -576,15 +585,6 @@ func (e *Engine) bumpOscillation(ctx context.Context, targetID, actionRef string
 // (design augur-dispatch-pickup §3.4); Nak-ing here would needlessly re-fire
 // the ALREADY-SUCCEEDED primary op's redelivery path for a purely cosmetic
 // flip delay.
-// planOptionalReads resolves a plan's optional-read closure for one episode's
-// claimID (nil-safe — most plans declare none).
-func planOptionalReads(pl *plan, claimID string) []string {
-	if pl.optionalReads == nil {
-		return nil
-	}
-	return pl.optionalReads(claimID)
-}
-
 func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markRevision uint64, claimID string, pl *plan) substrate.Decision {
 	requestID := deriveEpisodeRequestID(targetID, entityID, col, markRevision)
 	if pl.requestID != nil {

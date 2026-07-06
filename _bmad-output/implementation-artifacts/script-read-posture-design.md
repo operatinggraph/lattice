@@ -312,3 +312,30 @@ deleted keys; (c) Weaver's double `deriveStableTaskID` derivation drifting — d
 equality pinned by test; (d) old-binary/new-record skew on the Loom outbox optionalReads field —
 degrades to the lazy-read fallback, benign; (e) lint annotation-leak between adjacent calls within
 the 8-line window — advisory-only surface, closest-annotation-wins mitigates.
+
+**Addendum (2026-07-06, post-close): the background blind-hunt reviewer's report landed after the
+fire closed** (the child was running, not lost — the inline lens re-run above stands, but the full
+report went deeper). Reconciliation, fixes applied on the fire branch pre-merge:
+
+- **CONFIRMED (new, not an overturned dismissal): logical-delete create-wedge in CreateTask.**
+  Dismissal (b) above covered *hard* tombstones only (KVGet not-found → true self-heal). For a
+  *logically*-deleted task (present doc, `isDeleted=true`) the script's create can NEVER commit —
+  `step8_commit.go` sets `CreateOnly=true` unconditionally, the still-present key always conflicts,
+  the conflict is structurally non-retry-attributable (hydrates as present, not known-absent), and a
+  Weaver reclaim reproduces it every episode (bounded: each attempt Terms honestly; no hot loop).
+  **Pre-existing** (the lazy `kv.Read` path had identical semantics) and the same self-heal claim
+  sits in the frozen §10.3 text ("logical delete ⇒ present-but-isDeleted ⇒ create") — a contract
+  truth-drift, not a Fire 1–2 defect. Fixed here: the ddls.go comment now states the real behavior
+  instead of re-asserting the broken claim. **Follow-up to file post-merge (component-maintenance
+  row):** decide resurrect-vs-suppress for the logical-delete branch (e.g. revision-conditioned
+  update on `isDeleted` docs) + stage the §10.3 truth reconciliation.
+- **Fixed (cosmetic):** `fire`'s doc comment re-attached (planOptionalReads had been inserted
+  between comment and func, orphaning the followUp/Nak paragraph); duplicate `optionalReads`
+  absent-key now skips the second live GET (knownAbsent checked before KVGet).
+- **Recorded, no code change (advisory surfaces, accepted):** (i) `recordCommitConflict` now also
+  counts absorbed declared-dedup create races into the §3.2 lane-misassignment Health signal —
+  signal dilution, not correctness; split the counter when the signal is next consumed. (ii) lint
+  annotation window (8 lines, closest-wins) can silently inherit across an intervening call/function
+  boundary — false-negative vector on an advisory-only lint; tighten (reset at intervening
+  kv.* call) when the debt list is worked down. (iii) `fileMutates` is file-granular — coarse but
+  conservative; same revisit point as (ii).

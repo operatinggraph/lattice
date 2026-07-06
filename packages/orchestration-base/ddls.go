@@ -339,10 +339,17 @@ def execute(state, op):
         # task here means a duplicate dispatch: return empty mutations AND empty
         # events — a coherent no-op (the CreateOnly mutation below still guards the
         # same-commit concurrent race). Branch on isDeleted too: kv.Read yields
-        # None for a hard-tombstoned key but a present doc with isDeleted=true for
-        # a logically-deleted one — either means the gap still needs its task, so
-        # absent OR deleted falls through to create (self-heal); only a live task
-        # suppresses.
+        # None for a hard-tombstoned key but a present doc with isDeleted=true
+        # for a logically-deleted one — either way the gap still needs its task,
+        # so absent OR deleted falls through to create; only a live task
+        # suppresses. Self-heal actually COMPLETES only for absent/hard-tombstone
+        # (key gone → CreateOnly commits): on a logically-deleted key step 8's
+        # unconditional CreateOnly can never commit onto the still-present doc —
+        # each attempt Terms as an honest RevisionConflict and a reclaim
+        # re-dispatch reproduces it (bounded, operator-visible, no hot loop).
+        # The §10.3 "logical delete ⇒ create" self-heal claim holds only for
+        # hard tombstones — known truth-drift, follow-up recorded in the
+        # script-read-posture design §12 checkpoint.
         # read-posture: (d) declared in contextHint.optionalReads by the
         # engine dispatchers (see the dedup note above)
         existing = kv.Read(task_key)
