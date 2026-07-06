@@ -87,7 +87,7 @@ var (
 // cmd/<name> is a vertical application, which P5 forbids from reading Core KV
 // directly: it must read a lens projection in a read-model target.
 var platformCmds = map[string]bool{
-	"bootstrap": true, "bridge": true, "lattice": true, "lattice-pkg": true,
+	"bootstrap": true, "bridge": true, "chronicler": true, "lattice": true, "lattice-pkg": true,
 	"loom": true, "loupe": true, "object-store-manager": true,
 	"processor": true, "refractor": true, "weaver": true,
 }

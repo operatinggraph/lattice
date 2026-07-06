@@ -158,6 +158,7 @@ down:
 	-pkill -f "bin/weaver" 2>/dev/null || true
 	-pkill -f "bin/bridge" 2>/dev/null || true
 	-pkill -f "bin/object-store-manager" 2>/dev/null || true
+	-pkill -f "bin/chronicler" 2>/dev/null || true
 	-pkill -f "bin/loupe" 2>/dev/null || true
 	-pkill -f "bin/loftspace-app" 2>/dev/null || true
 	-pkill -f "bin/clinic-app" 2>/dev/null || true
@@ -306,6 +307,7 @@ build:
 	go build -o bin/object-store-manager ./cmd/object-store-manager
 	go build -o bin/loupe ./cmd/loupe
 	go build -o bin/gateway ./cmd/gateway
+	go build -o bin/chronicler ./cmd/chronicler
 
 ## test-cli — Run the lattice CLI unit + E2E tests.
 test-cli:

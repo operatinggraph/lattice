@@ -54,8 +54,9 @@ func protectedStreamDenies(stream string) []string {
 
 // The protected KV streams whose integrity is load-bearing.
 const (
-	coreKVStream       = "KV_core-kv"
-	capabilityKVStream = "KV_capability-kv"
+	coreKVStream               = "KV_core-kv"
+	capabilityKVStream         = "KV_capability-kv"
+	orchestrationHistoryStream = "KV_orchestration-history"
 )
 
 // component is one NATS user — a Lattice binary's scoped connection.
@@ -151,6 +152,29 @@ var matrix = []component{
 		desc:     "object GC actor; writes the object store, mutates Core state via ops",
 		pubAllow: []string{bootstrap.OpsWildcardSubject, "$O.core-objects.>", "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
+	},
+	{
+		name: "chronicler",
+		desc: "event-stream-to-KV-row materializer; CDC-reads vtx.meta.> for eventStream lens definitions, writes only its own lens-target buckets",
+		// CDC-subscribing core-kv (vtx.meta.>, read-only) and core-events (its
+		// definitions' subjects) needs no publish grant — reads are unrestricted;
+		// this account-level matrix gates writes only. Chronicler writes its own
+		// eventStream lens targets (orchestration-history is the only one today,
+		// chronicler-host-reconciliation-design.md / orchestration-history-read-
+		// model-design.md) + health-kv, and submits no ops (P2: it is a pure
+		// read-model materializer, never a Core-KV writer).
+		// The stream-admin verbs (CREATE/UPDATE/DELETE/PURGE) on chronicler's own
+		// backing stream are denied to chronicler itself too — bootstrap already
+		// primordially provisions orchestration-history (like weaver-targets/
+		// loom-state), so chronicler only ever needs the ordinary $KV.
+		// publish subject, never stream administration. This does NOT close the
+		// side channel for every OTHER component's pre-existing broad $JS.API.>
+		// grant (refractor, processor, loom, weaver, …) — that is the same
+		// natsperm-matrix-hygiene-tracked debt TestGatewayRevocationBucketWriteIsolation
+		// already documents for weaver-targets/token-revocation, now also
+		// covering this new bucket, not newly introduced here.
+		pubAllow: []string{"$KV.orchestration-history.>", "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
+		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream, orchestrationHistoryStream),
 	},
 	{
 		name: "bootstrap",

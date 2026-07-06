@@ -134,7 +134,7 @@ func TestConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse config: %v", err)
 	}
-	if got, want := len(opts.Nkeys), 13; got != want {
+	if got, want := len(opts.Nkeys), 14; got != want {
 		t.Errorf("NKey users = %d, want %d", got, want)
 	}
 	// Every user must carry an explicit publish allow-list (default-deny on
@@ -164,7 +164,7 @@ func TestCoreKVWriteIsolation(t *testing.T) {
 		t.Fatalf("processor KVPut core-kv: want success, got %v", err)
 	}
 
-	assertDeniedPuts(t, url, "core-kv", []string{"refractor", "loom", "weaver", "bridge", "loupe", "lattice", "gateway", "loftspace-app", "clinic-app", "object-store-manager"})
+	assertDeniedPuts(t, url, "core-kv", []string{"refractor", "loom", "weaver", "bridge", "loupe", "lattice", "gateway", "loftspace-app", "clinic-app", "object-store-manager", "chronicler"})
 }
 
 // TestCapabilityKVWriteIsolation: only refractor (and bootstrap) may write the
@@ -182,7 +182,29 @@ func TestCapabilityKVWriteIsolation(t *testing.T) {
 		t.Fatalf("refractor KVPut capability-kv: want success, got %v", err)
 	}
 
-	assertDeniedPuts(t, url, "capability-kv", []string{"processor", "loom", "weaver", "loupe", "lattice", "gateway"})
+	assertDeniedPuts(t, url, "capability-kv", []string{"processor", "loom", "weaver", "loupe", "lattice", "gateway", "chronicler"})
+}
+
+// TestChroniclerOrchestrationHistoryWriteAccess: chronicler (the eventStream
+// lens materializer) may write its own orchestration-history read model; a
+// non-chronicler component cannot — the direct proof for
+// chronicler-host-reconciliation's new matrix entry (only Chronicler writes
+// this bucket, mirroring TestLensTargetWriteIsolation's refractor pin for
+// weaver-targets).
+func TestChroniclerOrchestrationHistoryWriteAccess(t *testing.T) {
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provision(t, boot, "orchestration-history")
+
+	chr := connectAs(t, url, "chronicler")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := chr.KVPut(ctx, "orchestration-history", "instance_id.test", []byte("v")); err != nil {
+		t.Fatalf("chronicler KVPut orchestration-history: want success, got %v", err)
+	}
+
+	assertDeniedPuts(t, url, "orchestration-history", []string{"loom", "weaver", "loupe", "lattice", "gateway", "loftspace-app", "clinic-app"})
 }
 
 // TestLensTargetWriteIsolation: refractor (the sole projector) may write a
@@ -379,4 +401,38 @@ func TestBackingStreamSideChannel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestChroniclerBackingStreamSideChannel: chronicler-host-reconciliation's new
+// bucket closes the backing-stream side channel from day one rather than
+// reproducing the weaver-targets-class debt — chronicler itself is denied
+// stream-admin verbs on its OWN backing stream (bootstrap primordially
+// provisions orchestration-history; chronicler never administers it, only
+// reads/writes rows). Not a full close: every OTHER component's pre-existing
+// broad $JS.API.> grant (refractor, processor, loom, weaver, …) still isn't
+// denied here — that is the SAME natsperm-matrix-hygiene-tracked debt
+// TestGatewayRevocationBucketWriteIsolation already documents for
+// weaver-targets/token-revocation, now also covering this bucket.
+func TestChroniclerBackingStreamSideChannel(t *testing.T) {
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provision(t, boot, "orchestration-history")
+
+	// bootstrap (the actual provisioner) may purge the stream it created.
+	if _, err := boot.NATS().Request("$JS.API.STREAM.PURGE.KV_orchestration-history", []byte("{}"), 3*time.Second); err != nil {
+		t.Fatalf("bootstrap PURGE KV_orchestration-history: want success, got %v", err)
+	}
+
+	// chronicler — the bucket's sole legitimate row-writer — is nonetheless
+	// denied stream administration over its own backing stream (least
+	// privilege: it never needs to create/update/delete/purge the stream
+	// itself).
+	t.Run("denied-purge/chronicler", func(t *testing.T) {
+		t.Parallel()
+		c := connectAs(t, url, "chronicler")
+		if _, err := c.NATS().Request("$JS.API.STREAM.PURGE.KV_orchestration-history", []byte("{}"), deniedTimeout); err == nil {
+			t.Error("chronicler PURGE KV_orchestration-history: want denial, got a reply")
+		}
+	})
 }

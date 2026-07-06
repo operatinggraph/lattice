@@ -15,6 +15,39 @@
 > P5 read path all carry over verbatim — only the host moves; Refractor keeps no `LensSpec.Source`).
 > Tracked on the board as `chronicler-host-reconciliation` (now a ratified build, not a flag-for-Andrew).
 
+> **🏗️ CHECKPOINT (2026-07-06) — chronicler-host-reconciliation Increment 1 shipped.** Built the new
+> standalone `internal/chronicler` (`projection.go`/`manager.go` — a byte-for-byte-verified port of
+> `internal/refractor/eventlens`'s `Event`/`ProjectEvent`/`Manager` + `internal/refractor/lens/eventsource.go`'s
+> `EventProjection`/`ColumnMapping`/`validatePath`/`validateEventProjection`; `definition.go` — a new
+> `translateDefinition` mirroring `translateEventStreamSpec`'s validations, including the fail-closed
+> `protected`/`grantTable`/`secureColumns` rejection the sibling type enforces; `source.go` — a new `Host`
+> discovery loop mirroring Refractor's `CoreKVSource` vertex/aspect-buffering pattern, restricted to
+> `eventStream`-kind specs) + `cmd/chronicler` (health heartbeat via `internal/healthkv.Reporter`, no
+> bootstrap actor needed — P2: submits no ops) + a natsperm matrix entry (`$KV.orchestration-history.>` +
+> `health-kv` only, denied `core-kv`/`capability-kv`/its own backing-stream admin verbs) + a `make build`
+> wiring line. **Dormant/additive only:** `internal/refractor/eventlens`, `internal/refractor/lens/eventsource.go`,
+> and `cmd/refractor`'s `startEventStreamPipeline` are all UNTOUCHED and still live — Chronicler is not yet
+> wired into `make up`/`up-full`'s orchestration launch, deliberately avoiding a dual-write window where both
+> Refractor and Chronicler would consume the same `events.loom.>` subject into the same `orchestration-history`
+> bucket simultaneously. 3-layer adversarial reviewed (Blind Hunter, Edge Case Hunter, Acceptance Auditor);
+> fixed forward: a vertex reclassified away from `meta.lens` while its Manager was running was never torn
+> down (now handled — a class change, not just a delete, stops the Manager); the spec body's own untrusted
+> `id` JSON field was used verbatim in the durable name instead of the vertex-key-derived, NanoID-guaranteed
+> id (now always the latter); `protected`/`grantTable`/`secureColumns` on an eventStream target were silently
+> dropped instead of fail-closed rejected (now rejected, matching the sibling's doctrine); chronicler's own
+> backing stream lacked a stream-admin purge/delete deny (now denied to chronicler itself — bootstrap already
+> provisions the bucket primordially). **Deferred, not built:** nothing in `Host`/`translateDefinition`
+> detects two eventStream lens IDs declaring overlapping `source.subjects` — each would run an independent
+> durable consumer with no coordination. Not a concern while dormant; **Increment 2 (the live cutover) must
+> either add detection or confirm this is an accepted multi-consumer-fan-out pattern before going live.**
+> Also deferred: every OTHER component's pre-existing broad `$JS.API.>` grant (Refractor, Processor, Loom,
+> Weaver, …) still isn't denied `orchestration-history`'s stream-admin verbs — the same
+> `natsperm-matrix-hygiene`-tracked debt already accepted for `weaver-targets`/`token-revocation`, now
+> extended to cover this bucket too, not newly introduced here. **Next: Increment 2** — remove
+> `internal/refractor/eventlens` + `internal/refractor/lens/eventsource.go` + the `eventStream` branch/
+> `LensSpec.Source` field from Refractor, wire `cmd/chronicler` into the Makefile's orchestration tier
+> (`up-full`), and verify the cutover end-to-end against the shared dev stack.
+
 > ## RATIFICATION REWORK (2026-07-02) — supersedes the Fork-A/B framing below
 >
 > Every body mention of "extend Refractor / LensSpec / the pipeline" is **superseded**: the event→row
