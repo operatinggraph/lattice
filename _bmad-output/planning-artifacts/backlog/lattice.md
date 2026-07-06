@@ -51,6 +51,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Loom] Redelivery/deadline-recovery edge branches uncovered** | `engine.go:resumeStepZero` (41.7% — redelivered trigger whose `createInstance` batch committed but step 0 never submitted, incl. the pattern-pin-missing→fail branch) + `state.go:disarmDeadline` (33.3% — KVGet/KVDelete error arms + the already-disarmed no-op that breaks the deadline-watcher re-entry loop) sit untested by any direct unit test. | ★ | XS–S | 📋 · `internal/loom/engine.go:460`, `internal/loom/state.go:451` |
 | **[Refractor] Capability-pipeline link/aspect fan-out dispatch untested** | `evalLinkFanOut`/`evalAspectFanOut` (0%) — the actor-aware pipeline's CDC dispatch for `holdsRole`/`grantedBy` link + aspect events that recompute authz on role grant/revoke — has no test at any level; no test references `evaluateLinkFanOut`/`evaluateAspectFanOut` either. | ★★ | S–M | 📋 · `internal/refractor/pipeline/pipeline.go:577,609`, `evaluate.go:319,348,411` |
 | **[Refractor] NatsKVAdapter guarded-write CAS-contention + malformed-watermark edge branches uncovered** | `guardedWrite`'s revision-conflict retry loop + CAS-exhaustion path (53.8%) and `storedProjectionSeq`'s `json.Number`/malformed-doc branches (46.7%) — the H4 no-resurrect guard's contention/legacy-doc handling — untested. | ★ | XS–S | 📋 · `internal/refractor/adapter/natskv.go:190,250` |
+| **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 · `internal/weaver/evaluator.go` (`staleMark`) |
 
 ### Survey log (round-robin rotation)
 
@@ -175,6 +176,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-06 · `6d2b4c5` · [Weaver] External-gap stale-mark reclaim — prompt fresh-instance retry after a failed call, per Contract #10 §10.3; 3-layer reviewed, fixed forward (vacuous confirmedConcluded signal)
 - 2026-07-06 · `945f605` · [Contract #7] §7.2 reconciled to as-built kernel — holdsRole→operator topology (not data.protected), 5→1 meta-meta DDL, no processor identity; §7.7 untouched (arch item 7; +922a294, dfbad3d)
 - 2026-07-06 · `9711814` · [Contract #2] §2.6 error-code table reconciled to the wire + §2.9 lenient-parse fix + TestConformance_ErrorCodeTable_MatchesWire pin (arch item 4)
 - 2026-07-06 · `81c0c6b` · [Weaver] Planner mandate R2 — LoftSpace lease-renewal package (5 ops, 2 goal-authored targets, e2e); 3-layer reviewed, fixed forward (oscillation-path collision, double-extension guard); R3 FE next
