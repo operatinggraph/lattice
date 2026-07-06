@@ -174,10 +174,14 @@ var matrix = []component{
 		// — the admin object-upload surface (cmd/loupe/objects.go ObjectPut).
 		// lattice.vault.decrypt — the trusted-tool PII decrypt RPC (the Processor
 		// responds; vault-crypto-shredding-design.md §2.3, Loupe F12 Reveal).
+		// lattice.vault.wrapkey / lattice.vault.unwrapkey — the blob-plane
+		// envelope-key RPCs (object-store-crypto-shred-design.md §3.1 Fire 2):
+		// Loupe generates a per-object CEK client-side and wraps/unwraps it via
+		// the Processor's Vault rather than holding the master KEK itself.
 		// Loupe is a named trusted plaintext consumer; this is the transport
 		// gate authorizing it to reach the responder (only Loupe + the Processor
 		// carry it).
-		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.ctrl.>", "lattice.vault.decrypt"},
+		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.ctrl.>", "lattice.vault.decrypt", "lattice.vault.wrapkey", "lattice.vault.unwrapkey"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{

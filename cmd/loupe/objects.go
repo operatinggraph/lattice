@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -117,8 +120,14 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 	targetKey := strings.TrimSpace(r.FormValue("targetKey"))
 	linkName := strings.TrimSpace(r.FormValue("linkName"))
 	replaceObjectID := strings.TrimSpace(r.FormValue("replaceObjectId"))
+	sensitive := strings.TrimSpace(r.FormValue("sensitive")) == "true"
+	governingIdentity := strings.TrimSpace(r.FormValue("governingIdentity"))
 	if targetKey == "" || linkName == "" {
 		s.writeError(w, http.StatusBadRequest, "targetKey and linkName form fields are required")
+		return
+	}
+	if sensitive && governingIdentity == "" {
+		s.writeError(w, http.StatusBadRequest, "governingIdentity form field is required when sensitive=true")
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -138,6 +147,11 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	if sensitive {
+		s.handleSensitiveObjectUpload(w, ctx, conn, file, header, contentType, targetKey, linkName, replaceObjectID, governingIdentity)
+		return
+	}
 
 	// 1. Stream bytes under a provisional store name. The digest is computed by
 	//    NATS during the Put and returned after.
@@ -202,6 +216,121 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"oid": oid, "primaryKey": primaryKey,
 		"digest": info.Digest, "size": info.Size,
+	})
+}
+
+// handleSensitiveObjectUpload implements the sensitive branch of POST
+// /api/objects (object-store-crypto-shred-design.md §3.1/§3.5 Fire 2): the
+// plaintext is read fully into memory (an AEAD seals a whole buffer, not a
+// stream), encrypted client-side under a fresh per-object CEK, and only the
+// CEK — never the bulk bytes — passes through the Vault (wrapped under
+// governingIdentity's DEK). Ciphertext, not plaintext, is what streams to
+// core-objects; the oid is identity-salted (§3.3) so a sensitive object is
+// never cross-identity content-addressed.
+func (s *server) handleSensitiveObjectUpload(w http.ResponseWriter, ctx context.Context, conn *substrate.Conn, file multipart.File, header *multipart.FileHeader, contentType, targetKey, linkName, replaceObjectID, governingIdentity string) {
+	plaintext, err := io.ReadAll(io.LimitReader(file, s.uploadCap+1))
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "read upload: "+err.Error())
+		return
+	}
+	if int64(len(plaintext)) > s.uploadCap {
+		s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("upload exceeds the %d-byte cap", s.uploadCap))
+		return
+	}
+
+	// The oid is derived from the PLAINTEXT digest (post-decrypt integrity
+	// claim), salted with the governing identity (§3.3) — NATS's own digest
+	// (computed over whatever is streamed) would be the ciphertext's, which is
+	// useless for that claim, so it is never used on this branch. Computed
+	// before sealing so the oid can bind the content ciphertext as AEAD
+	// associated data (below) — otherwise a `.content` document splice could
+	// graft one object's ciphertext/envelope onto another's oid within the
+	// same governing identity and still decrypt.
+	plaintextDigest := sha256Digest(plaintext)
+	oid := substrate.SHA256NanoID("object:" + governingIdentity + ":" + plaintextDigest)
+	objKey := "vtx.object." + oid
+
+	env, err := fetchPiiKeyEnvelope(ctx, conn, governingIdentity)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	cek, err := generateCEK()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	contentNonce, ciphertext, err := sealAESGCM(cek, plaintext, []byte(oid))
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "encrypt: "+err.Error())
+		return
+	}
+	wrapped, err := vaultWrapKey(ctx, conn, governingIdentity, env, cek)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "wrap CEK: "+err.Error())
+		return
+	}
+
+	storeName, err := substrate.NewNanoID()
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "generate store name: "+err.Error())
+		return
+	}
+	info, err := conn.ObjectPut(ctx, bootstrap.CoreObjectsBucket, storeName, bytes.NewReader(ciphertext), int64(len(ciphertext)))
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "store object bytes: "+err.Error())
+		return
+	}
+
+	payload := map[string]any{
+		"digest": plaintextDigest, "size": info.Size, "contentType": contentType,
+		"storeName": storeName, "targetKey": targetKey, "linkName": linkName,
+		"sensitive": true, "governingIdentity": governingIdentity,
+		"encryption": map[string]any{
+			"algo":       contentEncryptionAlgo,
+			"nonce":      base64.StdEncoding.EncodeToString(contentNonce),
+			"wrappedCEK": encodeWrappedCEK(wrapped),
+			"keyId":      governingIdentity,
+		},
+	}
+	if header.Filename != "" {
+		payload["filename"] = header.Filename
+	}
+	if replaceObjectID != "" {
+		payload["replaceObjectId"] = replaceObjectID
+	}
+
+	reply, err := s.submitAttach(ctx, conn, oid, plaintextDigest, targetKey, linkName, replaceObjectID, payload)
+	if err != nil {
+		// The op never landed → our just-uploaded bytes are an orphan; reclaim.
+		_ = conn.ObjectDelete(ctx, bootstrap.CoreObjectsBucket, storeName)
+		s.writeError(w, http.StatusBadGateway, "submit AttachObject: "+err.Error())
+		return
+	}
+	if reply.Status == processor.ReplyStatusRejected {
+		_ = conn.ObjectDelete(ctx, bootstrap.CoreObjectsBucket, storeName)
+		s.writeJSON(w, http.StatusBadRequest, reply)
+		return
+	}
+
+	// Dedup self-heal (§10 byte-layer convergence): if the committed object
+	// points at a DIFFERENT storeName, an identical upload by this SAME
+	// identity already exists (sensitive dedup is within-identity only, §3.3)
+	// and ours is a duplicate — reclaim it so it does not orphan.
+	if canonical := s.objectStoreName(ctx, conn, objKey); canonical != "" && canonical != storeName {
+		_ = conn.ObjectDelete(ctx, bootstrap.CoreObjectsBucket, storeName)
+	}
+
+	primaryKey := reply.PrimaryKey
+	if primaryKey == "" {
+		if lk, e := objectLinkKey(oid, targetKey, linkName); e == nil {
+			primaryKey = lk
+		}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"oid": oid, "primaryKey": primaryKey,
+		"digest": plaintextDigest, "size": info.Size,
 	})
 }
 
@@ -273,9 +402,37 @@ func (s *server) submitAttach(ctx context.Context, conn *substrate.Conn, oid, di
 	return lastReply, nil
 }
 
-// handleObjectGet implements GET /api/objects/<oid>. It resolves the storeName
-// from the object's .content aspect and streams the bytes (NATS verifies the
-// digest as it streams). The Refractor is never in the byte path.
+// objectContentDoc is the .content aspect shape this handler reads —
+// carrying the sensitive-object encryption envelope alongside the
+// unconditionally-present fields (object-store-crypto-shred-design.md §3.2).
+type objectContentDoc struct {
+	IsDeleted bool `json:"isDeleted"`
+	Data      struct {
+		StoreName         string `json:"storeName"`
+		ContentType       string `json:"contentType"`
+		Digest            string `json:"digest"`
+		Sensitive         bool   `json:"sensitive"`
+		GoverningIdentity string `json:"governingIdentity"`
+		Encryption        struct {
+			Algo       string `json:"algo"`
+			Nonce      string `json:"nonce"`
+			WrappedCEK string `json:"wrappedCEK"`
+			KeyID      string `json:"keyId"`
+		} `json:"encryption"`
+	} `json:"data"`
+}
+
+// handleObjectGet implements GET /api/objects/<oid>[?decrypt=true]. It
+// resolves the storeName from the object's .content aspect and streams the
+// bytes (NATS verifies the digest as it streams). The Refractor is never in
+// the byte path.
+//
+// A sensitive object's bytes are ciphertext at rest; the default response is
+// that ciphertext, unreadable by construction — no read-path authorization
+// needed (object-store-crypto-shred-design.md §3.4). `?decrypt=true` is the
+// opt-in trusted-tool plaintext read: Loupe unwraps the CEK via the Vault and
+// decrypts locally. Non-sensitive objects ignore the parameter (already
+// plaintext).
 func (s *server) handleObjectGet(w http.ResponseWriter, r *http.Request, oid string) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -293,19 +450,18 @@ func (s *server) handleObjectGet(w http.ResponseWriter, r *http.Request, oid str
 		s.writeError(w, http.StatusNotFound, "object not found")
 		return
 	}
-	var doc struct {
-		IsDeleted bool `json:"isDeleted"`
-		Data      struct {
-			StoreName   string `json:"storeName"`
-			ContentType string `json:"contentType"`
-		} `json:"data"`
-	}
+	var doc objectContentDoc
 	if json.Unmarshal(entry.Value, &doc) != nil || doc.Data.StoreName == "" {
 		s.writeError(w, http.StatusBadGateway, "object metadata unreadable")
 		return
 	}
 	if doc.IsDeleted {
 		s.writeError(w, http.StatusNotFound, "object is deleted")
+		return
+	}
+
+	if doc.Data.Sensitive && r.URL.Query().Get("decrypt") == "true" {
+		s.handleSensitiveObjectDecrypt(w, ctx, conn, oid, doc)
 		return
 	}
 
@@ -330,6 +486,69 @@ func (s *server) handleObjectGet(w http.ResponseWriter, r *http.Request, oid str
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)
+}
+
+// handleSensitiveObjectDecrypt implements the `?decrypt=true` opt-in read for
+// a sensitive object: unwrap the CEK via the Vault, decrypt the ciphertext
+// locally, verify the GCM tag and the plaintext digest, then serve the
+// plaintext under the same anti-XSS disposition/CSP posture as the default
+// path (object-store-crypto-shred-design.md §3.4).
+func (s *server) handleSensitiveObjectDecrypt(w http.ResponseWriter, ctx context.Context, conn *substrate.Conn, oid string, doc objectContentDoc) {
+	wrapped, err := decodeWrappedCEK(doc.Data.Encryption.WrappedCEK)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "decode wrappedCEK: "+err.Error())
+		return
+	}
+	env, err := fetchPiiKeyEnvelope(ctx, conn, doc.Data.GoverningIdentity)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	cek, err := vaultUnwrapKey(ctx, conn, doc.Data.GoverningIdentity, env, wrapped)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "unwrap CEK: "+err.Error())
+		return
+	}
+	contentNonce, err := base64.StdEncoding.DecodeString(doc.Data.Encryption.Nonce)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "decode content nonce: "+err.Error())
+		return
+	}
+
+	rc, _, err := conn.ObjectGet(ctx, bootstrap.CoreObjectsBucket, doc.Data.StoreName)
+	if err != nil {
+		if errors.Is(err, substrate.ErrObjectNotFound) {
+			s.writeError(w, http.StatusNotFound, "object bytes not found")
+			return
+		}
+		s.writeError(w, http.StatusBadGateway, "read object bytes: "+err.Error())
+		return
+	}
+	ciphertext, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "read object bytes: "+err.Error())
+		return
+	}
+
+	plaintext, err := openAESGCM(cek, contentNonce, ciphertext, []byte(oid))
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "decrypt failed: tampered or corrupt ciphertext")
+		return
+	}
+	if sha256Digest(plaintext) != doc.Data.Digest {
+		s.writeError(w, http.StatusBadGateway, "decrypt succeeded but plaintext digest mismatch — integrity check failed")
+		return
+	}
+
+	ct, disposition := objectDisposition(doc.Data.ContentType)
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", strconv.Itoa(len(plaintext)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(plaintext)
 }
 
 // handleObjectDetach implements DELETE /api/objects/<oid>?targetKey=&linkName=.
