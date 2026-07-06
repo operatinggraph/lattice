@@ -57,6 +57,11 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "RecordServiceDispatch", Scope: "any"},
 			{OperationType: "DecideLeaseApplication", Scope: "any"},
 			{OperationType: "SetApplicantProfile", Scope: "any"},
+			{OperationType: "OpenRenewal", Scope: "any"},
+			{OperationType: "SetRenewalTerms", Scope: "any"},
+			{OperationType: "VerifyGuarantor", Scope: "any"},
+			{OperationType: "SignRenewal", Scope: "any"},
+			{OperationType: "CancelRenewal", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -159,15 +164,37 @@ func seedApplicant(t *testing.T, ctx context.Context, conn *substrate.Conn, id s
 	return key
 }
 
-// seedUnit seeds a live location-domain unit (vtx.unit.<id>, class=location) to
-// be the application's leased unit. Seeded directly (not via location-domain's
-// CreateLocation) because these package tests do not install location-domain;
-// the leaseapp op only alive-checks the unit by key.
+// seedUnit seeds a live location-domain unit (vtx.unit.<id>, class=location),
+// with a .listing aspect {availableFrom, leaseTermMonths, rentAmount,
+// rentCurrency}, to be the application's leased unit. Seeded directly (not via
+// location-domain's CreateLocation / loftspace-domain's SetListing) because
+// these package tests do not install those packages; the leaseapp op only
+// alive-checks the unit by key, and DecideLeaseApplication's approve-time
+// .tenancy stamping reads .listing directly via kv.Read.
 func seedUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, id string) string {
 	t.Helper()
 	key := "vtx.unit." + id
 	seedVertex(t, ctx, conn, key, "location", map[string]any{})
+	listing := map[string]any{
+		"class": "listing", "isDeleted": false, "vertexKey": key, "localName": "listing",
+		"data": map[string]any{
+			"availableFrom":   "2026-08-01T00:00:00Z",
+			"leaseTermMonths": 12,
+			"rentAmount":      2400,
+			"rentCurrency":    "USD",
+		},
+	}
+	lb, _ := json.Marshal(listing)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key+".listing", lb); err != nil {
+		t.Fatalf("seed unit .listing %s: %v", key, err)
+	}
 	return key
+}
+
+// unitKeyFor derives the deterministic unit key createApplication seeded for
+// a given applicant (the same applicant-id-reused-as-unit-id convention).
+func unitKeyFor(applicantKey string) string {
+	return "vtx.unit." + applicantKey[len("vtx.identity."):]
 }
 
 // createApplication submits CreateLeaseApplication and returns the app key. It
@@ -1202,9 +1229,13 @@ func TestSignLease_WritesSignatureAspect(t *testing.T) {
 	_ = identitydomain.Package
 }
 
-// decide submits DecideLeaseApplication{leaseAppKey, decision} (class leaseapp,
-// reads=[leaseAppKey]) at the given submittedAt and asserts the outcome.
-func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, submittedAt string, want processor.MessageOutcome) {
+// decide submits DecideLeaseApplication{leaseAppKey, decision, unit} (class
+// leaseapp) at the given submittedAt and asserts the outcome. unit is the
+// application's own appliesToUnit target (createApplication/unitKeyFor's
+// deterministic key) — required on the FIRST approve so the op can stamp
+// .tenancy from the unit's .listing; harmless (unread) on a decline or a
+// re-approve that already carries .tenancy.
+func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -1213,7 +1244,7 @@ func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *process
 		Actor:         lsActorKey,
 		SubmittedAt:   submittedAt,
 		Class:         "leaseapp",
-		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","decision":"` + decision + `"}`),
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","decision":"` + decision + `","unit":"` + unit + `"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{leaseAppKey}},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1250,10 +1281,11 @@ func TestDecideLeaseApplication(t *testing.T) {
 
 	applicantKey := seedApplicant(t, ctx, conn, "BBdecapp1cantHJKMNPQ")
 	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+	unitKey := unitKeyFor(applicantKey)
 
 	// Approve-readiness floor: approving an UNSIGNED application is rejected
 	// (NotReadyToApprove) — the verified premature-approval bug — and writes nothing.
-	decide(t, ctx, conn, cp, cons, "decideUnsign1", appKey, "approved", "2026-06-26T09:00:00Z", processor.OutcomeRejected)
+	decide(t, ctx, conn, cp, cons, "decideUnsign1", appKey, "approved", unitKey, "2026-06-26T09:00:00Z", processor.OutcomeRejected)
 	if keyExists(t, ctx, conn, appKey+".decision") {
 		t.Fatalf("a rejected premature approve must not write a .decision aspect")
 	}
@@ -1262,7 +1294,7 @@ func TestDecideLeaseApplication(t *testing.T) {
 	signLease(t, ctx, conn, cp, cons, "decideSign001", appKey, "2026-06-26T09:30:00Z")
 
 	// Approve → .decision{value:approved, decidedAt} on the application; root {} (D5).
-	decide(t, ctx, conn, cp, cons, "decideApprov1", appKey, "approved", "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+	decide(t, ctx, conn, cp, cons, "decideApprov1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
 	ddoc := readDoc(t, ctx, conn, appKey+".decision")
 	ddata, _ := ddoc["data"].(map[string]any)
 	if got, _ := ddata["value"].(string); got != "approved" {
@@ -1276,12 +1308,12 @@ func TestDecideLeaseApplication(t *testing.T) {
 	}
 
 	// Re-submitting the SAME decision is idempotent (re-run-safe under at-least-once).
-	decide(t, ctx, conn, cp, cons, "decideReappr1", appKey, "approved", "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
+	decide(t, ctx, conn, cp, cons, "decideReappr1", appKey, "approved", unitKey, "2026-06-26T11:00:00Z", processor.OutcomeAccepted)
 
 	// Terminal-decision guard: changing a recorded decision to a DIFFERENT value is
 	// rejected (DecisionFinal) — an approved application must not silently flip — and
 	// the recorded decision is unchanged.
-	decide(t, ctx, conn, cp, cons, "decideFlip001", appKey, "declined", "2026-06-26T12:00:00Z", processor.OutcomeRejected)
+	decide(t, ctx, conn, cp, cons, "decideFlip001", appKey, "declined", unitKey, "2026-06-26T12:00:00Z", processor.OutcomeRejected)
 	ddoc = readDoc(t, ctx, conn, appKey+".decision")
 	ddata, _ = ddoc["data"].(map[string]any)
 	if got, _ := ddata["value"].(string); got != "approved" {
@@ -1289,7 +1321,7 @@ func TestDecideLeaseApplication(t *testing.T) {
 	}
 
 	// Bad enum → BadDecision (rejected).
-	decide(t, ctx, conn, cp, cons, "decideBadEnum", appKey, "maybe", "2026-06-26T13:00:00Z", processor.OutcomeRejected)
+	decide(t, ctx, conn, cp, cons, "decideBadEnum", appKey, "maybe", unitKey, "2026-06-26T13:00:00Z", processor.OutcomeRejected)
 
 	// Tombstoned application → UnknownLeaseApplication (rejected). Logically
 	// tombstone the application, then a decision is rejected (the vertex_alive guard).
@@ -1298,14 +1330,16 @@ func TestDecideLeaseApplication(t *testing.T) {
 	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, appKey, tb); err != nil {
 		t.Fatalf("tombstone application: %v", err)
 	}
-	decide(t, ctx, conn, cp, cons, "decideTombsto", appKey, "approved", "2026-06-26T14:00:00Z", processor.OutcomeRejected)
+	decide(t, ctx, conn, cp, cons, "decideTombsto", appKey, "approved", unitKey, "2026-06-26T14:00:00Z", processor.OutcomeRejected)
 }
 
-// decideReason submits DecideLeaseApplication{leaseAppKey, decision, reason} so the
-// optional reason path can be exercised separately from the no-reason decide helper.
-func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, reason, submittedAt string, want processor.MessageOutcome) {
+// decideReason submits DecideLeaseApplication{leaseAppKey, decision, reason,
+// unit} so the optional reason path can be exercised separately from the
+// no-reason decide helper. unit mirrors decide's — required on a first
+// approve, harmless otherwise.
+func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, reason, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason})
+	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason, "unit": unit})
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -1332,11 +1366,12 @@ func TestDecideLeaseApplication_Reason(t *testing.T) {
 
 	applicantKey := seedApplicant(t, ctx, conn, "BBdecrsn1cantHJKMNPQ")
 	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+	unitKey := unitKeyFor(applicantKey)
 
 	// Decline with a reason → .decision{value:declined, decidedAt, reason}. A decline
 	// carries no approve-readiness floor, so an unsigned application can be declined.
 	const reason = "Income below the 3x-rent threshold."
-	decideReason(t, ctx, conn, cp, cons, "declineRsn1", appKey, "declined", reason, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+	decideReason(t, ctx, conn, cp, cons, "declineRsn1", appKey, "declined", reason, unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
 	ddata, _ := readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
 	if got, _ := ddata["value"].(string); got != "declined" {
 		t.Fatalf("decision.value = %q, want declined", got)
@@ -1347,7 +1382,7 @@ func TestDecideLeaseApplication_Reason(t *testing.T) {
 
 	// Terminal: a DIFFERENT later decision is rejected (DecisionFinal); the decision
 	// does not flip and the reason is preserved.
-	decide(t, ctx, conn, cp, cons, "reasonFlip01", appKey, "approved", "2026-06-26T11:00:00Z", processor.OutcomeRejected)
+	decide(t, ctx, conn, cp, cons, "reasonFlip01", appKey, "approved", unitKey, "2026-06-26T11:00:00Z", processor.OutcomeRejected)
 	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
 	if got, _ := ddata["value"].(string); got != "declined" {
 		t.Fatalf("decision.value after rejected flip = %q, want declined (unchanged)", got)
@@ -1358,7 +1393,7 @@ func TestDecideLeaseApplication_Reason(t *testing.T) {
 
 	// A same-value reasonless re-decline (idempotent) clears the reason — the
 	// unconditioned upsert carries only what the caller supplies this time.
-	decide(t, ctx, conn, cp, cons, "declineNoRsn1", appKey, "declined", "2026-06-26T12:00:00Z", processor.OutcomeAccepted)
+	decide(t, ctx, conn, cp, cons, "declineNoRsn1", appKey, "declined", unitKey, "2026-06-26T12:00:00Z", processor.OutcomeAccepted)
 	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
 	if _, present := ddata["reason"]; present {
 		t.Fatalf("a reasonless re-decline must clear the reason key, got %v", ddata["reason"])

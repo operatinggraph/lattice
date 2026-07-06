@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/asolgan/lattice/internal/pkgmgr"
 )
 
 // TestLeaseSigning_PlaybookColumnsMatchLens (test 6 — the §10.2↔§10.8 seam, §4
@@ -28,11 +30,23 @@ func TestLeaseSigning_PlaybookColumnsMatchLens(t *testing.T) {
 		t.Fatal("leaseApplicationComplete lens not declared")
 	}
 
-	targets := WeaverTargets()
-	if len(targets) != 1 {
-		t.Fatalf("expected exactly 1 weaverTarget, got %d", len(targets))
+	// The package now declares three weaverTargets (leaseApplicationComplete,
+	// plus the renewal chain's leaseExpiry/renewalComplete, design
+	// loftspace-lease-renewal-goal-authored-target-design.md §9 R2) — select
+	// the one this test is actually about by TargetID rather than assuming
+	// it is the only one.
+	var target pkgmgr.WeaverTargetSpec
+	var found bool
+	for _, wt := range WeaverTargets() {
+		if wt.TargetID == "leaseApplicationComplete" {
+			target = wt
+			found = true
+			break
+		}
 	}
-	target := targets[0]
+	if !found {
+		t.Fatal("leaseApplicationComplete weaverTarget not declared")
+	}
 
 	// TargetID == the lens OutputKeyPattern prefix (the §10.2↔§10.8 binding).
 	for _, l := range Lenses() {

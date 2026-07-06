@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.16.0
+version: 0.17.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -15,6 +15,12 @@ description: |
   RecordServiceDispatch), and the backgroundCheck/collectPayment/onboarding
   loomPatterns. The external-call outcome lives in the .outcome aspect and a
   pending (async) call in the .dispatch aspect (D5); vertex roots stay minimal.
+  Also the lease-renewal chain: a create-only .tenancy aspect stamped by
+  DecideLeaseApplication's first approve, the renewal vertex type + its five
+  ops (OpenRenewal / SetRenewalTerms / VerifyGuarantor / SignRenewal /
+  CancelRenewal), the leaseExpiry frozen-table target, and the
+  renewalComplete mode:planned target — the first goal-authored Weaver target
+  (Contract #10 §10.8 Planner extension).
   Depends on identity-domain, service-domain, and orchestration-base.
 depends:
   - identity-domain
@@ -34,6 +40,8 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: leaseServiceDispatchMarker
       class: meta.ddl.aspectType
+    - canonicalName: renewal
+      class: meta.ddl.vertexType
   lenses:
     - canonicalName: leaseApplicationComplete
       adapter: nats-kv
@@ -44,6 +52,14 @@ declares:
       engine: full
     - canonicalName: landlordLeaseApplicationsRead
       adapter: postgres
+      engine: full
+    - canonicalName: leaseExpiry
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: renewalComplete
+      adapter: nats-kv
+      bucket: weaver-targets
       engine: full
   permissions:
     - operationType: CreateLeaseApplication
@@ -70,9 +86,28 @@ declares:
     - operationType: SetApplicantProfile
       scope: any
       grantsTo: [operator]
+    - operationType: OpenRenewal
+      scope: any
+      grantsTo: [operator]
+    - operationType: SetRenewalTerms
+      scope: any
+      grantsTo: [operator]
+    - operationType: VerifyGuarantor
+      scope: any
+      grantsTo: [operator]
+    - operationType: SignRenewal
+      scope: any
+      grantsTo: [operator]
+    - operationType: CancelRenewal
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: leaseApplicationComplete
       lensRef: leaseApplicationComplete
+    - targetId: leaseExpiry
+      lensRef: leaseExpiry
+    - targetId: renewalComplete
+      lensRef: renewalComplete
   loomPatterns:
     - patternId: backgroundCheck
       subjectType: identity
@@ -87,3 +122,6 @@ declares:
     - operationType: RecordLeaseServiceOutcome
     - operationType: RecordServiceDispatch
     - operationType: SetApplicantProfile
+    - operationType: SetRenewalTerms
+    - operationType: VerifyGuarantor
+    - operationType: SignRenewal

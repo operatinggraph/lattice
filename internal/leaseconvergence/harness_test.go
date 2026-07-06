@@ -110,6 +110,15 @@ type harnessConfig struct {
 	// retry leg).
 	bridgePollInterval time.Duration
 	bridgeCallDeadline time.Duration
+	// extraLenses names additional actor-aggregate lenses (beyond
+	// leaseApplicationComplete) to activate off the SAME shared CoreKVSource at
+	// boot (the renewal targets, leaseExpiry/renewalComplete). A second,
+	// independently-Start'ed CoreKVSource would compete for
+	// lensSourceDurableName's shared JetStream durable with the first — each
+	// vtx.meta.> delivery goes to only ONE of the two competing consumers, so a
+	// lens discovered only by the second source can starve. One shared source
+	// avoids that structurally.
+	extraLenses []string
 }
 
 // harnessOpt mutates the harnessConfig before the stack boots.
@@ -216,7 +225,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	// projection through the production wiring (CoreKVSource watch +
 	// projection.InstallActorAggregate), exactly as the scalar e2e + cmd/refractor.
 	h.startAdjacencyBootstrapper(ctx, adjKV)
-	h.startRefractor(ctx, adjKV, coreKV, convKV)
+	h.startRefractor(ctx, adjKV, coreKV, convKV, hc.extraLenses)
 
 	// --- Loom: trigger/relay/deadline + per-domain completion consumers.
 	loomEng := loom.NewEngine(conn, loom.Config{
@@ -319,10 +328,15 @@ func (h *harness) startAdjacencyBootstrapper(ctx context.Context, adjKV *substra
 	}
 }
 
-// startRefractor discovers the installed leaseApplicationComplete lens via the
-// live CoreKVSource watch and wires it through projection.InstallActorAggregate
-// (the production actor-aggregate path) onto the weaver-targets bucket.
-func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *substrate.KV) {
+// startRefractor discovers the installed leaseApplicationComplete lens (plus
+// any extraLenses, e.g. the renewal targets) via ONE shared CoreKVSource watch
+// and wires each through projection.InstallActorAggregate (the production
+// actor-aggregate path) onto the weaver-targets bucket. A second,
+// independently-started CoreKVSource would compete with this one for
+// lensSourceDurableName's single shared JetStream durable — see harnessConfig
+// extraLenses' doc — so every activated lens in this test binary must be
+// discovered off this ONE source.
+func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *substrate.KV, extraLenses []string) {
 	fullEngine := full.New()
 	projectionRevision := func(k string) uint64 {
 		entry, gErr := coreKV.Get(ctx, k)
@@ -332,39 +346,60 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 		return entry.Revision
 	}
 
+	want := map[string]bool{"leaseApplicationComplete": true}
+	for _, n := range extraLenses {
+		want[n] = true
+	}
+
 	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, h.logger)
 	loaded := make(chan *lens.Rule, 16)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})
 	require.NoError(h.t, src.Start(ctx))
 
-	var convRule *lens.Rule
+	found := make(map[string]*lens.Rule, len(want))
 	deadline := time.Now().Add(25 * time.Second)
-	for convRule == nil {
+	for len(found) < len(want) {
 		if time.Now().After(deadline) {
-			h.t.Fatal("did not activate the leaseApplicationComplete lens within 25s")
+			h.t.Fatalf("did not activate all requested lenses (%v) within 25s; found=%v", want, found)
 		}
 		select {
 		case r := <-loaded:
-			if r.CanonicalName == "leaseApplicationComplete" {
-				convRule = r
+			if want[r.CanonicalName] {
+				found[r.CanonicalName] = r
 			}
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+
+	convRule := found["leaseApplicationComplete"]
 	require.Equal(h.t, "actorAggregate", convRule.ProjectionKind)
 	require.NotNil(h.t, convRule.CompiledRule)
 	h.convRID = convRule.ID
 
-	convAdpt, err := adapter.New(convKV, convRule.Into.Key, adapter.DeleteModeHard)
-	require.NoError(h.t, err)
-	p, err := pipeline.New(convRule.ID, "nats_kv", bootstrap.CoreKVBucket, adjKV, coreKV, convAdpt, nil)
-	require.NoError(h.t, err)
-	p.UseFullEngine(fullEngine, convRule.CompiledRule)
-	require.True(h.t, projection.InstallActorAggregate(p, convAdpt, convRule, projectionRevision, adjKV, coreKV, h.logger),
-		"leaseApplicationComplete lens must install through projection.InstallActorAggregate")
+	for name, rule := range found {
+		h.runActorAggregatePipeline(ctx, name, rule, fullEngine, projectionRevision, adjKV, coreKV, convKV)
+	}
+}
 
-	p.RunOn(h.conn, refractorSpec(convRule.ID))
+// runActorAggregatePipeline installs one discovered lens Rule through
+// projection.InstallActorAggregate and runs its supervised pipeline loop —
+// the per-lens second half of startRefractor's activation, factored out so
+// leaseApplicationComplete and any extraLenses share identical wiring.
+func (h *harness) runActorAggregatePipeline(ctx context.Context, name string, rule *lens.Rule, fullEngine *full.Engine, projectionRevision func(string) uint64, adjKV, coreKV, convKV *substrate.KV) {
+	h.t.Helper()
+	require.Equalf(h.t, "actorAggregate", rule.ProjectionKind, "lens %s must be actorAggregate", name)
+	require.NotNilf(h.t, rule.CompiledRule, "lens %s must compile", name)
+
+	adpt, err := adapter.New(convKV, rule.Into.Key, adapter.DeleteModeHard)
+	require.NoError(h.t, err)
+	p, err := pipeline.New(rule.ID, "nats_kv", bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
+	require.NoError(h.t, err)
+	p.UseFullEngine(fullEngine, rule.CompiledRule)
+	require.Truef(h.t, projection.InstallActorAggregate(p, adpt, rule, projectionRevision, adjKV, coreKV, h.logger),
+		"%s lens must install through projection.InstallActorAggregate", name)
+
+	p.RunOn(h.conn, refractorSpec(rule.ID))
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
 	go func() { defer close(doneCh); p.Run(pipelineCtx) }()

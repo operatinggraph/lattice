@@ -1,12 +1,25 @@
 package leasesigning
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // leaseAppDDLScript handles the leaseapp lifecycle ops CreateLeaseApplication
 // and SignLease. Known-key reads only (validates every link/aspect endpoint by
 // the keys the caller lists in ContextHint.Reads). Root data stays {} on every
 // op (D5): the applicant is a link, the signature is an aspect.
-const leaseAppDDLScript = `
+//
+// renewalWindow (a Go duration string, time.ParseDuration form) is baked into
+// DecideLeaseApplication's .tenancy stamping at package-init time — the same
+// "the policy lives in the script" convention bgcheckFreshnessWindow uses — so
+// renewalOpensAt = leaseEnd - renewalWindow is a compile-time-selected
+// constant, never a runtime mutation. The script ALSO contains Starlark's own
+// literal '%' formatting verbs (add_months' "%04d-%02d-%02d" date format and
+// the "%" modulo operator), so this substitutes the one renewalWindow site via
+// a plain strings.Replace token rather than fmt.Sprintf — a whole-script
+// Sprintf would misinterpret every one of those unrelated '%' as its own verb.
+var leaseAppDDLScript = strings.Replace(`
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -164,6 +177,60 @@ def vertex_alive(state, key):
         return False
     return True
 
+DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+def is_leap_year(year):
+    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+
+def days_in_month(year, month):
+    if month == 2 and is_leap_year(year):
+        return 29
+    return DAYS_IN_MONTH[month - 1]
+
+def zero_pad(n, width):
+    # Starlark's %-format supports no field-width flag (unlike Python/Go), so a
+    # fixed-width zero-padded integer (YYYY-MM-DD's month/day, always < 100,
+    # year always < 10000) is built by hand: left-pad the decimal string with
+    # "0" to the target width. This Starlark dialect has no while loop, so the
+    # pad is a bounded for-loop over the width itself (width is always a small
+    # literal — 2 or 4 — never large enough for the bound to matter).
+    s = str(n)
+    for _ in range(width):
+        if len(s) >= width:
+            break
+        s = "0" + s
+    return s
+
+def add_months(rfc3339_instant, months):
+    # Calendar-month addition on an RFC3339 instant (bespoke-contracts' "date math
+    # belongs to the op, cypher only compares" precedent): the deterministic
+    # Starlark sandbox has no calendar-aware builtin (time.rfc3339_add's Go
+    # duration form is hours-only — no months unit), and a lease term is a
+    # calendar-month count (12 months from Jan 31 is Jan 31 of next year, not a
+    # fixed hour count that would drift across leap years / month lengths), so
+    # this hand-rolls the same year/month/day carry identity-domain's DOB
+    # validator already parses (leap-year table above). The clock-time and zone
+    # suffix are preserved verbatim (a lease term shifts the calendar date, never
+    # the time of day); the day-of-month CLAMPS to the target month's length
+    # (Jan 31 + 1 month = Feb 28/29, never a rollover into March) — the
+    # conventional calendar-add rule, applied once (months is always a small
+    # positive integer here, never large enough to need iterated clamping).
+    utc = time.rfc3339_utc(rfc3339_instant)
+    year = int(utc[0:4])
+    month = int(utc[5:7])
+    day = int(utc[8:10])
+    rest = utc[10:]  # "Thh:mm:ssZ"
+
+    total = (month - 1) + int(months)
+    year = year + total // 12
+    month = (total % 12) + 1
+
+    max_day = days_in_month(year, month)
+    if day > max_day:
+        day = max_day
+
+    return zero_pad(year, 4) + "-" + zero_pad(month, 2) + "-" + zero_pad(day, 2) + rest
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -296,7 +363,7 @@ def execute(state, op):
         # app.decision.data.value: approved opens missing_listingLeased (→ the unit
         # leases); declined is a terminal disposition (declined OR'd in the lens).
         app_key = required_string(p, "leaseAppKey")
-        parts_of(app_key, "leaseAppKey", "leaseapp")
+        _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
             fail("UnknownLeaseApplication: " + app_key)
 
@@ -352,6 +419,47 @@ def execute(state, op):
         mutations = [
             make_aspect_upsert(app_key, "decision", "decision", decision_data),
         ]
+
+        # .tenancy: the tenancy-term fact stamped exactly once, on the FIRST
+        # approve — CREATE-ONLY (a re-approve of an already-terminal decision is
+        # idempotent at the DecisionFinal guard above, but even a same-value
+        # re-submission must never re-derive .tenancy and silently truncate a
+        # SignRenewal-extended leaseEnd back to the original term, design §4.1).
+        # Read the unit via the leaseapp's OWN appliesToUnit link (never the
+        # payload — the caller cannot forge which unit's listing feeds the term
+        # math) and its .listing economics; both are on-demand kv.Read (like
+        # SetApplicantProfile's rent lookup) so the caller need only list the
+        # unit key in ContextHint.Reads, mirroring the existing unit-verification
+        # idiom in this script.
+        if decision == "approved":
+            existing_tenancy = kv.Read(app_key + ".tenancy")
+            if existing_tenancy == None or existing_tenancy.isDeleted:
+                # appliesToUnit is required at CreateLeaseApplication (no unit-less
+                # application, §3 D5), so a live application always names exactly
+                # one unit. Starlark has no prefix scan, so the caller supplies the
+                # unit key explicitly and it is verified against the leaseapp's own
+                # deterministic appliesToUnit link — the same unit-verification
+                # idiom WithdrawLeaseApplication / SetApplicantProfile already use —
+                # so a wrong / fabricated unit can never feed the term math.
+                unit = required_string(p, "unit")
+                _, unit_id = parts_of(unit, "unit", "unit")
+                applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + unit_id
+                ulink = kv.Read(applies_to_lnk)
+                if ulink == None or ulink.isDeleted:
+                    fail("UnitMismatch: " + unit + " is not the unit application " + app_key + " applies to")
+                listing = kv.Read(unit + ".listing")
+                if listing == None or listing.isDeleted:
+                    fail("NoListing: unit " + unit + " has no .listing aspect; cannot compute a tenancy term")
+                available_from = listing.data.get("availableFrom")
+                term_months = listing.data.get("leaseTermMonths")
+                if available_from == None or term_months == None:
+                    fail("NoListing: unit " + unit + "'s .listing is missing availableFrom/leaseTermMonths")
+                lease_start = time.rfc3339_utc(available_from)
+                lease_end = add_months(lease_start, term_months)
+                renewal_opens_at = time.rfc3339_add(lease_end, "-__RENEWAL_WINDOW__")
+                mutations.append(make_aspect(app_key, "tenancy", "tenancy",
+                    {"leaseStart": lease_start, "leaseEnd": lease_end, "renewalOpensAt": renewal_opens_at}))
+
         events = [{"class": "leaseapp.applicationDecided",
                    "data": {"leaseAppKey": app_key, "decision": decision}}]
         return {"mutations": mutations, "events": events,
@@ -526,7 +634,7 @@ def execute(state, op):
                 "response": {"primaryKey": app_key}}
 
     fail("leaseapp DDL: unknown operationType: " + ot)
-`
+`, "__RENEWAL_WINDOW__", renewalWindow, 1)
 
 // leaseServiceInstanceDDLScript is the externalTask instanceOp. It mints the
 // claim vertex vtx.service.<handle> (the same shape 14.1's service instance

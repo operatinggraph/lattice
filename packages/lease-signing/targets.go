@@ -32,7 +32,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // TestLeaseSigning_PlaybookColumnsMatchLens). The literal status=leased is passed
 // verbatim (no row. prefix).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
-	return []pkgmgr.WeaverTargetSpec{{
+	targets := []pkgmgr.WeaverTargetSpec{{
 		TargetID: "leaseApplicationComplete",
 		LensRef:  "leaseApplicationComplete",
 		Gaps: map[string]pkgmgr.GapActionSpec{
@@ -43,4 +43,5 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"missing_listingLeased": {Action: "directOp", Operation: "SetListingStatus", Params: map[string]string{"unit": "row.unitKey", "status": "leased"}, Reads: []string{"row.unitKey"}},
 		},
 	}}
+	return append(targets, RenewalTargets()...)
 }

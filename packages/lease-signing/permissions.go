@@ -70,6 +70,36 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit SetApplicantProfile (the applicant records their qualification profile via the trusted-tool app — income / employment / references / co-applicant / guarantor; same operator model as SignLease).",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "OpenRenewal",
+			Scope:         "any",
+			Note:          "Grants the operator (Weaver's service actor) the right to submit OpenRenewal — the directOp the leaseExpiry target dispatches (the SetListingStatus cross-package directOp precedent).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "SetRenewalTerms",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SetRenewalTerms; the landlord sets it via the §10.7 ephemeral task grant (same operator model as SignLease/DecideLeaseApplication).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "VerifyGuarantor",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit VerifyGuarantor; the landlord performs it via the §10.7 ephemeral task grant (same operator model as SignLease).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "SignRenewal",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SignRenewal; the tenant signs via the §10.7 ephemeral task grant (same operator model as SignLease).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "CancelRenewal",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit CancelRenewal — the landlord's task-LESS terminal decline (no assignTask leg; a direct operator/trusted-tool action, same posture as WithdrawLeaseApplication).",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }
 
@@ -88,6 +118,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     the step strings directly (and the bridge selects the dispatchOp from the
 //     event body), not via forOperation, so these are hygiene, not strictly
 //     required.
+//   - SetRenewalTerms / VerifyGuarantor / SignRenewal — REQUIRED: the three
+//     assignTask operations the renewalComplete goal's actions catalog binds
+//     (renewal_targets.go); the Weaver Actuator resolves forOperation to each
+//     op-meta when it creates the remediation task. CancelRenewal is
+//     task-less (a directOp/operator action, never an assignTask target) so it
+//     needs no op-meta.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "SignLease"},
@@ -96,5 +132,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "RecordLeaseServiceOutcome"},
 		{OperationType: "RecordServiceDispatch"},
 		{OperationType: "SetApplicantProfile"},
+		{OperationType: "SetRenewalTerms"},
+		{OperationType: "VerifyGuarantor"},
+		{OperationType: "SignRenewal"},
 	}
 }

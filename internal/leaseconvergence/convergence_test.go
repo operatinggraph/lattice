@@ -39,13 +39,24 @@ func (h *harness) driveApplicantSteps(appKey, applicantKey string) {
 // decideLandlord submits the landlord's DecideLeaseApplication decision (the human
 // gate the listing-flip waits behind). decision is approved | declined. A qualified
 // application does NOT lease its unit until the landlord approves — convergence
-// (violating=false) requires this step after applicant readiness.
+// (violating=false) requires this step after applicant readiness. On an approve, it
+// also passes the harness's seeded unit (h.lastUnitKey) + lists it in Reads: the
+// FIRST approve for an application create-only-stamps the .tenancy aspect (the
+// renewal chain's tenancy-term fact) from the unit's .listing economics, so the op
+// needs the unit key + its .listing hydrated exactly like SetApplicantProfile does.
 func (h *harness) decideLandlord(appKey, decision string) {
 	h.t.Helper()
-	reply := h.submitOp("DecideLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+	payload := map[string]any{
 		"leaseAppKey": appKey,
 		"decision":    decision,
-	}, &processor.ContextHint{Reads: []string{appKey}})
+	}
+	reads := []string{appKey}
+	if decision == "approved" {
+		payload["unit"] = h.lastUnitKey
+		reads = append(reads, h.lastUnitKey)
+	}
+	reply := h.submitOp("DecideLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, payload,
+		&processor.ContextHint{Reads: reads})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, reply.Status, "DecideLeaseApplication(%s): %+v", decision, reply.Error)
 }
 

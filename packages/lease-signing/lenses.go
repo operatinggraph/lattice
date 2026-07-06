@@ -36,7 +36,7 @@ import (
 // (Contract #6 §6.13 scalar-passthrough amendment). With 14.2's keyColumn (the
 // bare-NanoID row key) the row is Weaver-readable end-to-end.
 func Lenses() []pkgmgr.LensSpec {
-	return []pkgmgr.LensSpec{
+	lenses := []pkgmgr.LensSpec{
 		{
 			CanonicalName:  "leaseApplicationComplete",
 			Class:          "meta.lens",
@@ -256,6 +256,7 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 	}
+	return append(lenses, RenewalLenses()...)
 }
 
 // leaseApplicationCompleteSpec is the one-row-per-anchor convergence cypher.
