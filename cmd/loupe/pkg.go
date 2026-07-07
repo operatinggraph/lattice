@@ -482,6 +482,7 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 	}
 	inst := pkgmgr.NewInstaller(conn, s.adminActor)
 	inst.RoleIDs = kernelRoleIDs()
+	inst.Submit = s.pkgmgrSubmit
 
 	ctx, cancel := s.pkgContext(r)
 	defer cancel()
@@ -537,6 +538,7 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 
 	inst := pkgmgr.NewInstaller(conn, s.adminActor)
 	inst.RoleIDs = kernelRoleIDs()
+	inst.Submit = s.pkgmgrSubmit
 
 	ctx, cancel := s.pkgContext(r)
 	defer cancel()

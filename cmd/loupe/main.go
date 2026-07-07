@@ -25,6 +25,8 @@
 //	                           dev key the Gateway/vertical apps also trust
 //	LOUPE_JWT_PUBLIC_KEY       PEM public key of a real operator IdP (production posture);
 //	                           LOUPE_JWT_ISSUER / LOUPE_JWT_AUDIENCE / LOUPE_JWT_KID refine it
+//	LOUPE_GATEWAY_URL          the Gateway's base URL op-submissions relay the operator's
+//	                           own Bearer token to (default: http://localhost:8080)
 //
 // Logs to stderr in slog text format. The server starts even when NATS is
 // unreachable or the bootstrap file is missing: the UI is served and each
@@ -54,8 +56,9 @@ import (
 )
 
 const (
-	defaultAddr      = "127.0.0.1:7777"
-	natsRequestLimit = 8 * time.Second
+	defaultAddr       = "127.0.0.1:7777"
+	natsRequestLimit  = 8 * time.Second
+	defaultGatewayURL = "http://localhost:8080"
 )
 
 func main() {
@@ -177,6 +180,7 @@ func run(logger *slog.Logger) error {
 		bindHost:           bindHost,
 		authn:              authn,
 		devSigner:          signer,
+		gatewayURL:         envOrDefault("LOUPE_GATEWAY_URL", defaultGatewayURL),
 	}
 
 	mux := http.NewServeMux()

@@ -773,12 +773,15 @@ func TestAuthenticateConsole_BadHeaderGoodCookie_FallsBack(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/api/systemmap", nil)
 	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
 	r.AddCookie(&http.Cookie{Name: operatorSessionCookieName, Value: tok, Expires: exp})
-	actor, err := s.authenticateConsole(r)
+	actor, gotTok, err := s.authenticateConsole(r)
 	if err != nil {
 		t.Fatalf("authenticateConsole: %v (a bad header must not mask a good cookie)", err)
 	}
 	if actor.Subject != "Hj4kPmRtw9nbCxz5vQ2y" {
 		t.Errorf("subject = %q, want the cookie's subject", actor.Subject)
+	}
+	if gotTok != tok {
+		t.Errorf("returned token = %q, want the cookie's token (what a relay must forward)", gotTok)
 	}
 }
 
@@ -794,7 +797,11 @@ func TestAuthenticateConsole_GoodHeaderWins(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/api/systemmap", nil)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	r.AddCookie(&http.Cookie{Name: operatorSessionCookieName, Value: "not.a.valid.jwt", Expires: exp})
-	if _, err := s.authenticateConsole(r); err != nil {
+	_, gotTok, err := s.authenticateConsole(r)
+	if err != nil {
 		t.Fatalf("authenticateConsole: %v (a valid header must succeed regardless of a bad cookie)", err)
+	}
+	if gotTok != tok {
+		t.Errorf("returned token = %q, want the header's token", gotTok)
 	}
 }

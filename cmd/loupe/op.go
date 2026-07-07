@@ -62,6 +62,25 @@ func buildEnvelope(req opRequest, requestID, actor string, now time.Time) (*proc
 	return env, nil
 }
 
+// gatewayRequestFromEnvelope narrows a validated OperationEnvelope down to
+// the fields the Gateway's POST /v1/operations wire shape accepts. Actor and
+// SubmittedAt are deliberately dropped — the Gateway stamps both itself, the
+// former from the caller's verified Bearer token (never from anything Loupe
+// asserts) and the latter from its own clock.
+func gatewayRequestFromEnvelope(env *processor.OperationEnvelope) gatewayOperationRequest {
+	req := gatewayOperationRequest{
+		RequestID:     env.RequestID,
+		Lane:          string(env.Lane),
+		OperationType: env.OperationType,
+		Class:         env.Class,
+		Payload:       env.Payload,
+	}
+	if env.ContextHint != nil {
+		req.Reads = env.ContextHint.Reads
+	}
+	return req
+}
+
 // cleanReads trims and drops empty entries from a declared read set, preserving
 // order and removing duplicates.
 func cleanReads(reads []string) []string {

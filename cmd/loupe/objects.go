@@ -12,9 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/asolgan/lattice/cmd/lattice/output"
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -104,11 +102,6 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if s.adminActor == "" {
-		s.writeError(w, http.StatusBadGateway,
-			"admin actor not loaded; a valid bootstrap file (BOOTSTRAP_JSON_PATH) is required to submit ops")
-		return
-	}
 
 	// Bound the whole request so form parsing can't exhaust memory; the stream
 	// cap inside ObjectPut is the authoritative per-blob limit.
@@ -145,7 +138,7 @@ func (s *server) handleObjectUpload(w http.ResponseWriter, r *http.Request) {
 		contentType = contentType[:255]
 	}
 
-	ctx, cancel := s.reqContext(r)
+	ctx, cancel := s.gatewaySubmitContext(r)
 	defer cancel()
 
 	if sensitive {
@@ -346,6 +339,7 @@ func (s *server) submitAttach(ctx context.Context, conn *substrate.Conn, oid, di
 		return nil, err
 	}
 
+	token := operatorToken(ctx)
 	var lastReply *processor.OperationReply
 	for attempt := 0; attempt < attachRetries; attempt++ {
 		reads := []string{targetKey} // always — it must be a live vertex
@@ -378,17 +372,15 @@ func (s *server) submitAttach(ctx context.Context, conn *substrate.Conn, oid, di
 		}
 		requestID := substrate.DeriveNanoID(attachReqNamespace, seed)
 
-		env := &processor.OperationEnvelope{
+		greq := gatewayOperationRequest{
 			RequestID:     requestID,
-			Lane:          processor.LaneDefault,
+			Lane:          string(processor.LaneDefault),
 			OperationType: "AttachObject",
-			Actor:         s.adminActor,
-			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 			Class:         "object",
 			Payload:       mustJSON(payload),
-			ContextHint:   &processor.ContextHint{Reads: reads},
+			Reads:         reads,
 		}
-		reply, err := output.SubmitOp(ctx, conn, env)
+		reply, err := submitOpViaGateway(ctx, s.gatewayURL, token, greq)
 		if err != nil {
 			return nil, err
 		}
@@ -557,11 +549,6 @@ func (s *server) handleObjectDetach(w http.ResponseWriter, r *http.Request, oid 
 	if !ok {
 		return
 	}
-	if s.adminActor == "" {
-		s.writeError(w, http.StatusBadGateway,
-			"admin actor not loaded; a valid bootstrap file is required to submit ops")
-		return
-	}
 	if !substrate.IsValidNanoID(oid) {
 		s.writeError(w, http.StatusBadRequest, "invalid object id")
 		return
@@ -579,7 +566,7 @@ func (s *server) handleObjectDetach(w http.ResponseWriter, r *http.Request, oid 
 	}
 	objKey := "vtx.object." + oid
 
-	ctx, cancel := s.reqContext(r)
+	ctx, cancel := s.gatewaySubmitContext(r)
 	defer cancel()
 
 	reads := []string{}
@@ -595,17 +582,15 @@ func (s *server) handleObjectDetach(w http.ResponseWriter, r *http.Request, oid 
 	// while a re-detach of a since-revived link is a distinct intent (CC6).
 	requestID := substrate.DeriveNanoID(detachReqNamespace,
 		join0(oid, targetKey, linkName, strconv.FormatUint(linkRev, 10)))
-	env := &processor.OperationEnvelope{
+	greq := gatewayOperationRequest{
 		RequestID:     requestID,
-		Lane:          processor.LaneDefault,
+		Lane:          string(processor.LaneDefault),
 		OperationType: "DetachObject",
-		Actor:         s.adminActor,
-		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "object",
 		Payload:       mustJSON(map[string]any{"oid": oid, "targetKey": targetKey, "linkName": linkName}),
-		ContextHint:   &processor.ContextHint{Reads: reads},
+		Reads:         reads,
 	}
-	reply, err := output.SubmitOp(ctx, conn, env)
+	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), greq)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "submit DetachObject: "+err.Error())
 		return

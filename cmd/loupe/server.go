@@ -16,7 +16,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/asolgan/lattice/cmd/lattice/output"
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/controlauth"
 	"github.com/asolgan/lattice/internal/gateway/auth"
@@ -80,6 +79,13 @@ type server struct {
 	// devSigner mints operator dev-tokens (POST /api/operator/dev-token) when
 	// the loopback dev-auth posture is enabled; nil otherwise.
 	devSigner *devSigner
+	// gatewayURL is the Gateway's base URL — op-submissions relay the
+	// requesting operator's own verified Bearer token here
+	// (loupe-operator-auth-lift-design.md §3.2) instead of Loupe stamping
+	// adminActor. Unlike loftspace-app/clinic-app (browser-direct to the
+	// Gateway), Loupe's own backend calls it, since some ops (the
+	// pkg-lifecycle batch) are assembled server-side.
+	gatewayURL string
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -188,6 +194,24 @@ func (s *server) requireConn(w http.ResponseWriter) (*substrate.Conn, bool) {
 // derived from the incoming request's context so a client disconnect cancels.
 func (s *server) reqContext(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), s.natsTimeout)
+}
+
+// gatewaySubmitContextTimeout bounds an op-submission relay call. It is
+// deliberately longer than the Gateway's own internal wait-for-Processor
+// timeout (internal/gateway/gateway.go's defaultReqTimeout, 8s) — Loupe's
+// clock starts before the HTTP hop to the Gateway even begins, so a Loupe
+// deadline equal to or shorter than the Gateway's own would routinely win
+// the race and tear the request down before the Gateway's designed
+// 202-with-requestId fallback could ever be produced or received, leaving
+// the caller with a bare "context deadline exceeded" and no requestId to
+// poll Core KV with. Giving Loupe's side comfortable headroom lets the
+// Gateway's own timeout fire first, so its fallback actually reaches here.
+const gatewaySubmitContextTimeout = 20 * time.Second
+
+// gatewaySubmitContext bounds a handler that relays an op through the
+// Gateway (handleOp, object attach/detach). See gatewaySubmitContextTimeout.
+func (s *server) gatewaySubmitContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), gatewaySubmitContextTimeout)
 }
 
 // handleCoreKVList implements GET /api/corekv?prefix=&limit=. Keys are listed
@@ -533,23 +557,16 @@ func (s *server) handlePackages(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOp implements POST /api/op. It parses the body into an opRequest,
-// builds a processor.OperationEnvelope (stamping a fresh request id + the admin
-// actor), submits it via output.SubmitOp, and returns the OperationReply.
+// validates + shapes it into an envelope (stamping a fresh request id), and
+// relays it to the Gateway under the requesting operator's own verified
+// Bearer token (loupe-operator-auth-lift-design.md §3.2) — Loupe itself
+// stamps no actor and needs no NATS connection to submit an op.
 func (s *server) handleOp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
 		return
 	}
 	if s.crossOriginBlocked(w, r) {
-		return
-	}
-	conn, ok := s.requireConn(w)
-	if !ok {
-		return
-	}
-	if s.adminActor == "" {
-		s.writeError(w, http.StatusBadGateway,
-			"admin actor not loaded; a valid bootstrap file (BOOTSTRAP_JSON_PATH) is required to submit ops")
 		return
 	}
 
@@ -569,16 +586,19 @@ func (s *server) handleOp(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "generate request id: "+err.Error())
 		return
 	}
-	env, err := buildEnvelope(req, requestID, s.adminActor, time.Now())
+	// buildEnvelope's actor param is unused by the relay path (the Gateway
+	// stamps the caller's verified token, never anything Loupe asserts) —
+	// passed empty rather than changing a signature op_test.go pins.
+	env, err := buildEnvelope(req, requestID, "", time.Now())
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	ctx, cancel := s.reqContext(r)
+	ctx, cancel := s.gatewaySubmitContext(r)
 	defer cancel()
 
-	reply, err := output.SubmitOp(ctx, conn, env)
+	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayRequestFromEnvelope(env))
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "submit op: "+err.Error())
 		return

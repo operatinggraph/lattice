@@ -749,6 +749,11 @@ refresh-loftspace:
 
 ## run-loupe — Build + run Loupe (the view/control web app) in the FOREGROUND.
 ## Open http://127.0.0.1:7777. Requires a running deployment (make up / up-full).
+## Op-submissions (Shred/Revoke/Attach/Detach/pkg install-upgrade-uninstall)
+## relay through the Gateway as the logged-in operator's own verified token
+## (loupe-operator-auth-lift-design.md §3.2) — `make run-gateway` (:8080,
+## LOUPE_GATEWAY_URL's default) must also be running, which `make up` alone
+## does not start; `up-full`/`up-full-capability` do.
 run-loupe:
 	@echo "==> Building loupe binary..."
 	go build -o bin/loupe ./cmd/loupe

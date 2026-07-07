@@ -267,6 +267,22 @@ func isBrowserNavigation(r *http.Request) bool {
 	return r.Method == http.MethodGet && strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "document")
 }
 
+// operatorTokenContextKey is the request-context key requireOperator stores
+// the winning credential's raw token under, so a handler can relay the exact
+// same Bearer token to the Gateway (op-submissions relay,
+// loupe-operator-auth-lift-design.md §3.2) without re-deriving it from the
+// header/cookie itself.
+type operatorTokenContextKey struct{}
+
+// operatorToken retrieves the current request's verified operator Bearer
+// token from ctx (or "" outside a requireOperator-gated request, or on the
+// exempted paths that never authenticate). Safe to call from anywhere ctx
+// descends from a gated request's context, however many layers deep.
+func operatorToken(ctx context.Context) string {
+	tok, _ := ctx.Value(operatorTokenContextKey{}).(string)
+	return tok
+}
+
 // requireOperator wraps next so every request — the static UI and every
 // /api/* route alike — must carry a valid operator credential (a Bearer
 // header or the session cookie), except the login page and the credential-
@@ -275,14 +291,17 @@ func isBrowserNavigation(r *http.Request) bool {
 // presented, or verification failing all deny, never a silent pass. An
 // unauthenticated top-level browser navigation is redirected to the login
 // page instead of answered with a bare JSON 401; a programmatic caller (curl,
-// the API, tests — no Sec-Fetch-Dest: document) still sees the plain 401.
+// the API, tests — no Sec-Fetch-Dest: document) still sees the plain 401. On
+// success, the winning raw token is attached to the request context
+// (operatorToken) so a handler can relay it onward.
 func (s *server) requireOperator(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isOperatorAuthExempt(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, err := s.authenticateConsole(r); err != nil {
+		_, tok, err := s.authenticateConsole(r)
+		if err != nil {
 			if isBrowserNavigation(r) {
 				http.Redirect(w, r, loginPagePath, http.StatusFound)
 				return
@@ -290,25 +309,29 @@ func (s *server) requireOperator(next http.Handler) http.Handler {
 			s.writeError(w, http.StatusUnauthorized, "operator login required: "+err.Error())
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), operatorTokenContextKey{}, tok)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// authenticateConsole verifies the request's operator credential. It tries
-// the Bearer header first; if that's absent OR fails to verify (a stray or
-// expired header must not mask an otherwise-good session — e.g. a leftover
-// devtools-replayed header alongside a live cookie), it falls back to the
-// session cookie. Returns an error only when neither transport yields a
-// verified operator — fail closed throughout.
-func (s *server) authenticateConsole(r *http.Request) (auth.VerifiedActor, error) {
+// authenticateConsole verifies the request's operator credential and returns
+// the verified actor alongside the exact raw token that verified it. It
+// tries the Bearer header first; if that's absent OR fails to verify (a
+// stray or expired header must not mask an otherwise-good session — e.g. a
+// leftover devtools-replayed header alongside a live cookie), it falls back
+// to the session cookie. Returns an error only when neither transport yields
+// a verified operator — fail closed throughout.
+func (s *server) authenticateConsole(r *http.Request) (auth.VerifiedActor, string, error) {
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
 	if tok := bearerToken(r); tok != "" {
 		if actor, err := s.verifyOperatorToken(ctx, tok); err == nil {
-			return actor, nil
+			return actor, tok, nil
 		}
 	}
-	return s.verifyOperatorToken(ctx, sessionCookieToken(r))
+	tok := sessionCookieToken(r)
+	actor, err := s.verifyOperatorToken(ctx, tok)
+	return actor, tok, err
 }
 
 // verifyOperatorToken is the one verification path every credential

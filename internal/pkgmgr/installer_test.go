@@ -615,6 +615,42 @@ func TestInstaller_Uninstall_RaceOnDeclaredKeyRejected(t *testing.T) {
 	}
 }
 
+// TestInstaller_SubmitOp_UsesSubmitFieldWhenSet proves submitOp's dispatch:
+// when Submit is set, it is used INSTEAD of direct-NATS request/reply (the
+// Installer holds no Conn/NATS connection at all here — a fallback to the
+// direct-NATS path would panic on the nil Conn before this test could ever
+// observe a false pass). cmd/loupe wires Submit to relay through the Gateway
+// under the caller's own operator credential
+// (loupe-operator-auth-lift-design.md §3.2); cmd/lattice-pkg and every
+// existing test in this file leave Submit nil and are provably unaffected
+// (they predate this field and continue to pass unchanged).
+func TestInstaller_SubmitOp_UsesSubmitFieldWhenSet(t *testing.T) {
+	var gotOpType, gotClass, gotReqID string
+	var gotPayload map[string]any
+	inst := &Installer{
+		AdminActor: "vtx.identity.admin1",
+		Now:        func() time.Time { return time.Time{} },
+		Submit: func(ctx context.Context, operationType, class, requestID string, payload map[string]any) (*processor.OperationReply, error) {
+			gotOpType, gotClass, gotReqID, gotPayload = operationType, class, requestID, payload
+			return &processor.OperationReply{Status: processor.ReplyStatusAccepted, RequestID: requestID}, nil
+		},
+	}
+
+	reply, err := inst.submitOp(context.Background(), "InstallPackage", "InstallPackage", "req-1", map[string]any{"x": float64(1)})
+	if err != nil {
+		t.Fatalf("submitOp: %v", err)
+	}
+	if reply.Status != processor.ReplyStatusAccepted {
+		t.Errorf("Status = %q, want accepted", reply.Status)
+	}
+	if gotOpType != "InstallPackage" || gotClass != "InstallPackage" || gotReqID != "req-1" {
+		t.Errorf("Submit received opType=%q class=%q reqID=%q, want InstallPackage/InstallPackage/req-1", gotOpType, gotClass, gotReqID)
+	}
+	if gotPayload["x"] != float64(1) {
+		t.Errorf("Submit received payload %+v", gotPayload)
+	}
+}
+
 // contains is a copy of strings.Contains so this test file stays
 // dependency-light (matches the style used in packages/identity-hygiene/package_test.go).
 func contains(haystack, needle string) bool {

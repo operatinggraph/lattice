@@ -45,6 +45,14 @@ type Installer struct {
 	// deterministic NanoIDs and merged in at install time. The map may be
 	// unset (nil) for tests that hard-code NanoIDs in GrantsTo.
 	RoleIDs map[string]string
+
+	// Submit, when set, replaces submitOp's default direct-NATS
+	// request/reply for every op this installer sends — e.g. a caller
+	// relaying through an HTTP Gateway with its own verified operator
+	// credential instead of stamping AdminActor
+	// (loupe-operator-auth-lift-design.md §3.2). nil (the default)
+	// preserves today's direct-NATS behavior unchanged.
+	Submit func(ctx context.Context, operationType, class, requestID string, payload map[string]any) (*processor.OperationReply, error)
 }
 
 // NewInstaller builds a default-configured installer.
@@ -317,10 +325,14 @@ func replyError(reply *processor.OperationReply) string {
 	return string(reply.Status)
 }
 
-// submitOp publishes an op to ops.meta and waits for the Processor reply
-// on a NATS inbox. Mirrors cmd/lattice/output.SubmitOp; reproduced here
-// so internal/pkgmgr does not depend on a cmd/ package.
+// submitOp publishes an op to ops.meta and waits for the Processor reply on
+// a NATS inbox, unless Submit is set (then it relays through that instead).
+// Mirrors cmd/lattice/output.SubmitOp; reproduced here so internal/pkgmgr
+// does not depend on a cmd/ package.
 func (i *Installer) submitOp(ctx context.Context, operationType, class, requestID string, payload map[string]any) (*processor.OperationReply, error) {
+	if i.Submit != nil {
+		return i.Submit(ctx, operationType, class, requestID, payload)
+	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
