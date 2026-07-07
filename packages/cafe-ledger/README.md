@@ -10,10 +10,11 @@ Depends: `lease-signing` (the `leaseapp` vertex type an account is `heldFor` —
 
 ## Increment 1 of 3 (Café vertical, `verticals.md`)
 
-This package ships the ledger primitive alone. `cafe-domain` (café location + the `OpenTab`/`Charge`/
-`Settle` tab lifecycle, which posts into this ledger) and the thin café FE are Increment 2; the
-one-bill composition lens unioning `ledgerHistory` + `cafeLedgerHistory` by `leaseAppKey` is
-Increment 3. See
+This package shipped the ledger primitive alone. `cafe-domain` (the `OpenTab`/`Charge`/`Settle` tab
+lifecycle) is Increment 2's domain half, posting into this ledger through a Weaver playbook via
+`DebitAccount`'s `tabRef` (below) — never a direct cross-package write; its thin FE is a follow-up
+checkpoint of the same increment. The one-bill composition lens unioning `ledgerHistory` +
+`cafeLedgerHistory` by `leaseAppKey` is Increment 3. See
 [`cafe-ledger-design.md`](../../_bmad-output/implementation-artifacts/cafe-ledger-design.md).
 
 ## Inventory
@@ -23,7 +24,7 @@ Increment 3. See
 | **Vertex types** (2) | `cafeaccount` (root `{}`, D5) · `cafetransaction` (root `{}`, D5, `.entry` aspect) |
 | **Aspect types** (1) | `cafeLedgerAccountGuard` — `vtx.leaseapp.<id>.cafeLedgerAccount`, the per-lease create-only uniqueness guard |
 | **Links** (2) | `heldFor` (cafeaccount → leaseapp) · `postedTo` (cafetransaction → cafeaccount) |
-| **Operations** (3) | `CreateAccount` · `DebitAccount` · `CreditAccount` |
+| **Operations** (3) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s Settle consumer) · `CreditAccount` |
 | **Projection lenses** (2) | `cafeLedgerHistory` (one row per transaction) → `cafe-ledger-history` · `cafeLeaseAccounts` (lease → account key lookup) → `cafe-lease-accounts` (both `nats-kv`, `full` engine) |
 
 Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — the trusted
@@ -71,9 +72,17 @@ only way the FE resolves a lease's café account key, since it is no longer deri
 `leaseAppKey` (the independent NanoID above) — a lease with no café account yet still gets a row
 (`accountKey` null).
 
+## `tabRef` — the `cafe-domain` settlement back-link
+
+`DebitAccount` accepts an optional `tabRef` (`vtx.tab.<NanoID>`, validated alive when supplied): when
+present it writes `lnk.cafetransaction.<id>.settles.tab.<id>` (mirroring `loftspace-ledger`'s
+`clauseRef`/`authorizedBy` precedent) — the audit link `cafe-domain`'s `cafeTabSettlement` lens reads
+to detect a settled tab's charge has posted. A plain human-submitted `DebitAccount` omitting `tabRef`
+is byte-for-byte unaffected.
+
 ## Out of scope (this increment)
 
-- **The tab lifecycle** (`OpenTab`/`Charge`/`Settle`) — `cafe-domain`, Increment 2.
+- **The thin café FE** — a follow-up checkpoint of `cafe-domain`'s Increment 2.
 - **A stored/cached balance** — deliberately never materialized; always summed from `cafeLedgerHistory`.
 - **Refunds / voids as a distinct operation** — model as an offsetting `CreditAccount`/`DebitAccount`
   entry with an explanatory `memo`, mirroring the other ledger packages.

@@ -114,19 +114,23 @@ func transactionDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"DebitAccount", "CreditAccount"},
 		Description: "House-tab ledger transaction DDL. Vertex shape: vtx.cafetransaction.<NanoID>, " +
 			"class=cafetransaction, root data = {} (minimal, D5 — the entry detail is a .entry aspect). " +
-			"DebitAccount{accountKey, amountCents, memo?} records a café charge (a settled tab); " +
+			"DebitAccount{accountKey, amountCents, memo?, tabRef?} records a café charge (a settled tab); " +
 			"CreditAccount{accountKey, amountCents, memo?} records a payment received. Each mints a fresh " +
 			"vtx.cafetransaction.<NanoID> + a .entry aspect {type (debit|credit), amountCents, memo?, postedAt} + the " +
 			"postedTo link (cafetransaction→cafeaccount, the cafetransaction is the later-arriving vertex so it is " +
 			"the source — Contract #1 §1.1). The ledger is APPEND-ONLY — no balance is stored or mutated on the " +
 			"account; the cafeLedgerHistory lens derives a balance by summing entries, so concurrent debits/credits " +
 			"never race a read-modify-write. Requires the accountKey be a live account and amountCents be a positive " +
-			"number.",
+			"number. DebitAccount-only optional tabRef (the cafe-domain Settle consumer, mirroring loftspace-ledger's " +
+			"clauseRef): when present and the referenced tab is alive, writes the settles audit link " +
+			"(cafetransaction→tab) the cafeTabSettlement Weaver target reads to detect the charge is posted; a plain " +
+			"human-submitted DebitAccount omitting tabRef is byte-for-byte unaffected.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> the transaction posts to (DebitAccount/CreditAccount; required, validated alive)."},` +
 			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required, must be > 0. A debit is a charge (increases what the resident owes on the house tab); a credit is a payment (decreases it)."},` +
-			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"Settled tab — table 4\", \"House tab payment\"). Optional."}},` +
+			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"Settled tab — table 4\", \"House tab payment\"). Optional."},` +
+			`"tabRef":{"type":"string","description":"DebitAccount only: vtx.tab.<NanoID> of the cafe-domain tab this charge settles (optional, validated alive when supplied). Writes the settles audit link."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.cafetransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
@@ -134,6 +138,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"accountKey":  "Full vtx.cafeaccount.<NanoID> key the transaction posts to. DebitAccount/CreditAccount validate it is alive and write the postedTo link (transaction→account) the cafeLedgerHistory lens walks.",
 			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the cafeLedgerHistory lens.",
 			"memo":        "Optional free-text description of the charge or payment (e.g. \"Settled tab — table 4\", \"House tab payment\"). Stored on the .entry aspect when supplied; projected by the cafeLedgerHistory lens.",
+			"tabRef":      "DebitAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this charge settles. Validated alive when supplied; writes the settles audit link (transaction→tab) the cafeTabSettlement Weaver target's missing_charge gap reads. Omitted on a plain human-submitted DebitAccount.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -143,6 +148,13 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"(root data {} — D5) + the .entry aspect {type: debit, amountCents: 1850, memo: \"Settled tab — table 4\", postedAt} " +
 					"+ the postedTo link (transaction→account). Emits account.debited{accountKey, transactionKey, amountCents}. " +
 					"Returns primaryKey. Rejects UnknownAccount if the account is absent, or InvalidArgument if amountCents <= 0.",
+			},
+			{
+				Name:    "DebitAccount — Weaver-dispatched tab settlement (tabRef)",
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "amountCents": 1850, "tabRef": "vtx.tab.<NanoID>"},
+				ExpectedOutcome: "Same as the plain DebitAccount, plus (tabRef alive) the settles link " +
+					"(transaction→tab) — the cafeTabSettlement Weaver target's missing_charge gap templates this from " +
+					"row.tabKey. Rejects UnknownTab if the referenced tab is absent or tombstoned.",
 			},
 			{
 				Name:    "CreditAccount — record a house-tab payment",

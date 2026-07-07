@@ -383,6 +383,64 @@ func TestDebitAccount_UnknownAccount(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
+// TestDebitAccount_TabRefWritesSettlesLink (cafe-domain Settle consumer,
+// mirroring bespoke-contracts' clauseRef test): a DebitAccount carrying a
+// live tabRef writes the settles audit link (transaction→tab) alongside the
+// normal postedTo link, on top of the byte-for-byte-unaffected plain path
+// TestDebitCreditAccount_PostEntries already covers (no tabRef at all).
+func TestDebitAccount_TabRefWritesSettlesLink(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "tabref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFELEASETABHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecreateaccttab001", leaseKey)
+	tabKey := "vtx.tab.BBCAFETABREFHJKMNPQR"
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+
+	debitReqID := testutil.GenReqID("cafedebittabref00001")
+	debitEnv := &processor.OperationEnvelope{
+		RequestID:     debitReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-07T13:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":950,"tabRef":"` + tabKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, tabKey}},
+	}
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	tabID := tabKey[len("vtx.tab."):]
+	settlesLnk := "lnk.cafetransaction." + nanoIDFromRequestID(debitReqID) + ".settles.tab." + tabID
+	if !keyExists(t, ctx, conn, settlesLnk) {
+		t.Fatalf("settles link must exist: %s", settlesLnk)
+	}
+}
+
+// TestDebitAccount_UnknownTabRefRejected rejects a tabRef naming an absent
+// tab (no-orphan invariant on the settles link, mirroring UnknownAccount).
+func TestDebitAccount_UnknownTabRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "unknowntabref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFELEASEBADTABHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecreateacctbadtb1", leaseKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cafedebitbadtabref01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-07T13:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":950,"tabRef":"vtx.tab.BBABSENTTABHJKMNPQR"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, "vtx.tab.BBABSENTTABHJKMNPQR"}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
 // TestDebitAccount_NonPositiveAmountRejected rejects amountCents <= 0
 // (InvalidArgument).
 func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {

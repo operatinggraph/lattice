@@ -179,7 +179,7 @@ def vertex_alive(state, key):
         return False
     return True
 
-def post_entry(state, op, entry_type, event_class):
+def post_entry(state, op, entry_type, event_class, allow_tab_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
     _, acct_id = parts_of(acct_key, "accountKey", "cafeaccount")
@@ -191,6 +191,20 @@ def post_entry(state, op, entry_type, event_class):
     if amount_cents <= 0:
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
+
+    # tabRef (DebitAccount only — the cafe-domain Settle consumer): the tab
+    # this charge settles. A tab-settlement playbook dispatch (cafe-domain's
+    # cafeTabSettlement Weaver target) always declares row.tabKey in Reads, so
+    # the tab is hydrated here; a plain human-submitted DebitAccount omits it
+    # entirely (nothing below runs) — the loftspace-ledger clauseRef precedent.
+    tab_key = None
+    tab_id = None
+    if allow_tab_ref:
+        tab_key = optional_string(p, "tabRef")
+        if tab_key != None:
+            _, tab_id = parts_of(tab_key, "tabRef", "tab")
+            if not vertex_alive(state, tab_key):
+                fail("UnknownTab: " + tab_key)
 
     tx_id = nanoid.new()
     tx_key = "vtx.cafetransaction." + tx_id
@@ -214,6 +228,15 @@ def post_entry(state, op, entry_type, event_class):
     ]
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
+
+    if tab_key != None:
+        # settles: the transaction (later-arriving) is the source, the
+        # pre-existing tab is the target (Contract #1 §1.1) — the "which tab
+        # did this charge settle?" chain of custody the cafeTabSettlement
+        # lens's missing_charge gate reads to detect the charge is posted.
+        settles_lnk = "lnk.cafetransaction." + tx_id + ".settles.tab." + tab_id
+        mutations.append(make_link(settles_lnk, tx_key, tab_key, "settles", "settles", {}))
+
     return {"mutations": mutations, "events": events,
             "response": {"primaryKey": tx_key}}
 
@@ -221,10 +244,10 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "DebitAccount":
-        return post_entry(state, op, "debit", "account.debited")
+        return post_entry(state, op, "debit", "account.debited", True)
 
     if ot == "CreditAccount":
-        return post_entry(state, op, "credit", "account.credited")
+        return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `
