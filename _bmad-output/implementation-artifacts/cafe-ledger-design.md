@@ -71,9 +71,28 @@ loftspace-ledger's: mints-held-for, unknown-lease, debit/credit post, unknown-ac
 non-positive-amount — plus a guard-collision regression seeding a loftspace-ledger `.ledgerAccount`
 guard on the same leaseapp and asserting `.cafeLedgerAccount` still writes cleanly alongside it).
 
+## Inc 2a — `cafe-domain` (domain + Weaver wiring), shipped
+
+`cafe-domain` ships the `tab` vertex (`OpenTab`/`Charge`/`Settle`, OCC-conditioned running total —
+`Charge` is a real accumulator, unlike an idempotent status flip, so it needs the `providerSlotClaim`
+precedent's OCC conditioning, not an unconditioned upsert) + the `cafeTabSettlement` actorAggregate
+convergence lens + a §10.8 playbook. No separate "café location" vertex: YAGNI — no demand row asks
+for multi-location cafés, and the tab's only essential relationship is to the resident lease
+(`openFor`), mirroring `cafe-ledger`'s own anchor.
+
+`Settle` never posts to `cafe-ledger` directly — the step-6 write gate keys `PermittedCommands` by
+`(operationType, class)`, so cafe-domain's own script cannot write a `cafeaccount`/`cafetransaction`
+mutation it doesn't own. Instead a settled, positive-total tab surfaces on `cafeTabSettlement`:
+`missing_account` (no café-ledger account yet) → Weaver `directOp(CreateAccount)` — "opening one via
+`CreateAccount` on first use"; `missing_charge` (account exists, not yet posted) → Weaver
+`directOp(DebitAccount)` with a `tabRef` back-link. `cafe-ledger`'s `DebitAccount` is extended
+(additive, byte-for-byte unaffected without `tabRef`) with that optional `tabRef`, writing the
+`settles` audit link (`cafetransaction`→`tab`) the lens's `missing_charge` gate reads — mirrors
+`loftspace-ledger`'s `clauseRef`/`bespoke-contracts` precedent exactly (`packages/bespoke-contracts/targets.go`).
+
 ## Next
 
-- **Inc 2** — `cafe-domain` (café location vertex + `tab` vertex: `OpenTab`/`Charge`/`Settle`; `Settle`
-  posts a `DebitAccount` to the resident's `cafeaccount`, opening one via `CreateAccount` on first use)
-  + thin FE (POS→tab · front-desk open-tabs · resident house-tab).
+- **Inc 2b** — thin café FE (POS→tab · front-desk open-tabs · resident house-tab), reading
+  `cafeTabSettlement`/`cafeLeaseAccounts`/`cafeLedgerHistory` (P5 lens read path) and submitting
+  `OpenTab`/`Charge`/`Settle` through the Gateway.
 - **Inc 3** — one-bill composition lens unioning `ledgerHistory` + `cafeLedgerHistory` by `leaseAppKey`.

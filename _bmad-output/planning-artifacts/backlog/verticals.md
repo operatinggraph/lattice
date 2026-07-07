@@ -17,7 +17,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **Café vertical** (house tabs) | `cafe-domain` (café location + OpenTab/Charge/Settle) on a `cafe-ledger` mirror of loftspace/clinic-ledger (`cafeaccount heldFor` the resident leaseapp; own `cafeaccount`/`cafetransaction` types) + thin café FE (POS→tab · front-desk open-tabs · resident house-tab). **One-bill** payoff: a combined-statement lens unions `ledgerHistory`+`cafeHistory` by `leaseAppKey` so café charges land on the lease statement. | Café | pkg + FE | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/cafe-ledger-design.md) · Inc1 done, next Inc2 |
+| **Café vertical** (house tabs) | `cafe-domain` (café location + OpenTab/Charge/Settle) on a `cafe-ledger` mirror of loftspace/clinic-ledger (`cafeaccount heldFor` the resident leaseapp; own `cafeaccount`/`cafetransaction` types) + thin café FE (POS→tab · front-desk open-tabs · resident house-tab). **One-bill** payoff: a combined-statement lens unions `ledgerHistory`+`cafeHistory` by `leaseAppKey` so café charges land on the lease statement. | Café | pkg + FE | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/cafe-ledger-design.md) · Inc2a done, Inc2b |
 | **Wellness vertical** (classes) | `wellness-domain` (studio + class/session + booking) reusing clinic-domain's generic slot-claim guard (`slot_cells`/`claim_cell`; only hub + aspect names change) + thin FE (schedule grid · roster · my-classes). **Resident-rate** payoff: CreateBooking reads the booker's live lease (`contextHint.reads`; verify `heldBy` the booker → no over-grant) then applies the member rate + writes `booking residentRate lease`. | Wellness | pkg + FE | ★★ | L | 📋 ready (after Café) |
 | **Mixed-use composition surfaces** | The "more than the sum" beats across lenses the one-liner omitted: **front-desk** unified resident context (lease + visit + open tab + booked class in one lookup, surfaced before asked) and **operations** portfolio-pulse aggregate (occupancy + service-attach-rate across packages) — views that exist only because the packages share one graph. Aggregate lenses + FE across both apps + Loupe. | Café/Wellness | FE + pkg | ★★★ | M | 📋 ready (after Café+Wellness) |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | 📋 ready (after Wellness) |
@@ -43,6 +43,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-07 · `5d065db` · Café vertical Inc 2a — `cafe-domain` tab lifecycle + Weaver-posted settlement — [design](../../implementation-artifacts/cafe-ledger-design.md)
 - 2026-07-07 · `317fbe9` · Café vertical Inc 1 — `cafe-ledger` house-tab payment ledger — [design](../../implementation-artifacts/cafe-ledger-design.md)
 - 2026-07-07 · `37f3a6a` · LoftSpace+Clinic browser-direct writes through the Gateway CLOSED — real-actor-write-auth-e2e Phase 1 item 5, live-verified — [design](../../implementation-artifacts/real-actor-write-auth-e2e-design.md)
 - 2026-07-07 · `921fda4` · LoftSpace consumer-scope op grant (real allow/deny) CLOSED — built cross-lane in the Lattice Phase-1 e2e fire (`CreateLeaseApplication` → consumer scope=self); board was stale, reconciled here
@@ -76,5 +77,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-07-01 · `5cf84e8` · Clinic recurring visit series Inc 1 — visitseries vertex + Start/Pause/Resume/AdvanceVisitSeries + rolling `visitSeriesDue` lens
 - 2026-06-30 · `f8240cd` · Clinic — `SetAppointmentStatus` terminal-status guard (cancelled/completed/noShow final → TerminalStatus; fixes completed→scheduled revert)
 - 2026-06-30 · `6674834` · LoftSpace — `DecideLeaseApplication` decision guards (recorded decision terminal → DecisionFinal; approve needs signed → NotReadyToApprove)
-- 2026-06-30 · `f70ab18` · Clinic follow-ups CLOSED — Inc 2 at-the-date `@at` follow-up reminder (`followUpReminders` + `RecordFollowUpReminder` + worklist badge)
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
