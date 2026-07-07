@@ -145,9 +145,14 @@ var matrix = []component{
 		allowResponses: true, // control responder (lattice.ctrl.loom.>)
 	},
 	{
-		name:           "weaver",
-		desc:           "reconciliation engine; owns weaver-state; targets are Refractor-written, Weaver-read",
-		pubAllow:       []string{bootstrap.OpsWildcardSubject, "$KV.weaver-state.>", "lattice.ctrl.weaver.>", bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
+		name: "weaver",
+		desc: "reconciliation engine; owns weaver-state; targets are Refractor-written, Weaver-read",
+		// The control responder only SUBSCRIBES to lattice.ctrl.weaver.> (already
+		// covered by the wildcard subscribe grant) and replies via allowResponses —
+		// it never publishes to the subject itself, so no explicit publish grant is
+		// needed here (mirrors refractor's control responder, which carries the
+		// same allowResponses-only posture for lattice.ctrl.refractor.>).
+		pubAllow:       []string{bootstrap.OpsWildcardSubject, "$KV.weaver-state.>", bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 		allowResponses: true, // control responder (lattice.ctrl.weaver.>)
 	},
