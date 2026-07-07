@@ -112,7 +112,6 @@ deferred follow-ons.
 |---|---|---|---|---|
 | **weaver-admission-pkgmgr-authoring** | The §10.2 admission block (dispatch pacing) is engine-complete but has no `pkgmgr` authoring path — only a raw-JSON install can declare it. Add `WeaverTargetSpec.Admission` + validation mirroring the engine's `validateAdmissionPolicy`. Consumer: a vertical target pacing a vendor adapter (LoftSpace bgcheck/payment). | ★ | S | 📋 |
 | **health-issue-since-field** | Health issue records omit Contract #5 §5.5's required `since` (first-arose ISO-8601 timestamp) — verified for Weaver, likely platform-wide. Thread a first-seen clock through each engine's issue cache. | ★ | M | 📋 · platform-wide (verified Weaver) |
-| **weaver-ctrl-publish-grant-trim** | The weaver NATS user may publish its own `lattice.ctrl.weaver.>` subjects; the control responder needs only subscribe + `allow_responses`. Trim the grant in `deploy/nats-server.conf` + `gen-dev-nkeys`. Least-privilege nit (self-scoped, still capability-checked). | ★ | XS | 📋 |
 | **weaver-untested-arms** | Five untested failure arms (none security-critical): `seedDisabledTargets` list-keys error → Start abort; disable/enable fail-safe ordering + silent Pause/Resume bool discards; `releaseCompletedLeg` revision-conflict skip; `freezeOscillatingPair` Disable-failure leg. Add colocated tests. | ★ | S | 📋 |
 
 ## Lattice feature backlog — the Phase-3 build queue
@@ -172,7 +171,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Refractor/deploy] Loupe read-only PG role (`provision-loupe-role`)** | Loupe's shipped F9 seam reads postgres lens targets via `LOUPE_PG_DSN` — needs a SELECT-only role (mirror `provision-loftspace-role`) + an inspector posture over FORCE-RLS tables: BYPASSRLS (recommended) vs wildcard `actor_read_grants` grant. Until then, postgres lens contents render pg-pending. | ★★ | S | 📋 · unblocks loupe F9 full value |
+| **[Refractor/deploy] Loupe read-only PG role (`provision-loupe-role`)** | Loupe's shipped F9 seam reads postgres lens targets via `LOUPE_PG_DSN` — needs a SELECT-only role (mirror `provision-loftspace-role`) + an inspector posture over FORCE-RLS tables: BYPASSRLS vs wildcard `actor_read_grants` grant. Until then, postgres lens contents render pg-pending. | ★★ | S | 🔭 flag-for-Andrew · RLS-bypass vs wildcard-grant is a security-posture call, not a Steward impl-level one — [design](../../implementation-artifacts/loupe-2-ux-design.md) §15 Q6 |
 | **[Refractor] Convergence-lens filtering-WHERE activation guard** | Filter-retraction relies on convergence (`violating`) lenses never carrying a filtering WHERE (a retracted row reads to Weaver as entity deletion) — true for every live lens but unenforced at activation. | ★ | XS–S | 📋 review carry-out · [design](../../implementation-artifacts/negative-filter-retraction-projection-design.md) §Fires-1+2-checkpoint |
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — first consumer (LoftSpace FTS unified search) filed on verticals; the OpenSearch adapter builds only on search-engine-scale demand |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
@@ -202,6 +201,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-07 · `af86835` · [Weaver] weaver-ctrl-publish-grant-trim — dropped the redundant `lattice.ctrl.weaver.>` publish grant (subscribe + `allow_responses` already cover the control responder); natsperm-verified
 - 2026-07-07 · `94087bd` · [Refractor] refractor-6-14-postgres-seam-truthup — seq-guarded protected-Delete tombstone, grant-table auth-plane severity, int64 wrap fix; lead-reviewed, CI green
 - 2026-07-07 · `8b481a1` · [Refractor] refractor-failure-tier-backhalf — wired `SetRetryQueue`(deferred retry/DLQ) + `SetAuditWriter` (per-rule audit trail) in `cmd/refractor`, both previously dormant; lead-reviewed, CI green
 - 2026-07-07 · `e189e74` · [Gateway] jwks health block — per-kid provenance (source/alg/addedAt) + poller lastPoll/swaps counters, mirroring the revocation block; lead-reviewed, CI green
@@ -233,8 +233,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-06 · `6d2b4c5` · [Weaver] External-gap stale-mark reclaim — prompt fresh-instance retry after a failed call, per Contract #10 §10.3; 3-layer reviewed, fixed forward (vacuous confirmedConcluded signal)
 - 2026-07-06 · `945f605` · [Contract #7] §7.2 reconciled to as-built kernel — holdsRole→operator topology (not data.protected), 5→1 meta-meta DDL, no processor identity; §7.7 untouched (arch item 7; +922a294, dfbad3d)
 - 2026-07-06 · `9711814` · [Contract #2] §2.6 error-code table reconciled to the wire + §2.9 lenient-parse fix + TestConformance_ErrorCodeTable_MatchesWire pin (arch item 4)
-- 2026-07-06 · `81c0c6b` · [Weaver] Planner mandate R2 — LoftSpace lease-renewal package (5 ops, 2 goal-authored targets, e2e); 3-layer reviewed, fixed forward (oscillation-path collision, double-extension guard); R3 FE next
-- 2026-07-05 · `11cc15f` · [loom] dispatch authContext.target — carry the real vtx.meta.<NanoID> as Pattern.MetaKey (not the human PatternID), both dispatch sites + pinning test (arch-review item 10)
-- 2026-07-05 · `11cc15f` · [repo] debris — 5 CONTRACT-AMENDMENT-REQUEST.md removed, objects-base reclaim comments fixed, objmgr up-full BOOTSTRAP_JSON_PATH, internal/spike README (arch item 11)
-- 2026-07-05 · `11cc15f` · [Gateway] up-full deploy — Gateway now started in make up-full (dev-mode :8080), Loupe map node no longer a ghost (arch item 1a; F10)
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*

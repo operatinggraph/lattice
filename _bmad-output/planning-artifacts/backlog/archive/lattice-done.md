@@ -2,6 +2,10 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-06 · `81c0c6b` · [Weaver] Planner mandate R2 — LoftSpace lease-renewal package (5 ops, 2 goal-authored targets, e2e); 3-layer reviewed, fixed forward (oscillation-path collision, double-extension guard); R3 FE next
+- 2026-07-05 · `11cc15f` · [loom] dispatch authContext.target — carry the real vtx.meta.<NanoID> as Pattern.MetaKey (not the human PatternID), both dispatch sites + pinning test (arch-review item 10)
+- 2026-07-05 · `11cc15f` · [repo] debris — 5 CONTRACT-AMENDMENT-REQUEST.md removed, objects-base reclaim comments fixed, objmgr up-full BOOTSTRAP_JSON_PATH, internal/spike README (arch item 11)
+- 2026-07-05 · `11cc15f` · [Gateway] up-full deploy — Gateway now started in make up-full (dev-mode :8080), Loupe map node no longer a ghost (arch item 1a; F10)
 - 2026-07-05 · `e0737db` · [Weaver] Planner mandate R1 pkgmgr authoring — mode/goal/goalColumns/actions on WeaverTargetSpec/GapActionSpec + install validation; R2 package next
 - 2026-07-05 · `c7f3bb5` · [Weaver] Planner mandate R1 — goal-regression dispatch wiring (Synthesize, per-leg pin/release, unplannable→augur); pkgmgr authoring next
 - 2026-07-05 · `b99d51c` · [Weaver] Planner mandate Fire 6 Increment 3 — per-gap `actions` catalog parse + install-validation (row-reachable pre/effects, concrete-effects check); R1 dispatch wiring next
