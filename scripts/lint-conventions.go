@@ -64,6 +64,13 @@
 //     lazy read, the read posture's only debt class. Same posture as
 //     TestPackage_NoScans, extended from "no raw scans" to "declare (or
 //     classify) your declarable reads".
+//   - Protected-by-default gate (Contract #6 §6.14). A non-test pkgmgr.LensSpec
+//     composite literal declaring `Adapter: "postgres"` must also declare one of
+//     Protected, Public, or GrantTable — a postgres business read model is
+//     protected by default, and an undeclared posture must fail closed rather
+//     than silently activate as a plain unguarded table. Mirrors the same gate
+//     Refractor's translateSpec and pkgmgr's validateLensReadPath enforce at
+//     runtime/install-time; this is the earliest (edit-time) tripwire.
 //
 // Markdown/docs are intentionally out of scope: they discuss the conventions
 // (e.g. "never an asp.* prefix") and would false-positive. The 6-segment link
@@ -104,6 +111,12 @@ var (
 	kvLinksCall   = regexp.MustCompile(`kv\.Links\(`)
 	readPosture   = regexp.MustCompile(`#\s*read-posture:\s*\(([cde])\)`)
 	scriptMutates = regexp.MustCompile(`"op":\s*"(create|update|tombstone)"|make_(vtx|link|aspect|update)`)
+	// lensAdapterPostgres anchors a pkgmgr.LensSpec composite literal's Adapter
+	// field declaring "postgres" (Contract #6 §6.14: a postgres business read
+	// model is protected by default). lensPostureFlag matches any of the three
+	// postures a lens entry may declare to opt out of the fail-closed default.
+	lensAdapterPostgres = regexp.MustCompile(`Adapter:\s*"postgres"`)
+	lensPostureFlag     = regexp.MustCompile(`\b(Protected|Public|GrantTable):`)
 )
 
 // readPostureWindow is how many lines above a kv.Read/kv.Links call the
@@ -272,6 +285,9 @@ func scanFile(path string) []finding {
 	// constants). Tests, engines, and harnesses are out of scope.
 	postureScoped := !isTest && (strings.HasPrefix(slash, "packages/") || strings.Contains(slash, "/packages/"))
 	fileMutates := postureScoped && scriptMutates.Match(data)
+	if !isTest {
+		out = append(out, checkLensProtectedByDefault(path, string(data))...)
+	}
 	// window holds the last readPostureWindow raw lines, for locating a
 	// `# read-posture:` annotation in the call's own comment block.
 	var window []string
@@ -299,6 +315,104 @@ func scanFile(path string) []finding {
 		window = append(window, line)
 		if len(window) > readPostureWindow {
 			window = window[1:]
+		}
+	}
+	return out
+}
+
+// lensScanWindow bounds how far checkLensProtectedByDefault walks backward/
+// forward from an Adapter match to find its composite literal's enclosing
+// braces — a safety cap against pathological input, well beyond any real
+// LensSpec entry's size.
+const lensScanWindow = 8000
+
+// checkLensProtectedByDefault flags a pkgmgr.LensSpec composite literal that
+// declares `Adapter: "postgres"` but none of Protected, Public, or GrantTable
+// (Contract #6 §6.14: a postgres business read model is protected by
+// default, and undeclared posture must fail closed rather than silently
+// activate as a plain unguarded table). For each Adapter match it walks
+// backward to the entry's own opening `{` and forward to its matching `}`
+// via balanced-brace counting (correct regardless of single-line vs
+// multi-line literal formatting, and regardless of neighboring entries in
+// the same slice), then checks only that span for a posture flag. A
+// *balanced* pair of braces inside a string field (e.g. a cypher `Spec`
+// literal like `MATCH (u:unit {status: "x"})`) is handled correctly — the
+// walk simply treats it as (harmless) nesting. Known limitation: an ODD
+// (unbalanced) brace count inside a plain string field between the Adapter
+// line and the entry's true close — e.g. a stray `{` or `}` in prose or a
+// JSON snippet — throws the walk off in either direction: it can overshoot
+// into a later entry and borrow its posture flag (false negative, a real
+// violation goes unreported) or close early on the stray brace before a
+// real posture flag further down (false positive on a correctly-declared
+// lens). No lens in this codebase has one today (Spec fields reference
+// named consts, not inline literals with stray braces), so this is accepted
+// as a non-AST scanner's residual risk rather than justifying a full
+// go/parser rewrite for what CLAUDE.md's own design intent for this file is
+// a pragmatic, highest-value/lowest-false-positive check.
+func checkLensProtectedByDefault(path, src string) []finding {
+	var out []finding
+	for _, m := range lensAdapterPostgres.FindAllStringIndex(src, -1) {
+		pos := m[0]
+		lineStart := strings.LastIndexByte(src[:pos], '\n') + 1
+		lineEnd := strings.IndexByte(src[pos:], '\n')
+		if lineEnd == -1 {
+			lineEnd = len(src)
+		} else {
+			lineEnd += pos
+		}
+		if strings.HasPrefix(strings.TrimSpace(src[lineStart:lineEnd]), "//") {
+			continue
+		}
+		backLimit := pos - lensScanWindow
+		if backLimit < 0 {
+			backLimit = 0
+		}
+		entryStart := -1
+		balance := 0
+		for i := pos - 1; i >= backLimit; i-- {
+			switch src[i] {
+			case '}':
+				balance++
+			case '{':
+				if balance == 0 {
+					entryStart = i
+				} else {
+					balance--
+				}
+			}
+			if entryStart != -1 {
+				break
+			}
+		}
+		if entryStart == -1 {
+			continue
+		}
+		fwdLimit := pos + lensScanWindow
+		if fwdLimit > len(src) {
+			fwdLimit = len(src)
+		}
+		entryEnd := -1
+		balance = 1
+		for i := entryStart + 1; i < fwdLimit; i++ {
+			switch src[i] {
+			case '{':
+				balance++
+			case '}':
+				balance--
+				if balance == 0 {
+					entryEnd = i
+				}
+			}
+			if entryEnd != -1 {
+				break
+			}
+		}
+		if entryEnd == -1 {
+			continue
+		}
+		if !lensPostureFlag.MatchString(src[entryStart : entryEnd+1]) {
+			line := strings.Count(src[:pos], "\n") + 1
+			out = append(out, finding{file: path, line: line, msg: "lens declares Adapter: \"postgres\" but neither Protected, Public, nor GrantTable — a postgres business read model is protected by default and undeclared posture fails closed at activation (Contract #6 §6.14)"})
 		}
 	}
 	return out

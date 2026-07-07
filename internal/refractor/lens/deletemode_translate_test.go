@@ -22,9 +22,10 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 func TestTranslateSpec_Postgres_DeleteMode(t *testing.T) {
 	base := func(mode any) *LensSpec {
 		cfg := map[string]any{
-			"dsn":   "postgres://localhost/test",
-			"table": "agreements",
-			"key":   []string{"agreement_id"},
+			"dsn":    "postgres://localhost/test",
+			"table":  "agreements",
+			"key":    []string{"agreement_id"},
+			"public": true,
 		}
 		if mode != nil {
 			cfg["deleteMode"] = mode

@@ -386,7 +386,7 @@ func TestHelloLattice_Milestone4_LensProjection(t *testing.T) {
 
 	// Build the LensSpec JSON string.
 	lensSpec := fmt.Sprintf(
-		`{"canonicalName":"books","targetType":"postgres","targetConfig":{"dsn":%q,"table":"books","key":["book_id"]},"cypherRule":"MATCH (b:book) RETURN b.key AS book_id, b.title AS title","engine":"full"}`,
+		`{"canonicalName":"books","targetType":"postgres","targetConfig":{"dsn":%q,"table":"books","key":["book_id"],"public":true},"cypherRule":"MATCH (b:book) RETURN b.key AS book_id, b.title AS title","engine":"full"}`,
 		pgURL,
 	)
 

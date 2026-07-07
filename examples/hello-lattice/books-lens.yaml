@@ -34,7 +34,8 @@ payload:
       "targetConfig": {
         "dsn": "postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable",
         "table": "books",
-        "key": ["book_id"]
+        "key": ["book_id"],
+        "public": true
       },
       "cypherRule": "MATCH (b:book) RETURN b.key AS book_id, b.title AS title",
       "engine": "full"

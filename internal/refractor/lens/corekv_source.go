@@ -553,6 +553,12 @@ func translateSpec(spec *LensSpec) (*Rule, error) {
 		if cfg.Protected && cfg.GrantTable {
 			return nil, fmt.Errorf("lens %q: a grant-table lens is not a protected business model (set neither protected nor public)", spec.ID)
 		}
+		if cfg.Public && cfg.GrantTable {
+			return nil, fmt.Errorf("lens %q: a grant-table lens is not a public business model (set neither protected nor public)", spec.ID)
+		}
+		if !cfg.Protected && !cfg.Public && !cfg.GrantTable {
+			return nil, fmt.Errorf("lens %q: targetConfig must declare protected, public, or grantTable — a postgres business read model is protected by default and undeclared posture fails closed (Contract #6 §6.14)", spec.ID)
+		}
 		cols, arrayCols, err := translatePostgresColumns(spec.ID, cfg)
 		if err != nil {
 			return nil, err

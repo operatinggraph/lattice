@@ -60,10 +60,15 @@ func BootstrapLens() *Rule {
 		ID:    BootstrapLensID,
 		Match: match,
 		Into: IntoConfig{
-			Target:          "postgres",
-			DSN:             dsn,
-			Table:           "contract_view",
-			Key:             KeyField{"contract_id"},
+			Target: "postgres",
+			DSN:    dsn,
+			Table:  "contract_view",
+			Key:    KeyField{"contract_id"},
+			// Public: this hardcoded dev-convenience path builds a *Rule
+			// directly and never goes through translateSpec, so it must
+			// declare its own posture explicitly (Contract #6 §6.14) —
+			// contract_view has no per-row owner to protect.
+			Public:          true,
 			QueryTimeoutRaw: "5s",
 			QueryTimeout:    5 * time.Second,
 		},
@@ -98,6 +103,7 @@ func BootstrapLensSpecJSON() ([]byte, error) {
 		"table":        "contract_view",
 		"key":          []string{"contract_id"},
 		"queryTimeout": "5s",
+		"public":       true,
 	}
 	cfgJSON, err := json.Marshal(cfg)
 	if err != nil {

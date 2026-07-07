@@ -111,6 +111,12 @@ func TestTranslateSpec_GrantTable_AndProtected_Rejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "grant-table lens is not a protected")
 }
 
+func TestTranslateSpec_GrantTable_AndPublic_Rejected(t *testing.T) {
+	_, err := translateSpec(protectedSpec(t, map[string]any{"public": true, "grantTable": true}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "grant-table lens is not a public")
+}
+
 func TestTranslateSpec_Protected_BadColumn_Rejected(t *testing.T) {
 	_, err := translateSpec(protectedSpec(t, map[string]any{
 		"protected": true,
@@ -177,15 +183,13 @@ func TestTranslateSpec_PlainNATSKV_Unaffected(t *testing.T) {
 	assert.Equal(t, "listings-index", r.Into.Bucket)
 }
 
-func TestTranslateSpec_NonProtected_NoProvisioning(t *testing.T) {
-	// A plain postgres lens (the existing path) carries none of the read-path flags.
-	r, err := translateSpec(protectedSpec(t, nil))
-	require.NoError(t, err)
-	assert.False(t, r.Into.Protected)
-	assert.False(t, r.Into.Public)
-	assert.False(t, r.Into.GrantTable)
-	assert.Nil(t, r.Into.Columns)
-	assert.Nil(t, r.Into.ArrayColumns)
+func TestTranslateSpec_NeitherProtectedPublicNorGrantTable_Rejected(t *testing.T) {
+	// A postgres lens declaring none of the read-path flags is protected by
+	// default (Contract #6 §6.14) — undeclared posture fails closed rather than
+	// silently activating as a plain unguarded table.
+	_, err := translateSpec(protectedSpec(t, nil))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must declare protected, public, or grantTable")
 }
 
 func TestTranslateSpec_EmptyDSN_ResolvesFromEnv(t *testing.T) {
@@ -198,9 +202,10 @@ func TestTranslateSpec_EmptyDSN_ResolvesFromEnv(t *testing.T) {
 		TargetType: "postgres",
 		CypherRule: "MATCH (a:application) RETURN a.id AS application_id",
 		TargetConfig: mustJSON(t, map[string]any{
-			"dsn":   "",
-			"table": "read_lease_applications",
-			"key":   []string{"application_id"},
+			"dsn":    "",
+			"table":  "read_lease_applications",
+			"key":    []string{"application_id"},
+			"public": true,
 		}),
 	}
 	r, err := translateSpec(spec)
@@ -211,7 +216,7 @@ func TestTranslateSpec_EmptyDSN_ResolvesFromEnv(t *testing.T) {
 func TestTranslateSpec_DeclaredDSN_OverridesEnv(t *testing.T) {
 	// An explicitly declared DSN is honored verbatim — env is only the fallback.
 	t.Setenv("REFRACTOR_PG_DSN", "postgres://env-host/db")
-	r, err := translateSpec(protectedSpec(t, nil))
+	r, err := translateSpec(protectedSpec(t, map[string]any{"public": true}))
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://localhost/test", r.Into.DSN)
 }

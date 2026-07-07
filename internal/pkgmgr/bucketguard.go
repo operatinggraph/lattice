@@ -80,6 +80,12 @@ func (def Definition) validateLensReadPath() error {
 		if l.Protected && l.GrantTable {
 			return fmt.Errorf("pkgmgr: Lens[%d] %q: a GrantTable lens is not a protected business model — set neither Protected nor Public (Contract #6 §6.14)", idx, l.CanonicalName)
 		}
+		if l.Public && l.GrantTable {
+			return fmt.Errorf("pkgmgr: Lens[%d] %q: a GrantTable lens is not a public business model — set neither Protected nor Public (Contract #6 §6.14)", idx, l.CanonicalName)
+		}
+		if l.Adapter == "postgres" && !l.Protected && !l.Public && !l.GrantTable {
+			return fmt.Errorf("pkgmgr: Lens[%d] %q: a postgres lens must declare Protected, Public, or GrantTable — a postgres business read model is protected by default and undeclared posture fails closed (Contract #6 §6.14)", idx, l.CanonicalName)
+		}
 		if l.DiffRetraction && l.Adapter != "postgres" {
 			return fmt.Errorf("pkgmgr: Lens[%d] %q: DiffRetraction is postgres-only — Refractor's translateSpec never threads it onto a nats-kv targetConfig, so it would silently no-op", idx, l.CanonicalName)
 		}
