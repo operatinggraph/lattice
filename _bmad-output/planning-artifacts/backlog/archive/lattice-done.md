@@ -2,6 +2,16 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-05 · `e0737db` · [Weaver] Planner mandate R1 pkgmgr authoring — mode/goal/goalColumns/actions on WeaverTargetSpec/GapActionSpec + install validation; R2 package next
+- 2026-07-05 · `c7f3bb5` · [Weaver] Planner mandate R1 — goal-regression dispatch wiring (Synthesize, per-leg pin/release, unplannable→augur); pkgmgr authoring next
+- 2026-07-05 · `b99d51c` · [Weaver] Planner mandate Fire 6 Increment 3 — per-gap `actions` catalog parse + install-validation (row-reachable pre/effects, concrete-effects check); R1 dispatch wiring next
+- 2026-07-05 · `ade75bd`+`bd90c71` · [Weaver] Planner mandate Fire 8 — admission control (priority-fair token-bucket dispatch pacing, §10.2 `priority` col + `admission` block, opt-in); Fire 9 next
+- 2026-07-05 · `33b75e8` · [Refractor] Personal Lens Fire PL.3 — D1 readableAnchors security gate (capabilityread pkg), security-wins-over-relevance; Gate-3 vectors 1-3 e2e, 3-layer reviewed; PL.4 next
+- 2026-07-05 · `93d6f88` · [Privacy/Object Store] Crypto-shred Fire 1 — Vault WrapKey/UnwrapKey + AttachObject sensitive/governingIdentity/encryption, identity-salted oid; dormant, 3-layer reviewed; Fire 2 next
+- 2026-07-05 · `a2208a6` · [Security] Control-plane capability authz Fire 2 — verified-actor JWT (reuses D1's gateway/auth), nil-verifier = Fire 1 unchanged; item CLOSED, 3-layer reviewed
+- 2026-07-05 · `0307450` · [Weaver] Planner mandate Fire 7 — contraction monitor + oscillation detector (heartbeat-surfaced diagnostics, freeze via `__control`); zero dispatch-decision change; Fire 8 next
+- 2026-07-05 · `c99770f` · [Security/Gateway] Fire 3 — RLS-enforced read-path front (`GET /v1/<name>`, config-only read-model registry); Gateway CLOSED (Fire 5 is ops), 3-layer reviewed
+- 2026-07-05 · `—` · [Privacy/Vault] Vault + crypto-shredding CLOSED — live delivery-boundary reset + e2e (attended session): real ciphertext at rest, real decrypt for the authorized landlord, real shred nulls contact cols row-intact
 - 2026-07-05 · `cfc65fe` · [Loupe] Chronicler Fire 3 CLOSED — Flows tab (durable Loom-flow history, P5 read + live/orphaned badge), lead-reviewed
 - 2026-07-05 · `1e35cc9` · [Refractor/orchestration-base] Chronicler Fire 2 — `loomFlowHistory` event-sourced lens, first eventStream consumer, 3-layer reviewed
 - 2026-07-05 · `a55a9db` · [Refractor] Chronicler Fire 1 — `eventStream` lens-source primitive (dark; no production lens yet), 3-layer reviewed

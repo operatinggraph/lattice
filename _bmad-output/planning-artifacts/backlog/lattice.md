@@ -97,7 +97,6 @@ and stale-marker corrections were applied in the filing commit (Done log); these
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **refractor-protected-by-default-gate** | §6.14 mandates a Postgres business lens declaring neither `protected` nor `public` fails closed (activation + lint) — neither exists: an undeclared lens activates as a plain unguarded LWW table. Add the declare-one requirement at `translateSpec` + the `lint-conventions` gate; migrate existing plain lenses to explicit `public:true`. | ★★★ | S | 📋 |
 | **refractor-6-14-postgres-seam-truthup** | Close the remaining §6.14 seams: seq-guard the protected `Delete` (stale-replay resurrection window); stage the M5 wildcard-anchor contract edit the shipped RLS policy already enforces (reconcile the `rls.go`/`capabilityread.go` §6.14 citations with it); decide auth-plane vs warning severity for a paused grant/protected lens; fix the `int64(MaxUint64)` wrap in the shred→grant-table seq stamp. Supersedes the protected-Postgres-LWW row. | ★★ | S | 📋 |
 | **refractor-failure-tier-backhalf** | `cmd/refractor` never wires `SetRetryQueue`/`SetAuditWriter`: no deferred retry, no DLQ routing, no audit emission. Wire the shipped libraries, or ratify the Nak-only posture and rewrite the failure-tier Route column. | ★★ | S | 📋 |
 | **lens-target-reserved-bucket-guard** | `pkgmgr` denies only the `"capability"` alias; Refractor auto-creates any bucket a lens names and rebuild `Truncate` purges it — a mis-authored lens can wipe `health-kv`/`refractor-adjacency`; ACL-less dev runs have no backstop. Add a reserved-bucket denylist in `pkgmgr` + a fail-closed mirror at Refractor activation. | ★★ | S | 📋 |
@@ -192,6 +191,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-07 · `da8ee6c` · [Refractor/pkgmgr] refractor-protected-by-default-gate — declare-one gate (translateSpec + pkgmgr + lint-conventions); 3-layer reviewed, fixed forward (lint scanner rewrite, BootstrapLens gap, Public+GrantTable guard)
 - 2026-07-07 · `921fda4` · [lease-signing/processor/lattice-pkg] real-actor-write-auth-e2e Phase 1 items 4+6 — consumer scope=self grant + live e2e proof; 2 platform bugs fixed along the way; 3-layer reviewed, fixed forward
 
 - 2026-07-06 · `265d5d8` · [Processor/Loom/Weaver] script-read-posture Fires 1–2 — optionalReads + enumerations metadata + read-posture lint; 3-layer reviewed, CI green
@@ -217,15 +217,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-05 · `11cc15f` · [loom] dispatch authContext.target — carry the real vtx.meta.<NanoID> as Pattern.MetaKey (not the human PatternID), both dispatch sites + pinning test (arch-review item 10)
 - 2026-07-05 · `11cc15f` · [repo] debris — 5 CONTRACT-AMENDMENT-REQUEST.md removed, objects-base reclaim comments fixed, objmgr up-full BOOTSTRAP_JSON_PATH, internal/spike README (arch item 11)
 - 2026-07-05 · `11cc15f` · [Gateway] up-full deploy — Gateway now started in make up-full (dev-mode :8080), Loupe map node no longer a ghost (arch item 1a; F10)
-- 2026-07-05 · `e0737db` · [Weaver] Planner mandate R1 pkgmgr authoring — mode/goal/goalColumns/actions on WeaverTargetSpec/GapActionSpec + install validation; R2 package next
-- 2026-07-05 · `c7f3bb5` · [Weaver] Planner mandate R1 — goal-regression dispatch wiring (Synthesize, per-leg pin/release, unplannable→augur); pkgmgr authoring next
-- 2026-07-05 · `b99d51c` · [Weaver] Planner mandate Fire 6 Increment 3 — per-gap `actions` catalog parse + install-validation (row-reachable pre/effects, concrete-effects check); R1 dispatch wiring next
-- 2026-07-05 · `ade75bd`+`bd90c71` · [Weaver] Planner mandate Fire 8 — admission control (priority-fair token-bucket dispatch pacing, §10.2 `priority` col + `admission` block, opt-in); Fire 9 next
-- 2026-07-05 · `33b75e8` · [Refractor] Personal Lens Fire PL.3 — D1 readableAnchors security gate (capabilityread pkg), security-wins-over-relevance; Gate-3 vectors 1-3 e2e, 3-layer reviewed; PL.4 next
-- 2026-07-05 · `93d6f88` · [Privacy/Object Store] Crypto-shred Fire 1 — Vault WrapKey/UnwrapKey + AttachObject sensitive/governingIdentity/encryption, identity-salted oid; dormant, 3-layer reviewed; Fire 2 next
-- 2026-07-05 · `a2208a6` · [Security] Control-plane capability authz Fire 2 — verified-actor JWT (reuses D1's gateway/auth), nil-verifier = Fire 1 unchanged; item CLOSED, 3-layer reviewed
-- 2026-07-05 · `0307450` · [Weaver] Planner mandate Fire 7 — contraction monitor + oscillation detector (heartbeat-surfaced diagnostics, freeze via `__control`); zero dispatch-decision change; Fire 8 next
-
-- 2026-07-05 · `c99770f` · [Security/Gateway] Fire 3 — RLS-enforced read-path front (`GET /v1/<name>`, config-only read-model registry); Gateway CLOSED (Fire 5 is ops), 3-layer reviewed
-- 2026-07-05 · `—` · [Privacy/Vault] Vault + crypto-shredding CLOSED — live delivery-boundary reset + e2e (attended session): real ciphertext at rest, real decrypt for the authorized landlord, real shred nulls contact cols row-intact
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*
