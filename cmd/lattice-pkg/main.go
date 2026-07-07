@@ -31,6 +31,7 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 	augur "github.com/asolgan/lattice/packages/augur"
 	bespokecontracts "github.com/asolgan/lattice/packages/bespoke-contracts"
+	cafeledger "github.com/asolgan/lattice/packages/cafe-ledger"
 	capabilityauthor "github.com/asolgan/lattice/packages/capability-author"
 	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
 	clinicledger "github.com/asolgan/lattice/packages/clinic-ledger"
@@ -74,6 +75,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"service-location":       servicelocation.Package,
 	"lease-signing":          leasesigning.Package,
 	"loftspace-ledger":       loftspaceledger.Package,
+	"cafe-ledger":            cafeledger.Package,
 	"objects-base":           objectsbase.Package,
 	"augur":                  augur.Package,
 	"capability-author":      capabilityauthor.Package,
