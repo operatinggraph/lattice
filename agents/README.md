@@ -20,6 +20,12 @@ Version-controlled source of truth for the **Agentic Operating Model** role-skil
 
 **Edit the copies under `agents/`**, then re-run `make install-skills` if you want the `/role` form refreshed.
 Do not edit `.claude/skills/<role>/` directly — those are install artifacts and get overwritten.
+- The 3 `bmad-agent-*` directories under `agents/` (`bmad-agent-architect`, `bmad-agent-ux-designer`,
+  `bmad-agent-qa` — the Winston / Sally / Quinn personas the roles above invoke) are a **different kind of
+  mirror**: hand-copied from the vendor install (`_bmad/`, gitignored) so a remote clone — which never sees
+  `_bmad/` — can still use them. Not `make install-skills` output; re-sync by hand if the vendor copies
+  change. The rest of the bmad tooling (the story-loop + review skills, party-mode) stays vendor-only in
+  `_bmad/` — no scheduled role invokes them, and review happens inside the roles themselves.
 
 ## The model in one breath
 
@@ -60,8 +66,9 @@ experience, the FE Engineer builds it (UX-then-FE).
 
 The Lattice stream is a three-stage pipeline: **Surveyor** (raw demand) → **Designer** (build-ready designs) →
 **Lattice Steward** (builds), with the **Whetstone** as a cross-cutting CI-speed loop. `owner`, `fe-engineer`,
-and `lamplighter` are **invoked by** the advancers (or run directly), not scheduled on their own. The bmad
-tooling skills stay local and are intentionally not tracked here — this directory is only the agentic-ops roles.
+and `lamplighter` are **invoked by** the advancers (or run directly), not scheduled on their own. Most bmad
+tooling stays local/vendor-only (`_bmad/`); only the three persona skills the roles invoke are mirrored
+here — see "How these are used" above.
 
 **Minutes avoid :00/:30 by design** (every task used to fire on the hour or half-hour, so on any hour multiple
 tasks share, they landed within seconds of each other, separated only by the scheduler's own small dispatch

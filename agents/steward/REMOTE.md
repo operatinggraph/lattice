@@ -7,17 +7,22 @@ not speculated. Read `SKILL.md` first; this file only overrides.
 
 ## 0. What is NOT in the clone (gitignored, Mac-local)
 
-`CLAUDE.md`, `/.claude` (skills/commands incl. the BMAD personas), `/_bmad`, `/.agents` are gitignored —
-**a remote session never sees them.**
+`/.claude`, `/_bmad`, `/.agents` are gitignored — a remote session never sees them. `CLAUDE.md` is
+committed (readable remotely). The scheduled-task closure — `steward`, `designer`, `owner`, `fe-engineer`,
+`lamplighter`, `whetstone`, `surveyor`, `vertical-po`, and everything they reference — is self-contained
+under `agents/`, including the three BMAD personas the roles invoke: `bmad-agent-architect` (Winston, via
+`designer`), `bmad-agent-ux-designer` (Sally, via `fe-engineer`/`steward`), `bmad-agent-qa` (Quinn, via
+`whetstone`) — hand-mirrored from `_bmad/`, no external config dependencies. Invoke them exactly as you
+would locally.
 
 - The house rules the `agents/*/SKILL.md` files quote inline (no-changelog rule, `docs/vendors.md`
   pointer, key-shape invariants) still bind — they're restated in the committed skills.
-- BMAD personas (`/bmad-agent-architect`, `bmad-party-mode`, the cr-* reviewer trio) are unavailable:
-  **channel the traits** (the skills already say so) and run reviews as harness-native adversarial
-  passes (independent review subagents with distinct lenses — acceptance-auditor / blind-hunter /
-  edge-case-hunter — mirroring the committed `*-cr-*.md` artifact shape).
-- If a Mac-local file is genuinely load-bearing for the fire, **ask Andrew to commit it** — don't guess
-  its contents.
+- Review is handled by the roles themselves (steward's risk-scaled lead/3-layer-adversarial call,
+  designer's pre-build gate) — not by invoking bmad's story-loop or review skills. Those stay local-only
+  in `_bmad/` (Andrew still runs that chain there) and are outside the remote closure entirely.
+- Anything else under `.claude/` / `_bmad/` / `.agents/` (other BMAD personas/workflows, local hooks,
+  IDE-specific config) is still genuinely unavailable. If one turns out load-bearing for the fire,
+  **ask Andrew to commit it** — don't guess its contents.
 
 ## 1. Isolation: worktree → fire branch; docs still in `main`
 
