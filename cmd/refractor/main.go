@@ -27,6 +27,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/capabilityenv"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
 	"github.com/asolgan/lattice/internal/refractor/control"
+	"github.com/asolgan/lattice/internal/refractor/failure"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/keyshredded"
 	"github.com/asolgan/lattice/internal/refractor/lens"
@@ -106,6 +107,13 @@ func main() {
 	// up in Health KV within 10s of process start (AC #6 + AC #9).
 	hb := health.NewLatticeHeartbeater(conn, healthKVBucket, instance, defaultHeartbeatEvery, logger)
 	go hb.Run(ctx)
+
+	// The deferred-retry queue for Transient write failures (the failure-tier
+	// "deferred retry queue" route, docs/components/refractor-failure-tiers.md).
+	// Shared across every pipeline instance — one Run loop for the process;
+	// RetryQueue enforces the single-caller invariant itself.
+	retryQueue := failure.NewRetryQueue()
+	go retryQueue.Run(ctx)
 
 	// Open Core KV and the (pre-provisioned) refractor-adjacency bucket as
 	// substrate handles — the read path threads *substrate.KV, not raw jetstream.
@@ -608,6 +616,27 @@ func main() {
 		lp := health.NewLagPoller(conn, p.Pending, reporter, r.ID)
 		lp.SetProgressFunc(func() time.Time { return p.Progress().LastProjectedAt })
 		p.SetLagPoller(lp)
+
+		// Transient write failures escalate to the shared retry queue (deferred
+		// backoff, then DLQ on exhaustion) when the rule declares one; absent
+		// `retry:`, a Transient failure keeps Naking for redelivery as before.
+		if r.Retry.MaxAttempts > 0 {
+			backoff, err := failure.ParseISO8601Duration(r.Retry.Backoff)
+			if err != nil {
+				logger.Error("parse retry backoff", "lensId", r.ID, "backoff", r.Retry.Backoff, "err", err)
+				return
+			}
+			p.SetRetryQueue(retryQueue, conn, r.Retry.MaxAttempts, backoff)
+		}
+
+		// Per-rule audit trail: append an entry to lattice.refractor.audit.<lensId>
+		// on every successful write (docs/components/refractor-failure-tiers.md).
+		aw := health.NewAuditWriter(conn, r.ID)
+		if err := aw.EnsureStream(ctx); err != nil {
+			logger.Error("ensure audit stream", "lensId", r.ID, "err", err)
+			return
+		}
+		p.SetAuditWriter(aw)
 
 		lensCtx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
