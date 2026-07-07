@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
@@ -18,6 +19,19 @@ import (
 	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/substrate"
 )
+
+// credentialBindingResolver is the credential→identity resolution surface
+// authenticateRead consults so a claimed credential (A) reads as its
+// business identity (U) — the shared seam the browser-direct topology
+// requires (real-actor-write-auth-e2e-design.md §5,
+// gateway-claim-flow-identity-provisioning-design.md §11.0): writes resolve
+// at the Gateway, reads land on this app's boundary, and both must resolve
+// the same claimed binding. internal/gateway/credentialbinding.Resolver
+// satisfies this; a nil resolver (the default) leaves every actor acting as
+// itself, unchanged from before this seam existed.
+type credentialBindingResolver interface {
+	Resolve(ctx context.Context, actorID string) (identityKey string, bound bool, err error)
+}
 
 // The read boundary (D1.3 Fire 3) — loftspace-app reads the protected
 // lease-applications Postgres model as an AUTHENTICATED actor. Authentication is
@@ -189,6 +203,17 @@ func (s *server) authenticateRead(r *http.Request) (auth.VerifiedActor, error) {
 	// empty actor — a missing principal must never reach the read path.
 	if strings.TrimSpace(actor.Subject) == "" {
 		return auth.VerifiedActor{}, fmt.Errorf("token has no subject")
+	}
+	if s.credBindings != nil {
+		if identityKey, bound, rerr := s.credBindings.Resolve(ctx, actor.ActorID); rerr != nil {
+			// Fail OPEN to the raw credential — the documented deny-safe
+			// fallback (matches the Gateway's resolveActor): an unresolved
+			// binding denies nothing on its own, it just means the actor
+			// sees/writes as itself, never more than it's entitled to.
+			s.logger.Error("loftspace-app: credential-binding resolve failed", "actor", actor.ActorID, "error", rerr)
+		} else if bound {
+			actor.Subject = strings.TrimPrefix(identityKey, auth.IdentityKeyPrefix)
+		}
 	}
 	return actor, nil
 }

@@ -45,6 +45,12 @@ type server struct {
 	pgPool    *pgxpool.Pool
 	authn     *auth.Authenticator
 	devSigner *devSigner
+
+	// credBindings is the shared credential→identity resolution seam
+	// authenticateRead consults (real-actor-write-auth-e2e-design.md §5);
+	// nil when the credential-bindings bucket is unavailable — every actor
+	// then reads as itself, exactly as before this seam existed.
+	credBindings credentialBindingResolver
 }
 
 // pgxBeginner is the subset of *pgxpool.Pool the protected read uses — a single

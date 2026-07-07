@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -191,6 +193,85 @@ func devAuthServer(t *testing.T) *server {
 		t.Fatalf("setupReadAuth: %v", err)
 	}
 	return &server{logger: discardLogger(), authn: authn, devSigner: signer, natsTimeout: testTimeout}
+}
+
+// fakeCredentialResolver is a fixed-answer credentialBindingResolver: bound
+// resolves rawActorID to identityKey; unbound reports bound=false; a
+// non-nil err always wins. Mirrors internal/gateway's own test fake.
+type fakeCredentialResolver struct {
+	identityKey string
+	bound       bool
+	err         error
+}
+
+func (f fakeCredentialResolver) Resolve(context.Context, string) (string, bool, error) {
+	return f.identityKey, f.bound, f.err
+}
+
+// TestAuthenticateRead_CredentialBinding_ResolvesToClaimedIdentity proves a
+// bound credential actor reads as the claimed business identity, not the raw
+// credential — the read-boundary half of the shared seam
+// (real-actor-write-auth-e2e-design.md §5).
+func TestAuthenticateRead_CredentialBinding_ResolvesToClaimedIdentity(t *testing.T) {
+	s := devAuthServer(t)
+	s.credBindings = fakeCredentialResolver{identityKey: "vtx.identity.CLAIMEDBUSINESS0000", bound: true}
+	tok, _, err := s.devSigner.mint("RAWCREDENTIAL00000000")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/my-appointments", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		t.Fatalf("authenticateRead: %v", err)
+	}
+	if actor.Subject != "CLAIMEDBUSINESS0000" {
+		t.Errorf("subject = %q, want the resolved business identity", actor.Subject)
+	}
+}
+
+// TestAuthenticateRead_CredentialBinding_Unbound_ActsAsRawActor proves an
+// unclaimed credential (no binding yet) reads as itself — the documented
+// deny-safe fallback, also covering the CDC-lag window.
+func TestAuthenticateRead_CredentialBinding_Unbound_ActsAsRawActor(t *testing.T) {
+	s := devAuthServer(t)
+	s.credBindings = fakeCredentialResolver{bound: false}
+	tok, _, err := s.devSigner.mint("RAWCREDENTIAL00000000")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/my-appointments", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		t.Fatalf("authenticateRead: %v", err)
+	}
+	if actor.Subject != "RAWCREDENTIAL00000000" {
+		t.Errorf("subject = %q, want the raw credential actor unchanged", actor.Subject)
+	}
+}
+
+// TestAuthenticateRead_CredentialBinding_ResolveError_FallsBackToRawActor
+// proves a resolver failure (e.g. KV unreachable) fails OPEN to the raw
+// credential rather than denying the read — mirrors the Gateway's
+// resolveActor: acting as the raw credential never grants more than the
+// actor is entitled to.
+func TestAuthenticateRead_CredentialBinding_ResolveError_FallsBackToRawActor(t *testing.T) {
+	s := devAuthServer(t)
+	s.credBindings = fakeCredentialResolver{err: errors.New("kv unreachable")}
+	tok, _, err := s.devSigner.mint("RAWCREDENTIAL00000000")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/my-appointments", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	actor, err := s.authenticateRead(r)
+	if err != nil {
+		t.Fatalf("authenticateRead: %v", err)
+	}
+	if actor.Subject != "RAWCREDENTIAL00000000" {
+		t.Errorf("subject = %q, want the raw credential actor unchanged (fail open)", actor.Subject)
+	}
 }
 
 func TestHandleMyAppointments_NoAuthConfigured_401(t *testing.T) {

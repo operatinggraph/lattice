@@ -53,6 +53,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/gateway/credentialbinding"
 	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -158,16 +159,29 @@ func run(logger *slog.Logger) error {
 		logger.Warn("read boundary has no auth posture (set LOFTSPACE_APP_DEV_AUTH or LOFTSPACE_APP_JWT_PUBLIC_KEY); /api/applications will return 401")
 	}
 
+	// Credential-binding resolution (real-actor-write-auth-e2e-design.md §5)
+	// is additive/best-effort, mirroring cmd/gateway's own wiring: a
+	// deployment that hasn't re-run bootstrap yet (bucket doesn't exist)
+	// still starts — every actor simply reads as itself until the bucket is
+	// provisioned.
+	var credBindings credentialBindingResolver
+	if credKV, err := conn.OpenKV(context.Background(), credentialbinding.BucketName); err != nil {
+		logger.Warn("loftspace-app: credential-bindings bucket unavailable; credential resolution disabled", "error", err)
+	} else {
+		credBindings = credentialbinding.New(credKV)
+	}
+
 	srv := &server{
-		conn:        conn,
-		adminActor:  adminActor,
-		logger:      logger,
-		natsTimeout: natsRequestLimit,
-		uploadCap:   uploadCap,
-		pgPool:      pgPool,
-		authn:       authn,
-		devSigner:   signer,
-		gatewayURL:  envOrDefault("LOFTSPACE_APP_GATEWAY_URL", defaultGatewayURL),
+		conn:         conn,
+		adminActor:   adminActor,
+		logger:       logger,
+		natsTimeout:  natsRequestLimit,
+		uploadCap:    uploadCap,
+		pgPool:       pgPool,
+		authn:        authn,
+		devSigner:    signer,
+		credBindings: credBindings,
+		gatewayURL:   envOrDefault("LOFTSPACE_APP_GATEWAY_URL", defaultGatewayURL),
 	}
 
 	mux := http.NewServeMux()
