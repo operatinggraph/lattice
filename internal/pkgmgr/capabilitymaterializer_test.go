@@ -545,6 +545,25 @@ func TestValidateCapabilityArtifact_WeaverTargetSmuggledGapFieldRejected(t *test
 	}
 }
 
+func TestValidateCapabilityArtifact_LoomPatternSmuggledStepFieldRejected(t *testing.T) {
+	// A key buried in a STEP entry (not at the top level) that StepArtifact does
+	// not expose is silently dropped by json.Unmarshal and would bypass §5's
+	// stored-invalid audit trail — the same class as a smuggled gap field. The
+	// nested step scan must catch it and report it as steps[<i>].<key>.
+	content := json.RawMessage(`{"patternId":"aiPattern","subjectType":"vtx.thing","steps":[{"kind":"systemOp","operation":"DoThing","escalate":["x"]}]}`)
+	report, err := ValidateCapabilityArtifact("loomPattern", content, fullCypherParser{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Valid {
+		t.Fatalf("expected an invalid report for a step smuggling an out-of-scope 'escalate' key")
+	}
+	joined := strings.Join(report.Errors, " ")
+	if !strings.Contains(joined, "steps[0].escalate") {
+		t.Fatalf("smuggled step key must be reported as steps[0].escalate; got %q", joined)
+	}
+}
+
 func TestDefinitionForCapabilityArtifact_WeaverTarget(t *testing.T) {
 	content := weaverTargetContent(t, WeaverTargetArtifactContent{
 		TargetID: "aiTargetDispatch",

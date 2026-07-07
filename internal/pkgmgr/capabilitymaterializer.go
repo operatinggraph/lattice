@@ -390,9 +390,30 @@ var knownLoomPatternFields = map[string]bool{
 	"steps":             true,
 }
 
-// unknownLoomPatternFields decodes content as a generic JSON object and
-// returns any top-level key outside knownLoomPatternFields, sorted for a
-// deterministic report. Mirrors unknownLensFields.
+// knownStepFields are the JSON keys StepArtifact exposes for one entry in a
+// loomPattern's `steps` array. A smuggled key on a step is silently dropped by
+// json.Unmarshal into StepArtifact and would bypass §5's stored-invalid audit
+// trail — the same class as knownGapActionFields one level down from a
+// weaverTarget's gaps.
+var knownStepFields = map[string]bool{
+	"kind":       true,
+	"operation":  true,
+	"guard":      true,
+	"adapter":    true,
+	"params":     true,
+	"replyOp":    true,
+	"instanceOp": true,
+}
+
+// unknownLoomPatternFields decodes content as a generic JSON object and returns
+// any key — at the top level (outside knownLoomPatternFields) OR inside a
+// `steps[]` entry (outside knownStepFields) — the AI loomPattern path does not
+// expose, sorted for a deterministic report. A per-step smuggled key is
+// reported as steps[<i>].<key>. The nested scan matters for the same reason as
+// unknownWeaverTargetFields' gaps recursion: json.Unmarshal into StepArtifact
+// silently drops an unknown step key, so a scope-widening posture buried in a
+// step would bypass §5's stored-invalid audit trail. Mirrors unknownLensFields,
+// extended one level down.
 func unknownLoomPatternFields(content json.RawMessage) []string {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(content, &raw); err != nil {
@@ -402,6 +423,22 @@ func unknownLoomPatternFields(content json.RawMessage) []string {
 	for k := range raw {
 		if !knownLoomPatternFields[k] {
 			extra = append(extra, k)
+		}
+	}
+	if stepsRaw, ok := raw["steps"]; ok {
+		var steps []json.RawMessage
+		if err := json.Unmarshal(stepsRaw, &steps); err == nil {
+			for i, stepRaw := range steps {
+				var step map[string]json.RawMessage
+				if err := json.Unmarshal(stepRaw, &step); err != nil {
+					continue
+				}
+				for k := range step {
+					if !knownStepFields[k] {
+						extra = append(extra, fmt.Sprintf("steps[%d].%s", i, k))
+					}
+				}
+			}
 		}
 	}
 	sort.Strings(extra)
