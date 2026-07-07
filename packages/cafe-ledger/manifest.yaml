@@ -1,0 +1,38 @@
+name: cafe-ledger
+version: 0.1.0
+description: |
+  Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount,
+  independently-minted id, one per lease via a .cafeLedgerAccount guard
+  aspect on the leaseapp) + the cafetransaction vertex type (DebitAccount /
+  CreditAccount, append-only entries linked to the account via postedTo) +
+  the cafeLedgerHistory read-model lens (one row per transaction) + the
+  cafeLeaseAccounts lens (lease -> account key lookup). Depends lease-signing.
+depends:
+  - lease-signing
+declares:
+  ddls:
+    - canonicalName: cafeaccount
+      class: meta.ddl.vertexType
+    - canonicalName: cafeLedgerAccountGuard
+      class: meta.ddl.aspectType
+    - canonicalName: cafetransaction
+      class: meta.ddl.vertexType
+  lenses:
+    - canonicalName: cafeLedgerHistory
+      adapter: nats-kv
+      bucket: cafe-ledger-history
+      engine: full
+    - canonicalName: cafeLeaseAccounts
+      adapter: nats-kv
+      bucket: cafe-lease-accounts
+      engine: full
+  permissions:
+    - operationType: CreateAccount
+      scope: any
+      grantsTo: [operator]
+    - operationType: DebitAccount
+      scope: any
+      grantsTo: [operator]
+    - operationType: CreditAccount
+      scope: any
+      grantsTo: [operator]
