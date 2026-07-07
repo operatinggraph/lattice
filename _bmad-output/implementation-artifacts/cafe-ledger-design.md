@@ -90,9 +90,45 @@ mutation it doesn't own. Instead a settled, positive-total tab surfaces on `cafe
 `settles` audit link (`cafetransaction`→`tab`) the lens's `missing_charge` gate reads — mirrors
 `loftspace-ledger`'s `clauseRef`/`bespoke-contracts` precedent exactly (`packages/bespoke-contracts/targets.go`).
 
+## Inc 2b — `cmd/cafe-app` thin FE, shipped
+
+Three vanilla-JS views (POS → tab, front-desk open-tabs, resident house-tab) mirroring
+`cmd/loftspace-app`/`cmd/clinic-app`'s idioms exactly: `server.go` route + `embed web`, a `devSigner`
+staff-token minter (every café op is `grantsTo:[operator] scope:any`, so one fixed staff identity
+covers every write — no per-resident login exists in this thin FE), and browser-direct
+`submitOp()` → the Gateway's `POST /v1/operations` (the current, non-deprecated write path both
+sibling apps use — NOT their own legacy `/api/op` proxy). Reads are three lens projections, all P5:
+`cafeLeaseAccounts` (the lease picker), `cafeTabSettlement` (open/settled tabs — `weaver-targets`,
+filtered by the `cafeTabSettlement.` key prefix since that bucket is shared across every package's
+convergence lens), and `cafeLedgerHistory` + `cafeLeaseAccounts` together (the resident's posted
+charge history + running balance, mirroring `cmd/loftspace-app/ledger.go`'s two-bucket join).
+
+**Lens gap closed first:** `cafeTabSettlement`'s `RETURN`/`BodyColumns` (§ above) projected only
+`missing_account`/`missing_charge`/`violating` — an **open** tab and a **settled-and-fully-posted**
+tab produced an identical body (both gaps false), so the FE had no way to tell "still open" from
+"posted." Fixed additively: `status`/`openedAt`/`settledAt` (already read internally off
+`t.status.data.*` for the gap booleans) now also flow to `RETURN` + `BodyColumns` — same lens, same
+bucket, no consumer of the two gap columns changes. `cmd/cafe-app/tabs.go`'s `Posted` field derives
+from `status == "settled" && !missing_account && !missing_charge`.
+
+**Verify:** `go build ./...`, `make vet`, `golangci-lint run ./...` all clean; `STRICT=1 go run
+./scripts/lint-conventions.go` 0 issues (unchanged advisory-warning count); full `go test ./...`
+green, including two new `cafeTabSettlement` cypher-lens regression cases (open tab's
+status/openedAt/settledAt shape, settled-and-converged tab's) and `cmd/cafe-app`'s own unit suite
+(`computeLeases`/`computeTabs`/`computeLedgerHistory`/`resolveLeaseAccount`/`healthProbe`, all
+table-tested over a fake KV seam, mirroring `cmd/loftspace-app`/`cmd/clinic-app`'s own test shape).
+Wired into the dev harness: `make up-cafe`/`install-cafe`/`refresh-cafe`/`run-cafe-app` (Makefile),
+a `cafe-app` NATS nkey + permission block (`deploy/gen-dev-nkeys/main.go`, regenerated
+`deploy/nats-server.conf` — additive, every existing component's seed/permissions untouched,
+confirmed by `internal/natsperm`'s `TestConfigParses` + the full write-isolation suite staying
+green) and a `:7801` origin added to `GATEWAY_CORS_ORIGINS`.
+**Live-stack / in-browser verification is DEFERRED**, not done this fire: the shared dev NATS
+container's loaded config predates this nkey addition, and reloading it (or swapping in another
+component's credential as a stand-in) are both live-shared-infrastructure actions outside this
+fire's authorization — the new nkey activates cleanly on the next `make down && make up-full`/
+`up-cafe` bootstrap cycle (or an explicitly authorized live reload), at which point the in-browser
+POS/front-desk/resident flows should be exercised end-to-end before this is treated as fully proven.
+
 ## Next
 
-- **Inc 2b** — thin café FE (POS→tab · front-desk open-tabs · resident house-tab), reading
-  `cafeTabSettlement`/`cafeLeaseAccounts`/`cafeLedgerHistory` (P5 lens read path) and submitting
-  `OpenTab`/`Charge`/`Settle` through the Gateway.
 - **Inc 3** — one-bill composition lens unioning `ledgerHistory` + `cafeLedgerHistory` by `leaseAppKey`.
