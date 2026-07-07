@@ -19,6 +19,7 @@ func TestControl_PersonalRegister_NoKVConfigured_FailsClosed(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	data, err := json.Marshal(control.ControlRequest{IdentityID: "identityA", DeviceID: "deviceX"})
@@ -39,6 +40,7 @@ func TestControl_PersonalRegister_MissingFields_Errors(t *testing.T) {
 
 	kv := makeKV(t, nc, js, "refractor-test-personal-interest-missing")
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalInterestKV(kv)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -60,6 +62,7 @@ func TestControl_PersonalRegister_Then_IsRelevant(t *testing.T) {
 
 	kv := makeKV(t, nc, js, "refractor-test-personal-interest-register")
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalInterestKV(kv)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -92,6 +95,7 @@ func TestControl_PersonalDeregister_RemovesRegistration(t *testing.T) {
 
 	kv := makeKV(t, nc, js, "refractor-test-personal-interest-deregister")
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalInterestKV(kv)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 

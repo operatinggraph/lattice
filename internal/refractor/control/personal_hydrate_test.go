@@ -33,6 +33,7 @@ func TestControl_PersonalHydrate_NoHydratorConfigured_FailsClosed(t *testing.T) 
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	data, err := json.Marshal(control.ControlRequest{IdentityID: "identityA"})
@@ -52,6 +53,7 @@ func TestControl_PersonalHydrate_MissingIdentityID_Errors(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalHydrator(&fakeHydrator{revision: 100})
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -73,6 +75,7 @@ func TestControl_PersonalHydrate_Success_ReturnsRevision(t *testing.T) {
 
 	h := &fakeHydrator{revision: 10500}
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalHydrator(h)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -96,6 +99,7 @@ func TestControl_PersonalHydrate_HydratorError_Surfaces(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalHydrator(&fakeHydrator{err: errors.New("boom")})
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -123,6 +127,7 @@ func TestControl_PersonalHydrate_WithDeviceID_RecordsRevisionCursor(t *testing.T
 	require.NoError(t, personalinterest.Register(ctx, kv, "identityA", "deviceX", []string{"lease"}, nil, "2026-07-06T00:00:00Z"))
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalHydrator(&fakeHydrator{revision: 20000})
 	svc.SetPersonalInterestKV(kv)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -158,6 +163,7 @@ func TestControl_PersonalHydrate_NoDeviceID_SkipsRevisionCursor(t *testing.T) {
 
 	kv := makeKV(t, nc, js, "refractor-test-personal-interest-hydrate-nodevice")
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalHydrator(&fakeHydrator{revision: 999})
 	svc.SetPersonalInterestKV(kv)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))

@@ -84,6 +84,7 @@ func makeKV(t *testing.T, nc *nats.Conn, js jetstream.JetStream, bucket string) 
 // TestControl_ResumeRule_CallsResumer verifies that ResumeRule calls the registered Resumer.
 func TestControl_ResumeRule_CallsResumer(t *testing.T) {
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockResumer{}
 	nc, js := startControlTestServerConn(t)
 
@@ -101,6 +102,7 @@ func TestControl_ResumeRule_CallsResumer(t *testing.T) {
 // TestControl_ResumeRule_NotRegistered verifies that ResumeRule returns an error for unknown rules.
 func TestControl_ResumeRule_NotRegistered(t *testing.T) {
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	err := svc.ResumeRule(context.Background(), "nonexistent-rule")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nonexistent-rule")
@@ -109,6 +111,7 @@ func TestControl_ResumeRule_NotRegistered(t *testing.T) {
 // TestControl_Unregister verifies that after Unregister, ResumeRule returns an error.
 func TestControl_Unregister(t *testing.T) {
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockResumer{}
 	svc.Register("rule-unreg", mr, nil)
 	svc.Unregister("rule-unreg")
@@ -149,6 +152,7 @@ func TestControl_Health_ReturnsEntry(t *testing.T) {
 	require.NoError(t, reporter.SetActive(ctx))
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockResumer{}
 	svc.Register("rule-5-1", mr, reporter)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -169,6 +173,7 @@ func TestControl_Health_UnknownRule(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendControlRequest(t, nc, control.ControlRequest{Op: "health", RuleID: "ghost-rule"})
@@ -189,6 +194,7 @@ func TestControl_UnknownOp(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	subj := control.ControlSubject("any", "bogus")
@@ -204,6 +210,7 @@ func TestControl_InvalidJSON(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	// Send raw non-JSON bytes directly (bypass helper) to a real endpoint subject.
@@ -253,6 +260,7 @@ func TestControl_Validate_ReturnsNotAvailable(t *testing.T) {
 
 	testRule := validateTestLens("validate-rule-present", `MATCH (a:agreement) RETURN a.id AS id, a.name AS name`)
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetRuleGetter(&mockRuleGetter{rules: map[string]*lens.Rule{"validate-rule-present": testRule}})
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -274,6 +282,7 @@ func TestControl_Validate_RuleNotLoaded(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	// SetRuleGetter with empty map — rule not found
 	svc.SetRuleGetter(&mockRuleGetter{rules: map[string]*lens.Rule{}})
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -317,6 +326,7 @@ func TestControl_Rebuild_ReturnsAck(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockRebuilder{}
 	svc.RegisterRebuilder("rebuild-rule-1", mr)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -344,6 +354,7 @@ func TestControl_Rebuild_TruncateFlag(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockRebuilder{}
 	svc.RegisterRebuilder("rebuild-rule-trunc", mr)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -375,6 +386,7 @@ func TestControl_Rebuild_RuleNotRegistered(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	// No Rebuilder registered.
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -413,6 +425,7 @@ func TestControl_Pause_ReturnsAck(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mp := &mockPauser{}
 	svc.RegisterPauser("pause-rule-1", mp)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -435,6 +448,7 @@ func TestControl_Pause_RuleNotRegistered(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	// No Pauser registered.
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -458,6 +472,7 @@ func TestControl_Resume_ReturnsAck(t *testing.T) {
 	reporter := health.New(kv, "resume-rule-1")
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockResumer{}
 	svc.Register("resume-rule-1", mr, reporter)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -479,6 +494,7 @@ func TestControl_Resume_RuleNotRegistered(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendControlRequest(t, nc, control.ControlRequest{Op: "resume", RuleID: "ghost-resume-rule"})
@@ -518,6 +534,7 @@ func TestControl_Delete_ReturnsAck(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	md := &mockDeleter{}
 	svc.RegisterDeleter("delete-rule-1", md)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -540,6 +557,7 @@ func TestControl_Delete_RuleNotRegistered(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	// No Deleter registered.
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
@@ -558,6 +576,7 @@ func TestControl_Delete_CallsDeleter(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	md := &mockDeleter{}
 	svc.RegisterDeleter("delete-rule-calls", md)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
@@ -585,6 +604,7 @@ func TestControl_TwoRules_BothRegistered(t *testing.T) {
 	require.NoError(t, reporterV2.SetActive(ctx))
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mrV1 := &mockResumer{}
 	mrV2 := &mockResumer{}
 	svc.Register("agreement-summary-v1", mrV1, reporterV1)
@@ -619,6 +639,7 @@ func TestControl_TwoRules_DeleteV1_LeavesV2(t *testing.T) {
 	require.NoError(t, reporterV2.SetActive(ctx))
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mrV1 := &mockResumer{}
 	mrV2 := &mockResumer{}
 	mpV1 := &mockPauser{}
@@ -666,6 +687,7 @@ func TestControl_TwoRules_PauseV1_DoesNotAffectV2(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mpV1 := &mockPauser{}
 	mpV2 := &mockPauser{}
 	svc.RegisterPauser("agreement-summary-v1", mpV1)
@@ -696,6 +718,7 @@ func TestControl_Delete_UnregistersRule(t *testing.T) {
 	require.NoError(t, reporter.SetActive(ctx))
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	mr := &mockResumer{}
 	md := &mockDeleter{}
 	svc.Register("delete-unreg-rule", mr, reporter)
@@ -725,6 +748,7 @@ func TestNATSServicesIntrospection(t *testing.T) {
 	t.Cleanup(cancel)
 
 	svc := control.NewService()
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	// PING — service-name-scoped: $SRV.PING.refractor-control

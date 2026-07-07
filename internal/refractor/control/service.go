@@ -233,9 +233,10 @@ type Service struct {
 	// a per-ruleID registry.
 	personalHydrator Hydrator
 	// capability authorizes every dispatchEndpoint op (FR30,
-	// control-plane-capability-authz-design.md). Defaults to a
-	// StubCapabilityChecker (allow-all + log); SetCapabilityChecker swaps in a
-	// real checker without touching handler bodies.
+	// control-plane-capability-authz-design.md). Defaults to the fail-closed
+	// denyAllChecker (deny-all + loud Warn) so the pre-set window fails closed;
+	// SetCapabilityChecker swaps in the real controlauth checker without
+	// touching handler bodies (cmd/refractor sets it before serving).
 	capability CapabilityChecker
 	// actorVerifier lifts HeaderActor from self-asserted to a verified JWT
 	// (Fire 2, control-plane-capability-authz-design.md). nil (the default)
@@ -244,8 +245,10 @@ type Service struct {
 }
 
 // NewService creates a new Service with empty registries. The control plane
-// starts with a StubCapabilityChecker (allow-all); call SetCapabilityChecker
-// to wire real Capability KV enforcement.
+// starts fail-closed (a denyAllChecker that denies every op with a loud Warn);
+// call SetCapabilityChecker to wire real Capability KV enforcement before
+// serving. The fail-closed default governs only the pre-set window / a
+// misconfiguration, never normal production traffic.
 func NewService() *Service {
 	return &Service{
 		resumerByRuleID:      make(map[string]Resumer),
@@ -254,7 +257,7 @@ func NewService() *Service {
 		deleterByRuleID:      make(map[string]Deleter),
 		rowNullifierByRuleID: make(map[string]RowNullifier),
 		reporters:            make(map[string]*health.Reporter),
-		capability:           NewStubCapabilityChecker(nil),
+		capability:           newDenyAllChecker(nil),
 	}
 }
 
@@ -271,13 +274,14 @@ func (s *Service) SetActorVerifier(v *controlauth.ActorVerifier) {
 
 // SetCapabilityChecker registers the capability checker every control op is
 // authorized against. Thread-safe; may be called at any time. A nil checker
-// resets to the default StubCapabilityChecker rather than leaving the field
-// nil (dispatchEndpoint calls it unconditionally).
+// resets to the fail-closed denyAllChecker (deny-all + loud Warn) rather than
+// leaving the field nil (dispatchEndpoint calls it unconditionally) — a
+// cleared checker must fail closed, never open.
 func (s *Service) SetCapabilityChecker(c CapabilityChecker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c == nil {
-		c = NewStubCapabilityChecker(nil)
+		c = newDenyAllChecker(nil)
 	}
 	s.capability = c
 }

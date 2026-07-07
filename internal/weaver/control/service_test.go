@@ -110,7 +110,7 @@ func TestControl_List(t *testing.T) {
 		{TargetID: "t2", LensRef: "lens-2", Gaps: []string{"missing_b"}, State: "disabled"},
 	}
 	eng := newFakeEngine(want...)
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendRequest(t, nc, control.ListSubject())
@@ -140,7 +140,7 @@ func TestControl_Disable(t *testing.T) {
 	t.Cleanup(cancel)
 
 	eng := newFakeEngine()
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendRequest(t, nc, control.TargetSubject("t1", "disable"))
@@ -159,7 +159,7 @@ func TestControl_Enable(t *testing.T) {
 	t.Cleanup(cancel)
 
 	eng := newFakeEngine()
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendRequest(t, nc, control.TargetSubject("t1", "enable"))
@@ -178,7 +178,7 @@ func TestControl_Revoke(t *testing.T) {
 	t.Cleanup(cancel)
 
 	eng := newFakeEngine()
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendRequest(t, nc, control.TargetSubject("t1", "revoke"))
@@ -199,7 +199,7 @@ func TestControl_Disable_EngineError(t *testing.T) {
 
 	eng := newFakeEngine()
 	eng.errOn["disable:ghost"] = errors.New(`weaver: target "ghost" not registered`)
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendRequest(t, nc, control.TargetSubject("ghost", "disable"))
@@ -219,7 +219,7 @@ func TestControl_UnknownOp(t *testing.T) {
 	t.Cleanup(cancel)
 
 	eng := newFakeEngine()
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	subj := control.TargetSubject("t1", "bogus")
@@ -235,7 +235,7 @@ func TestControl_StartNATSListener_AlreadyStarted(t *testing.T) {
 	t.Cleanup(cancel)
 
 	eng := newFakeEngine()
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	err := svc.StartNATSListener(ctx, nc)

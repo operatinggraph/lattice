@@ -198,7 +198,7 @@ func TestControl_List_EngineError(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
 	eng.errOn["list:"] = errors.New("loom: list instances: kv down")
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.ListSubject())
 	assert.NotEmpty(t, resp.Error)
@@ -231,7 +231,7 @@ func TestControl_Consumers_EngineError(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
 	eng.errOn["consumers:"] = errors.New("loom: consumers: boom")
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.ConsumersSubject())
 	assert.NotEmpty(t, resp.Error)
@@ -270,7 +270,7 @@ func TestControl_Inspect_Terminal(t *testing.T) {
 		CurrentStep: nil,
 		Terminal:    true,
 	}
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.NameSubject("done1", "inspect"))
 	require.Empty(t, resp.Error)
@@ -296,7 +296,7 @@ func TestControl_Inspect_TypedErrors(t *testing.T) {
 			nc := startTestServer(t)
 			eng := newFakeEngine()
 			eng.errOn["inspect:"+tc.name] = errors.New(tc.errText)
-			startService(t, nc, eng, nil)
+			startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 			resp := sendRequest(t, nc, control.NameSubject(tc.name, "inspect"))
 			assert.NotEmpty(t, resp.Error, "typed error must surface as a structured reply")
@@ -331,7 +331,7 @@ func TestControl_Pause_HappyPath(t *testing.T) {
 func TestControl_Resume_HappyPath(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.NameSubject("loom-widget", "resume"))
 	require.Empty(t, resp.Error)
@@ -346,7 +346,7 @@ func TestControl_Pause_UnknownName(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
 	eng.errOn["pause:loom-nope"] = errors.New(`loom: consumer not managed: "loom-nope"`)
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.NameSubject("loom-nope", "pause"))
 	assert.NotEmpty(t, resp.Error)
@@ -364,7 +364,7 @@ func TestControl_Pause_RelayDeadlineRejected(t *testing.T) {
 			nc := startTestServer(t)
 			eng := newFakeEngine()
 			eng.errOn["pause:"+name] = errors.New("loom: consumer is dispatch/crash-safety critical and cannot be paused: " + name)
-			startService(t, nc, eng, nil)
+			startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 			resp := sendRequest(t, nc, control.NameSubject(name, "pause"))
 			assert.NotEmpty(t, resp.Error)
@@ -391,7 +391,7 @@ func TestControl_CraftedNames(t *testing.T) {
 			nc := startTestServer(t)
 			eng := newFakeEngine()
 			eng.errOn["inspect:"+name] = errors.New(`loom: instance "` + name + `" not found`)
-			startService(t, nc, eng, nil)
+			startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 			resp := sendRequest(t, nc, control.NameSubject(name, "inspect"))
 			assert.NotEmpty(t, resp.Error)
@@ -401,7 +401,7 @@ func TestControl_CraftedNames(t *testing.T) {
 			nc := startTestServer(t)
 			eng := newFakeEngine()
 			eng.errOn["pause:"+name] = errors.New(`loom: consumer not managed: "` + name + `"`)
-			startService(t, nc, eng, nil)
+			startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 			resp := sendRequest(t, nc, control.NameSubject(name, "pause"))
 			assert.NotEmpty(t, resp.Error)
@@ -435,7 +435,7 @@ func TestControl_HandlerPanic_RecoversToErrorReply(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
 	eng.panicOn["pause:loom-widget"] = "boom in engine"
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.NameSubject("loom-widget", "pause"))
 	assert.NotEmpty(t, resp.Error, "a recovered panic must surface as an error reply, not a timeout/crash")
@@ -453,7 +453,7 @@ func TestControl_HandlerPanic_RecoversToErrorReply(t *testing.T) {
 func TestControl_UnknownOp(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
-	startService(t, nc, eng, nil)
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	_, err := nc.Request(control.NameSubject("i1", "bogus"), nil, 250*time.Millisecond)
 	require.Error(t, err, "request to unregistered op subject must fail (no responders / timeout)")
@@ -466,10 +466,46 @@ func TestControl_StartNATSListener_AlreadyStarted(t *testing.T) {
 	t.Cleanup(cancel)
 
 	eng := newFakeEngine()
-	svc := control.NewService(eng, nil, nil)
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	err := svc.StartNATSListener(ctx, nc)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already started")
+}
+
+// TestControl_NilCapability_FailsClosed proves the nil-checker default fails
+// CLOSED: NewService(engine, nil, ...) denies every op and never reaches the
+// engine, so a wiring regression that drops the real checker cannot fail open.
+func TestControl_NilCapability_FailsClosed(t *testing.T) {
+	nc := startTestServer(t)
+	eng := newFakeEngine()
+	eng.instances = []loom.InstanceSummary{{InstanceID: "i1", Status: "running"}}
+	startService(t, nc, eng, nil) // nil checker → fail-closed denyAllChecker
+
+	// An exact-subject op (list) is denied.
+	listResp := sendRequest(t, nc, control.ListSubject())
+	assert.NotEmpty(t, listResp.Error, "nil-checker default must deny the list op")
+	assert.Nil(t, listResp.Instances)
+
+	// A per-name op (pause) is denied AND never reaches the engine.
+	pauseResp := sendRequest(t, nc, control.NameSubject("loom-widget", "pause"))
+	assert.NotEmpty(t, pauseResp.Error, "nil-checker default must deny the pause op")
+	assert.Nil(t, pauseResp.Pause)
+	assert.Empty(t, eng.callLog(), "engine must not be invoked when the fail-closed default denies")
+}
+
+// TestControl_ExplicitStub_Allows proves the opt-in escape hatch still works:
+// an explicit StubCapabilityChecker allows every op (the dev/test allow-all
+// path), distinct from the nil default which now denies.
+func TestControl_ExplicitStub_Allows(t *testing.T) {
+	nc := startTestServer(t)
+	eng := newFakeEngine()
+	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
+
+	resp := sendRequest(t, nc, control.NameSubject("loom-widget", "resume"))
+	require.Empty(t, resp.Error, "explicit StubCapabilityChecker must allow")
+	require.NotNil(t, resp.Resume)
+	assert.True(t, resp.Resume.Resumed)
+	assert.Equal(t, []string{"resume:loom-widget"}, eng.callLog())
 }

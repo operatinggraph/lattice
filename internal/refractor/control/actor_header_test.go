@@ -2,6 +2,7 @@ package control_test
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -86,15 +87,17 @@ func TestControl_Health_NoHeaderExtractsEmptyActor(t *testing.T) {
 	assert.Equal(t, "", rec.actor())
 }
 
-// TestControl_SetCapabilityChecker_NilResetsToStub verifies
-// SetCapabilityChecker(nil) falls back to the default StubCapabilityChecker
-// rather than leaving a nil checker that would panic dispatchEndpoint's
-// unconditional call.
-func TestControl_SetCapabilityChecker_NilResetsToStub(t *testing.T) {
+// TestControl_SetCapabilityChecker_NilResetsToFailClosed verifies
+// SetCapabilityChecker(nil) falls back to the fail-closed denyAllChecker
+// (deny every op) rather than leaving a nil checker that would panic
+// dispatchEndpoint's unconditional call, and rather than resetting to an
+// allow-all: a cleared checker must fail closed, never open.
+func TestControl_SetCapabilityChecker_NilResetsToFailClosed(t *testing.T) {
 	nc, _ := startControlTestServerConn(t)
 
 	svc := control.NewService()
-	svc.SetCapabilityChecker(nil)
+	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil)) // start allow-all
+	svc.SetCapabilityChecker(nil)                                   // reset must go fail-closed, not back to allow
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -103,5 +106,28 @@ func TestControl_SetCapabilityChecker_NilResetsToStub(t *testing.T) {
 	subj := control.ControlSubject("rule-actor-test", "health")
 	reply, err := nc.Request(subj, nil, 2*time.Second)
 	require.NoError(t, err)
-	assert.NotEmpty(t, reply.Data)
+	var resp control.ControlResponse
+	require.NoError(t, json.Unmarshal(reply.Data, &resp))
+	assert.NotEmpty(t, resp.Error, "SetCapabilityChecker(nil) must reset to a fail-closed deny, not allow-all")
+}
+
+// TestControl_ConstructionDefault_FailsClosed verifies the construction-time
+// default fails CLOSED: a Service that never has SetCapabilityChecker(real)
+// called denies every op, so the pre-set window / a dropped wiring call cannot
+// fail open. Production sets the real checker before serving (cmd/refractor).
+func TestControl_ConstructionDefault_FailsClosed(t *testing.T) {
+	nc, _ := startControlTestServerConn(t)
+
+	svc := control.NewService() // no SetCapabilityChecker → fail-closed default
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	subj := control.ControlSubject("rule-actor-test", "health")
+	reply, err := nc.Request(subj, nil, 2*time.Second)
+	require.NoError(t, err)
+	var resp control.ControlResponse
+	require.NoError(t, json.Unmarshal(reply.Data, &resp))
+	assert.NotEmpty(t, resp.Error, "the construction-time default must deny (fail closed) until the real checker is set")
 }

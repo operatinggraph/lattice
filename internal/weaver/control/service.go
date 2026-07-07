@@ -93,10 +93,11 @@ const (
 // under subjectPrefix+".*.<op>".
 var targetOps = []string{opDisable, opEnable, opRevoke}
 
-// Service is the Weaver control-plane NATS responder. It
-// wraps an engineControl (in production, *weaver.Engine) and a
-// CapabilityChecker (in production, a stub allow-all — Epic 3 wires the
-// real Capability KV check).
+// Service is the Weaver control-plane NATS responder. It wraps an
+// engineControl (in production, *weaver.Engine) and a CapabilityChecker.
+// Production wires the real controlauth.CapabilityKVChecker (cmd/weaver
+// aborts startup if that construction fails); a nil checker falls back to the
+// fail-closed denyAllChecker, which denies every operation.
 type Service struct {
 	engine     engineControl
 	capability CapabilityChecker
@@ -110,15 +111,17 @@ type Service struct {
 	actorVerifier *controlauth.ActorVerifier
 }
 
-// NewService constructs a Service wrapping engine. capability may be nil —
-// a StubCapabilityChecker is used in that case. logger may be nil — slog's
-// default logger is used in that case.
+// NewService constructs a Service wrapping engine. capability may be nil — the
+// fail-closed denyAllChecker is used in that case (deny every op + loud Warn),
+// so a nil/misconfigured checker fails closed rather than allowing. Pass an
+// explicit StubCapabilityChecker for dev/test allow-all. logger may be nil —
+// slog's default logger is used in that case.
 func NewService(engine engineControl, capability CapabilityChecker, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if capability == nil {
-		capability = NewStubCapabilityChecker(logger)
+		capability = newDenyAllChecker(logger)
 	}
 	return &Service{engine: engine, capability: capability, logger: logger}
 }

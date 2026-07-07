@@ -75,7 +75,7 @@ func TestControl_List_EngineError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	svc := control.NewService(listErrEngine{err: errors.New("kv unavailable")}, nil, nil)
+	svc := control.NewService(listErrEngine{err: errors.New("kv unavailable")}, control.NewStubCapabilityChecker(nil), nil)
 	require.NoError(t, svc.StartNATSListener(ctx, nc))
 
 	resp := sendRequest(t, nc, control.ListSubject())
@@ -110,6 +110,49 @@ func TestTargetIDFromSubject(t *testing.T) {
 			assert.Equal(t, tc.wantTarget, got)
 		})
 	}
+}
+
+// TestControl_NilCapability_FailsClosed proves the nil-checker default fails
+// CLOSED: NewService(engine, nil, ...) denies every op and never reaches the
+// engine, so a wiring regression that drops the real checker cannot fail open.
+func TestControl_NilCapability_FailsClosed(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine(weaver.TargetSummary{TargetID: "t1"})
+	svc := control.NewService(eng, nil, nil) // nil checker → fail-closed denyAllChecker
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	// list is denied.
+	listResp := sendRequest(t, nc, control.ListSubject())
+	assert.NotEmpty(t, listResp.Error, "nil-checker default must deny the list op")
+	assert.Nil(t, listResp.Targets)
+
+	// a mutating op is denied AND never reaches the engine.
+	disableResp := sendRequest(t, nc, control.TargetSubject("t1", "disable"))
+	assert.NotEmpty(t, disableResp.Error, "nil-checker default must deny the disable op")
+	assert.Nil(t, disableResp.Disable)
+	assert.Empty(t, eng.callLog(), "engine must not be invoked when the fail-closed default denies")
+}
+
+// TestControl_ExplicitStub_Allows proves the opt-in escape hatch still works:
+// an explicit StubCapabilityChecker allows every op (the dev/test allow-all
+// path), distinct from the nil default which now denies.
+func TestControl_ExplicitStub_Allows(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("t1", "disable"))
+	require.Empty(t, resp.Error, "explicit StubCapabilityChecker must allow")
+	require.NotNil(t, resp.Disable)
+	assert.True(t, resp.Disable.Disabled)
+	assert.Equal(t, []string{"disable:t1"}, eng.callLog())
 }
 
 // TestNewStubCapabilityChecker_NilLogger verifies the nil-logger fallback and
