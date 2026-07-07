@@ -26,7 +26,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **F13 — Chronicler Time Machine** | Flow-history browser + map scrubber + ledger browser (platform-edges brief §4 L1–L3); overrides the Chronicler design's "rides F6" display note (Loupe scope). | ★★★ | L | 🚧 L1 reconciled (shipped Flows tab satisfies it, no rebuild) + L2 v1 SHIPPED (flow-liveness scrubber); L2-full/L3 blocked-on: Chronicler archive mode (lattice, unscheduled) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
-| **F15 — Operator auth lift** | Real human operator login (replaces localhost-trust-as-admin) + op-submissions relayed through the Gateway as the verified operator (not `adminActor` root); reads stay direct-inspector behind the login. Control plane already lifted. | ★★★ | L | ✅ ratified (Andrew 2026-07-06; B then C1) · [design](../../implementation-artifacts/loupe-operator-auth-lift-design.md) · depends on real-actor-write-auth Phase 1 (lattice) |
+| **F15 — Operator auth lift** | Real human operator login (replaces localhost-trust-as-admin) + op-submissions relayed through the Gateway as the verified operator (not `adminActor` root); reads stay direct-inspector behind the login. Control plane already lifted. | ★★★ | L | 🏗️ building (worktree) · [design](../../implementation-artifacts/loupe-operator-auth-lift-design.md) · inc.1 login gate SHIPPED (`19c1dd0`); next: inc.2 Gateway-relay (§7 item 4) |
 
 ## Component maintenance
 
@@ -60,6 +60,8 @@ Open items only (shipped ones are in the Done log) — none currently open.
 ## Done log — loupe (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
+
+- 2026-07-06 · `19c1dd0` · [Loupe/F15 inc.1] Operator login gate — requireOperator wraps the whole mux; 3-layer reviewed, fixed forward; verified live + CI green
 
 - 2026-07-06 · `c5e1c80` · [Loupe/F13] L1 reconciled + L2 v1 map scrubber (flow-liveness replay); 3-layer review fixed forward; verified live + CI green
 - 2026-07-06 · `f7c7e36` · [Loupe/maint] Ad-hoc (Andrew) — human-scale `freshness` "ago" past a minute (`32914s ago` → `9h ago`); single-point fix; verified live + CI green

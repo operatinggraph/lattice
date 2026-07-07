@@ -4,6 +4,15 @@
 Lattice lanes · **depends on** `real-actor-write-auth-e2e-design.md` Phase 1 (shared Fake IdP +
 `up-full-capability`) · **reconciles with** `control-plane-capability-authz-design.md` (✅ CLOSED)
 
+**🏗️ Build checkpoint (Loupe lane):** §7 item 3 (operator login gate) **SHIPPED** `19c1dd0` —
+`requireOperator` wraps the whole mux (static UI + every `/api/*`), fail-closed, `LOUPE_DEV_AUTH` /
+`LOUPE_JWT_PUBLIC_KEY` postures mirroring `cmd/loftspace-app/readauth.go`; verified live (unauthenticated
+→ 401 on both the UI and the API, forged token → 401, dev-minted token → 200) + CI green. **Next:** §7
+item 4 (op-submissions relay through the Gateway, replacing `adminActor` direct-stamp in
+`op.go`/`server.go`/`objects.go`/`pkg.go`) — depends on the Lattice-lane operator-privilege decision (B:
+the `consoleOperator` role package) landing so the relayed operator carries real scoped grants; items 5
+(pkg-lifecycle gating) and 6 (e2e proof) follow.
+
 > **Ratification (Andrew, 2026-07-06): B then C — both built, C not deferred.** The operator-privilege
 > fork (§4) resolves to **build B first** (the scoped `consoleOperator` role; pkg-lifecycle stays a
 > distinct root-admin path *in the interim*), **then build C** (per-role scoped privileged-lane grants —
