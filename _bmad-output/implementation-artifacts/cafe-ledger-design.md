@@ -129,6 +129,48 @@ fire's authorization — the new nkey activates cleanly on the next `make down &
 `up-cafe` bootstrap cycle (or an explicitly authorized live reload), at which point the in-browser
 POS/front-desk/resident flows should be exercised end-to-end before this is treated as fully proven.
 
+## Inc 3 — `packages/one-bill`, the composition lens, shipped
+
+The cypher engine has no UNION (`internal/refractor/ruleengine/full/visitor.go` rejects any query
+carrying a `oC_Union` at parse time, and `docs/contracts/06-capability-kv.md` states the platform rule —
+one Lens, one RETURN shape; multi-output patterns are additional Lenses, not Lens-internal complexity), so
+"unioning `ledgerHistory` + `cafeLedgerHistory` by `leaseAppKey`" is not a single unioned cypher query. It
+ships as a new lens-only package, `packages/one-bill` (no DDLs/permissions/roles — mirrors
+`control-authz`'s grant-only shape, just for lenses), declaring **two** Lenses —
+`oneBillRentEntries` (matches `:transaction`/`:account`, loftspace-ledger's classes) and
+`oneBillCafeEntries` (matches `:cafetransaction`/`:cafeaccount`, cafe-ledger's) — both projecting into
+the SAME shared bucket (`one-bill-history`), each row additionally tagged `source: "rent"` / `"cafe"`.
+This mirrors the existing rbac-domain (`cap.roles.*`) / service-location (`cap.svc.*`) precedent of two
+independently-declared Lenses composing into one bucket with disjoint keys — here the per-row key is the
+transaction's own `t.key`, and `vtx.transaction.<id>` vs `vtx.cafetransaction.<id>` are already disjoint
+by vertex-type prefix, so no extra key-namespacing is needed. `Depends: [loftspace-ledger, cafe-ledger]`
+for install-order/documentation honesty; the cypher engine itself matches by class label at read time
+regardless (same as loftspace-ledger's own OPTIONAL MATCH into bespoke-contracts' `:clause` with no
+declared dependency) — a stack running only one of the two ledgers just sees that lens side project zero
+rows, not an error (the installer logs, not fails, an unverified declared dependency).
+
+New Makefile target `install-onebill` (requires `install-loftspace` + `install-cafe` to have already run).
+
+**Verify:** `go build ./...`, `make vet`, `golangci-lint run ./...` (0 issues), `STRICT=1 go run
+./scripts/lint-conventions.go` (0 issues, unchanged 55 advisory-warning baseline — the package reads no
+KV directly), full `go test ./...` green including `packages/one-bill`'s own embedded-NATS cypher-lens
+regression suite (`lens_cypher_test.go`, mirroring `cafe-domain`'s `cafeTabSettlement` harness): each
+lens projects its own tagged row correctly, and — seeding BOTH a rent and a café transaction against the
+SAME lease in one graph — a `TestOneBill_KeysDoNotCollide` case proves the two lenses' output keys stay
+disjoint when run over a real mixed graph, not just by inspection. Installed live onto the running dev
+stack (`make install-onebill`): Core KV commit succeeded (`packageKey=vtx.package.8tSH7g2FgERmeMTX8tSH`,
+`writeCount=14`), confirming the manifest/Definition parse + install path end-to-end.
+**Live reprojection into `one-bill-history` is DEFERRED**, not done this fire, for the same reason Inc
+2b's in-browser check was: this is a lens newly ADDED to an already-running Refractor, and per this
+repo's own documented F-004 caveat ("an ADDED lens/role/op won't activate under a live stack — the
+Refractor + DDL cache load lenses at install time"), the running Refractor process won't start
+projecting rows into the new bucket until it restarts — a `make down && make up-full` cycle (or an
+explicitly authorized live Refractor restart), both live-shared-infrastructure actions outside this
+fire's authorization (the same boundary Inc 2b's nkey activation hit). The cypher logic itself is proven
+correct by the embedded-NATS regression suite above; only the live end-to-end reprojection await the
+next full bootstrap cycle.
+
 ## Next
 
-- **Inc 3** — one-bill composition lens unioning `ledgerHistory` + `cafeLedgerHistory` by `leaseAppKey`.
+- **Mixed-use composition surfaces** (verticals.md) — front-desk/operations aggregate views consuming
+  `one-bill-history` (and others) once a full bootstrap cycle activates it live.
