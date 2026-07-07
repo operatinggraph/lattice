@@ -132,6 +132,15 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		return nil, err
 	}
 
+	// Step 2.7 — weaver targetId collision against installed targets (§10.8:
+	// targetId uniqueness is install-validated across installed targets). A
+	// weaver target has no canonicalName aspect, so the check above misses it;
+	// this runs after the same idempotency gate so a re-install never collides
+	// with its own prior targets.
+	if err := i.checkWeaverTargetIDCollision(ctx, def); err != nil {
+		return nil, err
+	}
+
 	// Step 3 — build the mutation manifest (role NanoIDs, grant resolution,
 	// version-independent entity keys, the full create batch). Shared with
 	// Upgrade, which needs the identical new key set + bodies.
@@ -416,6 +425,17 @@ var ErrVersionMismatch = errors.New("pkgmgr: installed package version differs f
 // the install is rejected.
 var ErrCanonicalNameCollision = errors.New("pkgmgr: meta canonicalName already present in the kernel")
 
+// ErrWeaverTargetIDCollision is returned by Install when a weaver targetId the
+// package declares already exists on an installed weaver-target spec (Contract
+// #10 §10.8: targetId is install-validated for uniqueness across installed
+// targets). A weaver target has no canonicalName aspect — its identity is the
+// targetId carried on its `.spec` body — so ErrCanonicalNameCollision does not
+// cover it. A collision is a genuine hazard beyond the registry's keep-first:
+// the colliding package's lens still projects read-model rows under the same
+// `<targetId>.` prefix into the shared weaver-targets bucket, interleaving two
+// packages' rows, so the install is rejected before any row is written.
+var ErrWeaverTargetIDCollision = errors.New("pkgmgr: weaver targetId already present in the kernel")
+
 // ErrUninstallConflict is returned by Uninstall when a declared key was
 // modified concurrently between this uninstall's read and its commit
 // (F-011 per-key OCC, Contract #8 §8.3). The atomic batch rejects the whole
@@ -567,6 +587,70 @@ func (i *Installer) checkCanonicalNameCollision(ctx context.Context, def Definit
 		if _, collides := declared[env.Data.Value]; collides {
 			return fmt.Errorf("%w: %q (declared by package %q, already on %s)",
 				ErrCanonicalNameCollision, env.Data.Value, def.Name, k)
+		}
+	}
+	return nil
+}
+
+// checkWeaverTargetIDCollision rejects an install whose declared weaver
+// targetIds collide with a targetId already carried by an installed
+// weaver-target `.spec` aspect (Contract #10 §10.8: targetId uniqueness is
+// install-validated across installed targets). A weaver target has no
+// canonicalName aspect, so checkCanonicalNameCollision cannot catch it; its
+// identity lives on the `.spec` body's `targetId`. Mirrors
+// checkCanonicalNameCollision: a single KVListKeys pass plus a targeted read of
+// only the `vtx.meta.*.spec` keys, filtered to the weaver-target spec class. A
+// tombstoned spec is ignored — its targetId is no longer live. Runs AFTER the
+// idempotency check in Install so a re-install of the same package never sees
+// its own prior targets as a collision.
+func (i *Installer) checkWeaverTargetIDCollision(ctx context.Context, def Definition) error {
+	declared := make(map[string]struct{}, len(def.WeaverTargets))
+	for _, t := range def.WeaverTargets {
+		declared[t.TargetID] = struct{}{}
+	}
+	if len(declared) == 0 {
+		return nil
+	}
+
+	keys, err := i.Conn.KVListKeys(ctx, CoreBucket)
+	if err != nil {
+		return fmt.Errorf("pkgmgr: list keys: %w", err)
+	}
+	const metaPrefix = "vtx.meta."
+	const specSuffix = ".spec"
+	for _, k := range keys {
+		if len(k) < len(metaPrefix)+len(specSuffix) {
+			continue
+		}
+		if k[:len(metaPrefix)] != metaPrefix {
+			continue
+		}
+		if k[len(k)-len(specSuffix):] != specSuffix {
+			continue
+		}
+		entry, err := i.Conn.KVGet(ctx, CoreBucket, k)
+		if err != nil {
+			if errors.Is(err, substrate.ErrKeyNotFound) {
+				continue
+			}
+			return fmt.Errorf("pkgmgr: get %s: %w", k, err)
+		}
+		var env struct {
+			Class     string `json:"class"`
+			IsDeleted bool   `json:"isDeleted"`
+			Data      struct {
+				TargetID string `json:"targetId"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(entry.Value, &env); err != nil {
+			continue
+		}
+		if env.IsDeleted || env.Class != weaverTargetSpecClass {
+			continue
+		}
+		if _, collides := declared[env.Data.TargetID]; collides {
+			return fmt.Errorf("%w: %q (declared by package %q, already on %s)",
+				ErrWeaverTargetIDCollision, env.Data.TargetID, def.Name, k)
 		}
 	}
 	return nil

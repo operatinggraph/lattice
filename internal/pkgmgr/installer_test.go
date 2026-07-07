@@ -285,6 +285,95 @@ func TestInstaller_CollisionCheckPreservesIdempotency(t *testing.T) {
 	}
 }
 
+// weaverTargetDef returns a synthetic package declaring one lens and one weaver
+// target that references that lens by canonicalName, with the given targetId.
+// Distinct pkgName/lensCanonical/ddlCanonical let a test collide on targetId
+// alone (not a canonicalName).
+func weaverTargetDef(pkgName, ddlCanonical, lensCanonical, targetID, version string) Definition {
+	return Definition{
+		Name:    pkgName,
+		Version: version,
+		DDLs: []DDLSpec{
+			{
+				CanonicalName:     ddlCanonical,
+				Class:             "meta.ddl.vertexType",
+				PermittedCommands: []string{"WtOp"},
+				Description:       "wt",
+				Script:            "def execute(state, op):\n    return {\"mutations\": [], \"events\": []}\n",
+				InputSchema:       `{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`,
+				OutputSchema:      `{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}`,
+				FieldDescription:  map[string]string{"id": "Weaver-target entity ID."},
+				Examples: []ExampleSpec{
+					{Name: "WtOp example", Payload: map[string]any{"id": "abc"}, ExpectedOutcome: "Creates wt vertex."},
+				},
+			},
+		},
+		Lenses: []LensSpec{
+			{
+				CanonicalName: lensCanonical,
+				Class:         "meta.lens",
+				Adapter:       "nats-kv",
+				Bucket:        "wt-bucket",
+				Engine:        "full",
+				Spec:          `MATCH (n:wt) RETURN n.key AS key`,
+			},
+		},
+		WeaverTargets: []WeaverTargetSpec{
+			{
+				TargetID: targetID,
+				LensRef:  lensCanonical,
+				Gaps: map[string]GapActionSpec{
+					"missing_x": {Action: "directOp", Operation: "WtOp"},
+				},
+			},
+		},
+	}
+}
+
+// TestInstaller_RejectsWeaverTargetIDCollision installs package A declaring
+// weaver targetId "foo", then a distinct package B also declaring "foo" (with
+// its own lens/DDL canonicalNames so the ONLY collision is the targetId). B must
+// fail with ErrWeaverTargetIDCollision — a weaver target has no canonicalName
+// aspect, so checkCanonicalNameCollision cannot catch this; the §10.8
+// cross-target uniqueness check must. Re-installing A stays idempotent (the
+// targetId scan must not see A's own prior target as a self-collision).
+func TestInstaller_RejectsWeaverTargetIDCollision(t *testing.T) {
+	ctx, _, inst := newInstallerHarness(t)
+
+	a := weaverTargetDef("wt-pkg-a", "wtClassA", "wtLensA", "foo", "0.1.0")
+	if _, err := inst.Install(ctx, a); err != nil {
+		t.Fatalf("install A: %v", err)
+	}
+
+	// Re-installing A stays idempotent — no false self-collision on "foo".
+	res, err := inst.Install(ctx, a)
+	if err != nil {
+		t.Fatalf("re-install A: %v", err)
+	}
+	if !res.Skipped {
+		t.Fatalf("expected Skipped=true re-installing A, got %+v", res)
+	}
+
+	// B collides on targetId "foo" alone.
+	b := weaverTargetDef("wt-pkg-b", "wtClassB", "wtLensB", "foo", "0.1.0")
+	_, err = inst.Install(ctx, b)
+	if err == nil {
+		t.Fatal("expected ErrWeaverTargetIDCollision installing a package reusing an installed targetId, got nil")
+	}
+	if !errors.Is(err, ErrWeaverTargetIDCollision) {
+		t.Fatalf("expected ErrWeaverTargetIDCollision, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Errorf("collision error should name the colliding targetId; got %v", err)
+	}
+
+	// A non-colliding B (distinct targetId) installs fine.
+	bClean := weaverTargetDef("wt-pkg-b", "wtClassB", "wtLensB", "bar", "0.1.0")
+	if _, err := inst.Install(ctx, bClean); err != nil {
+		t.Fatalf("non-colliding targetId should install, got: %v", err)
+	}
+}
+
 // TestInstaller_HappyPath installs a synthetic package and asserts the
 // DDL meta-vertex, Lens meta-vertex, permission vertex, grant link, and
 // package vertex are all written.
