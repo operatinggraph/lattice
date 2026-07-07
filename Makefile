@@ -37,6 +37,10 @@ GATEWAY_PG_DSN ?= postgres://gateway:gateway_dev@localhost:5432/lattice?sslmode=
 # GET /v1/<name> route. See internal/gateway/read.go / cmd/gateway's
 # GATEWAY_READ_MODELS_DIR doc comment.
 GATEWAY_READ_MODELS_DIR ?= $(abspath ./deploy/gateway-read-models)
+# Origins allowed to call POST /v1/operations cross-origin — the vertical apps'
+# own dev ports, since the browser-direct write path (real-actor-write-auth-e2e-
+# design.md §3.1) has the FE call the Gateway directly from its own origin.
+GATEWAY_CORS_ORIGINS ?= http://localhost:7788,http://localhost:7799
 
 # Per-component dev NKey seeds (NATS account-level write restriction, Path A —
 # deploy/nats-server.conf's permission matrix). Each binary's NATS_NKEY points at
@@ -354,7 +358,7 @@ up-full:
 	@echo "==> Killing any prior Gateway process..."
 	-pkill -f "bin/gateway" 2>/dev/null || true
 	@echo "==> Starting Gateway (:8080, dev-mode) in background..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true GATEWAY_PG_DSN=$(GATEWAY_PG_DSN) GATEWAY_READ_MODELS_DIR=$(GATEWAY_READ_MODELS_DIR) ./bin/gateway >gateway.log 2>&1 </dev/null &
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true GATEWAY_PG_DSN=$(GATEWAY_PG_DSN) GATEWAY_READ_MODELS_DIR=$(GATEWAY_READ_MODELS_DIR) GATEWAY_CORS_ORIGINS=$(GATEWAY_CORS_ORIGINS) ./bin/gateway >gateway.log 2>&1 </dev/null &
 	@echo "==> Building loupe binary..."
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Killing any prior Loupe process..."
@@ -763,6 +767,7 @@ run-gateway:
 	@echo "==> Gateway on :8080, GATEWAY_DEV_MODE=true (Ctrl-C to stop)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true \
 		GATEWAY_PG_DSN=$(GATEWAY_PG_DSN) GATEWAY_READ_MODELS_DIR=$(GATEWAY_READ_MODELS_DIR) \
+		GATEWAY_CORS_ORIGINS=$(GATEWAY_CORS_ORIGINS) \
 		./bin/gateway
 
 ## run-loftspace-app — Build + run the LoftSpace applicant app in the FOREGROUND.

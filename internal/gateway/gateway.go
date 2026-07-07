@@ -66,6 +66,13 @@ type Server struct {
 	gatewayActorKey string
 	consumerRoleKey string
 	provisioned     *provisionedCache
+
+	// corsOrigins backs ConfigureCORS (real-actor-write-auth-e2e-design.md
+	// §3.1, browser-direct topology): nil/empty until configured, in which
+	// case /v1/operations serves exactly as before (no CORS headers) — a
+	// browser calling cross-origin is refused by the browser itself, same as
+	// today.
+	corsOrigins map[string]struct{}
 }
 
 // provisionedCacheMaxEntries caps provisionedCache's memory: it holds one
@@ -164,6 +171,46 @@ func (s *Server) ConfigureProvisioning(gatewayActorKey, consumerRoleKey string) 
 	s.provisioned = newProvisionedCache()
 }
 
+// ConfigureCORS enables CORS handling on POST /v1/operations for the given
+// exact set of allowed Origin values (real-actor-write-auth-e2e-design.md
+// §3.1): the browser-direct topology has the browser call the Gateway
+// cross-origin from the vertical app's own origin, so the preflight OPTIONS
+// request and the actual response must carry Access-Control-Allow-* headers
+// naming that origin. origins is matched by exact string equality (scheme +
+// host + port) — never a wildcard: a bearer-token API should not train
+// callers to expect Access-Control-Allow-Origin: *. Unconfigured (nil/empty),
+// CORS stays off and a cross-origin browser call is refused by the browser
+// itself, exactly as before this method existed.
+func (s *Server) ConfigureCORS(origins []string) {
+	s.corsOrigins = make(map[string]struct{}, len(origins))
+	for _, o := range origins {
+		if o = strings.TrimSpace(o); o != "" {
+			s.corsOrigins[o] = struct{}{}
+		}
+	}
+}
+
+// allowedOrigin reports whether origin is in the configured CORS allow-list.
+func (s *Server) allowedOrigin(origin string) bool {
+	if origin == "" || len(s.corsOrigins) == 0 {
+		return false
+	}
+	_, ok := s.corsOrigins[origin]
+	return ok
+}
+
+// writeCORSHeaders sets the Access-Control-Allow-* headers for a request from
+// origin (already confirmed allowed by the caller). Vary: Origin marks the
+// response as origin-dependent so a shared cache never serves it cross-origin.
+func writeCORSHeaders(w http.ResponseWriter, origin string) {
+	h := w.Header()
+	h.Set("Access-Control-Allow-Origin", origin)
+	h.Set("Vary", "Origin")
+	h.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	h.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	h.Set("Access-Control-Max-Age", "600")
+}
+
 // RegisterRoutes mounts the Gateway's HTTP surface on mux — the write-path
 // keystone plus one GET /v1/<name> route per read-model configured via
 // ConfigureReadModels (call it before RegisterRoutes; routes are mounted
@@ -223,6 +270,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // Bearer-authenticates the caller, strips any client-supplied actor, stamps
 // the verified actor, and publishes the resulting envelope.
 func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
+	if origin := r.Header.Get("Origin"); s.allowedOrigin(origin) {
+		writeCORSHeaders(w, origin)
+	}
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return

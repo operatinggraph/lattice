@@ -93,8 +93,11 @@ func laneValid(lane processor.Lane) bool {
 
 // handleOp implements POST /api/op. It parses the body into an opRequest, builds
 // an envelope (stamping a fresh request id + the admin actor), submits it via
-// output.SubmitOp, and returns the OperationReply. The applicant app submits
-// CreateLeaseApplication (apply) and SignLease (sign) through this path.
+// output.SubmitOp, and returns the OperationReply. The FE no longer calls this
+// path (writes go browser-direct to the Gateway's POST /v1/operations,
+// real-actor-write-auth-e2e-design.md §3.1, item 5) — retained as a Phase-3
+// enforcement detail (design §4): whether to delete or gate this endpoint is
+// decided when the apps' direct core-operations publish grant is stripped.
 func (s *server) handleOp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")

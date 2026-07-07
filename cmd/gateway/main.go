@@ -56,6 +56,10 @@
 //	GATEWAY_READ_MODELS_DIR   directory of <name>.sql files, each a fixed SELECT with no
 //	                          caller-supplied predicate (RLS scopes rows); name becomes the
 //	                          GET /v1/<name> path segment. Unset/empty ⇒ no read-model routes.
+//	GATEWAY_CORS_ORIGINS      comma-separated exact Origin values (scheme+host+port) allowed to
+//	                          call POST /v1/operations cross-origin — the browser-direct write
+//	                          topology (real-actor-write-auth-e2e-design.md §3.1). Unset/empty ⇒
+//	                          CORS off; a cross-origin browser call is refused by the browser.
 //
 // Logs to stderr in slog text format.
 package main
@@ -218,6 +222,9 @@ func run(logger *slog.Logger) error {
 	metrics := &gateway.Metrics{}
 	srv := gateway.NewServer(authn, conn, metrics, logger)
 	srv.ConfigureProvisioning(bootstrap.GatewayIdentityKey, "vtx.role."+pkgmgr.RoleID("identity-domain", "consumer"))
+	if origins := os.Getenv("GATEWAY_CORS_ORIGINS"); origins != "" {
+		srv.ConfigureCORS(strings.Split(origins, ","))
+	}
 
 	readModels, err := loadReadModels(os.Getenv("GATEWAY_READ_MODELS_DIR"))
 	if err != nil {

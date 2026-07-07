@@ -439,3 +439,92 @@ func TestHandleOperations_MalformedBody_400(t *testing.T) {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
+
+// --- CORS (real-actor-write-auth-e2e-design.md §3.1, browser-direct) -------
+
+func TestCORS_Unconfigured_NoHeaders(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "someone")
+	s := newTestServer(t, authn, func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	})
+
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	r := httptest.NewRequest(http.MethodPost, "/v1/operations", strings.NewReader(`{"operationType":"Noop"}`))
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Origin", "http://localhost:7788")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty (CORS not configured)", got)
+	}
+}
+
+func TestCORS_Preflight_AllowedOrigin(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	s := newTestServer(t, authn, nil)
+	s.ConfigureCORS([]string{"http://localhost:7788"})
+
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	r := httptest.NewRequest(http.MethodOptions, "/v1/operations", nil)
+	r.Header.Set("Origin", "http://localhost:7788")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:7788" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want the allowed origin", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Fatal("Access-Control-Allow-Methods missing on preflight response")
+	}
+}
+
+// TestCORS_Preflight_DisallowedOrigin_NoHeaders is the fail-closed check: a
+// preflight from an origin NOT in the allow-list gets no CORS headers, so the
+// browser blocks the follow-up write — never a wildcard fallback.
+func TestCORS_Preflight_DisallowedOrigin_NoHeaders(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	s := newTestServer(t, authn, nil)
+	s.ConfigureCORS([]string{"http://localhost:7788"})
+
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	r := httptest.NewRequest(http.MethodOptions, "/v1/operations", nil)
+	r.Header.Set("Origin", "http://evil.example")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty for a disallowed origin", got)
+	}
+}
+
+func TestCORS_ActualRequest_AllowedOriginGetsHeaders(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "someone")
+	s := newTestServer(t, authn, func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	})
+	s.ConfigureCORS([]string{"http://localhost:7788"})
+
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	r := httptest.NewRequest(http.MethodPost, "/v1/operations", strings.NewReader(`{"operationType":"Noop"}`))
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Origin", "http://localhost:7788")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:7788" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want the allowed origin", got)
+	}
+}

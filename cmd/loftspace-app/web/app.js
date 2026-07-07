@@ -1,8 +1,9 @@
 "use strict";
 
 // LoftSpace applicant app — Browse & Apply (Increment A). Vanilla JS, no build
-// step. The Go server does all NATS I/O; this view reads /api/listings +
-// /api/staff/identities and submits CreateLeaseApplication via /api/op.
+// step. The Go server does all NATS I/O for reads (/api/listings +
+// /api/staff/identities); writes go browser-direct to the Gateway's
+// POST /v1/operations via submitOp() (real-actor-write-auth-e2e-design.md §3.1).
 
 const APPLICANT_KEY = "loftspace.applicant";
 const MODE_KEY = "loftspace.mode";
@@ -247,6 +248,42 @@ async function authedGetAsStaff(path) {
   }
 }
 
+// ---- Write path: browser-direct through the Gateway (real-actor-write-auth-e2e Phase 1 item 5) ----
+// Writes no longer proxy through this app's own /api/op (which stamped a fixed
+// admin actor on every submit, regardless of who was signed in). The browser now
+// calls the Gateway's POST /v1/operations directly with a Bearer token, so the
+// Processor sees + authorizes the REAL verified actor. Reads are unaffected —
+// they stay on this app's own read boundary (readauth.go).
+let gatewayURLCache = null;
+async function gatewayURL() {
+  if (gatewayURLCache) return gatewayURLCache;
+  const body = await api("/api/config");
+  gatewayURLCache = body.gatewayUrl;
+  return gatewayURLCache;
+}
+
+// submitOp posts an operation to the Gateway as the given actor kind:
+// "staff" — this app's own admin/operator actor, the trusted-tool posture
+// almost every write already used (SignLease/SetApplicantProfile/etc. are
+// still operator-only ops; see permissions.go). "applicant" — the signed-in
+// applicant (state.applicant) themselves, used only for CreateLeaseApplication,
+// the one op with a real consumer scope=self grant (the design's proof case).
+// opts may carry {authContext} for the scope=self path. Returns the same
+// {status, error, primaryKey} shape api() already returns, so callers branch
+// on reply.status unchanged.
+async function submitOp(actorKind, body, opts) {
+  const [base, token] = await Promise.all([
+    gatewayURL(),
+    actorKind === "applicant" ? readToken() : staffReadToken(),
+  ]);
+  if (opts && opts.authContext) body = { ...body, authContext: opts.authContext };
+  return api(base + "/v1/operations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify(body),
+  });
+}
+
 // openDocument fetches a D1.5-protected object's bytes with the Bearer token
 // (a plain <a href> navigation can't attach one) and opens them as a blob URL
 // in a new tab. The blob URL is revoked after a delay long enough for the new
@@ -422,11 +459,7 @@ async function submitNewApplicant(ev) {
     const payload = { name, claimKeyHash };
     if (email) payload.email = email;
     if (phone) payload.phone = phone;
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ operationType: "CreateUnclaimedIdentity", class: "identity", payload }),
-    });
+    const reply = await submitOp("staff", { operationType: "CreateUnclaimedIdentity", class: "identity", payload });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not create applicant — " + msg, "err");
@@ -777,16 +810,19 @@ async function submitApply(ev) {
   const submit = $("#apply-submit");
   submit.disabled = true;
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    // CreateLeaseApplication carries the real consumer scope=self grant
+    // (design §3.4): submit as the applicant themselves, with authContext.target
+    // matching payload.applicant, so a real consumer's own apply is allowed.
+    const reply = await submitOp(
+      "applicant",
+      {
         operationType: "CreateLeaseApplication",
         class: "leaseapp",
         reads: [state.applicant, row.unitKey],
         payload,
-      }),
-    });
+      },
+      { authContext: { target: state.applicant } }
+    );
     if (reply && reply.status === "rejected") {
       const errMsg = (reply.error && reply.error.message) || "";
       // The guard rejects a repeat application by the same applicant for the same
@@ -1320,15 +1356,11 @@ async function submitProfile(ev, row) {
     if (cContact) payload.coApplicantContact = cContact;
   }
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "SetApplicantProfile",
-        class: "leaseapp",
-        reads: [row.entityKey],
-        payload,
-      }),
+    const reply = await submitOp("staff", {
+      operationType: "SetApplicantProfile",
+      class: "leaseapp",
+      reads: [row.entityKey],
+      payload,
     });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
@@ -1350,15 +1382,11 @@ async function submitProfile(ev, row) {
 async function withdrawApplication(row) {
   if (!confirm("Withdraw this application? You'll be able to apply to this unit again.")) return;
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "WithdrawLeaseApplication",
-        class: "leaseapp",
-        reads: [row.entityKey],
-        payload: { leaseAppKey: row.entityKey, unit: row.unitKey, applicant: state.applicant },
-      }),
+    const reply = await submitOp("staff", {
+      operationType: "WithdrawLeaseApplication",
+      class: "leaseapp",
+      reads: [row.entityKey],
+      payload: { leaseAppKey: row.entityKey, unit: row.unitKey, applicant: state.applicant },
     });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
@@ -1565,15 +1593,11 @@ async function submitComplete(ev) {
   const submit = $("#complete-submit");
   submit.disabled = true;
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: task.operationName,
-        class: desc.klass,
-        reads,
-        payload,
-      }),
+    const reply = await submitOp("staff", {
+      operationType: task.operationName,
+      class: desc.klass,
+      reads,
+      payload,
     });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
@@ -1613,15 +1637,11 @@ async function submitComplete(ev) {
 async function completeTask(taskKey) {
   if (!taskKey) return;
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "CompleteTask",
-        class: "task",
-        reads: [taskKey],
-        payload: { taskKey },
-      }),
+    const reply = await submitOp("staff", {
+      operationType: "CompleteTask",
+      class: "task",
+      reads: [taskKey],
+      payload: { taskKey },
     });
     if (reply && reply.status === "rejected" && reply.error) {
       console.warn("CompleteTask not applied:", reply.error.code, reply.error.message);
@@ -1822,15 +1842,11 @@ async function ensureLeaseDocument(leaseAppKey) {
 // a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
 // here would make account-opening impossible rather than idempotent.
 async function openLedgerAccount(leaseAppKey) {
-  const reply = await api("/api/op", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      operationType: "CreateAccount",
-      class: "account",
-      reads: [leaseAppKey],
-      payload: { leaseAppKey },
-    }),
+  const reply = await submitOp("staff", {
+    operationType: "CreateAccount",
+    class: "account",
+    reads: [leaseAppKey],
+    payload: { leaseAppKey },
   });
   if (reply && reply.status === "accepted" && reply.primaryKey) {
     return reply.primaryKey;
@@ -2884,15 +2900,11 @@ async function decideApplication(a, decision) {
     if (trimmed) payload.reason = trimmed;
   }
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "DecideLeaseApplication",
-        class: "leaseapp",
-        reads: [a.leaseAppKey],
-        payload,
-      }),
+    const reply = await submitOp("staff", {
+      operationType: "DecideLeaseApplication",
+      class: "leaseapp",
+      reads: [a.leaseAppKey],
+      payload,
     });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
@@ -2965,15 +2977,11 @@ function closePostListing() {
 // reloads after a beat so the new disposition shows once reprojected.
 async function setListingStatus(u, status) {
   try {
-    const reply = await api("/api/op", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationType: "SetListingStatus",
-        class: "loftspaceListing",
-        reads: [u.unitKey],
-        payload: { unit: u.unitKey, status },
-      }),
+    const reply = await submitOp("staff", {
+      operationType: "SetListingStatus",
+      class: "loftspaceListing",
+      reads: [u.unitKey],
+      payload: { unit: u.unitKey, status },
     });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
@@ -2990,11 +2998,7 @@ async function setListingStatus(u, status) {
 // opOrThrow submits an op and throws on a rejection or transport error, so the
 // post-a-listing chain stops at the first failure with a message naming the step.
 async function opOrThrow(body, what) {
-  const reply = await api("/api/op", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const reply = await submitOp("staff", body);
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
     throw new Error(`Could not ${what} — ${msg}`);

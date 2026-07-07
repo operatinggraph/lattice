@@ -2,9 +2,13 @@
 // person to browse leasable units, apply, track their application, complete
 // their tasks, and upload documents over a running Lattice deployment.
 //
-// It is a vertical product app, distinct from Loupe (the operator tool). Like
-// Loupe it is a trusted single-identity tool: it connects to NATS as the
-// primordial admin actor and submits operations on the applicant's behalf.
+// It is a vertical product app, distinct from Loupe (the operator tool).
+// Operation submits (apply, sign, list, decide, ...) go browser-direct to the
+// Gateway's POST /v1/operations with the signed-in actor's own Bearer token
+// (real-actor-write-auth-e2e-design.md §3.1) — this server no longer stamps a
+// fixed admin actor on them. It still connects to NATS as the primordial admin
+// actor for its remaining direct handlers (object upload/download, lease
+// document generation) that predate the operation write path.
 // READS are mixed: several protected Postgres read models (D1.5) require a
 // JWT-authenticated actor — including /api/staff/identities, the picker the
 // user reads to select which identity they are, which uses the system-wide
@@ -23,6 +27,8 @@
 //	BOOTSTRAP_JSON_PATH           path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
 //	LOFTSPACE_APP_INSTANCE        Health-KV instance id (default: auto-generated loft-<NanoID>)
 //	LOFTSPACE_APP_HEARTBEAT_EVERY Health-KV heartbeat cadence (default: 10s)
+//	LOFTSPACE_APP_GATEWAY_URL     the Gateway's base URL the FE submits writes to, browser-direct
+//	                              (default: http://localhost:8080; real-actor-write-auth-e2e-design.md §3.1)
 //
 // The server starts even when NATS is unreachable or the bootstrap file is
 // missing: the UI is served and each /api/* call returns a JSON error the UI
@@ -55,7 +61,8 @@ const (
 	defaultAddr      = "127.0.0.1:7788"
 	natsRequestLimit = 8 * time.Second
 	// defaultUploadCap bounds a single document upload (OBJECTS_MAX_UPLOAD_BYTES).
-	defaultUploadCap = 25 << 20 // 25 MiB
+	defaultUploadCap  = 25 << 20 // 25 MiB
+	defaultGatewayURL = "http://localhost:8080"
 )
 
 func main() {
@@ -160,6 +167,7 @@ func run(logger *slog.Logger) error {
 		pgPool:      pgPool,
 		authn:       authn,
 		devSigner:   signer,
+		gatewayURL:  envOrDefault("LOFTSPACE_APP_GATEWAY_URL", defaultGatewayURL),
 	}
 
 	mux := http.NewServeMux()

@@ -37,6 +37,12 @@ type server struct {
 	pgPool    *pgxpool.Pool
 	authn     *auth.Authenticator
 	devSigner *devSigner
+
+	// gatewayURL is the Gateway's externally-reachable base URL (e.g.
+	// http://localhost:8080), served to the FE via GET /api/config so it can
+	// submit writes browser-direct (real-actor-write-auth-e2e-design.md §3.1)
+	// instead of proxying through /api/op.
+	gatewayURL string
 }
 
 // pgxBeginner is the subset of *pgxpool.Pool the protected read uses — a single
@@ -66,6 +72,17 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ledger", s.handleLedger)
 	mux.HandleFunc("/api/op", s.handleOp)
 	mux.HandleFunc("/api/dev-token", s.handleDevToken)
+	mux.HandleFunc("/api/config", s.handleConfig)
+}
+
+// handleConfig implements GET /api/config: the FE's one bit of runtime
+// configuration, the Gateway base URL it submits writes to browser-direct.
+func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusBadRequest, "GET required")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"gatewayUrl": s.gatewayURL})
 }
 
 // writeJSON encodes v as JSON with the given status code.

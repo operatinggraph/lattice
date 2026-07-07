@@ -31,6 +31,11 @@ type server struct {
 	// uploadCap bounds a single document upload (OBJECTS_MAX_UPLOAD_BYTES); the
 	// substrate ObjectPut enforces it as the authoritative per-blob limit.
 	uploadCap int64
+	// gatewayURL is the Gateway's externally-reachable base URL (e.g.
+	// http://localhost:8080), served to the FE via GET /api/config so it can
+	// submit writes browser-direct (real-actor-write-auth-e2e-design.md §3.1)
+	// instead of proxying through /api/op.
+	gatewayURL string
 
 	// The read boundary (D1.3 Fire 3). pgPool is the protected lease-applications
 	// read-model pool; nil when LOFTSPACE_APP_PG_DSN is unset → protected reads
@@ -72,6 +77,17 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ledger", s.handleLedger)
 	mux.HandleFunc("/api/dev-token", s.handleDevToken)
 	mux.HandleFunc("/api/staff/dev-token", s.handleStaffDevToken)
+	mux.HandleFunc("/api/config", s.handleConfig)
+}
+
+// handleConfig implements GET /api/config: the FE's one bit of runtime
+// configuration, the Gateway base URL it submits writes to browser-direct.
+func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusBadRequest, "GET required")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"gatewayUrl": s.gatewayURL})
 }
 
 // writeJSON encodes v as JSON with the given status code.

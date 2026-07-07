@@ -4,10 +4,10 @@
 // appointments, and a clinic-desk view shows a provider's schedule.
 //
 // It is a vertical product app, distinct from Loupe (the operator tool) and a
-// sibling of loftspace-app. Like both it is a trusted single-identity tool for
-// WRITES: it connects to NATS as the primordial admin actor and submits
-// operations on the user's behalf — there is no Gateway, and no per-user authZ
-// on any write. READS are mixed: most stay on the unauthenticated admin path
+// sibling of loftspace-app. WRITES go browser-direct to the Gateway's
+// POST /v1/operations with the signed-in actor's own Bearer token
+// (real-actor-write-auth-e2e-design.md §3.1) — the app itself no longer
+// proxies writes. READS are mixed: most stay on the unauthenticated admin path
 // (the view is patient-centric — the user selects which patient they are and
 // the UI scopes its reads to that patient, but the server does not verify the
 // selection). /api/my-appointments, /api/my-schedule, /api/my-visit-series,
@@ -33,6 +33,8 @@
 //	CLINIC_APP_DEV_AUTH  "1" enables the demo dev-token minter (loopback bind only).
 //	CLINIC_APP_INSTANCE  Health-KV instance id (default: auto-generated clinic-<NanoID>).
 //	CLINIC_APP_HEARTBEAT_EVERY  Health-KV heartbeat cadence (default: 10s).
+//	CLINIC_APP_GATEWAY_URL  the Gateway's base URL the FE submits writes to, browser-direct
+//	                        (default: http://localhost:8080; real-actor-write-auth-e2e-design.md §3.1)
 //
 // The server starts even when NATS is unreachable or the bootstrap file is
 // missing: the UI is served and each /api/* call returns a JSON error the UI
@@ -61,8 +63,9 @@ import (
 )
 
 const (
-	defaultAddr      = "127.0.0.1:7799"
-	natsRequestLimit = 8 * time.Second
+	defaultAddr       = "127.0.0.1:7799"
+	natsRequestLimit  = 8 * time.Second
+	defaultGatewayURL = "http://localhost:8080"
 )
 
 func main() {
@@ -157,6 +160,7 @@ func run(logger *slog.Logger) error {
 		pgPool:      pgPool,
 		authn:       authn,
 		devSigner:   signer,
+		gatewayURL:  envOrDefault("CLINIC_APP_GATEWAY_URL", defaultGatewayURL),
 	}
 
 	mux := http.NewServeMux()

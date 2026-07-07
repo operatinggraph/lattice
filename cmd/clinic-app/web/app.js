@@ -1,10 +1,11 @@
 "use strict";
 
 // Clinic app — book · my appointments · provider schedule (Increment A). Vanilla
-// JS, no build step. The Go server does all NATS I/O; this view reads
-// /api/providers + /api/staff/patients + /api/appointments and submits
-// CreatePatient / CreateProvider / CreateAppointment / RescheduleAppointment /
-// SetAppointmentStatus via /api/op.
+// JS, no build step. The Go server does all NATS I/O for reads: this view reads
+// /api/providers + /api/staff/patients + /api/appointments. Writes
+// (CreatePatient / CreateProvider / CreateAppointment / RescheduleAppointment /
+// SetAppointmentStatus / ...) go browser-direct to the Gateway's
+// POST /v1/operations via submitOp() (real-actor-write-auth-e2e-design.md §3.1).
 
 const PATIENT_KEY = "clinic.patient";
 const state = {
@@ -220,12 +221,27 @@ function shortKey(key) {
 
 // ---- op submit helper ----
 //
-// submitOp posts an op and returns the reply, throwing on a transport error and
-// returning the reply (with .status) so callers can branch on rejected.
+// submitOp posts an op browser-direct to the Gateway's POST /v1/operations
+// (real-actor-write-auth-e2e-design.md §3.1) instead of proxying through this
+// app's own /api/op. Every clinic op is operator-only today (no consumer-scope
+// grant exists yet, unlike loftspace's CreateLeaseApplication), so every write
+// carries the staff Bearer token — the same actor (this app's admin identity)
+// /api/op used to stamp server-side, now verified by the Gateway instead of
+// assumed. Returns the reply (with .status) so callers can branch on
+// rejected, same as before.
+let gatewayURLCache = null;
+async function gatewayURL() {
+  if (gatewayURLCache) return gatewayURLCache;
+  const body = await api("/api/config");
+  gatewayURLCache = body.gatewayUrl;
+  return gatewayURLCache;
+}
+
 async function submitOp(operationType, klass, payload, reads) {
-  return api("/api/op", {
+  const [base, token] = await Promise.all([gatewayURL(), staffReadToken()]);
+  return api(base + "/v1/operations", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
     body: JSON.stringify({ operationType, class: klass, payload, reads }),
   });
 }
