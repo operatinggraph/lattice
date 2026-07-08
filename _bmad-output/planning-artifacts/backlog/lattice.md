@@ -200,6 +200,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-08 · `56784ac` · [docs] lens-hotreload-doc-fix CLOSED — "new lens needs Refractor restart" was false; corrected across 11 files incl. steward/fe-engineer SKILL.md + Loupe UI; local gates green, CI pending
 - 2026-07-07 · `56911ac` · [Refractor/deploy] loupe-read-only-pg-role CLOSED — wildcard-grant posture per Andrew's standing M5 decision (not a bypass, row cited the wrong doc); verified live, CI green
 
 - 2026-07-07 · `af86835` · [Weaver] weaver-ctrl-publish-grant-trim — dropped the redundant `lattice.ctrl.weaver.>` publish grant (subscribe + `allow_responses` already cover the control responder); natsperm-verified
@@ -224,14 +225,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-06 · `b0530b8` · [Weaver] Registry cleanup edge branches — targetId-rename + pattern-alias-reassignment coverage (33%→89%, 50%→100%); test-only, lead-reviewed
 - 2026-07-06 · `5e83939` · [Privacy/Object Store] Crypto-shred Fire 3 — erasure-coverage + §4.2 multi-party-independence tests over the real Loupe GET/decrypt handlers; test-only, lead-reviewed; Fire 4 (vertical consumer) next
 - 2026-07-06 · `6169671` · [Privacy/Object Store] Crypto-shred Fire 2 — Loupe trusted-client encrypt/decrypt path (AES-256-GCM, oid-bound AAD, Vault WrapKey/UnwrapKey RPCs); 3-layer reviewed, fixed forward (AAD binding); Fire 3 next
-- 2026-07-06 · `98ac889` · [Refractor] Personal Lens Fire PL.4 — Hydration Hook (`personal.hydrate` control RPC, cold bulk projection + terminal marker); 3-layer reviewed, fixed forward (SetRevisionCursor CAS race)
-- 2026-07-06 · `6cfda76` · [Weaver] weaver-exhausted-escalation-and-model CLOSED (Fire 9 Inc1) — exhausted budget escalates to Augur or raises `GapBudgetExhausted`; `augur.model` threaded; 3-layer reviewed, fixed forward (mark-storm bug)
-- 2026-07-06 · `7f34136` · [LoftSpace/Weaver planner] Lease-renewal R3 CLOSED — `renewalsRead` dual-anchor lens + tenant/landlord Renewal cards + task CTAs; 3-layer reviewed, fixed forward (co-manager read-access gap, numeric coercion)
-- 2026-07-06 · `286fd98` · [Chronicler/docs] component doc page + Fork-C re-ratification (own `health.chronicler.<instance>` heartbeat, Loupe node already expects it); eventlens→`cmd/chronicler` extraction is the ratified pending build
-- 2026-07-06 · `a865692` · [Refractor/docs] arch-review 2026-07-06 re-review filed + doc/marker truth-up (failure-tiers now-built sections, refractor.md 17-pkgs/step8-9/health-key, vendors ANTLR row, classify/rls stale markers)
-- 2026-07-06 · `8fa743c` · [Contract #3] §3.5/§3.4/§3.8 amended to as-built — referential integrity is script + Weaver's job (no step-6 dangling-ref pass); event schemas package-owned (no step-7 event-DDL check); arch item 5
-- 2026-07-06 · `3884f01` · [Contract #10] loom async-deadline paragraph reconciled to §10.6 — deadline bounds instanceOp submission (disarms at commit); bridge give-up timeout is the dead-call backstop (arch item 12)
-- 2026-07-06 · `6d2b4c5` · [Weaver] External-gap stale-mark reclaim — prompt fresh-instance retry after a failed call, per Contract #10 §10.3; 3-layer reviewed, fixed forward (vacuous confirmedConcluded signal)
-- 2026-07-06 · `945f605` · [Contract #7] §7.2 reconciled to as-built kernel — holdsRole→operator topology (not data.protected), 5→1 meta-meta DDL, no processor identity; §7.7 untouched (arch item 7; +922a294, dfbad3d)
-- 2026-07-06 · `9711814` · [Contract #2] §2.6 error-code table reconciled to the wire + §2.9 lenient-parse fix + TestConformance_ErrorCodeTable_MatchesWire pin (arch item 4)
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md))*
