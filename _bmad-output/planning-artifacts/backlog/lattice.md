@@ -200,7 +200,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-08 · `56784ac` · [docs] lens-hotreload-doc-fix CLOSED — "new lens needs Refractor restart" was false; corrected across 11 files incl. steward/fe-engineer SKILL.md + Loupe UI; local gates green, CI pending
+- 2026-07-08 · `56784ac` · [docs] lens-hotreload-doc-fix CLOSED — "new lens needs Refractor restart" was false; corrected across 11 files incl. steward/fe-engineer SKILL.md + Loupe UI; CI green
 - 2026-07-07 · `56911ac` · [Refractor/deploy] loupe-read-only-pg-role CLOSED — wildcard-grant posture per Andrew's standing M5 decision (not a bypass, row cited the wrong doc); verified live, CI green
 
 - 2026-07-07 · `af86835` · [Weaver] weaver-ctrl-publish-grant-trim — dropped the redundant `lattice.ctrl.weaver.>` publish grant (subscribe + `allow_responses` already cover the control responder); natsperm-verified
