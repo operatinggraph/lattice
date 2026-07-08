@@ -17,6 +17,7 @@ import (
 	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 	"github.com/asolgan/lattice/internal/weaver"
+	bespokecontracts "github.com/asolgan/lattice/packages/bespoke-contracts"
 )
 
 // --- Embedded NATS + provisioning -------------------------------------------
@@ -1179,4 +1180,104 @@ func TestWeaverE2E_TemporalMissedWhileDown(t *testing.T) {
 	require.Equal(t, "MarkExpired", op.OperationType)
 	require.Equal(t, weaver.DeriveTimerRequestID(schedSubject, fireAt), op.RequestID)
 	requireNoOp(t, ops, 2*time.Second)
+}
+
+// gapActionFixtureBody renders one pkgmgr.GapActionSpec into the lowerCamelCase
+// JSON shape the Weaver registry parses (mirrors the unexported
+// pkgmgr.gapActionBody the real installer emits) — read live off the package's
+// own WeaverTargets() so this fixture can never drift from what installs.
+func gapActionFixtureBody(action, operation, target string, params map[string]string, reads []string) map[string]any {
+	body := map[string]any{"action": action}
+	if operation != "" {
+		body["operation"] = operation
+	}
+	if target != "" {
+		body["target"] = target
+	}
+	if len(params) > 0 {
+		p := make(map[string]any, len(params))
+		for k, v := range params {
+			p[k] = v
+		}
+		body["params"] = p
+	}
+	if len(reads) > 0 {
+		r := make([]any, len(reads))
+		for i, v := range reads {
+			r[i] = v
+		}
+		body["reads"] = r
+	}
+	return body
+}
+
+// TestWeaverE2E_BespokeContracts_MissingCharge_PayloadCarriesAccountKey pins
+// the real bespoke-contracts missing_charge playbook (packages/bespoke-
+// contracts/targets.go), not a hand-copied mirror: it reads the package's own
+// WeaverTargets() and installs that exact gap spec as the fixture target, then
+// drives a real dispatch. A directOp's Target field ONLY sets
+// AuthContext.Target for auth-path scoping (internal/weaver/strategist.go's
+// buildPlan, actionDirectOp case) — it is NEVER merged into the dispatched
+// op's Payload, which is built exclusively from Params. DebitAccount's script
+// (packages/loftspace-ledger/scripts.go post_entry) reads accountKey strictly
+// from op.payload, so the gap's Params must template accountKey directly (the
+// objects-base / cafe-domain precedent) or every Weaver-dispatched charge
+// fails DebitAccount's own required-field validation.
+func TestWeaverE2E_BespokeContracts_MissingCharge_PayloadCarriesAccountKey(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+	ops := subscribeOps(t, nc)
+
+	targets := bespokecontracts.WeaverTargets()
+	require.Len(t, targets, 1, "bespoke-contracts must declare exactly one weaverTarget")
+	target := targets[0]
+	ga, ok := target.Gaps["missing_charge"]
+	require.True(t, ok, "bespoke-contracts playbook must declare missing_charge")
+	require.Equal(t, "directOp", ga.Action)
+	require.Equal(t, "DebitAccount", ga.Operation)
+
+	installWeaverTarget(t, ctx, conn, mustNanoID(t), map[string]any{
+		"targetId": target.TargetID,
+		"lensRef":  mustNanoID(t),
+		"gaps": map[string]any{
+			"missing_charge": gapActionFixtureBody(ga.Action, ga.Operation, ga.Target, ga.Params, ga.Reads),
+		},
+	})
+
+	engine := newEngine(conn, "e2e-bespoke-charge-"+mustNanoID(t))
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+
+	durable := "weaver-target-" + target.TargetID
+	waitConsumer(t, ctx, conn, durable)
+
+	entityID := mustNanoID(t)
+	acctKey := "vtx.account." + mustNanoID(t)
+	clauseKey := "vtx.clause." + mustNanoID(t)
+	putRow(t, ctx, conn, target.TargetID, entityID, map[string]any{
+		"entityKey":      "vtx.clause." + entityID,
+		"violating":      true,
+		"missing_charge": true,
+		"accountKey":     acctKey,
+		"amountCents":    int64(4500),
+		"clauseKey":      clauseKey,
+		"period":         "oneTime",
+	})
+
+	op := nextOp(t, ops, 15*time.Second)
+	require.Equal(t, "DebitAccount", op.OperationType)
+	require.Equal(t, acctKey, op.Payload["accountKey"],
+		"the dispatched DebitAccount payload must carry accountKey — Target only sets authContext.target, never the payload")
+	require.Equal(t, float64(4500), op.Payload["amountCents"])
+	require.Equal(t, clauseKey, op.Payload["clauseRef"])
 }
