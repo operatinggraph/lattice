@@ -25,10 +25,14 @@ LOFTSPACE_APP_PG_DSN ?= postgres://loftspace_app:loftspace_app_dev@localhost:543
 # The clinic-app read-boundary DSN (D1.5), same NON-superuser SELECT-only posture
 # as LOFTSPACE_APP_PG_DSN. See provision-clinic-role.
 CLINIC_APP_PG_DSN ?= postgres://clinic_app:clinic_app_dev@localhost:5432/lattice?sslmode=disable
-# Loupe's lens-contents read seam (loupe-2-ux-design.md §6.4/F9): a read-only
-# role's DSN. Empty by default — until the role is provisioned (lattice-lane
-# item), Loupe renders postgres lens contents as pg-pending.
-LOUPE_PG_DSN ?=
+# Loupe's lens-contents read seam (loupe-2-ux-design.md §6.4/F9): a NON-superuser,
+# SELECT-only role's DSN — same posture as LOFTSPACE_APP_PG_DSN/CLINIC_APP_PG_DSN/
+# GATEWAY_PG_DSN, deliberately NOT BYPASSRLS. Andrew's ratified M5 decision
+# (read-path-authorization-d1-design.md §8: "wildcard grant, not bypass") is that
+# Loupe's all-access reads stay INSIDE the RLS boundary via a wildcard
+# actor_read_grants row, so even admin reads pass through RLS and remain
+# attributable/loggable. See provision-loupe-role.
+LOUPE_PG_DSN ?= postgres://loupe_pg:loupe_pg_dev@localhost:5432/lattice?sslmode=disable
 # The Gateway read-path front's DSN (gateway-external-trust-boundary-design.md
 # Fire 3), same NON-superuser SELECT-only posture as LOFTSPACE_APP_PG_DSN /
 # CLINIC_APP_PG_DSN. See provision-gateway-role.
@@ -354,12 +358,14 @@ up-full:
 	@$(MAKE) orchestration
 	@$(MAKE) install-packages
 	@$(MAKE) provision-readpath
+	@$(MAKE) provision-gateway-role
 	@echo "==> Building gateway binary..."
 	go build -o bin/gateway ./cmd/gateway
 	@echo "==> Killing any prior Gateway process..."
 	-pkill -f "bin/gateway" 2>/dev/null || true
 	@echo "==> Starting Gateway (:8080, dev-mode) in background..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_GATEWAY) GATEWAY_DEV_MODE=true GATEWAY_PG_DSN=$(GATEWAY_PG_DSN) GATEWAY_READ_MODELS_DIR=$(GATEWAY_READ_MODELS_DIR) GATEWAY_CORS_ORIGINS=$(GATEWAY_CORS_ORIGINS) ./bin/gateway >gateway.log 2>&1 </dev/null &
+	@$(MAKE) provision-loupe-role
 	@echo "==> Building loupe binary..."
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Killing any prior Loupe process..."
@@ -426,6 +432,39 @@ dev-seed-staff:
 		--context-hint-reads "$$STAFF_KEY,$$ROLE_KEY"; \
 	 echo "==> Dev staff identity ready: $$STAFF_KEY holds operator. Mint a token: ./bin/gateway dev-token -sub $$STAFF_ID"
 
+## dev-seed-console-operator — Dev-seed ONE identity holding the scoped
+## `consoleOperator` role (packages/console-operator), NOT the kernel-primordial
+## `operator` role dev-seed-staff grants — loupe-operator-auth-lift-design.md
+## mechanism B: this is the non-root identity F15 items 5-6 need to prove the
+## meta-lane deny (InstallPackage etc. stay anchor-only; consoleOperator never
+## gets SystemActorKeys()-discovered root-equivalence). Requires
+## `make install-packages` (console-operator) already run. Not idempotent
+## across repeat runs (mints a fresh identity each time), same as
+## dev-seed-staff.
+dev-seed-console-operator:
+	@go build -o bin/lattice ./cmd/lattice
+	@ADMIN_ID=$$(jq -r '.primordialIDs.bootstrapIdentity' $(BOOTSTRAP_JSON)); \
+	 ADMIN_KEY="vtx.identity.$$ADMIN_ID"; \
+	 ROLE_KEY=$$(go run ./scripts/print-role-id.go console-operator consoleOperator); \
+	 echo "==> Creating dev console-operator identity (actor=$$ADMIN_KEY)..."; \
+	 CREATE_OUT=$$(NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) ./bin/lattice identity create-unclaimed \
+		--actor "$$ADMIN_KEY" --output json \
+		--payload '{"name":"Dev Console Operator","email":"console-operator@dev.lattice.local"}'); \
+	 echo "$$CREATE_OUT"; \
+	 OP_KEY=$$(echo "$$CREATE_OUT" | jq -r '.data.primaryKey'); \
+	 if [ -z "$$OP_KEY" ] || [ "$$OP_KEY" = "null" ]; then \
+		echo "==> ERROR: could not determine identity key from create-unclaimed output"; exit 1; \
+	 fi; \
+	 OP_ID=$${OP_KEY#vtx.identity.}; \
+	 echo "==> Assigning consoleOperator ($$ROLE_KEY) to $$OP_KEY..."; \
+	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) ./bin/lattice op submit \
+		--operation-type AssignRole --actor "$$ADMIN_KEY" --output json \
+		--payload "{\"actorKey\":\"$$OP_KEY\",\"roleKey\":\"$$ROLE_KEY\"}" \
+		--context-hint-reads "$$OP_KEY,$$ROLE_KEY"; \
+	 echo "==> Dev console-operator identity ready: $$OP_KEY holds consoleOperator (NOT root)."; \
+	 echo "==> Point Loupe at it: LOUPE_OPERATOR_ACTOR_KEY=$$OP_KEY (restart loupe with this set)."; \
+	 echo "==> Mint a login token: ./bin/gateway dev-token -sub $$OP_ID"
+
 ## provision-gateway-identity-provisioner — Grant the Gateway's own system
 ## identity the `identityProvisioner` role (gateway-claim-flow-identity-provisioning-design.md
 ## §3.3/§4): the one-time, documented ops action ProvisionConsumerIdentity
@@ -459,6 +498,15 @@ provision-gateway-identity-provisioner:
 test-real-actor-auth:
 	@echo "==> Running the real-actor-write-auth e2e proof..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-real-actor-write-auth.go
+
+## test-loupe-operator-tier — loupe-operator-auth-lift-design.md §7 item 6, the
+## operator-tier analog of test-real-actor-auth. Requires `make up-full-capability`
+## already running (real Processor under LATTICE_AUTH_MODE=capability, real
+## Gateway). Proves a consoleOperator can RevokeActor (default-lane) but is
+## DENIED InstallPackage (meta-lane stays anchor-only, mechanism B).
+test-loupe-operator-tier:
+	@echo "==> Running the Loupe operator-tier e2e proof..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-loupe-operator-tier.go
 
 ## up-loftspace — Full stack + the LoftSpace vertical + the applicant app on :7788.
 ## Runs up-full, installs the LoftSpace vertical (orchestration-base → location-domain
@@ -594,6 +642,30 @@ provision-gateway-role:
 		-c "GRANT USAGE ON SCHEMA public TO gateway;" \
 		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO gateway;" \
 		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO gateway;"
+
+## provision-loupe-role — Provision Loupe's non-superuser, SELECT-only Postgres
+## role for the F9 lens-contents read seam. Same posture as provision-loftspace-
+## role / provision-clinic-role / provision-gateway-role — deliberately NOT
+## BYPASSRLS. Andrew's ratified M5 decision (read-path-authorization-d1-design.md
+## §8) is that Loupe's all-access stays INSIDE the RLS boundary via a wildcard
+## actor_read_grants row, not an engine-level bypass, so even admin reads pass
+## through RLS and remain attributable/loggable (an un-instrumented superuser
+## read-actor is one compromise from total exposure). cmd/loupe/pg.go sets
+## lattice.actor_id to s.operatorActorKey per query; the kernel's
+## capabilityReadWildcardGrants lens grants that identity's wildcard row today
+## (holdsRole->operator, the default LOUPE_OPERATOR_ACTOR_KEY). Do not add
+## BYPASSRLS here.
+provision-loupe-role:
+	@echo "==> Provisioning loupe non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='loupe_pg') THEN \
+		    CREATE ROLE loupe_pg LOGIN PASSWORD 'loupe_pg_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO loupe_pg;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO loupe_pg;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO loupe_pg;"
 
 ## orchestration — Build + start the orchestration tier (Loom, Weaver, Bridge,
 ## object-store-manager, Chronicler) in the background. Requires a running

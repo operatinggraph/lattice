@@ -399,6 +399,52 @@ func applyReply(res *pkgmgr.ApplyResult) map[string]any {
 	}
 }
 
+// requireRootAdmin gates the meta-lane pkg-lifecycle handlers (loupe-operator-
+// auth-lift-design.md §4 mechanism B: "pkg-lifecycle tab is gated to a
+// distinct root-admin path... or hidden for consoleOperators"). Because
+// verifyOperatorToken only ever authenticates ONE identity per process
+// (readauth.go:364 denies any subject other than s.operatorActorKey), any
+// request that reached this handler already IS that configured operator —
+// this just asks whether that operator is root-equivalent.
+//
+// Without this, packagesApply/handlePackagesUninstall would submit
+// InstallPackage/UninstallPackage stamped as s.adminActor for ANY
+// successfully-logged-in operator regardless of their own grants — a confused-
+// deputy gap: Loupe performing a root-privileged action on behalf of a caller
+// whose own identity wouldn't authorize it. It's latent today only because
+// operatorActorKey defaults to adminActor (the same identity); re-scoping
+// LOUPE_OPERATOR_ACTOR_KEY to a scoped consoleOperator (mechanism B) would
+// otherwise silently reopen it.
+//
+// Root-equivalence is checked the same way the wildcard-read-grant lens and
+// the write-side capability anchor both do: bootstrap.SystemActorKeys's
+// bounded holdsRole→operator existence scan (Contract #7 §7.7) — never a
+// package-vocabulary check, so this needs no consoleOperator-specific code
+// and stays correct if a future mechanism grants root-equivalence some other
+// way. Writes the error response itself and returns false on any failure
+// (fail-closed: an errored root-check must never fall through to "allowed").
+func (s *server) requireRootAdmin(w http.ResponseWriter, r *http.Request, conn *substrate.Conn) bool {
+	if s.operatorActorKey == "" {
+		s.writeError(w, http.StatusBadGateway, "no operator actor configured (LOUPE_OPERATOR_ACTOR_KEY unset and no bootstrap admin actor loaded)")
+		return false
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+	roots, err := bootstrap.SystemActorKeys(ctx, conn)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "root-admin check: "+err.Error())
+		return false
+	}
+	for _, k := range roots {
+		if k == s.operatorActorKey {
+			return true
+		}
+	}
+	s.writeError(w, http.StatusForbidden,
+		"pkg-lifecycle is a root-admin-only action; the configured operator is not root-equivalent (holds no holdsRole->operator link)")
+	return false
+}
+
 // handlePackagesInstall implements POST /api/packages/install (multipart:
 // files=manifest.yaml, force=, dryRun=). Upgrade-aware per pkgmgr.Apply:
 // fresh install / same-version skip (force = dev refresh) / cross-version
@@ -424,6 +470,9 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 	}
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	if !s.requireRootAdmin(w, r, conn) {
 		return
 	}
 	if s.adminActor == "" {
@@ -518,6 +567,9 @@ func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request)
 	}
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	if !s.requireRootAdmin(w, r, conn) {
 		return
 	}
 	if s.adminActor == "" {

@@ -1,12 +1,25 @@
 package main
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	natstest "github.com/nats-io/nats-server/v2/test"
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // pkgStore builds a getter over a literal envelope map.
@@ -212,5 +225,101 @@ func TestPackageRegistryMirrorsLatticePkg(t *testing.T) {
 	}
 	if shipped == 0 {
 		t.Fatal("no shipped package manifests found — the ../../packages scan is broken")
+	}
+}
+
+// TestRequireRootAdmin pins the loupe-operator-auth-lift-design.md §4
+// mechanism B safety property directly (packagesApply/handlePackagesUninstall
+// must reject a non-root-equivalent operator before ever reaching
+// s.adminActor's direct-submit): a scoped identity holding no holdsRole
+// link is denied 403, a root-equivalent identity (holdsRole -> operator,
+// bootstrap.SystemActorKeys's own discovery predicate, Contract #7 §7.7) is
+// allowed through. Uses a real embedded NATS + Core KV, not a mock, since
+// SystemActorKeys does its own bounded KVListKeys/KVGet scan — mirrors
+// internal/bootstrap's own TestSystemActorKeys_DiscoversByOperatorTopology
+// fixture shape, scoped down to what this handler-level test needs.
+func TestRequireRootAdmin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
+	ns := natstest.RunServer(opts)
+	t.Cleanup(ns.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: ns.ClientURL(), Name: "loupe-test"})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bootstrap.CoreKVBucket}); err != nil {
+		t.Fatalf("create core-kv bucket: %v", err)
+	}
+
+	// SystemActorKeys reads the package-level bootstrap.RoleOperatorID
+	// (normally populated by bootstrap.Load against a real bootstrap.json) —
+	// set+restore it directly rather than pulling in the full bootstrap
+	// fixture, since this test only needs ONE stable role NanoID to link
+	// against.
+	testRoleOperatorID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("new nanoid: %v", err)
+	}
+	origRoleID := bootstrap.RoleOperatorID
+	bootstrap.RoleOperatorID = testRoleOperatorID
+	t.Cleanup(func() { bootstrap.RoleOperatorID = origRoleID })
+	roleKey := substrate.VertexKey("role", testRoleOperatorID)
+
+	rootID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("new nanoid: %v", err)
+	}
+	rootKey := substrate.VertexKey("identity", rootID)
+	linkKey := substrate.LinkKey("identity", rootID, "holdsRole", "role", testRoleOperatorID)
+	// SystemActorKeys only parses isDeleted off the link's value (it matches
+	// the holder purely from the KEY shape) — a minimal literal body is enough,
+	// sidestepping MakeLinkEnvelope's unrelated BootstrapIdentityKey/
+	// BootstrapOpKey package-state dependency this test has no reason to fake.
+	linkBody := []byte(`{"key":"` + linkKey + `","sourceVertex":"` + rootKey + `","targetVertex":"` + roleKey + `","localName":"holdsRole","isDeleted":false}`)
+	if _, err := conn.KVPut(ctx, bootstrap.CoreKVBucket, linkKey, linkBody); err != nil {
+		t.Fatalf("put holdsRole link: %v", err)
+	}
+
+	nonRootID, err := substrate.NewNanoID()
+	if err != nil {
+		t.Fatalf("new nanoid: %v", err)
+	}
+	nonRootKey := substrate.VertexKey("identity", nonRootID) // deliberately no holdsRole link
+
+	tests := []struct {
+		name        string
+		operatorKey string
+		wantAllowed bool
+		wantStatus  int
+	}{
+		{"root-equivalent operator allowed through", rootKey, true, 0},
+		{"scoped (non-root) operator denied", nonRootKey, false, http.StatusForbidden},
+		{"unconfigured operator denied", "", false, http.StatusBadGateway},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &server{
+				conn:             conn,
+				operatorActorKey: tc.operatorKey,
+				logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+				natsTimeout:      5 * time.Second,
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/packages/install", nil)
+			rec := httptest.NewRecorder()
+			got := s.requireRootAdmin(rec, req, conn)
+			if got != tc.wantAllowed {
+				t.Errorf("requireRootAdmin = %v, want %v (body: %s)", got, tc.wantAllowed, rec.Body.String())
+			}
+			if !tc.wantAllowed && rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+		})
 	}
 }

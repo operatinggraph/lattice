@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // The Postgres read seam (loupe-2-ux-design.md §6.4, fire F9): a read-only
@@ -18,9 +19,29 @@ import (
 // the protected read models and the shared grant table. Loupe connects with
 // its OWN DSN (LOUPE_PG_DSN), never the lens spec's writer DSN; the read-only
 // guarantee is the DSN role's Postgres grants (SELECT-only), not code
-// discipline (design §15 Q6 — role provisioning is a platform concern). Every
-// query is bounded three ways: the row limit, the pool-level statement
-// timeout, and the per-request context.
+// discipline. Every query is bounded three ways: the row limit, the
+// pool-level statement timeout, and the per-request context.
+//
+// Loupe's all-access read posture is a WILDCARD actor_read_grants GRANT, never
+// an RLS bypass (Andrew's ratified M5 decision, read-path-authorization-d1-
+// design.md §8: "even admin reads pass through RLS and remain
+// attributable/loggable — an un-instrumented superuser read-actor is one
+// compromise from total exposure"). Every query below runs inside a
+// transaction that sets lattice.actor_id to Loupe's configured operator
+// (s.operatorActorKey's bare NanoID, mirroring cmd/loftspace-app/applications.go's
+// queryApplications) — the kernel's capabilityReadWildcardGrants lens grants
+// that identity anchor '*' when it holds the primordial `operator` role, so
+// RLS itself resolves "sees everything," exactly like every other protected
+// read, never a role-level bypass.
+//
+// KNOWN GAP (not built): that kernel lens keys on holdsRole->operator only.
+// If LOUPE_OPERATOR_ACTOR_KEY is ever re-scoped to a consoleOperator identity
+// (loupe-operator-auth-lift-design.md mechanism B) instead of root, Postgres
+// reads would silently go to zero rows (RLS-denied, not pg-pending) until a
+// parallel wildcard-grant lens covers consoleOperator too — out of scope here
+// because F15 items 5-6 (the operator-tier proof) don't exercise Postgres
+// reads (design §9), and §1's "reads stay direct-inspector" table only
+// enumerates Core-KV/Health-KV/lens/vault-proxy, not this F9 seam.
 
 // pgStatementTimeoutMS is applied as the pool's statement_timeout runtime
 // parameter so a pathological query dies server-side even if the client-side
@@ -174,18 +195,37 @@ func pgRowDoc(cols []string, vals []any, keyCols []string) (string, map[string]a
 	return strings.Join(keyParts, "."), doc
 }
 
-// queryLensRows runs the bounded browse against the read pool and returns the
-// shaped rows plus the unfiltered-total/truncation facts the panel's status
-// line renders.
-func queryLensRows(ctx context.Context, pool *pgxpool.Pool, table string, keyCols []string, q string, limit int) (rows []map[string]any, total int, err error) {
+// queryLensRows runs the bounded browse inside a per-request transaction with
+// a txn-local actor session variable — the same pooling-safety shape
+// cmd/loftspace-app/applications.go's queryApplications uses: set_config(...,
+// is_local=true) is discarded at COMMIT/ROLLBACK, so the pooled connection
+// returns clean and the next request inherits no actor (deny) until it sets
+// its own. The query itself carries no auth filter — RLS is the scope, and
+// actorID's wildcard grant (or lack of one) is what determines whether it
+// sees every row or none. Returns the shaped rows plus the unfiltered-
+// total/truncation facts the panel's status line renders.
+//
+// actorID must be the bare identity NanoID (VerifiedActor.Subject shape),
+// matching the actor_id column in actor_read_grants and the §6.14 anchor
+// representation — never the prefixed vtx.identity.<id> key.
+func queryLensRows(ctx context.Context, pool *pgxpool.Pool, actorID, table string, keyCols []string, q string, limit int) (rows []map[string]any, total int, err error) {
 	countSQL, rowsSQL, args, err := buildLensRowsSQL(table, keyCols, q, limit)
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := pool.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, "SELECT set_config('lattice.actor_id', $1, true)", actorID); err != nil {
+		return nil, 0, fmt.Errorf("set actor: %w", err)
+	}
+	if err := tx.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count %s: %w", table, err)
 	}
-	pgRows, err := pool.Query(ctx, rowsSQL, args...)
+	pgRows, err := tx.Query(ctx, rowsSQL, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select %s: %w", table, err)
 	}
@@ -208,7 +248,26 @@ func queryLensRows(ctx context.Context, pool *pgxpool.Pool, table string, keyCol
 	if err := pgRows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("iterate %s: %w", table, err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, fmt.Errorf("commit: %w", err)
+	}
 	return rows, total, nil
+}
+
+// pgActorID resolves Loupe's configured operator to the bare identity NanoID
+// the RLS session variable expects (substrate.ParseVertexKey, the same
+// validated parse readauth.go's handleOperatorDevToken uses on this same
+// field) — never a naive prefix trim, so a malformed key errors instead of
+// silently setting lattice.actor_id to garbage that happens to deny everything.
+func (s *server) pgActorID() (string, error) {
+	if s.operatorActorKey == "" {
+		return "", fmt.Errorf("no operator actor configured (LOUPE_OPERATOR_ACTOR_KEY unset and no bootstrap admin actor loaded)")
+	}
+	vertexType, subject, ok := substrate.ParseVertexKey(s.operatorActorKey)
+	if !ok || vertexType != "identity" {
+		return "", fmt.Errorf("operator actor key is malformed (must be a vtx.identity.<id> key)")
+	}
+	return subject, nil
 }
 
 // lensRowsPG serves the CONTENTS panel for a postgres-target lens. Without a
@@ -237,7 +296,12 @@ func (s *server) lensRowsPG(ctx context.Context, w http.ResponseWriter, id strin
 		})
 		return
 	}
-	rows, total, err := queryLensRows(ctx, s.pg, table, keyCols, q, limit)
+	actorID, err := s.pgActorID()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "lens "+id+": "+err.Error())
+		return
+	}
+	rows, total, err := queryLensRows(ctx, s.pg, actorID, table, keyCols, q, limit)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, "lens "+id+": "+err.Error())
 		return
