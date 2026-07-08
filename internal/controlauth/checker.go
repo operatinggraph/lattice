@@ -72,9 +72,16 @@ type CapabilityKVChecker struct {
 // checker reads the same key the Processor would for any given actor:
 // rbacRolesActive true routes the kernel-seeded system actors to a union of
 // their cap.<actor> anchor and cap.roles.<actor>, and every other actor to
-// cap.roles.<actor> alone; false routes every actor to cap.<actor> (the
-// rbac-absent degradation — an ordinary actor then denies by absence, same
-// as the write path). Nil alerts uses a no-op emitter; nil logger uses
+// cap.roles.<actor> alone; false routes every actor to cap.<actor>.
+//
+// Production ALWAYS passes true. Class-aware routing is correct whether or not
+// rbac-domain is installed — an absent cap.roles.<actor> is an empty skip in
+// the union read (capabilitykv.ReadAndMerge), so a fresh kernel degrades to the
+// anchor floor for system actors and deny-by-absence for ordinary actors. Do
+// NOT re-gate it on a boot-time rbac-install probe: that probe latched the
+// pre-install state for a component booted before packages install and denied
+// every package-granted actor for the process lifetime. The false path is a
+// test-only posture. Nil alerts uses a no-op emitter; nil logger uses
 // slog.Default().
 func NewCapabilityKVChecker(
 	component string,

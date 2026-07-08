@@ -142,13 +142,23 @@ type SelectAuthorizerOpts struct {
 	// cap.<actor> primordial-anchor doc and cap.roles.<actor> (rbac-domain's
 	// capabilityRoles projection) — the floor plus the rbac-derived
 	// package-op extension (system-actor-package-op-grants-design.md); every
-	// other (ordinary) actor reads cap.roles.<actor> alone, unchanged. Set
-	// true only when rbac-domain is installed. When false the platform read
-	// targets cap.<actor> for all actors (rbac-absent degradation: ordinary
-	// actors deny by absence, Contract #6 §6.8). The rbac hook is folded into
-	// the platform entry's key derivation here — NOT a separate dispatch
-	// entry — so the user hot path stays single-key and the overlap guard is
-	// not tripped.
+	// other (ordinary) actor reads cap.roles.<actor> alone, unchanged. The rbac
+	// hook is folded into the platform entry's key derivation here — NOT a
+	// separate dispatch entry — so the user hot path stays single-key and the
+	// overlap guard is not tripped.
+	//
+	// PRODUCTION ALWAYS SETS THIS TRUE. Class-aware routing is correct whether
+	// or not rbac-domain is installed: an absent cap.roles.<actor> is an empty
+	// skip in the union read (capabilitykv.ReadAndMerge), so a fresh kernel
+	// degrades to the anchor floor for system actors and deny-by-absence for
+	// ordinary actors (Contract #6 §6.8) — proven by step3_auth_rbac_hook_test.
+	// Do NOT re-gate it on a boot-time rbac-install probe: that probe latched
+	// the pre-install state for a Processor booted before packages install (the
+	// kernel-first `make up` order) and denied every package-granted actor for
+	// the process lifetime — the bug that blocked capability mode by default.
+	// The false path targets cap.<actor> single-key for all actors and is
+	// retained only for tests that seed the anchor key directly
+	// (testutil.CapabilityPipeline / SeedCapDoc), never a production posture.
 	RbacRolesActive bool
 
 	// SystemActorKeys are the full vtx.identity.<id> keys of the kernel-seeded

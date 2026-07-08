@@ -50,7 +50,6 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/privacyworker"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/processor/outbox"
@@ -118,29 +117,32 @@ func run(logger *slog.Logger) error {
 	}
 	defer conn.Close()
 
-	// Probe rbac-domain install state to route the platform read by actor
-	// class. When rbac-domain is installed, ordinary actors read their
-	// role-derived grants from cap.roles.<actor> (rbac-domain's projection)
-	// while the kernel-seeded system actors keep reading cap.<actor> (the core
-	// primordial anchor). When it is absent, the platform read targets
-	// cap.<actor> for all actors and ordinary actors deny by absence.
-	probeCtx, probeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	rbacInstalled, err := pkgmgr.IsPackageInstalled(probeCtx, conn, "rbac-domain")
-	if err != nil {
-		probeCancel()
-		return fmt.Errorf("probe rbac-domain install state: %w", err)
-	}
-	systemActorKeys, err := bootstrap.SystemActorKeys(probeCtx, conn)
-	probeCancel()
+	// Class-aware platform routing is unconditional: the kernel-seeded system
+	// actors read a UNION of their cap.<actor> anchor and cap.roles.<actor>,
+	// every other actor reads cap.roles.<actor> alone. This is correct whether
+	// or not rbac-domain is installed — an absent cap.roles.<actor> is an empty
+	// skip in the union read (capabilitykv.ReadAndMerge), so a fresh kernel
+	// degrades to the anchor floor for system actors and deny-by-absence for
+	// ordinary actors, exactly the rbac-absent posture. It is deliberately NOT
+	// gated on an rbac-install probe: that probe ran once at startup, so a
+	// Processor booted before packages install (the kernel-first `make up`
+	// order) latched the pre-install state for its whole life and denied every
+	// package-granted actor even after rbac-domain landed — the bug that
+	// blocked running capability mode by default. SystemActorKeys are
+	// primordial (fixed at bootstrap), so discovering them once here is stable
+	// for the process lifetime.
+	discCtx, discCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	systemActorKeys, err := bootstrap.SystemActorKeys(discCtx, conn)
+	discCancel()
 	if err != nil {
 		return fmt.Errorf("discover system actor keys: %w", err)
 	}
 	authWiring := processor.AuthWiring{
-		RbacRolesActive: rbacInstalled,
+		RbacRolesActive: true,
 		SystemActorKeys: systemActorKeys,
 	}
-	logger.Info("step-3 platform routing wired",
-		"rbacRolesActive", rbacInstalled, "systemActors", len(systemActorKeys))
+	logger.Info("step-3 platform routing wired (class-aware, unconditional)",
+		"systemActors", len(systemActorKeys))
 
 	v, err := loadVault(logger)
 	if err != nil {

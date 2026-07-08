@@ -991,17 +991,21 @@ func MakeStubPipeline(conn *substrate.Conn, coreBucket, healthBucket string, aut
 
 // AuthWiring carries the platform-path routing inputs the step-3 authorizer
 // needs but the processor cannot compute itself (they depend on bootstrap key
-// constants + an install-state probe, both of which live above the processor
-// import boundary). The caller (cmd/processor) computes them and threads them
-// in. Zero value = rbac-domain not installed (today's cap.<actor> platform read
-// for all actors).
+// constants that live above the processor import boundary). The caller
+// (cmd/processor) discovers SystemActorKeys and threads them in.
 type AuthWiring struct {
-	// RbacRolesActive routes the platform read by actor class (system →
-	// cap.<actor>, ordinary → cap.roles.<actor>). Set true when rbac-domain is
-	// installed.
+	// RbacRolesActive enables class-aware platform routing (system actors →
+	// cap.<actor> ∪ cap.roles.<actor> union; every other actor →
+	// cap.roles.<actor>). Production ALWAYS sets this true — the routing is
+	// correct whether or not rbac-domain is installed, because an absent
+	// cap.roles.<actor> is an empty skip in the union read. It is NOT gated on
+	// an rbac-install probe: see the field doc on SelectAuthorizerOpts for why
+	// that probe was a boot-latch bug. The zero value (false) is a test-only
+	// posture (cap.<actor> single-key for all actors).
 	RbacRolesActive bool
-	// SystemActorKeys are the kernel-seeded system actor keys
-	// (vtx.identity.<id> of admin + Loom + Weaver) that keep reading cap.<actor>.
+	// SystemActorKeys are the kernel-seeded system actor keys (vtx.identity.<id>
+	// of admin + the service actors) that read the cap.<actor> ∪ cap.roles.<actor>
+	// union. Primordial, so a one-time discovery at startup is stable.
 	SystemActorKeys []string
 }
 

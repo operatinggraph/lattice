@@ -22,7 +22,6 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/controlauth"
-	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/refractor/adapter"
 	"github.com/asolgan/lattice/internal/refractor/capabilityenv"
 	"github.com/asolgan/lattice/internal/refractor/consumer"
@@ -909,29 +908,33 @@ func envOr(key, fallback string) string {
 func wireControlChecker(ctx context.Context, conn *substrate.Conn, component string, ops map[string]controlauth.OpMeta, logger *slog.Logger) (*controlauth.CapabilityKVChecker, error) {
 	mode := controlauth.AuthMode(envOr("LATTICE_AUTH_MODE", string(controlauth.AuthModeCapability)))
 
-	probeCtx, probeCancel := context.WithTimeout(ctx, 10*time.Second)
-	rbacInstalled, err := pkgmgr.IsPackageInstalled(probeCtx, conn, "rbac-domain")
-	if err != nil {
-		probeCancel()
-		return nil, fmt.Errorf("probe rbac-domain install state: %w", err)
-	}
-	systemActorKeys, err := bootstrap.SystemActorKeys(probeCtx, conn)
-	probeCancel()
+	// Class-aware platform routing is unconditional (mirrors cmd/processor's
+	// step-3 wiring): system actors read the cap.<actor> ∪ cap.roles.<actor>
+	// union, every other actor reads cap.roles.<actor>. Correct whether or not
+	// rbac-domain is installed (an absent cap.roles.<actor> is an empty skip in
+	// capabilitykv.ReadAndMerge), so it is deliberately NOT gated on a boot-time
+	// rbac-install probe — that probe latched the pre-install state for a
+	// component booted before packages install and denied every package-granted
+	// actor for the process lifetime. SystemActorKeys are primordial (stable
+	// post-bootstrap), so a one-time discovery here is enough.
+	discCtx, discCancel := context.WithTimeout(ctx, 10*time.Second)
+	systemActorKeys, err := bootstrap.SystemActorKeys(discCtx, conn)
+	discCancel()
 	if err != nil {
 		return nil, fmt.Errorf("discover system actor keys: %w", err)
 	}
 
 	alerts := controlauth.NewHealthAlertEmitter(conn, healthKVBucket, logger)
 	checker := controlauth.NewCapabilityKVChecker(component, ops, conn, bootstrap.CapabilityKVBucket,
-		systemActorKeys, rbacInstalled, mode, alerts, logger)
+		systemActorKeys, true, mode, alerts, logger)
 
 	operatorActor := os.Getenv("LATTICE_CONTROL_OPERATOR_ACTOR_KEY")
 	preflightCtx, preflightCancel := context.WithTimeout(ctx, 10*time.Second)
 	controlauth.Preflight(preflightCtx, checker, operatorActor, logger)
 	preflightCancel()
 
-	logger.Info("control-plane checker wired",
-		"component", component, "authMode", string(mode), "rbacRolesActive", rbacInstalled,
+	logger.Info("control-plane checker wired (class-aware, unconditional)",
+		"component", component, "authMode", string(mode),
 		"systemActors", len(systemActorKeys))
 	return checker, nil
 }
