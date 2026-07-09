@@ -162,6 +162,43 @@ async function authedGetAsProvider(path, providerKey) {
   }
 }
 
+// selfWriteToken (patient self-service booking) mints/caches a demo token for
+// the selected patient's own LINKED IDENTITY — the capability-plane actor a
+// consumer-scope write authenticates as (clinic-patient-self-service-booking-
+// design.md Checkpoint item (a)). This is distinct from readToken(), which
+// mints for the patient key itself and only ever serves the Postgres-RLS read
+// boundary; the write path's actor is necessarily an identity (the capability
+// plane resolves cap.identity.<id>, never cap.patient.<id> — see
+// CreateAppointment's identifiedBy guard). Returns null when the selected
+// patient has no linked identity (no self-service possible yet for them).
+let selfTokenCache = { subject: null, token: null, exp: 0 };
+
+function patientIdentityKey() {
+  const m = state.patients.find((p) => p.patientKey === state.patient);
+  return (m && m.identityKey) || null;
+}
+
+async function selfWriteToken() {
+  const identityKey = patientIdentityKey();
+  if (!identityKey) return null;
+  const subject = bareId(identityKey);
+  const now = Date.now();
+  if (selfTokenCache.subject === subject && selfTokenCache.token && now < selfTokenCache.exp - 60000) {
+    return selfTokenCache.token;
+  }
+  const res = await fetch("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) {
+    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
+  }
+  const body = await res.json();
+  selfTokenCache = { subject, token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
+  return body.token;
+}
+
 // staffReadToken (D1.5, the staff wildcard increment) mints/caches a demo
 // token for the clinic-wide STAFF view via POST /api/staff/dev-token — unlike
 // readToken/providerReadToken it carries no subject: the server mints for its
@@ -223,12 +260,15 @@ function shortKey(key) {
 //
 // submitOp posts an op browser-direct to the Gateway's POST /v1/operations
 // (real-actor-write-auth-e2e-design.md §3.1) instead of proxying through this
-// app's own /api/op. Every clinic op is operator-only today (no consumer-scope
-// grant exists yet, unlike loftspace's CreateLeaseApplication), so every write
-// carries the staff Bearer token — the same actor (this app's admin identity)
-// /api/op used to stamp server-side, now verified by the Gateway instead of
-// assumed. Returns the reply (with .status) so callers can branch on
-// rejected, same as before.
+// app's own /api/op. Almost every clinic op is operator-only, so every write
+// carries the staff Bearer token by default — the same actor (this app's
+// admin identity) /api/op used to stamp server-side, now verified by the
+// Gateway instead of assumed. CreateAppointment ALSO carries a real
+// consumer-scope=self grant (clinic-patient-self-service-booking-design.md):
+// passing opts.asSelf submits as the selected patient's own linked identity
+// instead, with authContext.target naming that identity — the Gateway/Processor
+// authorize the write as the real patient, not staff-on-their-behalf. Returns
+// the reply (with .status) so callers can branch on rejected, same as before.
 let gatewayURLCache = null;
 async function gatewayURL() {
   if (gatewayURLCache) return gatewayURLCache;
@@ -237,12 +277,16 @@ async function gatewayURL() {
   return gatewayURLCache;
 }
 
-async function submitOp(operationType, klass, payload, reads) {
-  const [base, token] = await Promise.all([gatewayURL(), staffReadToken()]);
+async function submitOp(operationType, klass, payload, reads, opts) {
+  const asSelf = !!(opts && opts.asSelf);
+  const [base, token] = await Promise.all([gatewayURL(), asSelf ? selfWriteToken() : staffReadToken()]);
+  if (asSelf && !token) throw new Error("this patient has no linked identity — self-service booking is unavailable");
+  const body = { operationType, class: klass, payload, reads };
+  if (asSelf) body.authContext = { target: patientIdentityKey() };
   return api(base + "/v1/operations", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify({ operationType, class: klass, payload, reads }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -373,11 +417,25 @@ function setPatient(value) {
   }
 }
 
-// syncBookPatient reflects the selected patient into the Book tab's read-only echo
-// and enables/disables the Book button.
+// syncBookPatient reflects the selected patient into the Book tab's read-only echo,
+// enables/disables the Book button, and toggles the self-service checkbox — offered
+// only when the selected patient has a linked identity (patientIdentityKey()), the
+// precondition CreateAppointment's consumer scope=self grant enforces server-side.
+// Unchecked + disabled whenever the patient changes, so a stale self-service choice
+// never survives a switch to an unlinked (or different) patient.
 function syncBookPatient() {
   const echo = $("#book-patient");
   echo.textContent = state.patient ? nameForPatient(state.patient) : "Select a patient above first.";
+  const selfBox = $("#book-self");
+  const selfHint = $("#book-self-hint");
+  const linked = !!patientIdentityKey();
+  selfBox.checked = false;
+  selfBox.disabled = !linked;
+  if (selfHint) {
+    selfHint.textContent = state.patient && !linked
+      ? "This patient has no linked identity yet — self-service booking needs one (add email/phone when creating a patient)."
+      : "";
+  }
   refreshBookEnabled();
 }
 
@@ -1340,6 +1398,8 @@ async function submitBook(ev) {
   const reason = $("#reason").value.trim();
   if (reason) payload.reason = reason;
 
+  const asSelf = $("#book-self").checked && !$("#book-self").disabled;
+
   const submit = $("#book-submit");
   submit.disabled = true;
   try {
@@ -1348,7 +1408,7 @@ async function submitBook(ev) {
     // commit IS the double-book lock (SlotConflict / PatientDoubleBook), so no
     // per-hub OCC epoch needs to be declared here.
     const reply = await submitOp("CreateAppointment", "appointment", payload,
-      [state.patient, provider]);
+      [state.patient, provider], { asSelf });
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Booking rejected — " + friendlyBookingRejection(msg), "err");

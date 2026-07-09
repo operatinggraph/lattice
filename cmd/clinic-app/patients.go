@@ -12,10 +12,11 @@ import (
 // linked identity, a linked identity missing that aspect, or a shredded one;
 // never an error, never a dropped row.
 type protectedPatientRow struct {
-	PatientKey string  `json:"patientKey"`
-	Name       string  `json:"name"`
-	Email      *string `json:"email,omitempty"`
-	Phone      *string `json:"phone,omitempty"`
+	PatientKey  string  `json:"patientKey"`
+	Name        string  `json:"name"`
+	Email       *string `json:"email,omitempty"`
+	Phone       *string `json:"phone,omitempty"`
+	IdentityKey *string `json:"identityKey,omitempty"`
 }
 
 // selectPatientsSQL reads the protected model. It carries NO auth WHERE — the
@@ -24,9 +25,11 @@ type protectedPatientRow struct {
 // variable. Every row here projects an EMPTY authz_anchors set (there is no
 // per-patient self-anchor for "the whole roster"), so only an actor holding
 // the reserved WildcardAnchor grant ever matches a row. Sorted by name for a
-// stable switcher, mirroring the retired computePatients' sort.
+// stable switcher, mirroring the retired computePatients' sort. identity_key
+// (nil for a patient with no identifiedBy link) is what lets the FE offer
+// patient self-service booking — see the clinicPatientsRead lens spec.
 const selectPatientsSQL = `
-SELECT patient_key, name, email, phone
+SELECT patient_key, name, email, phone, identity_key
 FROM read_clinic_patients
 ORDER BY name, patient_key`
 
@@ -55,7 +58,7 @@ func queryPatients(ctx context.Context, pool pgxBeginner, actorID string) ([]pro
 	out := make([]protectedPatientRow, 0)
 	for rows.Next() {
 		var row protectedPatientRow
-		if err := rows.Scan(&row.PatientKey, &row.Name, &row.Email, &row.Phone); err != nil {
+		if err := rows.Scan(&row.PatientKey, &row.Name, &row.Email, &row.Phone, &row.IdentityKey); err != nil {
 			return nil, err
 		}
 		out = append(out, row)

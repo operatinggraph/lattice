@@ -38,6 +38,10 @@
             <div id="book-patient" class="readonly">Select a patient above first.</div>
           </div>
           <div class="field">
+            <label class="check"><input type="checkbox" id="book-self" disabled /> Book as this patient (self-service, not staff-on-behalf-of)</label>
+            <p class="hint" id="book-self-hint"></p>
+          </div>
+          <div class="field">
             <label for="provider">Provider</label>
             <select id="provider" aria-label="Choose a provider"></select>
             <p class="hint">Add, edit, and manage providers' bookable hours &amp; time-off in the <a href="#" id="go-availability">Availability</a> tab.</p>
