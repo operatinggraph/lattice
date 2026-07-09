@@ -483,6 +483,21 @@ this design needs §3.10's per-identity DEK + the `internal/vault` SPI. Build or
 > Vault or Core-KV access. Fire 4 Increment 1 (privacy-base `piiKeyEnvelope` lens + the natsperm grant +
 > `internal/objectcrypto` extraction + test extension) is build-ready; not started in this session.
 
+> **✅ Fire 4 Increment 1 SHIPPED (2026-07-09, `172fa98`).** `internal/objectcrypto` now holds the
+> generic AEAD (`Seal`/`Open`/`GenerateCEK`/`Digest`/`Encode|DecodeWrappedCEK`) and Vault
+> `WrapKey`/`UnwrapKey` RPC helpers, extracted out of `cmd/loupe/objects_crypto.go`; Loupe's handlers
+> call the shared package unchanged, with `fetchPiiKeyEnvelope` (the P5 inspector-only direct Core-KV
+> read) staying Loupe-local. privacy-base gained the `piiKeyEnvelope` lens (`privacy-pii-key-envelopes`
+> bucket) projecting an identity's Envelope non-secret fields — the P5-compliant read seam a vertical
+> app uses instead of Loupe's exception. `deploy/gen-dev-nkeys` extends
+> `lattice.vault.wrapkey`/`unwrapkey` to `loftspace-app`; `internal/natsperm/vault_wrapkey_test.go`
+> proves reachability (Loupe + loftspace-app) and denial (clinic-app). Lead-reviewed (small, well-scoped,
+> mirrors the already 3-layer-reviewed Fire 2 shape; no new trust boundary — the widening itself was
+> Andrew's L3 call above), full `go build`/`make vet`/`golangci-lint`/`STRICT lint-conventions`/full
+> `go test ./...` green. **Next: Increment 2** — wire `handleLeaseDocumentAttach` (read the new lens
+> bucket instead of a Core-KV read, generate/seal/wrap a CEK, submit AttachObject) + a decrypt-capable
+> read path on the loftspace-app side; full 3-layer review (capability/crypto plane, per §9 above).
+
 ---
 
 ## 9. Open ratification items (for Andrew)
