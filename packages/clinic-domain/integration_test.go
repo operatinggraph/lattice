@@ -1405,7 +1405,52 @@ func TestClinic_CreateAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 	patientKey := "vtx.patient." + patientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "selfprv0001", "Dr. Nora Vance", "Dermatology")
 
+	// The self-service caller computes the identifiedBy link key client-side
+	// (it already knows payload.patient and its own authContext.target) and
+	// declares it in OptionalReads — the correct read-posture class (d): a
+	// declared, OCC-snapshotted, absence-tolerant read, not a lazy kv.Read.
+	identifiedByLnk := "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID
+
 	reqID := testutil.GenReqID("selfappt0001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateAppointment",
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"patient":"` + patientKey + `","provider":"` + providerKey + `","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: []string{identifiedByLnk}},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	apptKey := "vtx.appointment." + clNanoIDFromRequestID(reqID)
+	if adoc := clReadDoc(t, ctx, conn, apptKey); adoc["class"] != "appointment" {
+		t.Fatalf("appointment class = %v, want appointment", adoc["class"])
+	}
+}
+
+// TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead proves
+// the identifiedBy-link guard is correct even when the caller does NOT declare
+// the link key in ContextHint.OptionalReads: kv.Read (ddls.go) falls through to
+// a live on-demand read for any undeclared key (§2.5), so a caller that skips
+// the declaration still gets the same correct outcome — only OCC-snapshot
+// consistency, not correctness, depends on declaring it.
+func TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "appt-consumer-self-lazy")
+
+	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
+
+	patientID := clSubmit(t, ctx, conn, cp, cons, "lazypat00001", "CreatePatient", "patient",
+		`{"fullName":"Lazy Read Booker","identityKey":"`+clConsumerKey+`"}`,
+		[]string{clConsumerKey}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lazyprv0001", "Dr. Priya Anand", "Neurology")
+
+	reqID := testutil.GenReqID("lazyappt0001")
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -1438,8 +1483,16 @@ func TestClinic_CreateAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testin
 
 	// A patient with no linked identity at all (the common shape: staff creates
 	// most patients without ever pre-minting/wiring an identity).
-	victimPatientKey := createPatient(t, ctx, conn, cp, cons, "forgepat0001", "Unlinked Patient")
+	victimPatientID := clSubmit(t, ctx, conn, cp, cons, "forgepat0001", "CreatePatient", "patient",
+		`{"fullName":"Unlinked Patient"}`, nil, processor.OutcomeAccepted)
+	victimPatientKey := "vtx.patient." + victimPatientID
 	providerKey := createProvider(t, ctx, conn, cp, cons, "forgeprv0001", "Dr. Owen Reyes", "Pediatrics")
+
+	// Declared the same way a well-behaved caller would (OptionalReads,
+	// read-posture class (d)) — absent here (no identifiedBy link exists), which
+	// is exactly the case OptionalReads tolerates: the op still reaches the
+	// script's guard and is rejected there, not hard-failed at hydration.
+	identifiedByLnk := "lnk.patient." + victimPatientID + ".identifiedBy.identity." + clConsumerID
 
 	reqID := testutil.GenReqID("forgeappt001")
 	env := &processor.OperationEnvelope{
@@ -1450,7 +1503,7 @@ func TestClinic_CreateAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testin
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(`{"patient":"` + victimPatientKey + `","provider":"` + providerKey + `","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{victimPatientKey, providerKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{victimPatientKey, providerKey}, OptionalReads: []string{identifiedByLnk}},
 		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)

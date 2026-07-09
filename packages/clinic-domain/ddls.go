@@ -1504,22 +1504,23 @@ def execute(state, op):
         # the op's endpoint is the PATIENT vertex, not an identity — step 3 never
         # sees the payload and has no notion of "this patient's identity" anyway.
         # The script closes the gap by requiring the target identity to be THIS
-        # patient's linked identity (lnk.patient.<id>.identifiedBy.identity.<id>,
-        # kv.Read — the lazy on-demand idiom, same as claim_identity /
-        # wellness-domain's residency check): a consumer whose own identity is
-        # not the patient's identifiedBy link is rejected, even if they satisfy
-        # step 3 by naming themselves as authContext.target. Empty for the
-        # standing operator grant (scope=any never sets authContext), so this
-        # check is a no-op there — operator keeps booking on behalf of any
-        # patient, exactly as its own grant (unconstrained by scope) allows.
+        # patient's linked identity (lnk.patient.<id>.identifiedBy.identity.<id>).
+        # A consumer whose own identity is not the patient's identifiedBy link is
+        # rejected, even if they satisfy step 3 by naming themselves as
+        # authContext.target. Empty for the standing operator grant (scope=any
+        # never sets authContext), so this check is a no-op there — operator
+        # keeps booking on behalf of any patient, exactly as its own grant
+        # (unconstrained by scope) allows.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             identified_by_lnk = "lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id
-            # read-posture: (e) relation=identifiedBy epoch=none (authorization
-            # gate: reads current state so a concurrently-revoked link is never
-            # honored; no mutation is conditioned on this key, so it needs no
-            # OCC-declared epoch — a stale allow would only be possible via a
-            # stale HYDRATED snapshot, which this deliberately avoids)
+            # The self-service caller (the only one that ever sets
+            # authContextTarget) already knows both payload.patient and its own
+            # authContext.target before submitting, so it computes this key
+            # client-side and declares it — same as orchestration-base's
+            # engine-dispatcher availability gate.
+            # read-posture: (d) declared in contextHint.optionalReads by the
+            # self-service caller
             if kv.Read(identified_by_lnk) == None:
                 fail("AuthDenied: a patient may only book an appointment for themselves")
 

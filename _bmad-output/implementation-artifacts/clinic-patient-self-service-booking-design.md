@@ -65,6 +65,26 @@ contact display already requires).
   already use) — otherwise package install rejects the new `GrantsTo: ["consumer"]` entry as an
   unresolvable role.
 
+## Read-posture worked example (the correct fix, not just an annotation)
+
+The `identifiedBy`-link guard's `kv.Read` was first left as an unclassified lazy read, mirroring
+`wellness-domain`'s (also-unclassified) residency-check idiom — the lint tool flagged it as
+"class-(b) debt" (Contract #2 §2.5). The actual fix is **not** to annotate a lazy read as
+deliberate — it's to make it a **declared, absence-tolerant read**: the self-service caller
+already knows both `payload.patient` and its own `authContext.target` before submitting, so it
+can compute `lnk.patient.<id>.identifiedBy.identity.<id>` client-side and list it in
+`ContextHint.OptionalReads`. `kv.Read` (`internal/processor/starlark_kv.go`) transparently serves
+a declared key from the step-4 hydrated snapshot — present or known-absent — with **zero script
+change**; only the caller's envelope changes. This is class (d), matching
+`orchestration-base/ddls.go`'s engine-dispatcher availability-gate precedent exactly. A caller
+that omits the declaration still gets a correct answer (`kv.Read` falls through to a live
+on-demand read) — declaring it only buys OCC-snapshot consistency, proven by
+`TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead`. The remaining
+unclassified `kv.Read` debt elsewhere (board row: "Read-posture debt sweep") should get this same
+treatment wherever the caller can predeclare the key — a `(c)`/`(e)` annotation is the fallback
+for a read that is genuinely, structurally live (config, or a bounded enumeration), not a
+substitute for declaring a predictable key.
+
 ## Checkpoint — next fire
 
 - **FE**: `cmd/clinic-app` has no patient-authenticated *write* path today (only the read-side
