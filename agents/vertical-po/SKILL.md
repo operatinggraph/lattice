@@ -1,6 +1,6 @@
 ---
 name: vertical-po
-description: "Vertical Product Owner discovery routine — exercise a vertical's apps + packages against a running stack, think as the product owner, and FILE scored backlog items (features / gaps / bugs). The demand side of the flywheel; file-only (L0/L1), never builds. Rotates through the verticals (LoftSpace, Clinic). Runs as its own scheduled loop, staggered from the Steward. Design: _bmad-output/implementation-artifacts/agentic-ops-design.md §5."
+description: "Vertical Product Owner discovery routine — exercise a vertical's apps + packages against a running stack, think as the product owner, and FILE scored backlog items (features / gaps / bugs). The demand side of the flywheel; file-only (L0/L1), never builds. Rotates through the verticals with a shipped FE (LoftSpace, Clinic, Café; Wellness joins once cmd/wellness-app ships). Runs as its own scheduled loop, staggered from the Steward. Design: _bmad-output/implementation-artifacts/agentic-ops-design.md §5."
 ---
 
 # Vertical Product Owner — exercise & discover (one vertical per run)
@@ -11,30 +11,41 @@ proposals/candidates to the board; **never** commit code or contracts, never bui
 
 ## 1. Pick a vertical (rotate)
 
-**LoftSpace** (leasing — the lease-application reference vertical) and **Clinic** (appointments — the
-forcing-function vertical). Pick the **least-recently-exercised** (check the board's dated PO notes). One
-vertical per run.
+**LoftSpace** (leasing — the lease-application reference vertical), **Clinic** (appointments — the
+forcing-function vertical), and **Café** (house-tab payment ledger — the composition-surface vertical).
+Pick the **least-recently-exercised** (check the board's dated PO notes). One vertical per run.
+
+**Wellness** (classes/booking) is **not yet in rotation** — its package is built but `cmd/wellness-app`
+(Inc 2, the thin FE) hasn't shipped, so there is no app to drive. Once that FE ships (board:
+[verticals.md](../../_bmad-output/planning-artifacts/backlog/verticals.md)), add it to the rotation list
+above and to `Makefile`'s `up-wellness`/`install-wellness`/`run-wellness-app` triad, mirroring Café's. Until
+then, if you land on Wellness by any manual invocation, fall back to static package/FE-gap analysis against
+`packages/wellness-domain` + the design doc — there is nothing live to exercise.
 
 ## 2. Exercise it (against a SHARED stack — don't clobber the Steward)
 
 The Steward loop shares this single-machine stack and may be running **concurrently** (it fires every ~2h and
-can run long). `make up-full` / `up-loftspace` / `up-clinic` all bind the same core ports, and **`make down`
-kills *everything* — both apps and any stack the Steward has up.** So coordinate by detection, not timing:
+can run long). `make up-full` / `up-loftspace` / `up-clinic` / `up-cafe` all bind the same core ports, and
+**`make down` kills *everything* — every app and any stack the Steward has up.** So coordinate by detection,
+not timing:
 
 - **First, detect a running stack** — is NATS up on `:4222` / Loupe on `:7777`, or does `lattice health
   summary` succeed?
-- **If a stack is already up → REUSE it.** Do **not** run `up-full` / `up-loftspace` / `up-clinic` (port
-  collision). Just make sure your vertical is present (`make install-loftspace` *or* `make install-clinic` —
-  additive onto the running stack) and its app is running (`make run-loftspace-app` → `:7788`, *or*
-  `make run-clinic-app` → `:7799`). **Never `make down`** — it isn't your stack.
-- **If nothing is up → bring up your vertical** time-boxed: `make up-loftspace` *or* `make up-clinic` (each is
-  full-stack + that vertical + its app). If it won't come up cleanly in a few minutes, **fall back** to static
-  capability / product-gap analysis and say so. **Leave the stack up** at the end (matches the "stack up for
-  Andrew" convention and avoids killing a Steward fire that may have adopted it) — don't `make down`.
-- Drive the vertical's **real flows through its app FE** (LoftSpace `:7788` / Clinic `:7799`) as a user would,
-  plus the `lattice` CLI / Loupe for operator actions: the **lease-application** flow (LoftSpace) or the
-  **appointments + scheduling** domain (Clinic); exercise the packages it leans on (`orchestration-base`,
-  `lease-signing`, `loftspace-domain` / `clinic-domain` / `clinic-reminders`, identity, location).
+- **If a stack is already up → REUSE it.** Do **not** run `up-full` / `up-loftspace` / `up-clinic` / `up-cafe`
+  (port collision). Just make sure your vertical is present (`make install-loftspace` / `install-clinic` /
+  `install-cafe` — additive onto the running stack) and its app is running (`make run-loftspace-app` →
+  `:7788`, `run-clinic-app` → `:7799`, *or* `run-cafe-app` → `:7801`). **Never `make down`** — it isn't your
+  stack.
+- **If nothing is up → bring up your vertical** time-boxed: `make up-loftspace` / `up-clinic` / `up-cafe`
+  (each is full-stack + that vertical + its app). If it won't come up cleanly in a few minutes, **fall back**
+  to static capability / product-gap analysis and say so. **Leave the stack up** at the end (matches the
+  "stack up for Andrew" convention and avoids killing a Steward fire that may have adopted it) — don't
+  `make down`.
+- Drive the vertical's **real flows through its app FE** (LoftSpace `:7788` / Clinic `:7799` / Café `:7801`)
+  as a user would, plus the `lattice` CLI / Loupe for operator actions: the **lease-application** flow
+  (LoftSpace), the **appointments + scheduling** domain (Clinic), or the **house-tab POS/settlement** flow
+  (Café); exercise the packages it leans on (`orchestration-base`, `lease-signing`, `loftspace-domain` /
+  `clinic-domain` / `clinic-reminders` / `cafe-domain` / `cafe-ledger`, identity, location).
 - **Browser hygiene — REUSE one tab, CLOSE it when done (this loop OOM'd the host once).** A browser renderer
   holds its RAM until the tab closes, so a few exercise cycles that each open tabs and leave them open pile up
   until Chrome and the machine run out of memory. **Prefer the API path** — most PO ground-truthing here is

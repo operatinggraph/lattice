@@ -31,13 +31,15 @@ relation is `heldFor` (the demo's `ACC88`/`BK7`/`L204` + `billedWith` are cosmet
 ## PO notes (dated — drives rotation)
 
 Compact rotation memory only — PO *findings* are filed as demand rows above + the Done log; the verbose
-dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from the Steward.
+dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café, staggered from the Steward. **Wellness
+joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no app to exercise; see
+[agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×11, Clinic ×9 (last: Clinic 2026-07-09, drove CreateProvider→CreatePatient→CreateAppointment live end-to-end incl. the double-book guard; filed the patient-picker scale gap).
-- **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. Both apps exist + are exercisable live (`:7788` / `:7799`).
+- **Rotation to date:** LoftSpace ×11, Clinic ×9, Café ×0 (last: Clinic 2026-07-09, drove CreateProvider→CreatePatient→CreateAppointment live end-to-end incl. the double-book guard; filed the patient-picker scale gap). Café added to rotation 2026-07-09 (`cmd/cafe-app` shipped 2026-07-07; not yet exercised).
+- **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All three apps exist + are exercisable live (`:7788` / `:7799` / `:7801`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-07-06:** Enriched Café+Wellness → 4 grounded, sequenced rows (Café first) + verified no platform block; spec = the go-live composition demo.
-- **Next:** LoftSpace.
+- **Next:** Café (never yet exercised).
 
 ## Done log — verticals (newest first)
 
