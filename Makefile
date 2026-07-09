@@ -70,6 +70,7 @@ NKEY_LOUPE ?= $(NKEY_DIR)/loupe.nk
 NKEY_LOFTSPACE_APP ?= $(NKEY_DIR)/loftspace-app.nk
 NKEY_CLINIC_APP ?= $(NKEY_DIR)/clinic-app.nk
 NKEY_CAFE_APP ?= $(NKEY_DIR)/cafe-app.nk
+NKEY_WELLNESS_APP ?= $(NKEY_DIR)/wellness-app.nk
 NKEY_LATTICE_PKG ?= $(NKEY_DIR)/lattice-pkg.nk
 NKEY_LATTICE_CLI ?= $(NKEY_DIR)/lattice.nk
 NKEY_GATEWAY ?= $(NKEY_DIR)/gateway.nk
@@ -814,6 +815,44 @@ install-cafe:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/cafe-domain
 	@echo "==> Café vertical installed (lease-signing + cafe-ledger + cafe-domain). Drive it via the cafe-app, the lattice CLI, or Loupe."
 
+## install-wellness — Install the Wellness vertical onto a running up-full stack,
+## in dependency order: orchestration-base → service-domain → lease-signing →
+## wellness-domain (identity-domain is already installed by
+## install-packages/up-full; wellness-domain's only cross-package read is
+## lease-signing's leaseapp applicationFor link, by known key). Drive it via
+## the wellness-app, the lattice CLI, or Loupe.
+install-wellness:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Installing orchestration-base..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
+	@echo "==> Installing service-domain..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-domain
+	@echo "==> Installing lease-signing..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/lease-signing
+	@echo "==> Installing wellness-domain..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-domain
+	@echo "==> Wellness vertical installed (lease-signing + wellness-domain). Drive it via the wellness-app, the lattice CLI, or Loupe."
+
+## up-wellness — One-command Wellness vertical: up-full → install-wellness →
+## build + start wellness-app (:7802) in the background alongside Loupe
+## (:7777). No protected Postgres read model exists for wellness (every lens
+## is plain NATS-KV), so no provision-*-role step is needed, unlike
+## up-loftspace/up-clinic. Logs: wellness-app.log (+ the up-full logs).
+up-wellness:
+	@$(MAKE) up-full
+	@$(MAKE) install-wellness
+	@echo "==> Building wellness-app binary..."
+	go build -o bin/wellness-app ./cmd/wellness-app
+	@echo "==> Killing any prior wellness-app process..."
+	-pkill -f "bin/wellness-app" 2>/dev/null || true
+	@echo "==> Starting wellness-app in background (dev-auth staff token minter)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		WELLNESS_APP_DEV_AUTH=1 \
+		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
+	@sleep 1
+	@echo "==> Wellness ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · wellness app: http://127.0.0.1:7802"
+
 ## install-onebill — Install the Café Inc 3 "one-bill" composition lens (Café
 ## vertical row, ★★★): re-projects loftspace-ledger's + cafe-ledger's posted
 ## transactions, tagged by source, into the shared one-bill-history bucket
@@ -893,6 +932,29 @@ refresh-cafe:
 		./bin/cafe-app >cafe-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Café refreshed (packages diff-applied + cafe-app restarted). Café app: http://127.0.0.1:7801"
+
+## refresh-wellness — Dev-loop refresh of the Wellness vertical onto the RUNNING
+## stack, no `make down`: diff-apply the vertical's packages in place (F-004
+## upgrade-aware install) AND rebuild+restart bin/wellness-app — an edited OR
+## newly-added lens/role/op hot-activates live, no restart needed. Requires an
+## already-running up-wellness (or up-full + install-wellness).
+refresh-wellness:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Diff-applying wellness packages in place..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/lease-signing
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/wellness-domain
+	@echo "==> Rebuilding wellness-app binary..."
+	go build -o bin/wellness-app ./cmd/wellness-app
+	@echo "==> Restarting wellness-app..."
+	-pkill -f "bin/wellness-app" 2>/dev/null || true
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
+		WELLNESS_APP_DEV_AUTH=1 \
+		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
+	@sleep 1
+	@echo "==> Wellness refreshed (packages diff-applied + wellness-app restarted). Wellness app: http://127.0.0.1:7802"
 
 ## refresh-loftspace — Dev-loop refresh of the LoftSpace vertical onto the RUNNING
 ## stack, no `make down`: diff-apply the vertical's packages in place (F-004
@@ -979,6 +1041,15 @@ run-cafe-app:
 	go build -o bin/cafe-app ./cmd/cafe-app
 	@echo "==> Café app on http://127.0.0.1:7801 (Ctrl-C to stop)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_CAFE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) CAFE_APP_DEV_AUTH=1 ./bin/cafe-app
+
+## run-wellness-app — Build + run the Wellness app in the FOREGROUND. Open
+## http://127.0.0.1:7802. Requires a running deployment with the Wellness
+## vertical installed (make up-full + install-wellness, or make up-wellness).
+run-wellness-app:
+	@echo "==> Building wellness-app binary..."
+	go build -o bin/wellness-app ./cmd/wellness-app
+	@echo "==> Wellness app on http://127.0.0.1:7802 (Ctrl-C to stop)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) WELLNESS_APP_DEV_AUTH=1 ./bin/wellness-app
 
 ## test — Run all Go unit + integration tests.
 ## Test packages run concurrently (-p 4). Every embedded NATS/JetStream

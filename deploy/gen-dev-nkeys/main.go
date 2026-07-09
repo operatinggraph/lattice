@@ -265,6 +265,12 @@ var matrix = []component{
 		pubAllow: []string{"$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
+	{
+		name:     "wellness-app",
+		desc:     "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
+		pubAllow: []string{"$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
+		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
+	},
 }
 
 func main() {

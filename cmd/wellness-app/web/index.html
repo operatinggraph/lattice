@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wellness</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Wellness <span class="brand-sub">studio scheduling</span></div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-view="schedule" role="tab" aria-selected="true">Schedule</button>
+    <button class="tab" data-view="roster" role="tab" aria-selected="false">Roster</button>
+    <button class="tab" data-view="myclasses" role="tab" aria-selected="false">My Classes</button>
+  </nav>
+</header>
+
+<main>
+  <section id="view-schedule" role="tabpanel">
+    <div class="panel-controls">
+      <label for="schedule-studio">Studio</label>
+      <select id="schedule-studio"></select>
+      <button id="schedule-refresh" class="ghost">Refresh</button>
+      <span class="summary" id="schedule-summary"></span>
+    </div>
+    <div id="schedule-grid" class="grid" aria-live="polite"></div>
+  </section>
+
+  <section id="view-roster" role="tabpanel" hidden>
+    <div class="panel-controls">
+      <label for="roster-session">Session</label>
+      <select id="roster-session"></select>
+      <button id="roster-refresh" class="ghost">Refresh</button>
+    </div>
+    <div id="roster-body"></div>
+  </section>
+
+  <section id="view-myclasses" role="tabpanel" hidden>
+    <div class="panel-controls">
+      <label for="myclasses-resident">Resident</label>
+      <select id="myclasses-resident"></select>
+      <button id="myclasses-refresh" class="ghost">Refresh</button>
+    </div>
+    <div id="myclasses-body"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
