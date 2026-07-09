@@ -163,6 +163,15 @@ def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
 
+def make_vtx_revive_occ(key, cls, data, expected_revision):
+    # Revive a soft-deleted vertex (isDeleted=True -> False), CAS-guarded on the
+    # tombstone's own revision -- mirrors loftspace-domain's make_link_revive_occ.
+    # A blind make_vtx (op:create) collides with the existing key: CreateOnly
+    # asserts revision 0, which a previously-written key can never satisfy again.
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": False, "data": data},
+            "expectedRevision": expected_revision}
+
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False,
@@ -335,21 +344,12 @@ def execute(state, op):
         # where a miss faults HydrationMiss; declared-optional it resolves at the
         # step-4 snapshot — absent → None, with a lost create race absorbed by the
         # Processor's CreateOnly-backstop retry). Undeclared callers still get the
-        # lazy on-demand read. A present, ALIVE
-        # task here means a duplicate dispatch: return empty mutations AND empty
-        # events — a coherent no-op (the CreateOnly mutation below still guards the
-        # same-commit concurrent race). Branch on isDeleted too: kv.Read yields
-        # None for a hard-tombstoned key but a present doc with isDeleted=true
-        # for a logically-deleted one — either way the gap still needs its task,
-        # so absent OR deleted falls through to create; only a live task
-        # suppresses. Self-heal actually COMPLETES only for absent/hard-tombstone
-        # (key gone → CreateOnly commits): on a logically-deleted key step 8's
-        # unconditional CreateOnly can never commit onto the still-present doc —
-        # each attempt Terms as an honest RevisionConflict and a reclaim
-        # re-dispatch reproduces it (bounded, operator-visible, no hot loop).
-        # The §10.3 "logical delete ⇒ create" self-heal claim holds only for
-        # hard tombstones — known truth-drift, follow-up recorded in the
-        # script-read-posture design §12 checkpoint.
+        # lazy on-demand read. A present, ALIVE task means a duplicate dispatch:
+        # return empty mutations AND empty events — a coherent no-op (the
+        # CreateOnly/CAS mutation below still guards the same-commit concurrent
+        # race). A present, logically-deleted task (an out-of-band operator
+        # deletion — no in-repo mutator tombstones a task today) revives via CAS
+        # below instead of a blind create; only a live task suppresses.
         # read-posture: (d) declared in contextHint.optionalReads by the
         # engine dispatchers (see the dedup note above)
         existing = kv.Read(task_key)
@@ -359,8 +359,15 @@ def execute(state, op):
         forop_lnk = "lnk.task." + task_id + ".forOperation.meta." + op_id
         scoped_lnk = "lnk.task." + task_id + ".scopedTo." + scoped_type + "." + scoped_id
 
+        # The sibling links stay plain creates: nothing tombstones them alongside
+        # the root, so they are never present when the root is.
+        if existing != None:
+            task_mut = make_vtx_revive_occ(task_key, "task", {"status": "open", "expiresAt": expires_at}, existing.revision)
+        else:
+            task_mut = make_vtx(task_key, "task", {"status": "open", "expiresAt": expires_at})
+
         mutations = [
-            make_vtx(task_key, "task", {"status": "open", "expiresAt": expires_at}),
+            task_mut,
             make_link(forop_lnk, task_key, for_op, "forOperation", "forOperation", {}),
             make_link(scoped_lnk, task_key, scoped_to, "scopedTo", "scopedTo", {}),
         ]

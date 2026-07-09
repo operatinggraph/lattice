@@ -105,6 +105,17 @@ func seedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, cl
 	}
 }
 
+// tombstoneVertex overwrites a vertex doc as logically deleted, simulating an
+// out-of-band operator deletion (no in-repo mutator tombstones a task today).
+func tombstoneVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string) {
+	t.Helper()
+	doc := map[string]any{"class": class, "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("tombstone vertex %s: %v", key, err)
+	}
+}
+
 func readDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) map[string]any {
 	t.Helper()
 	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
@@ -332,5 +343,62 @@ func TestCreateTask_DeclaredOptionalReads_CreateThenDedup(t *testing.T) {
 	if secondEntry.Revision != firstEntry.Revision {
 		t.Fatalf("re-dispatch touched the task (rev %d → %d); declared dedup must no-op",
 			firstEntry.Revision, secondEntry.Revision)
+	}
+}
+
+// TestCreateTask_DeletedTask_ReviveCommits proves the logical-delete
+// create-wedge fix through the real commit path: a task key that reads as
+// present-but-isDeleted (an out-of-band operator deletion — no in-repo
+// mutator tombstones a task today) must revive via a CAS-guarded update, not
+// a blind CreateOnly (which would RevisionConflict forever against the
+// still-present key's write history — the pre-fix bug, Contract #10 §10.3).
+func TestCreateTask_DeletedTask_ReviveCommits(t *testing.T) {
+	ctx, conn := setupOrchEnv(t)
+	cp, cons := newTaskPipeline(t, ctx, conn, "ct-revive")
+
+	assigneeID := "BBassigneeHJKMNPQRST"
+	assigneeKey := "vtx.identity." + assigneeID
+	opID := "BBapproveBpHJKMNPQRS"
+	opKey := "vtx.meta." + opID
+	targetID := "BBease4ppHJKMNPQRSTU"
+	targetKey := "vtx.leaseapp." + targetID
+	seedVertex(t, ctx, conn, assigneeKey, "identity", map[string]any{"state": "claimed"})
+	seedVertex(t, ctx, conn, opKey, "meta", map[string]any{"operationType": "ApproveLeaseApplication"})
+	seedVertex(t, ctx, conn, targetKey, "leaseapp", map[string]any{"state": "pending"})
+
+	const suppliedID = "BBreviveXXHJKMNPQRST"
+	taskKey := "vtx.task." + suppliedID
+	expiresAt := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+
+	seedVertex(t, ctx, conn, taskKey, "task", map[string]any{"status": "open"})
+	tombstoneVertex(t, ctx, conn, taskKey, "task")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("CTRevive0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateTask",
+		Actor:         otStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "task",
+		Payload: json.RawMessage(`{"assignee":"` + assigneeKey + `","forOperation":"` + opKey +
+			`","scopedTo":"` + targetKey + `","expiresAt":"` + expiresAt + `","taskId":"` + suppliedID + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{assigneeKey, opKey, targetKey},
+			OptionalReads: []string{taskKey, assigneeKey + ".availability"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	taskDoc := readDoc(t, ctx, conn, taskKey)
+	if got, _ := taskDoc["isDeleted"].(bool); got {
+		t.Fatal("revived task must read isDeleted=false")
+	}
+	data, _ := taskDoc["data"].(map[string]any)
+	if got, _ := data["status"].(string); got != "open" {
+		t.Fatalf("revived task status = %q, want open", got)
+	}
+	if got, _ := data["expiresAt"].(string); got != expiresAt {
+		t.Fatalf("revived task expiresAt = %q, want %q", got, expiresAt)
 	}
 }

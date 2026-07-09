@@ -231,13 +231,15 @@ func TestCreateTask_PreexistingLiveTask_NoOp(t *testing.T) {
 
 // TestCreateTask_DeletedTask_SelfHeals: a logically-deleted task at the key
 // (isDeleted=true) does NOT suppress — the gap still needs a task, so the script
-// falls through to the create path (§10.3 self-heal). Mirrors the hard-tombstone
-// case (kv.Read None), which also creates.
+// falls through to a CAS-guarded revive (update, expectedRevision = the read
+// revision), not a blind create (which would collide with the existing key's
+// write history and RevisionConflict at commit — see create_task_test.go's
+// TestCreateTask_DeletedTask_ReviveCommits for the full-pipeline proof).
 func TestCreateTask_DeletedTask_SelfHeals(t *testing.T) {
 	const suppliedID = "BBsuppliedHJKMNPQRST"
 	taskKey := "vtx.task." + suppliedID
 	reader := taskKVReader{present: map[string]processor.VertexDoc{
-		taskKey: {Key: taskKey, Class: "task", IsDeleted: true, Data: map[string]any{}},
+		taskKey: {Key: taskKey, Class: "task", IsDeleted: true, Data: map[string]any{}, Revision: 7},
 	}}
 	res, err := runCreateTaskWithReader(t, map[string]any{
 		"assignee":     tsAssignee,
@@ -250,7 +252,20 @@ func TestCreateTask_DeletedTask_SelfHeals(t *testing.T) {
 		t.Fatalf("CreateTask on a deleted task: unexpected error: %v", err)
 	}
 	if got, want := taskKeyOf(t, res), taskKey; got != want {
-		t.Fatalf("a deleted task must self-heal (recreate); task key = %q, want %q", got, want)
+		t.Fatalf("a deleted task must self-heal (revive); task key = %q, want %q", got, want)
+	}
+	var taskMut *processor.MutationOp
+	for i := range res.Mutations {
+		if res.Mutations[i].Key == taskKey {
+			taskMut = &res.Mutations[i]
+			break
+		}
+	}
+	if taskMut.Op != "update" {
+		t.Fatalf("revive mutation op = %q, want %q (a blind create would RevisionConflict on the still-present key)", taskMut.Op, "update")
+	}
+	if taskMut.ExpectedRevision == nil || *taskMut.ExpectedRevision != 7 {
+		t.Fatalf("revive mutation expectedRevision = %v, want 7 (the tombstone's read revision)", taskMut.ExpectedRevision)
 	}
 }
 
