@@ -51,7 +51,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Refractor] NatsKVAdapter guardedWrite CAS-contention edge branches uncovered** | `guardedWrite`'s revision-conflict retry loop + CAS-exhaustion path (53.8%) — untested; not racelessly triggerable without a store-injection seam (residual, like `capabilityread-error-arm-tests`'s Get-failure arm). | ★ | XS–S | 📋 · `internal/refractor/adapter/natskv.go:192` |
 | **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 · `internal/weaver/evaluator.go` (`staleMark`) |
 | **[Processor] `stub-auth-active` health alert has no clear/TTL path** | `EmitAlert` writes via plain `KVPut` (no TTL, unlike `RecordCommitConflict`/`RecordClaimAttempt`'s `KVPutWithTTL`) — self-heals only by fresh re-emission. Mains now refuse a stub-mode start, so it can never re-fire — one historical event stays "warning" forever until the bucket is wiped. Needs a Designer call on reliably setting+clearing a "currently happening" signal. | ★ | S | 📋 needs-design (Designer) · `internal/processor/health_alerts.go:214` |
-| **[Weaver] `directOp` can't pin an explicit class → ambiguous operationType fails closed forever** | Live-verified (Café PO, 2026-07-09): `GapActionSpec` has no `Class` field; the wire envelope's `Class` field for this never gets set. `CreateAccount`/`DebitAccount` are each claimed by 3-4 installed ledger DDLs, so the reverse-index fails closed (`MissingClass`, silent). Fix: add `Class` to `GapActionSpec`, thread to `opEnvelope.Class`. | ★★★ | S | 📋 · `internal/pkgmgr/definition.go:238` · blocks [Café](verticals.md) |
 
 ### Survey log (round-robin rotation)
 
@@ -194,6 +193,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-09 · `659c635` · [Weaver] directOp-class-pin — `GapActionSpec.Class` threads to `opEnvelope.Class`; pinned on Café/bespoke-contracts ledger dispatches; unblocks [Café tab-settlement](verticals.md); CI green
 - 2026-07-09 · `128111f` · [orchestration-base] CreateTask logical-delete create-wedge — present-but-isDeleted task revives via CAS-guarded update, not a blind create; §10.3 text staged UNCOMMITTED for Andrew; CI green
 - 2026-07-09 · `20abd1e` · [auth] scoped-privileged-lane-grants Fire 3 CLOSED — consoleOperator gains the allowlisted pkg-lifecycle trio at meta; requireRootAdmin retired
 - 2026-07-09 · `f644399` · [Refractor] natskv-guard-edge-branches (storedProjectionSeq half) — fixed negative-seq uint64 wrap, removed dead json.Number branch, covered malformed/absent/negative/non-numeric watermarks; CI green
