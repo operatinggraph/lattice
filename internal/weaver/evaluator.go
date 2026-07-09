@@ -591,7 +591,7 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 	if pl.requestID != nil {
 		requestID = pl.requestID(claimID)
 	}
-	if err := e.act.submit(ctx, requestID, pl.operationType, pl.payload(claimID), pl.authTarget, pl.reads, planOptionalReads(pl, claimID)); err != nil {
+	if err := e.act.submit(ctx, requestID, pl.operationType, pl.class, pl.payload(claimID), pl.authTarget, pl.reads, planOptionalReads(pl, claimID)); err != nil {
 		e.logger.Error("weaver: op publish failed; nak for retry",
 			"targetId", targetID, "entityId", entityID, "gap", col, "requestId", requestID, "err", err)
 		return substrate.Nak
@@ -601,7 +601,7 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 		if fu.requestID != nil {
 			fuRequestID = fu.requestID(claimID)
 		}
-		if err := e.act.submit(ctx, fuRequestID, fu.operationType, fu.payload(claimID), fu.authTarget, fu.reads, planOptionalReads(fu, claimID)); err != nil {
+		if err := e.act.submit(ctx, fuRequestID, fu.operationType, fu.class, fu.payload(claimID), fu.authTarget, fu.reads, planOptionalReads(fu, claimID)); err != nil {
 			e.logger.Warn("weaver: follow-up op publish failed; will retry on next reconcile",
 				"targetId", targetID, "entityId", entityID, "gap", col, "requestId", fuRequestID, "err", err)
 		}

@@ -244,6 +244,15 @@ type GapActionSpec struct {
 	Assignee  string
 	Target    string
 	Params    map[string]string
+	// Class pins the dispatched op's DDL canonical name (Contract #2 §2.1
+	// operationType→class reverse index). Required whenever Operation is
+	// admitted by more than one installed vertexType DDL — the Processor's
+	// reverse index deliberately excludes an ambiguous operationType rather
+	// than guess, so an unpinned directOp against it fails closed
+	// (MissingClass) forever. A literal DDL CanonicalName, never a
+	// row.<column> template — the author, not the row, knows which DDL a
+	// directOp targets.
+	Class string
 	// Reads are the dispatched op's ContextHint.Reads — the bare vertex keys
 	// its DDL hydrates + validates. Each is a literal or a row.<column> template
 	// resolved from the violation row (e.g. `row.entityKey` to hand a directOp

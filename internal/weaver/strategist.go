@@ -92,8 +92,14 @@ func (e *planError) Error() string { return e.msg }
 // fire).
 type plan struct {
 	operationType string
-	authTarget    string
-	payload       func(claimID string) map[string]any
+	// class pins the dispatched op's DDL canonical name (opEnvelope.Class) —
+	// required only when operationType is admitted by more than one installed
+	// vertexType DDL (an ambiguous operationType the Processor's reverse index
+	// won't resolve for free). Empty for every unambiguous op, unchanged
+	// behavior.
+	class      string
+	authTarget string
+	payload    func(claimID string) map[string]any
 	// reads is the dispatched op's ContextHint.Reads: the BARE vertex keys the
 	// op's DDL script hydrates + validates (vertex_alive). The dispatcher
 	// declares them because it builds the payload and so knows the exact keys
@@ -270,6 +276,7 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 		}
 		return &plan{
 			operationType: ga.Operation,
+			class:         ga.Class,
 			authTarget:    authTarget,
 			payload:       func(string) map[string]any { return params },
 			reads:         reads,

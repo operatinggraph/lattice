@@ -23,11 +23,14 @@ type opEnvelope struct {
 	Actor         string          `json:"actor"`
 	SubmittedAt   string          `json:"submittedAt"`
 	Payload       json.RawMessage `json:"payload"`
-	// Class is the DDL canonical name. Optional (omitempty): Weaver leaves it
-	// empty and relies on the Processor's operationType→class reverse index
-	// (Contract #2 §2.1) — every op Weaver dispatches is admitted by exactly one
-	// vertexType DDL, so inference is unambiguous. The field exists so a future
-	// caller MAY pin a class explicitly when needed.
+	// Class is the DDL canonical name. Optional (omitempty): left empty for an
+	// operationType admitted by exactly one installed vertexType DDL, which the
+	// Processor's operationType→class reverse index (Contract #2 §2.1) infers
+	// for free. A directOp's playbook entry sets it (GapActionSpec.Class →
+	// plan.class) only when Operation is genuinely ambiguous across installed
+	// DDLs — the reverse index deliberately excludes an ambiguous operationType
+	// rather than guess, so an unpinned dispatch against it would fail closed
+	// (MissingClass) forever.
 	Class string `json:"class,omitempty"`
 	// ContextHint carries the OCC reads the dispatched op's DDL hydrates. Weaver
 	// sets it from the plan's declared read-set (the bare vertex keys the op's
@@ -69,11 +72,14 @@ func newActuator(conn *substrate.Conn, lane, actor string, logger *slog.Logger) 
 }
 
 // submit publishes one remediation op under Weaver's service-actor authority.
+// class pins the op's DDL canonical name (opEnvelope.Class) for an
+// operationType admitted by more than one installed vertexType DDL; empty for
+// every unambiguous op (the Processor's reverse index resolves it for free).
 // reads is the dispatched op's ContextHint.Reads (the bare vertex keys its DDL
 // hydrates); empty for read-free ops. optionalReads is its
 // ContextHint.OptionalReads (Contract #2 §2.5 — declared absence-tolerant
 // reads, e.g. assignTask's stable task dedup key); empty when the op reads none.
-func (a *actuator) submit(ctx context.Context, requestID, operationType string, payload map[string]any, authTarget string, reads, optionalReads []string) error {
+func (a *actuator) submit(ctx context.Context, requestID, operationType, class string, payload map[string]any, authTarget string, reads, optionalReads []string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("weaver: marshal op payload: %w", err)
@@ -85,6 +91,9 @@ func (a *actuator) submit(ctx context.Context, requestID, operationType string, 
 		Actor:         a.actor,
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       body,
+	}
+	if class != "" {
+		env.Class = class
 	}
 	if len(reads) > 0 || len(optionalReads) > 0 {
 		env.ContextHint = &contextHint{Reads: reads, OptionalReads: optionalReads}

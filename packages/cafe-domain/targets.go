@@ -26,14 +26,22 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"missing_account": {
 					Action:    "directOp",
 					Operation: "CreateAccount",
-					Params:    map[string]string{"leaseAppKey": "row.leaseAppKey"},
-					Reads:     []string{"row.leaseAppKey"},
+					// CreateAccount is claimed by 3 installed ledger DDLs
+					// (cafeaccount/account/clinicaccount) — pin the vertexType DDL
+					// this target actually dispatches to, or the Processor's
+					// operationType→class reverse index fails closed (MissingClass).
+					Class:  "cafeaccount",
+					Params: map[string]string{"leaseAppKey": "row.leaseAppKey"},
+					Reads:  []string{"row.leaseAppKey"},
 				},
 				"missing_charge": {
 					Action:    "directOp",
 					Operation: "DebitAccount",
-					Params:    map[string]string{"accountKey": "row.accountKey", "amountCents": "row.totalCents", "tabRef": "row.tabKey"},
-					Reads:     []string{"row.accountKey", "row.tabKey"},
+					// DebitAccount is claimed by 4 installed ledger DDLs — pin the
+					// vertexType DDL this target dispatches to (see missing_account).
+					Class:  "cafetransaction",
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.totalCents", "tabRef": "row.tabKey"},
+					Reads:  []string{"row.accountKey", "row.tabKey"},
 				},
 			},
 		},

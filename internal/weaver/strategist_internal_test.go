@@ -43,6 +43,28 @@ func TestBuildPlan_DirectOp_ResolvesReads(t *testing.T) {
 	}
 }
 
+// TestBuildPlan_DirectOp_SetsClass pins the directOp Class thread-through: a
+// playbook entry that pins Class (an operationType ambiguous across installed
+// vertexType DDLs, e.g. CreateAccount/DebitAccount claimed by multiple ledger
+// packages) carries it onto the resolved plan so the dispatched opEnvelope's
+// Class can short-circuit the Processor's operationType→class reverse index
+// instead of falling closed on MissingClass.
+func TestBuildPlan_DirectOp_SetsClass(t *testing.T) {
+	t.Parallel()
+	ga := GapAction{
+		Action:    "directOp",
+		Operation: "CreateAccount",
+		Class:     "cafeaccount",
+	}
+	pl, perr := buildPlan(nil, "cafeLedger", "AAentHJKMNPQRSTUVWX", "missing_account", ga, map[string]any{}, 1)
+	if perr != nil {
+		t.Fatalf("buildPlan: %v", perr)
+	}
+	if pl.class != "cafeaccount" {
+		t.Fatalf("class = %q want cafeaccount", pl.class)
+	}
+}
+
 // TestBuildPlan_DirectOp_MissingReadColumn errors when a row-templated read
 // references an absent column (a malformed playbook must not fire a read-less op).
 func TestBuildPlan_DirectOp_MissingReadColumn(t *testing.T) {

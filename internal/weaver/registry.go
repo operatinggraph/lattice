@@ -82,6 +82,13 @@ type GapAction struct {
 	Assignee  string            `json:"assignee,omitempty"`
 	Target    string            `json:"target,omitempty"`
 	Params    map[string]string `json:"params,omitempty"`
+	// Class pins the dispatched op's DDL canonical name onto the wire envelope
+	// (Contract #2 §2.1 operationType→class reverse index), for an Operation
+	// admitted by more than one installed vertexType DDL — the Processor's
+	// reverse index deliberately excludes an ambiguous operationType rather
+	// than guess, so an unpinned directOp against it fails closed
+	// (MissingClass) forever.
+	Class string `json:"class,omitempty"`
 	// IssueCode/IssueSeverity are consulted only when Action == actionSurface
 	// (FR29's "surface, never dispatch" gap): the Health-KV issue code/severity
 	// raised while the gap stays open, cleared on close. IssueSeverity defaults

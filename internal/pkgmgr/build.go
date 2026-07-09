@@ -504,6 +504,9 @@ func gapActionBody(ga GapActionSpec) map[string]any {
 	if ga.Operation != "" {
 		body["operation"] = ga.Operation
 	}
+	if ga.Class != "" {
+		body["class"] = ga.Class
+	}
 	if ga.Assignee != "" {
 		body["assignee"] = ga.Assignee
 	}

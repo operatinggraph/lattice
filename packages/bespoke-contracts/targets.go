@@ -42,8 +42,13 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"missing_charge": {
 					Action:    "directOp",
 					Operation: "DebitAccount",
-					Params:    map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "clauseRef": "row.clauseKey", "period": "row.period"},
-					Reads:     []string{"row.accountKey", "row.clauseKey"},
+					// DebitAccount is claimed by 4 installed ledger DDLs — pin the
+					// loftspace-ledger vertexType DDL this target dispatches to, or the
+					// Processor's operationType→class reverse index fails closed
+					// (MissingClass).
+					Class:  "transaction",
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "clauseRef": "row.clauseKey", "period": "row.period"},
+					Reads:  []string{"row.accountKey", "row.clauseKey"},
 				},
 				"missing_inspection": {
 					Action:    "assignTask",
