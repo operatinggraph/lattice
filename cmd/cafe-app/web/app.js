@@ -349,6 +349,12 @@ async function renderResident() {
     '<div class="panel" style="max-width:640px;">' +
     "<h2>Café ledger</h2>" +
     '<p class="ledger-balance">Balance: ' + money(ledger.balanceCents) + "</p>" +
+    (ledger.accountKey
+      ? '<form id="payment-form" class="field-row" style="margin:10px 0 16px;">' +
+        '<input id="payment-amount" type="number" step="0.01" min="0.01" placeholder="Payment amount ($)" required />' +
+        '<button id="payment-submit" type="submit">Record Payment</button>' +
+        "</form>"
+      : "") +
     (rows.length
       ? '<ul class="ledger-list">' +
         rows
@@ -365,6 +371,32 @@ async function renderResident() {
     "</div>"
   );
   body.innerHTML = parts.join("");
+  const paymentForm = document.getElementById("payment-form");
+  if (paymentForm) {
+    paymentForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const input = document.getElementById("payment-amount");
+      const cents = parseDollars(input.value);
+      if (cents === null) { toast("Enter a payment amount greater than $0.", false); return; }
+      const btn = document.getElementById("payment-submit");
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "CreditAccount", class: "cafetransaction",
+            reads: [ledger.accountKey],
+            payload: { accountKey: ledger.accountKey, amountCents: cents, memo: "House tab payment" },
+          },
+          "record the payment"
+        );
+        toast("Payment of " + money(cents) + " recorded.", true);
+        await renderResident();
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  }
 }
 
 function escapeHtml(s) {
