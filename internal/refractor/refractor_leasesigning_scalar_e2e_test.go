@@ -319,6 +319,22 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	// qualified application without it stays violating (missing_decision). There is no
 	// unit here, so an approval closes missing_decision and leaves no listing flip.
 	writeAspect(appKey, "decision", "decision", map[string]any{"value": "approved", "decidedAt": "2026-06-26T10:00:00Z"})
+	// The executed-lease document chain: a SIGNED application converges only once
+	// the document is produced (a docGen claim providedTo the APP with a completed
+	// pointer-carrying .outcome) and anchored (the signedLease object link) --
+	// missing_leaseDoc / missing_leaseDocAttach both fold into violating. Edges
+	// first (adjacency), then the CDC-triggering writes.
+	dgID := stableNanoID("lease-conv-docgen")
+	docObjID := stableNanoID("lease-conv-leasedoc")
+	buildEdge("providedTo", "service", dgID, "leaseapp", appID)
+	buildEdge("signedLease", "object", docObjID, "leaseapp", appID)
+	writeVertex(substrate.VertexKey("service", dgID), "service.docGen.instance", map[string]any{})
+	writeAspect(substrate.VertexKey("service", dgID), "outcome", "leaseDocOutcome", map[string]any{
+		"status": "completed", "completedAt": "2026-06-10T00:00:05Z",
+		"digest": "SHA-256=abc123", "size": 1264, "contentType": "text/plain; charset=utf-8",
+		"storeName": "dgStoreNanoXyz", "filename": "signed-lease-leaseapp.test.txt",
+	})
+	writeVertex(substrate.VertexKey("object", docObjID), "object", map[string]any{})
 
 	require.Eventually(t, func() bool {
 		entry, gErr := convKV.Get(ctx, convKey)

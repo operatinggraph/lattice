@@ -53,7 +53,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 		Version:                "1.0",
 		ProjectedAt:            now.Format(time.RFC3339Nano),
 		ProjectedFromRevisions: map[string]uint64{lsActorKey: 1},
-		Lanes:                  []string{"default"},
+		Lanes:                  []string{"default", "urgent"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
 			{OperationType: "SignLease", Scope: "any"},
@@ -61,6 +61,15 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateLeaseServiceInstance", Scope: "any"},
 			{OperationType: "RecordLeaseServiceOutcome", Scope: "any"},
 			{OperationType: "RecordServiceDispatch", Scope: "any"},
+			{OperationType: "CreateLeaseDocInstance", Scope: "any"},
+			{OperationType: "RecordLeaseDocOutcome", Scope: "any"},
+			// The docGen instanceOp test mints a REAL identity (encrypted .name +
+			// .piiKey) so the document-field assembly exercises decrypt-on-read.
+			{OperationType: "CreateUnclaimedIdentity", Scope: "any"},
+			// The docGen shredded-applicant test drives a REAL ShredIdentityKey
+			// (urgent lane) so the field-assembly script's piiKey probe is
+			// exercised against genuine vault-shredded state, not a fixture.
+			{OperationType: "ShredIdentityKey", Scope: "any"},
 			{OperationType: "DecideLeaseApplication", Scope: "any"},
 			{OperationType: "SetApplicantProfile", Scope: "any"},
 			{OperationType: "OpenRenewal", Scope: "any"},

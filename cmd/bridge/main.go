@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -89,16 +90,17 @@ func run(logger *slog.Logger) error {
 		Logger:         logger,
 	})
 
-	// Register the Phase-2 reference adapters (mocked, in-memory — the real
-	// Stripe / background-check integrations are Phase 3). A package's
-	// external.<adapter> events name these by the same strings. MUST run before
-	// Start: the registry has no lock-step with the dispatch path.
+	// Register the reference adapters (the real Stripe / background-check /
+	// legal-doc integrations are Phase 3). A package's external.<adapter> events
+	// name these by the same strings. MUST run before Start: the registry has no
+	// lock-step with the dispatch path.
 	//
 	// BRIDGE_FAKE_DECLINE is a demo affordance: a comma-separated set of adapter
 	// names (or "all") whose fake returns a terminal decline for EVERY subject,
 	// so an operator can drive the declined-application experience live (e.g.
 	// `BRIDGE_FAKE_DECLINE=backgroundCheck make up-loftspace`). Empty = the normal
-	// clearing fakes. It only affects these reference fakes, never real adapters.
+	// clearing fakes. It only affects the stripe/backgroundCheck fakes; docGen's
+	// failure path is input-driven (an unsigned/keyless render request).
 	decline := parseDeclineSet(os.Getenv("BRIDGE_FAKE_DECLINE"))
 	stripe := bridge.NewFakeStripe()
 	bgCheck := bridge.NewFakeBackgroundCheck()
@@ -111,9 +113,16 @@ func run(logger *slog.Logger) error {
 	if len(decline) > 0 {
 		logger.Warn("bridge: fake-adapter DECLINE mode active (demo affordance)", "decline", os.Getenv("BRIDGE_FAKE_DECLINE"))
 	}
+	// docGen — the reference external legal-document vendor. Unlike the pure
+	// in-memory fakes it writes the rendered artifact's bytes to the
+	// core-objects store (the bridge account holds the $O.core-objects.>
+	// publish), capped per artifact by OBJECTS_MAX_UPLOAD_BYTES (the same knob
+	// the vertical apps' upload paths use).
+	docGen := bridge.NewFakeDocGen(conn, bootstrap.CoreObjectsBucket, uploadCapFromEnv(logger))
 	for name, adapter := range map[string]bridge.Adapter{
 		"stripe":          stripe,
 		"backgroundCheck": bgCheck,
+		"docGen":          docGen,
 	} {
 		if err := engine.RegisterAdapter(name, adapter); err != nil {
 			return fmt.Errorf("register adapter %q: %w", name, err)
@@ -144,6 +153,25 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// defaultUploadCap bounds a single docGen artifact write (OBJECTS_MAX_UPLOAD_BYTES).
+const defaultUploadCap = 25 << 20 // 25 MiB
+
+// uploadCapFromEnv resolves the per-artifact object-store write cap from
+// OBJECTS_MAX_UPLOAD_BYTES, defaulting to defaultUploadCap — the same
+// environment convention the vertical apps' upload paths use.
+func uploadCapFromEnv(logger *slog.Logger) int64 {
+	capBytes := int64(defaultUploadCap)
+	if v := os.Getenv("OBJECTS_MAX_UPLOAD_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			capBytes = n
+		} else {
+			logger.Warn("ignoring invalid OBJECTS_MAX_UPLOAD_BYTES; using default",
+				"value", v, "default", int64(defaultUploadCap))
+		}
+	}
+	return capBytes
 }
 
 // parseDeclineSet parses BRIDGE_FAKE_DECLINE — a comma-separated set of adapter

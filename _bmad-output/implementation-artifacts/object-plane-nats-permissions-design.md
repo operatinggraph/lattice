@@ -112,10 +112,11 @@ blob-touching component already holds (`main.go:154,176,196` all include `$JS.AP
 |---|---|---|
 | `object-store-manager` | GC deleter — `internal/objectmanager/manager.go:148` `ObjectDelete` on tombstone cascade | **Yes** (publishes `M` rollup; purges via `$JS.API.>`) |
 | `loupe` | Trusted-client uploader — `cmd/loupe/objects.go:143` `ObjectPut` (admin object surface) | **Yes** (`C`+`M`) |
-| `loftspace-app` | Trusted-client uploader — lease-PDF + ID/signature `ObjectPut` | **Yes** (`C`+`M`) |
+| `loftspace-app` | Trusted-client uploader — document `ObjectPut` (`objects.go`) | **Yes** (`C`+`M`) |
+| `bridge` | The docGen reference vendor adapter (`internal/bridge/docgen_adapter.go`) — renders the executed-lease artifact and `ObjectPut`s its bytes, inert until an `AttachObject` op anchors them (lease-doc-external-io-design.md D4) | **Yes** (`C`+`M`) — the fourth writer, pinned in `TestObjectStoreWriteAccess` |
 | `clinic-app` | **No** blob write (`grep` clean — zero `ObjectPut`/`CoreObjectsBucket` refs) | **No** — leave unchanged |
 | `bootstrap` | Provisions the store via `$JS.API.STREAM.CREATE.OBJ_core-objects` (`$JS.API.>`); never `ObjectPut`s | Correct the dead `$OBJ.>` typo → `$O.>` (§3, cosmetic) |
-| all others (processor, refractor, loom, weaver, bridge, gateway, lattice, lattice-pkg) | No blob write | **No** |
+| all others (processor, refractor, loom, weaver, gateway, lattice, lattice-pkg) | No blob write | **No** |
 
 **Grant shape decision — `$O.core-objects.>` (bucket-scoped), uniform for all three writers.** It covers
 both `.C.>` and `.M.>` under the single object bucket, which *is* the security boundary here (there is

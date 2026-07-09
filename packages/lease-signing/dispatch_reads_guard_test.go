@@ -26,6 +26,15 @@ func TestInstanceOpReads_MatchDDLScript(t *testing.T) {
 	assertSameStringSet(t, "CreateLeaseServiceInstance", engineInstanceOpReads, got)
 }
 
+// TestDocInstanceOpReads_MatchDDLScript is the docGen twin: the leaseDocument
+// pattern's externalTask dispatches CreateLeaseDocInstance with the same
+// [subjectKey] read-set (the .signature gate and every document field resolve
+// via kv.Read/kv.Links, never hydration).
+func TestDocInstanceOpReads_MatchDDLScript(t *testing.T) {
+	got := vertexAlivePayloadFields(t, leaseDocInstanceDDLScript, "CreateLeaseDocInstance")
+	assertSameStringSet(t, "CreateLeaseDocInstance", engineInstanceOpReads, got)
+}
+
 // vertexAlivePayloadFields parses one op branch and returns the set of PAYLOAD
 // FIELDS whose values flow into a vertex_alive(state, <var>) check, mapping a
 // var to its payload field via the `<var> = required_string(p, "<field>")`

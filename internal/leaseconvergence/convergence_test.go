@@ -12,8 +12,11 @@ import (
 	"github.com/asolgan/lattice/internal/processor"
 )
 
-// gapColumns are the four §10.2 gap bools the convergence row carries.
-var gapColumns = []string{"missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature"}
+// gapColumns are the §10.2 gap bools the steady-state assertion pins false: the
+// four applicant gaps plus the executed-lease document chain (the docGen
+// externalTask on signing + Weaver's AttachObject anchor — platform-driven, no
+// harness involvement).
+var gapColumns = []string{"missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_leaseDoc", "missing_leaseDocAttach"}
 
 // driveApplicantSteps drives the two applicant-facing ops the userTask / assignTask
 // remediations represent: RecordIdentityPII (closes missing_onboarding) and

@@ -1,19 +1,23 @@
 name: lease-signing
-version: 0.17.0
+version: 0.18.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
   actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead
   protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self
-  read boundary, D1.3 Fire 2; unit_bedrooms/unit_bathrooms/unit_available_from
-  columns added D1.5) plus its landlordLeaseApplicationsRead sibling
+  read boundary, D1.3 Fire 2; carries the anchored executed-lease artifact's
+  doc pointers) plus its landlordLeaseApplicationsRead sibling
   (the landlord/residence audience anchored on the managing landlord via the
   loftspace-domain manages link, D1.3 Increment 2), the §10.8 playbook
-  (triggerLoom externalTask for bgcheck/payment, assignTask SignLease,
-  triggerLoom onboarding), the externalTask instanceOp/replyOp/dispatchOp wrapper
-  DDLs (CreateLeaseServiceInstance / RecordLeaseServiceOutcome /
-  RecordServiceDispatch), and the backgroundCheck/collectPayment/onboarding
-  loomPatterns. The external-call outcome lives in the .outcome aspect and a
+  (triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask
+  SignLease, triggerLoom onboarding, directOp AttachObject anchoring the
+  produced executed-lease artifact), the externalTask
+  instanceOp/replyOp/dispatchOp wrapper DDLs (CreateLeaseServiceInstance /
+  RecordLeaseServiceOutcome / RecordServiceDispatch, plus the leaseapp-subject
+  docGen triad CreateLeaseDocInstance / RecordLeaseDocOutcome — the
+  vendor-rendered executed-lease document), and the
+  backgroundCheck/collectPayment/onboarding/leaseDocument loomPatterns. The
+  external-call outcome lives in the .outcome aspect and a
   pending (async) call in the .dispatch aspect (D5); vertex roots stay minimal.
   Also the lease-renewal chain: a create-only .tenancy aspect stamped by
   DecideLeaseApplication's first approve, the renewal vertex type + its five
@@ -39,6 +43,12 @@ declares:
     - canonicalName: leaseServiceOutcome
       class: meta.ddl.aspectType
     - canonicalName: leaseServiceDispatchMarker
+      class: meta.ddl.aspectType
+    - canonicalName: leaseDocInstance
+      class: meta.ddl.vertexType
+    - canonicalName: leaseDocReply
+      class: meta.ddl.vertexType
+    - canonicalName: leaseDocOutcome
       class: meta.ddl.aspectType
     - canonicalName: renewal
       class: meta.ddl.vertexType
@@ -78,6 +88,12 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: RecordServiceDispatch
+      scope: any
+      grantsTo: [operator]
+    - operationType: CreateLeaseDocInstance
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordLeaseDocOutcome
       scope: any
       grantsTo: [operator]
     - operationType: SignLease
@@ -121,12 +137,16 @@ declares:
       subjectType: identity
     - patternId: onboarding
       subjectType: identity
+    - patternId: leaseDocument
+      subjectType: leaseapp
   opMetas:
     - operationType: SignLease
     - operationType: RecordIdentityPII
     - operationType: CreateLeaseServiceInstance
     - operationType: RecordLeaseServiceOutcome
     - operationType: RecordServiceDispatch
+    - operationType: CreateLeaseDocInstance
+    - operationType: RecordLeaseDocOutcome
     - operationType: SetApplicantProfile
     - operationType: SetRenewalTerms
     - operationType: VerifyGuarantor

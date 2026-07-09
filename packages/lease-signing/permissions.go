@@ -59,6 +59,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "CreateLeaseDocInstance",
+			Scope:         "any",
+			Note:          "Grants the operator (Loom's relay actor) the right to submit the docGen externalTask instanceOp.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RecordLeaseDocOutcome",
+			Scope:         "any",
+			Note:          "Grants the operator (the bridge's service actor) the right to submit the docGen externalTask replyOp.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "SignLease",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit SignLease; the applicant signs via the ephemeral task grant (§10.7).",
@@ -125,11 +137,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     identity-domain ships the op but no op-meta for it, so the onboarding
 //     pattern declares it here.
 //   - CreateLeaseServiceInstance / RecordLeaseServiceOutcome /
-//     RecordServiceDispatch — declared for discoverability + the manifest
-//     cross-check. The engine resolves the externalTask instanceOp/replyOp from
-//     the step strings directly (and the bridge selects the dispatchOp from the
-//     event body), not via forOperation, so these are hygiene, not strictly
-//     required.
+//     RecordServiceDispatch / CreateLeaseDocInstance / RecordLeaseDocOutcome —
+//     declared for discoverability + the manifest cross-check. The engine
+//     resolves the externalTask instanceOp/replyOp from the step strings
+//     directly (and the bridge selects the dispatchOp from the event body), not
+//     via forOperation, so these are hygiene, not strictly required.
 //   - SetRenewalTerms / VerifyGuarantor / SignRenewal — REQUIRED: the three
 //     assignTask operations the renewalComplete goal's actions catalog binds
 //     (renewal_targets.go); the Weaver Actuator resolves forOperation to each
@@ -143,6 +155,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "CreateLeaseServiceInstance"},
 		{OperationType: "RecordLeaseServiceOutcome"},
 		{OperationType: "RecordServiceDispatch"},
+		{OperationType: "CreateLeaseDocInstance"},
+		{OperationType: "RecordLeaseDocOutcome"},
 		{OperationType: "SetApplicantProfile"},
 		{OperationType: "SetRenewalTerms"},
 		{OperationType: "VerifyGuarantor"},

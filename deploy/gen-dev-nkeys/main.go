@@ -157,9 +157,14 @@ var matrix = []component{
 		allowResponses: true, // control responder (lattice.ctrl.weaver.>)
 	},
 	{
-		name:           "bridge",
-		desc:           "external-I/O egress; replies via ops; consumes its external-call/schedule durables (consumer names, not KV buckets — bridge's only KV write is health-kv)",
-		pubAllow:       []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$JS.API.>", "$JS.ACK.>"},
+		name: "bridge",
+		desc: "external-I/O egress; replies via ops; consumes its external-call/schedule durables (consumer names, not KV buckets — bridge's only KV write is health-kv)",
+		// $O.core-objects.> — the docGen reference vendor adapter's byte-plane
+		// write (cmd/bridge registers it with the core-objects bucket): the
+		// rendered executed-lease artifact is ObjectPut by the adapter and stays
+		// inert until an AttachObject op anchors it. Bridge is one of the four
+		// sanctioned object-plane writers (TestObjectStoreWriteAccess).
+		pubAllow:       []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 		allowResponses: true, // may respond to requests
 	},
@@ -241,10 +246,11 @@ var matrix = []component{
 	},
 	{
 		name: "loftspace-app",
-		desc: "vertical app (P5 reader); writes via ops",
-		// $O.core-objects.> — lease-PDF + ID/signature uploads (lease_document.go,
-		// objects.go ObjectPut).
-		pubAllow: []string{bootstrap.OpsWildcardSubject, "$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>"},
+		desc: "vertical app (P5 reader); writes go browser-direct through the Gateway — holds NO core-operations (ops.>) publish so a compromised app cannot forge an env.Actor (#75 Fire 2b)",
+		// $O.core-objects.> — document byte uploads (objects.go ObjectPut); bytes
+		// are inert until a browser-direct AttachObject (via the Gateway) anchors
+		// them, so the byte-ingest grant carries no actor authority.
+		pubAllow: []string{"$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>"},
 		pubDeny:  denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
 	},
 	{

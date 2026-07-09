@@ -60,6 +60,7 @@ import (
 	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
 	locationdomain "github.com/asolgan/lattice/packages/location-domain"
 	loftspacedomain "github.com/asolgan/lattice/packages/loftspace-domain"
+	objectsbase "github.com/asolgan/lattice/packages/objects-base"
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
 	servicedomain "github.com/asolgan/lattice/packages/service-domain"
@@ -290,6 +291,11 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 		require.NoError(t, bridgeEng.RegisterAdapter("backgroundCheck", h.bgFake))
 	}
 	require.NoError(t, bridgeEng.RegisterAdapter("stripe", h.stripe))
+	// docGen — the reference legal-document vendor: renders the executed-lease
+	// artifact on signing and ObjectPuts it into core-objects (seeded by the real
+	// ProvisionBuckets above); Weaver's AttachObject directOp then anchors it —
+	// convergence (violating=false) includes the whole document chain.
+	require.NoError(t, bridgeEng.RegisterAdapter("docGen", bridge.NewFakeDocGen(conn, bootstrap.CoreObjectsBucket, 1<<20)))
 	go func() { _ = bridgeEng.Start(ctx) }()
 
 	return h
@@ -306,6 +312,7 @@ func (h *harness) installChain() {
 		identitydomain.Package,
 		locationdomain.Package,
 		loftspacedomain.Package,
+		objectsbase.Package,
 		orchestrationbase.Package,
 		servicedomain.Package,
 		leasesigning.Package,

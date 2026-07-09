@@ -422,11 +422,13 @@ func (f *lensFixture) landlordDecisionReason(t *testing.T, appName, decision, re
 }
 
 // approvedAppFixture seeds a QUALIFIED application: alice onboarded (.ssn) + the
-// application signed (.signature), a fresh completed bgcheck, and a completed
-// payment — the four applicant gaps all closed (applicantApproved=true), but with
-// NO landlord decision yet (the qualified-awaiting-decision state). Tests layer a
-// unit and (where they exercise the listing flip) a landlordDecision on top to
-// drive the landlord-gated listing-leased convergence.
+// application signed (.signature), a fresh completed bgcheck, a completed
+// payment, and the converged executed-lease document chain (a signed
+// application's done-state includes the produced + anchored document) — the
+// applicant-side gaps all closed (applicantApproved=true), but with NO landlord
+// decision yet (the qualified-awaiting-decision state). Tests layer a unit and
+// (where they exercise the listing flip) a landlordDecision on top to drive the
+// landlord-gated listing-leased convergence.
 func approvedAppFixture(t *testing.T) *lensFixture {
 	t.Helper()
 	f := newLensFixture(t)
@@ -441,6 +443,7 @@ func approvedAppFixture(t *testing.T) *lensFixture {
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
+	attachedLeaseDoc(t, f)
 	return f
 }
 
@@ -778,6 +781,9 @@ func bgFreshnessFixture(t *testing.T, f *lensFixture, bgValidUntil string) strin
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
+	// The document leg of a signed application's done-state — closed here so the
+	// freshness assertions isolate the bgcheck/payment predicates.
+	attachedLeaseDoc(t, f)
 	return "app"
 }
 
@@ -952,6 +958,7 @@ func TestLeaseApplicationComplete_PaymentIgnoresValidUntil(t *testing.T) {
 	f.edge(t, "applicationFor", "app", "alice")
 	f.edge(t, "providedTo", "bg1", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
+	attachedLeaseDoc(t, f) // the document leg closed — only the payment branch is under test
 
 	rows := f.projectAt(t, "app", now)
 	require.Len(t, rows, 1, "exactly one row per anchor")
@@ -1083,6 +1090,7 @@ func TestLeaseApplicationComplete_MultipleFreshBgchecks(t *testing.T) {
 	f.edge(t, "providedTo", "bg1", "alice")
 	f.edge(t, "providedTo", "bg2", "alice")
 	f.edge(t, "providedTo", "pay1", "alice")
+	attachedLeaseDoc(t, f) // the document leg closed — freshness aggregation is under test
 
 	rows := f.projectAt(t, "app", now)
 	require.Len(t, rows, 1, "two fresh bgchecks on one identity must still project ONE row (no guardOutputKeyCollision)")

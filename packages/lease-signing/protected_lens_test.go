@@ -160,3 +160,49 @@ func TestLeaseApplicationsRead_BareShellProducesNoRow(t *testing.T) {
 	require.Equal(t, f.ids["app"], rows[0].Values["app_id"])
 	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, rows[0].Values["authz_anchors"]))
 }
+
+// TestLeaseApplicationsRead_DocPointersOnlyWhenAttached — the doc_store_name /
+// doc_filename / doc_content_type columns project ONLY once the signedLease
+// attachment exists: a completed docGen outcome with no anchored object still
+// projects null (the GET answers "being generated"), and the attachment alone
+// (without the outcome) carries no pointers to project. The extra fans stay
+// aggregated — one row per application throughout.
+func TestLeaseApplicationsRead_DocPointersOnlyWhenAttached(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedApplication(t, "app", "alice", "unit1")
+
+	// No docGen claim at all: null pointers.
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["doc_store_name"])
+	require.Nil(t, rows[0].Values["doc_filename"])
+	require.Nil(t, rows[0].Values["doc_content_type"])
+
+	// Completed docGen outcome, NOT yet anchored: still null (the app's GET
+	// serves only anchored documents).
+	f.vtxWithClass(t, "dg1", "service", "service.docGen.instance")
+	f.edge(t, "providedTo", "dg1", "app")
+	f.aspect(t, "dg1", "outcome", "leaseDocOutcome", map[string]any{
+		"status": "completed", "completedAt": "2026-07-15T00:00:05Z",
+		"digest": "SHA-256=abc123", "size": 1264, "contentType": "text/plain; charset=utf-8",
+		"storeName": "dgStoreNanoXyz", "filename": "signed-lease-leaseapp.test.txt",
+	})
+	rows = f.projectRead(t)
+	require.Len(t, rows, 1, "the docGen fan must not multiply the row")
+	require.Nil(t, rows[0].Values["doc_store_name"], "an un-anchored document projects no pointers")
+
+	// The signedLease attachment lands: the pointers project.
+	f.vtx(t, "leaseDocObj", "object")
+	f.edge(t, "signedLease", "leaseDocObj", "app")
+	rows = f.projectRead(t)
+	require.Len(t, rows, 1, "the attachment fan must not multiply the row")
+	v := rows[0].Values
+	require.Equal(t, "dgStoreNanoXyz", v["doc_store_name"])
+	require.Equal(t, "signed-lease-leaseapp.test.txt", v["doc_filename"])
+	require.Equal(t, "text/plain; charset=utf-8", v["doc_content_type"])
+	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
+		"the applicant-self anchor is untouched by the doc fans")
+}

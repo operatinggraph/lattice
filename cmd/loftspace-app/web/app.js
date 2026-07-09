@@ -1217,10 +1217,10 @@ function renderApplicationCard(row, highlight) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
-  // Signed-lease download: once the lease is signed, the executed lease is a
-  // produced artifact (a deterministic summary of the agreed terms, stamped with
-  // the signature date). The GET streams it on demand so the link never waits on
-  // object-store projection lag; the durable attach is produced on signing.
+  // Signed-lease download: once the lease is signed, the platform's docGen
+  // vendor generates the executed-lease artifact and Weaver anchors it to the
+  // application; the GET streams the anchored bytes (a 404 "being generated"
+  // inside the brief convergence window).
   if (!row.missing_signature) {
     const lease = document.createElement("a");
     lease.className = "ghost btn-link";
@@ -1703,10 +1703,9 @@ async function submitComplete(ev) {
     // out-of-band CompleteTask path. A benign rejection (the task already closed,
     // e.g. a double-submit) is non-fatal: the bound op already committed.
     await completeTask(task.taskKey);
-    // Signing the lease produces the executed-lease artifact: durably attach it to
-    // the application so both parties have the document on file (best-effort — the
-    // download path regenerates the same bytes on demand if this misses).
-    if (task.operationName === "SignLease" && target) ensureLeaseDocument(target);
+    // Signing the lease needs no client follow-up for the executed-lease
+    // artifact: the platform converges it automatically (the docGen external
+    // vendor renders + stores it and Weaver anchors it to the application).
     closeComplete();
     toast(desc.title + " — done.", "ok");
     if (desc.klass === "renewal") {
@@ -1905,23 +1904,6 @@ function openRenewalAction(row, operationName) {
     operationDescription: COMPLETIONS[operationName].title,
     scopedTo: row.entityKey,
   });
-}
-
-// ensureLeaseDocument produces + durably attaches the executed-lease artifact for
-// a just-signed application. Best-effort: a failure (the convergence row not yet
-// projecting the signature) is logged, not surfaced — the download path
-// regenerates the same deterministic bytes on demand regardless.
-async function ensureLeaseDocument(leaseAppKey) {
-  if (!leaseAppKey) return;
-  try {
-    await api("/api/lease-document", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ leaseAppKey }),
-    });
-  } catch (e) {
-    console.warn("lease document not attached (will regenerate on download):", e.message);
-  }
 }
 
 // openLedgerAccount opens the lease's ledger account (CreateAccount) and

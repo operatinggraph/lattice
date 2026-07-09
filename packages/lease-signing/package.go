@@ -31,7 +31,19 @@
 //     externalRef and writes a create-only .dispatch marker {vendorRef,
 //     submittedAt}; it emits NO completion signal (the task is not done — the
 //     token stays parked). The .dispatch and .outcome aspects are separate so
-//     pending does not collide with the once-only terminal .outcome.
+//     pending does not collide with the once-only terminal .outcome. It is
+//     family-agnostic: the docGen triad reuses it (and its marker gate)
+//     unchanged as its own pending path.
+//
+//   - The docGen triad (`leaseDocInstance` / CreateLeaseDocInstance,
+//     `leaseDocReply` / RecordLeaseDocOutcome, the `leaseDocOutcome` aspect
+//     gate) — executed-lease document generation as external I/O over the
+//     SIGNED leaseapp subject: the instanceOp assembles the document fields
+//     Processor-side and emits external.docGen; the reference vendor adapter
+//     (internal/bridge FakeDocGen) renders + stores the bytes; the replyOp
+//     records the pointer-carrying .outcome; Weaver anchors the artifact via
+//     directOp AttachObject (the signedLease slot) off the
+//     missing_leaseDocAttach gap. See leasedoc_ddls.go.
 //
 //   - The `leaseApplicationComplete` actorAggregate convergence lens (§10.2) —
 //     anchored on leaseapp, reading identity aspects + the service instance's
@@ -70,16 +82,18 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.17.0",
+	Version: "0.18.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
-		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; unit_bedrooms/" +
-		"unit_bathrooms/unit_available_from columns added D1.5) plus its " +
+		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
+		"the anchored executed-lease artifact's doc_store_name/doc_filename/doc_content_type pointers) plus its " +
 		"landlordLeaseApplicationsRead sibling (the landlord/residence audience anchored on the managing landlord via the " +
 		"loftspace-domain manages link, D1.3 Increment 2), the §10.8 playbook " +
-		"(triggerLoom externalTask for bgcheck/payment, assignTask SignLease, triggerLoom onboarding, directOp " +
-		"SetListingStatus to mark the unit leased on approval), the externalTask " +
-		"instanceOp/replyOp wrapper DDLs, the bgcheck/payment/onboarding loomPatterns, SetApplicantProfile " +
+		"(triggerLoom externalTask for bgcheck/payment/leaseDocument, assignTask SignLease, triggerLoom onboarding, directOp " +
+		"SetListingStatus to mark the unit leased on approval, directOp AttachObject to anchor the produced executed-lease " +
+		"artifact under the signedLease slot), the externalTask " +
+		"instanceOp/replyOp wrapper DDLs (identity-family bgcheck/payment AND the leaseapp-subject docGen triad — the " +
+		"vendor-rendered executed-lease document), the bgcheck/payment/onboarding/leaseDocument loomPatterns, SetApplicantProfile " +
 		"(the applicant's qualification profile — raw financials captured in Core KV, only derived landlord-facing " +
 		"signals projected), and the lease-renewal chain: a create-only .tenancy aspect (DecideLeaseApplication's " +
 		"first approve), the renewal vertex type + its five ops, the leaseExpiry frozen-table target (opens a " +

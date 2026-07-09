@@ -124,6 +124,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "terms_move_in_date", Type: "text"},
 		{Name: "terms_lease_term_months", Type: "double precision"},
 		{Name: "terms_requested_rent", Type: "double precision"},
+		{Name: "doc_store_name", Type: "text"},
+		{Name: "doc_filename", Type: "text"},
+		{Name: "doc_content_type", Type: "text"},
 	}
 	ddl, err := adapter.BuildProtectedTableDDL("read_lease_applications", []string{"app_id"}, body)
 	if err != nil {
@@ -145,10 +148,11 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	exec("GRANT SELECT ON " + rlsTestSchema + ".read_lease_applications TO " + rlsTestRole)
 	exec("GRANT SELECT ON " + rlsTestSchema + ".actor_read_grants TO " + rlsTestRole)
 
-	// Seed: A's application (anchor A, signed — the lease-document tests need a
-	// signed row to render) + B's application (anchor B, unsigned); self-grants.
-	// Both rows carry unit_bedrooms/unit_bathrooms/unit_available_from so the
-	// round-trip assertions below guard against the SELECT/Scan silently dropping them.
+	// Seed: A's application (anchor A, signed with NO doc pointers — the
+	// lease-document tests exercise the inside-the-convergence-window answer) +
+	// B's application (anchor B, unsigned); self-grants. Both rows carry
+	// unit_bedrooms/unit_bathrooms/unit_available_from so the round-trip
+	// assertions below guard against the SELECT/Scan silently dropping them.
 	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, landlord_decision, signed_at, unit_bedrooms, unit_bathrooms, unit_available_from, authz_anchors, projection_seq)
 	      VALUES ('app-A', 'vtx.leaseapp.app-A', 'vtx.identity.`+subAlice+`', 'approved', '2026-07-15T00:00:00Z', 2, 1, '2026-08-01', $1, 1)`, []string{subAlice})
 	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, unit_bedrooms, unit_bathrooms, unit_available_from, authz_anchors, projection_seq)
@@ -330,11 +334,12 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 	})
 
-	// The executed-lease document GET (D1.5): same RLS-scoped model, same
-	// authenticated actor, a different endpoint. s.conn is nil in this harness
-	// (no NATS fixture) — buildLeaseDocumentForActor degrades the applicant name
-	// to the bare key rather than failing, so the RLS/auth assertions below don't
-	// need a NATS connection.
+	// The executed-lease document GET: same RLS-scoped model, same authenticated
+	// actor, a different endpoint. The GET streams the ANCHORED artifact by the
+	// row's doc pointer columns; s.conn is nil in this harness (no NATS fixture),
+	// which is fine for every pointer-absent path below — the handler only
+	// touches NATS once a pointer exists (the byte-streaming happy path is the
+	// live e2e's concern).
 	getDoc := func(t *testing.T, authz, leaseAppKey string) (int, string) {
 		t.Helper()
 		rec := httptest.NewRecorder()
@@ -346,27 +351,34 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		return rec.Code, rec.Body.String()
 	}
 
-	t.Run("lease-document: A can download A's signed lease", func(t *testing.T) {
+	t.Run("lease-document: signed but not yet anchored is 404 being-generated", func(t *testing.T) {
+		// app-A is signed with NO doc pointers — the convergence window.
 		code, body := getDoc(t, "Bearer "+mint(subAlice), "vtx.leaseapp.app-A")
-		if code != http.StatusOK {
-			t.Fatalf("status = %d, want 200, body=%s", code, body)
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (document converging), body=%s", code, body)
 		}
-		if !strings.Contains(body, "RESIDENTIAL LEASE AGREEMENT") {
-			t.Fatalf("body must render the lease document, got %q", body)
+		if !strings.Contains(body, "being generated") {
+			t.Fatalf("a signed-but-unanchored application answers the honest async message, got %q", body)
 		}
 	})
 
 	t.Run("lease-document: A requesting B's key is 404, not leaked", func(t *testing.T) {
-		code, _ := getDoc(t, "Bearer "+mint(subAlice), "vtx.leaseapp.app-B")
+		code, body := getDoc(t, "Bearer "+mint(subAlice), "vtx.leaseapp.app-B")
 		if code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404 (RLS-hidden, indistinguishable from absent)", code)
 		}
+		if strings.Contains(body, "being generated") {
+			t.Fatalf("an RLS-hidden key must read as absent, never as converging: %q", body)
+		}
 	})
 
-	t.Run("lease-document: B's application is unsigned, 409", func(t *testing.T) {
-		code, _ := getDoc(t, "Bearer "+mint(subBob), "vtx.leaseapp.app-B")
-		if code != http.StatusConflict {
-			t.Fatalf("status = %d, want 409 (not yet signed)", code)
+	t.Run("lease-document: B's application is unsigned, 404", func(t *testing.T) {
+		code, body := getDoc(t, "Bearer "+mint(subBob), "vtx.leaseapp.app-B")
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (no document for an unsigned application)", code)
+		}
+		if strings.Contains(body, "being generated") {
+			t.Fatalf("an unsigned application is not converging a document: %q", body)
 		}
 	})
 

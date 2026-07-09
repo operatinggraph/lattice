@@ -141,17 +141,7 @@ func (s *server) adminActorID() (string, bool) {
 }
 
 // requireBody reads up to 1 MiB of the request body, the cap for the small JSON
-// op payloads this app submits.
+// request bodies this app accepts.
 func requireBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r.Body, 1<<20))
-}
-
-// mustJSON marshals v, returning a hand-built error object only if marshalling
-// fails (which it cannot for the small maps used here).
-func mustJSON(v any) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return json.RawMessage(`{"error":"internal: marshal failed"}`)
-	}
-	return b
 }

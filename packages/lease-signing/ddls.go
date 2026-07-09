@@ -40,6 +40,10 @@ import (
 // caller lists in ContextHint.Reads. The replyOp is the exception — the bridge
 // submits it with no Reads, so it reads no state and relies on the create-only
 // .outcome write for its once-only guarantee.
+//
+// The executed-lease document-generation triad (leaseDocInstance /
+// leaseDocReply / the leaseDocOutcome aspect gate) is appended from
+// leasedoc_ddls.go, and the renewal chain's DDLs from renewal_ddls.go.
 func DDLs() []pkgmgr.DDLSpec {
 	ddls := []pkgmgr.DDLSpec{
 		leaseAppDDL(),
@@ -49,6 +53,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		leaseServiceOutcomeAspectDDL(),
 		leaseServiceDispatchAspectDDL(),
 	}
+	ddls = append(ddls, LeaseDocDDLs()...)
 	return append(ddls, RenewalDDLs()...)
 }
 

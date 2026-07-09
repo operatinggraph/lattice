@@ -24,13 +24,31 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     reprojects this anchor). A qualified-but-undecided application sits in the
 //     lens's missing_decision state (violating, but NO playbook entry — nothing
 //     dispatches); the landlord decision is the human gate the flip waits behind.
+//   - missing_leaseDoc → triggerLoom(leaseDocument) over the application itself
+//     (row.entityKey — the pattern's subjectType is leaseapp). Opens on signing
+//     (signature present, no completed docGen outcome, none in flight, none
+//     failed); the pattern's externalTask has the vendor render + store the
+//     executed-lease bytes and RecordLeaseDocOutcome close the gap. A FAILED
+//     render is terminal (declined_docGen folds the gap false — no auto-retry;
+//     re-generation is a fresh manual StartLoomPattern).
+//   - missing_leaseDocAttach → directOp AttachObject anchoring the produced
+//     bytes to the application under the signedLease slot. The attach payload is
+//     drawn from the row's doc-pointer columns (projected off the completed
+//     docGen .outcome, so they are non-null exactly when this gap is open); the
+//     op is objects-base's generic attach, granted to operator (Weaver's service
+//     actor) — the replyOp cannot mint the object vertex itself (step-6 class→DDL
+//     resolution routes object-class mutations to objects-base's DDL). Closes
+//     when the signedLease link lands and the lens reprojects; a detached
+//     executed lease re-opens it (self-healing re-attach).
 //
 // External remediation is triggerLoom of an externalTask pattern (the retired
 // nudge action is never used). Every gap key is a column the lens projects, and
-// every row.<col> template (row.applicant, row.entityKey, row.unitKey) is a lens
-// BodyColumn — the §10.2↔§10.8 column seam (cross-checked by
-// TestLeaseSigning_PlaybookColumnsMatchLens). The literal status=leased is passed
-// verbatim (no row. prefix).
+// every row.<col> template (row.applicant, row.entityKey, row.unitKey, the
+// row.doc* pointers) is a lens BodyColumn — the §10.2↔§10.8 column seam
+// (cross-checked by TestLeaseSigning_PlaybookColumnsMatchLens). Literals
+// (status=leased, linkName=signedLease) are passed verbatim (no row. prefix);
+// row.docSize resolves type-preserving (a number reaches AttachObject's
+// integer-validated size, Contract #10 §10.8 templating).
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	targets := []pkgmgr.WeaverTargetSpec{{
 		TargetID: "leaseApplicationComplete",
@@ -41,6 +59,12 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"missing_payment":       {Action: "triggerLoom", Pattern: "collectPayment", Subject: "row.applicant"},
 			"missing_signature":     {Action: "assignTask", Operation: "SignLease", Assignee: "row.applicant", Target: "row.entityKey"},
 			"missing_listingLeased": {Action: "directOp", Operation: "SetListingStatus", Params: map[string]string{"unit": "row.unitKey", "status": "leased"}, Reads: []string{"row.unitKey"}},
+			"missing_leaseDoc":      {Action: "triggerLoom", Pattern: "leaseDocument", Subject: "row.entityKey"},
+			"missing_leaseDocAttach": {Action: "directOp", Operation: "AttachObject", Params: map[string]string{
+				"digest": "row.docDigest", "size": "row.docSize", "contentType": "row.docContentType",
+				"storeName": "row.docStoreName", "filename": "row.docFilename",
+				"targetKey": "row.entityKey", "linkName": "signedLease",
+			}, Reads: []string{"row.entityKey"}},
 		},
 	}}
 	return append(targets, RenewalTargets()...)

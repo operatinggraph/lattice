@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 )
@@ -16,7 +17,14 @@ type Request struct {
 	IdempotencyKey string
 	Operation      string
 	Subject        string
-	Params         map[string]string
+	// Params is the flat string view of the event's params: only string-valued
+	// entries survive (the Fake* reference adapters read at most one of them).
+	Params map[string]string
+	// RawParams is the event's params object verbatim (free-form JSON) — the
+	// structured field for an adapter whose call inputs carry nested objects or
+	// numbers the flat Params map cannot (e.g. the docGen adapter's resolved
+	// document fields). Empty when the event carried no params.
+	RawParams json.RawMessage
 }
 
 // Outcome is an adapter's TERMINAL business verdict on an Execute that ran to

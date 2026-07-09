@@ -212,8 +212,8 @@ exactly like Loom and Weaver (`docs/components/service-actors.md`). Consequences
 
 | Path | Role |
 |------|------|
-| `internal/bridge/` | Engine: durable `events.external.>` consumer, adapter registry, the two-method **Adapter SPI** (`Execute` / `Poll`; `Resolved` / `Pending` dispositions), idempotent dispatch (deterministic result-op requestId + adapter `idempotencyKey` dedup; optional generic op-tracker skip-on-redelivery), the **poll/timeout schedule lane** (`bridge-schedule` fixed durable, `schedule.go`/`actuator.go`), and result-op submission to `ops.<lane>`. Also the reference `Fake*` adapters — sync `FakeBackgroundCheck` / `FakeStripe`, async `FakeAsyncCheck`, and `FakeAugur` (`AugurProposal` structured output); real Stripe / background-check is Phase 3 |
-| `cmd/bridge/` | Binary entry point (extractable; shares only `substrate/*`); pins `ActorKey = bootstrap.BridgeIdentityKey` and registers the reference adapters for the demo |
+| `internal/bridge/` | Engine: durable `events.external.>` consumer, adapter registry, the two-method **Adapter SPI** (`Execute` / `Poll`; `Resolved` / `Pending` dispositions; `Request.RawParams` carries the event's params verbatim for adapters with structured inputs), idempotent dispatch (deterministic result-op requestId + adapter `idempotencyKey` dedup; optional generic op-tracker skip-on-redelivery), the **poll/timeout schedule lane** (`bridge-schedule` fixed durable, `schedule.go`/`actuator.go`), and result-op submission to `ops.<lane>`. Also the reference `Fake*` adapters — sync `FakeBackgroundCheck` / `FakeStripe`, async `FakeAsyncCheck`, `FakeAugur` (`AugurProposal` structured output), and `FakeDocGen` (the reference legal-document vendor: renders the executed-lease artifact from the event's resolved doc fields and **writes its bytes to the `core-objects` store** — the bridge's one byte-plane side-effect; the bytes stay inert until an `AttachObject` op anchors them); real vendor integrations are Phase 3 |
+| `cmd/bridge/` | Binary entry point (extractable; shares only `substrate/*`); pins `ActorKey = bootstrap.BridgeIdentityKey` and registers the reference adapters (`FakeDocGen` constructed with the conn + the `core-objects` bucket + the `OBJECTS_MAX_UPLOAD_BYTES` write cap) |
 
 **Engine vs package:** the consumer, registry, dispatch, recovery, and result-op submission are
 **engine code**. Which adapters exist, the `external.<adapter>` event-type DDL, the `instanceOp` /
@@ -232,6 +232,7 @@ exactly like Loom and Weaver (`docs/components/service-actors.md`). Consequences
 | Out (async) | `dispatchOp` pending-marker op via `core-operations` | on a `Pending` outcome: records the create-only vendor-`ref` marker, **no** terminal outcome (token stays parked) |
 | Out (async) | `@at` schedules `schedule.bridge.{poll,timeout}.<handle>` on `core-schedules` | arm the poll (self-rescheduling `@at` chain) + timeout (deadline backstop) for a pending call |
 | Out | adapter calls | the actual external I/O — the only component that makes them; `idempotencyKey = instanceKey` |
+| Out | `ObjectPut` → `core-objects` (docGen adapter) | the off-graph blob plane: the reference doc-gen vendor streams the rendered artifact's bytes under a deterministic, application-derived store name (a re-render overwrites; the ObjectPut is the adapter's `idempotencyKey`-deduped side-effect). Bytes are **inert until an `AttachObject` op anchors them** — the bridge account is one of the four sanctioned object-plane writers (`$O.core-objects.>`, pinned by `internal/natsperm` `TestObjectStoreWriteAccess`) and this grant carries no actor authority |
 | Out | Health (Contract #5) | heartbeat at `health.bridge.<instance>`; an unregistered adapter / unparseable envelope surfaces an issue, never a silent skip |
 
 ---
@@ -299,7 +300,11 @@ The **async result path** (Phase 3) is also built and CI-gated: the two-method A
 (`Execute` / `Poll`, `Resolved` / `Pending`), the `dispatchOp` pending marker, and the poll/timeout
 schedule lane (`bridge-schedule` durable) — proven end-to-end by `FakeAsyncCheck` (`pending_e2e_test.go`
 / `schedule_e2e_test.go`). The **Augur dispatch path** (the `augur` adapter returning an
-`AugurProposal`) rides the same SPI (`augur_proposal.go`, `fake_augur.go`).
+`AugurProposal`) rides the same SPI (`augur_proposal.go`, `fake_augur.go`). The **docGen path**
+(`docgen_adapter.go`) adds the byte-plane egress: the reference legal-document vendor renders the
+executed-lease artifact and `ObjectPut`s it to `core-objects`; its completed `Detail` is the JSON
+document-pointer set the `RecordLeaseDocOutcome` replyOp records on the claim's `.outcome` aspect,
+from which the lease-signing convergence lens + Weaver's `AttachObject` playbook anchor the artifact.
 
 **Deferred (Phase 3+).**
 

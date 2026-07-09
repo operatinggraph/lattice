@@ -46,6 +46,12 @@ type protectedApplicationRow struct {
 	TermsMoveInDate    *string  `json:"termsMoveInDate"`
 	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
 	TermsRequestedRent *float64 `json:"termsRequestedRent"`
+	// The anchored executed-lease artifact's pointers (null until the platform's
+	// docGen + attach convergence lands the signedLease attachment). The
+	// lease-document GET streams the bytes by DocStoreName.
+	DocStoreName   *string `json:"docStoreName"`
+	DocFilename    *string `json:"docFilename"`
+	DocContentType *string `json:"docContentType"`
 }
 
 // selectApplicationsSQL reads the protected model. It carries NO auth WHERE — the
@@ -57,7 +63,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
        unit_available_from, signed_at, landlord_decision,
        decline_reason, terms_move_in_date, terms_lease_term_months,
-       terms_requested_rent
+       terms_requested_rent, doc_store_name, doc_filename, doc_content_type
 FROM read_lease_applications
 ORDER BY app_id`
 
@@ -98,6 +104,7 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
 			&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
+			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		); err != nil {
 			return nil, err
 		}
@@ -122,7 +129,8 @@ const selectApplicationByKeySQL = `
 SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
        unit_available_from, signed_at, landlord_decision, decline_reason,
-       terms_move_in_date, terms_lease_term_months, terms_requested_rent
+       terms_move_in_date, terms_lease_term_months, terms_requested_rent,
+       doc_store_name, doc_filename, doc_content_type
 FROM read_lease_applications
 WHERE entity_key = $1`
 
@@ -148,6 +156,7 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
 		&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 		&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
+		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

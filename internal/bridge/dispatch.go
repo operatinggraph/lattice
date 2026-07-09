@@ -162,6 +162,7 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 		Operation:      ev.ReplyOp,
 		Subject:        instanceKey,
 		Params:         e.coerceParams(ev.Params),
+		RawParams:      ev.Params,
 	})
 	if execErr != nil {
 		e.logger.Error("bridge: adapter execute failed; nak with delay + health issue",

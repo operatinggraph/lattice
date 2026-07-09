@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "declined_bgcheck", "declined_payment", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -90,11 +90,11 @@ func Lenses() []pkgmgr.LensSpec {
 			// (Weaver-internal §10.2 orchestration state) — this read model carries
 			// the application's own identity + display scalars (unit, terms,
 			// signature, landlord decision), the hops off the leaseapp and its
-			// applicationFor identity / appliesToUnit unit. unit_bedrooms /
-			// unit_bathrooms / unit_available_from (D1.5) were added so the
-			// executed-lease document builder (cmd/loftspace-app/lease_document.go)
-			// could move off the unprotected weaver-targets read for its GET path
-			// and source the same display fields from here under RLS.
+			// applicationFor identity / appliesToUnit unit, plus the ANCHORED
+			// executed-lease artifact's pointers (doc_store_name / doc_filename /
+			// doc_content_type — projected only once the signedLease attachment
+			// exists), which cmd/loftspace-app's GET /api/lease-document uses to
+			// stream the document bytes under RLS.
 			CanonicalName: "leaseApplicationsRead",
 			Class:         "meta.lens",
 			Adapter:       "postgres",
@@ -122,6 +122,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "terms_move_in_date", Type: "text"},
 				{Name: "terms_lease_term_months", Type: "double precision"},
 				{Name: "terms_requested_rent", Type: "double precision"},
+				{Name: "doc_store_name", Type: "text"},
+				{Name: "doc_filename", Type: "text"},
+				{Name: "doc_content_type", Type: "text"},
 			},
 		},
 		{
@@ -506,6 +509,51 @@ func Lenses() []pkgmgr.LensSpec {
 //	  terminally exhausted"; while a retry is in flight inflight_<g> is true and the
 //	  FE prefers that ("re-checking") over the standing-rejection read.
 //
+// EXECUTED-LEASE DOCUMENT — the docGen externalTask chain + the attach anchor.
+//
+//	The docGen claims are providedTo the LEASEAPP itself (the document is about
+//	the application), so they ride their own OPTIONAL MATCH fan
+//	((app)<-[:providedTo]-(docInst:service)) — distinct from the identity fan —
+//	and the produced artifact's anchor is the signedLease link
+//	((app)<-[:signedLease]-(leaseDocObj:object), the object→owner direction
+//	objects-base AttachObject commits). Every use of both fans is aggregated
+//	(count DISTINCT / max) inside the same grouping WITH, so the anchor stays
+//	one-row (the cross product between fans is collapsed by DISTINCT on each
+//	fan's own keys).
+//
+//	- missing_leaseDoc — signature present AND no completed docGen outcome AND
+//	  none in flight AND none failed. Opens on signing; the playbook triggerLooms
+//	  the leaseDocument pattern (the vendor renders + stores the bytes;
+//	  RecordLeaseDocOutcome records the pointer-carrying .outcome, closing it).
+//	  Folding declined_docGen into the gap (rather than leaving it open like
+//	  missing_bgcheck) makes a FAILED render TERMINAL — no auto-retry; a
+//	  re-generation is a fresh manual StartLoomPattern. Folding inflight in
+//	  closes the gap while a future ASYNC vendor call is pending (the sync
+//	  reference adapter never writes .dispatch, so the gap simply stays open for
+//	  the milliseconds between claim and outcome — Weaver's dispatch mark + the
+//	  claimId-stable Loom instanceId absorb any re-fire in that window).
+//	- inflight_docGen / declined_docGen — the same presence-based pending test
+//	  and standing-rejection disposition as the bgcheck/payment families
+//	  (FE-facing; the gap formula above consumes them, so they are not Weaver
+//	  suppression companions — the companion convention would name them
+//	  inflight_leaseDoc, which no column uses).
+//	- docStoreName / docFilename / docContentType / docDigest / docSize — the
+//	  produced artifact's pointer set off the completed .outcome, the param
+//	  columns the §10.8 AttachObject playbook templates (non-null exactly when a
+//	  completed outcome exists, so a missing_leaseDocAttach dispatch never
+//	  resolves a null param). max() over the completed fan: the pointers are
+//	  deterministic per application (the vendor derives storeName from the
+//	  leaseapp key and overwrites on re-render), so multiple completed claims
+//	  carry the same values.
+//	- missing_leaseDocAttach — a completed docGen outcome exists AND no
+//	  signedLease attachment does. The playbook dispatches the generic
+//	  directOp(AttachObject) anchoring the stored bytes to the application;
+//	  the committed link reprojects this anchor (the link fan-out seeds from
+//	  both endpoints) and the gap closes. A detached executed lease re-opens it
+//	  — the self-healing re-attach.
+//	- leaseDocAttached — the FE-facing presence signal for the anchored artifact.
+//	- Both gaps fold into violating (Weaver dispatches only violating rows).
+//
 // '= null' (not IS NULL) is the full engine's null test (ruleengine/full
 // executor.go equalsAny treats null = null as true and any value = null as
 // false). Do not "correct" it to unsupported IS NULL.
@@ -545,6 +593,8 @@ var leaseApplicationCompleteSpec = fmt.Sprintf(`
 MATCH (app:leaseapp {key: $actorKey})
 OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
+OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
 %s
 WITH
   app.key AS entityKey,
@@ -578,6 +628,15 @@ WITH
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.dispatch.data.vendorRef <> null AND inst.outcome.data.status = null THEN inst.key ELSE null END) AS payInflight,
   count(DISTINCT CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS bgFailed,
   count(DISTINCT CASE WHEN inst.class = 'service.payment.instance' AND inst.outcome.data.status = 'failed' THEN inst.key ELSE null END) AS payFailed,
+  count(DISTINCT CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.key ELSE null END) AS docGenComplete,
+  count(DISTINCT CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.dispatch.data.vendorRef <> null AND docInst.outcome.data.status = null THEN docInst.key ELSE null END) AS docGenInflight,
+  count(DISTINCT CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'failed' THEN docInst.key ELSE null END) AS docGenFailed,
+  max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.storeName ELSE null END) AS docStoreName,
+  max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.filename ELSE null END) AS docFilename,
+  max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType,
+  max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.digest ELSE null END) AS docDigest,
+  max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.size ELSE null END) AS docSize,
+  count(DISTINCT CASE WHEN leaseDocObj.key <> null THEN leaseDocObj.key ELSE null END) AS leaseDocAttachedCount,
   max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.outcome.data.validUntil ELSE null END) AS freshUntil
 RETURN
   entityKey AS actorKey,
@@ -614,17 +673,27 @@ RETURN
   (signedAt = null)      AS missing_signature,
   (bgInflight > 0)       AS inflight_bgcheck,
   (payInflight > 0)      AS inflight_payment,
+  (docGenInflight > 0)   AS inflight_docGen,
   ((bgFailed > 0) AND (freshBgComplete = 0))  AS declined_bgcheck,
   ((payFailed > 0) AND (payComplete = 0))     AS declined_payment,
+  ((docGenFailed > 0) AND (docGenComplete = 0)) AS declined_docGen,
   (((bgFailed > 0) AND (freshBgComplete = 0)) OR ((payFailed > 0) AND (payComplete = 0)) OR (landlordDecision = 'declined')) AS declined,
   (landlordDecision = 'approved') AS landlordApproved,
   (landlordDecision = 'declined') AS landlordDeclined,
+  docStoreName,
+  docFilename,
+  docContentType,
+  docDigest,
+  docSize,
+  (leaseDocAttachedCount > 0) AS leaseDocAttached,
+  ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) AS missing_leaseDoc,
+  ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) AS missing_leaseDocAttach,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS applicantApproved,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) AS missing_decision,
   ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) AS missing_listingLeased,
   %d                     AS maxretries_bgcheck,
   %d                     AS maxretries_payment,
-  ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased'))) AS violating
+  ((ssnVal = null) OR (freshBgComplete = 0) OR (payComplete = 0) OR (signedAt = null) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null)) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
@@ -654,6 +723,20 @@ RETURN
 //     stay out of the read model until they are well-formed.) The
 //     landlord/residence anchor is a later increment (needs cap-read.residence +
 //     a landlord→unit ownership link loftspace-domain does not model yet).
+//   - doc_store_name / doc_filename / doc_content_type — the ANCHORED
+//     executed-lease artifact's pointers, the columns the app's GET
+//     /api/lease-document streams by (ObjectGet under RLS). Projected ONLY when
+//     the signedLease attachment exists: the max(CASE …) gate requires BOTH the
+//     attachment object ((app)<-[:signedLease]-(leaseDocObj:object)) AND the
+//     completed docGen outcome ((app)<-[:providedTo]-(docInst:service)) on the
+//     same pre-aggregation combination row, so an un-anchored (still-converging)
+//     document projects null and the GET answers "being generated." The
+//     aggregation forces the lens's first WITH: every other RETURN column is
+//     re-extracted as a WITH-passthrough alias first (the
+//     landlordLeaseApplicationsRead precedent). The attach LINK event reprojects
+//     this plain lens (the link fan-out seeds from both endpoints and the
+//     leaseapp endpoint is the anchor), so the pointers land the moment the
+//     artifact anchors.
 //
 // '= null' / '<> null' is the full engine's null test (not IS NULL); list
 // literals + nanoIdFromKey in RETURN are the cap-read base lens's proven shape.
@@ -661,27 +744,54 @@ const leaseApplicationsReadSpec = `
 MATCH (app:leaseapp)
 MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
+OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
+WITH
+  app.key                        AS entityKey,
+  id.key                         AS applicantKey,
+  u.key                          AS unitKey,
+  u.address.data.line1           AS unitAddress,
+  u.address.data.city            AS unitCity,
+  u.address.data.region          AS unitRegion,
+  u.listing.data.rentAmount      AS unitRent,
+  u.listing.data.rentCurrency    AS unitCurrency,
+  u.listing.data.status          AS unitStatus,
+  u.listing.data.bedrooms        AS unitBedrooms,
+  u.listing.data.bathrooms       AS unitBathrooms,
+  u.listing.data.availableFrom   AS unitAvailableFrom,
+  app.signature.data.signedAt    AS signedAt,
+  app.decision.data.value        AS landlordDecision,
+  app.decision.data.reason       AS declineReason,
+  app.terms.data.moveInDate      AS termsMoveInDate,
+  app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
+  app.terms.data.requestedRent   AS termsRequestedRent,
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.storeName ELSE null END) AS docStoreName,
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.filename ELSE null END) AS docFilename,
+  max(CASE WHEN leaseDocObj.key <> null AND docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType
 RETURN
-  nanoIdFromKey(app.key)         AS app_id,
-  app.key                        AS entity_key,
-  id.key                         AS applicant,
-  u.key                          AS unit_key,
-  u.address.data.line1           AS unit_address,
-  u.address.data.city            AS unit_city,
-  u.address.data.region          AS unit_region,
-  u.listing.data.rentAmount      AS unit_rent,
-  u.listing.data.rentCurrency    AS unit_currency,
-  u.listing.data.status          AS unit_status,
-  u.listing.data.bedrooms        AS unit_bedrooms,
-  u.listing.data.bathrooms       AS unit_bathrooms,
-  u.listing.data.availableFrom   AS unit_available_from,
-  app.signature.data.signedAt    AS signed_at,
-  app.decision.data.value        AS landlord_decision,
-  app.decision.data.reason       AS decline_reason,
-  app.terms.data.moveInDate      AS terms_move_in_date,
-  app.terms.data.leaseTermMonths AS terms_lease_term_months,
-  app.terms.data.requestedRent   AS terms_requested_rent,
-  [nanoIdFromKey(id.key)]        AS authz_anchors
+  nanoIdFromKey(entityKey)       AS app_id,
+  entityKey                      AS entity_key,
+  applicantKey                   AS applicant,
+  unitKey                        AS unit_key,
+  unitAddress                    AS unit_address,
+  unitCity                       AS unit_city,
+  unitRegion                     AS unit_region,
+  unitRent                       AS unit_rent,
+  unitCurrency                   AS unit_currency,
+  unitStatus                     AS unit_status,
+  unitBedrooms                   AS unit_bedrooms,
+  unitBathrooms                  AS unit_bathrooms,
+  unitAvailableFrom              AS unit_available_from,
+  signedAt                       AS signed_at,
+  landlordDecision               AS landlord_decision,
+  declineReason                  AS decline_reason,
+  termsMoveInDate                AS terms_move_in_date,
+  termsLeaseTermMonths           AS terms_lease_term_months,
+  termsRequestedRent             AS terms_requested_rent,
+  docStoreName                   AS doc_store_name,
+  docFilename                    AS doc_filename,
+  docContentType                 AS doc_content_type,
+  [nanoIdFromKey(applicantKey)]  AS authz_anchors
 `
 
 // landlordLeaseApplicationsReadSpec is the LANDLORD-facing protected Postgres
