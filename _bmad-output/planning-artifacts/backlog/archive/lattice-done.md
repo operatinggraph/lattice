@@ -2,6 +2,16 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-07 · `921fda4` · [lease-signing/processor/lattice-pkg] real-actor-write-auth-e2e Phase 1 items 4+6 — consumer scope=self grant + live e2e proof; 2 platform bugs fixed along the way; 3-layer reviewed, fixed forward
+- 2026-07-06 · `265d5d8` · [Processor/Loom/Weaver] script-read-posture Fires 1–2 — optionalReads + enumerations metadata + read-posture lint; 3-layer reviewed, CI green
+- 2026-07-06 · `5ad5d6e` · [Makefile] real-actor-write-auth-e2e Phase 1 item 3 — `up-full-capability` + `dev-seed-staff` (staff identity holds operator); lead-reviewed, live-verified except the AssignRole leg (permission-gated); item 4 (e2e) next
+- 2026-07-06 · `cf102b4` · [Gateway/apps] real-actor-write-auth-e2e Phase 1 item 1 — shared dev-IdP trust (loftspace/clinic dev-auth now signs+verifies with the Gateway's checked-in dev key); lead-reviewed; item 3 (up-full-capability) next
+- 2026-07-06 · `88815a8` · [Vault/Refractor] Personal Lens Fire PL.5 CLOSED — IssueSessionKey transient-key RPC + ciphertext passthrough marking; Gate-3 vector 5 e2e; 3-layer reviewed, fixed forward (rowHasCiphertext false-positive)
+- 2026-07-06 · `512ce42` · [Chronicler] chronicler-host-reconciliation CLOSED — live cutover done (attended): refractor/chronicler cycled, health green, no cypherRule errors; NATS container needed a restart (torn bind-mount)
+- 2026-07-06 · `0ae926a` · [Refractor/Processor] refractor-publish-acl-gap — ops.system + lattice.sync.> NATS grants (refractor + processor, co-located privacyworker); 2 natsperm proof vectors; 3-layer reviewed, clean
+- 2026-07-06 · `b0530b8` · [Weaver] Registry cleanup edge branches — targetId-rename + pattern-alias-reassignment coverage (33%→89%, 50%→100%); test-only, lead-reviewed
+- 2026-07-06 · `5e83939` · [Privacy/Object Store] Crypto-shred Fire 3 — erasure-coverage + §4.2 multi-party-independence tests over the real Loupe GET/decrypt handlers; test-only, lead-reviewed; Fire 4 (vertical consumer) next
+- 2026-07-06 · `6169671` · [Privacy/Object Store] Crypto-shred Fire 2 — Loupe trusted-client encrypt/decrypt path (AES-256-GCM, oid-bound AAD, Vault WrapKey/UnwrapKey RPCs); 3-layer reviewed, fixed forward (AAD binding); Fire 3 next
 - 2026-07-06 · `98ac889` · [Refractor] Personal Lens Fire PL.4 — Hydration Hook (`personal.hydrate` control RPC, cold bulk projection + terminal marker); 3-layer reviewed, fixed forward (SetRevisionCursor CAS race)
 - 2026-07-06 · `6cfda76` · [Weaver] weaver-exhausted-escalation-and-model CLOSED (Fire 9 Inc1) — exhausted budget escalates to Augur or raises `GapBudgetExhausted`; `augur.model` threaded; 3-layer reviewed, fixed forward (mark-storm bug)
 - 2026-07-06 · `7f34136` · [LoftSpace/Weaver planner] Lease-renewal R3 CLOSED — `renewalsRead` dual-anchor lens + tenant/landlord Renewal cards + task CTAs; 3-layer reviewed, fixed forward (co-manager read-access gap, numeric coercion)
