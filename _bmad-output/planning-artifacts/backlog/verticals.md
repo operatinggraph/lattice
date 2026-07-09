@@ -20,6 +20,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Wellness vertical** (classes) | `wellness-domain` (studio + class/session + booking) reusing clinic-domain's generic slot-claim guard (`slot_cells`/`claim_cell`; only hub + aspect names change) + thin FE (schedule grid · roster · my-classes). **Resident-rate** payoff: CreateBooking reads the booker's live lease (`contextHint.reads`; verify `heldBy` the booker → no over-grant) then applies the member rate + writes `booking residentRate lease`. | Wellness | pkg + FE | ★★ | L | 🏗️ building · [design](../../implementation-artifacts/wellness-vertical-design.md) · next: FE |
 | **Mixed-use composition surfaces** | The "more than the sum" beats across lenses the one-liner omitted: **front-desk** unified resident context (lease + visit + open tab + booked class in one lookup, surfaced before asked) and **operations** portfolio-pulse aggregate (occupancy + service-attach-rate across packages) — views that exist only because the packages share one graph. Aggregate lenses + FE across both apps + Loupe. | Café/Wellness | FE + pkg | ★★★ | M | 📋 ready (after Wellness) |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | 📋 ready (after Wellness) |
+| **Clinic patient picker doesn't scale** | Front-desk booking (`#patient` select, `app.js:340`) + `GET /api/staff/patients` (`patients.go:84`) both return/render the FULL unfiltered roster with no name-filter/search — every booking starts by scrolling a raw `<select>` of every patient the clinic has ever seen. Fine at demo scale, a real front-desk workflow blocker past a few dozen patients. Add a name-ILIKE query param to `queryPatients` + a debounced-input/typeahead replacing the plain select (same pattern, lower urgency, for `#provider`). | Clinic | pkg + FE | ★★ | S | 📋 ready |
 
 **Spec** = the go-live composition demo (public-presence site, `localhost:7900/#demo`) — four lenses × package
 toggles. PO ruling: all composition is **package-level, no Lattice block** (ledger `heldFor` anchor · generic
@@ -32,11 +33,11 @@ relation is `heldFor` (the demo's `ACC88`/`BK7`/`L204` + `billedWith` are cosmet
 Compact rotation memory only — PO *findings* are filed as demand rows above + the Done log; the verbose
 dated run-logs live in git history. Rotate LoftSpace ↔ Clinic, staggered from the Steward.
 
-- **Rotation to date:** LoftSpace ×11, Clinic ×8 (last: LoftSpace 2026-07-04, drove the full apply→sign→approve flow live end-to-end; filed a My-Applications SELECT-omission bug).
+- **Rotation to date:** LoftSpace ×11, Clinic ×9 (last: Clinic 2026-07-09, drove CreateProvider→CreatePatient→CreateAppointment live end-to-end incl. the double-book guard; filed the patient-picker scale gap).
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. Both apps exist + are exercisable live (`:7788` / `:7799`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-07-06:** Enriched Café+Wellness → 4 grounded, sequenced rows (Café first) + verified no platform block; spec = the go-live composition demo.
-- **Next:** Clinic.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
