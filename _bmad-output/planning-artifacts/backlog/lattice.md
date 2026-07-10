@@ -48,7 +48,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · Weaver has no lens-schema visibility at install time to validate against (checked 2026-07-10) — a mechanical validator isn't possible as scoped, needs a real cross-component mechanism |
-| **[Processor] `stub-auth-active` health alert has no clear/TTL path** | `EmitAlert` writes via plain `KVPut` (no TTL, unlike `RecordCommitConflict`/`RecordClaimAttempt`'s `KVPutWithTTL`) — self-heals only by fresh re-emission. Mains now refuse a stub-mode start, so it can never re-fire — one historical event stays "warning" forever until the bucket is wiped. Needs a Designer call on reliably setting+clearing a "currently happening" signal. | ★ | S | 📋 needs-design (Designer) · `internal/processor/health_alerts.go:214` |
 
 ### Survey log (round-robin rotation)
 
@@ -186,6 +185,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-10 · `e2a6a27` · [Processor] stub-auth-active-alert-ttl — `EmitAlert` joins Category B's `diagnosticTTL` (re-armed each write); self-clears instead of staying "warning" forever; CI green
 - 2026-07-10 · `c0875e6` · [Core] substrate-untested-arms — Wrap adapter (incl. closed-conn), IsConnectionError/IsInvalidKeyError classifiers, DocumentEnvelope.Update, KVPutWithTTL, KVDeleteRevision; cov 75.6%→77.5%; CI green
 - 2026-07-10 · `20b8707` · [Bootstrap] bootstrap-untested-arms — two-phase-commit recovery/error paths (nanoid.go) + toMap map/struct/marshal-error/non-object-error branches (envelope.go, no prior test file); cov 61.9%→65.5%; CI green
 - 2026-07-10 · `d6161aa` · [Refractor] natskv-guard-edge-branches (guardedWrite half) — kvStore seam + scripted-fake tests cover CAS retry (Create+Update) and exhaustion; CI green
