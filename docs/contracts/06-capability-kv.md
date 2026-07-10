@@ -447,12 +447,16 @@ A per-actor aggregating lens is driven by **declarative aspects**, not core Go k
 canonical name (the per-`CanonicalName` `switch` in `cmd/refractor/main.go` and the bespoke
 `internal/refractor/capabilityenv/` wrappers are **deleted** in Story 12.4). A `meta.lens` definition
 opts in with a new aspect **`projectionKind: "actorAggregate"`**; Refractor then compiles a
-`ProjectionPlan{Execution, Invalidation, Output}`:
+`ProjectionPlan{Execution, Output}` (plus an `AuthPlane` classification flag):
 
 - **Execution** — evaluate the lens for a bound `$actorKey` (the existing per-actor eval).
-- **Invalidation** — a **compiled reverse-traversal plan** derived from the lens MATCH that yields the
-  affected anchors from a changed vertex / link / aspect, replacing the broad `ActorEnumerator` BFS.
-  The covered-construct set is validated by the Story 12.2 spike.
+- **Fan-out** — on a changed vertex / link / aspect the affected anchors are enumerated by the **broad
+  adjacency BFS** (`ActorEnumerator`), a **sound superset** that can never miss an affected anchor: it
+  over-reprojects rather than under-reprojecting a security-plane lens, and is **unconditional** (identical
+  for auth-plane and business lenses). *There is no compiled narrow-invalidation plan member — the
+  Story-12.2 reverse-traversal compiler was retired (`retire-simple-engine`) in favor of the
+  always-correct broad BFS; the narrow path was an efficiency optimization whose per-lens coverage analysis
+  (and the activation gate guarding its incompleteness) was not worth the complexity.*
 - **Output descriptor** (lens-definition aspects) — replaces the four Go wrappers:
 
   | Aspect | Meaning |
@@ -464,9 +468,15 @@ opts in with a new aspect **`projectionKind: "actorAggregate"`**; Refractor then
   | `realnessFilter` | `{ field }` — drop degenerate collect artifacts (e.g. `{taskKey:null}`); generalizes `realEphemeralGrants` / `realOpenTasks` |
   | `freshness` | `auto` — stamp `projectionSeq` (§6.2 guard) + the widened `projectedFromRevisions` (§6.3) |
 
-- **Fail closed on the security plane:** an **auth-plane** `actorAggregate` lens whose MATCH uses a
-  construct the narrow invalidation compiler does not cover **fails activation**; a non-auth lens falls
-  back to broad BFS with a warning.
+- **Auth-plane classification (fail closed where it counts):** a lens is **auth-plane** when it projects
+  into `capability-kv` (the `cap.*` write-authorization surface) **or** into a Postgres grant table
+  (`actor_read_grants`, §6.14 read-authorization) — derived from the bucket/target, never a canonical-name
+  list. Auth-plane makes the lens **guarded**: its writes carry the §6.2 monotonic-seq guard (guarded
+  tombstone) so a stale CDC replay can never resurrect a revoked grant, and it alerts at the auth-plane
+  (error) heartbeat severity rather than the business-lens (warning) tier. **Activation fails closed** on
+  an invalid Output descriptor, or when a guarded lens's target adapter cannot enforce the write guard
+  (e.g. a non-NATS-KV target) — a guarded lens must never run unguarded. Because fan-out is broad BFS for
+  every lens, there is **no construct-coverage activation gate**.
 - **One mechanism, not two:** `emptyBehavior: softDelete` reuses the §6.2 guard's tombstone.
 - **`capabilityRoleIndex` is NOT an `actorAggregate`** — it is keyed by `operationType`. It keeps a
   bespoke path or gets a separate `operationAggregate` kind (decided in Story 12.4).

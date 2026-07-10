@@ -91,7 +91,6 @@ and stale-marker corrections were applied in the filing commit (Done log); these
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **section-6-13-invalidation-amendment** | §6.13 still describes the retired narrow `Invalidation` plan member + a construct-coverage fails-activation rule; shipped code (retire-simple-engine) uses an unconditional broad-BFS `ActorEnumerator`, and auth-plane now drives only the §6.2 write-guard + heartbeat severity (no construct gate). | ★★ | S | 📐 fix drafted, UNCOMMITTED in the tree for Andrew |
 
 ### Weaver re-review (2026-07-06)
 
@@ -187,6 +186,7 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 
 - 2026-07-10 · `eb7243c` · [Weaver] weaver-admission-pkgmgr-authoring — `WeaverTargetSpec.Admission` authoring path + install-time validation; lease-signing paces backgroundCheck/stripe; CI green
 - 2026-07-10 · `710f1f0` · [Weaver/Bridge/Gateway/Loom/objmgr] health-issue-since-field — stamp+persist Contract #5 §5.5 `since` on every health issue, platform-wide; CI green
+- 2026-07-09 · [Contract #6] §6.13 invalidation-amendment ratified — reconciled to retire-simple-engine's unconditional broad-BFS + auth-plane-guard reality (`6e0e205`); no narrow Invalidation member / construct gate
 - 2026-07-09 · `e35cc38` · [Contracts] §6.14 protected-Delete+M5 wildcard, §7.3 bootstrap.json example, §10 task-revive text ratified — reconciliation to shipped code (94087bd/128111f); no code change
 - 2026-07-09 · [F-004] Package version upgrade / DDL hot-reload CLOSED — Fires 1a-3 shipped; optional Fire-2 live-e2e deferred — [design](../../implementation-artifacts/package-version-upgrade-design.md)
 - 2026-07-09 · `e97305f` · [scripts] verify-package-clinic-domain — fixed a nondeterministic map-overwrite hiding CreateAppointment's 2nd (self/consumer) permission vertex; CI green
