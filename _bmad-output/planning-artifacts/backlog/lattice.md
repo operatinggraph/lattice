@@ -47,8 +47,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
-| **[Refractor] NatsKVAdapter guardedWrite CAS-contention edge branches uncovered** | `guardedWrite`'s revision-conflict retry loop + CAS-exhaustion path (53.8%) — untested; not racelessly triggerable without a store-injection seam (residual, like `capabilityread-error-arm-tests`'s Get-failure arm). | ★ | XS–S | 📋 · `internal/refractor/adapter/natskv.go:192` |
-| **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 · `internal/weaver/evaluator.go` (`staleMark`) |
+| **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · Weaver has no lens-schema visibility at install time to validate against (checked 2026-07-10) — a mechanical validator isn't possible as scoped, needs a real cross-component mechanism |
 | **[Processor] `stub-auth-active` health alert has no clear/TTL path** | `EmitAlert` writes via plain `KVPut` (no TTL, unlike `RecordCommitConflict`/`RecordClaimAttempt`'s `KVPutWithTTL`) — self-heals only by fresh re-emission. Mains now refuse a stub-mode start, so it can never re-fire — one historical event stays "warning" forever until the bucket is wiped. Needs a Designer call on reliably setting+clearing a "currently happening" signal. | ★ | S | 📋 needs-design (Designer) · `internal/processor/health_alerts.go:214` |
 
 ### Survey log (round-robin rotation)
@@ -187,6 +186,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-10 · `d6161aa` · [Refractor] natskv-guard-edge-branches (guardedWrite half) — kvStore seam + scripted-fake tests cover CAS retry (Create+Update) and exhaustion; CI green
 - 2026-07-10 · `9812231` · [Security] Contract #11 external actor authN — per-kid opaque/nanoid subject binding + IdP-provenance `.idpBinding` aspect; CI green
 - 2026-07-10 · `61859e0` · [Refractor] convergence-lens-where-guard — `ValidateNoFilteringWhereForConvergence` activation-time guard; exempts actorAggregate lenses (unroutedTasks precedent); CI green
 - 2026-07-10 · `0fd7f3f` · [CI] unit-job worker-packing experiment — natsperm/lease-signing isolated onto a dedicated worker, measured no win vs. noisy baseline, reverted (c2f25bb → 0fd7f3f); CI green
