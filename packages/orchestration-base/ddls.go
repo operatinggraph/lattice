@@ -425,8 +425,11 @@ def execute(state, op):
             # Not currently queued: either already claimed, or never queued.
             # A re-claim by the SAME actor (their own assignedTo already
             # committed) is an idempotent no-op; anyone else gets
-            # TaskAlreadyClaimed. kv.Read tolerates absence (on-demand, not a
-            # declared read -- the CreateTask idempotency-check idiom).
+            # TaskAlreadyClaimed.
+            # read-posture: (d) declared in contextHint.optionalReads by
+            # ClaimTask's dispatcher (test envelope today — no production
+            # dispatcher yet, hard case 3, script-read-posture-design §13);
+            # absence is a legitimate not-yet-claimed-by-this-actor branch
             assigned_doc = kv.Read(assigned_lnk)
             if assigned_doc != None and not assigned_doc.isDeleted:
                 return {"mutations": [], "events": []}
@@ -438,6 +441,9 @@ def execute(state, op):
         # The claimant must hold the queued role: a single known-key
         # on-demand read (both the claimant and the role are now known).
         holds_role_lnk = "lnk.identity." + claimant_id + ".holdsRole.role." + role_id
+        # read-posture: (e) per-candidate follow-up read off the queuedFor
+        # enumeration above (data-derived key — the role isn't known until
+        # the enumeration resolves, so it cannot be pre-declared)
         holds_doc = kv.Read(holds_role_lnk)
         if holds_doc == None or holds_doc.isDeleted:
             fail("NotAuthorizedToClaim: " + claimant + " does not hold role " + role_key)

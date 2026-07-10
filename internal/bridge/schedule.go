@@ -246,7 +246,7 @@ func (e *Engine) handleFiredPoll(ctx context.Context, handle string, payload sch
 		"status":      string(dispatch.Result.Status),
 		"result":      dispatch.Result.Detail,
 	}
-	if err := e.act.submit(ctx, replyReqID, payload.ReplyOp, replyPayload); err != nil {
+	if err := e.act.submit(ctx, replyReqID, payload.ReplyOp, replyPayload, replyOpReads(payload.ReplyOp, handle)); err != nil {
 		e.logger.Error("bridge: publish poll-resolved replyOp failed; nak with delay",
 			"requestId", replyReqID, "handle", handle, "adapter", payload.Adapter, "err", err)
 		e.issues.set("publish:"+payload.Adapter, severityWarning, codeReplyPublishFail,
@@ -272,7 +272,7 @@ func (e *Engine) handleFiredTimeout(ctx context.Context, handle string, payload 
 		"status":      string(OutcomeFailed),
 		"result":      "external call did not resolve before deadline",
 	}
-	if err := e.act.submit(ctx, replyReqID, payload.ReplyOp, replyPayload); err != nil {
+	if err := e.act.submit(ctx, replyReqID, payload.ReplyOp, replyPayload, replyOpReads(payload.ReplyOp, handle)); err != nil {
 		e.logger.Error("bridge: publish timeout replyOp failed; nak with delay",
 			"requestId", replyReqID, "handle", handle, "err", err)
 		e.issues.set("publish:"+payload.Adapter, severityWarning, codeReplyPublishFail,

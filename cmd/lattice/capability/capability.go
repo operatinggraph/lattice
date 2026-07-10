@@ -183,6 +183,7 @@ closes the approve to invalid if it no longer validates.`,
 			if err != nil {
 				return fmt.Errorf("generate requestId: %w", err)
 			}
+			proposalKey := "vtx.capabilityproposal." + proposalID
 			env := &processor.OperationEnvelope{
 				RequestID:     requestID,
 				Lane:          processor.LaneDefault,
@@ -190,6 +191,10 @@ closes the approve to invalid if it no longer validates.`,
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 				Payload:       json.RawMessage(payloadBytes),
+				// read-posture class (a) — proposalId is addressed directly by
+				// the caller, no claim indirection (script-read-posture-design
+				// §13).
+				ContextHint: &processor.ContextHint{Reads: []string{proposalKey + ".review"}},
 			}
 
 			reply, err := output.SubmitOp(ctx, conn, env)

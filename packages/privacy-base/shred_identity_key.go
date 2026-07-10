@@ -39,12 +39,12 @@ const keyShreddedEventDDL = "privacy.keyShredded"
 // every future Encrypt/Decrypt for this identity regardless of process
 // restarts.
 //
-// The op hydrates ONLY the identity vertex root (ContextHint.Reads =
-// [identityKey], the target-existence guard, mirroring MarkExpired's
-// vertex_alive check) — never the piiKey aspect itself, since a declared but
-// absent contextHint key fails hydration fatally (HydrationMiss) and piiKey
-// may legitimately not exist yet. The script instead uses the kv.Read(key)
-// on-demand seam (§2.5), which tolerates absence (returns None).
+// The op hydrates the identity vertex root via ContextHint.Reads = [identityKey]
+// (the target-existence guard, mirroring MarkExpired's vertex_alive check) and
+// the piiKey aspect via ContextHint.OptionalReads = [identityKey + ".piiKey"]
+// (read-posture class (d), §2.5/§13) — declared-absence-tolerant since the
+// identity may never have received a sensitive write; a declared `reads` entry
+// would fault hydration fatally (HydrationMiss) on that legitimate absence.
 //
 // The DDL also admits RecordShredFinalization{identityKey, step} — the
 // Fire-4b durable progress record the two async shred listeners submit under
@@ -154,13 +154,14 @@ def execute(state, op):
 
         pii_key_key = identity_key + ".piiKey"
 
-        # kv.Read tolerates absence (-> None), unlike a declared contextHint
-        # key (which would fail hydration fatally) -- the identity may never
-        # have received a sensitive write. Either way something durable is
-        # ALWAYS written: LocalBackend's shredded-identity deny-list is
-        # in-memory only, so skipping the mutation when no piiKey exists would
-        # let a sensitive write arriving after a Processor restart mint a
-        # fresh, unshredded key and silently reopen the identity to PII.
+        # kv.Read tolerates absence (-> None) -- the identity may never have
+        # received a sensitive write. Either way something durable is ALWAYS
+        # written: LocalBackend's shredded-identity deny-list is in-memory
+        # only, so skipping the mutation when no piiKey exists would let a
+        # sensitive write arriving after a Processor restart mint a fresh,
+        # unshredded key and silently reopen the identity to PII.
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # Loupe UI's ShredIdentityKey submit (cmd/loupe/web/js/views/graph.js)
         existing = kv.Read(pii_key_key)
         if existing != None and not existing.isDeleted:
             data = dict(existing.data)

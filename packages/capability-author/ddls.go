@@ -383,6 +383,9 @@ def execute(state, op):
         # real proposal vertex is resolved via the claim's .target aspect (a
         # single known-key read), never by treating externalRef as the proposal id.
         claim_handle = required_bare_id(p, "externalRef")
+        # read-posture: (a) declared in contextHint.reads by the bridge replyOp
+        # dispatcher (internal/bridge/dispatch.go replyOpReads, derived from
+        # externalRef alone)
         claim_target_doc = kv.Read("vtx.capabilityauthorclaim." + claim_handle + ".target")
         if not alive(claim_target_doc):
             fail("UnknownCapabilityAuthorClaim: no live claim for externalRef " + claim_handle)
@@ -390,6 +393,11 @@ def execute(state, op):
         if proposal_key == None or type(proposal_key) != type(""):
             fail("CorruptCapabilityAuthorClaim: " + claim_handle + " has no proposalKey")
 
+        # read-posture: (a) UNDECLARABLE — chained (script-read-posture-design
+        # §13 hard case 1). proposal_key is resolved from the :386 claim read's
+        # result; the bridge replyOp dispatcher knows only externalRef, so this
+        # key cannot be declared in contextHint.reads ahead of the script run.
+        # Sanctioned live known-key read; absence is still a wiring fault.
         request_doc = kv.Read(proposal_key + ".request")
         if not alive(request_doc):
             fail("UnknownCapabilityProposal: no live .request aspect for " + proposal_key + " (RequestCapabilityAuthoring must commit write-ahead)")
@@ -522,6 +530,8 @@ def execute(state, op):
         if verdict != "approve" and verdict != "reject":
             fail("InvalidArgument: verdict: must be one of approve, reject; got " + verdict)
 
+        # read-posture: (a) declared in contextHint.reads by the cmd/lattice
+        # "capability review" CLI dispatcher
         review_doc = kv.Read(proposal_key + ".review")
         if not alive(review_doc):
             fail("UnknownCapabilityProposal: no recorded review for " + proposal_key + " (RecordCapabilityProposal must commit a verdict before review)")
@@ -610,6 +620,8 @@ def execute(state, op):
         if package_type != "package":
             fail("InvalidArgument: packageKey: required vtx.package.<NanoID>; got " + package_key)
 
+        # read-posture: (a) declared in contextHint.reads by the cmd/lattice-pkg
+        # submitMarkApplied dispatcher
         review_doc = kv.Read(proposal_key + ".review")
         if not alive(review_doc):
             fail("UnknownCapabilityProposal: no recorded review for " + proposal_key)
@@ -632,6 +644,8 @@ def execute(state, op):
         # syntactically valid but nonexistent/tombstoned/unrelated packageKey
         # could otherwise mark this proposal applied with no server-side proof
         # it names the package the proposal actually targeted.
+        # read-posture: (a) declared in contextHint.reads by the cmd/lattice-pkg
+        # submitMarkApplied dispatcher (see the .review note above)
         target_doc = kv.Read(proposal_key + ".target")
         if not alive(target_doc):
             fail("UnknownCapabilityProposal: no recorded target for " + proposal_key)
@@ -640,6 +654,8 @@ def execute(state, op):
         if td != None and "packageName" in td:
             target_package_name = td["packageName"]
 
+        # read-posture: (a) declared in contextHint.reads by the cmd/lattice-pkg
+        # submitMarkApplied dispatcher (see the .review note above)
         manifest_doc = kv.Read(package_key + ".manifest")
         if not alive(manifest_doc):
             fail("UnknownPackage: " + package_key + " is not a live installed package")
@@ -791,6 +807,9 @@ def execute(state, op):
         adapter = required_string(p, "adapter")
         reply_op = required_string(p, "replyOp")
 
+        # read-posture: (a) declared in contextHint.reads by Loom's
+        # inferExternalTaskReads (internal/loom/externaltask_params.go) —
+        # every externalTask step's subjectKey is declared unconditionally
         subject_doc = kv.Read(subject_key)
         if not alive(subject_doc):
             fail("UnknownCapabilityProposal: " + subject_key)

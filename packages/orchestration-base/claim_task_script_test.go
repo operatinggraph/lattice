@@ -155,6 +155,18 @@ func runClaimTask(t *testing.T, claimant string, hydrated map[string]processor.V
 			Actor:         claimant,
 			SubmittedAt:   "2026-06-04T00:00:00Z",
 			Payload:       payload,
+			// read-posture — no production dispatcher yet (hard case 3,
+			// script-read-posture-design §13); the test envelope carries the
+			// declarations the future UI/dispatcher inherits. OptionalReads
+			// is class (d) (every runClaimTask caller claims as ctClaimant);
+			// Enumerations declares the op's one class-(e) kv.Links call
+			// (the queuedFor lookup) as metadata.
+			ContextHint: &processor.ContextHint{
+				OptionalReads: []string{ctAssignedLnk},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: ctTaskKey, Relation: "queuedFor", Direction: "out"},
+				},
+			},
 		},
 		Hydrated:     hydrated,
 		ScriptSource: taskScript(t),

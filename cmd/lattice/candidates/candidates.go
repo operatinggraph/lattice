@@ -171,6 +171,13 @@ warns and requires --force to proceed without edge migration.`,
 				return fmt.Errorf("generate requestId: %w", err)
 			}
 
+			reads := []string{
+				primaryKey, secondaryKey,
+				primaryKey + ".state", primaryKey + ".mergedInto",
+				secondaryKey + ".state", secondaryKey + ".mergedInto",
+			}
+			reads = append(reads, edges...)
+
 			env := &processor.OperationEnvelope{
 				RequestID:     requestID,
 				Lane:          processor.LaneDefault,
@@ -178,6 +185,18 @@ warns and requires --force to proceed without edge migration.`,
 				Actor:         actor,
 				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 				Payload:       json.RawMessage(payload),
+				// read-posture (script-read-posture-design §13): Reads is
+				// class (a) — the vertices/aspects/edges this CLI already
+				// resolved above. Enumerations declares the op's one
+				// class-(e) kv.Links call (the secondary-has-open-tasks
+				// guard) as metadata — bounded + paged, never hydrated; the
+				// declaration feeds the Edge mirror-coverage gate.
+				ContextHint: &processor.ContextHint{
+					Reads: reads,
+					Enumerations: []processor.EnumerationHint{
+						{Hub: secondaryKey, Relation: "assignedTo", Direction: "in"},
+					},
+				},
 			}
 
 			reply, err := submitOp(ctx, conn, env)

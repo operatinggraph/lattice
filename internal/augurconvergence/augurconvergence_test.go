@@ -183,6 +183,14 @@ func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 
 func (h *harness) submitOp(operationType, class, actor string, payload map[string]any) *processor.OperationReply {
 	h.t.Helper()
+	return h.submitOpReads(operationType, class, actor, payload, nil)
+}
+
+// submitOpReads is submitOp with an explicit ContextHint.Reads declaration —
+// the read-posture class-(a) test-envelope wiring for an op with no
+// production dispatcher yet (hard case 3, script-read-posture-design §13).
+func (h *harness) submitOpReads(operationType, class, actor string, payload map[string]any, reads []string) *processor.OperationReply {
+	h.t.Helper()
 	payloadBytes, _ := json.Marshal(payload)
 	reqID, err := substrate.NewNanoID()
 	require.NoError(h.t, err)
@@ -190,6 +198,9 @@ func (h *harness) submitOp(operationType, class, actor string, payload map[strin
 		RequestID: reqID, Lane: processor.LaneDefault, OperationType: operationType,
 		Class: class, Actor: actor, SubmittedAt: time.Now().UTC().Format(time.RFC3339),
 		Payload: json.RawMessage(payloadBytes),
+	}
+	if len(reads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads}
 	}
 	envBytes, _ := json.Marshal(env)
 	inbox := nats.NewInbox()
@@ -415,8 +426,12 @@ func TestAugurConvergence_MaliciousProposalInvalid(t *testing.T) {
 // harness's Processor pipeline.
 func (h *harness) approve(handle string) *processor.OperationReply {
 	h.t.Helper()
-	return h.submitOp("ReviewProposal", "augurproposal", bootstrap.BootstrapIdentityKey, map[string]any{
+	proposalKey := "vtx.augurproposal." + handle
+	return h.submitOpReads("ReviewProposal", "augurproposal", bootstrap.BootstrapIdentityKey, map[string]any{
 		"externalRef": handle, "verdict": "approve",
+	}, []string{
+		proposalKey + ".review", proposalKey + ".proposed",
+		proposalKey + ".confidence", proposalKey + ".gap",
 	})
 }
 

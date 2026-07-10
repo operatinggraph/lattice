@@ -42,6 +42,7 @@ type gatewayOperationRequest struct {
 	Class         string          `json:"class,omitempty"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
 	Reads         []string        `json:"reads,omitempty"`
+	OptionalReads []string        `json:"optionalReads,omitempty"`
 }
 
 // gatewayErrorBody is the JSON shape the Gateway answers with for a failure

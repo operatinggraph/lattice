@@ -51,6 +51,9 @@ def _resolve_subject_token(param_name, token, subject_key):
     if aspect != "":
         key = subject_key + "." + aspect
 
+    # read-posture: (a) declared in contextHint.reads by Loom's
+    # inferExternalTaskReads (internal/loom/externaltask_params.go) — every
+    # subject.<aspect>.data.<field> param token contributes its aspect key
     node = kv.Read(key)
     if node == None:
         fail("MissingSubjectData: " + param_name + " = " + token + " (key " + key + " absent)")

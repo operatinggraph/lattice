@@ -20,7 +20,15 @@ type opEnvelope struct {
 	Actor         string          `json:"actor"`
 	SubmittedAt   string          `json:"submittedAt"`
 	Payload       json.RawMessage `json:"payload"`
+	ContextHint   *contextHint    `json:"contextHint,omitempty"`
 	AuthContext   *authContext    `json:"authContext,omitempty"`
+}
+
+// contextHint mirrors internal/processor.ContextHint (Contract #2 §2.5) — the
+// same local-copy convention Weaver's and Loom's actuators use, since the
+// bridge is substrate-only and imports no internal/processor.
+type contextHint struct {
+	Reads []string `json:"reads,omitempty"`
 }
 
 type authContext struct {
@@ -51,8 +59,12 @@ func newActuator(conn *substrate.Conn, lane, actor string) *actuator {
 // fields. authContext is omitted: the bridge service actor is root-equivalent
 // (operator scope:"any") and authorizes regardless of target, and the bridge is
 // type-agnostic so it never synthesizes a typed claim-vertex target (the real
-// replyOp DDL supplies any narrow target).
-func (a *actuator) submit(ctx context.Context, requestID, operation string, payload map[string]any) error {
+// replyOp DDL supplies any narrow target). reads is the read-posture class-(a)
+// key set the replyOp DDL requires (Contract #2 §2.5, script-read-posture-design
+// §13 dispatcher map) — derivable from externalRef alone since that is all the
+// bridge ever knows about the reply; nil for a replyOp with no declarable read
+// (the DDL's own kv.Read stays lazy on-demand, unchanged behavior).
+func (a *actuator) submit(ctx context.Context, requestID, operation string, payload map[string]any, reads []string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("bridge: marshal replyOp payload: %w", err)
@@ -64,6 +76,9 @@ func (a *actuator) submit(ctx context.Context, requestID, operation string, payl
 		Actor:         a.actor,
 		SubmittedAt:   substrate.FormatTimestamp(time.Now()),
 		Payload:       body,
+	}
+	if len(reads) > 0 {
+		env.ContextHint = &contextHint{Reads: reads}
 	}
 	data, err := json.Marshal(env)
 	if err != nil {

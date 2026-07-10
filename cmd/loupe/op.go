@@ -15,13 +15,17 @@ import (
 // the Processor's "payload is required" check passes). reads is the optional
 // Contract #2 §2.5 declared read set — a read-dependent op (Tombstone/Update/
 // Assign/Grant…) must declare the keys it reads or its script sees no state and
-// fails (e.g. UnknownRole). Empty/blank entries are dropped.
+// fails (e.g. UnknownRole). optionalReads is the class-(d) absence-tolerant
+// counterpart (§2.5) — a key the op's own read-before-create/dedup branch may
+// legitimately find absent; unlike reads, an absent optionalReads key never
+// faults hydration. Empty/blank entries are dropped from both.
 type opRequest struct {
 	OperationType string          `json:"operationType"`
 	Lane          string          `json:"lane,omitempty"`
 	Class         string          `json:"class,omitempty"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
 	Reads         []string        `json:"reads,omitempty"`
+	OptionalReads []string        `json:"optionalReads,omitempty"`
 }
 
 // buildEnvelope turns a parsed opRequest into a processor.OperationEnvelope,
@@ -56,8 +60,10 @@ func buildEnvelope(req opRequest, requestID, actor string, now time.Time) (*proc
 		Class:         req.Class,
 		Payload:       payload,
 	}
-	if reads := cleanReads(req.Reads); len(reads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads}
+	reads := cleanReads(req.Reads)
+	optionalReads := cleanReads(req.OptionalReads)
+	if len(reads) > 0 || len(optionalReads) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
 	}
 	return env, nil
 }
@@ -77,6 +83,7 @@ func gatewayRequestFromEnvelope(env *processor.OperationEnvelope) gatewayOperati
 	}
 	if env.ContextHint != nil {
 		req.Reads = env.ContextHint.Reads
+		req.OptionalReads = env.ContextHint.OptionalReads
 	}
 	return req
 }

@@ -496,18 +496,18 @@ def execute(state, op):
             if ch not in nanoid_alphabet:
                 fail("InvalidArgument: targetActorKey: id segment must be NanoID-alphabet")
 
-        # kv.Read, NOT a contextHint read: target_actor_key legitimately may
-        # not exist yet (the fresh-actor case), and a declared-but-absent
-        # read faults (HydrationMiss) before the script ever runs — exactly
-        # what kv.Read avoids (mirrors orchestration-base CreateTask). Unlike
-        # CreateTask, no op in this package (or anywhere) ever tombstones a
-        # bare identity vertex, so there is no un-tombstone-and-recreate case
-        # to self-heal here: ANY existing record — live or (hypothetically)
-        # tombstoned — is already-provisioned. Treating a tombstoned record
-        # as absent and falling through to "create" would hit a hard
-        # RevisionConflict at commit (create-only conditioning targets the
-        # NATS subject's last sequence, not its logical isDeleted flag), so
-        # deliberately not mirroring CreateTask's isDeleted branch here.
+        # target_actor_key legitimately may not exist yet (the fresh-actor
+        # case). Unlike CreateTask, no op in this package (or anywhere) ever
+        # tombstones a bare identity vertex, so there is no
+        # un-tombstone-and-recreate case to self-heal here: ANY existing
+        # record — live or (hypothetically) tombstoned — is
+        # already-provisioned. Treating a tombstoned record as absent and
+        # falling through to "create" would hit a hard RevisionConflict at
+        # commit (create-only conditioning targets the NATS subject's last
+        # sequence, not its logical isDeleted flag), so deliberately not
+        # mirroring CreateTask's isDeleted branch here.
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # Gateway's provisionActorIfNeeded dispatcher (internal/gateway/gateway.go)
         existing = kv.Read(target_actor_key)
         if existing != None:
             # No "response" here: the write-path reply-constraint rejects a
@@ -526,6 +526,9 @@ def execute(state, op):
         consumer_role_key = p.consumerRoleKey if hasattr(p, "consumerRoleKey") else None
         if consumer_role_key != "__EXPECTED_CONSUMER_ROLE_KEY__":
             fail("InvalidArgument: consumerRoleKey: must be the identity-domain consumer role")
+        # read-posture: (a) declared in contextHint.reads by the Gateway's
+        # provisionActorIfNeeded dispatcher (internal/gateway/gateway.go) — a
+        # pinned, always-live role vertex; absence is a wiring fault
         role_vtx = kv.Read(consumer_role_key)
         if role_vtx == None or role_vtx.isDeleted:
             fail("UnknownRole: " + consumer_role_key)

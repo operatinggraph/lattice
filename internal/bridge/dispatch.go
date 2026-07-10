@@ -71,6 +71,27 @@ func (ev externalEvent) externalRefValue() string {
 	return ev.InstanceKey
 }
 
+// replyOpReads resolves the read-posture class-(a) contextHint.reads set for a
+// terminal replyOp (Contract #2 §2.5, script-read-posture-design §13
+// dispatcher map) — the bridge's own claim-vertex reconstruction read, always
+// a known key built from externalRef alone (the only identity the bridge ever
+// has). Unlisted replyOps return nil: their DDL kv.Read, if any, stays lazy
+// on-demand — unchanged behavior, not a regression.
+func replyOpReads(replyOp, externalRef string) []string {
+	switch replyOp {
+	case "RecordProposal":
+		// augur/ddls.go: RecordProposal reconstructs the TRUSTED gap context
+		// from the claim vertex CreateAugurReasoningClaim minted write-ahead.
+		return []string{"vtx.augurproposal." + externalRef + ".gap"}
+	case "RecordCapabilityProposal":
+		// capability-author/ddls.go: RecordCapabilityProposal resolves the real
+		// proposal vertex via the correlation claim's .target aspect.
+		return []string{"vtx.capabilityauthorclaim." + externalRef + ".target"}
+	default:
+		return nil
+	}
+}
+
 // handleExternal processes one external.<adapter> event: parse → (optional)
 // skip-on-redelivery → look up the adapter → dispatch → publish the result op →
 // ack. Every outcome is an explicit ack Decision (the handler is idempotent —
@@ -185,7 +206,7 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 		"status":      string(dispatch.Result.Status),
 		"result":      dispatch.Result.Detail,
 	}
-	if err := e.act.submit(ctx, replyReqID, ev.ReplyOp, payload); err != nil {
+	if err := e.act.submit(ctx, replyReqID, ev.ReplyOp, payload, replyOpReads(ev.ReplyOp, ev.externalRefValue())); err != nil {
 		e.logger.Error("bridge: publish replyOp failed; nak with delay",
 			"requestId", replyReqID, "instanceKey", instanceKey, "adapter", ev.Adapter, "err", err)
 		e.issues.set("publish:"+ev.Adapter, severityWarning, codeReplyPublishFail,
@@ -260,7 +281,7 @@ func (e *Engine) handlePending(ctx context.Context, ev externalEvent, instanceKe
 		"nextPollAt":  nextPollAt.Format(time.RFC3339),
 		"deadline":    deadline.Format(time.RFC3339),
 	}
-	if err := e.act.submit(ctx, dispatchReqID, ev.DispatchOp, payload); err != nil {
+	if err := e.act.submit(ctx, dispatchReqID, ev.DispatchOp, payload, nil); err != nil {
 		e.logger.Error("bridge: publish dispatchOp failed; nak with delay",
 			"requestId", dispatchReqID, "instanceKey", instanceKey, "adapter", ev.Adapter, "err", err)
 		e.issues.set("publish:"+ev.Adapter, severityWarning, codeReplyPublishFail,

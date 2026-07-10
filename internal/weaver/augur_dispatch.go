@@ -158,10 +158,11 @@ func buildProposedDirectOpPlan(params map[string]any, expectedRevision uint64) (
 // recordDispatchOutcomePlan builds the RecordProposalDispatch flip plan
 // (design §3.3). Its requestId is proposal-scoped + outcome-scoped so a
 // redelivery collapses it too (the DDL's approved-only guard is the second,
-// independent backstop). No ContextHint.Reads: the DDL reads the proposal's
-// .review aspect by known key (kv.Read), the same posture ReviewProposal
-// already has — Weaver still routes the proposal key so the alive-check
-// mirrors CreateAugurReasoningClaim's belt-and-suspenders convention.
+// independent backstop). ContextHint.Reads carries the proposal's .review
+// aspect (the required key the DDL's kv.Read fails closed on — read-posture
+// class (a), script-read-posture-design §13); the bare proposalKey rides
+// alongside it for authTarget's belt-and-suspenders alive check, mirroring
+// CreateAugurReasoningClaim's convention.
 func recordDispatchOutcomePlan(handle, outcome, reason string) *plan {
 	proposalKey := "vtx.augurproposal." + handle
 	return &plan{
@@ -175,7 +176,7 @@ func recordDispatchOutcomePlan(handle, outcome, reason string) *plan {
 			}
 			return p
 		},
-		reads: []string{proposalKey},
+		reads: []string{proposalKey, proposalKey + ".review"},
 	}
 }
 

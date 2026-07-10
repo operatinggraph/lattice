@@ -571,6 +571,7 @@ const (
 func reviewEnv(reqID, handle, verdict string) *processor.OperationEnvelope {
 	payload := map[string]any{"externalRef": handle, "verdict": verdict}
 	b, _ := json.Marshal(payload)
+	proposalKey := "vtx.augurproposal." + handle
 	return &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -579,6 +580,13 @@ func reviewEnv(reqID, handle, verdict string) *processor.OperationEnvelope {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "augurproposal",
 		Payload:       json.RawMessage(b),
+		// read-posture class (a) — no production dispatcher yet (hard case 3,
+		// script-read-posture-design §13); the test envelope carries the
+		// declaration the future UI/dispatcher inherits when wired.
+		ContextHint: &processor.ContextHint{Reads: []string{
+			proposalKey + ".review", proposalKey + ".proposed",
+			proposalKey + ".confidence", proposalKey + ".gap",
+		}},
 	}
 }
 

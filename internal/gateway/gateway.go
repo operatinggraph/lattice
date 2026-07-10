@@ -451,11 +451,16 @@ func (s *Server) provisionActorIfNeeded(ctx context.Context, actorID string) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "identity",
 		Payload:       payload,
-		// Deliberately no ContextHint: targetActorKey legitimately does not
-		// exist yet on the fresh-actor path, and a declared-but-absent read
-		// faults (HydrationMiss) before the script runs — exactly what the
-		// script's own kv.Read-based checks are built to avoid. Declaring it
-		// here would fault every first-touch request and defeat the op.
+		// read-posture: targetActorKey is class (d) — legitimately does not
+		// exist yet on the fresh-actor path, so it rides OptionalReads
+		// (absence-tolerant), never Reads (which faults HydrationMiss on the
+		// legitimately-absent key and would wedge every first-touch
+		// request). consumerRoleKey is class (a) — a pinned, always-live
+		// role vertex; its absence is a wiring fault.
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{s.consumerRoleKey},
+			OptionalReads: []string{actorID},
+		},
 	}
 	reply, err := s.submit(ctx, env)
 	if err != nil {

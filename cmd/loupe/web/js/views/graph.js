@@ -1037,6 +1037,10 @@ function openShredModal(identityKey) {
         lane: "urgent",
         payload: { identityKey },
         reads: [identityKey],
+        // read-posture class (d) — the identity may never have received a
+        // sensitive write, so its piiKey aspect may legitimately not exist
+        // yet (script-read-posture-design §13).
+        optionalReads: [identityKey + ".piiKey"],
       }),
     });
     inFlight = false;

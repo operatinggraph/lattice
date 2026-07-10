@@ -50,8 +50,12 @@
 //   - Read-posture classification (Contract #2 §2.5; ADVISORY — warns, never
 //     fails --strict: the check lands warn-first per the script-read-posture
 //     design §7). Every script `kv.Read(` / `kv.Links(` call site in a
-//     packages/ non-test file must carry a `# read-posture: (c|d|e)` Starlark
-//     annotation on the call line or within the preceding lines:
+//     packages/ non-test file must carry a `# read-posture: (a|c|d|e)`
+//     Starlark annotation on the call line or within the preceding lines:
+//     (a) required read declared in contextHint.reads by the dispatcher (the
+//     key's absence is a correctness error — annotate the site's own
+//     dispatcher(s) rather than leaving it silently debt-classed once
+//     declared);
 //     (c) deliberately-unsnapshotted config read (annotate why);
 //     (d) absence-tolerant read declared in contextHint.optionalReads by the
 //     dispatcher (read-before-create / dedup);
@@ -109,7 +113,7 @@ var (
 	// call must carry on its line or within the preceding window.
 	kvCall        = regexp.MustCompile(`kv\.(Read|Links)\(`)
 	kvLinksCall   = regexp.MustCompile(`kv\.Links\(`)
-	readPosture   = regexp.MustCompile(`#\s*read-posture:\s*\(([cde])\)`)
+	readPosture   = regexp.MustCompile(`#\s*read-posture:\s*\(([acde])\)`)
 	scriptMutates = regexp.MustCompile(`"op":\s*"(create|update|tombstone)"|make_(vtx|link|aspect|update)`)
 	// lensAdapterPostgres anchors a pkgmgr.LensSpec composite literal's Adapter
 	// field declaring "postgres" (Contract #6 §6.14: a postgres business read
@@ -452,7 +456,7 @@ func checkReadPosture(path string, ln int, line string, window []string, fileMut
 			call = "kv.Links"
 		}
 		return []finding{{file: path, line: ln, warn: true,
-			msg: "read-posture: unclassified " + call + " — class-(b) debt (Contract #2 §2.5). Declare the key in contextHint reads/optionalReads (class a/d) or annotate the call: `# read-posture: (c) <why>` (config, deliberately live), `(d) <declared-by>` (declared optionalReads), or `(e) relation=<rel> epoch=<key|none (…)>` (bounded enumeration / its follow-up read)"}}
+			msg: "read-posture: unclassified " + call + " — class-(b) debt (Contract #2 §2.5). Declare the key in contextHint reads/optionalReads and annotate the call: `# read-posture: (a) <declared-by>` (required read declared in contextHint.reads), `(c) <why>` (config, deliberately live), `(d) <declared-by>` (declared optionalReads), or `(e) relation=<rel> epoch=<key|none (…)>` (bounded enumeration / its follow-up read)"}}
 	}
 	var out []finding
 	if isLinks {

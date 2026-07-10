@@ -425,6 +425,7 @@ func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposa
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
+	proposalKey := "vtx.capabilityproposal." + proposalID
 	env := &processor.OperationEnvelope{
 		RequestID:     requestID,
 		Lane:          processor.LaneDefault,
@@ -432,6 +433,11 @@ func submitMarkApplied(ctx context.Context, conn *substrate.Conn, actor, proposa
 		Actor:         actor,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Payload:       json.RawMessage(payload),
+		// read-posture class (a) — every key is derivable from the payload
+		// alone (script-read-posture-design §13).
+		ContextHint: &processor.ContextHint{Reads: []string{
+			proposalKey + ".review", proposalKey + ".target", packageKey + ".manifest",
+		}},
 	}
 	envBytes, err := json.Marshal(env)
 	if err != nil {

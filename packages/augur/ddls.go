@@ -404,6 +404,10 @@ def scope_verdict(params, entity_key, entity_id):
 # longer validates against the static boundary.) Known-key reads only. Returns
 # (ok, reason); ok False => the approval fail-closes to invalid.
 def revalidate_for_approval(proposal_key):
+    # read-posture: (a) declared in contextHint.reads by ReviewProposal's
+    # dispatcher (test envelope today — no production dispatcher yet, hard
+    # case 3, script-read-posture-design §13); absence of a recorded
+    # .proposed aspect is a wiring fault, never a legitimate branch
     proposed_doc = kv.Read(proposal_key + ".proposed")
     if not alive(proposed_doc) or proposed_doc.data == None:
         return False, "proposal has no recorded .proposed aspect"
@@ -417,6 +421,8 @@ def revalidate_for_approval(proposal_key):
     if action not in ALLOWED_ACTIONS:
         return False, "action not in allowed escalation vocabulary (triggerLoom|assignTask|directOp): " + action
 
+    # read-posture: (a) declared in contextHint.reads by ReviewProposal's
+    # dispatcher (see the .proposed note above)
     conf_doc = kv.Read(proposal_key + ".confidence")
     score = -1.0
     if alive(conf_doc) and conf_doc.data != None and "score" in conf_doc.data:
@@ -426,6 +432,8 @@ def revalidate_for_approval(proposal_key):
     if score < 0.0 or score > 1.0:
         return False, "confidence out of range [0,1]: " + str(score)
 
+    # read-posture: (a) declared in contextHint.reads by ReviewProposal's
+    # dispatcher (see the .proposed note above)
     gap_doc = kv.Read(proposal_key + ".gap")
     if not alive(gap_doc) or gap_doc.data == None or "entityId" not in gap_doc.data:
         return False, "claim .gap missing entityId"
@@ -467,8 +475,12 @@ def execute(state, op):
         # ContextHint.Reads, but the alive checks use kv.Read (Contract #2 §2.5
         # known-key lazy read) — read-path-independent, matched to the bridge reply
         # leg's no-Reads posture.
+        # read-posture: (a) declared in contextHint.reads by Weaver's
+        # augurEscalation directOp (internal/weaver/strategist.go)
         if not alive(kv.Read(target_key)):
             fail("UnknownTarget: " + target_key)
+        # read-posture: (a) declared in contextHint.reads by Weaver's
+        # augurEscalation directOp (see the target_key note above)
         if not alive(kv.Read(entity_key)):
             fail("UnknownCandidate: " + entity_key)
 
@@ -510,8 +522,7 @@ def execute(state, op):
 
     if ot == "RecordProposal":
         # The bridge replyOp: payload {externalRef, status, result}. Reconstruct the
-        # claim-vertex key from the bare handle; the bridge submits this with no
-        # ContextHint.Reads, so every read is a kv.Read of a known key.
+        # claim-vertex key from the bare handle.
         handle = required_bare_handle(p, "externalRef")
         proposal_key = "vtx.augurproposal." + handle
 
@@ -519,6 +530,9 @@ def execute(state, op):
         # minted write-ahead (design §5 safety split: entity identity comes from
         # HERE, never the model's reply). The claim MUST be live — its absence is a
         # wiring fault (the instanceOp must commit first).
+        # read-posture: (a) declared in contextHint.reads by the bridge replyOp
+        # dispatcher (internal/bridge/dispatch.go replyOpReads, derived from
+        # externalRef alone)
         gap_doc = kv.Read(proposal_key + ".gap")
         if not alive(gap_doc):
             fail("UnknownAugurClaim: no live claim vertex for " + proposal_key + " (the CreateAugurReasoningClaim instanceOp must commit write-ahead of the reply)")
@@ -640,6 +654,9 @@ def execute(state, op):
         if verdict != "approve" and verdict != "reject":
             fail("InvalidArgument: verdict: must be one of approve, reject; got " + verdict)
 
+        # read-posture: (a) declared in contextHint.reads by ReviewProposal's
+        # dispatcher (test envelope today — no production dispatcher yet, hard
+        # case 3, script-read-posture-design §13); absence is a wiring fault
         review_doc = kv.Read(proposal_key + ".review")
         if not alive(review_doc):
             fail("UnknownAugurProposal: no recorded proposal for " + proposal_key + " (RecordProposal must commit a verdict before review)")
@@ -716,6 +733,8 @@ def execute(state, op):
         if outcome == "invalid" and len(reason.strip()) == 0:
             fail("InvalidArgument: reason: required when outcome is invalid")
 
+        # read-posture: (a) declared in contextHint.reads by Weaver's
+        # recordDispatchOutcomePlan directOp (internal/weaver/augur_dispatch.go)
         review_doc = kv.Read(proposal_key + ".review")
         if not alive(review_doc):
             fail("UnknownAugurProposal: no recorded proposal for " + proposal_key + " (RecordProposal must commit a verdict before dispatch)")

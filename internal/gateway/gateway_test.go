@@ -381,10 +381,18 @@ func TestHandleOperations_ProvisioningPreflight_FirstTouch(t *testing.T) {
 	if prov.Actor != "vtx.identity.GATEWAY00000000000A" {
 		t.Fatalf("first submit Actor = %q, want the Gateway's own actor", prov.Actor)
 	}
-	if prov.ContextHint != nil {
-		t.Fatalf("first submit ContextHint = %+v, want nil — targetActorKey does not exist yet on the "+
-			"fresh-actor path, and a declared-but-absent read faults (HydrationMiss) before the script "+
-			"runs, defeating the op on every first-touch request", prov.ContextHint)
+	// read-posture (script-read-posture-design §13): targetActorKey rides
+	// OptionalReads (absence-tolerant — legitimately absent on first touch,
+	// never Reads which would fault HydrationMiss); consumerRoleKey is a
+	// pinned, always-live role vertex and rides Reads.
+	if prov.ContextHint == nil {
+		t.Fatal("first submit ContextHint = nil, want Reads=[consumerRoleKey] OptionalReads=[targetActorKey]")
+	}
+	if got := prov.ContextHint.Reads; len(got) != 1 || got[0] != "vtx.role.CONSUMER0000000000A" {
+		t.Fatalf("first submit ContextHint.Reads = %v, want [vtx.role.CONSUMER0000000000A]", got)
+	}
+	if got := prov.ContextHint.OptionalReads; len(got) != 1 || got[0] != "vtx.identity.FRESHACTOR000000000A" {
+		t.Fatalf("first submit ContextHint.OptionalReads = %v, want [vtx.identity.FRESHACTOR000000000A]", got)
 	}
 	var payload struct {
 		TargetActorKey  string `json:"targetActorKey"`
