@@ -57,6 +57,7 @@ joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
 - 2026-07-10 · `5263c2b` · Read-posture sweep Fire 1 — Gateway optionalReads wiring + clinic-domain 8/44 — [design §13](../../implementation-artifacts/script-read-posture-design.md)
+- 2026-07-09 · `441ad1c` · semantic-contracts rename (was `bespoke-contracts`) — package identity + README shipped-status sync — [design](../../implementation-artifacts/semantic-contracts-executable-paper-design.md)
 - 2026-07-09 · `1b47e0a` · Clinic reminders notification CLOSED — real `FakeNotification` bridge adapter wired, no Loom pattern needed — [design](../../implementation-artifacts/clinic-reminders-notification-adapter-design.md)
 - 2026-07-09 · `ff748ef` · Café payment-collection UI CLOSED — resident-view "Record Payment" form wired to `CreditAccount`, live-verified (balance $35.50→$25.50)
 - 2026-07-09 · `—` · Café tab settlement regression CLOSED — re-verified live post-`659c635`; all tabs now `posted:true` — [design](../../implementation-artifacts/cafe-ledger-design.md)
