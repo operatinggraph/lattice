@@ -2,6 +2,11 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-07 · `b9433a2` · [Contract #10] weaver/augur/substrate shards reconciled to as-built — augur op/adapter/replyOp+directOp, §10.2 P5 read-path, anti-storm supersede, plan-hash RESERVED; retires contract-10-weaver-text-reconciliation
+- 2026-07-07 · `0d6c71e` · [Refractor] capabilityread-error-arm-tests — 2 of 3 D1-gate error arms pinned (malformed-JSON, list-keys-failure); Get-failure arm left as documented residual (not racelessly triggerable); lead-reviewed
+- 2026-07-07 · `c5ed56b` · [pkgmgr/Refractor] lens-target-reserved-bucket-guard — reserved-bucket-name denylist (install-time) + fail-closed activation mirror; adversarially reviewed, clean
+- 2026-07-07 · `da8ee6c` · [Refractor/pkgmgr] refractor-protected-by-default-gate — declare-one gate (translateSpec + pkgmgr + lint-conventions); 3-layer reviewed, fixed forward (lint scanner rewrite, BootstrapLens gap, Public+GrantTable guard)
+- 2026-07-06 · `7326774` · [Gateway] gateway-claim-flow-authz-contradiction CLOSED — `ProvisionConsumerIdentity` auto-provisions a consumer on first touch (narrow `identityProvisioner` role), closing the pre-auth chicken-and-egg
 - 2026-07-06 · `—` · [Security] Control-plane capability authz (FR30) CLOSED — Fires 1a-1c+2 shipped (verified-actor JWT, both control planes gated) — [design](../../implementation-artifacts/control-plane-capability-authz-design.md)
 - 2026-07-05 · `—` · [Gateway] Edge trust-boundary CLOSED — Fire 1+2+3 shipped (write path, JWKS, RLS read-front); Fire 5 is ops not Steward — [design](../../implementation-artifacts/gateway-external-trust-boundary-design.md)
 - 2026-07-07 · `921fda4` · [lease-signing/processor/lattice-pkg] real-actor-write-auth-e2e Phase 1 items 4+6 — consumer scope=self grant + live e2e proof; 2 platform bugs fixed along the way; 3-layer reviewed, fixed forward

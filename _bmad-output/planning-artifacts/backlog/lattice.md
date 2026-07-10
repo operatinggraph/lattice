@@ -83,7 +83,7 @@ Severity-ordered; same row discipline as component maintenance (shipped rows col
 |---|---|---|---|---|
 | **natsperm-matrix-hygiene** | Refractor's `$KV.>` write is broader than its lens-target set (covers dynamically-named package buckets — narrowing needs a real design, not a mechanical prune). | ★ | S | 📋 · bridge phantom-bucket half shipped `0377938`; remaining: Refractor narrowing needs design |
 | **contract7-7.3-config-example-refresh** | §7.3's bootstrap.json example still lists `processorIdentityKey` + a 5-key `metaMetaDDLKeys` block (same drift §7.2 items 1/7 fixed) — reconcile to the as-built config struct (no processor identity; one self-describing root DDL). | ★ | XS | 📐 fix drafted, UNCOMMITTED in the tree for Andrew (frozen-contract edit, no paired design) |
-| **fr22-service-denial-structural-fields** | FR22's `DenialDetails` has no service branch — a service-op denial names nothing structural. Fork B: emit `deniedService` (from authContext) + `deniedServiceClass` (one `.class` aspect read at denial time); `availableServiceClasses` is out of scope — what's available is the app's read-model question (P5). Contract #6 §6.12 is the spec. | ★ | S | 📋 · Fork B ratified 2026-07-03 (§6.12 amended) · low-priority |
+| **fr22-service-denial-structural-fields** | FR22's `DenialDetails` has no service branch — a service-op denial names nothing structural. Fork B: emit `deniedService` (from authContext) + `deniedServiceClass` (one `.class` aspect read at denial time); `availableServiceClasses` is out of scope — what's available is the app's read-model question (P5). Contract #6 §6.12 is the spec. | ★ | S | ✅ shipped (`7f1e5d1`) |
 
 ### Refractor re-review (2026-07-06)
 
@@ -95,7 +95,7 @@ and stale-marker corrections were applied in the filing commit (Done log); these
 |---|---|---|---|---|
 | **refractor-6-14-postgres-seam-truthup** | Close the remaining §6.14 seams: seq-guard the protected `Delete` (stale-replay resurrection window); stage the M5 wildcard-anchor contract edit the shipped RLS policy already enforces (reconcile the `rls.go`/`capabilityread.go` §6.14 citations with it); decide auth-plane vs warning severity for a paused grant/protected lens; fix the `int64(MaxUint64)` wrap in the shred→grant-table seq stamp. Supersedes the protected-Postgres-LWW row. | ★★ | S | ✅ shipped (`94087bd`) · §6.14 contract text staged UNCOMMITTED for Andrew |
 | **section-6-13-invalidation-amendment** | §6.13's frozen text specifies an `Invalidation` plan member + fails-activation rule that retire-simple-engine deliberately deleted (code: broad-BFS enumerator, warn-and-proceed). Stage the in-place contract edit reconciling §6.13 to the as-ratified reality, uncommitted for Andrew. | ★★ | S | 🔭 flag-for-Andrew |
-| **refractor-health-contract-minors** | Align the heartbeat `version` (`"0.1.0"`→`"1.0"`) and status (`"shutdown"`→`shuttingDown`) to Contract #5 (Processor already conforms; update the observability schema doc); add a `pendingSpecs` spec-before-parent ordering test. | ★ | S | 📋 |
+| **refractor-health-contract-minors** | Align the heartbeat `version` (`"0.1.0"`→`"1.0"`) and status (`"shutdown"`→`shuttingDown`) to Contract #5 (Processor already conforms; update the observability schema doc); add a `pendingSpecs` spec-before-parent ordering test. | ★ | S | ✅ shipped (`ba28bc7`) |
 
 ### Weaver re-review (2026-07-06)
 
@@ -193,6 +193,9 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-09 · `e97305f` · [scripts] verify-package-clinic-domain — fixed a nondeterministic map-overwrite hiding CreateAppointment's 2nd (self/consumer) permission vertex; CI green
+- 2026-07-09 · `ba28bc7` · [Refractor] refractor-health-contract-minors — heartbeat version/status aligned to Contract #5; pendingSpecs ordering test added; CI green
+- 2026-07-09 · `7f1e5d1` · [Processor] fr22-service-denial-structural-fields — deniedService/deniedServiceClass on single-service AuthContextMismatch; CI green
 - 2026-07-09 · `513587d` · [Object Store] crypto-shred Fire 4 Increment 2 CLOSED — loftspace-app idDocument/proofOfIncome sensitive upload+decrypt; fixed a real pre-existing governingIdentity-persistence bug; 3-layer reviewed, CI green
 - 2026-07-09 · `172fa98` · [Object Store] crypto-shred Fire 4 Increment 1 — `internal/objectcrypto` extracted from Loupe; privacy-base `piiKeyEnvelope` lens; `lattice.vault.wrapkey`/`unwrapkey` extended to loftspace-app; CI green
 - 2026-07-09 · `659c635` · [Weaver] directOp-class-pin — `GapActionSpec.Class` threads to `opEnvelope.Class`; pinned on Café/bespoke-contracts ledger dispatches; unblocks [Café tab-settlement](verticals.md); CI green
@@ -217,9 +220,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-07 · `5bee182` · [pkgmgr] console-operator role package — mechanism B part 1 (scoped `consoleOperator` role + default-lane/ctrl.* grants, no privileged lane); lead-reviewed, CI green
 - 2026-07-07 · `8846771` · [loftspace-app/clinic-app] real-actor-write-auth-e2e Phase 2 Inc 2 — credential-bindings read-boundary wiring, both vertical apps; lead-reviewed (mirrors already 3-layer-reviewed Gateway resolver), CI green
 - 2026-07-07 · `0a73c3c` · [Weaver] arch-review fixes — control fail-closed default (3 planes), validator-mirror parity + heartbeat honesty, cross-package targetId install-check, materializer step-recursion, comment/natsperm hygiene; CI green
-- 2026-07-07 · `b9433a2` · [Contract #10] weaver/augur/substrate shards reconciled to as-built — augur op/adapter/replyOp+directOp, §10.2 P5 read-path, anti-storm supersede, plan-hash RESERVED; retires contract-10-weaver-text-reconciliation
-- 2026-07-07 · `0d6c71e` · [Refractor] capabilityread-error-arm-tests — 2 of 3 D1-gate error arms pinned (malformed-JSON, list-keys-failure); Get-failure arm left as documented residual (not racelessly triggerable); lead-reviewed
-- 2026-07-07 · `c5ed56b` · [pkgmgr/Refractor] lens-target-reserved-bucket-guard — reserved-bucket-name denylist (install-time) + fail-closed activation mirror; adversarially reviewed, clean
-- 2026-07-07 · `da8ee6c` · [Refractor/pkgmgr] refractor-protected-by-default-gate — declare-one gate (translateSpec + pkgmgr + lint-conventions); 3-layer reviewed, fixed forward (lint scanner rewrite, BootstrapLens gap, Public+GrantTable guard)
-- 2026-07-06 · `7326774` · [Gateway] gateway-claim-flow-authz-contradiction CLOSED — `ProvisionConsumerIdentity` auto-provisions a consumer on first touch (narrow `identityProvisioner` role), closing the pre-auth chicken-and-egg
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*
