@@ -263,12 +263,23 @@ async function loadFrontDesk() {
     grid.innerHTML = '<div class="empty">' + e.message + "</div>";
     return;
   }
+  // The unified resident context: join each open tab to the resident's own
+  // booked wellness class (if any) client-side by leaseAppKey — the front-desk
+  // package (if installed) is the ONLY source for this, the café ledger has
+  // no notion of a class booking. Best-effort: an unreachable/uninstalled
+  // front-desk still renders the tabs, just without class badges.
+  let bookingsByLease = {};
+  try {
+    const br = await api("/api/frontdesk-bookings");
+    (br.bookings || []).forEach((b) => { bookingsByLease[b.leaseAppKey] = b; });
+  } catch (_) { /* front-desk not installed / unreachable — badges just don't show */ }
+
   summary.textContent = tabs.length + " open tab" + (tabs.length === 1 ? "" : "s");
   if (!tabs.length) {
     grid.innerHTML = '<div class="empty">No open tabs.</div>';
     return;
   }
-  grid.innerHTML = tabs.map(frontDeskCard).join("");
+  grid.innerHTML = tabs.map((t) => frontDeskCard(t, bookingsByLease[t.leaseAppKey])).join("");
   tabs.forEach((t) => {
     const btn = document.getElementById("settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""));
     if (!btn) return;
@@ -289,14 +300,18 @@ async function loadFrontDesk() {
   });
 }
 
-function frontDeskCard(t) {
+function frontDeskCard(t, booking) {
   const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, "");
+  const classBadge = booking
+    ? '<div class="meta">🧘 Booked: ' + (booking.sessionName || "class") + " · " + (booking.startsAt || "?") + "</div>"
+    : "";
   return (
     '<div class="card">' +
     '<span class="badge open">open</span>' +
     '<div class="who">' + shortKey(t.leaseAppKey) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
     '<div class="meta">Opened ' + (t.openedAt || "?") + "</div>" +
+    classBadge +
     '<div class="card-actions"><button id="' + id + '" class="danger">Settle</button></div>' +
     "</div>"
   );

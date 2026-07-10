@@ -36,6 +36,7 @@ import (
 	clinicreminders "github.com/asolgan/lattice/packages/clinic-reminders"
 	consoleoperator "github.com/asolgan/lattice/packages/console-operator"
 	controlauthz "github.com/asolgan/lattice/packages/control-authz"
+	frontdesk "github.com/asolgan/lattice/packages/front-desk"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	identityhygiene "github.com/asolgan/lattice/packages/identity-hygiene"
 	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
@@ -74,6 +75,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"cafe-ledger":            cafeledger.Package,
 	"cafe-domain":            cafedomain.Package,
 	"one-bill":               onebill.Package,
+	"front-desk":             frontdesk.Package,
 	"objects-base":           objectsbase.Package,
 	"augur":                  augur.Package,
 	"capability-author":      capabilityauthor.Package,
