@@ -374,28 +374,17 @@ the design must honor:
    into the `external.<adapter>` **event** (which lands in the durable `events.external.>` stream) — fine
    for plaintext-for-now fields, **not** fine for SSN once we have a Vault to protect it.
 
-**Fire 3 design (composes on Vault, builds after it):**
-
-- A `subject.<aspect>.data.<field>` template whose aspect is `sensitive: true` resolves **not** to the
-  value but to a **sensitive-ref envelope** — `{ ref: "vtx.identity.<id>.ssn", field: "value",
-  keyId: "<identity-DEK-id>" }` — carried in the event params. **Plaintext never enters the event log or
-  the claim vertex.**
-- The **bridge** is the unwrap point — it is the platform's trusted PII-egress boundary, and the Vault
-  design already names *"a bridge adapter sending PII to a vendor"* as a Phase-B consumer
-  (`vault-crypto-shredding-design.md:12–13`). Just before the adapter call, the bridge resolves any
-  sensitive-ref in `Request.Params` via the Vault (the same envelope-unwrap the Secure Lens uses on the
-  read path) and hands the adapter plaintext for the single outbound call.
-- This keeps the **Processor sole-writer** invariant (no new write path), keeps **plaintext exposure
-  bounded to the bridge's in-memory call** (not the durable event/claim plane), and reuses Vault's
-  per-identity DEK (no new key hierarchy).
-
-**Sequencing.** Fire 3 is **build-sequenced behind the ratified Vault feature** (itself behind D1). Until
-Vault ships, sensitive fields either (a) stay out of adapter params, or (b) flow as the
-**plaintext-for-now** values the codebase already treats as plaintext (`scripts.go:386`) — no regression
-vs today, where they don't flow at all. Fire 3's design is on the shelf; the Steward builds it when Vault
-lands. A small note will be added to `vault-crypto-shredding-design.md` Phase B's consumer list (the
-bridge-egress unwrap point) — **uncommitted, for Andrew**, only if/when Fire 3 is greenlit; this design
-does not stage it now (Vault's §3.10 is the governing contract and is already staged).
+> **⛔ SUPERSEDED (2026-07-10) — this section's mechanism sketch is replaced by
+> [`sensitive-param-egress-design.md`](sensitive-param-egress-design.md) (📐 awaiting-Andrew).** The
+> sketch below predated the shipped Vault and was wrong on two mechanics the successor grounds: hydration
+> returns **plaintext** (decrypt-on-read is unconditional), so the "resolves not to the value" behavior
+> needs a real Processor-side primitive (`contextHint.egressReads`, ref-if-sensitive hydration); and a
+> ref must **not** carry key material or a frozen envelope — the successor's ref is
+> `{ref, ciphertext, field}` with the bridge fetching the **live** envelope (a frozen envelope defeats
+> crypto-shred across a Vault restart). Direction retained: the bridge **is** the unwrap point (the
+> §11-3 fork, resolved there), plaintext exposure stays bounded to the in-memory adapter call, and the
+> per-identity DEK is reused. Build sequencing, fire decomposition, and this row's remaining scope now
+> live in the successor design (its Fires 1–2 subsume this design's Fires 2–3).
 
 > **🚧 GROUNDING FINDING (2026-07-06, Lattice Steward fire) — Fire 2 is now BLOCKED, not just
 > "not yet picked up."** Vault has since shipped (2026-07-05, `vault-crypto-shredding-design.md`) and
@@ -418,7 +407,10 @@ does not stage it now (Vault's §3.10 is the governing contract and is already s
 > routes to the **Designer** (`lattice-designer`), not an inline Steward build. **Do not build Fire 2
 > against `.ssn`/`.dob` as currently speced** until Fire 3's primitive is designed and ratified — flag
 > this row `🚧 blocked-on:` a Designer fire for "Starlark sensitivity-detection primitive (adapter
-> read-seam Fire 3)" on the board.
+> read-seam Fire 3)" on the board. **→ RESOLVED (2026-07-10): the Designer fire ran —
+> [`sensitive-param-egress-design.md`](sensitive-param-egress-design.md) (📐 awaiting-Andrew) designs the
+> primitive (as a Processor-side `egressReads` hydration disposition, deliberately *not* a
+> Starlark-visible sensitivity check) and subsumes Fires 2–3 of this design.**
 
 ---
 
