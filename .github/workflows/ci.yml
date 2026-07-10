@@ -181,33 +181,12 @@ jobs:
           check-latest: true
 
       - name: Run all tests (unit + integration)
-        # Total concurrency stays 4 (same as before), but split into two
-        # invocations run at once: go test's package scheduler doesn't sort
-        # by expected duration, and internal/natsperm (~50s) + packages/lease-
-        # signing (~35s) are consistently the two heaviest packages by a wide
-        # margin (the next-heaviest is under 30s) — left in one ./... pool
-        # they often don't get a slot until well into the run, stretching the
-        # job's tail. Giving them their own worker (-p 1, they queue behind
-        # each other) frees the other ~90 packages to pack across the
-        # remaining 3 workers (-p 3) instead of 4, without waiting on the two
-        # outliers. Every embedded NATS+JetStream fixture binds a random port
-        # and owns a private StoreDir under jsstore.Dir(t), so concurrent
-        # packages share no JetStream file state regardless of which pool
-        # runs them — Postgres integration tests are the exception, sharing
-        # the service container above (unique per-test table/role names keep
-        # them -p-parallel-safe, per their own doc comments).
+        # -p 4: up to four test packages run concurrently. Every embedded
+        # NATS+JetStream fixture binds a random port and owns a private
+        # StoreDir under jsstore.Dir(t), so concurrent packages share no
+        # JetStream file state — Postgres integration tests are the exception,
+        # sharing the service container above (unique per-test table/role names
+        # keep them -p-parallel-safe, per their own doc comments).
         env:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
-        run: |
-          set +e
-          go test ./internal/natsperm/... ./packages/lease-signing/... -count=1 -p 1 -timeout 10m &
-          slow_pid=$!
-          go test $(go list ./... | grep -v -e '/internal/natsperm$' -e '/packages/lease-signing$') -count=1 -p 3 -timeout 10m &
-          fast_pid=$!
-          wait "$slow_pid"; slow_status=$?
-          wait "$fast_pid"; fast_status=$?
-          set -e
-          if [ "$slow_status" -ne 0 ] || [ "$fast_status" -ne 0 ]; then
-            echo "slow pool exit=$slow_status fast pool exit=$fast_status"
-            exit 1
-          fi
+        run: go test ./... -count=1 -p 4 -timeout 10m
