@@ -380,7 +380,10 @@ degrades undeclared ops to pending rather than depending on the capability being
    mirror-coverage gate has zero production data.
 3. **The flip (lattice, one line, after 1+2).** Read-posture findings advisory→blocking. Deliberately
    NOT a baseline-ratchet (block-new-only) — both fires are expected to land within days at ★★★;
-   ratchet machinery would outlive its usefulness.
+   ratchet machinery would outlive its usefulness. **Closing step (Andrew, 2026-07-09): un-block the
+   Edge Lattice row** — Andrew moved Edge to near-term predicated on this sweep; when the flip ships,
+   clear the Edge row's `🚧 seq:` and EDGE.1 (edge design §7 — the trusted-posture local mirror + sync
+   loop; its PL.1/PL.2 co-build dependency already shipped) becomes the lane's next ratified pick.
 
 **Proposed dispositions** (rollup: **38 (a) · 24 (d) · 1 (c) · 1 (e) · 1 chained**; the sweep fire
 re-verifies each against the §3.1 fail-closed rule — required key → `reads`, never `optionalReads`):
