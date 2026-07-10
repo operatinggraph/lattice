@@ -1,6 +1,6 @@
 # Mixed-use composition surfaces — design + checkpoint
 
-**Status:** 🏗️ building (Inc 1 shipped). Board row: [verticals.md](../planning-artifacts/backlog/verticals.md).
+**Status:** 🏗️ building (Inc 1+2 shipped). Board row: [verticals.md](../planning-artifacts/backlog/verticals.md).
 
 ## Goal
 
@@ -64,19 +64,54 @@ operations aggregate (too large for one fire — see Deferred below):
   `lens_cypher_test.go` against the real rule engine using the exact production `bookingsSpec`
   constant — the strongest available proof short of a live click-through.
 
-## Deferred (Inc 2+, not yet scoped in detail)
+## Increment 2 (shipped this fire) — portfolio-pulse: occupancy
+
+Scoped down from the full portfolio-pulse aggregate (occupancy + service-attach-rate) to the
+**occupancy half only** — the same scoping-down move Inc 1 made for front-desk:
+
+- **New protected Postgres lens `landlordUnitsRead`** (`packages/loftspace-domain`, v0.6.0 → 0.7.0):
+  `MATCH (u:unit)<-[:manages]-(landlord:identity)`, no leaseapp required — a vacant, never-applied-to
+  unit still projects a row, unlike lease-signing's `landlordLeaseApplicationsRead` (which requires a
+  leaseapp to exist at all). Composite `unit_id`/`landlord_id` `IntoKey` (a co-managed unit fans out to
+  one row per landlord, mirroring `landlordLeaseApplicationsRead`'s `app_id`/`landlord_id` shape).
+  `authz_anchors = [nanoIdFromKey(landlord.key)]` — the same §6.14 set-membership RLS the
+  primordial cap-read self-grant already licenses. `DiffRetraction: true` — the MATCH walks `manages`
+  structurally (not an anchor-key equality), so a `RemoveUnitOwner` unassign needs Refractor's
+  target-diff retraction path, same reasoning as the precedent lens. `unit_status` projects **null**
+  for a managed-but-never-listed unit (its own bucket, not an excluded row) — proved by
+  `landlord_units_lens_test.go`'s rule-engine tests (managed+listed, managed+unlisted-null-status,
+  unmanaged-excluded, co-managed-fans-out-per-landlord).
+- **`cmd/loftspace-app/portfolio.go`**: `GET /api/portfolio-pulse` — sibling of
+  `handleLandlordApplications` (identical verified-JWT → per-request txn → `SET LOCAL
+  lattice.actor_id` → RLS path). Folds the RLS-scoped rows into `{totalUnits, leased, available,
+  pending, withdrawn, notListed, occupancyRate}` (`summarizePortfolioPulse`, occupancyRate = 0 when
+  the landlord manages no units — never divides by zero).
+- **FE**: a `#portfolio-pulse` banner in the landlord view (mirrors the `#landlord-rls` RLS-banner
+  idiom) — `loadPortfolioPulse()` reads the endpoint on landlord sign-in/refresh, degrades to hidden
+  (not a page error) when the boundary is unavailable, same best-effort posture as `loadLandlordRLS`.
+- **Registries**: package version bump only (0.6.0 → 0.7.0, `package.go` + `manifest.yaml`); no new
+  DDL/permission, so `make verify-package-loftspace-domain` (which asserts DDLs/permissions/package
+  vertex, not lenses) needed no update — the lens shape is pinned by
+  `TestPackage_ManifestMatchesDefinition` + `TestPackage_Permissions`' lens-count/shape assertions
+  instead.
+- Live-verify: `make refresh-loftspace` diff-applies the bumped package + cycles `bin/loftspace-app`
+  on the running dev stack (F-004, no teardown) — see the Done-log entry for the outcome.
+
+## Deferred (Inc 3+, not yet scoped in detail)
 
 - **Clinic visit in the unified context** — deliberately excluded from Inc 1 per the PHI-sensitivity
   note on the *separate* "Clinical notes are write-only" backlog row (clinic patient data has its own
   Secure-Lens/Vault posture, `identifiedBy` claim semantics differ from `residentRate`'s optional/
   best-effort link) — needs its own grounding pass, not a copy-paste of this pattern.
-- **Operations portfolio-pulse aggregate** (occupancy + service-attach-rate across packages) — needs
-  an occupancy data source not yet identified (LoftSpace's `.listing` economics project availability,
-  not a live occupancy count); a fresh grounding pass, likely its own lens-only package alongside
-  `front-desk`.
+- **Service-attach-rate** (does a resident have a live wellness booking / open café tab, across all
+  their leases) — the other half of the operations portfolio-pulse aggregate, deliberately deferred
+  from Inc 2: it needs a cross-package KV fan-in (`front-desk-bookings` + `cafe-domain`'s tab lens)
+  this app doesn't otherwise do, keyed by `leaseAppKey` against occupancy's unit-keyed rows — a fresh
+  grounding pass on where that join lives (this app, or Loupe, which already reads across packages as
+  the inspector) and how it aggregates per-landlord rather than per-lease.
 - **Lease details on the front-desk card** (term/rent, not just the `leaseAppKey` short-key already
   shown) — small, no new lens needed (loftspace-ledger's existing lens already carries it), just FE
   wiring; picked up whenever `front-desk` gets its next increment.
 
-**Next fire on this item:** pick up operations portfolio-pulse OR the clinic-visit tail — whichever
-grounds cleanest; re-read this doc's Deferred section first.
+**Next fire on this item:** pick up service-attach-rate OR the clinic-visit tail — whichever grounds
+cleanest; re-read this doc's Deferred section first.
