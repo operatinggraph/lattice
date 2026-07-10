@@ -403,3 +403,38 @@ func TestReclaim_ReleasesCompletedLegInsteadOfReclaiming(t *testing.T) {
 	}
 	h.requireNoOp(t)
 }
+
+// TestReleaseCompletedLeg_RevisionConflict_LeavesMarkStanding proves
+// releaseCompletedLeg's revision-conditioned mark clear (evaluator.go) skips
+// the release — returning false, not erroring — when the mark changed
+// underneath the caller's read (a concurrent path already released or is
+// otherwise handling this same episode), mirroring every other sweep-path
+// mark mutation's conflict-is-not-fatal posture.
+func TestReleaseCompletedLeg_RevisionConflict_LeavesMarkStanding(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newSweepHarness(t, ctx)
+
+	const targetID = "fixtureReleaseConflict"
+	ga := goalGapFixture(t)
+
+	entityID := testNanoID(t)
+	key := markKey(targetID, entityID, "missing_x")
+	rev := h.putMark(t, ctx, key, fixtureMark(targetID, entityID, "missing_x", "legA", futureLease()))
+
+	// legA's effect (aDone) already holds in the row — a real release would
+	// fire here — but pass a revision one past the mark's actual current
+	// revision, as if a concurrent path had already advanced it.
+	row := map[string]any{"entityKey": "vtx.leaseApp." + entityID, "aDone": true}
+	if released := h.engine.releaseCompletedLeg(ctx, targetID, entityID, "missing_x", ga, "legA", row, rev+1); released {
+		t.Fatalf("releaseCompletedLeg with a stale/mismatched revision = true, want false (conflict)")
+	}
+
+	if !h.markExists(t, ctx, key) {
+		t.Fatalf("a revision-conflicted release must leave the mark standing, got deleted")
+	}
+}

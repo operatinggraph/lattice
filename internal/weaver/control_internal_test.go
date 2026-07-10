@@ -11,6 +11,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/asolgan/lattice/internal/guardgrammar"
 	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -394,6 +395,110 @@ func TestSeedDisabledTargets_RestoresInMemorySet(t *testing.T) {
 
 	if !h.engine.isTargetDisabled("t1") {
 		t.Fatalf("isTargetDisabled(t1) = false after seedDisabledTargets, want true")
+	}
+}
+
+// TestSeedDisabledTargets_ListKeysErrorPropagates verifies a KVListKeys
+// failure (e.g. the weaver-state bucket isn't provisioned yet) surfaces as an
+// error rather than being swallowed into an empty disabled-set — Engine.Start
+// wraps and aborts on it (engine.go), so a substrate outage at boot must fail
+// closed, never silently start with every target's disable-state unknown.
+func TestSeedDisabledTargets_ListKeysErrorPropagates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
+	srv := natstest.RunServer(opts)
+	t.Cleanup(srv.Shutdown)
+	nc, err := nats.Connect(srv.ClientURL())
+	if err != nil {
+		t.Fatalf("nats connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+	conn, err := substrate.Wrap(nc)
+	if err != nil {
+		t.Fatalf("substrate wrap: %v", err)
+	}
+	// Deliberately do NOT provision the weaver-state bucket.
+	engine := NewEngine(conn, Config{
+		ActorKey: "vtx.identity.WeaverServiceActor1abc",
+		Instance: "seed-err-" + testNanoID(t),
+		Logger:   discardLogger(),
+	})
+
+	if err := engine.seedDisabledTargets(ctx); err == nil {
+		t.Fatalf("seedDisabledTargets against an unprovisioned bucket = nil error, want error")
+	}
+}
+
+// TestDisable_UnmanagedConsumer_StillMarksControlState verifies Disable/Enable
+// degrade safely when the target's lane-1 consumer isn't (yet) registered
+// with the supervisor: Pause/Resume are silent no-ops on an unmanaged name
+// (substrate.ConsumerSupervisor.Pause/Resume's bool return, discarded here),
+// but the durable `__control` marker and in-memory disabled-set — the actual
+// remediation-skip authority handleRow reads — are still set/cleared exactly
+// as when a real consumer is paused/resumed.
+func TestDisable_UnmanagedConsumer_StillMarksControlState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newControlHarness(t, ctx)
+	h.seedTarget(&Target{TargetID: "t1", LensRef: "lens-1", Gaps: map[string]GapAction{}})
+	// Deliberately skip h.addConsumer: the supervisor has no managed consumer
+	// for t1, so Disable/Enable's Pause/Resume calls are silent no-ops.
+
+	if err := h.engine.Disable(ctx, "t1"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	disabled, err := h.engine.marks.isDisabled(ctx, "t1")
+	if err != nil {
+		t.Fatalf("isDisabled: %v", err)
+	}
+	if !disabled {
+		t.Fatalf("isDisabled(t1) = false after Disable with no managed consumer, want true")
+	}
+	if !h.engine.isTargetDisabled("t1") {
+		t.Fatalf("isTargetDisabled(t1) = false after Disable with no managed consumer, want true")
+	}
+
+	if err := h.engine.Enable(ctx, "t1"); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	disabled, err = h.engine.marks.isDisabled(ctx, "t1")
+	if err != nil {
+		t.Fatalf("isDisabled: %v", err)
+	}
+	if disabled {
+		t.Fatalf("isDisabled(t1) = true after Enable with no managed consumer, want false")
+	}
+	if h.engine.isTargetDisabled("t1") {
+		t.Fatalf("isTargetDisabled(t1) = true after Enable with no managed consumer, want false")
+	}
+}
+
+// TestFreezeOscillatingPair_DisableFailureStillAlerts verifies a Disable
+// failure for one leg of an oscillating pair (e.g. the target was removed
+// between its last dispatch and the freeze) is logged, not fatal: the other
+// leg is still disabled and the oscillation alert still names the pair.
+func TestFreezeOscillatingPair_DisableFailureStillAlerts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newControlHarness(t, ctx)
+	h.seedTarget(&Target{TargetID: "targetA", LensRef: "lens-a", Gaps: map[string]GapAction{}})
+	h.addConsumer(t, ctx, "targetA")
+	// targetB is deliberately NOT registered — Disable("targetB") errors.
+
+	h.engine.freezeOscillatingPair(ctx, "targetA", "targetB", guardgrammar.Path{Field: "status"})
+
+	disabled, err := h.engine.marks.isDisabled(ctx, "targetA")
+	if err != nil {
+		t.Fatalf("isDisabled: %v", err)
+	}
+	if !disabled {
+		t.Fatalf("isDisabled(targetA) = false after freeze, want true (the registered leg must still be disabled despite the other leg's Disable failing)")
+	}
+
+	issues := h.engine.issues.snapshot()
+	if !hasIssueCode(issues, "TargetOscillation") {
+		t.Fatalf("expected a TargetOscillation issue naming the pair even though targetB's Disable failed, got %+v", issues)
 	}
 }
 
