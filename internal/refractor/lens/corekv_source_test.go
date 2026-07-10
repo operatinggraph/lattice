@@ -100,6 +100,72 @@ func TestCoreKVSource_LoadsLensFromAspect(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond, "update callback not invoked")
 }
 
+// TestCoreKVSource_LoadsLensFromAspect_SpecBeforeParent verifies the
+// spec-before-parent buffering path: CDC ordering is not guaranteed, so a
+// `.spec` aspect can arrive before its `vtx.meta.<id>` parent vertex. The
+// spec must be buffered in pendingSpecs and replayed once the parent vertex
+// (with class `meta.lens`) is observed — not dropped.
+func TestCoreKVSource_LoadsLensFromAspect_SpecBeforeParent(t *testing.T) {
+	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
+	s := test.RunServer(opts)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	defer nc.Close()
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: "core-kv"})
+	require.NoError(t, err)
+
+	src := lens.NewCoreKVSource(conn, "core-kv", slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	loaded := make(chan *lens.Rule, 4)
+	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
+	require.NoError(t, src.Start(ctx))
+
+	vtxKey := "vtx.meta.ZzYyXxWwVvUuTtSsRrQq"
+
+	// Write the spec aspect FIRST — before the parent vertex's class is known.
+	spec := lens.LensSpec{
+		ID:            "ZzYyXxWwVvUuTtSsRrQq",
+		CanonicalName: "lens.spec-before-parent",
+		TargetType:    "nats_kv",
+		CypherRule:    "MATCH (c:contract) RETURN c.id AS contract_id",
+		TargetConfig:  json.RawMessage(`{"bucket":"spec_before_parent_view","key":["contract_id"]}`),
+	}
+	specJSON, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, putJSON(ctx, kv, vtxKey+".spec", specJSON))
+
+	// Give the source a moment to (not) process the orphaned spec — it must
+	// buffer it, not drop it or dispatch prematurely.
+	select {
+	case r := <-loaded:
+		t.Fatalf("load callback fired before parent vertex arrived: %+v", r)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Now write the parent vertex — the buffered spec must replay.
+	require.NoError(t, putJSON(ctx, kv, vtxKey, map[string]any{"id": "ZzYyXxWwVvUuTtSsRrQq", "class": "meta.lens"}))
+
+	select {
+	case r := <-loaded:
+		require.Equal(t, "ZzYyXxWwVvUuTtSsRrQq", r.ID)
+		require.Equal(t, "spec_before_parent_view", r.Into.Bucket)
+	case <-time.After(3 * time.Second):
+		t.Fatal("buffered spec was not replayed after parent vertex arrived")
+	}
+}
+
 // TestCoreKVSource_SkipsEventStreamSpec verifies that a lens spec declaring
 // `source.kind: "eventStream"` (a Chronicler-owned definition, e.g.
 // orchestration-base's loomFlowHistory) is silently skipped rather than

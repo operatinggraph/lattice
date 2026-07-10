@@ -285,7 +285,7 @@ func (h *LatticeHeartbeater) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			detached, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			h.emit(detached, "shutdown")
+			h.emit(detached, "shuttingDown")
 			cancel()
 			return
 		case <-t.C:
@@ -366,18 +366,18 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 	}
 	// Elevate to the §5.4 degraded/unhealthy status while a capability or
 	// business-lens issue is open — at startup too, so a paused-at-boot lens is
-	// visible immediately. A "shutdown" beat is left as-is (the instance is
+	// visible immediately. A "shuttingDown" beat is left as-is (the instance is
 	// tearing down), and a clean cycle keeps its lifecycle status
 	// ("starting"/"healthy").
 	effectiveStatus := status
-	if status != "shutdown" && len(allIssues) > 0 {
+	if status != "shuttingDown" && len(allIssues) > 0 {
 		effectiveStatus = aggregateStatus(allIssues)
 	}
 	doc := LatticeHealthDoc{
 		Key:         h.healthKey(),
 		Component:   "refractor",
 		Instance:    h.instance,
-		Version:     "0.1.0",
+		Version:     "1.0",
 		Status:      effectiveStatus,
 		HeartbeatAt: substrate.FormatTimestamp(now),
 		StartedAt:   substrate.FormatTimestamp(h.startedAt),
