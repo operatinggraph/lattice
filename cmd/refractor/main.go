@@ -529,6 +529,28 @@ func main() {
 			logger.Info("diff retraction installed", "lensId", r.ID)
 		}
 
+		// Convergence-lens no-filtering-WHERE activation guard
+		// (negative-filter-retraction-projection-design.md's review carry-out;
+		// docs/components/refractor.md's authoring invariant). A plain
+		// (non-actorAggregate) lens projecting into the shared weaver-targets
+		// bucket must carry no filtering WHERE — Fire 2's presence-check
+		// retraction would emit a Delete on a WHERE-dropped anchor, which
+		// Weaver reads as "entity gone," not "stopped violating." actorAggregate
+		// lenses (e.g. unroutedTasks) are exempt: their retraction runs through
+		// the envelope's EmptyBehavior, not this path, so a filtering WHERE
+		// there is safe and already shipped. Data-driven, not
+		// canonical-name-keyed — a brand-new convergence lens is checked for
+		// free. Simple-engine lenses have no CompiledRule of this shape and are
+		// silently out of scope (they express matching differently).
+		if r.Into.Target == "nats_kv" && r.Into.Bucket == bootstrap.WeaverTargetsBucket && !projection.IsActorAggregate(r) {
+			if cr, ok := r.CompiledRule.(*full.CompiledRule); ok {
+				if err := cr.ValidateNoFilteringWhereForConvergence(); err != nil {
+					logger.Error("convergence-lens filtering-WHERE validation", "lensId", r.ID, "err", err)
+					return
+				}
+			}
+		}
+
 		// Install the per-lens projection components via data-driven paths keyed
 		// off lens-definition aspects — never off the canonical name. An
 		// actor-aggregate lens (projectionKind: actorAggregate) is driven by the

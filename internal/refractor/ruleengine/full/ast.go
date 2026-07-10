@@ -391,6 +391,54 @@ func (cr *CompiledRule) ValidateUnanchoredForDiffRetraction() error {
 	return nil
 }
 
+// ValidateNoFilteringWhereForConvergence fails closed when the compiled
+// query carries a filtering WHERE — a non-optional MATCH's WHERE, or any
+// WITH's WHERE — that can drop the anchor out of the RETURN row set.
+//
+// The plain (non-actorAggregate) full-engine path retracts via
+// pipeline.evaluateForEntryRaw's post-re-execute presence check
+// (negative-filter-retraction-projection-design.md Fire 2): when the
+// anchor's own mutation drops it from the freshly-computed match, the
+// adapter receives a Delete on that key. For a lens projecting into the
+// shared weaver-targets bucket, Weaver reads that Delete as "the entity is
+// gone" — not "it stopped violating" — so a filtering WHERE there would
+// silently misreport convergence state (docs/components/refractor.md's
+// convergence-lens authoring invariant). This is the activation-time
+// backstop, called for every plain weaver-targets lens
+// (cmd/refractor/main.go), so a future or misconfigured lens fails to
+// activate rather than corrupting Weaver's read of it.
+//
+// A WHERE on an OPTIONAL MATCH is exempt: per the null-restore semantics
+// (docs/components/refractor.md), it cannot drop the anchor row — a failed
+// optional predicate restores nulls for that pattern's bindings rather than
+// removing the row. Only a required (non-optional) MATCH's WHERE, or a
+// WITH's WHERE (which always operates on already-bound rows), can collapse
+// the anchor out of RETURN.
+//
+// actorAggregate lenses (e.g. unroutedTasks) are out of scope: their
+// retraction runs through the envelope's EmptyBehavior, not this
+// presence-check path, so a filtering WHERE there is safe by construction
+// and already shipped — callers gate on !projection.IsActorAggregate(r)
+// before invoking this.
+func (cr *CompiledRule) ValidateNoFilteringWhereForConvergence() error {
+	if cr == nil || cr.Query == nil {
+		return errors.New("full engine: convergence lens: compiled rule has no query")
+	}
+	for _, c := range cr.Query.Clauses {
+		switch cl := c.(type) {
+		case *Match:
+			if !cl.Optional && cl.Where != nil {
+				return errors.New("full engine: convergence lens requires no filtering WHERE — a required MATCH carries one")
+			}
+		case *With:
+			if cl.Where != nil {
+				return errors.New("full engine: convergence lens requires no filtering WHERE — a WITH carries one")
+			}
+		}
+	}
+	return nil
+}
+
 // pathPatternReferencesActorKey reports whether any node/relationship
 // property map in p embeds a $actorKey reference (e.g. `(x {key: $actorKey})`).
 func pathPatternReferencesActorKey(p PathPattern) bool {

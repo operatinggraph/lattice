@@ -357,10 +357,19 @@ NATS-KV/Postgres row target (pinned by test); on a **GrantTable** target the
 `RevokeGrant` write deliberately inserts a seq-stamped tombstone row for a
 never-granted key (deny-direction, ≤1 row per actor — it also makes a `protected`
 flag flipping false promptly revoke the wildcard grant).
-Convergence (`violating`-flag) lenses are unaffected: they anchor-match every
-candidate unconditionally, so the presence check never fires for them — an authoring
-invariant (a future convergence lens with a filtering `WHERE` would retract rows
-Weaver misreads as deletions; keep convergence predicates in the `violating` flag).
+Convergence (`violating`-flag) lenses on a **plain** (non-actorAggregate) full-engine
+path are unaffected by design and now **enforced at activation**: a lens projecting
+into the shared `weaver-targets` bucket may carry no filtering (non-optional) `WHERE`
+— `(*full.CompiledRule).ValidateNoFilteringWhereForConvergence`, called from
+`startPipeline` alongside the `DiffRetraction` guard, fails the lens closed rather than
+let its presence-check retraction emit a Delete Weaver would misread as "entity gone"
+instead of "stopped violating." **actorAggregate convergence lenses are exempt** — the
+presence check only ever runs for `p.actorEnumerator == nil && p.envelopeFn == nil`, so
+it structurally cannot fire for an envelope lens regardless of `WHERE`; their zero-match
+case already resolves safely through the envelope's `EmptyBehavior` (a missing row and a
+live `violating: false` row are handled identically by Weaver's evaluator) — proven live
+by `unroutedTasks` (`packages/orchestration-base/lenses.go`), the one shipped convergence
+lens with a required `WHERE` on its anchor match.
 
 **Neighbor-driven / multi-row retraction (target-diff, opt-in).** A neighbor-keyed
 composite lens whose presence check structurally falls through (above) can opt into
