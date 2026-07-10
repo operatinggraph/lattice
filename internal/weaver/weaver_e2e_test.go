@@ -17,6 +17,7 @@ import (
 	"github.com/asolgan/lattice/internal/jsstore"
 	"github.com/asolgan/lattice/internal/substrate"
 	"github.com/asolgan/lattice/internal/weaver"
+	"github.com/asolgan/lattice/packages/augur"
 	semanticcontracts "github.com/asolgan/lattice/packages/semantic-contracts"
 )
 
@@ -1280,4 +1281,178 @@ func TestWeaverE2E_SemanticContracts_MissingCharge_PayloadCarriesAccountKey(t *t
 		"the dispatched DebitAccount payload must carry accountKey — Target only sets authContext.target, never the payload")
 	require.Equal(t, float64(4500), op.Payload["amountCents"])
 	require.Equal(t, clauseKey, op.Payload["clauseRef"])
+}
+
+// installAugurDispatchTarget pins the real augur package's augurDispatch
+// meta.weaverTarget (packages/augur/targets.go) as the fixture target — same
+// "read live off the package's own WeaverTargets(), never hand-copy" precedent
+// gapActionFixtureBody documents above — so these two tests can never drift
+// from what the package actually installs.
+func installAugurDispatchTarget(t *testing.T, ctx context.Context, conn *substrate.Conn) string {
+	t.Helper()
+	targets := augur.WeaverTargets()
+	require.Len(t, targets, 1, "augur must declare exactly one weaverTarget")
+	target := targets[0]
+	ga, ok := target.Gaps["missing_dispatch"]
+	require.True(t, ok, "augur playbook must declare missing_dispatch")
+	require.Equal(t, "proposedOp", ga.Action)
+	installWeaverTarget(t, ctx, conn, mustNanoID(t), map[string]any{
+		"targetId": target.TargetID,
+		"lensRef":  target.LensRef,
+		"gaps": map[string]any{
+			"missing_dispatch": map[string]any{"action": ga.Action},
+		},
+	})
+	return target.TargetID
+}
+
+// putAugurDispatchRow writes one augurDispatchPending-lens-shaped row (design
+// augur-dispatch-pickup-design.md §10.2, mirrored from
+// internal/augurconvergence's harness.putDispatchRow — same row shape, no
+// live Processor here) directly into weaver-targets under
+// augurDispatch.<handle>, simulating an approved proposal ready for pickup.
+func putAugurDispatchRow(t *testing.T, ctx context.Context, conn *substrate.Conn, targetID, handle, candidateKey, action string, params map[string]any) {
+	t.Helper()
+	putRow(t, ctx, conn, targetID, handle, map[string]any{
+		"entityKey":        "vtx.augurproposal." + handle,
+		"violating":        true,
+		"missing_dispatch": true,
+		"proposedAction":   action,
+		"proposedParams":   params,
+		"candidateKey":     candidateKey,
+	})
+}
+
+// TestWeaverE2E_AugurDispatch_MidFlightKill applies the TestWeaverE2E_
+// MidFlightKill crash-recovery pattern to Fire 2b's dispatch episode (design
+// augur-dispatch-pickup-design.md §6 residual): an Actuator that died after
+// CAS-creating its `proposedOp` mark but before publishing leaves a dead mark
+// behind. While its lease lives, nothing dispatches; once it expires, the
+// reconciler sweep reclaims and fires the SAME proposal-scoped requestId
+// (deriveProposalDispatchRequestID, §3.3) — a fresh episode collapses on the
+// deterministic tracker, so exactly one inner op + one dispatched-flip land,
+// never a storm, even across a further row re-observe.
+func TestWeaverE2E_AugurDispatch_MidFlightKill(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+	ops := subscribeOps(t, nc)
+
+	targetID := installAugurDispatchTarget(t, ctx, conn)
+
+	handle := mustNanoID(t)
+	candidateKey := "vtx.identity." + mustNanoID(t)
+	deadRev := putDeadMark(t, ctx, conn, targetID, handle, "missing_dispatch", "proposedOp",
+		time.Now().Add(8*time.Second))
+	putAugurDispatchRow(t, ctx, conn, targetID, handle, candidateKey, "directOp", map[string]any{
+		"operation": "SetAvailability",
+		"target":    candidateKey,
+		"params":    map[string]any{"identity": candidateKey, "available": true},
+	})
+
+	instance := "e2e-augur-kill-" + mustNanoID(t)
+	engine := newEngine(conn, instance, func(c *weaver.Config) {
+		c.SweepInterval = time.Second
+		c.MarkLease = 8 * time.Second
+	})
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
+
+	// While the dead mark's lease lives: the replayed fresh delivery
+	// anti-storm-drops and the sweep leaves the in-flight episode alone.
+	requireNoOp(t, ops, time.Second)
+
+	// Lease expiry → the sweep reclaims and fires the two-op dispatch: the
+	// materialised remediation, then the dispatched-flip, in that order
+	// (evaluator.fire's publish order).
+	remediation := nextOp(t, ops, 15*time.Second)
+	require.Equal(t, "SetAvailability", remediation.OperationType)
+	require.Equal(t, candidateKey, remediation.AuthContext.Target)
+
+	flip := nextOp(t, ops, 5*time.Second)
+	require.Equal(t, "RecordProposalDispatch", flip.OperationType)
+	require.Equal(t, handle, flip.Payload["externalRef"])
+	require.Equal(t, "dispatched", flip.Payload["outcome"])
+
+	markKey := targetID + "." + handle + ".missing_dispatch"
+	entry, err := conn.KVGet(ctx, weaverStateBucket, markKey)
+	require.NoError(t, err, "the reclaim must re-create the mark")
+	require.NotEqual(t, deadRev, entry.Revision, "the reclaimed mark must be a fresh episode")
+
+	// Exactly one re-attempt — never a storm, and a fresh re-upsert of the
+	// still-open row alone does not re-fire (F5 coalesce angle).
+	requireNoOp(t, ops, 2*time.Second)
+	putAugurDispatchRow(t, ctx, conn, targetID, handle, candidateKey, "directOp", map[string]any{
+		"operation": "SetAvailability",
+		"target":    candidateKey,
+		"params":    map[string]any{"identity": candidateKey, "available": true},
+	})
+	requireNoOp(t, ops, 2*time.Second)
+}
+
+// TestWeaverE2E_AugurDispatch_ScopeEscapeInvalid proves the design's §6
+// adversarial claim end-to-end (augur-dispatch-pickup-design.md §6: "a
+// FakeAugur proposal that somehow reached approved carrying a directOp on a
+// different entity ... is caught at the dispatch-time §5 scope check →
+// invalid, never dispatches"): a row whose proposedParams.target names an
+// entity OTHER than the row's own trusted candidateKey — the drift a
+// compromised or buggy upstream (record/approval-time Starlark legs) could in
+// principle let through — is rejected by Weaver's OWN independent Go
+// dispatch-time re-validation leg (validateProposedDispatch) the instant it
+// reaches the running engine. Only the RecordProposalDispatch{invalid} flip
+// fires; the proposed remediation NEVER dispatches.
+func TestWeaverE2E_AugurDispatch_ScopeEscapeInvalid(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+	ops := subscribeOps(t, nc)
+
+	targetID := installAugurDispatchTarget(t, ctx, conn)
+
+	engine := newEngine(conn, "e2e-augur-invalid-"+mustNanoID(t))
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
+
+	handle := mustNanoID(t)
+	candidateKey := "vtx.identity." + mustNanoID(t)
+	foreignKey := "vtx.identity." + mustNanoID(t)
+	putAugurDispatchRow(t, ctx, conn, targetID, handle, candidateKey, "directOp", map[string]any{
+		// target names a DIFFERENT entity than candidateKey — the anchor-field
+		// scope-escape validateProposedDispatch's dispatchAnchorField check
+		// rejects (never merely "referenced somewhere" — the actual anchor).
+		"operation": "SetAvailability",
+		"target":    foreignKey,
+		"params":    map[string]any{"identity": foreignKey, "available": true},
+	})
+
+	// The ONLY op that ever fires is the invalid flip — never the remediation.
+	flip := nextOp(t, ops, 15*time.Second)
+	require.Equal(t, "RecordProposalDispatch", flip.OperationType)
+	require.Equal(t, handle, flip.Payload["externalRef"])
+	require.Equal(t, "invalid", flip.Payload["outcome"])
+	reason, _ := flip.Payload["reason"].(string)
+	require.Contains(t, reason, "does not equal the escalated candidate",
+		"the invalid flip must record an auditable scope-escape reason")
+
+	requireNoOp(t, ops, 2*time.Second)
 }
