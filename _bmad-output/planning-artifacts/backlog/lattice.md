@@ -113,8 +113,7 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (this section only — check the **Arch-review intake** section above too, it
-> carries its own ✅ ratified / 📋 ready items, e.g. `fr22-service-denial-structural-fields` ★, Fork B ratified):
-> Object crypto-shred Fire 4 CLOSED (`513587d` 2026-07-09) — see Security & trust boundary below.
+> carries its own ✅ ratified / 📋 ready items).
 > *Still gated*: **AI-caps Fire 4** (Andrew sign-off on AI-code-execution, not the sandbox).
 
 ### Security & trust boundary
