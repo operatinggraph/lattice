@@ -23,18 +23,19 @@ const (
 
 // DDLs returns the package's DDL meta-vertices: the appointment-reminder op handler
 // (vertexType) + its .reminder aspect-type gate, the follow-up-reminder pair
-// (followups.go), and the recurring visit-series vertex type + its three aspect
-// gates (visitseries.go). clinic-domain owns the appointment vertex + its
-// .schedule/.status/.encounter aspects; this package ATTACHES the .reminder /
-// .followUpReminder marker aspects onto it (the loftspace-domain idiom of a package
-// adding an aspect onto another package's vertex type) AND owns its own
-// self-contained visitseries vertex type (the clinic-domain patient/provider idiom)
-// for the recurring series.
+// (followups.go), the notification-outcome replyOp pair for each (notifications.go),
+// and the recurring visit-series vertex type + its three aspect gates (visitseries.go).
+// clinic-domain owns the appointment vertex + its .schedule/.status/.encounter aspects;
+// this package ATTACHES the .reminder / .followUpReminder marker aspects onto it (the
+// loftspace-domain idiom of a package adding an aspect onto another package's vertex
+// type) AND owns its own self-contained visitseries vertex type (the clinic-domain
+// patient/provider idiom) for the recurring series.
 func DDLs() []pkgmgr.DDLSpec {
 	ddls := append([]pkgmgr.DDLSpec{
 		recordReminderVertexTypeDDL(),
 		reminderAspectTypeDDL(),
 	}, followUpReminderDDLs()...)
+	ddls = append(ddls, notificationDDLs()...)
 	return append(ddls, visitSeriesDDLs()...)
 }
 
@@ -46,8 +47,10 @@ func DDLs() []pkgmgr.DDLSpec {
 // update (overwrite-if-present) — idempotent in effect (re-running re-stamps a
 // later sentAt; the gap stays closed once any sentAt is present), so a redelivery
 // or sweep reclaim is harmless without a revision condition (the MarkExpired
-// idiom). The actual notification channel (email/SMS) is the deferred bridge-
-// adapter work; recording sentAt + the FE surfacing it is the demonstrable slice.
+// idiom). The script also fires the actual notification send (email/SMS) off
+// its own transactional outbox to the bridge's "notification" adapter
+// (notifications.go) — no Loom pattern needed, the bridge dispatch path is
+// generic.
 func recordReminderVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     reminderOpDDL,
@@ -61,12 +64,13 @@ func recordReminderVertexTypeDDL() pkgmgr.DDLSpec {
 			"liveness-guard the parent (never marks a reminder on an absent/tombstoned appointment). The write is an " +
 			"UNCONDITIONED update (create-if-absent / overwrite-if-present), so it is idempotent in effect and re-run-safe " +
 			"under at-least-once. Submitted under Weaver's service-actor authority. Mints NO vertex of its own type (the " +
-			"freshnessMarker idiom). NOTE: the actual notification delivery (email/SMS) is the deferred real-adapter work; " +
-			"this records that the reminder became DUE, not that a notification was sent. It guards liveness " +
+			"freshnessMarker idiom). It also emits external.notification off its own outbox (keyed on appointmentKey:" +
+			"remindedFor) so the bridge's \"notification\" adapter actually sends; see RecordAppointmentReminderNotification " +
+			"(notifications.go) for the replyOp that records the outcome. It guards liveness " +
 			"(isDeleted) but NOT status: an appointment cancelled in the narrow window between the gap opening and this " +
-			"op committing still gets a .reminder marker. That is harmless while the marker is inert; the authoritative " +
-			"\"do not actually notify a cancelled/changed appointment\" check belongs at the deferred notification-delivery " +
-			"point (which must read live state at send time anyway), not here.",
+			"op committing still gets a .reminder marker and a notification send. That is a rare-window best-effort gap, " +
+			"not a hard guarantee — the authoritative \"do not notify a cancelled/changed appointment\" check would need a " +
+			"live read at send time, which this read-guarded-once op does not repeat.",
 		Script: recordReminderScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> the reminder fired for (required; validated alive). The caller MUST list it in ContextHint.Reads."},` +
@@ -207,6 +211,23 @@ def execute(state, op):
         ]
         events = [{"class": "clinic.appointmentReminderSent",
                    "data": {"appointmentKey": appt_key, "sentAt": sent_at, "remindedFor": reminded_for}}]
+
+        # Fire the actual notification send off this op's own transactional
+        # outbox (notifications.go). No Loom pattern needed — the bridge's
+        # dispatch path is fully generic (internal/bridge/dispatch.go). The
+        # external ref keys on (appointmentKey, remindedFor): a redelivery of
+        # the SAME due reminder reuses the same key so the adapter dedups (no
+        # double-send), while a reschedule (a new remindedFor) mints a fresh
+        # key and sends again — the same re-arm semantics the .reminder marker
+        # already has.
+        if reminded_for != None:
+            ext_ref = appt_key + ":" + reminded_for
+            events.append({"class": "external.notification",
+                            "data": {"instanceKey": ext_ref, "adapter": "notification",
+                                     "replyOp": "RecordAppointmentReminderNotification",
+                                     "externalRef": ext_ref, "idempotencyKey": ext_ref,
+                                     "params": {"appointmentKey": appt_key, "reminderType": "appointment", "remindedFor": reminded_for}}})
+
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 

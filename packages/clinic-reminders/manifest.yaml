@@ -14,10 +14,13 @@ description: |
   weaver-target lens (freshUntil = .progress.nextDueAt, re-armed forward on every
   advance instead of clearing to a permanent close). Each gap dispatches a directOp
   via the §10.8 playbook; all three invert lease-signing's freshness re-open
-  (open-at-deadline instead of reopen-at-expiry). Depends on clinic-domain (the
-  appointment/patient/provider vertex types + .schedule.remindAt /
-  .encounter.followUpDate) and orchestration-base (MarkExpired re-touch at the @at
-  firing).
+  (open-at-deadline instead of reopen-at-expiry). Both reminder ops also fire
+  external.notification off their own outbox to the bridge's "notification" adapter;
+  RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record
+  the outcome as an audit-only aspect (neither gates the convergence lenses above).
+  Depends on clinic-domain (the appointment/patient/provider vertex types +
+  .schedule.remindAt / .encounter.followUpDate) and orchestration-base (MarkExpired
+  re-touch at the @at firing).
 depends:
   - clinic-domain
   - orchestration-base
@@ -30,6 +33,14 @@ declares:
     - canonicalName: followUpReminderOp
       class: meta.ddl.vertexType
     - canonicalName: followUpReminder
+      class: meta.ddl.aspectType
+    - canonicalName: appointmentReminderNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: appointmentReminderNotification
+      class: meta.ddl.aspectType
+    - canonicalName: followUpReminderNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: followUpReminderNotification
       class: meta.ddl.aspectType
     - canonicalName: visitseries
       class: meta.ddl.vertexType
@@ -62,6 +73,12 @@ declares:
     - operationType: RecordFollowUpReminder
       scope: any
       grantsTo: [operator]
+    - operationType: RecordAppointmentReminderNotification
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordFollowUpReminderNotification
+      scope: any
+      grantsTo: [operator]
     - operationType: StartVisitSeries
       scope: any
       grantsTo: [operator]
@@ -84,6 +101,8 @@ declares:
   opMetas:
     - operationType: RecordAppointmentReminder
     - operationType: RecordFollowUpReminder
+    - operationType: RecordAppointmentReminderNotification
+    - operationType: RecordFollowUpReminderNotification
     - operationType: StartVisitSeries
     - operationType: PauseVisitSeries
     - operationType: ResumeVisitSeries

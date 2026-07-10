@@ -119,10 +119,15 @@ func run(logger *slog.Logger) error {
 	// publish), capped per artifact by OBJECTS_MAX_UPLOAD_BYTES (the same knob
 	// the vertical apps' upload paths use).
 	docGen := bridge.NewFakeDocGen(conn, bootstrap.CoreObjectsBucket, uploadCapFromEnv(logger))
+	// notification — the clinic-reminders vendor (email/SMS). Fired from the
+	// existing RecordAppointmentReminder/RecordFollowUpReminder ops' own outbox,
+	// not a Loom pattern (clinic-reminders-notification-adapter-design.md).
+	notification := bridge.NewFakeNotification()
 	for name, adapter := range map[string]bridge.Adapter{
 		"stripe":          stripe,
 		"backgroundCheck": bgCheck,
 		"docGen":          docGen,
+		"notification":    notification,
 	} {
 		if err := engine.RegisterAdapter(name, adapter); err != nil {
 			return fmt.Errorf("register adapter %q: %w", name, err)

@@ -45,8 +45,12 @@
 // AdvanceVisitSeries rewrites nextDueAt to a new future deadline, rolling the series
 // forward instead of converging (visitSeriesDueSpec, visitseries.go).
 //
-// The actual notification channel (email/SMS) is the deferred real-adapter work;
-// recording the reminder fact + the FE surfacing it is the demonstrable slice.
+// Both reminder ops also fire the actual notification send off their own
+// transactional outbox to the bridge's "notification" adapter (notifications.go
+// — RecordAppointmentReminderNotification / RecordFollowUpReminderNotification
+// record the outcome as an audit-only aspect; neither gates the convergence
+// lenses above, which stay keyed on .reminder/.followUpReminder unchanged). See
+// _bmad-output/implementation-artifacts/clinic-reminders-notification-adapter-design.md.
 //
 // Depends clinic-domain (the appointment/patient/provider vertex types + the
 // appointment's .schedule.remindAt / .encounter.followUpDate) + orchestration-base
@@ -67,7 +71,9 @@ var Package = pkgmgr.Definition{
 		"at the deadline); and the visitseries vertex type + Start/Pause/Resume/AdvanceVisitSeries ops + the " +
 		"visitSeriesDue rolling convergence lens (freshUntil re-arms forward on every advance instead of clearing " +
 		"to a permanent close) — the §10.8 playbooks dispatch each gap's directOp. Inverts lease-signing's " +
-		"freshness re-open. Depends clinic-domain + orchestration-base.",
+		"freshness re-open. Both reminder ops also fire external.notification off their own outbox to the bridge's " +
+		"\"notification\" adapter; RecordAppointmentReminderNotification / RecordFollowUpReminderNotification " +
+		"record the outcome. Depends clinic-domain + orchestration-base.",
 	Depends:       []string{"clinic-domain", "orchestration-base"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

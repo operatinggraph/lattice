@@ -23,16 +23,19 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the eight DDLs — the appointment-reminder pair
+// TestPackage_DDLs pins the twelve DDLs — the appointment-reminder pair
 // (appointmentReminderOp vertexType + appointmentReminder aspectType), the
-// follow-up-reminder pair (followUpReminderOp + followUpReminder), and the
-// visit-series group (visitseries vertexType + its three aspectType gates). Each op
-// vertexType owns its Record*/Start*/Advance* script; each aspectType is the step-6
-// write gate and MUST be NON-sensitive (a timestamp / cadence on an
-// appointment/visitseries, not an identity).
+// follow-up-reminder pair (followUpReminderOp + followUpReminder), the two
+// notification-outcome replyOp pairs (appointmentReminderNotificationOp +
+// appointmentReminderNotification, followUpReminderNotificationOp +
+// followUpReminderNotification), and the visit-series group (visitseries
+// vertexType + its three aspectType gates). Each op vertexType owns its
+// Record*/Start*/Advance* script; each aspectType is the step-6 write gate and
+// MUST be NON-sensitive (a timestamp / cadence on an appointment/visitseries,
+// not an identity).
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 8 {
-		t.Fatalf("expected 8 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 12 {
+		t.Fatalf("expected 12 DDLs, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -42,6 +45,8 @@ func TestPackage_DDLs(t *testing.T) {
 	pairs := []struct{ opName, aspName, cmd string }{
 		{"appointmentReminderOp", "appointmentReminder", "RecordAppointmentReminder"},
 		{"followUpReminderOp", "followUpReminder", "RecordFollowUpReminder"},
+		{"appointmentReminderNotificationOp", "appointmentReminderNotification", "RecordAppointmentReminderNotification"},
+		{"followUpReminderNotificationOp", "followUpReminderNotification", "RecordFollowUpReminderNotification"},
 	}
 	for _, pr := range pairs {
 		op, ok := byName[pr.opName]
@@ -142,10 +147,11 @@ func TestPackage_Depends(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the six ops granted to operator (scope any).
+// TestPackage_Permissions pins the eight ops granted to operator (scope any).
 func TestPackage_Permissions(t *testing.T) {
 	want := map[string]bool{
 		"RecordAppointmentReminder": false, "RecordFollowUpReminder": false,
+		"RecordAppointmentReminderNotification": false, "RecordFollowUpReminderNotification": false,
 		"StartVisitSeries": false, "PauseVisitSeries": false, "ResumeVisitSeries": false, "AdvanceVisitSeries": false,
 	}
 	if len(Package.Permissions) != len(want) {
@@ -171,9 +177,11 @@ func TestPackage_Permissions(t *testing.T) {
 // prefix scan.
 func TestPackage_NoScans(t *testing.T) {
 	scripts := map[string]string{
-		"recordReminderScript":         recordReminderScript,
-		"recordFollowUpReminderScript": recordFollowUpReminderScript,
-		"visitSeriesScript":            visitSeriesScript,
+		"recordReminderScript":                     recordReminderScript,
+		"recordFollowUpReminderScript":             recordFollowUpReminderScript,
+		"recordReminderNotificationScript":         recordReminderNotificationScript,
+		"recordFollowUpReminderNotificationScript": recordFollowUpReminderNotificationScript,
+		"visitSeriesScript":                        visitSeriesScript,
 	}
 	for name, script := range scripts {
 		for _, forbidden := range []string{"KVListKeys", "list_keys", "scan(", "keys_with_prefix"} {

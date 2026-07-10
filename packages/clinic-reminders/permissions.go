@@ -18,6 +18,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		},
 		followUpReminderPermission(),
 	}
+	perms = append(perms, notificationPermissions()...)
 	return append(perms, visitSeriesPermissions()...)
 }
 
@@ -31,5 +32,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: reminderOp},
 		{OperationType: followUpReminderOp},
 	}
+	metas = append(metas, notificationOpMetas()...)
 	return append(metas, visitSeriesOpMetas()...)
 }

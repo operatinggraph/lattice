@@ -53,6 +53,8 @@ func followUpReminderDDLs() []pkgmgr.DDLSpec {
 // appointment, read-guarded on [appointmentKey] (never marks a follow-up reminder on
 // an absent/tombstoned appointment), as an UNCONDITIONED update (idempotent in
 // effect, re-run-safe under at-least-once — the RecordAppointmentReminder idiom).
+// It also fires the actual notification send off its own transactional outbox
+// (notifications.go) — the RecordAppointmentReminder idiom.
 func recordFollowUpReminderVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     followUpReminderOpDDL,
@@ -65,8 +67,9 @@ func recordFollowUpReminderVertexTypeDDL() pkgmgr.DDLSpec {
 			"re-documentation that moves the followUpDate re-opens the gap and re-arms the reminder. Reads [appointmentKey] to " +
 			"liveness-guard the parent. The write is an UNCONDITIONED update (create-if-absent / overwrite-if-present), so it is idempotent in effect and re-run-safe " +
 			"under at-least-once. Submitted under Weaver's service-actor authority. Mints NO vertex of its own type (the " +
-			"freshnessMarker idiom). NOTE: the actual notification delivery (email/SMS) is the deferred real-adapter work; " +
-			"this records that the follow-up became DUE, not that a notification was sent.",
+			"freshnessMarker idiom). It also emits external.notification off its own outbox (keyed on appointmentKey:" +
+			"remindedFor) so the bridge's \"notification\" adapter actually sends; see RecordFollowUpReminderNotification " +
+			"(notifications.go) for the replyOp that records the outcome.",
 		Script: recordFollowUpReminderScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> whose documented visit requested the follow-up (required; validated alive). The caller MUST list it in ContextHint.Reads."},` +
@@ -194,6 +197,18 @@ def execute(state, op):
         ]
         events = [{"class": "clinic.followUpReminderSent",
                    "data": {"appointmentKey": appt_key, "sentAt": sent_at, "remindedFor": reminded_for}}]
+
+        # Fire the actual notification send off this op's own transactional
+        # outbox (notifications.go) — the RecordAppointmentReminder idiom (no
+        # Loom pattern; the bridge's dispatch path is generic).
+        if reminded_for != None:
+            ext_ref = appt_key + ":" + reminded_for
+            events.append({"class": "external.notification",
+                            "data": {"instanceKey": ext_ref, "adapter": "notification",
+                                     "replyOp": "RecordFollowUpReminderNotification",
+                                     "externalRef": ext_ref, "idempotencyKey": ext_ref,
+                                     "params": {"appointmentKey": appt_key, "reminderType": "followUp", "remindedFor": reminded_for}}})
+
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 

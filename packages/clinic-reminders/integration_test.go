@@ -42,6 +42,7 @@ const (
 // clinic-reminders ops (reminders + the recurring visit series).
 var crOps = []string{
 	"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder",
+	"RecordAppointmentReminderNotification", "RecordFollowUpReminderNotification",
 	"StartVisitSeries", "PauseVisitSeries", "ResumeVisitSeries", "AdvanceVisitSeries",
 }
 
@@ -219,6 +220,70 @@ func TestRecordAppointmentReminder_RejectsTombstonedAppointment(t *testing.T) {
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".reminder"); err == nil {
 		t.Fatalf("a reminder marker must NOT be written for a tombstoned appointment")
 	}
+}
+
+// TestRecordAppointmentReminderNotification_WritesMarker drives the replyOp the
+// bridge posts after its "notification" adapter Executes for the
+// external.notification event recordReminderScript emits. It submits with no
+// Reads (the bridge submits none), asserts the .reminderNotification aspect
+// lands with the split-out remindedFor, and then proves the create-only
+// once-only guard: a second reply for the SAME externalRef is Rejected (the
+// FR58 redelivery defense).
+func TestRecordAppointmentReminderNotification_WritesMarker(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "remnotif", Instance: "cr-remnotif"})
+
+	apptKey := "vtx.appointment.CRnotifApptMNPQRSTUV"
+	extRef := apptKey + ":2026-07-01T15:00:00Z"
+
+	crSubmit(t, ctx, conn, cp, cons, "crremnotif01", "RecordAppointmentReminderNotification", "",
+		`{"externalRef":"`+extRef+`","status":"completed","result":"notification sent"}`, nil, processor.OutcomeAccepted)
+
+	notif := crReadDoc(t, ctx, conn, apptKey+".reminderNotification")
+	if notif["class"] != "appointmentReminderNotification" {
+		t.Fatalf("reminderNotification class = %v, want appointmentReminderNotification", notif["class"])
+	}
+	nd, _ := notif["data"].(map[string]any)
+	if s, _ := nd["status"].(string); s != "completed" {
+		t.Fatalf("reminderNotification status = %q, want completed", s)
+	}
+	if rf, _ := nd["remindedFor"].(string); rf != "2026-07-01T15:00:00Z" {
+		t.Fatalf("reminderNotification remindedFor = %q, want 2026-07-01T15:00:00Z", rf)
+	}
+
+	// Create-only: a redelivered reply for the SAME externalRef must be
+	// Rejected (once-only FR58 guard), not silently re-accepted.
+	crSubmit(t, ctx, conn, cp, cons, "crremnotif02", "RecordAppointmentReminderNotification", "",
+		`{"externalRef":"`+extRef+`","status":"completed","result":"redelivered"}`, nil, processor.OutcomeRejected)
+}
+
+// TestRecordFollowUpReminderNotification_WritesMarker mirrors
+// TestRecordAppointmentReminderNotification_WritesMarker for the follow-up
+// reminder's notification-outcome replyOp.
+func TestRecordFollowUpReminderNotification_WritesMarker(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "fremnotif", Instance: "cr-fremnotif"})
+
+	apptKey := "vtx.appointment.CRfnotifApptMNPQRSTU"
+	extRef := apptKey + ":2027-01-15T09:00:00Z"
+
+	crSubmit(t, ctx, conn, cp, cons, "crfremnotif01", "RecordFollowUpReminderNotification", "",
+		`{"externalRef":"`+extRef+`","status":"completed","result":"notification sent"}`, nil, processor.OutcomeAccepted)
+
+	notif := crReadDoc(t, ctx, conn, apptKey+".followUpReminderNotification")
+	if notif["class"] != "followUpReminderNotification" {
+		t.Fatalf("followUpReminderNotification class = %v, want followUpReminderNotification", notif["class"])
+	}
+	nd, _ := notif["data"].(map[string]any)
+	if s, _ := nd["status"].(string); s != "completed" {
+		t.Fatalf("followUpReminderNotification status = %q, want completed", s)
+	}
+	if rf, _ := nd["remindedFor"].(string); rf != "2027-01-15T09:00:00Z" {
+		t.Fatalf("followUpReminderNotification remindedFor = %q, want 2027-01-15T09:00:00Z", rf)
+	}
+
+	crSubmit(t, ctx, conn, cp, cons, "crfremnotif02", "RecordFollowUpReminderNotification", "",
+		`{"externalRef":"`+extRef+`","status":"completed","result":"redelivered"}`, nil, processor.OutcomeRejected)
 }
 
 // TestRecordFollowUpReminder_WritesMarker mints a bookable appointment then drives

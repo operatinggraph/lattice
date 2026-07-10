@@ -115,11 +115,20 @@ overwrite-if-present, no `expectedRevision`) → idempotent in effect, so an at-
 sweep reclaim re-stamps it harmlessly (the `MarkExpired` idiom).
 
 It guards **liveness** (`isDeleted`) but deliberately **not status** — an appointment cancelled in the
-narrow window between the gap opening and this op committing still gets a `.reminder` marker. That is
-harmless while the marker is inert: this op records that a reminder became **due**, not that a
-notification was sent. The real notification channel (email / SMS) is the deferred bridge-adapter work,
-and the authoritative "do not actually notify a cancelled/changed appointment" check belongs at that
-delivery point (which must read live state at send time anyway), not here.
+narrow window between the gap opening and this op committing still gets a `.reminder` marker (and a
+notification send). That is a rare-window best-effort gap, not a hard guarantee.
+
+The script also fires `external.notification` off its own transactional outbox (no Loom pattern — the
+bridge's dispatch path, `internal/bridge/dispatch.go`, is fully generic and needs neither a claim
+vertex nor a Loom-parked token), keyed on `appointmentKey:remindedFor` so a redelivery of the *same*
+due reminder dedups at the adapter while a **reschedule** (a new `remindedFor`) mints a fresh key and
+sends again. The bridge's `"notification"` adapter (`FakeNotification`, mirroring `FakeStripe` — the
+platform's established simulated-adapter convention) Executes and posts
+`RecordAppointmentReminderNotification` / `RecordFollowUpReminderNotification`
+(`notifications.go`) back, which record the outcome as an **audit-only** `.reminderNotification` /
+`.followUpReminderNotification` aspect — neither gates the convergence lenses above (still keyed on
+`.reminder`/`.followUpReminder`, unchanged). See
+`_bmad-output/implementation-artifacts/clinic-reminders-notification-adapter-design.md`.
 
 ## Recurring visit series (`visitseries.go`)
 
@@ -174,8 +183,12 @@ and the op by `TestRecordAppointmentReminder_{WritesMarker, RejectsTombstonedApp
 
 ## Out of scope
 
-- **The notification channel** (email / SMS delivery) — deferred real-adapter work. This package records
-  that a reminder became due (or a series occurrence came due); it does not send anything.
+- **Real vendor integration + real recipient targeting** — the `"notification"` bridge adapter
+  (`FakeNotification`) is simulated, same convention as every other adapter this platform ships
+  (`FakeStripe`/`FakeBackgroundCheck`/`FakeDocGen`). A real recipient send additionally needs the
+  Vault-decrypt-at-send question resolved (patient contact info is Vault-encrypted on `vtx.identity`,
+  decryptable only via the Secure-Lens read path — an architectural fork, not implementation work).
+  The series occurrence path (`visitSeriesDue`) has no notification wired at all yet.
 - **Recurring `@every` schedules** — the visit series above meets clinic's recurring-cadence need with a
   **rolling `@at`** (state lives in the read model; each convergence re-arms the next deadline itself),
   so no engine-level `@every` primitive was needed (see the visit-series design doc §3 for why). A
