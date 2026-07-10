@@ -507,23 +507,37 @@ feature*.
 
 ## 7. Decomposition for the Steward (fire-by-fire, each independently shippable + green)
 
-> **🏗️ CHECKPOINT (2026-07-10, Steward).** EDGE.1 CLOSED — the offline-first read loop is done. **Done:**
-> `internal/edge/store` (§3.1, the Local VAL Store) — bbolt-backed, Contract #1-keyed, `ApplyUpsert`/
-> `ApplyDelete` LWW-by-revision, persisted `Cursor`, scaffolded `local:` sovereign namespace (`1783f10`).
-> `internal/edge/sync` (§3.2, the Sync Manager) — `substrate.RunDurableConsumer` on the `SYNC` stream
-> (per-actor `lattice.sync.user.<id>` filter, stable per-device durable name), a locally re-declared
-> `deltaEnvelope` mirroring `natssubject.go`'s wire shape, `store.ApplyUpsert`/`ApplyDelete` per delivered
-> delta + `store.SetCursor` advancing on every applied message, cold-start/gap-triggered
-> `personal.register`+`personal.hydrate` control RPCs (gap detected by comparing the local cursor to the
-> SYNC stream's live `FirstSeq`), warm resume otherwise. `cmd/edge` — the binary wiring `store`+`sync`
-> (mirrors `cmd/loupe`'s flat layout; `EDGE_STORE_PATH`/`NATS_URL`/`EDGE_IDENTITY_ID`/`EDGE_DEVICE_ID`/
-> `EDGE_ACTOR_KEY` env config). Ephemeral-stack e2e (embedded NATS + a real `control.Service` +
-> capability-stub, §5's "against a live trusted slice") proves cold-start hydrate+register, warm-resume
-> skips hydrate, gap→re-hydrate, and the upsert/delete/hydrationComplete/unknown-op/malformed-envelope
-> apply switch. `docs/components/edge.md` updated in the same commit. **Next:** EDGE.2 —
-> `internal/edge/overlay` (optimistic local-apply + pending overlay + UI-discovery) +
-> `internal/edge/agent` (durable intent queue, submit-on-reconnect, tracker poll/confirm, conflict
-> re-audit, local GC) — trusted posture, §7 item 2.
+> **🏗️ CHECKPOINT (2026-07-10, Steward).** EDGE.1 + EDGE.2 CLOSED — the offline-first read loop AND the
+> optimistic write path are done. **EDGE.1 done:** `internal/edge/store` (§3.1, the Local VAL Store) —
+> bbolt-backed, Contract #1-keyed, `ApplyUpsert`/`ApplyDelete` LWW-by-revision, persisted `Cursor`,
+> scaffolded `local:` sovereign namespace (`1783f10`). `internal/edge/sync` (§3.2, the Sync Manager) —
+> `substrate.RunDurableConsumer` on the `SYNC` stream (per-actor `lattice.sync.user.<id>` filter, stable
+> per-device durable name), a locally re-declared `deltaEnvelope` mirroring `natssubject.go`'s wire shape,
+> `store.ApplyUpsert`/`ApplyDelete` per delivered delta + `store.SetCursor` advancing on every applied
+> message, cold-start/gap-triggered `personal.register`+`personal.hydrate` control RPCs, warm resume
+> otherwise. `cmd/edge` — the binary wiring `store`+`sync` (mirrors `cmd/loupe`'s flat layout).
+> **EDGE.2 done:** `internal/edge/overlay` (§3.4, pure-A this increment — no local Starlark prediction;
+> A′ is gated on the edge Starlark sandbox and not built here) — `Apply` installs the caller-supplied
+> intended value as a pending overlay (baseline = the confirmed revision at apply-time) over `store`;
+> `Read` merges pending-over-confirmed and lazily retires an overlay once the confirmed entry's revision
+> advances past that baseline (R3: cleared by the authoritative value from ANY source, never local submit
+> success alone — F1/F7's chained-prediction DAG invalidation is deferred to A′, since pure-A has no
+> chaining to invalidate); `Discard` drops a rejected intent's overlay; `Links` (new `store.ScanPrefix`)
+> answers "UI Discovery" over confirmed+pending link keys. `internal/edge/agent` (§3.5) — durable
+> `store`-backed intent queue (`EnqueueIntent`/`ListIntents`/`DeleteIntent`, FIFO by bbolt
+> `NextSequence`); `Drain` submits queued envelopes to `core-operations` (a locally-reproduced submit
+> helper mirroring `cmd/lattice/output.SubmitOp`, per the `internal/pkgmgr` no-cmd-dependency
+> precedent), stopping at the first transport failure so a later `Drain` resumes; `RevisionConflict` (the
+> only hard case — cloud state moved under the offline edit) triggers `sync.Manager.Rehydrate` (new
+> export reusing the existing full `personal.hydrate` call — no anchor-scoped hydrate RPC ships, so no
+> narrower primitive invented) before discarding the overlay; any other rejection discards without
+> re-hydrating; `GC` sweeps overlays a `Read` never revisited. `cmd/edge` wires overlay+agent, draining +
+> GC-sweeping on a fixed interval. Unit tests (embedded NATS + a fake Processor responder for `agent`)
+> cover accept/duplicate/conflict/other-rejection/transport-failure/malformed-intent/FIFO-order.
+> `docs/components/edge.md` updated in the same commit. **Next:** EDGE.3 — untrusted multi-identity
+> (Gateway-verified JWT, Personal Lens PL.3 security filter, NATS-account subscribe-ACL) — **🚧 gated** on
+> D1 (PL.3) + the Gateway write-path translator + NATS-account-auth subscribe-ACL; not build-ready until
+> those land.
 
 Ordered so the security-inert local-first loop lands first (co-built with its cloud producer), the security
 turn-on is its own gated fire, and confidentiality + the real device extend it. **Dependency gates explicit.**

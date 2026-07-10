@@ -21,7 +21,7 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
 
 ## Status
 
-**EDGE.1 in progress.** Shipped so far:
+**EDGE.1 + EDGE.2 done.** Shipped so far:
 
 - **`internal/edge/store`** — the Local VAL Store (design §3.1): an embedded, transactional local KV
   (`bbolt`) keyed by the exact Contract #1 key strings (`vtx.<type>.<id>`, `vtx.<type>.<id>.<localName>`,
@@ -44,14 +44,30 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
   warm cursor still within retention skips both and resumes incrementally from the durable's own ack floor.
   Control-plane requests carry an optional `Lattice-Actor` header (trusted posture; EDGE.3 replaces this
   with a Gateway-verified identity).
-- **`cmd/edge`** — the binary wiring `store` + `sync` together (mirrors `cmd/loupe`'s flat layout):
-  `EDGE_STORE_PATH`/`NATS_URL`/`EDGE_IDENTITY_ID`/`EDGE_DEVICE_ID`/`EDGE_ACTOR_KEY` env config, connects,
-  and blocks running the Sync Manager until SIGINT/SIGTERM.
+- **`internal/edge/overlay`** (design §3.4, the Edge "Processor" — pure-A this increment, no local
+  Starlark prediction yet): `Apply` installs the caller-supplied intended value as a pending overlay over
+  a key, visible immediately through `Read`; the overlay retires the instant ANY fresher confirmed value
+  lands for that key (the intent's own eventual commit or an unrelated concurrent write) — R3's "cleared
+  by the authoritative cloud value, never local success alone." `Discard` drops a rejected intent's
+  overlay. `Links` answers "UI Discovery" — a presentation-only read enumerating confirmed + pending link
+  keys incident on a hub, merging pending creations/deletions.
+- **`internal/edge/agent`** (design §3.5) — the durable intent uploader + reconcile-by-revision:
+  `Enqueue` durably queues an operation envelope (called after `overlay.Apply`); `Drain` submits every
+  queued intent in FIFO order to `core-operations` (trusted posture, direct submit), stopping at the
+  first transport failure so a later `Drain` resumes. A `RevisionConflict` reply — the only hard case,
+  the cloud state moved under the offline edit — triggers a full re-hydrate (no anchor-scoped hydrate RPC
+  ships yet, so `sync.Manager.Rehydrate` reuses the existing `personal.hydrate` call) before discarding
+  the stale overlay; any other rejection discards without re-hydrating. `GC` sweeps pending overlays a
+  `Read` never revisited.
+- **`cmd/edge`** — the binary wiring `store` + `sync` + `overlay` + `agent` together (mirrors `cmd/loupe`'s
+  flat layout): `EDGE_STORE_PATH`/`NATS_URL`/`EDGE_IDENTITY_ID`/`EDGE_DEVICE_ID`/`EDGE_ACTOR_KEY` env
+  config, connects, runs the Sync Manager, and drains the agent's intent queue + sweeps overlay GC on a
+  fixed interval (submit-on-reconnect rides the NATS client's own auto-reconnect) until SIGINT/SIGTERM.
 
 **Not yet built** (see the design doc §7 for the full fire-by-fire plan):
 
-- **`internal/edge/overlay`** (EDGE.2) — the optimistic local-apply + intent queue write path.
-- **`internal/edge/agent`** (EDGE.2) — the intent uploader + reconcile-by-revision conflict handling.
+- **EDGE.3** — untrusted multi-identity: Gateway-verified JWT identity, Personal Lens PL.3
+  security-filtered SYNC stream, NATS-account subscribe-ACL. Gated on D1 + the Gateway + NATS-account-auth.
 - **`internal/edge/vault`** (EDGE.4) — the transient session-key Vault Proxy for sensitive aspects.
 
 **Trusted single identity only, no security filter** — the same carve-out Loupe + Personal Lens PL.1/
