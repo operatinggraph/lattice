@@ -441,6 +441,29 @@ func weaverTargetSpecBody(t WeaverTargetSpec, lensRef string) map[string]any {
 	if t.Mode != "" {
 		body["mode"] = t.Mode
 	}
+	if t.Admission != nil {
+		body["admission"] = admissionBody(t.Admission)
+	}
+	return body
+}
+
+// admissionBody emits the optional §10.8 "Admission control" `admission` block
+// (Fire 8), including only the fields the engine parses so the emitted body
+// matches the engine's AdmissionPolicy JSON shape (globalRate/adapterRates).
+// Emitted only when t.Admission != nil, so a target without a declared policy
+// round-trips to the frozen-contract (unbounded) shape.
+func admissionBody(a *AdmissionSpec) map[string]any {
+	body := map[string]any{}
+	if a.GlobalRate > 0 {
+		body["globalRate"] = a.GlobalRate
+	}
+	if len(a.AdapterRates) > 0 {
+		rates := make(map[string]any, len(a.AdapterRates))
+		for adapter, rate := range a.AdapterRates {
+			rates[adapter] = rate
+		}
+		body["adapterRates"] = rates
+	}
 	return body
 }
 

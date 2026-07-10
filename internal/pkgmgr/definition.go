@@ -202,6 +202,28 @@ type WeaverTargetSpec struct {
 	// planner's pick for real (a gap needs Goal + Actions, or Candidates, to
 	// have anything for the planner to pick from).
 	Mode string
+
+	// Admission is the optional Fire-8 dispatch-pacing policy (Contract #10
+	// §10.8 "Admission control", mirrors the engine's Target.Admission): nil
+	// (the default — omitted from the emitted body) is unbounded, byte-identical
+	// dispatch to every target before this fire; a declared policy paces WHEN an
+	// already-resolved gap fires, never gating correctness (the §10.3 mark
+	// CAS-create remains the sole anti-storm/idempotency guard).
+	Admission *AdmissionSpec
+}
+
+// AdmissionSpec mirrors the engine's AdmissionPolicy (internal/weaver/admission.go,
+// Contract #10 §10.8 "Admission control") field-for-field so the emitted body
+// deserializes cleanly into the runtime policy.
+type AdmissionSpec struct {
+	// GlobalRate bounds the target's TOTAL dispatch rate (tokens/sec, burst
+	// capacity == the rate). 0/absent = unbounded on this axis.
+	GlobalRate float64
+	// AdapterRates bounds the dispatch rate for gaps whose resolved action
+	// declares a matching GapActionSpec.Adapter — a rate here takes precedence
+	// over GlobalRate for a gap declaring that adapter. A gap with no declared
+	// Adapter, or one absent from this map, is governed by GlobalRate alone.
+	AdapterRates map[string]float64
 }
 
 // AugurSpec mirrors the engine's AugurPolicy (Contract #10 §10.8 "Augur

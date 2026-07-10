@@ -441,3 +441,43 @@ func TestEmit_WeaverTarget_AugurBlockRoundTripsThroughEngineParse(t *testing.T) 
 		t.Errorf("autoApply not round-tripped: %+v", target.Augur.AutoApply)
 	}
 }
+
+// TestEmit_WeaverTarget_AdmissionBlockRoundTripsThroughEngineParse proves the
+// optional §10.8 "Admission control" (Fire 8) block survives the full emit
+// path (admissionBody → spec aspect → weaver.Target parse). A target with no
+// admission block round-trips to the frozen-contract (unbounded) shape
+// (Admission == nil), asserted by the base test above.
+func TestEmit_WeaverTarget_AdmissionBlockRoundTripsThroughEngineParse(t *testing.T) {
+	def := orchestrationDef()
+	def.WeaverTargets[0].Admission = &pkgmgr.AdmissionSpec{
+		GlobalRate:   10,
+		AdapterRates: map[string]float64{"backgroundCheck": 2, "stripe": 5},
+	}
+
+	ops, _, err := pkgmgr.BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+	targetID := pkgmgr.EntityNanoIDForTest(def.Name, "weaverTarget:leaseSigning")
+	specDoc := findDoc(ops, "vtx.meta."+targetID+".spec")
+	if specDoc == nil {
+		t.Fatalf("no weaver-target spec aspect emitted")
+	}
+	raw, err := json.Marshal(specDoc["data"])
+	if err != nil {
+		t.Fatalf("marshal target body: %v", err)
+	}
+	var target weaver.Target
+	if err := json.Unmarshal(raw, &target); err != nil {
+		t.Fatalf("emitted admission-bearing body does not deserialize into weaver.Target: %v", err)
+	}
+	if target.Admission == nil {
+		t.Fatalf("admission block dropped on the emit path")
+	}
+	if target.Admission.GlobalRate != 10 {
+		t.Errorf("globalRate not round-tripped: %v", target.Admission.GlobalRate)
+	}
+	if target.Admission.AdapterRates["backgroundCheck"] != 2 || target.Admission.AdapterRates["stripe"] != 5 {
+		t.Errorf("adapterRates not round-tripped: %+v", target.Admission.AdapterRates)
+	}
+}

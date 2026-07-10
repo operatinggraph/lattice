@@ -10,7 +10,11 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Each gap → remediation:
 //   - missing_onboarding → triggerLoom(onboarding) over the applicant identity.
 //   - missing_bgcheck    → triggerLoom(backgroundCheck): an externalTask pattern.
+//     Adapter is set to the pattern's own vendor (backgroundCheck) purely as an
+//     admission-bucketing label (resolved.Adapter, evaluator.go admitGap) — the
+//     Loom pattern itself, not this label, drives the actual dispatch.
 //   - missing_payment    → triggerLoom(collectPayment): an externalTask pattern.
+//     Adapter is set to stripe for the same admission-bucketing reason.
 //   - missing_signature  → assignTask SignLease to the applicant, scoped to the
 //     application (the only gap closed by a user op rather than a flow).
 //   - missing_listingLeased → directOp SetListingStatus(status=leased) over the
@@ -53,10 +57,18 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	targets := []pkgmgr.WeaverTargetSpec{{
 		TargetID: "leaseApplicationComplete",
 		LensRef:  "leaseApplicationComplete",
+		// Admission (Contract #10 §10.8 "Admission control", Fire 8) paces this
+		// target's two vendor-backed gaps independently: a spike of applicants
+		// hitting missing_bgcheck/missing_payment together must not burst either
+		// vendor beyond a sane call rate. Conservative placeholder budgets — a
+		// real vendor integration tunes these to its actual rate-limit contract.
+		Admission: &pkgmgr.AdmissionSpec{
+			AdapterRates: map[string]float64{"backgroundCheck": 2, "stripe": 5},
+		},
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_onboarding":    {Action: "triggerLoom", Pattern: "onboarding", Subject: "row.applicant"},
-			"missing_bgcheck":       {Action: "triggerLoom", Pattern: "backgroundCheck", Subject: "row.applicant"},
-			"missing_payment":       {Action: "triggerLoom", Pattern: "collectPayment", Subject: "row.applicant"},
+			"missing_bgcheck":       {Action: "triggerLoom", Pattern: "backgroundCheck", Subject: "row.applicant", Adapter: "backgroundCheck"},
+			"missing_payment":       {Action: "triggerLoom", Pattern: "collectPayment", Subject: "row.applicant", Adapter: "stripe"},
 			"missing_signature":     {Action: "assignTask", Operation: "SignLease", Assignee: "row.applicant", Target: "row.entityKey"},
 			"missing_listingLeased": {Action: "directOp", Operation: "SetListingStatus", Params: map[string]string{"unit": "row.unitKey", "status": "leased"}, Reads: []string{"row.unitKey"}},
 			"missing_leaseDoc":      {Action: "triggerLoom", Pattern: "leaseDocument", Subject: "row.entityKey"},

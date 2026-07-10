@@ -495,3 +495,64 @@ func TestValidateWeaverTargets_AugurRejections(t *testing.T) {
 		})
 	}
 }
+
+func admissionTargetDef(a *AdmissionSpec) Definition {
+	return Definition{
+		WeaverTargets: []WeaverTargetSpec{{
+			TargetID: "leaseSigning",
+			LensRef:  "leaseSigningCandidates",
+			Gaps: map[string]GapActionSpec{
+				"missing_approval": {Action: "assignTask", Operation: "Approve", Assignee: "row.a", Target: "row.t"},
+			},
+			Admission: a,
+		}},
+	}
+}
+
+func TestValidateWeaverTargets_AdmissionNilOK(t *testing.T) {
+	if err := admissionTargetDef(nil).validateWeaverTargets(); err != nil {
+		t.Fatalf("a target with no admission block must pass: %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AdmissionValid(t *testing.T) {
+	def := admissionTargetDef(&AdmissionSpec{
+		GlobalRate:   10,
+		AdapterRates: map[string]float64{"backgroundCheck": 2, "stripe": 5},
+	})
+	if err := def.validateWeaverTargets(); err != nil {
+		t.Fatalf("a fully-populated valid admission block must pass: %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AdmissionAdapterOnlyOK(t *testing.T) {
+	def := admissionTargetDef(&AdmissionSpec{AdapterRates: map[string]float64{"stripe": 5}})
+	if err := def.validateWeaverTargets(); err != nil {
+		t.Fatalf("adapterRates alone (no globalRate) must pass: %v", err)
+	}
+}
+
+func TestValidateWeaverTargets_AdmissionRejections(t *testing.T) {
+	cases := []struct {
+		name    string
+		spec    *AdmissionSpec
+		wantSub string
+	}{
+		{"empty block", &AdmissionSpec{}, "declares no positive rate"},
+		{"negative globalRate", &AdmissionSpec{GlobalRate: -1}, "must be >= 0"},
+		{"zero adapter rate", &AdmissionSpec{AdapterRates: map[string]float64{"stripe": 0}}, "must be > 0"},
+		{"negative adapter rate", &AdmissionSpec{AdapterRates: map[string]float64{"stripe": -5}}, "must be > 0"},
+		{"empty adapter key", &AdmissionSpec{AdapterRates: map[string]float64{"": 5}}, "empty adapter key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := admissionTargetDef(tc.spec).validateWeaverTargets()
+			if err == nil {
+				t.Fatalf("%s: must be rejected", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("%s: unexpected reason: %v", tc.name, err)
+			}
+		})
+	}
+}

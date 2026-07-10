@@ -130,6 +130,9 @@ func (def Definition) validateWeaverTargets() error {
 		if err := def.validateAugurSpec(idx, t.TargetID, t.Augur); err != nil {
 			return err
 		}
+		if err := validateAdmissionSpec(idx, t.TargetID, t.Admission); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -174,6 +177,41 @@ func (def Definition) validateAugurSpec(targetIdx int, targetID string, a *Augur
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: augur.autoApply.minConfidence %v is out of range (must be in [0,1])",
 				targetIdx, targetID, a.AutoApply.MinConfidence)
 		}
+	}
+	return nil
+}
+
+// validateAdmissionSpec runs the §10.8 "Admission control" install-time
+// validations on a target's optional admission block (Fire 8), mirroring the
+// engine's validateAdmissionPolicy (internal/weaver/registry.go) so a package
+// that would fail the engine's own CDC-load validation fails loudly at install
+// instead. A nil block is the default (unbounded dispatch) and always valid. A
+// present block must declare at least one strictly positive rate — an empty
+// block is exactly as inert as omitting it and almost certainly an authoring
+// mistake, so it is rejected rather than silently accepted as a no-op.
+func validateAdmissionSpec(targetIdx int, targetID string, a *AdmissionSpec) error {
+	if a == nil {
+		return nil
+	}
+	if a.GlobalRate < 0 {
+		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: admission.globalRate %v must be >= 0 (0 means not declared)",
+			targetIdx, targetID, a.GlobalRate)
+	}
+	declared := a.GlobalRate > 0
+	for adapter, rate := range a.AdapterRates {
+		if adapter == "" {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: admission.adapterRates has an empty adapter key",
+				targetIdx, targetID)
+		}
+		if rate <= 0 {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: admission.adapterRates[%q] %v must be > 0 (omit the entry to leave that adapter ungoverned)",
+				targetIdx, targetID, adapter, rate)
+		}
+		declared = true
+	}
+	if !declared {
+		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: admission block present but declares no positive rate (omit the block to leave the target unbounded)",
+			targetIdx, targetID)
 	}
 	return nil
 }
