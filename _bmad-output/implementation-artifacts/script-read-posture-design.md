@@ -444,6 +444,19 @@ The Platform annotation-form gap (§13 sequencing item 2) is ALREADY shipped (`d
 platform-package sweep 21/21) — once the clinic-domain residual lands, only the flip (sequencing
 item 3) is outstanding.
 
+**Fire 4 (verticals) closes the clinic-domain residual — the vertical-package sweep (sequencing
+item 1) is now COMPLETE.** All 5 sites annotated `(a)`: `require_matching_provider`/
+`require_matching_patient`'s `withProvider`/`forPatient` link reads (declared by every caller's
+dispatcher — RescheduleAppointment's `submitReschedule` and SetAppointmentStatus's `setStatus` in
+`cmd/clinic-app/web/app.js`, both already declaring these keys in `reads`; TombstoneAppointment has
+no FE dispatcher, so its declared-by is `integration_test.go`'s `clSubmit` calls, its only caller —
+those 3 call sites (`dbtomb0001`/`tvtomb0001`/`tvtomb0002`) were under-declaring `reads` and are now
+fixed to match) and the three `appt.schedule` cell-release reads (Reschedule/SetAppointmentStatus's
+terminal branch/Tombstone). `STRICT=1 go run ./scripts/lint-conventions.go` now reports **0 warnings
+repo-wide** — sequencing items 1 (verticals) and 2 (platform, `d439919`) are both done; **item 3 (the
+advisory→blocking flip) is the only remaining step**, and per the closing-step note above, shipping
+it also unblocks the Edge Lattice row.
+
 **Proposed dispositions** (rollup: **38 (a) · 24 (d) · 1 (c) · 1 (e) · 1 chained**; the sweep fire
 re-verifies each against the §3.1 fail-closed rule — required key → `reads`, never `optionalReads`):
 

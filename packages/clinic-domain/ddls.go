@@ -1456,6 +1456,10 @@ def require_matching_provider(appt_id, provider):
     # stored back-reference (Contract #1: no relationship-as-key-list in aspect data).
     _, provider_id = parts_of(provider, "provider", "provider")
     with_provider_lnk = "lnk.appointment." + appt_id + ".withProvider.provider." + provider_id
+    # read-posture: (a) declared in contextHint.reads by every caller's dispatcher —
+    # RescheduleAppointment (cmd/clinic-app/web/app.js submitReschedule),
+    # SetAppointmentStatus's terminal branch (setStatus), TombstoneAppointment
+    # (packages/clinic-domain/integration_test.go clSubmit calls, its only caller)
     wp = kv.Read(with_provider_lnk)
     if wp == None or wp.isDeleted:
         fail("WrongProvider: provider " + provider + " is not the provider of appointment vtx.appointment." + appt_id)
@@ -1465,6 +1469,10 @@ def require_matching_patient(appt_id, patient):
     # Symmetric analog of require_matching_provider over the forPatient link.
     _, patient_id = parts_of(patient, "patient", "patient")
     for_patient_lnk = "lnk.appointment." + appt_id + ".forPatient.patient." + patient_id
+    # read-posture: (a) declared in contextHint.reads by every caller's dispatcher —
+    # RescheduleAppointment (cmd/clinic-app/web/app.js submitReschedule),
+    # SetAppointmentStatus's terminal branch (setStatus), TombstoneAppointment
+    # (packages/clinic-domain/integration_test.go clSubmit calls, its only caller)
     fp = kv.Read(for_patient_lnk)
     if fp == None or fp.isDeleted:
         fail("WrongPatient: patient " + patient + " is not the patient of appointment vtx.appointment." + appt_id)
@@ -1664,6 +1672,8 @@ def execute(state, op):
         # CURRENT .schedule to know which cells it holds today, discretize both the
         # old and new intervals, and diff. Cells held by BOTH sets need no mutation —
         # they stay claimed straight through the move (no read/re-claim gap).
+        # read-posture: (a) declared in contextHint.reads by RescheduleAppointment's
+        # dispatcher (cmd/clinic-app/web/app.js submitReschedule)
         old_sched = kv.Read(appt_key + ".schedule")
         if old_sched == None or old_sched.isDeleted:
             fail("InvalidState: " + appt_key + ".schedule is missing; cannot reschedule")
@@ -1764,6 +1774,8 @@ def execute(state, op):
             require_matching_provider(appt_id, provider)
             patient = required_string(p, "patient")
             require_matching_patient(appt_id, patient)
+            # read-posture: (a) declared in contextHint.reads by SetAppointmentStatus's
+            # dispatcher (cmd/clinic-app/web/app.js setStatus), only on the terminal branch
             mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
@@ -1827,6 +1839,9 @@ def execute(state, op):
         require_matching_provider(appt_id, provider)
         patient = required_string(p, "patient")
         require_matching_patient(appt_id, patient)
+        # read-posture: (a) declared in contextHint.reads by TombstoneAppointment's
+        # dispatcher (packages/clinic-domain/integration_test.go clSubmit calls, its
+        # only caller — operator-only op, no FE dispatcher)
         mutations = [make_tombstone(appt_key)] + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
         events = [{"class": "clinic.appointmentTombstoned", "data": {"appointmentKey": appt_key}}]
         return {"mutations": mutations, "events": events,

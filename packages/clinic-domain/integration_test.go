@@ -423,9 +423,16 @@ func TestClinic_DoubleBookRejected(t *testing.T) {
 	// 9. Tombstone a4 (11:00–11:30), then re-book that slot → the hard tombstone
 	//    released a4's held cells too → accepted.
 	a4Key := "vtx.appointment." + a4
+	// read-posture (a): the appointment's .schedule (required for cell release) +
+	// the withProvider/forPatient endpoint-validation links (script-read-posture-
+	// design.md §13) — this test is TombstoneAppointment's only dispatcher.
 	clSubmit(t, ctx, conn, cp, cons, "dbtomb0001", "TombstoneAppointment", "appointment",
 		`{"appointmentKey":"`+a4Key+`","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{a4Key}, processor.OutcomeAccepted)
+		[]string{
+			a4Key, a4Key + ".schedule",
+			"lnk.appointment." + a4 + ".withProvider.provider." + providerKey[len("vtx.provider."):],
+			"lnk.appointment." + a4 + ".forPatient.patient." + patientKey[len("vtx.patient."):],
+		}, processor.OutcomeAccepted)
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-01T11:00:00Z")
 	mkAppt("dbappt0009", patientKey, providerKey, "2026-08-01T11:00:00Z", "2026-08-01T11:30:00Z", processor.OutcomeAccepted)
 }
@@ -448,19 +455,29 @@ func TestClinic_TombstoneAppointmentValidatesEndpoints(t *testing.T) {
 	apptKey := "vtx.appointment." + apptID
 
 	// A provider that is NOT this appointment's actual provider → WrongProvider,
-	// rejected before any mutation.
+	// rejected before any mutation. require_matching_provider fails before the
+	// script ever reads forPatient/.schedule, so only the (wrong) withProvider
+	// link is a real read here (read-posture (a), script-read-posture-design.md §13).
 	clSubmit(t, ctx, conn, cp, cons, "tvtomb0001", "TombstoneAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+otherProvider+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+		[]string{
+			apptKey,
+			"lnk.appointment." + apptID + ".withProvider.provider." + otherProvider[len("vtx.provider."):],
+		}, processor.OutcomeRejected)
 	if clMissing(t, ctx, conn, apptKey) {
 		t.Fatalf("appointment must survive a TombstoneAppointment with a wrong provider")
 	}
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-08-05T10:00:00Z")
 
-	// The real endpoints → accepted, cells released.
+	// The real endpoints → accepted, cells released. read-posture (a): .schedule +
+	// the withProvider/forPatient links (script-read-posture-design.md §13).
 	clSubmit(t, ctx, conn, cp, cons, "tvtomb0002", "TombstoneAppointment", "appointment",
 		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		[]string{
+			apptKey, apptKey + ".schedule",
+			"lnk.appointment." + apptID + ".withProvider.provider." + providerKey[len("vtx.provider."):],
+			"lnk.appointment." + apptID + ".forPatient.patient." + patientKey[len("vtx.patient."):],
+		}, processor.OutcomeAccepted)
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-08-05T10:00:00Z")
 }
 
