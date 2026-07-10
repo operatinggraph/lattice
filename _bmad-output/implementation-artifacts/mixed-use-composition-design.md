@@ -94,8 +94,15 @@ Scoped down from the full portfolio-pulse aggregate (occupancy + service-attach-
   vertex, not lenses) needed no update — the lens shape is pinned by
   `TestPackage_ManifestMatchesDefinition` + `TestPackage_Permissions`' lens-count/shape assertions
   instead.
-- Live-verify: `make refresh-loftspace` diff-applies the bumped package + cycles `bin/loftspace-app`
-  on the running dev stack (F-004, no teardown) — see the Done-log entry for the outcome.
+- Live-verify: `make refresh-loftspace` diff-applied the bumped package + cycled `bin/loftspace-app`
+  on the running dev stack (F-004, no teardown). The new lens is `Protected`, so it started
+  infra-paused (Contract #6 §6.14 verify-and-pause — Refractor issues no runtime DDL for a protected
+  table); `make provision-readpath` (not yet part of the documented refresh flow — see
+  `reference_protected_lens_provision_readpath` in Steward memory) created `read_landlord_units` +
+  its RLS policy, the probe loop auto-cleared the pause (`"dependency recovered, resuming"`, no
+  manual control-plane call), and `GET /api/portfolio-pulse` with a real dev-minted token returned 4
+  live-projected units (`available` × 4, rents $2500/$2500/$2400/$2200) — full round-trip proven,
+  not just the rule-engine tests.
 
 ## Deferred (Inc 3+, not yet scoped in detail)
 
