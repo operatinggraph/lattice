@@ -2,6 +2,12 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-08 · `56784ac` · [docs] lens-hotreload-doc-fix CLOSED — "new lens needs Refractor restart" was false; corrected across 11 files incl. steward/fe-engineer SKILL.md + Loupe UI; CI green
+- 2026-07-08 · `3e4930d` · [hello-lattice] grant CreateBook to operator before Milestone 3 submits it — capability-mode fix
+- 2026-07-08 · `050e5ac` · [Auth] unconditional class-aware platform routing — dropped the rbac boot-probe latch that stale-latched "rbac absent" for a component's whole life
+- 2026-07-08 · `9116052` · [Auth] capability is the only operational auth mode — stub retired as a deployable posture, Makefile default flipped
+- 2026-07-08 · `f8dec9c` · [Security] #75 Fire 2b increment 1 — clinic/cafe apps' core-operations publish stripped + dead /api/op deleted; natsperm-pinned (`TestVerticalAppOpsPublishDenied`), CI green
+- 2026-07-08 · `ed90925` · [loftspace-app] #75 Fire 2b increment 2 — Attach/DetachObject browser-direct via the Gateway; dedup requestId ported to JS (verified vs Go); live-verified
 - 2026-07-07 · `56911ac` · [Refractor/deploy] loupe-read-only-pg-role CLOSED — wildcard-grant posture per Andrew's standing M5 decision (not a bypass, row cited the wrong doc); verified live, CI green
 - 2026-07-07 · `af86835` · [Weaver] weaver-ctrl-publish-grant-trim — dropped the redundant `lattice.ctrl.weaver.>` publish grant (subscribe + `allow_responses` already cover the control responder); natsperm-verified
 - 2026-07-07 · `94087bd` · [Refractor] refractor-6-14-postgres-seam-truthup — seq-guarded protected-Delete tombstone, grant-table auth-plane severity, int64 wrap fix; lead-reviewed, CI green

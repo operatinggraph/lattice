@@ -186,6 +186,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-10 · `20b8707` · [Bootstrap] bootstrap-untested-arms — two-phase-commit recovery/error paths (nanoid.go) + toMap map/struct/marshal-error/non-object-error branches (envelope.go, no prior test file); cov 61.9%→65.5%; CI green
 - 2026-07-10 · `d6161aa` · [Refractor] natskv-guard-edge-branches (guardedWrite half) — kvStore seam + scripted-fake tests cover CAS retry (Create+Update) and exhaustion; CI green
 - 2026-07-10 · `9812231` · [Security] Contract #11 external actor authN — per-kid opaque/nanoid subject binding + IdP-provenance `.idpBinding` aspect; CI green
 - 2026-07-10 · `61859e0` · [Refractor] convergence-lens-where-guard — `ValidateNoFilteringWhereForConvergence` activation-time guard; exempts actorAggregate lenses (unroutedTasks precedent); CI green
@@ -211,10 +212,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-09 · `0982345` · [auth] scoped-privileged-lane-grants Fire 2 — core `{op,lane}` allowlist + fail-closed strip-to-default + `PrivilegedLaneGrantRejected` alert; CI green
 - 2026-07-09 · `16c3993` · [test] CI fix — sync a second Postgres fixture's `read_lease_applications` column list (objects_rls_test.go), missed in the same-day fire; CI green
 - 2026-07-09 · `3a9d140` · [Security] #75 Fire 2b CLOSED — lease-doc gen is external I/O (docGen triad+bridge+Weaver auto-attach); loftspace-app `ops.>` stripped — [design](../../implementation-artifacts/lease-doc-external-io-design.md)
-- 2026-07-08 · `ed90925` · [loftspace-app] #75 Fire 2b increment 2 — Attach/DetachObject browser-direct via the Gateway; dedup requestId ported to JS (verified vs Go); live-verified
-- 2026-07-08 · `f8dec9c` · [Security] #75 Fire 2b increment 1 — clinic/cafe apps' core-operations publish stripped + dead /api/op deleted; natsperm-pinned (`TestVerticalAppOpsPublishDenied`), CI green
-- 2026-07-08 · `9116052` · [Auth] capability is the only operational auth mode — stub retired as a deployable posture, Makefile default flipped
-- 2026-07-08 · `050e5ac` · [Auth] unconditional class-aware platform routing — dropped the rbac boot-probe latch that stale-latched "rbac absent" for a component's whole life
-- 2026-07-08 · `3e4930d` · [hello-lattice] grant CreateBook to operator before Milestone 3 submits it — capability-mode fix
-- 2026-07-08 · `56784ac` · [docs] lens-hotreload-doc-fix CLOSED — "new lens needs Refractor restart" was false; corrected across 11 files incl. steward/fe-engineer SKILL.md + Loupe UI; CI green
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*
