@@ -28,9 +28,25 @@ const guardCASMaxAttempts = 8
 // ordering token on a guarded write (Contract #6 §6.2).
 const projectionSeqField = "projectionSeq"
 
+// kvStore is the subset of *substrate.KV's method set NatsKVAdapter depends
+// on. *substrate.KV satisfies it implicitly (no call-site changes needed);
+// tests substitute a scripted fake to trigger guardedWrite's
+// revision-conflict-retry and CAS-exhaustion branches deterministically,
+// which a real NATS-backed store can only reach via an actual race.
+type kvStore interface {
+	Get(ctx context.Context, key string) (*substrate.KVEntry, error)
+	Create(ctx context.Context, key string, value []byte) (uint64, error)
+	Update(ctx context.Context, key string, value []byte, expectedRevision uint64) (uint64, error)
+	Put(ctx context.Context, key string, value []byte) (uint64, error)
+	Delete(ctx context.Context, key string) error
+	ListKeys(ctx context.Context) ([]string, error)
+	Purge(ctx context.Context, key string) error
+	Status(ctx context.Context) error
+}
+
 // NatsKVAdapter writes materialized rows to a NATS KV bucket.
 type NatsKVAdapter struct {
-	kv         *substrate.KV
+	kv         kvStore
 	keyOrder   []string   // ordered key field names; used for deterministic composite key construction
 	deleteMode DeleteMode // hard (default): kv.Delete; soft: tombstone Put
 	// guarded selects the monotonic projection-write guard (Contract #6 §6.2).
