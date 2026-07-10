@@ -135,7 +135,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Real adapters + async result-return | Replace the `Fake*` adapters with real vendors + design the async result path. | ★★ | M–L | ✅ async result-return done · real adapters deferred (prod) |
-| Adapter read-seam / richer params | Adapters can only use what the target-lens row projects; add a subject-templated fetch seam for extra fields (SSN/DOB). | ★★ | S–M | 🚧 blocked-on: Designer (Starlark sensitivity-detection primitive) · [design](../../implementation-artifacts/adapter-read-seam-subject-templated-params-design.md) §grounding-finding · F1 shipped, F2 unsafe as speced (all identity PII is now Vault-sensitive) |
+| Adapter read-seam / richer params | Adapters can only use what the target-lens row projects; add a subject-templated fetch seam for extra fields (SSN/DOB). | ★★ | S–M | 🏗️ designing (sensitivity primitive, this fire) · [design](../../implementation-artifacts/adapter-read-seam-subject-templated-params-design.md) §grounding-finding · F1 shipped |
 
 ### Scale-out
 | Item | What it is | Imp | Size | State |
