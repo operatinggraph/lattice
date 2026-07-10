@@ -104,21 +104,51 @@ Scoped down from the full portfolio-pulse aggregate (occupancy + service-attach-
   live-projected units (`available` × 4, rents $2500/$2500/$2400/$2200) — full round-trip proven,
   not just the rule-engine tests.
 
-## Deferred (Inc 3+, not yet scoped in detail)
+## Increment 3 (shipped this fire) — portfolio-pulse: service-attach-rate
+
+Of the landlord's currently-occupied (signed) leases, what fraction have a live wellness booking or
+an open café tab — the other half of portfolio-pulse, deferred from Inc 2.
+
+**Grounding (resolved before building, was the open question Inc 2 left):** where does the
+cross-package join live? Confirmed **two existing precedents** for a vertical app reading a
+*different* package's lens bucket — `cmd/cafe-app` already reads `packages/front-desk`'s
+`front-desk-bookings` bucket (`cmd/cafe-app/frontdesk.go`), and `cmd/loftspace-app` already reads
+`packages/privacy-base`'s PII-envelope bucket (`cmd/loftspace-app/objects_crypto.go`). So this is
+applying an established pattern a second/third time, **not** inventing a new cross-package
+mechanism — no primitive to file, no Designer/Andrew gate; built directly in `cmd/loftspace-app`
+(the app that already owns occupancy).
+
+- **`occupiedLeaseAppKeys`**: the landlord's signed applications (`queryLandlordApplications`,
+  already read for the separate landlord-applications view) filtered to `SignedAt != nil` — the
+  occupied-lease set attach-rate measures against (distinct from occupancy's unit-keyed rows, since
+  `landlordUnitsRead` has no `leaseAppKey` at all — it's unit-centric via `manages`, not
+  leaseapp-centric).
+- **`computeServiceAttachRate`**: folds `front-desk-bookings` (keyed by `leaseAppKey`) and the
+  shared `weaver-targets` bucket (`cafeTabSettlement.*` prefix, `leaseAppKey` in the body) down to
+  the intersection with this landlord's occupied set — both buckets are global/cross-landlord, so
+  the intersection is also the privacy boundary: never surfaces another landlord's or resident's
+  raw row, only the count. A tab counts as attached while its status isn't `"settled"`; a booking
+  counts by existing (`frontDeskBookings` already filters to `status='booked'`).
+- **Best-effort**: unlike occupancy (502s if Postgres is down), a missing NATS connection or a
+  failed KV read leaves `occupiedLeases`/`serviceAttached`/`serviceAttachRate` at zero rather than
+  failing the whole `/api/portfolio-pulse` response — mirrors front-desk-bookings' own "no bucket =
+  no rows, not an error" posture. FE (`loadPortfolioPulse`) omits the attach-rate clause entirely
+  when `occupiedLeases` is 0, rather than showing a misleading "0% attached".
+- Live-verify: landlord "Cap Default Verify" (`vtx.identity.8citcJ8PYhszmbMdPsuD`, 2 managed units,
+  0 signed leases in this dev dataset) correctly rendered "0% occupied (0/2 leased, 2 available)"
+  with the attach-rate clause correctly omitted — no dev-dataset lease is signed yet, so the
+  positive-attach path is proven by `TestComputeServiceAttachRate` (unit test) against the real
+  join logic, not live-clicked; no console errors.
+
+## Deferred (Inc 4+, not yet scoped in detail)
 
 - **Clinic visit in the unified context** — deliberately excluded from Inc 1 per the PHI-sensitivity
   note on the *separate* "Clinical notes are write-only" backlog row (clinic patient data has its own
   Secure-Lens/Vault posture, `identifiedBy` claim semantics differ from `residentRate`'s optional/
   best-effort link) — needs its own grounding pass, not a copy-paste of this pattern.
-- **Service-attach-rate** (does a resident have a live wellness booking / open café tab, across all
-  their leases) — the other half of the operations portfolio-pulse aggregate, deliberately deferred
-  from Inc 2: it needs a cross-package KV fan-in (`front-desk-bookings` + `cafe-domain`'s tab lens)
-  this app doesn't otherwise do, keyed by `leaseAppKey` against occupancy's unit-keyed rows — a fresh
-  grounding pass on where that join lives (this app, or Loupe, which already reads across packages as
-  the inspector) and how it aggregates per-landlord rather than per-lease.
 - **Lease details on the front-desk card** (term/rent, not just the `leaseAppKey` short-key already
   shown) — small, no new lens needed (loftspace-ledger's existing lens already carries it), just FE
   wiring; picked up whenever `front-desk` gets its next increment.
 
-**Next fire on this item:** pick up service-attach-rate OR the clinic-visit tail — whichever grounds
-cleanest; re-read this doc's Deferred section first.
+**Next fire on this item:** pick up the clinic-visit tail (its own PHI/Vault grounding pass) or the
+front-desk lease-details tail — whichever grounds cleanest; re-read this doc's Deferred section first.
