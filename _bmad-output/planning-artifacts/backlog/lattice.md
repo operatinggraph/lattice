@@ -108,7 +108,6 @@ deferred follow-ons.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **weaver-admission-pkgmgr-authoring** | The §10.2 admission block (dispatch pacing) is engine-complete but has no `pkgmgr` authoring path — only a raw-JSON install can declare it. Add `WeaverTargetSpec.Admission` + validation mirroring the engine's `validateAdmissionPolicy`. Consumer: a vertical target pacing a vendor adapter (LoftSpace bgcheck/payment). | ★ | S | 📋 |
-| **health-issue-since-field** | Health issue records omit Contract #5 §5.5's required `since` (first-arose ISO-8601 timestamp) — verified for Weaver, likely platform-wide. Thread a first-seen clock through each engine's issue cache. | ★ | M | 📋 · platform-wide (verified Weaver) |
 | **weaver-untested-arms** | Five untested failure arms (none security-critical): `seedDisabledTargets` list-keys error → Start abort; disable/enable fail-safe ordering + silent Pause/Resume bool discards; `releaseCompletedLeg` revision-conflict skip; `freezeOscillatingPair` Disable-failure leg. Add colocated tests. | ★ | S | 📋 |
 
 ## Lattice feature backlog — the Phase-3 build queue
@@ -193,6 +192,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-10 · `710f1f0` · [Weaver/Bridge/Gateway/Loom/objmgr] health-issue-since-field — stamp+persist Contract #5 §5.5 `since` on every health issue, platform-wide; CI green
 - 2026-07-09 · `e97305f` · [scripts] verify-package-clinic-domain — fixed a nondeterministic map-overwrite hiding CreateAppointment's 2nd (self/consumer) permission vertex; CI green
 - 2026-07-09 · `ba28bc7` · [Refractor] refractor-health-contract-minors — heartbeat version/status aligned to Contract #5; pendingSpecs ordering test added; CI green
 - 2026-07-09 · `7f1e5d1` · [Processor] fr22-service-denial-structural-fields — deniedService/deniedServiceClass on single-service AuthContextMismatch; CI green
