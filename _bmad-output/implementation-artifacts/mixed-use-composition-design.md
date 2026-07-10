@@ -1,6 +1,6 @@
 # Mixed-use composition surfaces — design + checkpoint
 
-**Status:** 🏗️ building (Inc 1+2 shipped). Board row: [verticals.md](../planning-artifacts/backlog/verticals.md).
+**Status:** 🏗️ building (Inc 1-4 shipped). Board row: [verticals.md](../planning-artifacts/backlog/verticals.md).
 
 ## Goal
 
@@ -140,15 +140,50 @@ mechanism — no primitive to file, no Designer/Andrew gate; built directly in `
   positive-attach path is proven by `TestComputeServiceAttachRate` (unit test) against the real
   join logic, not live-clicked; no console errors.
 
-## Deferred (Inc 4+, not yet scoped in detail)
+## Increment 4 (shipped this fire) — front-desk: lease details
+
+The other front-desk tail from the Deferred list below: term/rent on the card, not just the
+`leaseAppKey` short-key.
+
+**Grounding correction (verified before building, was the open question this Deferred note left):**
+Inc 3's note claimed "loftspace-ledger's existing lens already carries it" — **false**, verified by
+reading both `packages/loftspace-ledger/lenses.go` (ledgerHistory/leaseAccounts, neither carries unit
+rent/term) and `packages/cafe-domain/lenses.go` (tabSettlement, same). No existing unprotected,
+staff-readable lens keyed by leaseAppKey carries unit rent/term — `leaseApplicationsRead` /
+`landlordLeaseApplicationsRead` (lease-signing) do, but both are §6.14 Protected/RLS-anchored to the
+applicant or landlord, not café-staff-readable. Rather than copy the stale premise, added a **second
+small unprotected nats-kv lens in `front-desk` itself** (`frontDeskLeaseDetails`, mirrors
+`frontDeskBookings`' own shape) — package-level lens work, no primitive, no Designer/Andrew gate.
+
+- **`frontDeskLeaseDetails`** (`packages/front-desk/lenses.go`, 0.1.0 → 0.2.0): one row per leaseapp
+  (not per booking — every open tab needs a row, not just those with a booked class), keyed by
+  `leaseAppKey`. `MATCH (l:leaseapp) OPTIONAL MATCH (l)-[:appliesToUnit]->(u:unit)` — OPTIONAL mirrors
+  lease-signing's `leaseApplicationCompleteSpec` (unit is required at CreateLeaseApplication, so no
+  `missing_unit` gap, but a tombstoned unit must not drop the anchor). Projects `unitAddress` /
+  `unitRent` / `unitCurrency` / `unitLeaseTermMonths` off the unit's `.address`/`.listing` aspects.
+- **`cmd/cafe-app`**: new `GET /api/frontdesk-lease-details` handler (`frontdesk.go`), same
+  best-effort posture as the bookings handler (missing bucket → empty list, not an error). FE
+  (`loadFrontDesk`/`frontDeskCard`) joins it client-side by `leaseAppKey`, same idiom as the bookings
+  join — each open-tab card now shows a "🏠 $X USD/mo · Nmo term" line when the lease has an applied-to
+  unit.
+- Tests: `lens_cypher_test.go` (unit row projects rent/term; a leaseapp with no `appliesToUnit` link
+  still projects a row, rent/term null), `frontdesk_test.go` (tombstoned-row skip, mirrors the
+  bookings test).
+- Live-verified: `make reinstall-package PKG=packages/front-desk` diff-applied 0.1.0→0.2.0 on the
+  running dev stack (`upgrade committed ... created=6 updated=2`); cycled `bin/cafe-app`; the new
+  bucket projected real data (`$2500 USD/mo`, 12mo term) via curl. In-browser: opened a real tab via a
+  direct op submission (the browser sandbox's fetch to the gateway's `:8080` origin fails —
+  `net::ERR_FAILED`, unrelated to this change — so the op that creates the fixture was submitted via
+  curl instead of the UI's own "Open Tab" button), reloaded the Front Desk view, and the card rendered
+  "🏠 $2500 USD/mo · 12mo term" with no console errors; settled the tab afterward to leave the dev
+  dataset clean.
+
+## Deferred (Inc 5+, not yet scoped in detail)
 
 - **Clinic visit in the unified context** — deliberately excluded from Inc 1 per the PHI-sensitivity
   note on the *separate* "Clinical notes are write-only" backlog row (clinic patient data has its own
   Secure-Lens/Vault posture, `identifiedBy` claim semantics differ from `residentRate`'s optional/
   best-effort link) — needs its own grounding pass, not a copy-paste of this pattern.
-- **Lease details on the front-desk card** (term/rent, not just the `leaseAppKey` short-key already
-  shown) — small, no new lens needed (loftspace-ledger's existing lens already carries it), just FE
-  wiring; picked up whenever `front-desk` gets its next increment.
 
-**Next fire on this item:** pick up the clinic-visit tail (its own PHI/Vault grounding pass) or the
-front-desk lease-details tail — whichever grounds cleanest; re-read this doc's Deferred section first.
+**Next fire on this item:** the clinic-visit tail (its own PHI/Vault grounding pass) — the last item
+in the Deferred list; re-read this doc's Deferred section first.

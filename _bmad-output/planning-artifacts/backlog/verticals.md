@@ -17,7 +17,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **Mixed-use composition surfaces** | The "more than the sum" beats across lenses the one-liner omitted: **front-desk** unified resident context (lease + visit + open tab + booked class in one lookup, surfaced before asked) and **operations** portfolio-pulse aggregate (occupancy + service-attach-rate across packages) — views that exist only because the packages share one graph. Aggregate lenses + FE across both apps + Loupe. | Café/Wellness | FE + pkg | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/mixed-use-composition-design.md) · next: Inc 4 |
+| **Mixed-use composition surfaces** | The "more than the sum" beats across lenses the one-liner omitted: **front-desk** unified resident context (lease + visit + open tab + booked class in one lookup, surfaced before asked) and **operations** portfolio-pulse aggregate (occupancy + service-attach-rate across packages) — views that exist only because the packages share one graph. Aggregate lenses + FE across both apps + Loupe. | Café/Wellness | FE + pkg | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/mixed-use-composition-design.md) · next: Inc 5 clinic tail |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | 📋 ready (after Wellness) |
 | **Clinic patient picker doesn't scale** | `#provider` still has no search (lower-urgency half, left open). | Clinic | pkg + FE | ★ | XS | 📋 ready |
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
@@ -57,6 +57,7 @@ joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no 
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-10 · `8b3848b` · Mixed-use composition Inc 4 — front-desk lease details (term/rent card line, corrected the Inc 3 note's stale premise) — [design](../../implementation-artifacts/mixed-use-composition-design.md)
 - 2026-07-10 · `838761f` · App read boundaries revocation kill-switch CLOSED — loftspace/clinic wired (cafe/wellness have no protected read boundary, N/A) — [authN §12.1](../../implementation-artifacts/external-actor-authn-binding-design.md)
 - 2026-07-10 · `—` · Self-service identity 403s CLOSED — env gap, ops fix + Gateway restart, live-verified fresh-identity apply — [finding](../../implementation-artifacts/self-service-identity-env-gap-finding.md)
 - 2026-07-10 · `—` · `/api/ledger` unauthenticated-read CLOSED — gated on `authenticateRead` + staff wildcard visibility (reuses `clinicPatientsRead`, no new schema), live-verified 401/403/200 + real FE flow
