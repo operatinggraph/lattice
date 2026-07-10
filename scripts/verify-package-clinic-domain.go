@@ -17,7 +17,9 @@
 //	The retired providerBookingGuard / patientBookingGuard DDLs are asserted ABSENT
 //	(clinic-booking-write-path-slot-claims-design.md — write-path slot claims
 //	replaced the scalar OCC epoch + hasBooking-link enumeration).
-//	12 permission vertices (one per op), scope any, granted to operator.
+//	13 permission vertices: one per op (scope any, granted to operator), plus
+//	  a second CreateAppointment vertex (scope self, granted to consumer —
+//	  the real-actor-write-auth-e2e patient-books-their-own-appointment idiom).
 //	1 package vertex + manifest aspect (name=clinic-domain).
 //
 // Run via: go run ./scripts/verify-package-clinic-domain.go
@@ -46,6 +48,32 @@ var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment",
+}
+
+// permGrant is one expected (scope, grantee-role) pair for an operationType's
+// permission vertex. Every op here carries exactly one, except
+// CreateAppointment, which carries two distinct permission vertices —
+// packages/clinic-domain/permissions.go grants the operator role scope=any
+// AND the consumer role scope=self (the real-actor-write-auth-e2e idiom: a
+// patient books their own appointment).
+type permGrant struct {
+	scope   string
+	grantee string
+}
+
+var clinicOpGrants = map[string][]permGrant{
+	"CreatePatient":         {{"any", "operator"}},
+	"TombstonePatient":      {{"any", "operator"}},
+	"CreateProvider":        {{"any", "operator"}},
+	"TombstoneProvider":     {{"any", "operator"}},
+	"SetProviderProfile":    {{"any", "operator"}},
+	"SetProviderHours":      {{"any", "operator"}},
+	"SetProviderTimeOff":    {{"any", "operator"}},
+	"CreateAppointment":     {{"any", "operator"}, {"self", "consumer"}},
+	"RescheduleAppointment": {{"any", "operator"}},
+	"SetAppointmentStatus":  {{"any", "operator"}},
+	"RecordEncounter":       {{"any", "operator"}},
+	"TombstoneAppointment":  {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -217,8 +245,41 @@ func main() {
 		}
 	}
 
-	// permission vertices + scope + grantedBy-operator links.
-	permIDByOp := map[string]string{}
+	// Discover role NanoIDs (operator from bootstrap; others — e.g. consumer,
+	// the real-actor-write-auth-e2e grantee — by scanning vtx.role.*.canonicalName).
+	operatorRoleID := bootstrap.RoleOperatorID
+	roleIDByCanonical := map[string]string{}
+	if operatorRoleID != "" {
+		roleIDByCanonical["operator"] = operatorRoleID
+	}
+	for key := range allKeys {
+		if !strings.HasPrefix(key, "vtx.role.") || !strings.HasSuffix(key, ".canonicalName") {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+		if err != nil {
+			continue
+		}
+		data, _ := env["data"].(map[string]any)
+		val, _ := data["value"].(string)
+		if val == "" {
+			continue
+		}
+		parts := strings.Split(key, ".")
+		if len(parts) != 4 {
+			continue
+		}
+		roleIDByCanonical[val] = parts[2]
+	}
+
+	// permission vertices + scope + grantedBy-role links. Most ops carry a
+	// single permission vertex (any/operator); CreateAppointment carries two
+	// (any/operator + self/consumer — packages/clinic-domain/permissions.go,
+	// the real-actor-write-auth-e2e idiom). Collect ALL matching vertices per
+	// op — a single permIDByOp[op] overwrite would pick whichever vertex Go's
+	// unstable map iteration visited last, nondeterministically hiding the
+	// other (the bug this replaces: it passed or failed at random per run).
+	permIDsByOp := map[string][]string{}
 	for key := range allKeys {
 		if !strings.HasPrefix(key, "vtx.permission.") {
 			continue
@@ -238,40 +299,63 @@ func main() {
 		opType, _ := data["operationType"].(string)
 		for _, expected := range clinicExpectedOps {
 			if opType == expected {
-				permIDByOp[opType] = parts[2]
+				permIDsByOp[opType] = append(permIDsByOp[opType], parts[2])
 				break
 			}
 		}
 	}
 
-	operatorRoleID := bootstrap.RoleOperatorID
 	for _, op := range clinicExpectedOps {
-		permID, found := permIDByOp[op]
-		if !found {
+		permIDs := permIDsByOp[op]
+		if len(permIDs) == 0 {
 			fail("vtx.permission.*[operationType="+op+"]", "not found in Core KV")
 			continue
 		}
-		permKey := "vtx.permission." + permID
-		ok(fmt.Sprintf("%s operationType=%s", permKey, op))
-
-		if env, err := pkgverify.GetEnvelope(ctx, coreKV, permKey); err == nil {
-			data, _ := env["data"].(map[string]any)
-			if scope, _ := data["scope"].(string); scope != "any" {
-				fail(permKey+" scope", fmt.Sprintf("got %q want any", scope))
-			} else {
-				ok(permKey + " scope=any")
-			}
+		grants := clinicOpGrants[op]
+		if len(permIDs) != len(grants) {
+			fail(fmt.Sprintf("vtx.permission.*[operationType=%s]", op),
+				fmt.Sprintf("found %d permission vertices, want %d (%v)", len(permIDs), len(grants), grants))
+			continue
 		}
+		for _, grant := range grants {
+			// Match this grant to the permission vertex among permIDs
+			// carrying its scope (each op's grants declare distinct scopes).
+			var matchedID string
+			for _, permID := range permIDs {
+				env, err := pkgverify.GetEnvelope(ctx, coreKV, "vtx.permission."+permID)
+				if err != nil {
+					continue
+				}
+				data, _ := env["data"].(map[string]any)
+				if scope, _ := data["scope"].(string); scope == grant.scope {
+					matchedID = permID
+					break
+				}
+			}
+			if matchedID == "" {
+				fail(fmt.Sprintf("vtx.permission.*[operationType=%s,scope=%s]", op, grant.scope),
+					"not found among discovered permission vertices")
+				continue
+			}
+			permKey := "vtx.permission." + matchedID
+			ok(fmt.Sprintf("%s operationType=%s scope=%s", permKey, op, grant.scope))
 
-		linkKey := "lnk.permission." + permID + ".grantedBy.role." + operatorRoleID
-		if _, exists := allKeys[linkKey]; !exists {
-			fail(linkKey, "grantedBy.operator link not found")
-		} else if lenv, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
-			fail(linkKey, fmt.Sprintf("cannot read: %v", err))
-		} else if isDeleted, _ := lenv["isDeleted"].(bool); isDeleted {
-			fail(linkKey, "link is tombstoned")
-		} else {
-			ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<operator> exists", permID))
+			granteeRoleID, roleFound := roleIDByCanonical[grant.grantee]
+			if !roleFound {
+				fail(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<%s>", matchedID, grant.grantee),
+					fmt.Sprintf("role %q NanoID not found; cannot verify grant link", grant.grantee))
+				continue
+			}
+			linkKey := "lnk.permission." + matchedID + ".grantedBy.role." + granteeRoleID
+			if _, exists := allKeys[linkKey]; !exists {
+				fail(linkKey, "grantedBy."+grant.grantee+" link not found")
+			} else if lenv, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
+				fail(linkKey, fmt.Sprintf("cannot read: %v", err))
+			} else if isDeleted, _ := lenv["isDeleted"].(bool); isDeleted {
+				fail(linkKey, "link is tombstoned")
+			} else {
+				ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<%s> exists", matchedID, grant.grantee))
+			}
 		}
 	}
 
