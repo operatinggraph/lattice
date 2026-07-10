@@ -66,14 +66,17 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
 
 **Not yet built** (see the design doc §7 for the full fire-by-fire plan):
 
-- **EDGE.3** — untrusted multi-identity: Gateway-verified JWT identity, Personal Lens PL.3
-  security-filtered SYNC stream, NATS-account subscribe-ACL. Gated on D1 + the Gateway + NATS-account-auth.
+- **EDGE.3** — untrusted multi-identity: Gateway-verified JWT identity (Contract #11), Personal Lens
+  PL.3 security-filtered SYNC stream, per-identity subscribe-ACL. Gated on the **per-identity NATS
+  subscribe-ACL** (its own lattice-lane row, needs-design) — the gate's other two legs (D1/PL.3, the
+  Gateway) shipped; the NATS-account-auth item's v1 explicitly declined subscribe lockdown, so the ACL
+  does not arrive from there.
 - **`internal/edge/vault`** (EDGE.4) — the transient session-key Vault Proxy for sensitive aspects.
 
 **Trusted single identity only, no security filter** — the same carve-out Loupe + Personal Lens PL.1/
-PL.2 use. Untrusted multi-identity exposure is EDGE.3, explicitly gated on D1 (Personal Lens PL.3) +
-the Gateway + NATS-account-auth (see the design doc); Edge must not accept an untrusted connection before
-that fire lands.
+PL.2 use. Untrusted multi-identity exposure is EDGE.3, gated on the **per-identity NATS subscribe-ACL**
+(the D1/PL.3 + Gateway legs of its original gate are closed — see the design doc §7 checkpoint); Edge
+must not accept an untrusted connection before that fire lands.
 
 ## Grounding
 

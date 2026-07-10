@@ -535,9 +535,18 @@ feature*.
 > GC-sweeping on a fixed interval. Unit tests (embedded NATS + a fake Processor responder for `agent`)
 > cover accept/duplicate/conflict/other-rejection/transport-failure/malformed-intent/FIFO-order.
 > `docs/components/edge.md` updated in the same commit. **Next:** EDGE.3 — untrusted multi-identity
-> (Gateway-verified JWT, Personal Lens PL.3 security filter, NATS-account subscribe-ACL) — **🚧 gated** on
-> D1 (PL.3) + the Gateway write-path translator + NATS-account-auth subscribe-ACL; not build-ready until
-> those land.
+> (Gateway-verified JWT, Personal Lens PL.3 security filter, NATS-account subscribe-ACL). **Gate
+> re-verified leg-by-leg (2026-07-10):** the original "D1 + Gateway + NATS-account-auth" label is
+> two-thirds satisfied — **D1/PL.3 ✅ shipped** (`internal/refractor/capabilityread`, fail-closed, Gate-3
+> vectors 1–3 proven) and **the Gateway ✅ shipped** (write translator Fire 1; Contract #11 ratified
+> 2026-07-10 freezes the untrusted node's token profile + subject binding). The one open leg is the
+> **per-identity subscribe-ACL** — and it does NOT arrive via the NATS-account-auth item: that design's
+> v1 **explicitly declined** subscribe lockdown (§3.2 *"v1 does not lock down subscribe… Personal-Lens /
+> Edge territory"*) and is ✅ effectively done, while PL Fork 3 assumed the ACL "rides" it — a circular,
+> un-owned dependency. Now filed as its own lattice row (**Per-identity NATS subscribe-ACL**, 📋
+> needs-design): dynamic per-identity NATS authN (auth-callout vs operator-JWT fork) scoping an untrusted
+> connection to its own `subjects.PersonalSync` subject, with revocation cutting subscribe. **🚧 EDGE.3 is
+> not build-ready until that row lands.**
 
 Ordered so the security-inert local-first loop lands first (co-built with its cloud producer), the security
 turn-on is its own gated fire, and confidentiality + the real device extend it. **Dependency gates explicit.**
@@ -559,11 +568,14 @@ turn-on is its own gated fire, and confidentiality + the real device extend it. 
    EDGE.1.*
 
 3. **EDGE.3 — untrusted multi-identity (the security turn-on).** The node authenticates via
-   `internal/gateway/auth` (JWT, D1.2) + submits intents through the **Gateway** (verify-and-stamp `env.Actor`);
-   the SYNC stream is **security-filtered** by Personal Lens PL.3 (`readableAnchors`); subscribe-ACL rides the
-   NATS-account-auth design. Add the Gate-3 Edge read-bypass suite (§5). *Green:* A never sees B's slice;
-   no-grant ⇒ empty; revoked JWT ⇒ no submit/subscribe. **🚧 GATED on D1 (PL.3) + the Gateway (write-path
-   translator) + NATS-account-auth (subscribe-ACL).** *Depends on: EDGE.2.*
+   `internal/gateway/auth` (JWT — Contract #11's frozen profile + subject binding, ratified 2026-07-10) +
+   submits intents through the **Gateway** (verify-and-stamp `env.Actor`); the SYNC stream is
+   **security-filtered** by Personal Lens PL.3 (`readableAnchors`, ✅ shipped); the connection is scoped by
+   the **per-identity subscribe-ACL** (its own filed lattice row — *not* delivered by the shipped
+   NATS-account-auth item, whose v1 explicitly declined subscribe lockdown, §3.2). Add the Gate-3 Edge
+   read-bypass suite (§5). *Green:* A never sees B's slice; no-grant ⇒ empty; revoked JWT ⇒ no
+   submit/subscribe. **🚧 GATED on the per-identity subscribe-ACL row (the D1/PL.3 + Gateway legs closed,
+   re-verified 2026-07-10).** *Depends on: EDGE.2.*
 
 4. **EDGE.4 — the Vault Proxy (sensitive aspects).** `internal/edge/vault` — request a transient session key,
    decrypt ciphertext deltas **in-memory** (no persisted plaintext), TTL-discard; the Gate-3 shred vector. *Green:*
@@ -585,9 +597,10 @@ turn-on is its own gated fire, and confidentiality + the real device extend it. 
 
 **Build-now vs. gated.** **EDGE.1 + EDGE.2 are buildable now** (co-built with Personal Lens PL.1/PL.2, under the
 trusted posture) — the complete offline-first loop, security-inert, independently demoable, and the consumer
-that un-gates Personal Lens. **EDGE.3 gates on D1 + Gateway + NATS-account-auth; EDGE.4 on Vault; EDGE.5 on the
-Gateway WS bridge; EDGE.6 is design-only.** This mirrors the ratify-now / build-as-foundations-land posture
-already accepted for Multi-cell, HA-NATS, and Personal Lens itself.
+that un-gates Personal Lens. **EDGE.3 gates on the per-identity subscribe-ACL row (its original D1 + Gateway
+legs closed — re-verified 2026-07-10); EDGE.4 on Vault Phase A + PL.5 (both since shipped) behind EDGE.3;
+EDGE.5 on the Gateway WS bridge; EDGE.6 is design-only.** This mirrors the ratify-now / build-as-foundations-land
+posture already accepted for Multi-cell, HA-NATS, and Personal Lens itself.
 
 ---
 

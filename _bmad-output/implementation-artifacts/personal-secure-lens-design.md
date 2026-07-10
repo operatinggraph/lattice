@@ -18,6 +18,11 @@ Author: Winston (Designer fire, 2026-06-27).
 >    ready.
 > 3. **Fork 3 (subject subscribe-ACL) — rides the ratified NATS account-write-restriction (#1)** (per-user
 >    NATS subscribe permissions on `lattice.sync.user.<id>`), now on firm ground.
+>    *[2026-07-10 correction: #75's v1 shipped explicitly WITHOUT subscribe lockdown (its §3.2: "v1 does
+>    not lock down subscribe… Personal-Lens/Edge territory") — so nothing delivers this ACL today. It is
+>    now its own filed lattice row (**Per-identity NATS subscribe-ACL**, needs-design), the one open leg
+>    gating Edge EDGE.3; the shipped SYNC subject is `subjects.PersonalSync` (`<prefix>.<identity>`), not
+>    the `lattice.sync.user.<id>` sketch above.]*
 >
 > **Reconciliation fix folded in:** §3.3's security filter referenced D1's *pre-decomposition* single
 > `cap-read.<actor>` doc; updated to the **decomposed/unioned** model (union across `cap-read.*.<actor>` /
