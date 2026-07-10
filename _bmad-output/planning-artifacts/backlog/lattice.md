@@ -112,8 +112,9 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (this section only — check the **Arch-review intake** section above too, it
-> carries its own ✅ ratified / 📋 ready items): **Read-posture debt sweep (platform pkgs) → flip**
-> (✅ ratified, §13 worklist — Refinements & ops); the flip un-blocks **Edge Lattice** (EDGE.1 next).
+> carries its own ✅ ratified / 📋 ready items): **Read-posture debt sweep → flip** (§13 worklist —
+> Refinements & ops) — platform half (21) 🏗️ done, [verticals half](verticals.md) in-flight; the flip
+> ships once both land, un-blocking **Edge Lattice** (EDGE.1 next).
 > *Still gated*: **AI-caps Fire 4** (Andrew sign-off on AI-code-execution, not the sandbox).
 > Whoever ships the named pick updates this callout to the next one — a stale callout starves the lane.
 
@@ -167,7 +168,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · `internal/bridge`'s 46 tests + a fixture race fixed (d2b6321, package 35s→7s) but `unit` job wall-clock unchanged (~137s) — local per-package sums don't predict the `-p4` critical path; next: capture real per-package timing FROM a CI run to find the actual pole |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ Fires 1–2 shipped · [design §12](../../implementation-artifacts/script-read-posture-design.md) · Fire 3 (guards) deferred to its first consumer; debt sweep + warn→block flip = its own row below |
-| **Read-posture debt sweep (platform packages) → flip lint to blocking** | 21 class-(b) lazy `kv.Read` sites in `packages/` — augur 8 · capability-author 7 · orchestration-base 3 · identity-domain 2 · privacy-base 1 — declare (a/d) or annotate (c/e) incl. dispatcher envelopes; add the missing `(a)` annotation form; flip the findings advisory→blocking after the [verticals half](verticals.md) — stops accrual (65 today), feeds Edge's declared-reads ⊆ mirror gate. | ★★★ | S–M | ✅ ratified · [design §13](../../implementation-artifacts/script-read-posture-design.md) |
+| **Read-posture debt sweep (platform packages) → flip lint to blocking** | 21 class-(b) lazy `kv.Read` sites in `packages/` — declare (a/d) or annotate (c/e) incl. dispatcher envelopes; flip advisory→blocking after the [verticals half](verticals.md) too — stops accrual, feeds Edge's declared-reads ⊆ mirror gate. | ★★★ | S–M | 🏗️ platform 21/21 done · [design §13](../../implementation-artifacts/script-read-posture-design.md) · next: flip once verticals lands |
 
 ### Parking lot — very low priority (far, far back)
 
