@@ -66,26 +66,31 @@ This `holdsRole → operator` topology **is** how the Capability Lens designates
 
 ### 7.3 NanoID Generation and Bootstrap Config
 
-All NanoIDs for primordial vertices are generated at first `make up` execution and persisted to `lattice.bootstrap.json` (or equivalent path determined by deployment conventions). The config file contains:
+All NanoIDs for primordial vertices are generated at first `make up` execution and persisted to `lattice.bootstrap.json` (or equivalent path determined by deployment conventions). The config file's top level carries a version marker plus the nested primordial-ID set (`internal/bootstrap.BootstrapFile` / `PrimordialIDsRaw` is authoritative for the full field list, which grows as the kernel does — see that file's version history comment):
 
 ```json
 {
-  "platformVersion": "1.0",
-  "bootstrapDate": "2026-05-12T14:32:18.142Z",
-  "rootRoleKey": "vtx.role.<NanoID>",
-  "bootstrapIdentityKey": "vtx.identity.<NanoID>",
-  "processorIdentityKey": "vtx.identity.<NanoID>",
-  "capabilityLensKey": "vtx.meta.<NanoID>",
-  "bootstrapOpKey": "vtx.op.<NanoID>",
-  "metaMetaDDLKeys": {
-    "vertexType": "vtx.meta.<NanoID>",
-    "aspectType": "vtx.meta.<NanoID>",
-    "linkType": "vtx.meta.<NanoID>",
-    "eventType": "vtx.meta.<NanoID>",
-    "lens": "vtx.meta.<NanoID>"
+  "version": "16",
+  "generatedAt": "2026-05-12T14:32:18.142Z",
+  "status": "committed",
+  "primordialIDs": {
+    "bootstrapOp": "vtx.op.<NanoID>",
+    "bootstrapIdentity": "vtx.identity.<NanoID>",
+    "loomIdentity": "vtx.identity.<NanoID>",
+    "weaverIdentity": "vtx.identity.<NanoID>",
+    "bridgeIdentity": "vtx.identity.<NanoID>",
+    "objmgrIdentity": "vtx.identity.<NanoID>",
+    "privacyIdentity": "vtx.identity.<NanoID>",
+    "gatewayIdentity": "vtx.identity.<NanoID>",
+    "metaRoot": "vtx.meta.<NanoID>",
+    "capabilityLens": "vtx.meta.<NanoID>",
+    "roleOperator": "vtx.role.<NanoID>",
+    "permCreateMetaVertex": "vtx.permission.<NanoID>"
   }
 }
 ```
+
+There is no `processorIdentityKey` (§7.2 item 7 — the Processor is the sole Core-KV writer, not an actor, so it needs no seeded identity) and no per-class `metaMetaDDLKeys` block (§7.2 item 1 — the five former per-class meta-meta DDLs collapsed into the single self-describing `metaRoot`).
 
 This config provides the deployment a stable reference set for the primordial NanoIDs across restarts. Without it, post-restart code paths that need to reference (e.g.) "the bootstrap identity" couldn't find it without a class-based Lens query (which would work, but adds startup latency).
 

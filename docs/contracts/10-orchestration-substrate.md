@@ -236,8 +236,11 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
     script reads the task key via **`kv.Read()`** (§2.5 lazy on-demand read — *not* a `contextHint`
     read, which would fatal-`HydrationMiss` on the legitimately-absent key) and branches: present **and
     alive** (`task != None and not task.isDeleted`) → empty mutations **and** empty events (a coherent
-    silent no-op); absent **or** logically-deleted → create as normal. The existing `CreateOnly` mutation
-    is the narrow concurrent-dispatch backstop.
+    silent no-op); absent → create as normal (the `CreateOnly` mutation is the narrow concurrent-dispatch
+    backstop); present **and** logically-deleted → **revive**, an `update` mutation conditioned on the
+    read revision (`expectedRevision`) that flips `isDeleted` back to `false` — a blind `create` would
+    collide with the tombstone's own write history (`CreateOnly` asserts revision 0, which a previously-
+    written key can never satisfy again) and RevisionConflict forever.
   - **`triggerLoom` → `StartLoomPattern`:** the Loom instance lives in **loom-state** (no Core-KV
     vertex), so the dedup is at **Loom**, not a Processor read — `StartLoomPattern` carries the stable
     `claimId`-seeded `instanceId` on `loom.patternStarted`, and Loom's instance presence check +
@@ -248,7 +251,7 @@ value: { targetId, entityKey, gap, action, claimId?, claimedAt, leaseExpiresAt, 
   A legitimate close→reopen — or a §10.8 planned-**leg** boundary (ratified Andrew 2026-07-05) —
   mints a new mark ⇒ new `claimId` ⇒ a fresh artifact; an out-of-band deletion
   self-heals (hard-tombstone ⇒ `kv.Read()` `None` ⇒ create; logical delete ⇒ present-but-`isDeleted`
-  ⇒ create). This **supersedes** the prior "accepted rare double / check-before-act = Phase-3 hardening"
+  ⇒ CAS-guarded revive). This **supersedes** the prior "accepted rare double / check-before-act = Phase-3 hardening"
   disposition for the two human userTask actions. **External gaps are unchanged** — their reclaim
   re-dispatch is *intended* (re-call a dead vendor / mint a fresh service instance), episode-scoped on
   `markRevision` and bounded by `inflight_<g>` + `maxretries_<g>`; `directOp` likewise. *(The

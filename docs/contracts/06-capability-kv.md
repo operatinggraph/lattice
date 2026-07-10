@@ -632,21 +632,41 @@ boundary authenticates the reader (D1 increment 1: a signed JWT keyed to the Ide
   (a fail-closed outage, never a silent leak). The table is **provisioned out-of-band** (a migration), like
   every other Postgres lens target — Refractor issues **no DDL**. Instead Refractor **verifies the security
   posture at lens activation** — `FORCE ROW LEVEL SECURITY` is enabled, the required columns
-  (`authz_anchors text[]`, `projection_seq bigint`, key + body) exist, and a `FOR SELECT` policy is present —
-  and if any is absent it **pauses the lens fail-closed** (`PauseInfra` → never projects a protected row into
-  an unverified table; raises `CapabilityLensPaused`), **auto-resuming** once a re-probe confirms the posture
-  (no Refractor restart). The check re-runs on the periodic heartbeat, so a post-activation
-  `FORCE ROW LEVEL SECURITY` removal re-pauses. The **security-load-bearing assertion is
-  `FORCE ROW LEVEL SECURITY = on`**: with it enabled, *any* policy/column mistake fails closed (the table
-  over-denies — a visible outage), so an out-of-band provisioning error can never over-share. This is the
-  destination for **all** protected read models.
-- **`actor_read_grants` is `projectionSeq`-guarded (the read-auth source of truth).** Unlike business
-  read-model tables (which may be last-writer-wins — the Postgres adapter is guard-exempt there), the grant
-  table inherits the §6.2/§6.8 **monotonic-seq guarantee**: an upsert/delete applies only when its incoming
-  `projectionSeq` exceeds the stored one (per `(actor_id, anchor_id, grant_source)`), so a stale
-  CDC replay **cannot resurrect a revoked grant**. Each lens's projection upserts/tombstones **only its own
-  `grant_source` rows** (so revoking one source never wipes another's coexisting grant), and a package
-  uninstall retracts its `grant_source` rows via the standard lens-eviction.
+  (`authz_anchors text[]`, `projection_seq bigint`, `is_deleted boolean`, `deleted_at timestamptz`, key +
+  body) exist, and a `FOR SELECT` policy is present — and if any is absent it **pauses the lens fail-closed**
+  (`PauseInfra` → never projects a protected row into an unverified table; raises `CapabilityLensPaused`),
+  **auto-resuming** once a re-probe confirms the posture (no Refractor restart). The check re-runs on the
+  periodic heartbeat, so a post-activation `FORCE ROW LEVEL SECURITY` removal re-pauses. The
+  **security-load-bearing assertion is `FORCE ROW LEVEL SECURITY = on`**: with it enabled, *any*
+  policy/column mistake fails closed (the table over-denies — a visible outage), so an out-of-band
+  provisioning error can never over-share. This is the destination for **all** protected read models. The
+  generated `USING` clause denies a tombstoned row (`NOT is_deleted`) to every reader before evaluating
+  anchor membership at all (see the seq-guarded protected Delete below).
+- **`actor_read_grants` is `projectionSeq`-guarded (the read-auth source of truth).** Unlike an ordinary
+  (non-protected) business read-model table (which may be last-writer-wins — the Postgres adapter is
+  guard-exempt there), the grant table inherits the §6.2/§6.8 **monotonic-seq guarantee**: an upsert/delete
+  applies only when its incoming `projectionSeq` exceeds the stored one (per `(actor_id, anchor_id,
+  grant_source)`), so a stale CDC replay **cannot resurrect a revoked grant**. Each lens's projection
+  upserts/tombstones **only its own `grant_source` rows** (so revoking one source never wipes another's
+  coexisting grant), and a package uninstall retracts its `grant_source` rows via the standard lens-eviction.
+- **A protected business table's own Delete is seq-guarded the same way.** A protected table also carries
+  `projection_seq` (guarded on Upsert, mirroring the grant table above); its Delete is likewise **always** a
+  seq-guarded soft tombstone (`is_deleted = true, deleted_at = NOW(), projection_seq` bumped to the incoming
+  value, conditioned on the incoming value exceeding the stored one) — never a hard `DELETE` — regardless of
+  the lens's declared `deleteMode`. Retaining the row and its watermark (rather than discarding both via a
+  hard delete) means a later stale CDC replay's `INSERT … ON CONFLICT` guard still has a row to compare
+  against; a hard delete would leave no row, so the guard could never fire and the stale replay would
+  resurrect the row unconditionally. A fresh Upsert at a higher seq revives a tombstoned row
+  (`is_deleted ← false`), mirroring `UpsertGrant`.
+- **The wildcard anchor (D1 design M5) — an all-access grant.** A grant row `(actor_id, '*', grant_source)`
+  — the reserved anchor `'*'`, never a real resource NanoID (the platform's NanoID alphabet excludes it) —
+  makes `actor_id` able to read every row of every protected table, regardless of that row's `authz_anchors`.
+  The generated policy checks this first: `EXISTS (SELECT 1 FROM actor_read_grants WHERE actor_id =
+  current_setting('lattice.actor_id', true) AND anchor_id = '*' AND NOT is_deleted) OR EXISTS (SELECT 1 FROM
+  unnest(authz_anchors) a WHERE a IN (SELECT anchor_id FROM actor_read_grants WHERE actor_id =
+  current_setting('lattice.actor_id', true) AND NOT is_deleted))`. It is still a §6.14 set-membership lookup
+  against `actor_read_grants` (seq-guarded, revocable, traceable to a grant row) — never an RLS bypass; an
+  all-access read stays attributable exactly like any other read.
 - **NATS-KV read-gateway filter (Path B) — transitional scaffold only.** During a migration a boundary MAY
   GET the `cap-read.*.<actor>` slices, union them, and filter NATS-KV rows whose `authzAnchor` ∉ that union.
   **This is not a sanctioned end-state:** once Postgres-RLS ships, **a `protected: true` read model served
