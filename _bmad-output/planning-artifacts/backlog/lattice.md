@@ -91,7 +91,7 @@ and stale-marker corrections were applied in the filing commit (Done log); these
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **section-6-13-invalidation-amendment** | §6.13's frozen text specifies an `Invalidation` plan member + fails-activation rule that retire-simple-engine deliberately deleted (code: broad-BFS enumerator, warn-and-proceed). Stage the in-place contract edit reconciling §6.13 to the as-ratified reality, uncommitted for Andrew. | ★★ | S | 🔭 flag-for-Andrew |
+| **section-6-13-invalidation-amendment** | §6.13 still describes the retired narrow `Invalidation` plan member + a construct-coverage fails-activation rule; shipped code (retire-simple-engine) uses an unconditional broad-BFS `ActorEnumerator`, and auth-plane now drives only the §6.2 write-guard + heartbeat severity (no construct gate). | ★★ | S | 📐 fix drafted, UNCOMMITTED in the tree for Andrew |
 
 ### Weaver re-review (2026-07-06)
 
