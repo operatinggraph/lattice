@@ -4,12 +4,15 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //
-// All three ops are operator-driven: Loupe (the trusted single-identity client)
-// submits AttachObject / DetachObject as admin, and the object-store-manager's
-// owner-tombstone cascade submits TombstoneObject as the operator-equivalent
-// service actor. So the grants go to `operator` only (scope: any) — the same
-// operator-grant idiom service-domain / orchestration-base use for their
-// lifecycle ops. Tightening to additional roles later is purely additive.
+// The three lifecycle ops are granted to `operator` only (scope: any) — the
+// operator-grant idiom service-domain / orchestration-base use for lifecycle ops.
+// Live submitters: the object-store-manager owner-tombstone cascade (TombstoneObject,
+// an operator-equivalent service actor), Loupe (admin), and the vertical apps'
+// browser-direct AttachObject / DetachObject through the Gateway (today under a
+// shared staff credential that holds operator). A consumer scope=self grant on
+// AttachObject is deferred to the real-actor write migration
+// (real-actor-write-auth-e2e §3.4), where the browser-direct attach submits under
+// the applicant's own identity; adding roles/scopes then is purely additive.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
