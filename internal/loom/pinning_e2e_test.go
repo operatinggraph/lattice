@@ -335,6 +335,76 @@ func TestPinningE2E_RedeliveredTriggerResumesStepZero(t *testing.T) {
 	require.ErrorIs(t, err, substrate.ErrKeyNotFound, "terminal batch must delete the pin")
 }
 
+// TestPinningE2E_RedeliveredTriggerMissingPinFails proves resumeStepZero's own
+// pattern-pin-missing branch: unlike TestPinningE2E_MissingPinFailsInstance
+// (which destroys an already-pinned instance's pin mid-flight, hit via
+// advance), this manufactures a redelivered patternStarted trigger whose
+// instance record exists (status=running, pendingToken empty — the
+// createInstance-committed-but-step-0-never-submitted crash residue) but
+// whose pin was NEVER written at all. resumeStepZero must fail the instance
+// (operator-visible terminal), not Nak-loop forever.
+func TestPinningE2E_RedeliveredTriggerMissingPinFails(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+
+	fp := &fakeProcessor{
+		conn: conn, logger: testLogger(),
+		rejectOps: map[string]struct{}{},
+		eventFor:  func(string) string { return "identity.stepDone" },
+	}
+	fp.run(ctx, t)
+
+	instanceID := mustNanoID(t)
+	patternID := mustNanoID(t)
+	patternRef := "vtx.meta." + patternID
+	subjectKey := "vtx.identity." + mustNanoID(t)
+
+	// Manufacture the crash residue with NO pin written — the createInstance
+	// batch itself never committed (or was rolled back out-of-band), leaving
+	// only the instance record.
+	instBody, err := json.Marshal(loom.Instance{
+		InstanceID: instanceID,
+		PatternRef: patternRef,
+		SubjectKey: subjectKey,
+		Status:     "running",
+	})
+	require.NoError(t, err)
+	_, err = conn.KVPut(ctx, loomStateBucket, "instance."+instanceID, instBody)
+	require.NoError(t, err)
+
+	engine := newEngine(conn)
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+
+	ev, err := json.Marshal(map[string]any{
+		"eventId":   mustNanoID(t),
+		"requestId": instanceID,
+		"eventType": "loom.patternStarted",
+		"payload": map[string]any{
+			"instanceId": instanceID,
+			"patternRef": patternRef,
+			"subjectKey": subjectKey,
+		},
+		"timestamp": substrate.FormatTimestamp(time.Now()),
+	})
+	require.NoError(t, err)
+	_, err = conn.JetStream().Publish(ctx, "events.loom.patternStarted", ev)
+	require.NoError(t, err)
+
+	inst := waitInstanceStatus(t, ctx, conn, instanceID, "failed")
+	require.Equal(t, "", inst.PendingToken, "the failed terminal clears the pending token")
+}
+
 // TestPinningE2E_MissingPinFailsInstance proves the poison-wedge guard: a
 // RUNNING instance whose pin is deleted out-of-band (an invariant break no
 // retry can repair) is failed — an operator-visible terminal — instead of
