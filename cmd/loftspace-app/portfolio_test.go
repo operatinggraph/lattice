@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	cafedomain "github.com/asolgan/lattice/packages/cafe-domain"
 )
 
 // No-Postgres unit coverage for the portfolio-pulse reader: the fail-closed
@@ -80,4 +82,59 @@ func TestSummarizePortfolioPulse_NoUnits_ZeroRateNoDivideByZero(t *testing.T) {
 	if got.TotalUnits != 0 || got.OccupancyRate != 0 {
 		t.Fatalf("empty portfolio should be all-zero, got %+v", got)
 	}
+}
+
+func strp(s string) *string { return &s }
+
+func TestOccupiedLeaseAppKeys(t *testing.T) {
+	rows := []protectedLandlordRow{
+		{EntityKey: "vtx.leaseapp.a", SignedAt: strp("2026-07-01T00:00:00Z")},
+		{EntityKey: "vtx.leaseapp.b", SignedAt: nil},        // never signed
+		{EntityKey: "vtx.leaseapp.c", SignedAt: strp("")},   // signed_at present but empty
+		{EntityKey: "vtx.leaseapp.d", SignedAt: strp("2026-07-05T00:00:00Z")},
+	}
+	got := occupiedLeaseAppKeys(rows)
+	want := []string{"vtx.leaseapp.a", "vtx.leaseapp.d"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("occupiedLeaseAppKeys = %v, want %v", got, want)
+	}
+}
+
+func TestComputeServiceAttachRate(t *testing.T) {
+	occupied := []string{"vtx.leaseapp.a", "vtx.leaseapp.b", "vtx.leaseapp.c"}
+
+	bookings := map[string][]byte{
+		"b1": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.a"}),
+		// belongs to a landlord/lease NOT in this landlord's occupied set —
+		// must not leak into the count.
+		"b2": mustMarshal(serviceBookingRow{LeaseAppKey: "vtx.leaseapp.other-landlord"}),
+	}
+	tabs := map[string][]byte{
+		cafedomainPrefixKey("t1"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.b", Status: "open"}),
+		cafedomainPrefixKey("t2"): mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.c", Status: "settled"}),
+		"not-a-tab-key":           mustMarshal(serviceTabRow{LeaseAppKey: "vtx.leaseapp.c", Status: "open"}), // wrong prefix, ignored
+	}
+	getBookings := func(k string) ([]byte, bool) { v, ok := bookings[k]; return v, ok }
+	getTabs := func(k string) ([]byte, bool) { v, ok := tabs[k]; return v, ok }
+
+	bookingKeys := []string{"b1", "b2"}
+	tabKeys := []string{cafedomainPrefixKey("t1"), cafedomainPrefixKey("t2"), "not-a-tab-key"}
+
+	attached, total := computeServiceAttachRate(occupied, bookingKeys, getBookings, tabKeys, getTabs)
+	// a: booked -> attached. b: open tab -> attached. c: settled tab + a
+	// wrong-prefix "open" row that must be ignored -> not attached.
+	if attached != 2 || total != 3 {
+		t.Fatalf("computeServiceAttachRate = (%d, %d), want (2, 3)", attached, total)
+	}
+}
+
+func TestComputeServiceAttachRate_NoOccupiedLeases_ZeroNoDivideByZero(t *testing.T) {
+	attached, total := computeServiceAttachRate(nil, []string{"x"}, func(string) ([]byte, bool) { return nil, false }, []string{"y"}, func(string) ([]byte, bool) { return nil, false })
+	if attached != 0 || total != 0 {
+		t.Fatalf("computeServiceAttachRate with no occupied leases = (%d, %d), want (0, 0)", attached, total)
+	}
+}
+
+func cafedomainPrefixKey(suffix string) string {
+	return cafedomain.TabSettlementTarget + "." + suffix
 }

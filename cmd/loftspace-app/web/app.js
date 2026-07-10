@@ -2534,12 +2534,16 @@ async function loadLandlord() {
   loadPortfolioPulse();
 }
 
-// loadPortfolioPulse — the occupancy half of the operations portfolio-pulse
-// aggregate (mixed-use-composition-design.md Inc 2): every unit the signed-in
-// landlord manages, RLS-scoped, folded into an occupancy rate + status
-// breakdown. Best-effort like loadLandlordRLS: an unavailable read boundary
-// hides the card rather than breaking the view (the same dev-posture-gap the
-// RLS banner already tolerates).
+// loadPortfolioPulse — the operations portfolio-pulse aggregate: occupancy
+// (Inc 2, mixed-use-composition-design.md) + service-attach-rate (Inc 3) —
+// every unit the signed-in landlord manages, RLS-scoped, folded into an
+// occupancy rate + status breakdown, plus what fraction of occupied leases
+// have a live wellness booking or open café tab. Best-effort like
+// loadLandlordRLS: an unavailable read boundary hides the card rather than
+// breaking the view; service-attach-rate itself is additionally best-effort
+// server-side (occupiedLeases stays 0 when its cross-package read is
+// unavailable, so it's simply omitted from the line rather than shown as a
+// misleading 0%).
 async function loadPortfolioPulse() {
   const el = $("#portfolio-pulse");
   if (!el) return;
@@ -2555,12 +2559,17 @@ async function loadPortfolioPulse() {
       return;
     }
     const pct = Math.round(data.occupancyRate * 100);
-    el.hidden = false;
-    el.textContent = `📊 Portfolio pulse: ${pct}% occupied (${data.leased}/${data.totalUnits} leased` +
+    let text = `📊 Portfolio pulse: ${pct}% occupied (${data.leased}/${data.totalUnits} leased` +
       (data.available ? `, ${data.available} available` : "") +
       (data.pending ? `, ${data.pending} pending` : "") +
       (data.notListed ? `, ${data.notListed} not listed` : "") +
       ").";
+    if (data.occupiedLeases) {
+      const attachPct = Math.round(data.serviceAttachRate * 100);
+      text += ` ${attachPct}% service-attached (${data.serviceAttached}/${data.occupiedLeases} occupied leases with a live booking or open tab).`;
+    }
+    el.hidden = false;
+    el.textContent = text;
   } catch (e) {
     console.warn("portfolio-pulse unavailable:", e);
     el.hidden = true;

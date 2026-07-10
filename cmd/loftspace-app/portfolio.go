@@ -2,22 +2,39 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
+
+	cafedomain "github.com/asolgan/lattice/packages/cafe-domain"
+	frontdesk "github.com/asolgan/lattice/packages/front-desk"
 )
 
-// Portfolio-pulse occupancy (mixed-use-composition-design.md Inc 2): the
-// landlord-facing "how full is my portfolio" view, read from the protected
-// landlordUnitsRead Postgres model. Sibling of handleLandlordApplications —
-// identical verified-JWT -> per-request txn -> SET LOCAL lattice.actor_id ->
-// RLS path, but this reads EVERY unit the landlord manages, independent of
-// whether it has ever had a lease application (landlordLeaseApplicationsRead
-// requires a leaseapp to exist at all, so a never-applied-to unit is invisible
-// to it).
+// Portfolio-pulse (mixed-use-composition-design.md Inc 2 + Inc 3): the
+// landlord-facing "how full is my portfolio, and is it being used" view.
 //
-// Service-attach-rate (occupancy's cross-package sibling — does a resident
-// have a live wellness booking / open café tab) is deliberately deferred: it
-// needs a cross-package KV fan-in this app doesn't otherwise do, and its own
-// grounding pass (see mixed-use-composition-design.md Deferred).
+// Occupancy (Inc 2) reads the protected landlordUnitsRead Postgres model.
+// Sibling of handleLandlordApplications — identical verified-JWT -> per-request
+// txn -> SET LOCAL lattice.actor_id -> RLS path, but this reads EVERY unit the
+// landlord manages, independent of whether it has ever had a lease application
+// (landlordLeaseApplicationsRead requires a leaseapp to exist at all, so a
+// never-applied-to unit is invisible to it).
+//
+// Service-attach-rate (Inc 3) is occupancy's cross-package sibling — of the
+// landlord's currently-occupied (signed) leases, what fraction have a live
+// wellness booking or an open café tab. It joins three lens read-models
+// entirely client-side (this app already reads landlordLeaseApplicationsRead
+// for the occupied-lease set; front-desk-bookings and cafe-domain's
+// cafeTabSettlement are both global NATS-KV buckets keyed/filterable by
+// leaseAppKey, the same join key front-desk's own FE already uses,
+// packages/front-desk/lenses.go) — the precedent for an app reading a
+// DIFFERENT package's lens bucket already exists twice (cmd/cafe-app reads
+// front-desk's bucket; this app already reads packages/privacy-base's), so
+// this is applying an established pattern, not inventing one. Best-effort:
+// unlike occupancy (which 502s if Postgres is down), a missing NATS
+// connection or an unreadable bucket degrades attach-rate to zero/omitted
+// rather than failing the whole portfolio-pulse response — the same posture
+// front-desk-bookings itself takes ("no bucket = no rows, not an error").
 
 // portfolioPulseUnit is one row of the occupancy breakdown: a unit the
 // landlord manages, plus its coarse listing status. UnitStatus is empty when
@@ -42,6 +59,37 @@ type portfolioPulseResult struct {
 	Withdrawn     int                  `json:"withdrawn"`
 	NotListed     int                  `json:"notListed"`
 	OccupancyRate float64              `json:"occupancyRate"`
+	// Service-attach-rate (Inc 3): OccupiedLeases is the count this rate is
+	// over (the landlord's currently-signed leases, independent of Leased
+	// above — a unit can be listed "leased" slightly ahead of/behind its
+	// application's signed_at during convergence); ServiceAttached is how
+	// many of those have a live booking or open tab. Both are 0, and
+	// ServiceAttachRate is 0, when the cross-package read is unavailable —
+	// the FE distinguishes "0 attached of N" from "no data" by checking
+	// OccupiedLeases > 0 first.
+	OccupiedLeases    int     `json:"occupiedLeases"`
+	ServiceAttached   int     `json:"serviceAttached"`
+	ServiceAttachRate float64 `json:"serviceAttachRate"`
+}
+
+// weaverTargetsBucket is the shared cross-package Weaver convergence bucket
+// every actorAggregate lens projects into, multiplexed by key prefix — the
+// same bucket cmd/cafe-app's own weaverTargetsBucket constant names
+// (packages/cafe-domain/lenses.go).
+const weaverTargetsBucket = "weaver-targets"
+
+// serviceBookingRow is the front-desk-bookings lens row (packages/front-desk),
+// narrowed to the leaseAppKey the attach-rate joins on.
+type serviceBookingRow struct {
+	LeaseAppKey string `json:"leaseAppKey"`
+}
+
+// serviceTabRow is the cafeTabSettlement convergence-lens row
+// (packages/cafe-domain), narrowed to the leaseAppKey + status the
+// attach-rate joins on (mirrors cmd/cafe-app's tabSettlementProjection).
+type serviceTabRow struct {
+	LeaseAppKey string `json:"leaseAppKey"`
+	Status      string `json:"status"`
 }
 
 // selectLandlordUnitsSQL reads the protected occupancy model. No auth WHERE —
@@ -115,6 +163,74 @@ func summarizePortfolioPulse(units []portfolioPulseUnit) portfolioPulseResult {
 	return res
 }
 
+// occupiedLeaseAppKeys returns the leaseAppKey (EntityKey) of every SIGNED —
+// currently occupying — application among the landlord's RLS-scoped rows.
+// An application with no signed lease isn't occupying a unit yet, so it's
+// excluded: only an occupying resident can have a booking or a tab to
+// attach-rate against.
+func occupiedLeaseAppKeys(rows []protectedLandlordRow) []string {
+	keys := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.SignedAt != nil && *r.SignedAt != "" {
+			keys = append(keys, r.EntityKey)
+		}
+	}
+	return keys
+}
+
+// computeServiceAttachRate folds the (global, cross-landlord) front-desk
+// booking + café tab rows down to the subset touching THIS landlord's
+// occupied leases, never surfacing any other landlord's or resident's raw
+// row in the response — only the count. A row that fails to decode or
+// carries no leaseAppKey is skipped (mirrors front-desk's and cafe-app's own
+// tombstoned-entry guards). A tab counts as "attached" while it is anything
+// other than settled (mirrors cmd/cafe-app's own open-tab reasoning); a
+// booking counts simply by existing (the frontDeskBookings lens already
+// filters to status='booked' — see packages/front-desk/lenses.go).
+func computeServiceAttachRate(occupied []string, bookingKeys []string, getBookings kvGetter, tabKeys []string, getTabs kvGetter) (attached, total int) {
+	total = len(occupied)
+	if total == 0 {
+		return 0, 0
+	}
+	occupiedSet := make(map[string]bool, total)
+	for _, k := range occupied {
+		occupiedSet[k] = true
+	}
+
+	active := make(map[string]bool)
+	for _, k := range bookingKeys {
+		raw, ok := getBookings(k)
+		if !ok {
+			continue
+		}
+		var b serviceBookingRow
+		if json.Unmarshal(raw, &b) != nil || b.LeaseAppKey == "" || !occupiedSet[b.LeaseAppKey] {
+			continue
+		}
+		active[b.LeaseAppKey] = true
+	}
+
+	prefix := cafedomain.TabSettlementTarget + "."
+	for _, k := range tabKeys {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		raw, ok := getTabs(k)
+		if !ok {
+			continue
+		}
+		var t serviceTabRow
+		if json.Unmarshal(raw, &t) != nil || t.LeaseAppKey == "" || !occupiedSet[t.LeaseAppKey] {
+			continue
+		}
+		if t.Status != "settled" {
+			active[t.LeaseAppKey] = true
+		}
+	}
+
+	return len(active), total
+}
+
 func (s *server) handlePortfolioPulse(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.authenticateRead(r)
 	if err != nil {
@@ -135,5 +251,41 @@ func (s *server) handlePortfolioPulse(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, "could not read the protected landlord-units model")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, summarizePortfolioPulse(units))
+	result := summarizePortfolioPulse(units)
+
+	// Service-attach-rate is additive, best-effort: neither the landlord-
+	// applications read nor the NATS-KV lens buckets are load-bearing for
+	// occupancy above, so any failure here just leaves the three
+	// attach-rate fields at their zero value rather than failing the
+	// request front-desk-bookings-style.
+	if appRows, err := queryLandlordApplications(ctx, s.pgPool, actor.Subject); err == nil && s.conn != nil {
+		occupied := occupiedLeaseAppKeys(appRows)
+		conn := s.conn
+		bookingKeys, bErr := conn.KVListKeys(ctx, frontdesk.BookingsBucket)
+		tabKeys, tErr := conn.KVListKeys(ctx, weaverTargetsBucket)
+		if bErr == nil && tErr == nil {
+			getBookings := func(key string) ([]byte, bool) {
+				entry, err := conn.KVGet(ctx, frontdesk.BookingsBucket, key)
+				if err != nil {
+					return nil, false
+				}
+				return entry.Value, true
+			}
+			getTabs := func(key string) ([]byte, bool) {
+				entry, err := conn.KVGet(ctx, weaverTargetsBucket, key)
+				if err != nil {
+					return nil, false
+				}
+				return entry.Value, true
+			}
+			attached, total := computeServiceAttachRate(occupied, bookingKeys, getBookings, tabKeys, getTabs)
+			result.OccupiedLeases = total
+			result.ServiceAttached = attached
+			if total > 0 {
+				result.ServiceAttachRate = float64(attached) / float64(total)
+			}
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, result)
 }
