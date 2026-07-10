@@ -34,7 +34,7 @@ func newDenialBuilderForTest(t *testing.T, indexEntries map[string][]string) *De
 		}
 		reader.entries[key] = raw
 	}
-	return NewDenialResponseBuilder(reader, "capability-kv", capTestLogger())
+	return NewDenialResponseBuilder(reader, "capability-kv", "core-kv", capTestLogger())
 }
 
 func baseEnv(opType, actor string) *OperationEnvelope {
@@ -218,6 +218,113 @@ func TestDenialBuilder_AuthContextMismatch_ServiceNotInProjection(t *testing.T) 
 	}
 	if dd.DiagnosticHint == "" {
 		t.Errorf("diagnosticHint: expected non-empty for service-not-in-projection")
+	}
+	// FR22/§6.12: deniedService echoes authContext.service even though the
+	// key here ("vtx.service.someOther") is not a well-formed 20-char NanoID
+	// vertex key — deniedServiceClass must degrade to "" rather than panic
+	// (authContext.service is client-supplied, unvalidated upstream).
+	if dd.DeniedService != "vtx.service.someOther" {
+		t.Errorf("deniedService: got %q want vtx.service.someOther", dd.DeniedService)
+	}
+	if dd.DeniedServiceClass != "" {
+		t.Errorf("deniedServiceClass: expected empty for a malformed service key, got %q", dd.DeniedServiceClass)
+	}
+}
+
+// --- AuthContextMismatch: a well-formed but non-service vertex key must not
+// leak that vertex's `.class` aspect (NFR-S6: authContext.service is
+// client-supplied and never validated against a real service upstream — a
+// denial must not become a `.class`-aspect oracle over arbitrary vertices,
+// e.g. identities/roles/tasks, just because they happen to hold a `.class`
+// aspect too). ---
+
+func TestDenialBuilder_AuthContextMismatch_NonServiceVertexKey_NoClassLeak(t *testing.T) {
+	const otherIdentityKey = "vtx.identity.Rm7q3pntwzkfbcxv5p9k"
+	b := newDenialBuilderForTest(t, nil)
+	classAsp := struct {
+		Data struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}{}
+	classAsp.Data.Value = "identity.staff.manager"
+	raw, err := json.Marshal(classAsp)
+	if err != nil {
+		t.Fatalf("marshal class aspect: %v", err)
+	}
+	b.reader.(*fakeReader).entries[otherIdentityKey+".class"] = raw
+
+	doc := baseDoc([]string{"vtx.role.leaseholder"})
+	env := envFor("DoSomething", capTestActorKey, &AuthContext{Service: otherIdentityKey})
+	dec := Decision{
+		Authorized: false,
+		Code:       ErrCodeAuthContextMismatch,
+		Reason:     "service not in serviceAccess",
+		Doc:        doc,
+	}
+	dd := b.BuildDenialDetails(context.Background(), env, dec, doc)
+	if dd.DeniedService != otherIdentityKey {
+		t.Errorf("deniedService: got %q want %q (still echoed — it's authContext.service verbatim)", dd.DeniedService, otherIdentityKey)
+	}
+	if dd.DeniedServiceClass != "" {
+		t.Errorf("deniedServiceClass: expected empty for a non-service vertex type; got %q (class-aspect oracle leak)", dd.DeniedServiceClass)
+	}
+}
+
+// --- AuthContextMismatch: single-service denial names the service + class ---
+
+func TestDenialBuilder_AuthContextMismatch_ServiceDenied_WithClass(t *testing.T) {
+	const serviceKey = "vtx.service.Rm7q3pntwzkfbcxv5p9k"
+	b := newDenialBuilderForTest(t, nil)
+	// Seed the service vertex's `.class` aspect in Core KV.
+	classAsp := struct {
+		Data struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}{}
+	classAsp.Data.Value = "service.cleaning.standard"
+	raw, err := json.Marshal(classAsp)
+	if err != nil {
+		t.Fatalf("marshal class aspect: %v", err)
+	}
+	b.reader.(*fakeReader).entries[serviceKey+".class"] = raw
+
+	doc := baseDoc([]string{"vtx.role.leaseholder"})
+	env := envFor("BookLaundryService", capTestActorKey, &AuthContext{Service: serviceKey})
+	dec := Decision{
+		Authorized: false,
+		Code:       ErrCodeAuthContextMismatch,
+		Reason:     "service not in serviceAccess",
+		Doc:        doc,
+	}
+	dd := b.BuildDenialDetails(context.Background(), env, dec, doc)
+	if dd.DeniedService != serviceKey {
+		t.Errorf("deniedService: got %q want %q", dd.DeniedService, serviceKey)
+	}
+	if dd.DeniedServiceClass != "service.cleaning.standard" {
+		t.Errorf("deniedServiceClass: got %q want service.cleaning.standard", dd.DeniedServiceClass)
+	}
+}
+
+// --- AuthContextMismatch: task-path and both-set omit the service fields ---
+
+func TestDenialBuilder_AuthContextMismatch_NonServiceMismatch_OmitsServiceFields(t *testing.T) {
+	b := newDenialBuilderForTest(t, nil)
+	doc := baseDoc([]string{"vtx.role.penthouseResident"})
+
+	taskEnv := envFor("ApproveLeaseApplication", capTestActorKey, &AuthContext{Task: capTestTaskKey, Target: capTestTargetKey})
+	taskDec := Decision{Authorized: false, Code: ErrCodeAuthContextMismatch, Reason: "no matching ephemeralGrant", Doc: doc}
+	taskDD := b.BuildDenialDetails(context.Background(), taskEnv, taskDec, doc)
+	if taskDD.DeniedService != "" || taskDD.DeniedServiceClass != "" {
+		t.Errorf("task-path mismatch must omit service fields; got deniedService=%q deniedServiceClass=%q",
+			taskDD.DeniedService, taskDD.DeniedServiceClass)
+	}
+
+	bothEnv := envFor("X", capTestActorKey, &AuthContext{Service: capTestServiceKey, Task: capTestTaskKey})
+	bothDec := Decision{Authorized: false, Code: ErrCodeAuthContextMismatch, Reason: "service and task mutually exclusive", Doc: doc}
+	bothDD := b.BuildDenialDetails(context.Background(), bothEnv, bothDec, doc)
+	if bothDD.DeniedService != "" || bothDD.DeniedServiceClass != "" {
+		t.Errorf("both-set mismatch must omit service fields; got deniedService=%q deniedServiceClass=%q",
+			bothDD.DeniedService, bothDD.DeniedServiceClass)
 	}
 }
 

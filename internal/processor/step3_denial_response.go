@@ -13,7 +13,10 @@
 //
 // For AuthContextMismatch the actor-role and role-coverage fields are
 // omitted (denial is not about role coverage per AC); a diagnosticHint is
-// included instead.
+// included instead. A single-service mismatch (authContext.service set,
+// authContext.task not) additionally names deniedService/deniedServiceClass,
+// the latter from one denial-time Core KV read of the service's `.class`
+// aspect (Contract #6 §6.12).
 //
 // NFR-S6: no other actors' identities, role membership lists, graph paths, or
 // internal vertex keys leak through this response. actorRoles uses the raw role
@@ -50,28 +53,35 @@ type RoleByOperationDoc struct {
 // read is performed only on the denial path — allowed operations incur zero
 // overhead from this code.
 type DenialResponseBuilder struct {
-	reader CapabilityReader
-	bucket string
-	logger *slog.Logger
+	reader     CapabilityReader
+	bucket     string
+	coreBucket string
+	logger     *slog.Logger
 }
 
 // NewDenialResponseBuilder constructs the builder. Uses the same
-// CapabilityReader + bucket as CapabilityAuthorizer — wired by
-// cmd/processor/main.go via MakePipeline.
-func NewDenialResponseBuilder(reader CapabilityReader, bucket string, logger *slog.Logger) *DenialResponseBuilder {
+// CapabilityReader as CapabilityAuthorizer — wired by cmd/processor/main.go
+// via MakePipeline. bucket is the capability-kv bucket (role-by-operation
+// index); coreBucket is Core KV, read once on a service-op AuthContextMismatch
+// to fetch the denied service's `.class` aspect (Contract #6 §6.12).
+func NewDenialResponseBuilder(reader CapabilityReader, bucket, coreBucket string, logger *slog.Logger) *DenialResponseBuilder {
 	if reader == nil {
 		panic("processor: DenialResponseBuilder requires a CapabilityReader")
 	}
 	if bucket == "" {
 		panic("processor: DenialResponseBuilder requires a bucket name")
 	}
+	if coreBucket == "" {
+		panic("processor: DenialResponseBuilder requires a coreBucket name")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &DenialResponseBuilder{
-		reader: reader,
-		bucket: bucket,
-		logger: logger,
+		reader:     reader,
+		bucket:     bucket,
+		coreBucket: coreBucket,
+		logger:     logger,
 	}
 }
 
@@ -100,6 +110,14 @@ type DenialDetails struct {
 	// DiagnosticHint — operator-actionable text for AuthContextMismatch
 	// where role-coverage context is inapplicable.
 	DiagnosticHint string `json:"diagnosticHint,omitempty"`
+
+	// DeniedService / DeniedServiceClass — structural fields for a service-op
+	// AuthContextMismatch (Contract #6 §6.12). DeniedService echoes
+	// authContext.service; DeniedServiceClass is a single denial-time read of
+	// the service vertex's `.class` aspect. Both omitted when the mismatch
+	// is not a single-service denial (task-path, or service+task both set).
+	DeniedService      string `json:"deniedService,omitempty"`
+	DeniedServiceClass string `json:"deniedServiceClass,omitempty"`
 }
 
 // BuildDenialDetails constructs the FR22 DenialDetails for an auth denial.
@@ -124,6 +142,15 @@ func (b *DenialResponseBuilder) BuildDenialDetails(
 	switch dec.Code {
 	case ErrCodeAuthContextMismatch:
 		details.DiagnosticHint = diagnosticHintForMismatch(dec, env)
+		// A single-service denial (service set, task not) additionally names
+		// what was denied, structurally — Contract #6 §6.12. Task-path and
+		// service+task-both-set mismatches are not "service not available"
+		// denials, so they omit these fields (mirrors diagnosticHintForMismatch's
+		// branch order).
+		if ac := env.AuthContext; ac != nil && ac.Service != "" && ac.Task == "" {
+			details.DeniedService = ac.Service
+			details.DeniedServiceClass = b.fetchServiceClass(ctx, ac.Service)
+		}
 		return details
 	}
 
@@ -223,6 +250,45 @@ func (b *DenialResponseBuilder) fetchRolesCarryingPermission(ctx context.Context
 		return []string{}
 	}
 	return doc.Roles
+}
+
+// fetchServiceClass reads the `.class` aspect of a service vertex from Core
+// KV — a single denial-time GET (Contract #6 §6.12; §6.5 rationale: the rich
+// `service.<x>.<variant>` discriminator lives only in the aspect, not the
+// residence-based projection). Returns "" on any read/parse failure, a
+// missing aspect, or an invalid serviceKey. Two checks guard against
+// authContext.service being client-supplied and never upstream-validated:
+// (1) it must parse as a well-formed vertex key at all — AspectKey panics on
+// a non vertex-key string, so this must never reach it unchecked; (2) its
+// vertex TYPE must be "service" — otherwise a denial (which only requires
+// the actor to hold at least one unrelated legitimate service-access grant
+// to reach this branch) becomes a general `.class`-aspect oracle over any
+// vertex in the graph (identities, roles, tasks, …), not just services. All
+// non-fatal — the denial itself is already underway.
+func (b *DenialResponseBuilder) fetchServiceClass(ctx context.Context, serviceKey string) string {
+	if vertexType, _, ok := substrate.ParseVertexKey(serviceKey); !ok || vertexType != "service" {
+		return ""
+	}
+	key := substrate.AspectKey(serviceKey, "class")
+	entry, err := b.reader.KVGet(ctx, b.coreBucket, key)
+	if err != nil {
+		if !errors.Is(err, substrate.ErrKeyNotFound) {
+			b.logger.Warn("denial response: failed to read service class aspect",
+				"key", key, "error", err)
+		}
+		return ""
+	}
+	var asp struct {
+		Data struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(entry.Value, &asp); err != nil {
+		b.logger.Warn("denial response: failed to parse service class aspect",
+			"key", key, "error", err)
+		return ""
+	}
+	return asp.Data.Value
 }
 
 // diagnosticHintForMismatch returns an operator-actionable hint for

@@ -1063,7 +1063,7 @@ func MakePipeline(conn *substrate.Conn, coreBucket, healthBucket, capabilityBuck
 	// Wire DenialResponseBuilder (FR22) when capability mode is active.
 	var denialBuilder *DenialResponseBuilder
 	if capabilityBucket != "" {
-		denialBuilder = NewDenialResponseBuilder(conn, capabilityBucket, logger)
+		denialBuilder = NewDenialResponseBuilder(conn, capabilityBucket, coreBucket, logger)
 	}
 
 	// Wire AuthTraceEmitter (FR23) when health bucket is available. Nil emitter
