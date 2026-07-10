@@ -58,7 +58,9 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/gateway/credentialbinding"
+	"github.com/asolgan/lattice/internal/gateway/revocation"
 	"github.com/asolgan/lattice/internal/healthkv"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -145,7 +147,19 @@ func run(logger *slog.Logger) error {
 		logger.Warn("CLINIC_APP_PG_DSN / REFRACTOR_PG_DSN unset; every protected endpoint will report the protected read model is unconfigured")
 	}
 
-	authn, signer, err := setupReadAuth(logger, isLoopbackHost(hostOf(addr)))
+	// Token-revocation kill-switch (external-actor-authn-binding-design.md
+	// §12.1) is additive/best-effort here, mirroring the credential-bindings
+	// wiring just below: a deployment that hasn't re-run bootstrap yet (bucket
+	// doesn't exist) still starts — reads simply aren't revocation-gated until
+	// the bucket is provisioned, with the short JWT TTL as the backstop.
+	var revocationChecker auth.RevocationChecker
+	if revKV, err := conn.OpenKV(context.Background(), revocation.BucketName); err != nil {
+		logger.Warn("clinic-app: token-revocation bucket unavailable; revocation kill-switch disabled for reads", "error", err)
+	} else {
+		revocationChecker = revocation.New(revKV)
+	}
+
+	authn, signer, err := setupReadAuth(logger, isLoopbackHost(hostOf(addr)), revocationChecker)
 	if err != nil {
 		return err
 	}

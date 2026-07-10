@@ -96,7 +96,7 @@ func (d *devSigner) mint(subject string) (string, time.Time, error) {
 // returns (nil, nil, nil) when no posture is configured — a nil authenticator
 // makes every protected read fail closed with 401, which is the correct default
 // for an app whose read boundary is not provisioned.
-func setupReadAuth(logger *slog.Logger, loopback bool) (*auth.Authenticator, *devSigner, error) {
+func setupReadAuth(logger *slog.Logger, loopback bool, revocationChecker auth.RevocationChecker) (*auth.Authenticator, *devSigner, error) {
 	if isTruthy(os.Getenv("LOFTSPACE_APP_DEV_AUTH")) {
 		// Defense in depth: the dev minter trusts any caller-supplied subject, so it
 		// must never be reachable off-host. Refuse to enable it on a non-loopback
@@ -130,9 +130,7 @@ func setupReadAuth(logger *slog.Logger, loopback bool) (*auth.Authenticator, *de
 			ttl:  devTokenTTL,
 			now:  time.Now,
 		}
-		// Revocation is the D1.2 kill-switch; the demo has no revocation bucket, so
-		// pass nil (the Authenticator permits a nil checker — verification only).
-		return auth.NewAuthenticator(verifier, nil), signer, nil
+		return auth.NewAuthenticator(verifier, revocationChecker), signer, nil
 	}
 
 	pemKey := os.Getenv("LOFTSPACE_APP_JWT_PUBLIC_KEY")
@@ -158,7 +156,7 @@ func setupReadAuth(logger *slog.Logger, loopback bool) (*auth.Authenticator, *de
 		return nil, nil, fmt.Errorf("build verifier: %w", err)
 	}
 	logger.Info("read boundary configured with external IdP public key", "kid", kid)
-	return auth.NewAuthenticator(verifier, nil), nil, nil
+	return auth.NewAuthenticator(verifier, revocationChecker), nil, nil
 }
 
 // parsePublicKeyPEM decodes a PEM-encoded RSA or ECDSA public key (PKIX).

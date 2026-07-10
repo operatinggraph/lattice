@@ -75,7 +75,7 @@ func TestIsTruthy(t *testing.T) {
 // round-trips to the RLS principal.
 func TestSetupReadAuth_DevPosture(t *testing.T) {
 	t.Setenv("CLINIC_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true)
+	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
 	if err != nil {
 		t.Fatalf("setupReadAuth: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestSetupReadAuth_DevPosture(t *testing.T) {
 // validates at this app's read boundary. One shared key, either direction.
 func TestSetupReadAuth_DevPosture_SharedKeyInteroperates(t *testing.T) {
 	t.Setenv("CLINIC_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true)
+	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
 	if err != nil {
 		t.Fatalf("setupReadAuth: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSetupReadAuth_DevPosture_SharedKeyInteroperates(t *testing.T) {
 func TestSetupReadAuth_NoPosture(t *testing.T) {
 	t.Setenv("CLINIC_APP_DEV_AUTH", "")
 	t.Setenv("CLINIC_APP_JWT_PUBLIC_KEY", "")
-	authn, signer, err := setupReadAuth(discardLogger(), true)
+	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
 	if err != nil {
 		t.Fatalf("setupReadAuth: %v", err)
 	}
@@ -179,8 +179,36 @@ func TestSetupReadAuth_NoPosture(t *testing.T) {
 func TestSetupReadAuth_BadPublicKey(t *testing.T) {
 	t.Setenv("CLINIC_APP_DEV_AUTH", "")
 	t.Setenv("CLINIC_APP_JWT_PUBLIC_KEY", "not a pem")
-	if _, _, err := setupReadAuth(discardLogger(), true); err == nil {
+	if _, _, err := setupReadAuth(discardLogger(), true, nil); err == nil {
 		t.Fatal("expected an error for an unparseable public key")
+	}
+}
+
+// fakeRevocationChecker is a fixed-answer auth.RevocationChecker.
+type fakeRevocationChecker struct {
+	revoked bool
+	err     error
+}
+
+func (f fakeRevocationChecker) IsRevoked(context.Context, string) (bool, error) {
+	return f.revoked, f.err
+}
+
+// TestSetupReadAuth_RevocationChecker_Wired proves setupReadAuth threads the
+// revocation checker it's given into the Authenticator it builds (§12.1) — a
+// revoked actor's otherwise-valid token is denied, not just verified.
+func TestSetupReadAuth_RevocationChecker_Wired(t *testing.T) {
+	t.Setenv("CLINIC_APP_DEV_AUTH", "1")
+	authn, signer, err := setupReadAuth(discardLogger(), true, fakeRevocationChecker{revoked: true})
+	if err != nil {
+		t.Fatalf("setupReadAuth: %v", err)
+	}
+	tok, _, err := signer.mint("Hj4kPmRtw9nbCxz5vQ2y")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if _, err := authn.Authenticate(t.Context(), tok); !errors.Is(err, auth.ErrTokenRevoked) {
+		t.Fatalf("Authenticate = %v, want ErrTokenRevoked", err)
 	}
 }
 
@@ -188,7 +216,7 @@ func TestSetupReadAuth_BadPublicKey(t *testing.T) {
 func devAuthServer(t *testing.T) *server {
 	t.Helper()
 	t.Setenv("CLINIC_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true)
+	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
 	if err != nil {
 		t.Fatalf("setupReadAuth: %v", err)
 	}

@@ -184,7 +184,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true)
+	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
 	if err != nil {
 		t.Fatalf("setupReadAuth: %v", err)
 	}
