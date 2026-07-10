@@ -498,6 +498,69 @@ this design needs §3.10's per-identity DEK + the `internal/vault` SPI. Build or
 > bucket instead of a Core-KV read, generate/seal/wrap a CEK, submit AttachObject) + a decrypt-capable
 > read path on the loftspace-app side; full 3-layer review (capability/crypto plane, per §9 above).
 
+> **🔭 Increment 2 grounding finding (2026-07-09) — retargeted before building.** The plan above assumed
+> `handleLeaseDocumentAttach` (a server-side handler that reads/seals/wraps then self-submits
+> `AttachObject`). That function **no longer exists**: `#75 Fire 2b` (`3a9d140`/`ed90925`), shipped in the
+> same window as Increment 1, moved the lease-signing PDF to a fully external-I/O path — `cmd/bridge`'s
+> `FakeDocGen` adapter renders + `ObjectPut`s the plaintext bytes server-side, and Weaver auto-attaches via
+> a generic `directOp AttachObject` (`internal/bridge/docgen_adapter.go`) — and it stripped
+> `loftspace-app`'s `core-operations` publish grant entirely (`TestVerticalAppOpsPublishDenied`). The app
+> never asserts an actor for ANY anchor op anymore; `AttachObject`/`DetachObject` are submitted **browser-direct** through the Gateway (`web/app.js`'s `attachObject()`), with the app's own `POST /api/objects`
+> doing the byte-plane write only (`cmd/loftspace-app/objects.go:handleObjectUpload`). Making the
+> system-generated lease PDF sensitive would mean teaching `cmd/bridge` (a P5-exempt platform binary) to
+> encrypt server-side and teaching Weaver's generic `directOp` templating to carry an encryption envelope
+> it has never needed to — a materially different, untested mechanism, not "wire a handler."
+>
+> **Retargeted to a genuine, already-live browser-uploaded PII artifact instead**: LoftSpace's
+> `idDocument`/`proofOfIncome` Documents-tab upload slots (`cmd/loftspace-app/objects.go`
+> `handleObjectUpload`/`handleObjectGet`, `web/app.js`'s `attachObject()`) — applicant-scoped ID
+> scans/pay-stubs, explicitly called out in the same file's comments as PII document content alongside the
+> (now bridge-owned) signed lease. This reuses the identical, already-ratified Fire 1–4-Inc-1 crypto
+> mechanism unchanged (`internal/objectcrypto`, the Vault wrap/unwrap RPC, the `privacy-base`
+> `piiKeyEnvelope` lens) with one adaptation for the post-#75 shape: the Go handler still does the
+> byte-plane write + seal + wrap server-side (unchanged from #75) and returns the encryption envelope in
+> the upload JSON response instead of self-submitting `AttachObject`; the browser folds those fields into
+> the `AttachObject` payload it already assembles (mirroring how it already threads
+> digest/size/contentType/storeName through today). One new guard beyond Fire 2's Loupe shape (an
+> admin-console caller Vault's wrap/unwrap RPC already trusts wholesale, §3.1): since an applicant browser
+> session is not equivalently trusted, `handleObjectUpload`'s sensitive branch requires
+> `governingIdentity` equal the caller's own authenticated identity (`authenticateRead` + the same
+> ownership check `entitledToObjectOwner`'s identity branch already makes in the same file) — self-only
+> for this consumer, not Andrew-gated (mirrors an existing in-file pattern, not a new trust boundary).
+> Building as scoped: same mechanism, different (already-live) consumer artifact — impl-level, not a
+> substantial new design.
+
+> **✅ Fire 4 Increment 2 SHIPPED (2026-07-09, `513587d`).** `cmd/loftspace-app/objects.go` +
+> new `objects_crypto.go`: `handleObjectUpload`'s sensitive branch (auth + self-identity-only
+> `governingIdentity`) seals the upload under a fresh per-object CEK, fetches the piiKey envelope via the
+> `privacy-base` lens (P5), wraps via the Vault, and returns the envelope for the browser to fold into the
+> `AttachObject` payload it submits itself; `handleObjectGet` gains `?decrypt=true` gated behind the
+> existing D1.5 owner-entitlement check. `packages/objects-base`: the `objectAttachments` lens now projects
+> `sensitive`/`governingIdentity`/`encryption`/`digest`; **also fixed a real pre-existing bug** —
+> `attach_object` never persisted `governingIdentity` as a top-level `.content.data` field (only
+> `encryption.keyId`), so a REAL (non-test-seeded) sensitive decrypt — including **Loupe's own**, since Fire
+> 2/3 — would call `fetchPiiKeyEnvelope` with an empty identity key and fail; now written + pinned by a test
+> assertion. `web/app.js`: `SENSITIVE_DOC_SLOTS` (idDocument/proofOfIncome) thread `governingIdentity`
+> through upload → the AttachObject payload; `openDocument` requests `?decrypt=true` for a sensitive doc.
+> 3-layer adversarially reviewed (Blind Hunter, Edge Case Hunter, Acceptance Auditor — all independently
+> corroborated the pre-existing Loupe bug fix; Acceptance Auditor confirmed full scope delivery; Edge Case
+> Hunter found no unhandled branch/boundary). Full `go build`/`make vet`/`golangci-lint`(0 issues)/`STRICT
+> lint-conventions`/`go test ./...` (full repo, `-p 4`) green.
+>
+> **🔭 Residual flagged by Blind Hunter (not fixed here, bounded).** The self-identity check gates only
+> this app's own `/api/objects` upload endpoint. `AttachObject`'s own submission is browser-direct via the
+> Gateway using the shared "staff" trusted-tool credential (`#75 Fire 2b` — `staffReadToken` carries no
+> real per-applicant subject, and `operator` already holds `AttachObject scope:any`), so a caller who
+> already holds that credential could submit `AttachObject` directly, bypassing this handler, with a
+> self-consistent-looking but Vault-unwrapped (forged) `encryption` block claiming an arbitrary
+> `governingIdentity` — the SAME pre-existing trust boundary every other `AttachObject` field
+> (targetKey/linkName/storeName) already has today, not introduced by this increment and not closeable by
+> it alone. **Bounded**: no plaintext ever leaks this way (Vault's AEAD tag rejects a forged `wrappedCEK`
+> on decrypt) — the exposure is a spurious `governingIdentity` attribution on an object the forger already
+> controls, not a confidentiality breach. **Closing it for real needs a consumer `scope=self` grant for
+> `AttachObject`** (mirroring `CreateLeaseApplication`'s existing precedent, real-actor-write-auth-e2e-
+> design.md §3.1) — a capability-plane decision, flagged for a future fire, not improvised here.
+
 ---
 
 ## 9. Open ratification items (for Andrew)

@@ -120,20 +120,20 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (this section only — check the **Arch-review intake** section above too, it
 > carries its own ✅ ratified / 📋 ready items, e.g. `fr22-service-denial-structural-fields` ★, Fork B ratified):
-> **Object crypto-shred Fire 4 Increment 2** (Increment 1 shipped `172fa98` 2026-07-09 off Andrew's
-> 2026-07-07 trust-boundary ratification) — wire `handleLeaseDocumentAttach` + a decrypt-capable read.
+> Object crypto-shred Fire 4 CLOSED (`513587d` 2026-07-09) — see Security & trust boundary below.
 > *Still gated*: **AI-caps Fire 4** (Andrew sign-off on AI-code-execution, not the sandbox).
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
+| AttachObject has no consumer scope=self grant | Browser-direct AttachObject (#75 Fire 2b) submits via the shared "staff" credential — any caller holding it can attach to/claim `governingIdentity` on ANY target, bounded (no plaintext leak) but a real gap. Blind-Hunter-flagged off crypto-shred Fire 4 Inc 2. | ★ | S | 🔭 flag-for-Andrew · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) §9 residual · mirror CreateLeaseApplication's scope=self precedent |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[identity-hygiene] Dedup over encrypted PII (duplicateCandidates)** | Post-Vault, the lens's WHERE matching (email/phone equality, name Levenshtein) runs on per-identity-DEK ciphertext → functionally inert; a secure lens can't fix in-engine matching. Needs a design: blind-index/HMAC companion aspect vs sanctioned engine mechanism. | ★★ | M | 📋 needs-design (Designer) · context in the [vault design](../../implementation-artifacts/vault-crypto-shredding-design.md) Fire 5b-i checkpoint |
-| **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · Fire 4 Inc 1 shipped `172fa98`; next: Inc 2 wire handleLeaseDocumentAttach |
+| **[Object Store] Crypto-shred for object-store blobs** | Vault covers sensitive **aspects** (Core KV) but not PII-bearing **blobs** (lease PDFs, ID scans, signatures) — extend crypto-shred to the Object Store. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/object-store-crypto-shred-design.md) · Fires 1-4 shipped (`513587d` closes it, LoftSpace idDocument/proofOfIncome); residual filed above |
 
 ### External-I/O maturity (bridge follow-ons)
 | Item | What it is | Imp | Size | State |
@@ -193,6 +193,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-09 · `513587d` · [Object Store] crypto-shred Fire 4 Increment 2 CLOSED — loftspace-app idDocument/proofOfIncome sensitive upload+decrypt; fixed a real pre-existing governingIdentity-persistence bug; 3-layer reviewed, CI green
 - 2026-07-09 · `172fa98` · [Object Store] crypto-shred Fire 4 Increment 1 — `internal/objectcrypto` extracted from Loupe; privacy-base `piiKeyEnvelope` lens; `lattice.vault.wrapkey`/`unwrapkey` extended to loftspace-app; CI green
 - 2026-07-09 · `659c635` · [Weaver] directOp-class-pin — `GapActionSpec.Class` threads to `opEnvelope.Class`; pinned on Café/bespoke-contracts ledger dispatches; unblocks [Café tab-settlement](verticals.md); CI green
 - 2026-07-09 · `128111f` · [orchestration-base] CreateTask logical-delete create-wedge — present-but-isDeleted task revives via CAS-guarded update, not a blind create; §10.3 text staged UNCOMMITTED for Andrew; CI green
