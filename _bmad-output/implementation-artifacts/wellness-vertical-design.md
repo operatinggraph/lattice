@@ -8,12 +8,7 @@ shape exactly (vanilla HTML/CSS/JS, three views: Schedule / Roster / My Classes)
 lenses below plus the shared `leaseApplicationComplete` convergence lens for the resident/lease picker
 (the "who" dimension, mirroring `cafe-app`'s lease picker). Wired into the Path-A NATS permission matrix
 (`deploy/gen-dev-nkeys`) alongside the other three vertical apps. Build/vet/lint/lint-conventions(P5)
-all green, CI green. **Live-data browser verify is PENDING a one-time NATS server reload** — adding a
-new component's nkey to the static Path-A matrix requires the NATS process to pick up the regenerated
-`deploy/nats-server.conf`, and this fire correctly declined to bounce the shared, always-on NATS
-container unattended (sandboxed as a shared-infra action). Whoever next touches the stack (a `make up`
-cycle that bounces NATS, or a manual `docker compose restart nats`) picks this up for free; no further
-code change is needed.
+all green, CI green. **Live lens reads verified (2026-07-09):** wellness-app on `:7802` authenticates to NATS and all four lens endpoints (`studios`/`sessions`/`bookings`/`residents`) return — `residents` is populated from the shared graph; `studios`/`sessions`/`bookings` await demo data the PO will create. Loading wellness-app's Path-A nkey requires the shared NATS container to read the current `deploy/nats-server.conf`; on a long-running dev stack a stale single-file bind-mount is only refreshed by a `docker restart lattice-nats` (a SIGHUP reload cannot fix a torn mount), not a code change.
 
 ## Scope of this increment
 
