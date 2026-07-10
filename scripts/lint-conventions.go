@@ -47,9 +47,10 @@
 //     instanceOf-chain resolver (Contract #1 §1.5). The signal is anchored on the
 //     Starlark aspect-emit helper, so a discriminator word used as a CLI flag, a
 //     string-slice element, or an aspect's `cls` arg is not flagged.
-//   - Read-posture classification (Contract #2 §2.5; ADVISORY — warns, never
-//     fails --strict: the check lands warn-first per the script-read-posture
-//     design §7). Every script `kv.Read(` / `kv.Links(` call site in a
+//   - Read-posture classification (Contract #2 §2.5; BLOCKING — fails
+//     --strict, per the script-read-posture design §13's flip once the
+//     platform + verticals sweeps closed the debt list). Every script
+//     `kv.Read(` / `kv.Links(` call site in a
 //     packages/ non-test file must carry a `# read-posture: (a|c|d|e)`
 //     Starlark annotation on the call line or within the preceding lines:
 //     (a) required read declared in contextHint.reads by the dispatcher (the
@@ -423,7 +424,7 @@ func checkLensProtectedByDefault(path, src string) []finding {
 }
 
 // checkReadPosture classifies one script kv.Read/kv.Links call line against
-// the Contract #2 §2.5 read posture (all findings ADVISORY — warn:true).
+// the Contract #2 §2.5 read posture (all findings BLOCKING — warn:false).
 // window is the preceding raw lines; the annotation may sit there or on the
 // call line itself. Comment lines (Go `//` or Starlark `#`) are skipped —
 // prose ABOUT kv.Read is not a call.
@@ -455,21 +456,21 @@ func checkReadPosture(path string, ln int, line string, window []string, fileMut
 		if isLinks {
 			call = "kv.Links"
 		}
-		return []finding{{file: path, line: ln, warn: true,
+		return []finding{{file: path, line: ln, warn: false,
 			msg: "read-posture: unclassified " + call + " — class-(b) debt (Contract #2 §2.5). Declare the key in contextHint reads/optionalReads and annotate the call: `# read-posture: (a) <declared-by>` (required read declared in contextHint.reads), `(c) <why>` (config, deliberately live), `(d) <declared-by>` (declared optionalReads), or `(e) relation=<rel> epoch=<key|none (…)>` (bounded enumeration / its follow-up read)"}}
 	}
 	var out []finding
 	if isLinks {
 		if class != "e" {
-			out = append(out, finding{file: path, line: ln, warn: true,
+			out = append(out, finding{file: path, line: ln, warn: false,
 				msg: "read-posture: kv.Links must be class (e) — a bounded paged enumeration, declared as contextHint.enumerations metadata (Contract #2 §2.5)"})
 		} else {
 			if !strings.Contains(annotated, "relation=") {
-				out = append(out, finding{file: path, line: ln, warn: true,
+				out = append(out, finding{file: path, line: ln, warn: false,
 					msg: "read-posture: a class-(e) kv.Links annotation must name `relation=<rel>` (matches the dispatcher's contextHint.enumerations declaration, Contract #2 §2.5)"})
 			}
 			if fileMutates && !strings.Contains(annotated, "epoch=") {
-				out = append(out, finding{file: path, line: ln, warn: true,
+				out = append(out, finding{file: path, line: ln, warn: false,
 					msg: "read-posture: enumerate-then-write without a companion epoch — record `epoch=<key>` (a class-(a) serialization key every mutator of the relation bumps, declared in reads) or an explicit `epoch=none (<accepted-risk>)`; best-effort contention reduction, Weaver detect+recover enforces (Contract #2 §2.5)"})
 			}
 		}
