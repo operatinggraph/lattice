@@ -7,6 +7,29 @@ The #11 §11.1 consumer-table row is committed with this ratification. Ratificat
 vendor claim against the pinned NATS 2.14 module source (issuer/auth_users requirements, fail-closed
 callout, expiry-disconnect, filtered-create pinning, NKey bypass, client filtered-create form) — zero
 corrections. The Steward builds Fires 1–3; Fire 3 flips EDGE.3 build-ready. · Designer fire 2026-07-10
+**🏗️ Fire 1 checkpoint (Steward, 2026-07-11).** Code COMPLETE + tested + gates green in worktree
+`/tmp/lattice-worktrees/per-identity-subscribe-acl-fire1` (branch `steward-per-identity-subscribe-acl-fire1`):
+`internal/gateway/natsauth` (the responder + §3.3 permission template), `substrate.ConnectOpts.Token`,
+`deploy/gen-dev-nkeys` auth_callout rendering, `cmd/gateway` wiring, `internal/natsperm/auth_callout_test.go`
+(6 conformance vectors against the real committed conf). Full 3-layer adversarial pass run — one HIGH
+finding folded before commit: the design's §3.3 `lattice.ctrl.refractor.personal.*` control-RPC grant
+depends on a §3.4 server-side identity-binding override that is Fire 2 scope and does not exist yet
+(`internal/refractor/control/service.go`'s personal handlers trust `body.IdentityID` unchecked) — Fire 1
+now ships WITHOUT that grant (sync-plane read confinement only); Fire 2 must land the grant and the
+override together. Two MEDIUM/LOW findings also folded (identity NanoID-alphabet enforcement at the
+resolved-identity check; a length cap on the CONNECT-supplied device name). `go build`/`make vet`/
+`golangci-lint`/`STRICT lint-conventions`/`go test` all green; `make verify-kernel` green against the
+live shared stack.
+**🚧 BLOCKED — not committed — needs Andrew's one-look authorization, not a design question.** The
+auth_callout mechanism needs a brand-new ACCOUNT-type NATS NKey seed
+(`deploy/nkeys/auth-callout-issuer.nk`) — the same dev-only-seed convention as the 16 already-committed
+`deploy/nkeys/*.nk` files (`gen-dev-nkeys`'s own doc: "committed like POSTGRES_PASSWORD: lattice_dev").
+The session's auto-mode credential-leakage classifier blocked staging that one new file for commit
+(a real, if dev-only, generated private key, in a confirmed-public repo, with no user present in this
+unattended fire to authorize it) — it did NOT flag any of the code. Andrew: either (a) explicitly
+authorize committing that one seed file (mirrors the 16 existing ones — no new precedent), or (b) it
+gets minted fresh + committed together with a future *attended* fire. Nothing else about this fire is
+blocked; the worktree is ready to merge the moment the seed is authorized.
 **Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → Security & trust boundary → *Per-identity NATS subscribe-ACL (Edge sync plane)*
 **Consumers:** [Edge Lattice EDGE.3](edge-lattice-full-design.md) (§7 — the one open gate leg) · [Personal Lens Fork 3](personal-secure-lens-design.md) (subject subscribe-authorization)
 **Contracts:** #11 (external actor authN — build-to, plus one staged consumer-table row, see §6) · #1 (subject shapes — build-to) · #75 design's §3.2 matrix (extends, does not alter)

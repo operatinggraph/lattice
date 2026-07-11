@@ -115,8 +115,11 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > (Personal Lens PL.3) + the Gateway write-path translator + NATS-account subscribe-ACL — not build-ready
 > yet (edge design §7 checkpoint) — but its gate is now owned + ratified. **sensitive-param-egress
 > CLOSED** (2026-07-11) — Fire 1 (disposition + emission guard) + Fire 2 (bridge unwrap + lease-signing
-> live consumer) both shipped, CI green. **Next pick: per-identity subscribe-ACL Fires 1–3** (✅
-> 2026-07-10, fork A auth-callout — builds the EDGE.3 gate leg, Security table).
+> live consumer) both shipped, CI green. **per-identity subscribe-ACL Fire 1 code-complete, gates
+> green, 3-layer reviewed but NOT MERGED** (2026-07-11) — blocked on Andrew authorizing one new
+> dev-only NKey seed commit (checkpoint in the design doc; not a design question). Whoever picks
+> this row next: merge the worktree once authorized, don't re-build it. Next pick otherwise: Fires
+> 2–3 of the same item once Fire 1 lands (builds the EDGE.3 gate leg, Security table).
 > **AI-caps Fire 4 materializer NOT yet build-ready** (verified 2026-07-11): sign-off condition 1
 > (Processor-MAC'd sensitive-refs, sensitive-param-egress-design.md §3.6) has no code anywhere
 > (`git log --all` shows only the ratification doc commit) — it needs its own design pass
@@ -129,7 +132,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | **Multi-credential identity linking + merge credential-awareness** | One human, N IdPs: no path binds a 2nd credential to a claimed U (claim is one-shot); MergeIdentity never repoints credentialindex/bindings and the materializers fold `identity.claimed` only → a merge strands A on the merged-loser. Link flow + merge rebind + provision probe + unlink + whoami. | ★★ | M | ✅ ratified 2026-07-10 (unlink in scope — 4 fires) · [design](../../implementation-artifacts/multi-credential-identity-linking-design.md) |
-| **Per-identity NATS subscribe-ACL (Edge sync plane)** | Untrusted Edge connections may subscribe ONLY their own per-identity SYNC subject (`subjects.PersonalSync`), and revocation must cut subscribe. #75 v1 explicitly declined subscribe lockdown (§3.2); PL Fork 3 assumed #75 delivers it — un-owned gap, now owned. Dynamic per-identity NATS authN consuming Contract #11 tokens. | ★★ | M | ✅ ratified 2026-07-10 (fork A — auth callout) · [design](../../implementation-artifacts/per-identity-nats-subscribe-acl-design.md) · Fire 3 flips EDGE.3 build-ready |
+| **Per-identity NATS subscribe-ACL (Edge sync plane)** | Untrusted Edge connections may subscribe ONLY their own per-identity SYNC subject (`subjects.PersonalSync`), and revocation must cut subscribe. #75 v1 explicitly declined subscribe lockdown (§3.2); PL Fork 3 assumed #75 delivers it — un-owned gap, now owned. Dynamic per-identity NATS authN consuming Contract #11 tokens. | ★★ | M | 🏗️ Fire 1 done+green · [checkpoint](../../implementation-artifacts/per-identity-nats-subscribe-acl-design.md) · 🚧 blocked-on: Andrew NKey-seed-commit ask |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 
 ### Privacy / Vault
