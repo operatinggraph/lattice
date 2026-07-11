@@ -164,8 +164,38 @@ var matrix = []component{
 		// rendered executed-lease artifact is ObjectPut by the adapter and stays
 		// inert until an AttachObject op anchors it. Bridge is one of the four
 		// sanctioned object-plane writers (TestObjectStoreWriteAccess).
-		pubAllow:       []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>"},
-		pubDeny:        denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
+		// lattice.vault.decrypt — the egress-unwrap boundary (design
+		// sensitive-param-egress-design.md §3.5/§For-Andrew #1): the bridge is a
+		// named trusted plaintext consumer alongside Loupe/the apps, decrypting a
+		// sensitive-ref param at the last possible moment before a vendor call.
+		pubAllow: []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$KV.health-kv.>", "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.vault.decrypt"},
+		// denyProtected covers the core-kv/capability-kv WRITE side (the
+		// $KV.core-kv.> publish subject + the backing-stream admin verbs). The two
+		// extra denies below close the READ side of the same grant's blast radius
+		// (design §For-Andrew #1/§8, adversarial finding B2): the broad $JS.API.>
+		// grant every component holds admits $JS.API.DIRECT.GET / STREAM.MSG.GET
+		// requests — a JetStream KV read, not a write, and NOT covered by
+		// denyProtected — so a decrypt-RPC-holding bridge could otherwise reach
+		// the whole core-kv corpus via the backing-stream side channel. Denying
+		// them here pins the bridge's reachable read set to the ONE lens bucket
+		// (privacy-pii-key-envelopes) its egress unwrap actually needs — still
+		// reachable via the unrestricted $JS.API.> grant, since the deny is
+		// scoped to the core-kv backing stream only. (The account-wide read
+		// laxity for every OTHER component is the open natsperm-matrix-hygiene
+		// row — flagged, not silently absorbed here.)
+		pubDeny: append(
+			denyProtected([]string{"$KV.core-kv.>", "$KV.capability-kv.>"}, coreKVStream, capabilityKVStream),
+			// The BARE form (no trailing token) is also a live request shape —
+			// nats.go's direct-get-by-sequence (KeyValue.GetRevision) publishes to
+			// exactly this subject with no subject-suffix — and NATS' `>` wildcard
+			// requires at least one token after the prefix, so "...KV_core-kv.>"
+			// alone does NOT match it: the bare-subject deny is required alongside
+			// the wildcarded one, or the read-tightening is sequence-walk-bypassable
+			// (adversarial review finding, this fire).
+			"$JS.API.DIRECT.GET."+coreKVStream,
+			"$JS.API.DIRECT.GET."+coreKVStream+".>",
+			"$JS.API.STREAM.MSG.GET."+coreKVStream,
+		),
 		allowResponses: true, // may respond to requests
 	},
 	{

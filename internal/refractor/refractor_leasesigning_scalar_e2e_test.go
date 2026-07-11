@@ -287,14 +287,20 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	require.Equal(t, 1, strings.Count(convKey, "."), "convergence key must have exactly one dot")
 
 	// Every bool gap column must be a Go bool (Weaver's boolColumn reads a bool;
-	// a [] would be a RowDataError and never actionable). All gaps open → all true.
-	for _, col := range []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature"} {
+	// a [] would be a RowDataError and never actionable). All gaps open → all true
+	// EXCEPT missing_bgcheck: it additionally requires ssnVal <> null (onboarding
+	// already done — sensitive-param-egress-design.md §7 / lenses.go's doc note),
+	// so on a fresh application it starts false, not true — checked separately below.
+	for _, col := range []string{"violating", "missing_onboarding", "missing_payment", "missing_signature"} {
 		v, isBool := openEnv[col].(bool)
 		require.Truef(t, isBool, "column %q must project as a Go bool, got %T %v (E6: scalars must not coerce to [])", col, openEnv[col], openEnv[col])
 		require.Truef(t, v, "column %q must be true with all gaps open", col)
 		_, isList := openEnv[col].([]any)
 		require.Falsef(t, isList, "column %q must NOT project as a list", col)
 	}
+	bgv, bgIsBool := openEnv["missing_bgcheck"].(bool)
+	require.Truef(t, bgIsBool, "column missing_bgcheck must project as a Go bool, got %T %v (E6: scalars must not coerce to [])", openEnv["missing_bgcheck"], openEnv["missing_bgcheck"])
+	require.Falsef(t, bgv, "missing_bgcheck must be false before onboarding — it is not yet applicable to remediate (ssnVal is still null)")
 	// The §10.8 param columns must be the full vertex-key STRINGS the playbook
 	// templates resolve (row.entityKey / row.applicant), not lists.
 	require.Equal(t, appKey, openEnv["entityKey"], "entityKey must be the full leaseapp key string")

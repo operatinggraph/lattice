@@ -159,7 +159,9 @@ func TestPiiKeyEnvelopeLens_ProjectsOnlyIdentitiesWithAnEnvelope(t *testing.T) {
 	require.Equal(t, "d2FyID09PT0=", real["wrappedDEK"])
 	require.Equal(t, "v1", real["kekVersion"])
 	require.Equal(t, "AES-256-GCM", real["alg"])
+	require.Equal(t, false, real["shredded"], "an unshredded identity's row must project shredded=false — a bridge/app consumer OR's this into its Decrypt/Encrypt shred check (sensitive-param-egress-design.md §3.2/§3.5)")
 
 	placeholder := byKey[placeholderKey].Values
 	require.Equal(t, "", placeholder["wrappedDEK"], "a shredded placeholder still projects — WrapKey/UnwrapKey fails closed on the empty key, not this lens")
+	require.Equal(t, true, placeholder["shredded"], "shredded must be projected (not silently dropped) so a Vault-process restart cannot re-admit a shredded identity's PII via this lens")
 }

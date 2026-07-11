@@ -278,7 +278,15 @@ func Lenses() []pkgmgr.LensSpec {
 //     envelope `class` field shadows the .class aspect on the read path); the
 //     completed test reads the .outcome aspect status. The replyOp writing the
 //     .outcome aspect flips the matching gap false. bgcheck additionally requires
-//     freshness (see FRESHNESS below); payment is ever-completed.
+//     freshness (see FRESHNESS below); payment is ever-completed. missing_bgcheck
+//     ALSO requires ssnVal <> null (onboarding already done): the backgroundCheck
+//     pattern's params subject-template .name/.dob (sensitive-param-egress-design
+//     §7, the live subject-PII adapter consumer), and Loom's egressReads
+//     hydration is fail-closed like reads (missing key ⇒ HydrationMiss) — without
+//     this gate Weaver would race missing_bgcheck against missing_onboarding
+//     (both open on a fresh application) and could dispatch the pattern before
+//     RecordIdentityPII ever wrote .dob, permanently HydrationMiss-rejecting the
+//     instanceOp with no auto-retry (found + fixed building the Fire 2 e2e).
 //   - missing_signature — the application has no .signature aspect. SignLease
 //     writes it, flipping this false.
 //
@@ -668,7 +676,7 @@ RETURN
   landlordDecision,
   declineReason,
   (ssnVal = null)        AS missing_onboarding,
-  (freshBgComplete = 0)  AS missing_bgcheck,
+  ((ssnVal <> null) AND (freshBgComplete = 0))  AS missing_bgcheck,
   (payComplete = 0)      AS missing_payment,
   (signedAt = null)      AS missing_signature,
   (bgInflight > 0)       AS inflight_bgcheck,

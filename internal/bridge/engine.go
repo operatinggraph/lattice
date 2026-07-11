@@ -155,8 +155,12 @@ func (c *Config) withDefaults() {
 // requestId. It keeps no durable outbox: the message ack is the commit point,
 // and the deterministic reply requestId makes redelivery idempotent, so its only
 // durable state is the consumer ack floor and the Contract #4 op tracker (owned
-// by the Processor). It imports ONLY internal/substrate; all cross-component
-// interaction is over NATS.
+// by the Processor). It imports internal/substrate for all cross-component
+// interaction over NATS, plus internal/vault for the DecryptRequest/Response
+// wire types of the lattice.vault.decrypt RPC its egress-unwrap boundary calls
+// (design sensitive-param-egress §3.5) — the bridge still reads no Core KV;
+// its two new transport surfaces are that one RPC subject and one lens-bucket
+// read (P5).
 type Engine struct {
 	cfg        Config
 	conn       *substrate.Conn

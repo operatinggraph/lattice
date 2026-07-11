@@ -28,6 +28,11 @@ type FakeBackgroundCheck struct {
 	// calls counts the side-effects actually performed per idempotencyKey — the
 	// idempotency assertion: a repeat key must leave its count at 1.
 	calls map[string]int
+	// lastParams records the Params map the most recent Execute call for each
+	// idempotencyKey received — the sensitive-param-egress live-consumer
+	// witness (design §7): a test asserts this is real PLAINTEXT (the vendor's
+	// last-mile view), never a `$sensitiveRef` marker.
+	lastParams map[string]map[string]string
 	// declineAll, when set, makes EVERY subject decline (terminal OutcomeFailed),
 	// not only BackgroundCheckDeclineSubject — the operator-driven demo affordance
 	// (SetDeclineAll, wired to the bridge's BRIDGE_FAKE_DECLINE env) for exercising
@@ -39,8 +44,9 @@ type FakeBackgroundCheck struct {
 // NewFakeBackgroundCheck returns a fresh in-memory reference adapter.
 func NewFakeBackgroundCheck() *FakeBackgroundCheck {
 	return &FakeBackgroundCheck{
-		results: make(map[string]Result),
-		calls:   make(map[string]int),
+		results:    make(map[string]Result),
+		calls:      make(map[string]int),
+		lastParams: make(map[string]map[string]string),
 	}
 }
 
@@ -59,6 +65,7 @@ func (f *FakeBackgroundCheck) Execute(_ context.Context, req Request) (Dispatch,
 		return Dispatch{Disposition: Resolved, Result: res}, nil
 	}
 	f.calls[req.IdempotencyKey]++
+	f.lastParams[req.IdempotencyKey] = req.Params
 	res := Result{Status: OutcomeCompleted, Detail: "background-check cleared for " + req.Subject}
 	if f.declineAll || req.Subject == BackgroundCheckDeclineSubject {
 		res = Result{Status: OutcomeFailed, Detail: "background-check declined for " + req.Subject}
@@ -93,4 +100,14 @@ func (f *FakeBackgroundCheck) SideEffects(idempotencyKey string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls[idempotencyKey]
+}
+
+// LastParams returns the Params map the most recent Execute call for
+// idempotencyKey received (nil if never called) — the last-mile vendor view,
+// after the bridge's egress unwrap has substituted any `$sensitiveRef` marker
+// with its decrypted plaintext (sensitive-param-egress-design.md §7).
+func (f *FakeBackgroundCheck) LastParams(idempotencyKey string) map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastParams[idempotencyKey]
 }

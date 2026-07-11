@@ -187,7 +187,7 @@ func TestLeaseApplicationComplete_ProjectsOneRowPerAnchor(t *testing.T) {
 	require.Equal(t, appKey, v["entityKey"], "entityKey must be the full leaseapp key")
 	require.Equal(t, idKey, v["applicant"], "applicant must be the full identity key")
 	require.Equal(t, true, v["missing_onboarding"])
-	require.Equal(t, true, v["missing_bgcheck"])
+	require.Equal(t, false, v["missing_bgcheck"], "missing_bgcheck requires onboarding (ssnVal <> null) first — not yet applicable to remediate")
 	require.Equal(t, true, v["missing_payment"])
 	require.Equal(t, true, v["missing_signature"])
 	require.Equal(t, true, v["violating"])
@@ -1139,7 +1139,7 @@ func TestLeaseApplicationComplete_FreshUntilNullBeforeOnboarding(t *testing.T) {
 	v := rows[0].Values
 	require.Nil(t, v["freshUntil"], "no completed bgcheck → freshUntil null")
 	require.Equal(t, true, v["violating"])
-	require.Equal(t, true, v["missing_bgcheck"])
+	require.Equal(t, false, v["missing_bgcheck"], "missing_bgcheck requires onboarding (ssnVal <> null) first — not yet applicable before PII is recorded")
 }
 
 // inflightBgFixture seeds an applicant (PII recorded, signed — so onboarding and

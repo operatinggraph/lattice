@@ -3,6 +3,8 @@ package leasesigning
 import (
 	"fmt"
 	"strings"
+
+	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
 // leaseAppDDLScript handles the leaseapp lifecycle ops CreateLeaseApplication
@@ -678,7 +680,22 @@ def execute(state, op):
 // discriminator + the providedTo link, and emits the external.<adapter> event
 // off its own transactional outbox. Template-less (no instanceOf): the lens
 // hops providedTo, not instanceOf.
+//
+// event_data.params is resolve_subject_params(p.params, subject_key)
+// (orchestration-base's shared helper, prepended below): the backgroundCheck
+// pattern's name/dob subject.*.data.value templates resolve here — both
+// identity-domain aspects are sensitive, so Loom's inferExternalTaskReads
+// declared them under egressReads (not reads), and the Processor hydrated
+// them as $sensitiveRef markers (never plaintext) rather than the plain
+// reads/optionalReads decrypt-on-hydrate path — the resolver only recognizes
+// the marker the Processor authored, so plaintext can never leak into this
+// event even if a future template targets a sensitive field (design
+// sensitive-param-egress §3.2/§3.3). params.family stays a literal
+// (collectPayment's "payment", this pattern's "backgroundCheck") — it never
+// starts with "subject." so resolve_subject_params passes it through
+// unchanged.
 const leaseServiceInstanceDDLScript = `
+` + orchestrationbase.ResolveSubjectParamsHelper + `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -805,6 +822,14 @@ def execute(state, op):
         # bridge posts if its adapter returns Pending (it records the .dispatch
         # marker); it is the matched pair of replyOp, which the bridge posts on a
         # terminal outcome.
+        raw_params = p.params if hasattr(p, "params") and p.params != None else {}
+        resolved_params = resolve_subject_params(raw_params, subject_key)
+        # family_of already validated + trimmed fam; re-pin it post-resolve so a
+        # caller's untrimmed family value can never diverge from the validated
+        # one (resolve_subject_params passes non-"subject."-prefixed values
+        # through byte-identical, which for family is normally a no-op, but
+        # trim discipline should not depend on that being true forever).
+        resolved_params["family"] = fam
         event_data = {
             "instanceKey":    handle,
             "adapter":        adapter,
@@ -812,7 +837,7 @@ def execute(state, op):
             "dispatchOp":     "RecordServiceDispatch",
             "externalRef":    handle,
             "idempotencyKey": handle,
-            "params":         {"family": fam},
+            "params":         resolved_params,
         }
         events = [{"class": "external." + adapter, "data": event_data}]
         return {"mutations": mutations, "events": events,

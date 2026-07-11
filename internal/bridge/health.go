@@ -37,6 +37,7 @@ const (
 	codeScheduleReadFailed  = "BridgeScheduleReadFailed"
 	codeSchedulePublishFail = "BridgeSchedulePublishFailed"
 	codePollFailed          = "BridgePollFailed"
+	codeEgressUnwrapFailed  = "BridgeEgressUnwrapFailed"
 	severityError           = "error"
 	severityWarning         = "warning"
 )

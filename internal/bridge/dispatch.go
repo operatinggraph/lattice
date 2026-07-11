@@ -107,6 +107,13 @@ func replyOpReads(replyOp, externalRef string) []string {
 //     KV failure falls back to the real call, never drops the event, and a
 //     sustained Core KV outage stays observable, not log-only).
 //   - adapter not registered → errConfig: Ack + a Health issue.
+//   - egress unwrap (a `$sensitiveRef` param) fails permanently (shredded key,
+//     malformed ref, absent field, absent envelope row after the retry budget)
+//     → the adapter is NEVER called; a terminal failed replyOp posts instead,
+//     through the same path an adapter's own OutcomeFailed takes (converge,
+//     never park) → Ack. A transient egress failure (Vault RPC hiccup, an
+//     envelope-lens row not yet projected) → NakWithDelay + a Health issue,
+//     bounded (design sensitive-param-egress §3.5).
 //   - adapter error (or a contained panic) → NakWithDelay + a Health issue
 //     (bounded-cadence redelivery on the same idempotencyKey; the adapter
 //     dedups, so a re-attempt is safe).
@@ -178,24 +185,54 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 		return substrate.Ack
 	}
 
-	dispatch, execErr := executeAdapter(ctx, adapter, Request{
-		IdempotencyKey: instanceKey,
-		Operation:      ev.ReplyOp,
-		Subject:        instanceKey,
-		Params:         e.coerceParams(ev.Params),
-		RawParams:      ev.Params,
-	})
-	if execErr != nil {
-		e.logger.Error("bridge: adapter execute failed; nak with delay + health issue",
-			"adapter", ev.Adapter, "instanceKey", instanceKey, "err", execErr)
-		e.metrics.incAdapterErrors()
-		e.issues.set("adapter:"+ev.Adapter, severityWarning, codeAdapterFailed,
-			fmt.Sprintf("adapter %q failed (transient; redelivering on the same idempotencyKey): %v", ev.Adapter, execErr))
-		return substrate.NakWithDelay
+	// The egress unwrap runs BEFORE coerceParams (design sensitive-param-egress
+	// §3.5): a `$sensitiveRef` marker in ev.Params is replaced by its decrypted
+	// plaintext field here, so coerceParams never has to distinguish a marker
+	// object from an ordinary literal. A permanent failure never reaches the
+	// adapter — it synthesizes the SAME terminal failed-outcome shape an
+	// adapter's own OutcomeFailed would, so it posts through the identical
+	// replyOp path below (converge, never park). A transient failure Naks with
+	// the bounded-attempts budget.
+	var dispatch Dispatch
+	var execErr error
+	substitutedParams, ferr := e.unwrapEgressParams(ctx, ev.Params, msg.NumDelivered)
+	if ferr != nil {
+		if ferr.class == egressTransient {
+			e.logger.Warn("bridge: egress unwrap transient failure; nak with delay + health issue",
+				"adapter", ev.Adapter, "instanceKey", instanceKey, "numDelivered", msg.NumDelivered, "err", ferr.err)
+			e.issues.set("egress:"+ev.Adapter, severityWarning, codeEgressUnwrapFailed,
+				fmt.Sprintf("egress unwrap failed (transient; redelivering): %v", ferr.err))
+			return substrate.NakWithDelay
+		}
+		e.logger.Error("bridge: egress unwrap permanent failure; posting failed replyOp",
+			"adapter", ev.Adapter, "instanceKey", instanceKey, "err", ferr.err)
+		e.issues.set("egress:"+ev.Adapter, severityError, codeEgressUnwrapFailed,
+			fmt.Sprintf("egress unwrap failed permanently: %v", ferr.err))
+		dispatch = Dispatch{Disposition: Resolved, Result: Result{
+			Status: OutcomeFailed,
+			Detail: "egress unwrap failed: " + ferr.err.Error(),
+		}}
+	} else {
+		e.issues.clear("egress:" + ev.Adapter)
+		dispatch, execErr = executeAdapter(ctx, adapter, Request{
+			IdempotencyKey: instanceKey,
+			Operation:      ev.ReplyOp,
+			Subject:        instanceKey,
+			Params:         e.coerceParams(substitutedParams),
+			RawParams:      ev.Params,
+		})
+		if execErr != nil {
+			e.logger.Error("bridge: adapter execute failed; nak with delay + health issue",
+				"adapter", ev.Adapter, "instanceKey", instanceKey, "err", execErr)
+			e.metrics.incAdapterErrors()
+			e.issues.set("adapter:"+ev.Adapter, severityWarning, codeAdapterFailed,
+				fmt.Sprintf("adapter %q failed (transient; redelivering on the same idempotencyKey): %v", ev.Adapter, execErr))
+			return substrate.NakWithDelay
+		}
+		// A success (Resolved or Pending) clears any prior transient-failure /
+		// missing issue for this adapter (the condition resolved).
+		e.issues.clear("adapter:" + ev.Adapter)
 	}
-	// A success (Resolved or Pending) clears any prior transient-failure / missing
-	// issue for this adapter (the condition resolved).
-	e.issues.clear("adapter:" + ev.Adapter)
 
 	if dispatch.Disposition == Pending {
 		return e.handlePending(ctx, ev, instanceKey, dispatch.Ref)

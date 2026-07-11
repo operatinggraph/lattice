@@ -97,6 +97,19 @@ RETURN
 // wrappedDEK is ciphertext, inert without the Vault's master KEK, the same
 // posture as shredStatus. keyId here is redundant with the row's own key but
 // kept so the projected row is a complete, self-describing Envelope.
+//
+// shredded IS projected (unlike CreatedAt, which stays unprojected — a
+// display nicety no consumer needs): ShredIdentityKey does NOT zero an
+// already-minted identity's wrappedDEK (it only flips shredded=true, keeping
+// the real bytes — packages/privacy-base/shred_identity_key.go), so
+// LocalBackend's own in-memory shredded-set is the ONLY restart-proof signal
+// for an envelope-lens consumer that omits this field — a genuine Vault
+// process restart loses that in-memory set and a stale lens row would
+// silently re-admit a shredded identity's PII (sensitive-param-egress-design
+// §3.2/§3.5's live-envelope rule requires the CALLER-supplied envelope to
+// carry the durable, CDC-refreshed truth). Every reader must map this into
+// vault.Envelope.Shredded (Decrypt/Encrypt OR it with the backend's own
+// check — internal/vault/local.go's checkAndDeriveDEK).
 const piiKeyEnvelopeSpec = `MATCH (i:identity)
 WHERE i.piiKey.data.keyId <> null
 RETURN
@@ -104,4 +117,5 @@ RETURN
   i.piiKey.data.wrappedDEK AS wrappedDEK,
   i.piiKey.data.keyId AS keyId,
   i.piiKey.data.kekVersion AS kekVersion,
-  i.piiKey.data.alg AS alg`
+  i.piiKey.data.alg AS alg,
+  i.piiKey.data.shredded AS shredded`

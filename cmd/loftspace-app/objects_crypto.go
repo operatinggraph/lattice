@@ -25,13 +25,14 @@ import (
 // binaries get; object-store-crypto-shred-design.md §9 Fire 4 Increment 1).
 // The lens is a flat "nats-kv" projection keyed by the identity vertex key
 // verbatim (internal/pkgmgr's IntoKey default), so the KV value unmarshals
-// directly onto vault.Envelope — CreatedAt/Shredded are not projected (the
-// lens intentionally carries only the non-secret wrap-material fields) and so
-// stay zero-valued here, which is safe: the Vault backend's own shred check
-// is keyed off its authoritative in-memory registry, not the caller-supplied
-// envelope's Shredded flag (internal/vault/local.go's `b.shredded[identityKey]
-// || envelope.Shredded` — an OR, so the backend's own record alone already
-// fails a shredded identity closed).
+// directly onto vault.Envelope. CreatedAt stays unprojected/zero (a display
+// nicety no consumer needs) but Shredded IS projected (sensitive-param-egress
+// Fire 2 fixed this — a stale unprojected value would defeat a restart-proof
+// shred check for any consumer besides the Vault process's own in-memory
+// registry): the Vault backend's shred check is
+// `b.shredded[identityKey] || envelope.Shredded` (internal/vault/local.go), an
+// OR, so this call's Envelope.Shredded is real, CDC-refreshed durable truth —
+// a second, restart-proof gate alongside the backend's own record.
 func fetchPiiKeyEnvelope(ctx context.Context, conn *substrate.Conn, identityKey string) (vault.Envelope, error) {
 	entry, err := conn.KVGet(ctx, privacybase.PiiKeyEnvelopeBucket, identityKey)
 	if err != nil {

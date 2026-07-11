@@ -43,7 +43,13 @@ func LoomPatterns() []pkgmgr.LoomPatternSpec {
 				Adapter:    "backgroundCheck",
 				InstanceOp: "CreateLeaseServiceInstance",
 				ReplyOp:    "RecordLeaseServiceOutcome",
-				Params:     map[string]any{"family": "backgroundCheck"},
+				// name/dob are subject-templated (Contract #10 §10.5): both
+				// identity-domain aspects are sensitive, so Loom's inference
+				// declares them under egressReads (not reads) and the vendor
+				// receives real plaintext only at the bridge's egress-unwrap
+				// boundary — the live subject-PII adapter payload consumer named
+				// in sensitive-param-egress-design.md §7.
+				Params: map[string]any{"family": "backgroundCheck", "name": "subject.name.data.value", "dob": "subject.dob.data.value"},
 			}},
 		},
 		{

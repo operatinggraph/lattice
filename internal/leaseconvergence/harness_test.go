@@ -55,6 +55,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/vault"
 	"github.com/asolgan/lattice/internal/weaver"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
@@ -62,6 +63,7 @@ import (
 	loftspacedomain "github.com/asolgan/lattice/packages/loftspace-domain"
 	objectsbase "github.com/asolgan/lattice/packages/objects-base"
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	privacybase "github.com/asolgan/lattice/packages/privacy-base"
 	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
 	servicedomain "github.com/asolgan/lattice/packages/service-domain"
 )
@@ -81,6 +83,14 @@ type harness struct {
 	bgAsync *bridge.FakeAsyncCheck // registered for backgroundCheck when the async variant is selected
 	stripe  *bridge.FakeStripe
 	convRID string // the leaseApplicationComplete lens rule ID
+
+	// vault is the real LocalBackend wired into the Processor's step 6.5 AND
+	// the vault.Service decrypt RPC responder this harness starts — the SAME
+	// instance, so the bridge's egress-unwrap decrypt call and RecordIdentityPII's
+	// encrypt-on-write share one in-memory shredded-set / DEK cache (sensitive-
+	// param-egress-design.md §7). A stub-pipeline harness (no Vault) cannot
+	// exercise this: sensitive aspects would land unencrypted.
+	vault *vault.LocalBackend
 
 	// lastUnit* capture the unit minted by the most recent seedApplicant call so
 	// a test can assert the convergence row's informational unit columns.
@@ -184,13 +194,24 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	convKV, err := conn.OpenKV(ctx, bootstrap.WeaverTargetsBucket)
 	require.NoError(t, err)
 
-	h := &harness{t: t, ctx: ctx, conn: conn, logger: logger, coreKV: coreKV, convKV: convKV}
+	// A real Vault backend (not MakeStubPipeline's nil) — sensitive-param-egress
+	// Fire 2's live consumer needs RecordIdentityPII's .name/.dob to actually
+	// encrypt at rest, so the bridge's egress unwrap has real ciphertext to
+	// decrypt. The SAME instance backs the Processor's step 6.5 AND the
+	// vault.Service RPC responder below, so a ShredKey call the harness drives
+	// directly is observed by both.
+	v, err := vault.NewLocalBackend([]byte("leaseconvergence-test-master-kek"[:32]), "test-v1")
+	require.NoError(t, err)
+
+	h := &harness{t: t, ctx: ctx, conn: conn, logger: logger, coreKV: coreKV, convKV: convKV, vault: v}
 
 	// --- the Processor: one commit path consuming ALL lanes (ops.>), AuthModeStub.
 	// It runs every DDL (kernel + the installed packages). The DDL cache refreshes
 	// on meta-lane commits, so InstallPackage's meta-lane writes land before any
-	// package op is submitted.
-	cp, _, err := processor.MakeStubPipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, processor.AuthModeStub, logger, "lc-processor")
+	// package op is submitted. capabilityBucket="" keeps AuthModeStub (the
+	// convergence proof is orchestration mechanics, not capability auth); v wires
+	// real PII crypto in place of MakeStubPipeline's nil.
+	cp, _, err := processor.MakePipeline(conn, bootstrap.CoreKVBucket, bootstrap.HealthKVBucket, "", processor.AuthModeStub, false, logger, "lc-processor", processor.AuthWiring{}, v)
 	require.NoError(t, err)
 	procCons, err := processor.EnsureConsumer(ctx, js, processor.ConsumerConfig{
 		StreamName:     "core-operations",
@@ -218,6 +239,14 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 	// external.<adapter>) never leave the outbox — the orchestration loop stalls.
 	outboxC := outbox.New(conn, bootstrap.CoreKVBucket, logger)
 	go func() { _ = outboxC.Run(ctx) }()
+
+	// The Vault decrypt RPC (lattice.vault.decrypt) — hosted on the same
+	// instance backing the Processor's step 6.5, mirroring cmd/processor's own
+	// wiring. This is the bridge's egress-unwrap boundary (sensitive-param-
+	// egress-design.md §3.5): without it the live consumer's decrypt RPC has no
+	// responder and every unwrap fails.
+	vaultSvc := vault.NewService(v, logger)
+	require.NoError(t, vaultSvc.StartNATSListener(ctx, nc))
 
 	// --- install the real chain via the real InstallPackage op path (ops.meta).
 	h.installChain()
@@ -310,6 +339,7 @@ func (h *harness) installChain() {
 	for _, pkg := range []pkgmgr.Definition{
 		rbacdomain.Package,
 		identitydomain.Package,
+		privacybase.Package,
 		locationdomain.Package,
 		loftspacedomain.Package,
 		objectsbase.Package,
@@ -353,7 +383,7 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 		return entry.Revision
 	}
 
-	want := map[string]bool{"leaseApplicationComplete": true}
+	want := map[string]bool{"leaseApplicationComplete": true, "piiKeyEnvelope": true}
 	for _, n := range extraLenses {
 		want[n] = true
 	}
@@ -385,8 +415,47 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 	h.convRID = convRule.ID
 
 	for name, rule := range found {
-		h.runActorAggregatePipeline(ctx, name, rule, fullEngine, projectionRevision, adjKV, coreKV, convKV)
+		if projection.IsActorAggregate(rule) {
+			h.runActorAggregatePipeline(ctx, name, rule, fullEngine, projectionRevision, adjKV, coreKV, convKV)
+			continue
+		}
+		// A flat (non-actorAggregate) lens — piiKeyEnvelope, the sensitive-
+		// param-egress live consumer's read seam — needs no InstallActorAggregate
+		// wrapping (cmd/refractor/main.go's activation switch falls through to
+		// nothing extra for this projection kind); just the adapter + pipeline.
+		h.runFlatLensPipeline(ctx, name, rule, fullEngine, adjKV, coreKV)
 	}
+}
+
+// runFlatLensPipeline activates a plain (non-actorAggregate) full-engine lens
+// — piiKeyEnvelope here — mirroring cmd/refractor/main.go's nats_kv adapter
+// builder: open the target bucket, auto-provisioning it on first open failure
+// exactly as production does for a package-owned lens target (privacy-base's
+// own lens is never pre-provisioned by bootstrap; Refractor provisions it on
+// load).
+func (h *harness) runFlatLensPipeline(ctx context.Context, name string, rule *lens.Rule, fullEngine *full.Engine, adjKV, coreKV *substrate.KV) {
+	h.t.Helper()
+	require.NotNilf(h.t, rule.CompiledRule, "lens %s must compile", name)
+
+	targetKV, err := h.conn.OpenKV(ctx, rule.Into.Bucket)
+	if err != nil {
+		_, cerr := h.conn.JetStream().CreateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: rule.Into.Bucket})
+		require.NoErrorf(h.t, cerr, "provision lens target bucket %s", rule.Into.Bucket)
+		targetKV, err = h.conn.OpenKV(ctx, rule.Into.Bucket)
+		require.NoErrorf(h.t, err, "open lens target bucket %s after provisioning", rule.Into.Bucket)
+	}
+
+	adpt, err := adapter.New(targetKV, rule.Into.Key, adapter.DeleteModeHard)
+	require.NoError(h.t, err)
+	p, err := pipeline.New(rule.ID, "nats_kv", bootstrap.CoreKVBucket, adjKV, coreKV, adpt, nil)
+	require.NoError(h.t, err)
+	p.UseFullEngine(fullEngine, rule.CompiledRule)
+
+	p.RunOn(h.conn, refractorSpec(rule.ID))
+	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
+	doneCh := make(chan struct{})
+	go func() { defer close(doneCh); p.Run(pipelineCtx) }()
+	h.t.Cleanup(func() { pipelineCancel(); <-doneCh })
 }
 
 // runActorAggregatePipeline installs one discovered lens Rule through
@@ -573,7 +642,7 @@ func (h *harness) dumpDiagnostics(appID string) {
 	ck, _ := h.conn.KVListKeys(h.ctx, bootstrap.CoreKVBucket)
 	for _, k := range ck {
 		if len(k) > len("vtx.service.") && k[:len("vtx.service.")] == "vtx.service." {
-			h.t.Logf("core-kv service key: %s", k)
+			h.t.Logf("core-kv service key: %s class=%s outcome=%v", k, h.vertexClass(k), h.aspectData(k, "outcome"))
 		}
 	}
 	// Weaver health (dispatch publish failures surface here).
