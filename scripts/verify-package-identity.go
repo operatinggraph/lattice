@@ -6,27 +6,30 @@
 // identity-domain package has been correctly installed. Asserts:
 //
 //	1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//	8 DDL aspects: .canonicalName=identity, .permittedCommands (5 ops),
+//	8 DDL aspects: .canonicalName=identity, .permittedCommands (7 ops),
 //	               .description, .script,
 //	               .inputSchema, .outputSchema, .fieldDescription, .examples
 //	  Each aspect also validated for correct vertexKey + localName envelope fields.
 //	7 sensitive aspect-type DDLs (ssn, dob, name, email, phone, claimKey,
 //	  credentialBinding): class=meta.ddl.aspectType, each carrying a .sensitive
 //	  aspect with value=true
-//	5 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
-//	  UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity
-//	8 grantedBy link keys:
+//	7 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
+//	  UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity,
+//	  InitiateCredentialLink, CompleteCredentialLink
+//	10 grantedBy link keys:
 //	  CreateUnclaimedIdentity   → operator, frontOfHouse, backOfHouse
 //	  UpdateIdentityState       → operator
 //	  ClaimIdentity             → consumer
 //	  RecordIdentityPII         → operator, frontOfHouse, backOfHouse
 //	  ProvisionConsumerIdentity → identityProvisioner, operator
+//	  InitiateCredentialLink    → consumer
+//	  CompleteCredentialLink    → consumer
 //	4 role vertices (consumer, frontOfHouse, backOfHouse — user-facing;
 //	  identityProvisioner — system-only) seeded by PreInstall hook (vtx.role.<NanoID>)
 //	1 package vertex (vtx.package.<NanoID>)
 //	1 package manifest aspect with name=identity-domain
 //
-// Total target: ~62 OK lines.
+// Total target: ~80 OK lines.
 //
 // Exit 0: all assertions pass.
 // Exit 1: one or more assertions failed.
@@ -61,6 +64,8 @@ var identityGrantTargets = map[string][]string{
 	"ClaimIdentity":             {"consumer"},
 	"RecordIdentityPII":         {"operator", "frontOfHouse", "backOfHouse"},
 	"ProvisionConsumerIdentity": {"identityProvisioner", "operator"},
+	"InitiateCredentialLink":    {"consumer"},
+	"CompleteCredentialLink":    {"consumer"},
 }
 
 var identityExpectedOps = []string{
@@ -69,6 +74,8 @@ var identityExpectedOps = []string{
 	"ClaimIdentity",
 	"RecordIdentityPII",
 	"ProvisionConsumerIdentity",
+	"InitiateCredentialLink",
+	"CompleteCredentialLink",
 }
 
 var identityOpScopes = map[string]string{
@@ -77,6 +84,8 @@ var identityOpScopes = map[string]string{
 	"ClaimIdentity":             "self",
 	"RecordIdentityPII":         "any",
 	"ProvisionConsumerIdentity": "any",
+	"InitiateCredentialLink":    "self",
+	"CompleteCredentialLink":    "self",
 }
 
 // userFacingRoles are seeded by identity-domain's PreInstall hook.
