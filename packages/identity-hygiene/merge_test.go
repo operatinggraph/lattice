@@ -1,6 +1,6 @@
 // MergeIdentity end-to-end tests for the identity-hygiene Capability Package.
 //
-// All 10 tests exercise the MergeIdentity operation through the real Processor
+// All 14 tests exercise the MergeIdentity operation through the real Processor
 // pipeline (CapabilityAuthorizer → DDLCache → Hydrator → Executor → Committer)
 // using the testutil harness.
 //
@@ -18,6 +18,10 @@
 //  8. TestMerge_NonOperatorActor_Denied — consumer actor denied at step 3
 //  9. TestMerge_RejectsSecondaryWithOpenTask — live assignedTo + open task → IdentityHasOpenTasks
 //  10. TestMerge_AllowsSecondaryWithClosedTask — live assignedTo + completed task → allowed
+//  11. TestMerge_TombstonesDuplicateOfLink_ForwardDirection — pair link (secondary=source) tombstoned
+//  12. TestMerge_TombstonesDuplicateOfLink_InvertedMerge — pair link tombstoned when merge roles invert its direction
+//  13. TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched — owned identityindex repointed, third-party untouched
+//  14. TestMerge_TrustGateAcceptsRealClassLink — real production class (not "link") migrates
 package identityhygiene_test
 
 import (
@@ -616,4 +620,228 @@ func TestMerge_AllowsSecondaryWithClosedTask(t *testing.T) {
 	if got, _ := stateData["value"].(string); got != "merged" {
 		t.Fatalf("secondary.state = %q, want merged", got)
 	}
+}
+
+// --- 11. TestMerge_TombstonesDuplicateOfLink_ForwardDirection ---
+
+// TestMerge_TombstonesDuplicateOfLink_ForwardDirection seeds the durable pair
+// link in the CreateUnclaimedIdentity convention (the later-arriving identity
+// is the source) with secondary as the later arrival, then merges secondary
+// into primary. The script must tombstone the pair link independently of
+// `edges` (dedup-over-encrypted-pii-design.md §3.4).
+func TestMerge_TombstonesDuplicateOfLink_ForwardDirection(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mdupfwd")
+
+	primaryID := testutil.GenReqID("PrimDupFwd0000")
+	secondaryID := testutil.GenReqID("SecDupFwd00000")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	dupKey := "lnk.identity." + secondaryID + ".duplicateOf.identity." + primaryID
+	seedLinkVertexWithClass(t, ctx, conn, dupKey, "duplicateOf", false,
+		map[string]any{"criteria": []any{"exact-email"}})
+
+	edges := []string{}
+	reqID := testutil.GenReqID("MrgDupFwd00000")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:11:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, edges),
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			OptionalReads: []string{
+				dupKey,
+				"lnk.identity." + primaryID + ".duplicateOf.identity." + secondaryID,
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	assertLinkTombstoned(t, ctx, conn, dupKey)
+}
+
+// --- 12. TestMerge_TombstonesDuplicateOfLink_InvertedMerge ---
+
+// TestMerge_TombstonesDuplicateOfLink_InvertedMerge seeds the pair link with
+// identity B as the source (duplicateOf A), then merges with the roles
+// INVERTED from the link's own direction: primary=B, secondary=A. Adversarial
+// finding 6 (design §3.4/§12): a single-direction tombstone would leave this
+// pair link live post-merge. Both directional keys must be probed.
+func TestMerge_TombstonesDuplicateOfLink_InvertedMerge(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mdupinv")
+
+	aID := testutil.GenReqID("IdentAInvert00")
+	bID := testutil.GenReqID("IdentBInvert00")
+	aKey := "vtx.identity." + aID
+	bKey := "vtx.identity." + bID
+
+	seedIdentityVertex(t, ctx, conn, aKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, bKey, "unclaimed", "")
+
+	// B is the later arrival: B duplicateOf A.
+	dupKey := "lnk.identity." + bID + ".duplicateOf.identity." + aID
+	seedLinkVertexWithClass(t, ctx, conn, dupKey, "duplicateOf", false,
+		map[string]any{"criteria": []any{"exact-phone"}})
+
+	// Operator picks the INVERTED merge: B survives (primary), A is merged away.
+	primaryKey := bKey
+	secondaryKey := aKey
+	edges := []string{}
+	reqID := testutil.GenReqID("MrgDupInvert00")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:12:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, edges),
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			OptionalReads: []string{
+				dupKey,
+				"lnk.identity." + bID + ".duplicateOf.identity." + aID,
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	assertLinkTombstoned(t, ctx, conn, dupKey)
+}
+
+// --- 13. TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched ---
+
+// TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched seeds an identityindex
+// vertex owned by the secondary (via a live inbound `indexes` link) and a
+// second identityindex vertex owned by an unrelated third identity. After
+// merging secondary into primary: the secondary's owned index is repointed
+// (old link tombstoned, new link to primary created, vertex identityKey
+// updated, contactType preserved) — decrypt-free (design §3.4). The
+// third-party index is untouched (the enumeration is scoped to secondary's
+// inbound links only).
+func TestMerge_IndexesRepoint_OwnedAndThirdPartyUntouched(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "midxrp")
+
+	primaryID := testutil.GenReqID("PrimIdxRepoint")
+	secondaryID := testutil.GenReqID("SecIdxRepoint0")
+	thirdID := testutil.GenReqID("ThirdIdxOwner0")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+	thirdKey := "vtx.identity." + thirdID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, thirdKey, "unclaimed", "")
+
+	ownedHash := testutil.GenReqID("OwnedIdxHash00")
+	ownedIdxKey := "vtx.identityindex." + ownedHash
+	ownedLinkKey := "lnk.identityindex." + ownedHash + ".indexes.identity." + secondaryID
+	seedIdentityIndexVertex(t, ctx, conn, ownedIdxKey, "email", secondaryKey)
+	seedLinkVertexWithClass(t, ctx, conn, ownedLinkKey, "indexes", false, map[string]any{})
+
+	thirdHash := testutil.GenReqID("ThirdIdxHash00")
+	thirdIdxKey := "vtx.identityindex." + thirdHash
+	thirdLinkKey := "lnk.identityindex." + thirdHash + ".indexes.identity." + thirdID
+	seedIdentityIndexVertex(t, ctx, conn, thirdIdxKey, "phone", thirdKey)
+	seedLinkVertexWithClass(t, ctx, conn, thirdLinkKey, "indexes", false, map[string]any{})
+
+	edges := []string{}
+	reqID := testutil.GenReqID("MrgIdxRepoint0")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:13:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, edges),
+		ContextHint: &processor.ContextHint{
+			Reads: mergeReads(primaryKey, secondaryKey, edges),
+			Enumerations: []processor.EnumerationHint{
+				{Hub: secondaryKey, Relation: "indexes", Direction: "in"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// Owned index: old link tombstoned, new link to primary live.
+	assertLinkTombstoned(t, ctx, conn, ownedLinkKey)
+	newOwnedLinkKey := "lnk.identityindex." + ownedHash + ".indexes.identity." + primaryID
+	assertLinkLive(t, ctx, conn, newOwnedLinkKey)
+
+	ownedIdxData := readAspectData(t, ctx, conn, ownedIdxKey)
+	if got, _ := ownedIdxData["identityKey"].(string); got != primaryKey {
+		t.Fatalf("owned identityindex.identityKey = %q, want %s", got, primaryKey)
+	}
+	if got, _ := ownedIdxData["contactType"].(string); got != "email" {
+		t.Fatalf("owned identityindex.contactType = %q, want email (must be preserved)", got)
+	}
+
+	// Third-party index: untouched.
+	assertLinkLive(t, ctx, conn, thirdLinkKey)
+	thirdIdxData := readAspectData(t, ctx, conn, thirdIdxKey)
+	if got, _ := thirdIdxData["identityKey"].(string); got != thirdKey {
+		t.Fatalf("third-party identityindex.identityKey changed to %q, want unchanged %s", got, thirdKey)
+	}
+}
+
+// --- 14. TestMerge_TrustGateAcceptsRealClassLink ---
+
+// TestMerge_TrustGateAcceptsRealClassLink seeds a link touching secondary
+// with a real production class (its relation name, "holdsRole" — never the
+// literal "link"), mirroring the shared make_link(cls=...) idiom every
+// production writer uses. Pre-Fire-2 this would reject EdgeNotALink (adversarial
+// finding 7, design §2.4/§3.4); the class check is now removed, so the merge
+// must succeed and the edge must migrate.
+func TestMerge_TrustGateAcceptsRealClassLink(t *testing.T) {
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newMergePipeline(t, ctx, conn, "mrealcls")
+
+	primaryID := testutil.GenReqID("PrimRealClass0")
+	secondaryID := testutil.GenReqID("SecRealClass00")
+	roleID := testutil.GenReqID("RealClassRole0")
+	primaryKey := "vtx.identity." + primaryID
+	secondaryKey := "vtx.identity." + secondaryID
+
+	seedIdentityVertex(t, ctx, conn, primaryKey, "unclaimed", "")
+	seedIdentityVertex(t, ctx, conn, secondaryKey, "unclaimed", "")
+
+	roleLnk := "lnk.identity." + secondaryID + ".holdsRole.role." + roleID
+	seedLinkVertexWithClass(t, ctx, conn, roleLnk, "holdsRole", false, map[string]any{})
+
+	edges := []string{roleLnk}
+	reqID := testutil.GenReqID("MrgRealClass00")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "MergeIdentity",
+		Actor:         operatorActorKey,
+		SubmittedAt:   "2026-05-23T10:14:00Z",
+		Class:         "identityHygiene",
+		Payload:       mergePayload(primaryKey, secondaryKey, edges),
+		ContextHint:   &processor.ContextHint{Reads: mergeReads(primaryKey, secondaryKey, edges)},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	assertLinkTombstoned(t, ctx, conn, roleLnk)
+	newRoleLnk := "lnk.identity." + primaryID + ".holdsRole.role." + roleID
+	assertLinkLive(t, ctx, conn, newRoleLnk)
 }

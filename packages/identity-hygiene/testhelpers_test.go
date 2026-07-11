@@ -140,14 +140,48 @@ func seedIdentityVertex(t *testing.T, ctx context.Context, conn *substrate.Conn,
 func seedLinkVertex(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	linkKey string, isDeleted bool) {
 	t.Helper()
+	seedLinkVertexWithClass(t, ctx, conn, linkKey, "link", isDeleted, nil)
+}
+
+// seedLinkVertexWithClass writes a link vertex envelope with an explicit
+// class + data — real production links carry their relation name as class
+// (e.g. "holdsRole", "duplicateOf", "indexes"), never the literal "link"
+// (TestMerge_TrustGateAcceptsRealClassLink, dedup-over-encrypted-pii-design.md
+// §2.4/§3.4). data defaults to {} when nil.
+func seedLinkVertexWithClass(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	linkKey, class string, isDeleted bool, data map[string]any) {
+	t.Helper()
+	if data == nil {
+		data = map[string]any{}
+	}
 	doc := map[string]any{
-		"class":     "link",
+		"class":     class,
 		"isDeleted": isDeleted,
-		"data":      map[string]any{},
+		"data":      data,
 	}
 	b, _ := json.Marshal(doc)
 	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, linkKey, b); err != nil {
 		t.Fatalf("seed link vertex %s: %v", linkKey, err)
+	}
+}
+
+// seedIdentityIndexVertex writes a vtx.identityindex.<hash> vertex owned by
+// ownerIdentityKey (identity-domain/ddls.go §3.1 shape: {contactType,
+// identityKey}).
+func seedIdentityIndexVertex(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	indexKey, contactType, ownerIdentityKey string) {
+	t.Helper()
+	doc := map[string]any{
+		"class":     "identityindex",
+		"isDeleted": false,
+		"data": map[string]any{
+			"contactType": contactType,
+			"identityKey": ownerIdentityKey,
+		},
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, indexKey, b); err != nil {
+		t.Fatalf("seed identityindex vertex %s: %v", indexKey, err)
 	}
 }
 
@@ -165,6 +199,36 @@ func seedTaskVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, tas
 	b, _ := json.Marshal(doc)
 	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, taskKey, b); err != nil {
 		t.Fatalf("seed task vertex %s: %v", taskKey, err)
+	}
+}
+
+// assertLinkTombstoned asserts the link/vertex envelope at key exists and
+// is tombstoned (isDeleted=true).
+func assertLinkTombstoned(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(entry.Value, &doc)
+	if isDeleted, _ := doc["isDeleted"].(bool); !isDeleted {
+		t.Fatalf("%s should be tombstoned", key)
+	}
+}
+
+// assertLinkLive asserts the link/vertex envelope at key exists and is NOT
+// tombstoned.
+func assertLinkLive(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(entry.Value, &doc)
+	if isDeleted, _ := doc["isDeleted"].(bool); isDeleted {
+		t.Fatalf("%s should be live, is tombstoned", key)
 	}
 }
 

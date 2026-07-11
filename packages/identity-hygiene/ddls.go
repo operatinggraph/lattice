@@ -21,16 +21,17 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     (Contract #10 §10.1 no-orphan tombstone guard: `IdentityHasOpenTasks`
 //     — reassign/cancel the task first. Enumerated via the one sanctioned
 //     bounded kv.Links primitive, Contract #2 §2.5.1, direction "in";
-//     mirrors clinic-domain's assert_no_overlap idiom. This is the only
-//     enumeration the script performs — everything else stays known-key.)
+//     mirrors clinic-domain's assert_no_overlap idiom.)
 //   - every entry in `edges` validates per the trust gate below
 //   - total mutations <= 999 (`MergeBatchTooLarge` otherwise)
 //
 // Edge validation (the trust gate):
 //   - read the hydrated link envelope from state
 //   - reject `EdgeNotFound` if missing or tombstoned
-//   - reject `EdgeNotALink` if envelope.class != "link" OR the key does
-//     not have the six-segment `lnk.<srcType>.<srcId>.<rel>.<tgtType>.<tgtId>` shape
+//   - reject `EdgeNotALink` if the key does not have the six-segment
+//     `lnk.<srcType>.<srcId>.<rel>.<tgtType>.<tgtId>` shape (envelope class
+//     is NOT checked — a production link's class is its relation name, e.g.
+//     `holdsRole`, never the literal string "link")
 //   - reject `EdgeDoesNotTouchSecondary` if neither endpoint (derived
 //     from key segments) is the secondary
 //
@@ -40,6 +41,20 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     drop the duplicate (idempotent merge); else create the rekeyed
 //     link envelope
 //   - Self-loops after rekey: tombstone only
+//
+// duplicateOf pair-link tombstone (dedup-over-encrypted-pii-design.md §3.4):
+// both directional keys — `lnk.identity.<secondary>.duplicateOf.identity.<primary>`
+// and the inverted key — are dispatch-derivable, declared as optionalReads,
+// and probed via `state`; whichever is live is tombstoned. Independent of
+// `edges` (the CLI excludes duplicateOf/indexes from that list — they are
+// pair-evidence, not business edges).
+//
+// indexes-driven repoint (same design, §3.4): the secondary's inbound
+// `indexes` links are enumerated (bounded kv.Links, relation "indexes",
+// direction "in" — the second and last enumeration this script performs).
+// For each live one: the owned identityindex vertex is repointed to primary
+// (`identityKey` field), the old link is tombstoned, and a new link to
+// primary is created — no decryption anywhere (linkage is ownership).
 //
 // State updates:
 //   - secondary.state → "merged"
@@ -128,11 +143,24 @@ func DDLs() []pkgmgr.DDLSpec {
 //   - (optional) primary.{name,email,phone} +
 //     secondary.{name,email,phone}  when ACR is requested
 //
-// The script reads the hydrated map by known key, with one sanctioned
-// exception: the secondary-has-open-tasks guard enumerates secondary's
-// inbound assignedTo links via the bounded kv.Links primitive (Contract #2
-// §2.5.1) — the same idiom clinic-domain's assert_no_overlap uses. It never
-// scans, and never reads any lens-output bucket.
+// Caller's ContextHint.OptionalReads MUST include (dispatch-derivable,
+// absence-tolerant — dedup-over-encrypted-pii-design.md §3.4):
+//   - lnk.identity.<secondaryId>.duplicateOf.identity.<primaryId>
+//   - lnk.identity.<primaryId>.duplicateOf.identity.<secondaryId>
+//
+// Caller's ContextHint.Enumerations MUST declare the secondary's inbound
+// `indexes` links (Hub: secondary, Relation: "indexes", Direction: "in"), in
+// addition to the existing assignedTo enumeration.
+//
+// The script reads the hydrated map by known key, with two sanctioned
+// enumeration exceptions: the secondary-has-open-tasks guard (inbound
+// assignedTo) and the indexes-driven repoint (inbound indexes), both via the
+// bounded kv.Links primitive (Contract #2 §2.5.1) — the same idiom
+// clinic-domain's assert_no_overlap uses. Each indexes hit's owned
+// identityindex vertex and the primary's would-be new indexes link are
+// read/probed via kv.Read, a per-candidate follow-up off the enumeration
+// (the hash is not dispatch-known ahead of the enumeration). The script
+// never scans, and never reads any lens-output bucket.
 const identityHygieneScript = `
 IDENTITY_TASK_PAGE_LIMIT = 256
 MAX_IDENTITY_TASK_PAGES = 64
@@ -167,6 +195,32 @@ def identity_has_open_tasks(identity_key):
         if cursor == None:
             return
     fail("IdentityTaskFanoutTooLarge: " + identity_key + " has too many assignedTo links to enumerate at merge time; reassign/cancel enough to bring it under the page cap first")
+
+INDEXES_PAGE_LIMIT = 256
+MAX_INDEXES_PAGES = 64
+
+def collect_indexes_repoints(secondary_key):
+    # dedup-over-encrypted-pii-design.md §3.4: the secondary's owned
+    # identityindex vertices are enumerable via their inbound "indexes"
+    # links (linkage IS ownership) without knowing the plaintext the hash
+    # derives from. Enumerated via the sanctioned bounded kv.Links
+    # (Contract #2 §2.5.1), direction "in" -- the secondary identity is the
+    # indexes link's TARGET (identityindex vertex is source, per Contract #1
+    # §1.1).
+    repoints = []
+    cursor = None
+    for _page in range(MAX_INDEXES_PAGES):
+        # read-posture: (e) relation=indexes epoch=none (read-only guard: an
+        # indexes link created concurrently with the tombstone slips past --
+        # accepted, same posture as identity_has_open_tasks above)
+        links, cursor = kv.Links(secondary_key, "indexes", "in", cursor, INDEXES_PAGE_LIMIT)
+        for lk in links:
+            if lk.isDeleted:
+                continue
+            repoints.append(lk)
+        if cursor == None:
+            return repoints
+    fail("IdentityIndexFanoutTooLarge: " + secondary_key + " has too many indexes links to enumerate at merge time")
 
 def execute(state, op):
     ot = op.operationType
@@ -223,6 +277,26 @@ def execute(state, op):
     # reassigns/cancels the task via the task DDL first).
     identity_has_open_tasks(secondary)
 
+    # --- duplicateOf pair-link probe (both directions): dispatch-derivable
+    # from primary+secondary, declared optionalReads, absence-tolerant.
+    # The operator may pick either identity as primary, so both directional
+    # keys are checked; whichever is live is tombstoned below.
+    dup_probe_keys = [
+        "lnk.identity." + secondary_id + ".duplicateOf.identity." + primary_id,
+        "lnk.identity." + primary_id + ".duplicateOf.identity." + secondary_id,
+    ]
+    dup_links_to_tombstone = []
+    for dk in dup_probe_keys:
+        if dk in state:
+            d = state[dk]
+            if d != None and not (hasattr(d, "isDeleted") and d.isDeleted):
+                dup_links_to_tombstone.append({"key": dk, "doc": d})
+
+    # --- indexes-driven repoint: enumerate secondary's owned identityindex
+    # vertices (via inbound indexes links) up front so the batch-size cap
+    # below accounts for them.
+    idx_repoints = collect_indexes_repoints(secondary)
+
     # --- Trust gate: validate every declared edge against Core KV.
     # Actors are not trusted to declare keys honestly; each must
     # re-read as a link envelope and endpoint-touch the secondary.
@@ -250,10 +324,9 @@ def execute(state, op):
         if hasattr(link, "isDeleted") and link.isDeleted:
             fail("EdgeNotFound: " + lk)
 
-        # Envelope class must be link.
-        link_class = getattr(link, "class") if hasattr(link, "class") else ""
-        if link_class != "link":
-            fail("EdgeNotALink: " + lk)
+        # Envelope class is NOT checked here: a production link's class is
+        # its relation name (e.g. "holdsRole"), never the literal "link" --
+        # the six-segment key shape above is the real link-ness test.
 
         # Endpoint touch: per Contract #1 §1.1 the key carries the
         # endpoints; require at least one endpoint = secondary.
@@ -285,7 +358,11 @@ def execute(state, op):
         for asp in ["name", "email", "phone"]:
             if asp in acr and acr[asp] == "secondary-wins":
                 acr_count += 1
-    total_muts = link_count_full * 2 + link_count_self + 2 + acr_count
+    # duplicateOf tombstones: 1 mutation each. indexes repoints: up to 3
+    # mutations each (tombstone old link + update index vertex + create new
+    # link; the create is skipped if primary already owns the same index).
+    total_muts = (link_count_full * 2 + link_count_self + 2 + acr_count +
+                  len(dup_links_to_tombstone) + len(idx_repoints) * 3)
     if total_muts > 999:
         fail("MergeBatchTooLarge: " + str(total_muts))
 
@@ -323,6 +400,45 @@ def execute(state, op):
         new_doc = {"class": link_class, "isDeleted": False, "data": link_data_in}
         mutations.append({"op": "create", "key": new_key, "document": new_doc})
         links_migrated += 1
+
+    # --- duplicateOf pair-link tombstone (both directions probed above) ---
+    for entry in dup_links_to_tombstone:
+        dk = entry["key"]
+        d = entry["doc"]
+        dup_class = getattr(d, "class") if hasattr(d, "class") else "duplicateOf"
+        dup_data = d.data if hasattr(d, "data") and d.data != None else {}
+        mutations.append({"op": "update", "key": dk,
+            "document": {"class": dup_class, "isDeleted": True, "data": dup_data}})
+
+    # --- indexes-driven repoint: no decryption -- linkage is ownership. ---
+    for lk in idx_repoints:
+        idx_vertex_key = lk.sourceVertex
+        old_link_key = lk.key
+        link_data = lk.data if lk.data != None else {}
+        mutations.append({"op": "update", "key": old_link_key,
+            "document": {"class": "indexes", "isDeleted": True, "data": link_data}})
+
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key: the hash is not dispatch-known ahead of
+        # collect_indexes_repoints)
+        idx_vtx = kv.Read(idx_vertex_key)
+        contact_type = None
+        if idx_vtx != None and idx_vtx.data != None and "contactType" in idx_vtx.data:
+            contact_type = idx_vtx.data["contactType"]
+        mutations.append({"op": "update", "key": idx_vertex_key,
+            "document": {"class": "identityindex", "isDeleted": False,
+                         "data": {"contactType": contact_type, "identityKey": primary}}})
+
+        new_indexes_key = "lnk." + idx_vertex_key[len("vtx."):] + ".indexes.identity." + primary_id
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key)
+        existing_new = kv.Read(new_indexes_key)
+        already_live = existing_new != None and not (hasattr(existing_new, "isDeleted") and existing_new.isDeleted)
+        if not already_live:
+            mutations.append({"op": "create", "key": new_indexes_key,
+                "document": {"class": "indexes", "isDeleted": False,
+                             "sourceVertex": idx_vertex_key, "targetVertex": primary,
+                             "localName": "indexes", "data": {}}})
 
     # --- Secondary state aspect: -> merged ---
     mutations.append({"op": "update", "key": secondary + ".state",
