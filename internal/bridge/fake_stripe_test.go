@@ -183,3 +183,14 @@ func TestFakeStripe_FailUntilFailsNThenSucceeds(t *testing.T) {
 		t.Fatalf("after the fail window closes: side effects = %d, want 1", got)
 	}
 }
+
+// TestFakeStripe_PollUnsupported: this adapter is synchronous (Execute never
+// returns Pending), so Poll must surface a clear error rather than silently
+// resolving a ref it never issued.
+func TestFakeStripe_PollUnsupported(t *testing.T) {
+	t.Parallel()
+	a := bridge.NewFakeStripe()
+	if _, err := a.Poll(context.Background(), "some-ref"); err == nil {
+		t.Fatal("Poll: want an error for a synchronous adapter, got nil")
+	}
+}

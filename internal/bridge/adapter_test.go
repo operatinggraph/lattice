@@ -92,3 +92,38 @@ func TestFakeBackgroundCheck_DistinctKeysEachActOnce(t *testing.T) {
 		t.Fatalf("distinct keys: k1=%d k2=%d, want 1 each", a.SideEffects("k1"), a.SideEffects("k2"))
 	}
 }
+
+// TestAdapterFunc_ExecuteDelegatesToTheWrappedFunction proves AdapterFunc is a
+// transparent adapter over a plain synchronous function.
+func TestAdapterFunc_ExecuteDelegatesToTheWrappedFunction(t *testing.T) {
+	t.Parallel()
+	var gotReq bridge.Request
+	f := bridge.AdapterFunc(func(_ context.Context, req bridge.Request) (bridge.Dispatch, error) {
+		gotReq = req
+		return bridge.Dispatch{Disposition: bridge.Resolved, Result: bridge.Result{Status: bridge.OutcomeCompleted}}, nil
+	})
+	req := bridge.Request{IdempotencyKey: "k1", Subject: "vtx.identity.x"}
+	d, err := f.Execute(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if d.Result.Status != bridge.OutcomeCompleted {
+		t.Fatalf("Status = %q, want %q", d.Result.Status, bridge.OutcomeCompleted)
+	}
+	if gotReq.IdempotencyKey != req.IdempotencyKey || gotReq.Subject != req.Subject {
+		t.Fatalf("the wrapped function did not receive the same Request: got %+v, want %+v", gotReq, req)
+	}
+}
+
+// TestAdapterFunc_PollUnsupported: a function-only adapter is synchronous by
+// construction (it never returns Pending), so its Poll is unreachable in
+// practice — it must return a clear error rather than a silent zero Dispatch.
+func TestAdapterFunc_PollUnsupported(t *testing.T) {
+	t.Parallel()
+	f := bridge.AdapterFunc(func(_ context.Context, _ bridge.Request) (bridge.Dispatch, error) {
+		return bridge.Dispatch{}, nil
+	})
+	if _, err := f.Poll(context.Background(), "some-ref"); err == nil {
+		t.Fatal("Poll: want an error for a synchronous AdapterFunc, got nil")
+	}
+}

@@ -297,3 +297,13 @@ func TestFakeDocGen_DeterministicRender(t *testing.T) {
 	require.Equal(t, run("docgen-det-1"), run("docgen-det-2"),
 		"identical inputs must yield the identical digest (a fresh claim re-render overwrites the same content)")
 }
+
+// TestFakeDocGen_PollUnsupported: this adapter is synchronous (Execute never
+// returns Pending), so Poll must surface a clear error rather than silently
+// resolving a ref it never issued.
+func TestFakeDocGen_PollUnsupported(t *testing.T) {
+	conn := startDocGenStore(t)
+	a := bridge.NewFakeDocGen(conn, docGenTestBucket, 1<<20)
+	_, err := a.Poll(context.Background(), "some-ref")
+	require.Error(t, err, "Poll: want an error for a synchronous adapter")
+}

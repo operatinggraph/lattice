@@ -66,3 +66,14 @@ func TestFakeBackgroundCheck_DeclineIsTerminalFailure(t *testing.T) {
 		t.Fatalf("repeat decline returned a different Result: %+v vs %+v", res2.Result, res.Result)
 	}
 }
+
+// TestFakeBackgroundCheck_PollUnsupported: this adapter is synchronous
+// (Execute never returns Pending), so Poll must surface a clear error rather
+// than silently resolving a ref it never issued.
+func TestFakeBackgroundCheck_PollUnsupported(t *testing.T) {
+	t.Parallel()
+	a := bridge.NewFakeBackgroundCheck()
+	if _, err := a.Poll(context.Background(), "some-ref"); err == nil {
+		t.Fatal("Poll: want an error for a synchronous adapter, got nil")
+	}
+}
