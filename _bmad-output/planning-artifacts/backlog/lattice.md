@@ -48,6 +48,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · install-time lens-schema check impossible as scoped (2026-07-10); runtime candidate: `staleMark` consults the gap's action class from the target spec — Weaver holds both at runtime |
+| **[natsperm] No account holds `$JS.FC.>` — flow-control ACK denied, watches hang under backlog** | No `Matrix` entry grants `$JS.FC.>`; a busy stream's flow control can't be ack'd, hangs forever, no error. Live repro 2026-07-11: `lattice-pkg install` hung 2+ fires (`docker logs lattice-nats`: 1000+/48h `Publish Violation`). | ★★ | XS | 🔭 flag-for-Andrew · fix grounded (add `"$JS.FC.>"` in matrix.go + regen conf + restart nats); classifier blocks unattended IAM edit |
 
 ### Survey log (round-robin rotation)
 
