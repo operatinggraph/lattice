@@ -322,6 +322,34 @@ func TestHandleOperations_CredentialBinding_ClaimIdentityCarveOut(t *testing.T) 
 	}
 }
 
+// TestHandleOperations_CredentialBinding_CompleteCredentialLinkCarveOut
+// proves the carve-out extends to CompleteCredentialLink
+// (multi-credential-identity-linking-design.md §5): the new credential A2
+// hashes its own op.actor to prove it, so it must see the raw credential,
+// never a resolved business identity (which would be nonsensical here — A2
+// is not yet bound to anything).
+func TestHandleOperations_CredentialBinding_CompleteCredentialLinkCarveOut(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "NcxqoP292Z4a7uPKftM6")
+
+	var captured *processor.OperationEnvelope
+	fake := func(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		captured = env
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	}
+	s := newTestServer(t, authn, fake)
+	s.ConfigureCredentialBindings(fakeCredentialResolver{identityKey: "vtx.identity.CLAIMEDBUSINESS0000", bound: true})
+
+	w := doOperations(t, s, token, `{"operationType":"CompleteCredentialLink"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if captured.Actor != "vtx.identity.NcxqoP292Z4a7uPKftM6" {
+		t.Fatalf("CompleteCredentialLink env.Actor = %q, want the raw credential (carve-out bypassed)", captured.Actor)
+	}
+}
+
 // TestHandleOperations_CredentialBinding_ResolveError_FallsBackToRawActor
 // proves a resolver failure (e.g. KV unreachable) fails OPEN to the raw
 // credential actor rather than denying the request — acting as the raw

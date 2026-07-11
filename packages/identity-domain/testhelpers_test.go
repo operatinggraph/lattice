@@ -36,6 +36,14 @@ const (
 	consumerActorKey = "vtx.identity." + consumerActorID
 	consumerCapKey   = "cap.identity." + consumerActorID
 
+	// secondCredActorID/Key/CapKey is A2 — a second raw credential distinct
+	// from consumerActorKey (U), used by InitiateCredentialLink/
+	// CompleteCredentialLink tests (multi-credential-identity-linking-design.md
+	// §3.2).
+	secondCredActorID  = "JsecCrdHJKMNPQRSTUVW"
+	secondCredActorKey = "vtx.identity." + secondCredActorID
+	secondCredCapKey   = "cap.identity." + secondCredActorID
+
 	gatewayActorID  = "JgtwyActHJKMNPQRSTUV"
 	gatewayActorKey = "vtx.identity." + gatewayActorID
 	gatewayCapKey   = "cap.identity." + gatewayActorID
@@ -66,7 +74,9 @@ func staffCapDoc() *processor.CapabilityDoc {
 	}
 }
 
-// consumerCapDoc seeds a cap doc granting only ClaimIdentity (scope=self).
+// consumerCapDoc seeds a cap doc granting ClaimIdentity + InitiateCredentialLink
+// (both scope=self) — the two ops a claimed consumer identity (U) submits
+// through the normal resolved path (op.actor == U).
 func consumerCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -78,6 +88,28 @@ func consumerCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "ClaimIdentity", Scope: "self"},
+			{OperationType: "InitiateCredentialLink", Scope: "self"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role.consumer"},
+	}
+}
+
+// secondCredCapDoc seeds a cap doc for A2 — a second raw credential distinct
+// from U — granting only CompleteCredentialLink (scope=self), the op A2
+// submits as its raw, unresolved self (Gateway raw-credential carve-out).
+func secondCredCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    secondCredCapKey,
+		Actor:                  secondCredActorKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{secondCredActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "CompleteCredentialLink", Scope: "self"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -113,6 +145,7 @@ func setupTestEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t)
 	testutil.SeedCapDoc(t, ctx, conn, staffCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, consumerCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, secondCredCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, gatewayCapDoc())
 	return ctx, conn
 }

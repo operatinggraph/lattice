@@ -45,17 +45,18 @@ func TestPackage_DeclaresUserFacingRoles(t *testing.T) {
 }
 
 func TestPackage_DDLsAndOps(t *testing.T) {
-	if got := len(Package.DDLs); got != 14 {
-		t.Fatalf("expected 14 DDLs (identity + ssn, dob, name, email, phone, claimKey, credentialBinding, idpBinding + "+
+	if got := len(Package.DDLs); got != 15 {
+		t.Fatalf("expected 15 DDLs (identity + ssn, dob, name, email, phone, claimKey, linkKey, credentialBinding, idpBinding + "+
 			"indexes, duplicateOf + actorRevocation, gateway.actorRevoked, gateway.actorUnrevoked), got %d", got)
 	}
 	identity := ddlByCanonicalName(t, "identity")
 	if identity.Class != "meta.ddl.vertexType" {
 		t.Fatalf("identity DDL class = %q, want meta.ddl.vertexType", identity.Class)
 	}
-	if got := len(identity.PermittedCommands); got != 5 {
-		t.Fatalf("identity permittedCommands: got %d, want 5 "+
-			"(CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity)", got)
+	if got := len(identity.PermittedCommands); got != 7 {
+		t.Fatalf("identity permittedCommands: got %d, want 7 "+
+			"(CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity, "+
+			"InitiateCredentialLink, CompleteCredentialLink)", got)
 	}
 }
 
@@ -80,14 +81,15 @@ func TestPackage_SensitivePIIAspectTypes(t *testing.T) {
 }
 
 // TestPackage_LifecyclePIIAspectTypesSensitive pins the name/email/phone/
-// claimKey/credentialBinding aspect-type DDLs as sensitive=true with EMPTY
-// permittedCommands. They are written by multiple ops across packages
-// (CreateUnclaimedIdentity, ClaimIdentity, and identity-hygiene's
-// MergeIdentity), so a non-empty permittedCommands would make step-6 reject a
-// legitimate writer (e.g. MergeIdentity writing name) — identity-anchoring is
-// their only enforcement.
+// claimKey/linkKey/credentialBinding aspect-type DDLs as sensitive=true with
+// EMPTY permittedCommands. They are written by multiple ops across packages
+// (CreateUnclaimedIdentity, ClaimIdentity, InitiateCredentialLink/
+// CompleteCredentialLink, and identity-hygiene's MergeIdentity), so a
+// non-empty permittedCommands would make step-6 reject a legitimate writer
+// (e.g. MergeIdentity writing name) — identity-anchoring is their only
+// enforcement.
 func TestPackage_LifecyclePIIAspectTypesSensitive(t *testing.T) {
-	for _, name := range []string{"name", "email", "phone", "claimKey", "credentialBinding"} {
+	for _, name := range []string{"name", "email", "phone", "claimKey", "linkKey", "credentialBinding"} {
 		d := ddlByCanonicalName(t, name)
 		if d.Class != "meta.ddl.aspectType" {
 			t.Errorf("%s DDL class = %q, want meta.ddl.aspectType", name, d.Class)

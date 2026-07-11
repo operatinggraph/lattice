@@ -208,6 +208,23 @@ func (s *Server) ConfigureCredentialBindings(r CredentialBindingResolver) {
 // (gateway-claim-flow-identity-provisioning-design.md §11.0 "one carve-out").
 const claimIdentityOperationType = "ClaimIdentity"
 
+// completeCredentialLinkOperationType extends the raw-credential carve-out
+// to the second credential-binding op: CompleteCredentialLink hashes
+// op.actor exactly like ClaimIdentity does (the new credential A2 proving
+// control of a link secret), so it must see the raw A2, never a resolved
+// identity (multi-credential-identity-linking-design.md §5, Contract #11
+// §11.4's carve-out generalizes from ClaimIdentity alone to this pair).
+const completeCredentialLinkOperationType = "CompleteCredentialLink"
+
+// rawCredentialCarveOut is the set of operation types resolveActor's caller
+// must skip (submit under the raw authenticated actor, never the resolved
+// business identity) — every op whose script hashes op.actor to derive or
+// check a credentialindex key.
+var rawCredentialCarveOut = map[string]struct{}{
+	claimIdentityOperationType:          {},
+	completeCredentialLinkOperationType: {},
+}
+
 // resolveActor consults the credential-bindings resolver (if configured) to
 // turn a raw credential actor into its claimed business identity. An
 // unconfigured resolver, a miss (no binding yet — the CDC-lag window between
@@ -277,6 +294,7 @@ func writeCORSHeaders(w http.ResponseWriter, origin string) {
 // once, from whatever is configured at this call).
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/operations", s.handleOperations)
+	mux.HandleFunc("/v1/actor", s.handleWhoami)
 	for name, model := range s.readModels {
 		if !ValidReadModelName(name) {
 			s.logger.Error("gateway: skipping invalid read-model name", "name", name)
@@ -391,7 +409,7 @@ func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedActor := actor.ActorID
-	if req.OperationType != claimIdentityOperationType {
+	if _, rawCredential := rawCredentialCarveOut[req.OperationType]; !rawCredential {
 		resolvedActor = s.resolveActor(ctx, actor.ActorID)
 	}
 

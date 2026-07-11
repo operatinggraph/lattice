@@ -51,6 +51,8 @@ func DDLs() []pkgmgr.DDLSpec {
 				"ClaimIdentity",
 				"RecordIdentityPII",
 				"ProvisionConsumerIdentity",
+				"InitiateCredentialLink",
+				"CompleteCredentialLink",
 			},
 			Description: "Identity domain DDL. " +
 				"Vertex shape: vtx.identity.<NanoID>, class=identity. " +
@@ -59,7 +61,10 @@ func DDLs() []pkgmgr.DDLSpec {
 				"ssn (sensitive, applicant SSN: 9 digits; any hyphens accepted and stripped; written by RecordIdentityPII), " +
 				"dob (sensitive, ISO YYYY-MM-DD applicant date of birth, written by RecordIdentityPII), " +
 				"claimKey (sensitive, stores the client-supplied claimKeyHash verbatim; tombstoned after claim), " +
-				"credentialBinding (sensitive; null pre-claim), " +
+				"linkKey (sensitive; stores the client-supplied linkKeyHash verbatim; armed by InitiateCredentialLink, " +
+				"tombstoned by CompleteCredentialLink; re-initiating overwrites), " +
+				"credentialBinding (sensitive; null pre-claim; data.credentials is the N-credential array a second " +
+				"CompleteCredentialLink appends to — multi-credential-identity-linking-design.md §3.1), " +
 				"idpBinding (sensitive; the raw iss/sub of the external IdP token an opaque-mode ActorID was " +
 				"derived from — Contract #11 §3.3, written only by ProvisionConsumerIdentity, absent for a " +
 				"nanoid-mode/dev-provisioned actor), " +
@@ -87,7 +92,10 @@ func DDLs() []pkgmgr.DDLSpec {
 				`"targetActorKey":{"type":"string","description":"vtx.identity.<NanoID> — the ActorID a verified JWT subject maps to (ProvisionConsumerIdentity). Caller-derived, never minted."},` +
 				`"consumerRoleKey":{"type":"string","description":"vtx.role.<NanoID> of the consumer role to grant (ProvisionConsumerIdentity). Caller-resolved via pkgmgr.RoleID; validated alive before granting."},` +
 				`"idpIssuer":{"type":"string","description":"Raw JWT iss claim (ProvisionConsumerIdentity, optional). Present only for an opaque-mode token (Contract #11 §3.2); written verbatim into the .idpBinding aspect."},` +
-				`"idpSubject":{"type":"string","description":"Raw JWT sub claim (ProvisionConsumerIdentity, optional). Must accompany idpIssuer; written verbatim into the .idpBinding aspect."}}}`,
+				`"idpSubject":{"type":"string","description":"Raw JWT sub claim (ProvisionConsumerIdentity, optional). Must accompany idpIssuer; written verbatim into the .idpBinding aspect."},` +
+				`"linkKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted link secret (InitiateCredentialLink, required). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
+				`"linkKeyAlgo":{"type":"string","enum":["sha256"],"description":"Hash algorithm for linkKeyHash. Optional; defaults to sha256 (the only accepted value)."},` +
+				`"linkKey":{"type":"string","description":"One-time-use link key plaintext (CompleteCredentialLink). Its sha256 must match the stored hash on targetIdentityKey."}}}`,
 			OutputSchema: `{"type":"object","properties":` +
 				`{"primaryKey":{"type":"string","description":"vtx.identity.<NanoID> of the created, claimed, or PII-recorded identity (the operation's principal key)."}}}`,
 			FieldDescription: map[string]string{
@@ -106,6 +114,9 @@ func DDLs() []pkgmgr.DDLSpec {
 				"consumerRoleKey":   "vtx.role.<NanoID> of the consumer role (ProvisionConsumerIdentity, required). Must resolve to a live role vertex; rejected otherwise.",
 				"idpIssuer":         "Raw JWT iss claim (ProvisionConsumerIdentity, optional; present only for an opaque-mode token). Stored verbatim in the sensitive .idpBinding aspect.",
 				"idpSubject":        "Raw JWT sub claim (ProvisionConsumerIdentity, optional; must accompany idpIssuer). Stored verbatim in the sensitive .idpBinding aspect.",
+				"linkKeyHash":       "Lowercase hex sha256 of the client-minted link secret. Required on InitiateCredentialLink. Stored verbatim; Lattice never holds the plaintext.",
+				"linkKeyAlgo":       "Hash algorithm for linkKeyHash. Optional; defaults to sha256 (the only accepted value).",
+				"linkKey":           "The plaintext one-time link key the client minted at InitiateCredentialLink. Used for CompleteCredentialLink verification (its sha256 is compared to the stored hash).",
 			},
 			Examples: []pkgmgr.ExampleSpec{
 				{
@@ -119,6 +130,26 @@ func DDLs() []pkgmgr.DDLSpec {
 					Name:            "ClaimIdentity — actor claims their identity",
 					Payload:         map[string]any{"targetIdentityKey": "vtx.identity.<NanoID>", "claimKey": "<plaintextKey>"},
 					ExpectedOutcome: "Verifies claimKey hash, writes credentialBinding aspect, transitions state unclaimed→claimed, tombstones claimKey aspect, grants holdsRole→consumer to the claimed identity.",
+				},
+				{
+					Name:    "InitiateCredentialLink — U arms a link secret for a second credential",
+					Payload: map[string]any{"linkKeyHash": "<sha256-hex-of-client-minted-secret>"},
+					ExpectedOutcome: "Submitted as the already-claimed identity U (op.actor == U, scope=self). Writes/overwrites " +
+						"vtx.identity.<NanoID>.linkKey {hash, algo}. Re-initiating rotates a lost secret. Rejects a not-found, " +
+						"tombstoned, unclaimed, or merged U.",
+				},
+				{
+					Name:    "CompleteCredentialLink — a second credential proves the secret, binds to U",
+					Payload: map[string]any{"targetIdentityKey": "vtx.identity.<NanoID-of-U>", "linkKey": "<plaintextLinkKey>"},
+					ExpectedOutcome: "Submitted as the raw new credential A2 (op.actor == A2, scope=self, Gateway raw-credential " +
+						"carve-out). Verifies the linkKey hash, creates vtx.credentialindex.<hash(A2)>, appends " +
+						"{actorKey:A2,boundAt} to U.credentialBinding.credentials (creating the aspect if U never had one), " +
+						"tombstones U.linkKey, emits identity.claimed{identityKey:U, actorKey:A2} — the same class " +
+						"ClaimIdentity emits, so the credential-bindings materializer folds it with zero changes. Rejects a " +
+						"wrong/spent secret, an already-bound A2, or a not-claimed U — all collapse to the same " +
+						"generic ClaimKeyInvalid wire code ClaimIdentity uses (NFR-S6 anti-enumeration; the " +
+						"Processor's classifier reclassifies any \"ClaimKeyInvalid: <outcome>\" fail() message the " +
+						"same way regardless of which op raised it — specific outcomes surface only via Health KV).",
 				},
 				{
 					Name:    "RecordIdentityPII — capture applicant SSN/DOB",
@@ -288,21 +319,48 @@ func DDLs() []pkgmgr.DDLSpec {
 			},
 		},
 		{
+			CanonicalName: "linkKey",
+			Class:         "meta.ddl.aspectType",
+			Sensitive:     true,
+			Description: "Client-supplied link-key hash — the claimKey twin for binding a SECOND credential " +
+				"to an already-claimed identity (multi-credential-identity-linking-design.md §3.2). Sensitive " +
+				"aspect-type: stored as vtx.identity.<NanoID>.linkKey, sensitive=true, identity-anchored. " +
+				"Written (create-or-overwrite) by InitiateCredentialLink, verified + tombstoned by " +
+				"CompleteCredentialLink; permittedCommands is intentionally empty, mirroring claimKey.",
+			Script: sensitiveAspectDDLScript,
+			InputSchema: `{"type":"object","properties":` +
+				`{"hash":{"type":"string","description":"Lowercase hex sha256 of the client-minted link secret, stored verbatim."}}}`,
+			OutputSchema: `{"type":"object"}`,
+			FieldDescription: map[string]string{
+				"hash": "Lowercase hex sha256 of the client-minted link secret, stored verbatim as a sensitive aspect on the identity.",
+			},
+			Examples: []pkgmgr.ExampleSpec{
+				{
+					Name:            "linkKey aspect",
+					Payload:         map[string]any{"hash": "<sha256-hex-of-client-minted-secret>"},
+					ExpectedOutcome: "Stored as sensitive vtx.identity.<NanoID>.linkKey; rejected on any non-identity vertex by step-6 sensitiveAspectScope.",
+				},
+			},
+		},
+		{
 			CanonicalName: "credentialBinding",
 			Class:         "meta.ddl.aspectType",
 			Sensitive:     true,
 			Description: "Actor-to-identity credential binding. Sensitive aspect-type " +
 				"(lattice-architecture Item 6 / PRD §358): stored as vtx.identity.<NanoID>.credentialBinding, " +
-				"sensitive=true, identity-anchored. Written by ClaimIdentity; permittedCommands is " +
+				"sensitive=true, identity-anchored. Written by ClaimIdentity (first credential) and " +
+				"CompleteCredentialLink (Nth credential, appends to data.credentials); permittedCommands is " +
 				"intentionally empty so any identity-anchored writer is allowed.",
 			Script: sensitiveAspectDDLScript,
 			InputSchema: `{"type":"object","properties":` +
-				`{"actorKey":{"type":"string","description":"Actor key bound to the identity at claim time."},` +
-				`"boundAt":{"type":"string","description":"Timestamp the binding was established."}}}`,
+				`{"actorKey":{"type":"string","description":"First-bound credential's actor key (Contract #9 record; kept for the single-credential case)."},` +
+				`"boundAt":{"type":"string","description":"Timestamp the first binding was established."},` +
+				`"credentials":{"type":"array","description":"N-credential array [{actorKey,boundAt}, ...] every credential resolving to this identity; absent on a pre-Fire-2 record (readers fall back to the singular actorKey/boundAt fields).","items":{"type":"object"}}}}`,
 			OutputSchema: `{"type":"object"}`,
 			FieldDescription: map[string]string{
-				"actorKey": "Actor key bound to the identity at claim time, stored as a sensitive aspect on the identity.",
-				"boundAt":  "Timestamp the credential binding was established.",
+				"actorKey":    "Actor key bound to the identity at claim time, stored as a sensitive aspect on the identity.",
+				"boundAt":     "Timestamp the credential binding was established.",
+				"credentials": "N-credential array; every CompleteCredentialLink/MergeIdentity repoint appends/unions into this array.",
 			},
 			Examples: []pkgmgr.ExampleSpec{
 				{
@@ -791,7 +849,8 @@ def execute(state, op):
             {"op": "create", "key": target_identity_key + ".credentialBinding",
              "document": {"class": "credentialBinding", "vertexKey": target_identity_key,
                           "localName": "credentialBinding", "isDeleted": False,
-                          "data": {"actorKey": actor_key, "boundAt": observed_at}}},
+                          "data": {"actorKey": actor_key, "boundAt": observed_at,
+                                   "credentials": [{"actorKey": actor_key, "boundAt": observed_at}]}}},
             {"op": "update", "key": target_identity_key + ".state",
              "document": {"class": "state", "vertexKey": target_identity_key,
                           "localName": "state", "isDeleted": False,
@@ -817,6 +876,177 @@ def execute(state, op):
         # committed key is the state aspect (unclaimed -> claimed). primaryKey
         # names the principal entity (the identity); the Processor accepts it as
         # the 3-segment root of the committed aspects.
+        return {
+            "mutations": mutations,
+            "events": events,
+            "response": {"primaryKey": target_identity_key},
+        }
+
+    if ot == "InitiateCredentialLink":
+        # "as U: arm a link secret" -- submitted through the normal resolved
+        # path (env.Actor == U, authContext.target == U), so the identity
+        # being armed IS the caller; no separate target field
+        # (multi-credential-identity-linking-design.md §3.2).
+        link_key_hash = p.linkKeyHash if hasattr(p, "linkKeyHash") else None
+        if link_key_hash == None or type(link_key_hash) != type("") or len(link_key_hash) == 0:
+            fail("InvalidArgument: linkKeyHash: required non-empty lowercase hex sha256")
+        if len(link_key_hash) != 64:
+            fail("InvalidArgument: linkKeyHash: must be 64-char lowercase hex sha256")
+        for ch in link_key_hash.elems():
+            if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+                fail("InvalidArgument: linkKeyHash: must be lowercase hex")
+        link_key_algo = p.linkKeyAlgo if hasattr(p, "linkKeyAlgo") else None
+        if link_key_algo == None or link_key_algo == "":
+            link_key_algo = "sha256"
+        if link_key_algo != "sha256":
+            fail("InvalidArgument: linkKeyAlgo: only sha256 is supported")
+
+        u_key = op.actor
+        if not u_key.startswith("vtx.identity."):
+            fail("InvalidArgument: actor: must be a vtx.identity.<NanoID>")
+
+        u_vtx = state[u_key] if u_key in state else None
+        if u_vtx == None or (hasattr(u_vtx, "isDeleted") and u_vtx.isDeleted):
+            fail("IdentityNotFound: " + u_key)
+        u_state = read_state(state, u_key)
+        u_merged_into = read_merged_into(state, u_key)
+        enforce_not_merged(u_state, u_merged_into)
+        if u_state != "claimed":
+            fail("InvalidStateTransition: InitiateCredentialLink requires state=claimed, got " + str(u_state))
+
+        # Create-or-overwrite: .linkKey is declared optionalReads by the
+        # caller (not Reads), so this key carries no step-4 hydrated
+        # revision and "update" commits as an unconditioned blind Put --
+        # arming a fresh secret whether or not one was already armed
+        # (re-initiating rotates a lost secret). Mirrors the merge script's
+        # unconditioned-update idiom (identity-hygiene MergeIdentity §3.3).
+        mutations = [
+            {"op": "update", "key": u_key + ".linkKey",
+             "document": {"class": "linkKey", "vertexKey": u_key, "localName": "linkKey",
+                          "isDeleted": False, "data": {"hash": link_key_hash, "algo": link_key_algo}}},
+        ]
+
+        # No event: nothing consumes an armed-but-unused link secret
+        # (mirrors claimKey's own no-event-on-write posture).
+        return {
+            "mutations": mutations,
+            "events": [],
+            "response": {"primaryKey": u_key},
+        }
+
+    if ot == "CompleteCredentialLink":
+        def fail_link(outcome):
+            # Reuses ClaimIdentity's exact "ClaimKeyInvalid: " prefix so the
+            # Processor's existing classifyScriptError/classifyStepError
+            # reclassification (NFR-S6 anti-enumeration — generic wire code,
+            # specifics via Health KV only) covers this op with zero Go-side
+            # changes, instead of adding a new ErrorCode (a frozen Contract #2
+            # §2.6 change requiring its own ratification).
+            fail("ClaimKeyInvalid: " + outcome)
+
+        link_key_plaintext = p.linkKey if hasattr(p, "linkKey") else None
+        if link_key_plaintext == None or type(link_key_plaintext) != type("") or len(link_key_plaintext) == 0:
+            fail_link("invalid-key")
+
+        target_identity_key = p.targetIdentityKey if hasattr(p, "targetIdentityKey") else None
+        if target_identity_key == None or type(target_identity_key) != type("") or len(target_identity_key) == 0:
+            fail_link("no-target")
+        if not target_identity_key.startswith("vtx.identity."):
+            fail_link("no-target")
+
+        target_vtx = state[target_identity_key] if target_identity_key in state else None
+        if target_vtx == None or (hasattr(target_vtx, "isDeleted") and target_vtx.isDeleted):
+            fail_link("no-target")
+
+        target_state = read_state(state, target_identity_key)
+        if target_state == "merged":
+            fail_link("merged")
+        if target_state != "claimed":
+            fail_link("wrong-state")
+
+        # The same one-credential-<=-one-identity dedup guard ClaimIdentity
+        # applies (#11 §11.4): this is a declared-optionalReads guard for the
+        # friendly generic error only -- the load-bearing stop is the
+        # CreateOnly create of cred_index_key below, which RevisionConflicts
+        # on an already-bound credential regardless of declaration (finding
+        # A4, mirrored from ClaimIdentity).
+        actor_key = op.actor
+        cred_index_key = "vtx.credentialindex." + crypto.sha256NanoID(actor_key)
+        cred_index = state[cred_index_key] if cred_index_key in state else None
+        if cred_index != None and not (hasattr(cred_index, "isDeleted") and cred_index.isDeleted):
+            fail_link("credential-already-bound")
+
+        link_key_aspect_key = target_identity_key + ".linkKey"
+        link_key_aspect = state[link_key_aspect_key] if link_key_aspect_key in state else None
+        if link_key_aspect == None or (hasattr(link_key_aspect, "isDeleted") and link_key_aspect.isDeleted):
+            fail_link("invalid-key")
+        if link_key_aspect.data == None or "hash" not in link_key_aspect.data:
+            fail_link("invalid-key")
+
+        submitted_hash = crypto.sha256(link_key_plaintext)
+        stored_hash = link_key_aspect.data["hash"]
+        if not crypto.constant_time_equal(submitted_hash, stored_hash):
+            fail_link("invalid-key")
+
+        observed_at = op.submittedAt
+        new_entry = {"actorKey": actor_key, "boundAt": observed_at}
+
+        # U.credentialBinding is declared optionalReads: absent entirely for
+        # a Scenario-B identity that never claimed via ClaimIdentity (its
+        # implicit self-credential lives only as its own vertex key), in
+        # which case this branch creates the aspect for the first time --
+        # otherwise it appends to the existing array (or the pre-Fire-2
+        # singular actorKey/boundAt fields, folded into a one-element array).
+        binding_key = target_identity_key + ".credentialBinding"
+        existing_binding = state[binding_key] if binding_key in state else None
+        binding_absent = existing_binding == None or (hasattr(existing_binding, "isDeleted") and existing_binding.isDeleted)
+
+        mutations = [
+            {"op": "create", "key": cred_index_key,
+             "document": {"class": "credentialindex", "isDeleted": False,
+                          "data": {"actorKey": actor_key,
+                                   "identityKey": target_identity_key,
+                                   "boundAt": observed_at}}},
+            {"op": "tombstone", "key": link_key_aspect_key},
+        ]
+
+        if binding_absent:
+            mutations.append({"op": "create", "key": binding_key,
+                "document": {"class": "credentialBinding", "vertexKey": target_identity_key,
+                             "localName": "credentialBinding", "isDeleted": False,
+                             "data": {"actorKey": actor_key, "boundAt": observed_at,
+                                      "credentials": [new_entry]}}})
+        else:
+            existing_data = existing_binding.data if existing_binding.data != None else {}
+            existing_credentials = existing_data.get("credentials")
+            if existing_credentials == None or type(existing_credentials) != type([]):
+                first_actor = existing_data.get("actorKey")
+                if first_actor != None:
+                    existing_credentials = [{"actorKey": first_actor, "boundAt": existing_data.get("boundAt")}]
+                else:
+                    existing_credentials = []
+            unioned = list(existing_credentials) + [new_entry]
+            singular_actor = existing_data.get("actorKey")
+            singular_bound = existing_data.get("boundAt")
+            if singular_actor == None:
+                singular_actor = actor_key
+                singular_bound = observed_at
+            mutations.append({"op": "update", "key": binding_key,
+                "document": {"class": "credentialBinding", "vertexKey": target_identity_key,
+                             "localName": "credentialBinding", "isDeleted": False,
+                             "data": {"actorKey": singular_actor, "boundAt": singular_bound,
+                                      "credentials": unioned}}})
+
+        # Deliberately the existing identity.claimed class: the semantic
+        # ("this credential is now bound to this identity") and payload are
+        # identical, so the shipped credential-bindings materializer folds
+        # this with zero changes (multi-credential-identity-linking-design.md
+        # §4.3).
+        events = [{"class": "identity.claimed", "data": {
+            "identityKey": target_identity_key,
+            "actorKey": actor_key,
+        }}]
+
         return {
             "mutations": mutations,
             "events": events,

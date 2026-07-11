@@ -3,10 +3,11 @@ version: 0.2.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity,
-  RecordIdentityPII, ProvisionConsumerIdentity. Depends on rbac-domain. The
-  consumer, frontOfHouse, backOfHouse, and identityProvisioner roles are
-  declared in the package definition and created in the single install
-  batch routed through the Processor (Story 1.5.5).
+  RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink,
+  CompleteCredentialLink. Depends on rbac-domain. The consumer,
+  frontOfHouse, backOfHouse, and identityProvisioner roles are declared in
+  the package definition and created in the single install batch routed
+  through the Processor (Story 1.5.5).
 depends:
   - rbac-domain
 declares:
@@ -24,6 +25,8 @@ declares:
     - canonicalName: phone
       class: meta.ddl.aspectType
     - canonicalName: claimKey
+      class: meta.ddl.aspectType
+    - canonicalName: linkKey
       class: meta.ddl.aspectType
     - canonicalName: credentialBinding
       class: meta.ddl.aspectType
@@ -55,6 +58,12 @@ declares:
     - operationType: ProvisionConsumerIdentity
       scope: any
       grantsTo: [identityProvisioner, operator]
+    - operationType: InitiateCredentialLink
+      scope: self
+      grantsTo: [consumer]
+    - operationType: CompleteCredentialLink
+      scope: self
+      grantsTo: [consumer]
     - operationType: RevokeActor
       scope: any
       grantsTo: [operator]
