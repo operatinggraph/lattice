@@ -47,7 +47,8 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
-| **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · Weaver has no lens-schema visibility at install time to validate against (checked 2026-07-10) — a mechanical validator isn't possible as scoped, needs a real cross-component mechanism |
+| **[Gateway] credential-bindings publish grant missing (live bug)** | The shipped credential-bindings materializer KVPuts on the Gateway NKey connection, but the matrix grants only token-revocation — every fold is transport-denied under enforcement; `bucketguard.go` also misses the bucket. Grant + guard entry + natsperm vectors. | ★★ | XS | 📋 ready · [evidence](../../implementation-artifacts/natsperm-platform-bucket-isolation-design.md) §Fire-0 — ships independently of that design's ratification |
+| **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · install-time lens-schema check impossible as scoped (2026-07-10); runtime candidate: `staleMark` consults the gap's action class from the target spec — Weaver holds both at runtime |
 
 ### Survey log (round-robin rotation)
 
@@ -78,7 +79,7 @@ Severity-ordered; same row discipline as component maintenance (shipped rows col
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **natsperm-matrix-hygiene** | Refractor's `$KV.>` write is broader than its lens-target set (covers dynamically-named package buckets — narrowing needs a real design, not a mechanical prune). | ★ | S | 📋 · bridge phantom-bucket half shipped `0377938`; remaining: Refractor narrowing needs design |
+| **natsperm-matrix-hygiene** | Refractor's `$KV.>` write is broader than its lens-target set (covers dynamically-named package buckets — narrowing needs a real design, not a mechanical prune). | ★ | S | 📐 awaiting-Andrew · [design](../../implementation-artifacts/natsperm-platform-bucket-isolation-design.md) · bridge half shipped `0377938` |
 
 ### Refractor re-review (2026-07-06)
 
