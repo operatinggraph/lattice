@@ -191,6 +191,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-11 · `4bae4d5` · [CI] two unit-job flakes root-caused at source — processor ack/term consumer-state reads + substrate AckResume dead-iterator race; poll/quiesce test barriers, vendor-source-grounded (detail in commit msgs); CI green
 - 2026-07-11 · `5ce906b` · [identity-domain,gateway] multi-credential-linking Fire 3 — provision-time identityindex probe (whoami `?probe=1`), built as a P5-clean lens read (§3.4 build-note); no contract change; CI green
 - 2026-07-11 · `bfe91b4` · [scripts] verify-package-identity — expect Fire 2's 2 new permittedCommands (CI stack-gates caught the stale count live); CI green
 - 2026-07-11 · `625f411` · [identity-hygiene] multi-credential-linking Fire 2 — link flow (InitiateCredentialLink/CompleteCredentialLink) + Gateway whoami; NFR-S6 leak found+fixed in review; CI green
