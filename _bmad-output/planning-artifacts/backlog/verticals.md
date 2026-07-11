@@ -17,6 +17,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
+| **Account settings — manage sign-in methods** | Live-verified: LoftSpace has no account/profile surface at all today (grepped `app.js`/`index.html` — only qualification-profile, no identity page). Page for the applicant to see linked credentials (`whoami`), link another (`InitiateCredentialLink`/`CompleteCredentialLink`), and remove one (`UnlinkCredential`, platform refuses removing the last). | LoftSpace | FE + pkg | ★★ | S | 🚧 blocked-on: [multi-credential identity linking](lattice.md) Fires 2+4 (whoami, link ops, unlink) — design names this row as the FE consumer, §9 |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | 📋 ready (after Wellness) |
 | **Clinic patient picker doesn't scale** | `#provider` still has no search (lower-urgency half, left open). | Clinic | pkg + FE | ★ | XS | 📋 ready |
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
@@ -43,19 +44,16 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café, stagg
 joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no app to exercise; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×12, Clinic ×10, Café ×2 (2026-07-09: first live exercise — found Weaver tab-settlement posting fails closed on the shared stack (platform bug, blocked-on lattice.md) + no payment-collection UI).
+- **Rotation to date:** LoftSpace ×13, Clinic ×10, Café ×2.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All three apps exist + are exercisable live (`:7788` / `:7799` / `:7801`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-07-06:** Enriched Café+Wellness → 4 grounded, sequenced rows (Café first) + verified no platform block; spec = the go-live composition demo.
 - **2026-07-09:** LoftSpace — exercised Browse&Apply live; found + root-caused self-service identity never claims (blocks CreateLeaseApplication for every applicant); filed.
 - **2026-07-10:** Clinic — drove staff booking/schedule/ledger live on the shared stack; found + confirmed `/api/ledger` unauthenticated (any caller reads any patient's billing history); filed.
 - **2026-07-10:** Café — drove POS OpenTab/Charge/Settle + resident ledger live; found stale post-write state (no eventual-consistency re-fetch delay), mirrored LoftSpace's existing fix; filed.
-- **2026-07-10 — REQUEST (Winston, at multi-credential ratification):** spec the account-surface
-  consumer for credential management — "manage sign-in methods": list linked credentials (whoami),
-  link-another (re-auth + link secret), remove one (unlink; the platform refuses removing the last).
-  Pick the vertical (LoftSpace suggested — richest self-service identity flow) and file the scored
-  demand row. Platform ops ship lattice-side ([design](../../implementation-artifacts/multi-credential-identity-linking-design.md) Fires 2+4).
-- **Next:** LoftSpace.
+- **2026-07-10 — REQUEST fulfilled:** LoftSpace — live-verified no account surface exists; filed
+  "manage sign-in methods" (whoami/link/unlink), blocked-on multi-credential design Fires 2+4.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
