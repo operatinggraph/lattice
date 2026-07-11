@@ -87,10 +87,18 @@ then park; the completer is a human for userTask, the bridge for externalTask). 
   literal or a `subject.<aspect>.data.<field>` / `subject.data.<field>` path (the §10.5 guard-path
   grammar), **resolved against the subject's current Core-KV state when the instanceOp runs** (a
   null/absent resolution is a data error — surface, do not dispatch). Resolution is a **write-path read**:
-  the submitter (Loom) declares the subject's aspect keys in the instanceOp's `contextHint.reads`, and the
+  the submitter (Loom) declares the subject root in the instanceOp's `contextHint.reads` and the
+  template-inferred aspect keys in **`contextHint.egressReads`** (Contract #2 §2.5 class (f)), and the
   instanceOp resolves the templates from that JIT-hydrated state as it emits the `external.<adapter>`
   event — so an adapter receives the real subject fields it needs (a vendor's legal-name / DOB / address)
-  without any reader touching a lens read-model. The **`row.<column>`** half of §10.8 templating is the **Weaver actuator's**
+  without any reader touching a lens read-model. **A template over a `sensitive: true` aspect (§3.10)
+  resolves to a sensitive-ref** (`{"$sensitiveRef": {ref, ciphertext, field}}` — the at-rest ciphertext,
+  never plaintext): plaintext PII never enters the `external.<adapter>` event, the claim vertex, or any
+  durable plane. The **bridge** is the unwrap point — at dispatch, just before the adapter call, it
+  resolves each sensitive-ref via the Vault decrypt RPC using the identity's **live** key envelope
+  (never a stored copy — §3.10 live-envelope rule), so a shredded identity's ref fails closed. An unwrap
+  failure is a data error: a permanent one (shredded/malformed/absent) posts the terminal `replyOp` with
+  a failed outcome so the pattern converges; a transient one retries — never a blank field to a vendor. The **`row.<column>`** half of §10.8 templating is the **Weaver actuator's**
   resolution (`subject`/`assignee`/`target` selection from a violation row) and is **not** reachable on
   the Loom write path: by the time the instanceOp runs the violation row is gone, the write path must not
   read the lagging `weaver-targets` read-model, and `triggerLoom{pattern, subject}` carries no row. (A

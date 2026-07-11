@@ -227,9 +227,21 @@ idempotency (which key on the request, not on content).
 
 **Readers.** Direct Core-KV readers observe ciphertext. The Refractor's default projection path copies the
 ciphertext as-is — so sensitive aspects are unreadable at general lens targets without an explicit
-decryption seam. Plaintext is produced only by the Processor (for Starlark) and by an explicit
-Vault-decrypt consumer (a trusted tool, or the read-path-authorized Secure Lens). `ShredIdentityKey`
-destroys the DEK, after which no consumer can decrypt.
+decryption seam. Plaintext is produced only by the Processor (for Starlark), by an explicit
+Vault-decrypt consumer (a trusted tool, or the read-path-authorized Secure Lens), or by the **bridge's
+external-egress unwrap** (§10.5 sensitive-ref params — plaintext bounded to the in-memory adapter call).
+`ShredIdentityKey` destroys the DEK, after which no consumer can decrypt.
+
+**External-egress guard.** An operation that emits an `external.*`-domain event must not have decrypted
+sensitive plaintext in the same execution (via `reads`, `optionalReads`, or a lazy `kv.Read`) — the
+Processor rejects the commit. Sensitive data reaches an external event only as a **sensitive-ref**
+hydrated under `contextHint.egressReads` (Contract #2 §2.5 class (f)); the ref carries the at-rest
+ciphertext, never plaintext.
+
+**Live-envelope rule.** A Vault-decrypt consumer resolves the identity's key envelope from the
+**current** `piiKey` state (the aspect, or its lens projection) **at decrypt time — never from a stored
+or carried copy**. A shred rewrites `piiKey` to a shredded placeholder at the source; a frozen envelope
+copy in a durable plane would out-live that rewrite and defeat crypto-shredding across a Vault restart.
 
 ### 3.11 Sensitive-object (blob) encryption at rest
 

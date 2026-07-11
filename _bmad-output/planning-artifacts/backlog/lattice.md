@@ -113,9 +113,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > the offline-first read loop AND the optimistic write path (`internal/edge/{store,sync,overlay,agent}` +
 > `cmd/edge`) are done. **Edge's own queue is now gated**: EDGE.3 (untrusted multi-identity) needs D1
 > (Personal Lens PL.3) + the Gateway write-path translator + NATS-account subscribe-ACL — not build-ready
-> yet (edge design §7 checkpoint). No other ratified-design item is queued behind it — the next fire
-> should re-derive the top importance×readiness pick from this board (component maintenance table +
-> Arch-review intake) rather than assume a named Edge increment.
+> yet (edge design §7 checkpoint). **Next pick: sensitive-param-egress Fires 1–2** (✅ ratified
+> 2026-07-10, External-I/O table — the first real PII adapter payload, lease-signing e2e as the live
+> consumer).
 > *Still gated*: **AI-caps Fire 4** (Andrew sign-off on AI-code-execution, not the sandbox).
 > Whoever ships the named pick updates this callout to the next one — a stale callout starves the lane.
 
@@ -135,7 +135,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Real adapters + async result-return | Replace the `Fake*` adapters with real vendors + design the async result path. | ★★ | M–L | ✅ async result-return done · real adapters deferred (prod) |
-| Adapter read-seam / richer params | Adapters can only use what the target-lens row projects; add a subject-templated fetch seam for extra fields (SSN/DOB). | ★★ | S–M | 📐 awaiting-Andrew · [sensitive-param-egress design](../../implementation-artifacts/sensitive-param-egress-design.md) (unblocks F2–3; #2/#3/#10-loom edits staged uncommitted) · F1 shipped |
+| Adapter read-seam / richer params | Adapters can only use what the target-lens row projects; add a subject-templated fetch seam for extra fields (SSN/DOB). | ★★ | S–M | ✅ ratified 2026-07-10 · [sensitive-param-egress design](../../implementation-artifacts/sensitive-param-egress-design.md) · F1 shipped; Fires 1–2 build-ready |
 
 ### Scale-out
 | Item | What it is | Imp | Size | State |

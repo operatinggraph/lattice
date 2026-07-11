@@ -1,6 +1,12 @@
 # Sensitive-param egress — the `egressReads` disposition + bridge egress unwrap
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-10).
+**Status: ✅ RATIFIED (Andrew, 2026-07-10).** Both §For-Andrew decisions approved as recommended:
+(1) the bridge joins the `lattice.vault.decrypt` allowlist — Fire 2 pairs the grant with the core-kv
+read-deny + a natsperm read vector; (2) refs stay trusted at the package-DDL boundary — Processor-MAC'd
+refs are the named follow-on, triggered before AI-authored DDLs ship (AI-caps Fire 4). The #2/#3/#10
+contract edits are committed with this ratification. Ratification DD folded two corrections
+(§1.1 capability-author live templates; the #2 cell's "never the key envelope" wording). The Lattice
+Steward builds Fires 1–2. Author: Winston (Designer fire, 2026-07-10).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *External-I/O maturity → Adapter read-seam /
 richer params* (★★, S–M) — the row's `🚧 blocked-on: Designer (Starlark sensitivity-detection
 primitive)` gate. Parent design: `adapter-read-seam-subject-templated-params-design.md` (✅ ratified
@@ -74,9 +80,11 @@ on grounding (2026-07-06): the as-built schema has no `.demographics` — the re
 (`packages/orchestration-base/external_params.go`) would receive **plaintext** SSN/DOB and bake it into
 the `external.<adapter>` event, which lands in the **durable `events.external.>` stream**. That is exactly
 the exposure the parent design's Fire 3 existed to prevent — live risk since Vault shipped, so the row was
-blocked rather than built. Verified unchanged today: no pattern declares a `subject.*` template yet (the
-only live params is the literal `{family}`), so nothing is exposed *now*; the mechanism is simply unusable
-for every field a real vendor needs.
+blocked rather than built. Verified today (ratification DD corrected the first draft's "no template exists" claim): the only live
+`subject.*` templates are capability-author's `subject.request.data.{requesterId,intent,contextRef}`
+(`packages/capability-author/patterns.go:34` — AI-caps Fire 1, 2026-07-04) — over a **non-sensitive**
+aspect, and lease-signing's live params is the literal `{family}` — so nothing is exposed *now*; the
+mechanism is simply unusable for every field a real vendor needs (all of identity's are sensitive).
 
 ### 1.2 Intent
 
@@ -349,8 +357,13 @@ with a natsperm vector proving the bridge still cannot touch `$KV.core-kv.>`.
 
 ## 7. Migration & test strategy
 
-**Migration: none.** No pattern declares a `subject.*` template yet (verified §1.1); `egressReads` absent
-= today's behavior byte-for-byte; the emission guard's migration grep (§3.6) is expected clean. No
+**Migration: one mechanical mover, zero package edits.** capability-author's `subject.request.data.*`
+templates (§1.1, non-sensitive) re-class from `reads` to `egressReads` automatically when Loom's
+inference splits — the templates live in the pattern, the classing lives in `inferExternalTaskReads`,
+so no package changes; hydration is byte-identical (ref-if-sensitive leaves plain aspects untouched)
+and no drift-guard pins its read set (lease-signing's is the only one, updated in Fire 1). It becomes
+Fire 1's live exerciser of the non-sensitive egress path. `egressReads` absent = today's behavior
+byte-for-byte; the emission guard's migration grep (§3.6) is expected clean. No
 bootstrap bump (no new kernel entity; contextHint is envelope shape, parsed leniently by version).
 
 **Tests (the proof set):**
@@ -441,13 +454,13 @@ Checks that passed: coerceParams ordering, identityKey/AAD derivation, caller-su
 DecryptRequest, transient-retry idempotency (adapter never reached), async Poll untouched.
 **The pre-build gate is discharged; no deferred gate is left for the Steward.**
 
-## 11. Open items for Andrew
+## 11. Open items for Andrew — ✅ all resolved at ratification (2026-07-10)
 
-1. The `lattice.vault.decrypt` grant to the bridge user (§For-Andrew #1) — the one privilege widening.
-2. The ref-trust posture + MAC-before-AI-DDLs trigger (§For-Andrew #2).
-3. The three staged contract edits (§4).
+1. `lattice.vault.decrypt` grant to the bridge user — **approved** (Fire 2, paired with the read-deny).
+2. Ref-trust posture — **approved**; the MAC-before-AI-DDLs trigger stands as the named follow-on.
+3. The three contract edits (§4) — **committed** with the ratification.
 
 ---
 
-*Designed by Winston (Designer fire, 2026-07-10). Awaiting Andrew's ratification; the Lattice Steward
-builds Fires 1–2 once ratified.*
+*Designed by Winston (Designer fire, 2026-07-10); ratified by Andrew 2026-07-10. The Lattice Steward
+builds Fires 1–2.*
