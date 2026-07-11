@@ -20,12 +20,13 @@ import (
 // legitimately find absent; unlike reads, an absent optionalReads key never
 // faults hydration. Empty/blank entries are dropped from both.
 type opRequest struct {
-	OperationType string          `json:"operationType"`
-	Lane          string          `json:"lane,omitempty"`
-	Class         string          `json:"class,omitempty"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	Reads         []string        `json:"reads,omitempty"`
-	OptionalReads []string        `json:"optionalReads,omitempty"`
+	OperationType string                      `json:"operationType"`
+	Lane          string                      `json:"lane,omitempty"`
+	Class         string                      `json:"class,omitempty"`
+	Payload       json.RawMessage             `json:"payload,omitempty"`
+	Reads         []string                    `json:"reads,omitempty"`
+	OptionalReads []string                    `json:"optionalReads,omitempty"`
+	Enumerations  []processor.EnumerationHint `json:"enumerations,omitempty"`
 }
 
 // buildEnvelope turns a parsed opRequest into a processor.OperationEnvelope,
@@ -62,8 +63,8 @@ func buildEnvelope(req opRequest, requestID, actor string, now time.Time) (*proc
 	}
 	reads := cleanReads(req.Reads)
 	optionalReads := cleanReads(req.OptionalReads)
-	if len(reads) > 0 || len(optionalReads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	if len(reads) > 0 || len(optionalReads) > 0 || len(req.Enumerations) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: req.Enumerations}
 	}
 	return env, nil
 }
@@ -84,6 +85,7 @@ func gatewayRequestFromEnvelope(env *processor.OperationEnvelope) gatewayOperati
 	if env.ContextHint != nil {
 		req.Reads = env.ContextHint.Reads
 		req.OptionalReads = env.ContextHint.OptionalReads
+		req.Enumerations = env.ContextHint.Enumerations
 	}
 	return req
 }

@@ -1041,6 +1041,16 @@ function openShredModal(identityKey) {
         // sensitive write, so its piiKey aspect may legitimately not exist
         // yet (script-read-posture-design §13).
         optionalReads: [identityKey + ".piiKey"],
+        // class (e) — the script's decrypt-free dedup-hygiene erase
+        // (dedup-over-encrypted-pii-design.md §3.5): the identity's owned
+        // identityindex vertices (inbound "indexes") and every duplicateOf
+        // pair link touching it (both directions — it may be either side
+        // of the pair) are bounded kv.Links enumerations, metadata only.
+        enumerations: [
+          { hub: identityKey, relation: "indexes", direction: "in" },
+          { hub: identityKey, relation: "duplicateOf", direction: "out" },
+          { hub: identityKey, relation: "duplicateOf", direction: "in" },
+        ],
       }),
     });
     inFlight = false;

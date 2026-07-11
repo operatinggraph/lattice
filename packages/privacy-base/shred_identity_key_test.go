@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,17 @@ func recordPII(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 }
 
+// shredEnumerations declares the two dedup-hygiene erasure enumerations
+// (dedup-over-encrypted-pii-design.md §3.5) every ShredIdentityKey dispatcher
+// must declare — mirrors cmd/loupe/web/js/views/graph.js's openShredModal.
+func shredEnumerations(identityKey string) []processor.EnumerationHint {
+	return []processor.EnumerationHint{
+		{Hub: identityKey, Relation: "indexes", Direction: "in"},
+		{Hub: identityKey, Relation: "duplicateOf", Direction: "out"},
+		{Hub: identityKey, Relation: "duplicateOf", Direction: "in"},
+	}
+}
+
 func submitShred(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	cp *processor.CommitPath, cons jetstream.Consumer, identityKey, reqLabel string, wantOutcome processor.MessageOutcome) {
 	t.Helper()
@@ -130,7 +142,7 @@ func submitShred(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		SubmittedAt:   "2026-07-02T10:10:00Z",
 		Class:         "shredIdentityKey",
 		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}},
+		ContextHint:   &processor.ContextHint{Reads: []string{identityKey}, Enumerations: shredEnumerations(identityKey)},
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, wantOutcome)
@@ -470,4 +482,228 @@ func readCiphertextForTest(t *testing.T, ctx context.Context, conn *substrate.Co
 		t.Fatalf("unmarshal %s: %v", key, err)
 	}
 	return doc.Data
+}
+
+// --- Fire 3 (shred hygiene, design §3.5): erasing the live dedup-hygiene
+// footprint in the SAME atomic batch as the shred intent. ---
+
+// pbContactIndexKey mirrors identity-domain's contactIndexKey / the script's
+// own crypto.sha256NanoID(contactType + ":" + normalized) derivation.
+func pbContactIndexKey(contactType, normalized string) string {
+	return "vtx.identityindex." + substrate.SHA256NanoID(contactType+":"+normalized)
+}
+
+// pbIndexesLinkKey mirrors the script's `indexes` link key: the identityindex
+// vertex is the source, the identity vertex is the target.
+func pbIndexesLinkKey(indexKey, identityID string) string {
+	return "lnk." + strings.TrimPrefix(indexKey, "vtx.") + ".indexes.identity." + identityID
+}
+
+// pbDuplicateOfLinkKey mirrors the script's `duplicateOf` link key: the
+// newer (source) identity to the incumbent (target) identity.
+func pbDuplicateOfLinkKey(newID, incumbentKey string) string {
+	return "lnk.identity." + newID + ".duplicateOf." + strings.TrimPrefix(incumbentKey, "vtx.")
+}
+
+func readIsDeleted(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) bool {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, key)
+	del, _ := doc["isDeleted"].(bool)
+	return del
+}
+
+// createUnclaimedWithProbe submits CreateUnclaimedIdentity with the given
+// name/email, declaring probeKeys as OptionalReads (the Fire-1 dispatcher
+// fix) so a real collision is detected and flagged.
+func createUnclaimedWithProbe(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, name, email, claimHash, reqLabel string,
+	probeKeys []string) (identityKey, identityID string) {
+	t.Helper()
+	reqID := testutil.GenReqID(reqLabel)
+	identityID = identityIDFromRequestID(reqID)
+	identityKey = "vtx.identity." + identityID
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateUnclaimedIdentity",
+		Actor:         pbStaffActorKey,
+		SubmittedAt:   "2026-07-11T10:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"name":"` + name + `","email":"` + email + `","claimKeyHash":"` + claimHash + `"}`),
+		ContextHint:   &processor.ContextHint{OptionalReads: probeKeys},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return identityKey, identityID
+}
+
+// TestShredIdentityKey_ErasesOwnedIndexesAndLinks proves the identityindex
+// vertices an identity owns (email + name, both created fresh — no
+// collision) and their `indexes` links are tombstoned in the SAME commit as
+// the shred intent (design §3.5).
+func TestShredIdentityKey_ErasesOwnedIndexesAndLinks(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-idx-erase", v)
+
+	identityKey := createIdentity(t, ctx, conn, cp, cons, "IdxErase")
+	identityID := strings.TrimPrefix(identityKey, "vtx.identity.")
+
+	emailIdxKey := pbContactIndexKey("email", "shred-idxerase@example.com")
+	nameIdxKey := pbContactIndexKey("name", "shred target")
+	emailLinkKey := pbIndexesLinkKey(emailIdxKey, identityID)
+	nameLinkKey := pbIndexesLinkKey(nameIdxKey, identityID)
+
+	if readIsDeleted(t, ctx, conn, emailIdxKey) {
+		t.Fatalf("precondition: email index already tombstoned")
+	}
+	if readIsDeleted(t, ctx, conn, nameLinkKey) {
+		t.Fatalf("precondition: name indexes link already tombstoned")
+	}
+
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-idx-erase-urgent", v)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "IdxEraseShred", processor.OutcomeAccepted)
+
+	if !readIsDeleted(t, ctx, conn, emailIdxKey) {
+		t.Fatalf("email identityindex vertex not tombstoned after shred")
+	}
+	if !readIsDeleted(t, ctx, conn, emailLinkKey) {
+		t.Fatalf("email indexes link not tombstoned after shred")
+	}
+	if !readIsDeleted(t, ctx, conn, nameIdxKey) {
+		t.Fatalf("name identityindex vertex not tombstoned after shred")
+	}
+	if !readIsDeleted(t, ctx, conn, nameLinkKey) {
+		t.Fatalf("name indexes link not tombstoned after shred")
+	}
+}
+
+// TestShredIdentityKey_ErasesDuplicateOfLink_SourceSide shreds the NEWER
+// (source) side of a duplicateOf pair — the "out" direction enumeration.
+func TestShredIdentityKey_ErasesDuplicateOfLink_SourceSide(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-dup-src", v)
+
+	claimA := strings.Repeat("1", 64)
+	claimB := strings.Repeat("2", 64)
+	incumbentKey, _ := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Incumbent One", "collide-src@example.com", claimA, "DupSrcIncumbent", nil)
+
+	emailIdxKey := pbContactIndexKey("email", "collide-src@example.com")
+	newcomerKey, newcomerID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Newcomer Two", "collide-src@example.com", claimB, "DupSrcNewcomer", []string{emailIdxKey})
+
+	dupLinkKey := pbDuplicateOfLinkKey(newcomerID, incumbentKey)
+	if readIsDeleted(t, ctx, conn, dupLinkKey) {
+		t.Fatalf("precondition: duplicateOf link already tombstoned")
+	}
+
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-dup-src-urgent", v)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, newcomerKey, "DupSrcShred", processor.OutcomeAccepted)
+
+	if !readIsDeleted(t, ctx, conn, dupLinkKey) {
+		t.Fatalf("duplicateOf link not tombstoned after shredding its source side")
+	}
+}
+
+// TestShredIdentityKey_ErasesDuplicateOfLink_TargetSide shreds the
+// INCUMBENT (target) side of a duplicateOf pair — the "in" direction
+// enumeration — while the newer side stays alive.
+func TestShredIdentityKey_ErasesDuplicateOfLink_TargetSide(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-dup-tgt", v)
+
+	claimA := strings.Repeat("3", 64)
+	claimB := strings.Repeat("4", 64)
+	incumbentKey, _ := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Incumbent Three", "collide-tgt@example.com", claimA, "DupTgtIncumbent", nil)
+
+	emailIdxKey := pbContactIndexKey("email", "collide-tgt@example.com")
+	newcomerKey, newcomerID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Newcomer Four", "collide-tgt@example.com", claimB, "DupTgtNewcomer", []string{emailIdxKey})
+
+	dupLinkKey := pbDuplicateOfLinkKey(newcomerID, incumbentKey)
+	if readIsDeleted(t, ctx, conn, dupLinkKey) {
+		t.Fatalf("precondition: duplicateOf link already tombstoned")
+	}
+
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-dup-tgt-urgent", v)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, incumbentKey, "DupTgtShred", processor.OutcomeAccepted)
+
+	if !readIsDeleted(t, ctx, conn, dupLinkKey) {
+		t.Fatalf("duplicateOf link not tombstoned after shredding its target (incumbent) side")
+	}
+	// The newer side is untouched — still a live identity, just no longer
+	// linked to the now-shredded incumbent.
+	if readIsDeleted(t, ctx, conn, newcomerKey) {
+		t.Fatalf("shredding the incumbent must not tombstone the newer identity's own root vertex")
+	}
+}
+
+// TestShredIdentityKey_Reshred_Idempotent proves a second ShredIdentityKey
+// on an already-shredded identity still succeeds (the erasure enumerations
+// find nothing the second time — no fanout-cap or ordering fault).
+func TestShredIdentityKey_Reshred_Idempotent(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-reshred", v)
+
+	identityKey := createIdentity(t, ctx, conn, cp, cons, "Reshred")
+
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-reshred-urgent", v)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "ReshredOne", processor.OutcomeAccepted)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, identityKey, "ReshredTwo", processor.OutcomeAccepted)
+
+	if !readIsDeleted(t, ctx, conn, pbContactIndexKey("name", "shred target")) {
+		t.Fatalf("name index not tombstoned after re-shred")
+	}
+}
+
+// TestShredIdentityKey_PostShredCreate_FreshIndexNoLinkToShredded is the
+// Gate-3-style vector design §3.5/§7 names explicitly: after Fire 3 erases a
+// shredded identity's owned index, a LATER create for the same contact must
+// revive a fresh, live index pointed at the new identity — not silently skip
+// indexing (the tombstone would otherwise look "present" to the create
+// script's not-in-state gate) — and must NOT flag a duplicateOf against the
+// shredded identity.
+func TestShredIdentityKey_PostShredCreate_FreshIndexNoLinkToShredded(t *testing.T) {
+	ctx, conn := setupShredEnv(t)
+	v := testutil.TestVault(t)
+	cp, cons := newDefaultPipeline(t, ctx, conn, "shred-postcreate", v)
+
+	claimA := strings.Repeat("5", 64)
+	claimC := strings.Repeat("6", 64)
+	ownerKey, _ := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Reuse Owner", "reuse@example.com", claimA, "ReuseOwner", nil)
+
+	urgentCP, urgentCons := newUrgentPipeline(t, ctx, conn, "shred-postcreate-urgent", v)
+	submitShred(t, ctx, conn, urgentCP, urgentCons, ownerKey, "ReuseOwnerShred", processor.OutcomeAccepted)
+
+	emailIdxKey := pbContactIndexKey("email", "reuse@example.com")
+	if !readIsDeleted(t, ctx, conn, emailIdxKey) {
+		t.Fatalf("precondition: owner's email index not tombstoned by shred")
+	}
+
+	newKey, newID := createUnclaimedWithProbe(t, ctx, conn, cp, cons,
+		"Reuse New", "reuse@example.com", claimC, "ReuseNew", []string{emailIdxKey})
+
+	if readIsDeleted(t, ctx, conn, emailIdxKey) {
+		t.Fatalf("email index still tombstoned after a fresh create for the same contact — the revive did not run")
+	}
+	postDoc := readDoc(t, ctx, conn, emailIdxKey)
+	postData, _ := postDoc["data"].(map[string]any)
+	if postData["identityKey"] != newKey {
+		t.Fatalf("email index owner = %v, want the new identity %s (revived, not left pointing at the shredded owner)", postData["identityKey"], newKey)
+	}
+
+	newLinkKey := pbIndexesLinkKey(emailIdxKey, newID)
+	if readIsDeleted(t, ctx, conn, newLinkKey) {
+		t.Fatalf("new identity's indexes link not live")
+	}
+
+	if kvExists(t, ctx, conn, pbDuplicateOfLinkKey(newID, ownerKey)) {
+		t.Fatalf("a duplicateOf link was created against the shredded owner — the revived index must not be treated as a live duplicate")
+	}
 }

@@ -291,24 +291,27 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 // sends one in the raw JSON (unknown fields are dropped by json.Unmarshal);
 // the verified actor is the ONLY source of env.Actor (design §3.1, A2).
 type operationRequest struct {
-	RequestID     string                   `json:"requestId,omitempty"`
-	Lane          string                   `json:"lane,omitempty"`
-	OperationType string                   `json:"operationType"`
-	Class         string                   `json:"class,omitempty"`
-	Payload       json.RawMessage          `json:"payload,omitempty"`
-	Reads         []string                 `json:"reads,omitempty"`
-	OptionalReads []string                 `json:"optionalReads,omitempty"`
-	AuthContext   *processor.AuthContext   `json:"authContext,omitempty"`
-	ContextHint   *operationRequestContext `json:"contextHint,omitempty"`
+	RequestID     string                      `json:"requestId,omitempty"`
+	Lane          string                      `json:"lane,omitempty"`
+	OperationType string                      `json:"operationType"`
+	Class         string                      `json:"class,omitempty"`
+	Payload       json.RawMessage             `json:"payload,omitempty"`
+	Reads         []string                    `json:"reads,omitempty"`
+	OptionalReads []string                    `json:"optionalReads,omitempty"`
+	Enumerations  []processor.EnumerationHint `json:"enumerations,omitempty"`
+	AuthContext   *processor.AuthContext      `json:"authContext,omitempty"`
+	ContextHint   *operationRequestContext    `json:"contextHint,omitempty"`
 }
 
 // operationRequestContext lets a client declare Contract #2 §2.5 reads
-// either as a bare `reads`/`optionalReads` array or nested under
-// `contextHint.{reads,optionalReads}` — both forms are accepted so a caller
-// mirroring the OperationEnvelope wire shape works unmodified.
+// either as a bare `reads`/`optionalReads`/`enumerations` array or nested
+// under `contextHint.{reads,optionalReads,enumerations}` — both forms are
+// accepted so a caller mirroring the OperationEnvelope wire shape works
+// unmodified.
 type operationRequestContext struct {
-	Reads         []string `json:"reads,omitempty"`
-	OptionalReads []string `json:"optionalReads,omitempty"`
+	Reads         []string                    `json:"reads,omitempty"`
+	OptionalReads []string                    `json:"optionalReads,omitempty"`
+	Enumerations  []processor.EnumerationHint `json:"enumerations,omitempty"`
 }
 
 // errorResponse is the JSON body of a non-2xx reply.
@@ -562,8 +565,12 @@ func buildEnvelope(req operationRequest, actorID string, now time.Time) (*proces
 	}
 	reads := cleanKeys(req.Reads, contextHintReads(req))
 	optionalReads := cleanKeys(req.OptionalReads, contextHintOptionalReads(req))
-	if len(reads) > 0 || len(optionalReads) > 0 {
-		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads}
+	enumerations := req.Enumerations
+	if len(enumerations) == 0 {
+		enumerations = contextHintEnumerations(req)
+	}
+	if len(reads) > 0 || len(optionalReads) > 0 || len(enumerations) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: enumerations}
 	}
 	return env, nil
 }
@@ -580,6 +587,13 @@ func contextHintOptionalReads(req operationRequest) []string {
 		return nil
 	}
 	return req.ContextHint.OptionalReads
+}
+
+func contextHintEnumerations(req operationRequest) []processor.EnumerationHint {
+	if req.ContextHint == nil {
+		return nil
+	}
+	return req.ContextHint.Enumerations
 }
 
 // cleanKeys accepts either wire form (bare array or the nested contextHint

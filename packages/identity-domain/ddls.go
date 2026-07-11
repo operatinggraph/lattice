@@ -434,6 +434,22 @@ const identityDDLScriptTemplate = `
 def make_update(key, data):
     return {"op": "update", "key": key, "document": {"isDeleted": False, "data": data}}
 
+def index_vertex_mutation(index_key, contact_type, identity_key, existing):
+    # dedup-over-encrypted-pii-design.md §3.5: a shredded identity's owned
+    # identityindex vertices are tombstoned in-commit, so a later create for
+    # the SAME contact must be able to re-derive a live index -- a blind
+    # "create" collides with the tombstone's own write history (CreateOnly
+    # asserts revision 0, which a previously-written key can never satisfy
+    # again). Mirrors orchestration-base's make_vtx_revive_occ /
+    # loftspace-domain's make_link_revive_occ precedent: a present-but-
+    # tombstoned index revives via a CAS-guarded update; a truly absent one
+    # still gets a plain create.
+    doc = {"class": "identityindex", "isDeleted": False,
+           "data": {"contactType": contact_type, "identityKey": identity_key}}
+    if existing != None:
+        return {"op": "update", "key": index_key, "document": doc, "expectedRevision": existing.revision}
+    return {"op": "create", "key": index_key, "document": doc}
+
 def read_state(state, identity_key):
     aspect_key = identity_key + ".state"
     if aspect_key in state:
@@ -575,10 +591,8 @@ def execute(state, op):
             mutations.append({"op": "create", "key": identity_key + ".email",
                 "document": {"class": "email", "vertexKey": identity_key, "localName": "email",
                              "isDeleted": False, "data": {"value": email}}})
-            if email_index_key not in state:
-                mutations.append({"op": "create", "key": email_index_key,
-                    "document": {"class": "identityindex", "isDeleted": False,
-                                 "data": {"contactType": "email", "identityKey": identity_key}}})
+            if email_hit == None or (hasattr(email_hit, "isDeleted") and email_hit.isDeleted):
+                mutations.append(index_vertex_mutation(email_index_key, "email", identity_key, email_hit))
                 mutations.append({"op": "create", "key": "lnk." + email_index_key[len("vtx."):] + ".indexes.identity." + identity_id,
                     "document": {"class": "indexes", "isDeleted": False,
                                  "sourceVertex": email_index_key, "targetVertex": identity_key,
@@ -587,18 +601,14 @@ def execute(state, op):
             mutations.append({"op": "create", "key": identity_key + ".phone",
                 "document": {"class": "phone", "vertexKey": identity_key, "localName": "phone",
                              "isDeleted": False, "data": {"value": phone}}})
-            if phone_index_key not in state:
-                mutations.append({"op": "create", "key": phone_index_key,
-                    "document": {"class": "identityindex", "isDeleted": False,
-                                 "data": {"contactType": "phone", "identityKey": identity_key}}})
+            if phone_hit == None or (hasattr(phone_hit, "isDeleted") and phone_hit.isDeleted):
+                mutations.append(index_vertex_mutation(phone_index_key, "phone", identity_key, phone_hit))
                 mutations.append({"op": "create", "key": "lnk." + phone_index_key[len("vtx."):] + ".indexes.identity." + identity_id,
                     "document": {"class": "indexes", "isDeleted": False,
                                  "sourceVertex": phone_index_key, "targetVertex": identity_key,
                                  "localName": "indexes", "data": {}}})
-        if name_index_key not in state:
-            mutations.append({"op": "create", "key": name_index_key,
-                "document": {"class": "identityindex", "isDeleted": False,
-                             "data": {"contactType": "name", "identityKey": identity_key}}})
+        if name_hit == None or (hasattr(name_hit, "isDeleted") and name_hit.isDeleted):
+            mutations.append(index_vertex_mutation(name_index_key, "name", identity_key, name_hit))
             mutations.append({"op": "create", "key": "lnk." + name_index_key[len("vtx."):] + ".indexes.identity." + identity_id,
                 "document": {"class": "indexes", "isDeleted": False,
                              "sourceVertex": name_index_key, "targetVertex": identity_key,

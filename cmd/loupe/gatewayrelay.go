@@ -36,13 +36,14 @@ var gatewayHTTPClient = &http.Client{}
 // field: the Gateway stamps the Bearer token's verified subject, ignoring
 // anything a caller might send.
 type gatewayOperationRequest struct {
-	RequestID     string          `json:"requestId,omitempty"`
-	Lane          string          `json:"lane,omitempty"`
-	OperationType string          `json:"operationType"`
-	Class         string          `json:"class,omitempty"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	Reads         []string        `json:"reads,omitempty"`
-	OptionalReads []string        `json:"optionalReads,omitempty"`
+	RequestID     string                      `json:"requestId,omitempty"`
+	Lane          string                      `json:"lane,omitempty"`
+	OperationType string                      `json:"operationType"`
+	Class         string                      `json:"class,omitempty"`
+	Payload       json.RawMessage             `json:"payload,omitempty"`
+	Reads         []string                    `json:"reads,omitempty"`
+	OptionalReads []string                    `json:"optionalReads,omitempty"`
+	Enumerations  []processor.EnumerationHint `json:"enumerations,omitempty"`
 }
 
 // gatewayErrorBody is the JSON shape the Gateway answers with for a failure
