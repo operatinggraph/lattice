@@ -173,7 +173,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · next: mine remaining flake history (2 more unrelated unit-job failures, 2026-07-07/09 — one looks like transient runner infra, not a fixable timeout) · unit job holds ~3.5min, no further win found this fire (see Done log) |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · unit job 5m20→3m25 this fire (Done log) · next: re-baseline the new long pole before picking a lever |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ Fires 1–2 shipped · [design §12](../../implementation-artifacts/script-read-posture-design.md) · Fire 3 (guards) deferred to its first consumer; debt sweep + warn→block flip = its own row below |
 
@@ -192,6 +192,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-11 · `f4eb556` · [CI] natsperm deniedTimeout 2s→500ms (unit job's new long pole after this morning's matrix-hygiene Fire 1 added 2 registry-driven tests) — unit job 5m20→3m25, CI green, no new flakiness (stress-ran ×10)
 - 2026-07-11 · `3a2aa15` · [identity-hygiene] dedup-over-encrypted-pii Fire 2 — MergeIdentity duplicateOf both-direction tombstone + indexes-driven repoint + edge trust-gate real-class fix; CI green (incl. verify-package-identity-hygiene)
 - 2026-07-11 · `51a3f2e` · [identity-hygiene] dedup-over-encrypted-pii Fire 1 — duplicateOf/indexes links + dispatcher sweep fixes live RevisionConflict; PII-free lens; DiffRetraction on nats-kv; CI green
 - 2026-07-11 · `4258180` · [natsperm] natsperm-matrix-hygiene Fire 1 CLOSED — platform-bucket registry derives provisioning/guards/matrix; matrix hoisted to internal/natsperm; CI green
