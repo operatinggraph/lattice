@@ -264,26 +264,43 @@ same out-of-band handoff discipline as the claim link (§11.1a of the claim-flow
 
 ### 3.4 Gap 3 — the provision-time identityindex probe
 
-`ProvisionConsumerIdentity` gains an optional payload field `contactIndexKeys:
-["vtx.identityindex.<hash>", …]`, which the **Gateway computes exclusively from *verified* token
-claims** (`email` with `email_verified == true`; phone analog) via `substrate.SHA256NanoID("email:" +
-email)` — never from client-supplied input — and declares as **optionalReads**. The script answers
-with one boolean: `existingIdentityHint = true` iff any probed index vertex exists, is live, and its
-`identityKey != target_actor_key` — **on both branches**, including the already-provisioned no-op
-branch (today that branch returns no response body, `ddls.go:557–563`; it gains the hint field —
-finding A5: a hint only computable at the literal first touch is unreachable for any returning
-session). The hint is therefore **on-demand, not standing**: `GET /v1/actor?probe=1` (§3.5) always
-submits the idempotent op (bypassing the Gateway's `provisioned` fast-path set for that call) with
-the probe keys, and relays the reply's hint — the FE calls it once when rendering its
-account/linking screen. The response schema (closed, per-op — package work, not a contract change)
-gains the optional field; the FE routes a hit: *"a record matching your verified email may exist —
-have a claim code? or sign in with your original provider and link this one,"* and suppresses it
-once `resolvedActorId != actorId` (already linked/claimed).
+**Build-time correction (Fire 3, 2026-07-11):** the mechanism below as originally drafted routed the
+hint through `ProvisionConsumerIdentity`'s op reply, on the premise that "the response schema (closed,
+per-op) gains the optional field" was package work, not a contract change. That premise is **false**:
+Contract #2 §2.7 closes the script-return `response` schema to exactly `primaryKey` **at the Processor
+level**, platform-wide, not per-op — `internal/processor/starlark_runner.go`'s `parseResponse` fails
+closed (`ScriptFailed`/`InvalidReturnShape`) on any other key, and `primaryKey` itself must be a
+committed mutation key (§2.7's own text: "This makes the synchronous reply incapable of carrying
+arbitrary or sensitive data"). The already-provisioned no-op branch also commits nothing, so it
+structurally cannot even smuggle the hint via `primaryKey`. Widening §2.7 to carry a read-derived
+boolean would reopen exactly the class of leak Story 1.5.7 froze it to prevent — not a narrow,
+uncontroversial edit. Built instead, with **no contract change**: a small P5-clean lens
+(`identityIndexHint`, `packages/identity-domain/lenses.go`) projects live `identityindex` vertices
+into their own NATS-KV bucket (`identity-index-hint`); `GET /v1/actor?probe=1` reads it **directly**
+(`internal/gateway/identityindexhint`, mirroring `credentialbinding`'s resolver pattern) — the same P5
+read seam every lens consumer already uses, never through an operation reply. `ProvisionConsumerIdentity`
+is untouched by this fire (no `contactIndexKeys` payload field, no response-schema change); the probe is
+fully decoupled from provisioning. The paragraph below is superseded where it describes routing through
+the op; retained for the intent/outcome, which is unchanged.
 
-- **P2/P5 clean:** the Core-KV read is Processor-side via declared optionalReads (the ratified
-  reflex); the Gateway only computes a hash. **No PII persists:** the op payload carries the derived
-  index *keys* — the same hashes already stored as identityindex vertex keys; no new exposure class
-  in `core-operations`.
+~~`ProvisionConsumerIdentity` gains an optional payload field `contactIndexKeys:
+["vtx.identityindex.<hash>", …]`~~, which the **Gateway computes exclusively from *verified* token
+claims** (`email` with `email_verified == true`; phone TBD, not built this fire) via
+`substrate.SHA256NanoID("email:" + normalizedEmail)` — never from client-supplied input. The lens read
+answers with one boolean: `existingIdentityHint = true` iff any probed index vertex exists and its
+`identityKey != actor's own ActorID` (§4's original "target_actor_key" — the raw, pre-resolution actor).
+The hint is **on-demand, not standing**: `GET /v1/actor?probe=1` (§3.5) additionally performs the lens
+read (no op re-submission, so the `provisioned` fast-path set is irrelevant to it) — the FE calls it
+once when rendering its account/linking screen. The FE routes a hit: *"a record matching your verified
+email may exist — have a claim code? or sign in with your original provider and link this one,"* and
+suppresses it once `resolvedActorId != actorId` (already linked/claimed) — an FE-side concern, not yet
+built (no FE consumer this fire; see §9 Fire 3 scope).
+
+- **P2/P5 clean:** the Gateway never reads Core KV — the identityindex existence check is a Refractor
+  lens projection (`identityIndexHint`), and the Gateway reads that lens's NATS-KV read-model bucket
+  directly, the same P5 seam every lens consumer uses; it computes only the lookup hash. **No PII
+  persists or transits:** the lookup key is the same one-way hash already used as the identityindex
+  vertex key; nothing new enters `core-operations` (the probe submits no operation at all).
 - **Enumeration posture:** the boolean is an existence oracle **scoped to emails the caller provably
   controls** (verified claim of their own token) — the same answer front-desk staff would give them;
   arbitrary-email probing is structurally impossible since the Gateway never hashes client input.
@@ -493,10 +510,13 @@ verify (both packages' DDL/permissions change).
    **Sequencing note:** the #11 derivation fire shipped first (`9812231`, 2026-07-10) without
    whoami — Fire 2 builds it; it is the missing client-side enabler for every self-scoped op under
    the now-live opaque derivation (§3.5).
-3. **Fire 3 (S) — the provision-time probe.** `ProvisionConsumerIdentity` payload/response — **both
-   branches return the hint**, incl. the no-op branch (§3.4) — + Gateway verified-claim hashing +
-   whoami `?probe=1` (forces the op past the provisioned fast-path set) + probe tests/e2e.
-   Sequenced after Fire 2 (the hint's consumer is the link flow's FE routing).
+3. **Fire 3 (S) — SHIPPED (2026-07-11).** The provision-time probe, built as a P5-clean lens read
+   instead of an op-reply field (§3.4 build-note — Contract #2 §2.7's closed response schema forbids
+   the originally-drafted shape; no contract change was needed for the corrected shape). Backend only:
+   `packages/identity-domain` (`identityIndexHint` lens), `internal/gateway/identityindexhint`
+   (resolver) + `internal/gateway/auth` (verified email/email_verified claim capture) +
+   `internal/gateway` whoami `?probe=1` + tests. `ProvisionConsumerIdentity` untouched. No FE consumer
+   yet (the link flow's account/linking screen, §3.4 — Vertical PO's filed request, verticals board).
 4. **Fire 4 (S) — `UnlinkCredential` + the bucket-delete fold** (§8: last-credential lockout guard,
    index-vertex tombstone, array removal, `identity.unbound` → materializer `KVDelete`) + tests
    (happy path incl. the bucket delete; last-credential refusal; unlink-then-relink round-trip;
