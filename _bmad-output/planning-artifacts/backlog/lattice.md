@@ -48,7 +48,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · install-time lens-schema check impossible as scoped (2026-07-10); runtime candidate: `staleMark` consults the gap's action class from the target spec — Weaver holds both at runtime |
-| **[Bridge/Processor] Op-status read surface — `lattice.op.status` responder** | Processor-hosted op-status RPC (vault.decrypt pattern); bridge probe migrates (Fire 1); Fires 2–4: Gateway status endpoint, Loom probe migration (+§10.6 reconciliation), CLI — the gate for matrix-wide read tightening. Interim probe-off mitigation applied. | ★★★ | S | ✅ ratified · [design](../../implementation-artifacts/op-status-read-surface-design.md) |
+| **[Bridge/Processor] Op-status read surface — `lattice.op.status` responder** | Processor-hosted op-status RPC (vault.decrypt pattern); Fires 2–4: Gateway status endpoint, Loom probe migration (+§10.6 reconciliation), CLI — the gate for matrix-wide read tightening. | ★★★ | S | 🏗️ building · [design](../../implementation-artifacts/op-status-read-surface-design.md) · next: Fire 2 Gateway status endpoint |
 
 ### Survey log (round-robin rotation)
 
@@ -190,6 +190,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-12 · `f12f4ce` · [Processor,Bridge] op-status-read-surface Fire 1 — lattice.op.status responder replaces the bridge's direct Core-KV skip-probe read; CI green
 - 2026-07-12 · `bd3f4b7` · [Edge,Gateway] Edge Lattice EDGE.3 CLOSED — agent.Submitter + GatewaySubmitter replace direct core-operations submit; Gate-3 e2e proves valid-submits/revoked-denies vs a real gateway.Server; CI green
 - 2026-07-12 · `eec08a6` · [identity-domain,Gateway] multi-credential-identity-linking Fire 4 CLOSED — UnlinkCredential + credentialindex revive-safety + materializer bucket-delete fold; Fires 1-4 all shipped; CI green
 - 2026-07-12 · `3e345d1` · [Edge,scripts] per-identity-nats-subscribe-acl Fire 3 CLOSED — live-stack revocation e2e proves vector 4 against real prod wiring; EDGE.3 gate flipped build-ready; CI green

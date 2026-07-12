@@ -1,13 +1,18 @@
 # Op-status read surface — a sanctioned way to ask "did my operation land?"
 
-**Status: ✅ RATIFIED (Andrew, 2026-07-11)** — Fire 1 ratified as designed; the Fires 2–4 sequencing
-accepted; the interim mitigation approved and APPLIED the same session (bridge restarted with
-`BRIDGE_SKIP_ON_REDELIVERY=false` — the env lever added in cmd/bridge — all 6 stuck events drained,
-result ops committed, bridge health clean; re-enable the probe when Fire 1 ships). Designer: Winston
-(main session, 2026-07-11) · Origin: live incident (bridge skip-on-redelivery probe broken by the
-same-day read-tightening) + Andrew's framing: read posture was meant to stop components reading
-*business data* from Core KV; checking the status of an op you submitted is a legitimate generic need
-everyone has, and today the only way to do it is a Core KV `Get`.
+**Status: 🏗️ Fire 1 SHIPPED (`f12f4ce`, 2026-07-12)** — the `lattice.op.status` responder
+(`internal/opstatus`) + the bridge's skip-on-redelivery probe migration are live; the interim
+`BRIDGE_SKIP_ON_REDELIVERY=false` mitigation is REVERTED on the shared dev stack (bridge/processor
+restarted with the new binaries, `deploy/nats-server.conf` regenerated + `lattice-nats` restarted to
+pick up the bridge's `lattice.op.status` grant). Fires 2–4 (Gateway status endpoint, Loom probe
+migration, CLI) remain open. Ratified (Andrew, 2026-07-11): Fire 1 as designed; the Fires 2–4
+sequencing accepted; the interim mitigation approved and APPLIED the same session (bridge restarted
+with `BRIDGE_SKIP_ON_REDELIVERY=false` — the env lever added in cmd/bridge — all 6 stuck events
+drained, result ops committed, bridge health clean). Designer: Winston (main session, 2026-07-11) ·
+Origin: live incident (bridge skip-on-redelivery probe broken by the same-day read-tightening) +
+Andrew's framing: read posture was meant to stop components reading *business data* from Core KV;
+checking the status of an op you submitted is a legitimate generic need everyone has, and today the
+only way to do it is a Core KV `Get`.
 
 ## Ratification block (decided 2026-07-11; kept for the build fire's context)
 
