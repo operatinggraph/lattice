@@ -21,7 +21,7 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
 
 ## Status
 
-**EDGE.1 + EDGE.2 done.** Shipped so far:
+**EDGE.1 + EDGE.2 + EDGE.3 done.** Shipped so far:
 
 - **`internal/edge/store`** — the Local VAL Store (design §3.1): an embedded, transactional local KV
   (`bbolt`) keyed by the exact Contract #1 key strings (`vtx.<type>.<id>`, `vtx.<type>.<id>.<localName>`,
@@ -56,33 +56,39 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
   keys incident on a hub, merging pending creations/deletions.
 - **`internal/edge/agent`** (design §3.5) — the durable intent uploader + reconcile-by-revision:
   `Enqueue` durably queues an operation envelope (called after `overlay.Apply`); `Drain` submits every
-  queued intent in FIFO order to `core-operations` (trusted posture, direct submit), stopping at the
-  first transport failure so a later `Drain` resumes. A `RevisionConflict` reply — the only hard case,
-  the cloud state moved under the offline edit — triggers a full re-hydrate (no anchor-scoped hydrate RPC
-  ships yet, so `sync.Manager.Rehydrate` reuses the existing `personal.hydrate` call) before discarding
-  the stale overlay; any other rejection discards without re-hydrating. `GC` sweeps pending overlays a
-  `Read` never revisited.
+  queued intent in FIFO order via a pluggable `Submitter`, stopping at the first transport failure so a
+  later `Drain` resumes. **`GatewaySubmitter`** (EDGE.3, `submit_gateway.go`) POSTs to the Gateway's
+  `/v1/operations` presenting `EDGE_TOKEN` as the caller's own Bearer credential — the Gateway
+  re-verifies the token and stamps the verified subject as `env.Actor` itself, so a denied/revoked token
+  is refused before any envelope ever reaches `core-operations`; this is `cmd/edge`'s production
+  Submitter. **`NATSSubmitter`** (`submit_nats.go`) is the EDGE.1/2 trusted-posture direct-to-
+  `core-operations` submitter, kept for tests and any fully-trusted deployment run without a Gateway. A
+  `RevisionConflict` reply — the only hard case, the cloud state moved under the offline edit — triggers
+  a full re-hydrate (no anchor-scoped hydrate RPC ships yet, so `sync.Manager.Rehydrate` reuses the
+  existing `personal.hydrate` call) before discarding the stale overlay; any other rejection discards
+  without re-hydrating. `GC` sweeps pending overlays a `Read` never revisited.
 - **`cmd/edge`** — the binary wiring `store` + `sync` + `overlay` + `agent` together (mirrors `cmd/loupe`'s
-  flat layout): `EDGE_STORE_PATH`/`NATS_URL`/`EDGE_IDENTITY_ID`/`EDGE_DEVICE_ID`/`EDGE_TOKEN` env config,
-  connects to NATS via the auth-callout boundary (`substrate.ConnectOpts.Token` + a
-  `_INBOX.edge.<id>`-scoped `InboxPrefix`, per-identity-nats-subscribe-acl-design.md §3.3), runs the Sync
-  Manager, and drains the agent's intent queue + sweeps overlay GC on a fixed interval
-  (submit-on-reconnect rides the NATS client's own auto-reconnect) until SIGINT/SIGTERM. `EDGE_TOKEN` is
-  the sole credential — `EDGE_ACTOR_KEY` self-assertion has retired.
+  flat layout): `EDGE_STORE_PATH`/`NATS_URL`/`EDGE_GATEWAY_URL`/`EDGE_IDENTITY_ID`/`EDGE_DEVICE_ID`/
+  `EDGE_TOKEN` env config, connects to NATS via the auth-callout boundary (`substrate.ConnectOpts.Token`
+  + a `_INBOX.edge.<id>`-scoped `InboxPrefix`, per-identity-nats-subscribe-acl-design.md §3.3), runs the
+  Sync Manager, and drains the agent's intent queue (via `GatewaySubmitter`) + sweeps overlay GC on a
+  fixed interval (submit-on-reconnect rides the NATS client's own auto-reconnect) until SIGINT/SIGTERM.
+  `EDGE_TOKEN` is the sole credential, authenticating both the NATS connection and every Gateway submit —
+  `EDGE_ACTOR_KEY` self-assertion has retired.
 
 **Not yet built** (see the design doc §7 for the full fire-by-fire plan):
 
-- **EDGE.3** — untrusted multi-identity: Gateway-verified JWT identity (Contract #11), Personal Lens
-  PL.3 security-filtered SYNC stream, per-identity subscribe-ACL. Gated on the **per-identity NATS
-  subscribe-ACL** (its own lattice-lane row, needs-design) — the gate's other two legs (D1/PL.3, the
-  Gateway) shipped; the NATS-account-auth item's v1 explicitly declined subscribe lockdown, so the ACL
-  does not arrive from there.
-- **`internal/edge/vault`** (EDGE.4) — the transient session-key Vault Proxy for sensitive aspects.
+- **`internal/edge/vault`** (EDGE.4) — the transient session-key Vault Proxy for sensitive aspects, gated
+  on Vault Phase A + Personal Lens PL.5.
+- **EDGE.5** — the browser/mobile node, gated on the Gateway WS/push bridge.
 
-**Trusted single identity only, no security filter** — the same carve-out Loupe + Personal Lens PL.1/
-PL.2 use. Untrusted multi-identity exposure is EDGE.3, gated on the **per-identity NATS subscribe-ACL**
-(the D1/PL.3 + Gateway legs of its original gate are closed — see the design doc §7 checkpoint); Edge
-must not accept an untrusted connection before that fire lands.
+**EDGE.3 (untrusted multi-identity) is live**: the node authenticates via a Gateway-verified JWT
+(Contract #11), reads the Personal Lens PL.3 security-filtered SYNC stream, connects under the
+per-identity NATS subscribe-ACL, and submits every intent through the Gateway (not directly to
+`core-operations`) — `internal/gateway`'s `TestEdgeGate3_*` tests prove a valid token submits and a
+revoked token is denied before ever reaching the Processor. Sensitive-aspect confidentiality is still
+EDGE.4; until that lands, a sensitive delta is unreadable ciphertext on the wire and in the local store,
+never a Gate-3 exposure.
 
 ## Grounding
 

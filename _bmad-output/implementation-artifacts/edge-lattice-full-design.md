@@ -535,14 +535,20 @@ feature*.
 > GC-sweeping on a fixed interval. Unit tests (embedded NATS + a fake Processor responder for `agent`)
 > cover accept/duplicate/conflict/other-rejection/transport-failure/malformed-intent/FIFO-order.
 > `docs/components/edge.md` updated in the same commit.
-> **EDGE.3 is now build-ready (2026-07-12).** The one open gate leg —
-> [per-identity NATS subscribe-ACL](per-identity-nats-subscribe-acl-design.md) — is ✅ CLOSED, all 3
-> fires shipped: the NATS auth-callout responder (Fire 1), `cmd/edge`'s `EDGE_TOKEN` connect + the
-> Refractor control-RPC identity binding (Fire 2), and the revocation e2e proof against the live
-> production wiring + this gate flip (Fire 3, `scripts/verify-edge-revocation-e2e.go`). D1/PL.3
-> (security filter) and the Gateway (write translator + Contract #11 token profile) were already
-> shipped. **Next: build EDGE.3** — wire `cmd/edge` through the untrusted posture (Gateway submit,
-> Personal Lens PL.3 fan-out, the now-closed subscribe-ACL) + the Gate-3 Edge read-bypass suite (§5).
+> **EDGE.3 CLOSED (2026-07-12).** `internal/edge/agent` now depends on a pluggable `Submitter`
+> (agent.go): `GatewaySubmitter` (submit_gateway.go) POSTs to the Gateway's `/v1/operations` with
+> `EDGE_TOKEN` as Bearer, mirroring `cmd/loupe/gatewayrelay.go`'s wire shape — the Gateway re-verifies
+> the token and stamps `env.Actor` itself, never trusting a client-asserted identity; `NATSSubmitter`
+> (submit_nats.go, the extracted EDGE.1/2 direct-submit path) remains for tests / fully-trusted
+> deployments. `cmd/edge` now wires `GatewaySubmitter` as its production Submitter (`EDGE_GATEWAY_URL`,
+> default `http://localhost:8080`) — the last of the three untrusted-posture legs (Gateway-verified JWT,
+> PL.3 fan-out, subscribe-ACL) is live. The Gate-3 Edge read-bypass suite (§5) proving the write side —
+> `internal/gateway/edge_gate3_e2e_test.go`'s `TestEdgeGate3_ValidTokenSubmitsThroughGateway` /
+> `TestEdgeGate3_RevokedTokenNeverSubmits` — wires a real `gateway.Server` + `auth.Authenticator` (not a
+> fake HTTP stub) in front of a real `agent.Agent`, proving a valid token's envelope reaches submit with
+> the Gateway-stamped actor and a revoked token is denied before ever reaching it, leaving the intent
+> queued rather than discarded. `docs/components/edge.md` updated in the same commit. **Next: EDGE.4**
+> (Vault Proxy, gated on Vault Phase A + PL.5) or EDGE.5 (browser node, gated on the Gateway WS bridge).
 
 Ordered so the security-inert local-first loop lands first (co-built with its cloud producer), the security
 turn-on is its own gated fire, and confidentiality + the real device extend it. **Dependency gates explicit.**
@@ -569,8 +575,9 @@ turn-on is its own gated fire, and confidentiality + the real device extend it. 
    **security-filtered** by Personal Lens PL.3 (`readableAnchors`, ✅ shipped); the connection is scoped by
    the **per-identity subscribe-ACL** (✅ CLOSED, all 3 fires — [design](per-identity-nats-subscribe-acl-design.md)).
    Add the Gate-3 Edge read-bypass suite (§5). *Green:* A never sees B's slice; no-grant ⇒ empty; revoked
-   JWT ⇒ no submit/subscribe. **📋 Build-ready (2026-07-12) — every gate leg (D1/PL.3, Gateway, subscribe-ACL)
-   is shipped.** *Depends on: EDGE.2.*
+   JWT ⇒ no submit/subscribe. **✅ CLOSED (2026-07-12)** — `GatewaySubmitter` + the write-side Gate-3 suite
+   shipped (see the checkpoint above); the read-side vectors (A/B isolation, no-grant⇒empty) were already
+   proved by PL.3's own e2e suite, which the same live subscribe-ACL now scopes. *Depends on: EDGE.2.*
 
 4. **EDGE.4 — the Vault Proxy (sensitive aspects).** `internal/edge/vault` — request a transient session key,
    decrypt ciphertext deltas **in-memory** (no persisted plaintext), TTL-discard; the Gate-3 shred vector. *Green:*
@@ -590,11 +597,10 @@ turn-on is its own gated fire, and confidentiality + the real device extend it. 
    Steward doesn't re-discover it, and flagged to **not build until the overlay node is proven and Andrew
    ratifies the P2-relaxation.** *Gated on: a concrete ZK/disconnected-authority need + Andrew.*
 
-**Build-now vs. gated.** **EDGE.1 + EDGE.2 are buildable now** (co-built with Personal Lens PL.1/PL.2, under the
-trusted posture) — the complete offline-first loop, security-inert, independently demoable, and the consumer
-that un-gates Personal Lens. **EDGE.3 is now build-ready** (the per-identity subscribe-ACL row closed
-2026-07-12; D1/PL.3 + Gateway legs closed earlier); **EDGE.4 on Vault Phase A + PL.5 (both since shipped)
-behind EDGE.3; EDGE.5 on the Gateway WS bridge; EDGE.6 is design-only.** This mirrors the ratify-now /
+**Build-now vs. gated.** **EDGE.1 + EDGE.2 + EDGE.3 are done** — the complete offline-first loop
+(security-inert, trusted posture) plus the untrusted multi-identity security turn-on (Gateway-verified
+submit + PL.3 fan-out + subscribe-ACL). **EDGE.4 on Vault Phase A + PL.5 (both since shipped) behind
+EDGE.3; EDGE.5 on the Gateway WS bridge; EDGE.6 is design-only.** This mirrors the ratify-now /
 build-as-foundations-land posture already accepted for Multi-cell, HA-NATS, and Personal Lens itself.
 
 ---
@@ -606,8 +612,15 @@ before EDGE.1. Lenses: Winston (architect), Mary (root-cause), Amelia (impl), Qu
 Barry (lean). **8 findings folded in** (F1 speculation-DAG, F2 inert predicted-events, F3 the predict-iff-reads⊆mirror
 gate, F4 enumeration-not-predictable, F5 security-holds/accuracy-degrades, F6 ciphertext-prediction-is-sensitive,
 F7 conflict-re-present-as-a-set, F8 the cross-cutting "scripts-read-Core-KV smell" flagged for Andrew) — see the
-*Ratified + party-mode findings* block. **A re-review is still warranted before EDGE.3** (the security + Gateway
-turn-on). This is a cross-cutting, security-plane capstone composing onto four upstream designs. Highest-leverage things to attack: **(a)** the P2 boundary — is there *any* path,
+*Ratified + party-mode findings* block. **EDGE.3 shipped 2026-07-12 (Steward fire) with targeted tests, not a
+full `bmad-party-mode` re-review**: `TestEdgeGate3_ValidTokenSubmitsThroughGateway` /
+`TestEdgeGate3_RevokedTokenNeverSubmits` (`internal/gateway/edge_gate3_e2e_test.go`) prove points **(a)**-partial
+(no local commit — every accepted path still routes through the real Gateway+Processor reply contract) and
+**(c)** (a revoked/invalid token is denied before any envelope reaches submit) against a real
+`gateway.Server`+`auth.Authenticator`, plus the full `go test ./...` suite green. **The full multi-persona
+adversarial pass this note calls for — (b) reconcile-by-revision soundness, (d) the transient-key path, (e) the
+PL.1 co-build seam — is still open**; flag for a dedicated review fire before EDGE.4 (which composes the
+transient-key path directly onto this boundary). Highest-leverage things to attack: **(a)** the P2 boundary — is there *any* path,
 including the optimistic overlay + the intent queue + a conflict re-audit, where the Edge becomes an
 authoritative writer or a local commit escapes the cloud Processor? (the whole FORK-A rationale rests on "no");
 **(b)** reconcile-by-revision soundness — can a stale/reordered/duplicate delta or an OCC-conflicting offline

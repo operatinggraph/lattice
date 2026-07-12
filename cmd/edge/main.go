@@ -1,32 +1,34 @@
 // cmd/edge — the Edge Lattice reference node (edge-lattice-full-design.md
-// EDGE.1+EDGE.2, connect hardening per per-identity-nats-subscribe-acl-
-// design.md Fire 2): a local-first device that mirrors a single identity's
+// EDGE.1+EDGE.2+EDGE.3): a local-first device that mirrors one identity's
 // Personal-Lens slice into an embedded local store, keeps it fresh via the
-// Sync Manager, and drives the optimistic write path (overlay + agent) —
-// intents queued locally are drained to core-operations on a fixed
-// interval, with a RevisionConflict triggering a re-hydrate and any
-// rejection discarding the stale overlay. The connection authenticates to
-// NATS via the auth-callout boundary (a bearer JWT, EDGE_TOKEN) and stamps
-// the same JWT as the control plane's Lattice-Actor header — the Refractor
+// Sync Manager, and drives the optimistic write path (overlay + agent).
+// The node authenticates to NATS via the auth-callout boundary (a bearer
+// JWT, EDGE_TOKEN, scoped by the per-identity subscribe-ACL) and stamps the
+// same JWT as the control plane's Lattice-Actor header — the Refractor
 // verifies it and binds every personal.{register,deregister,hydrate} call
-// to the resolved identity server-side (§3.4), so the token is the sole
-// authority; no client-asserted identity field is trusted. Still
-// single-identity/no security-filter (the same carve-out Loupe and Personal
-// Lens PL.1/PL.2 use) — EDGE.3 (Personal Lens PL.3 exposure + Gateway
-// write routing) is gated on this design's Fire 3.
+// to the resolved identity server-side (§3.4). Queued intents submit
+// through the Gateway's POST /v1/operations (EDGE.3's "the security
+// turn-on") presenting EDGE_TOKEN as the caller's own Bearer credential —
+// the Gateway re-verifies it and stamps the verified subject as env.Actor
+// itself, so a client-asserted identity is never trusted on either the
+// read path (Personal Lens PL.3's readableAnchors filter) or the write
+// path. Token is the sole authority throughout.
 //
 // Environment:
 //
 //	EDGE_STORE_PATH    path to the local bbolt store file (default: ./edge.db)
 //	NATS_URL           NATS server URL (default: nats://localhost:4222)
+//	EDGE_GATEWAY_URL   the Gateway's base URL intents submit through
+//	                    (default: http://localhost:8080)
 //	EDGE_IDENTITY_ID    the identity NanoID this node mirrors (required)
 //	EDGE_DEVICE_ID      this device's id, distinguishes multiple nodes for
 //	                    the same identity (required)
 //	EDGE_TOKEN          a bearer JWT (Contract #11) authenticating this
-//	                    device's NATS connection (auth-callout token) and
+//	                    device's NATS connection (auth-callout token),
 //	                    stamped as the Lattice-Actor header on every
 //	                    personal.{register,deregister,hydrate} control
-//	                    request (required)
+//	                    request, and presented as the Gateway's Bearer
+//	                    credential on every submitted intent (required)
 //
 // Logs to stderr in slog text format. Blocks until SIGINT/SIGTERM.
 package main
@@ -49,6 +51,10 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
+// defaultGatewayURL matches cmd/gateway's own default listen address and
+// cmd/loupe's LOUPE_GATEWAY_URL default — the standard dev-stack Gateway.
+const defaultGatewayURL = "http://localhost:8080"
+
 // agentDrainInterval is how often the intent queue is drained and the
 // overlay GC sweep runs. Fixed (not env-configurable) — a reference node
 // has no operational reason to tune this yet.
@@ -65,6 +71,7 @@ func main() {
 func run(logger *slog.Logger) error {
 	storePath := envOrDefault("EDGE_STORE_PATH", "./edge.db")
 	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
+	gatewayURL := envOrDefault("EDGE_GATEWAY_URL", defaultGatewayURL)
 	identityID := os.Getenv("EDGE_IDENTITY_ID")
 	deviceID := os.Getenv("EDGE_DEVICE_ID")
 	if identityID == "" || deviceID == "" {
@@ -110,7 +117,8 @@ func run(logger *slog.Logger) error {
 	}
 
 	ov := overlay.New(st)
-	ag := agent.New(conn, st, ov, mgr, agent.Config{
+	submitter := &agent.GatewaySubmitter{URL: gatewayURL, Token: token}
+	ag := agent.New(submitter, st, ov, mgr, agent.Config{
 		Logger: logger,
 		Conflict: func(c agent.ConflictInfo) {
 			logger.Warn("edge agent: intent rejected", "requestId", c.RequestID, "keys", c.Keys)
@@ -118,7 +126,7 @@ func run(logger *slog.Logger) error {
 	})
 	go runAgentLoop(ctx, ag, logger)
 
-	logger.Info("edge sync manager starting", "identityId", identityID, "deviceId", deviceID)
+	logger.Info("edge sync manager starting", "identityId", identityID, "deviceId", deviceID, "gatewayUrl", gatewayURL)
 	return mgr.Run(ctx)
 }
 

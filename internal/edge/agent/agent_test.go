@@ -3,59 +3,32 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/store"
 	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
 )
 
-func newAgentTestConn(t *testing.T, ctx context.Context) *substrate.Conn {
-	t.Helper()
-	url := testutil.StartEmbeddedNATS(t)
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{URL: url})
-	require.NoError(t, err)
-	t.Cleanup(conn.Close)
-	_, err = conn.JetStream().CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     "core-operations",
-		Subjects: []string{"ops.>"},
-	})
-	require.NoError(t, err)
-	return conn
+// fakeSubmitter is a Submitter test double: decide answers every Submit
+// call, in FIFO order of arrival, recording the envelopes it saw. A nil
+// decide simulates a transport-level failure — the offline case Drain must
+// leave the intent queued for.
+type fakeSubmitter struct {
+	decide func(*processor.OperationEnvelope) (*processor.OperationReply, error)
+	seen   []string
 }
 
-// startFakeProcessor replies to every operation envelope published on
-// ops.> according to decide, mimicking the Processor's synchronous
-// request-reply (commit_path.go's Lattice-Reply-Inbox header path) without
-// running the real pipeline.
-func startFakeProcessor(t *testing.T, conn *substrate.Conn, decide func(*processor.OperationEnvelope) processor.OperationReply) {
-	t.Helper()
-	sub, err := conn.NATS().Subscribe("ops.>", func(msg *nats.Msg) {
-		var env processor.OperationEnvelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			return
-		}
-		inbox := msg.Header.Get(replyInboxHeader)
-		if inbox == "" {
-			return
-		}
-		reply := decide(&env)
-		b, err := json.Marshal(reply)
-		if err != nil {
-			return
-		}
-		_ = conn.NATS().Publish(inbox, b)
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+func (f *fakeSubmitter) Submit(_ context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+	f.seen = append(f.seen, env.RequestID)
+	if f.decide == nil {
+		return nil, fmt.Errorf("fakeSubmitter: no responder configured (simulated offline)")
+	}
+	return f.decide(env)
 }
 
 func openTestStack(t *testing.T) (*store.Store, *overlay.Overlay) {
@@ -87,17 +60,15 @@ func testEnv(requestID string) *processor.OperationEnvelope {
 }
 
 func TestDrain_AcceptedDequeuesWithoutTouchingOverlay(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx)
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 
-	startFakeProcessor(t, conn, func(env *processor.OperationEnvelope) processor.OperationReply {
-		return processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted, Decision: "committed"}
-	})
+	sub := &fakeSubmitter{decide: func(env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted, Decision: "committed"}, nil
+	}}
 
 	require.NoError(t, ov.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
-	a := New(conn, st, ov, nil, Config{})
+	a := New(sub, st, ov, nil, Config{})
 	require.NoError(t, a.Enqueue(testEnv("req1"), []string{testKey}))
 
 	require.NoError(t, a.Drain(ctx))
@@ -113,17 +84,15 @@ func TestDrain_AcceptedDequeuesWithoutTouchingOverlay(t *testing.T) {
 }
 
 func TestDrain_DuplicateDequeuesWithoutTouchingOverlay(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx)
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 
-	startFakeProcessor(t, conn, func(env *processor.OperationEnvelope) processor.OperationReply {
-		return processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusDuplicate}
-	})
+	sub := &fakeSubmitter{decide: func(env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusDuplicate}, nil
+	}}
 
 	require.NoError(t, ov.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
-	a := New(conn, st, ov, nil, Config{})
+	a := New(sub, st, ov, nil, Config{})
 	require.NoError(t, a.Enqueue(testEnv("req1"), []string{testKey}))
 
 	require.NoError(t, a.Drain(ctx))
@@ -134,23 +103,21 @@ func TestDrain_DuplicateDequeuesWithoutTouchingOverlay(t *testing.T) {
 }
 
 func TestDrain_RevisionConflictRehydratesAndDiscardsOverlay(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx)
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 
-	startFakeProcessor(t, conn, func(env *processor.OperationEnvelope) processor.OperationReply {
-		return processor.OperationReply{
+	sub := &fakeSubmitter{decide: func(env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{
 			RequestID: env.RequestID,
 			Status:    processor.ReplyStatusRejected,
 			Error:     &processor.ReplyError{Code: processor.ErrCodeRevisionConflict, Message: "stale"},
-		}
-	})
+		}, nil
+	}}
 
 	require.NoError(t, ov.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
 	rh := &fakeRehydrator{}
 	var conflicts []ConflictInfo
-	a := New(conn, st, ov, rh, Config{Conflict: func(c ConflictInfo) { conflicts = append(conflicts, c) }})
+	a := New(sub, st, ov, rh, Config{Conflict: func(c ConflictInfo) { conflicts = append(conflicts, c) }})
 	require.NoError(t, a.Enqueue(testEnv("req1"), []string{testKey}))
 
 	require.NoError(t, a.Drain(ctx))
@@ -170,22 +137,20 @@ func TestDrain_RevisionConflictRehydratesAndDiscardsOverlay(t *testing.T) {
 }
 
 func TestDrain_OtherRejectionDiscardsWithoutRehydrate(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx)
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 
-	startFakeProcessor(t, conn, func(env *processor.OperationEnvelope) processor.OperationReply {
-		return processor.OperationReply{
+	sub := &fakeSubmitter{decide: func(env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{
 			RequestID: env.RequestID,
 			Status:    processor.ReplyStatusRejected,
 			Error:     &processor.ReplyError{Code: processor.ErrCodeDDLViolation, Message: "bad shape"},
-		}
-	})
+		}, nil
+	}}
 
 	require.NoError(t, ov.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
 	rh := &fakeRehydrator{}
-	a := New(conn, st, ov, rh, Config{})
+	a := New(sub, st, ov, rh, Config{})
 	require.NoError(t, a.Enqueue(testEnv("req1"), []string{testKey}))
 
 	require.NoError(t, a.Drain(ctx))
@@ -197,17 +162,14 @@ func TestDrain_OtherRejectionDiscardsWithoutRehydrate(t *testing.T) {
 }
 
 func TestDrain_TransportFailureLeavesIntentQueued(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx) // no fake processor started — no responder ever replies.
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 
-	a := New(conn, st, ov, nil, Config{})
+	sub := &fakeSubmitter{} // no decide configured — every Submit fails, as if offline.
+	a := New(sub, st, ov, nil, Config{})
 	require.NoError(t, a.Enqueue(testEnv("req1"), nil))
 
-	drainCtx, drainCancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer drainCancel()
-	err := a.Drain(drainCtx)
+	err := a.Drain(ctx)
 	require.Error(t, err)
 
 	intents, err2 := st.ListIntents()
@@ -216,9 +178,7 @@ func TestDrain_TransportFailureLeavesIntentQueued(t *testing.T) {
 }
 
 func TestDrain_MalformedIntentIsDroppedNotWedged(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx)
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 	// store.EnqueueIntent validates its argument is syntactically valid JSON
 	// (json.RawMessage), so genuinely malformed bytes can never reach the
@@ -227,7 +187,7 @@ func TestDrain_MalformedIntentIsDroppedNotWedged(t *testing.T) {
 	_, err := st.EnqueueIntent([]byte("{}"))
 	require.NoError(t, err)
 
-	a := New(conn, st, ov, nil, Config{})
+	a := New(&fakeSubmitter{}, st, ov, nil, Config{})
 	require.NoError(t, a.Drain(ctx))
 
 	intents, err := st.ListIntents()
@@ -236,29 +196,24 @@ func TestDrain_MalformedIntentIsDroppedNotWedged(t *testing.T) {
 }
 
 func TestDrain_MultipleIntentsSubmitInFIFOOrder(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn := newAgentTestConn(t, ctx)
+	ctx := context.Background()
 	st, ov := openTestStack(t)
 
-	var seen []string
-	startFakeProcessor(t, conn, func(env *processor.OperationEnvelope) processor.OperationReply {
-		seen = append(seen, env.RequestID)
-		return processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}
-	})
+	sub := &fakeSubmitter{decide: func(env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+		return &processor.OperationReply{RequestID: env.RequestID, Status: processor.ReplyStatusAccepted}, nil
+	}}
 
-	a := New(conn, st, ov, nil, Config{})
+	a := New(sub, st, ov, nil, Config{})
 	require.NoError(t, a.Enqueue(testEnv("req1"), nil))
 	require.NoError(t, a.Enqueue(testEnv("req2"), nil))
 	require.NoError(t, a.Enqueue(testEnv("req3"), nil))
 
-	require.Eventually(t, func() bool {
-		_ = a.Drain(ctx)
-		intents, err := st.ListIntents()
-		return err == nil && len(intents) == 0
-	}, 10*time.Second, 50*time.Millisecond)
+	require.NoError(t, a.Drain(ctx))
 
-	require.Equal(t, []string{"req1", "req2", "req3"}, seen)
+	intents, err := st.ListIntents()
+	require.NoError(t, err)
+	require.Empty(t, intents)
+	require.Equal(t, []string{"req1", "req2", "req3"}, sub.seen)
 }
 
 func TestGC_PrunesSupersededOverlays(t *testing.T) {

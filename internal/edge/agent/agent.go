@@ -1,10 +1,13 @@
 // Package agent is the Edge node's intent uploader + reconcile-by-revision
 // (edge-lattice-full-design.md §3.5): a durable FIFO of operation envelopes
 // queued by locally-triggered mutations (internal/edge/overlay's optimistic
-// apply, §3.4), submitted to core-operations on Drain through the
-// platform's ordinary write path — trusted posture, direct submit,
-// pre-Gateway (EDGE.3 replaces this with the Gateway once the Edge is an
-// external actor).
+// apply, §3.4), submitted to the platform on Drain via a pluggable
+// Submitter — GatewaySubmitter (submit_gateway.go) is the untrusted
+// multi-identity posture EDGE.3 turns on (the Gateway verifies the bearer
+// token and stamps env.Actor itself, never trusting anything the caller
+// asserts); NATSSubmitter (submit_nats.go) is the EDGE.1/2 trusted-single-
+// identity direct-to-core-operations posture, kept for tests and any
+// fully-trusted deployment that runs without a Gateway.
 //
 // A rejected commit is the only hard case (§3.5): RevisionConflict means
 // the cloud state moved under the offline edit, so Drain triggers a full
@@ -29,19 +32,17 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/store"
 	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// replyInboxHeader carries the reply inbox subject through JetStream
-// delivery (mirrors cmd/lattice/output.SubmitOp; reproduced rather than
-// imported so this internal package does not depend on a cmd/ package —
-// the same rationale as internal/pkgmgr.Installer.submitOp).
-const replyInboxHeader = "Lattice-Reply-Inbox"
+// Submitter delivers one operation envelope to the platform and waits for
+// its terminal reply. Implementations decide the transport and trust
+// posture — see GatewaySubmitter and NATSSubmitter.
+type Submitter interface {
+	Submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error)
+}
 
 // Rehydrator triggers a full cold re-projection of the identity's slice.
 // *sync.Manager satisfies this via its Rehydrate method.
@@ -70,7 +71,7 @@ type Config struct {
 
 // Agent is the Edge node's intent uploader + reconciler.
 type Agent struct {
-	conn      *substrate.Conn
+	submitter Submitter
 	store     *store.Store
 	overlay   *overlay.Overlay
 	rehydrate Rehydrator
@@ -81,13 +82,14 @@ type Agent struct {
 // New builds an Agent. rehydrate may be nil only if the caller never
 // expects a RevisionConflict (e.g. tests with a synthetic conflict-free
 // harness) — a nil Rehydrator on an actual conflict is a logged no-op, not
-// a panic.
-func New(conn *substrate.Conn, st *store.Store, ov *overlay.Overlay, rehydrate Rehydrator, cfg Config) *Agent {
+// a panic. submitter may be nil only if the caller never calls Drain (e.g.
+// GC-only tests).
+func New(submitter Submitter, st *store.Store, ov *overlay.Overlay, rehydrate Rehydrator, cfg Config) *Agent {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Agent{conn: conn, store: st, overlay: ov, rehydrate: rehydrate, cfg: cfg, logger: logger}
+	return &Agent{submitter: submitter, store: st, overlay: ov, rehydrate: rehydrate, cfg: cfg, logger: logger}
 }
 
 // intentRecord is the store.IntentRecord.Envelope payload: the operation
@@ -114,10 +116,11 @@ func (a *Agent) Enqueue(env *processor.OperationEnvelope, touchedKeys []string) 
 }
 
 // Drain submits every currently-queued intent, in FIFO order, stopping at
-// the first transport-level failure (SubmitOp itself erroring — offline
-// again) so a later Drain call resumes where this one stopped. A terminal
-// reply (accepted/duplicate/rejected) always dequeues the intent, since the
-// cloud has authoritatively decided its fate.
+// the first transport-level failure (the Submitter itself erroring —
+// offline again, or the Gateway rejecting the credential outright) so a
+// later Drain call resumes where this one stopped. A terminal reply
+// (accepted/duplicate/rejected) always dequeues the intent, since the cloud
+// has authoritatively decided its fate.
 func (a *Agent) Drain(ctx context.Context) error {
 	recs, err := a.store.ListIntents()
 	if err != nil {
@@ -136,7 +139,7 @@ func (a *Agent) Drain(ctx context.Context) error {
 			}
 			continue
 		}
-		reply, err := a.submit(ctx, ir.Envelope)
+		reply, err := a.submitter.Submit(ctx, ir.Envelope)
 		if err != nil {
 			return fmt.Errorf("edge/agent: submit %s: %w", ir.Envelope.RequestID, err)
 		}
@@ -208,41 +211,4 @@ func (a *Agent) GC() (stillPending int, err error) {
 		}
 	}
 	return stillPending, nil
-}
-
-// submit publishes env to ops.<lane> via JetStream and waits for the
-// Processor's reply on a NATS core inbox (mirrors cmd/lattice/output.
-// SubmitOp — see replyInboxHeader).
-func (a *Agent) submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
-	data, err := json.Marshal(env)
-	if err != nil {
-		return nil, fmt.Errorf("marshal envelope: %w", err)
-	}
-
-	inbox := nats.NewInbox()
-	sub, err := a.conn.NATS().SubscribeSync(inbox)
-	if err != nil {
-		return nil, fmt.Errorf("subscribe inbox: %w", err)
-	}
-	defer func() { _ = sub.Unsubscribe() }()
-
-	subject := "ops." + string(env.Lane)
-	msg := &nats.Msg{
-		Subject: subject,
-		Data:    data,
-		Header:  nats.Header{replyInboxHeader: []string{inbox}},
-	}
-	if _, err := a.conn.JetStream().PublishMsg(ctx, msg); err != nil {
-		return nil, fmt.Errorf("publish to %s: %w", subject, err)
-	}
-
-	replyMsg, err := sub.NextMsgWithContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("wait for reply: %w", err)
-	}
-	var reply processor.OperationReply
-	if err := json.Unmarshal(replyMsg.Data, &reply); err != nil {
-		return nil, fmt.Errorf("parse reply: %w", err)
-	}
-	return &reply, nil
 }
