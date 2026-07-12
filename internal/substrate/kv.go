@@ -201,6 +201,14 @@ func (c *Conn) KVListKeys(ctx context.Context, bucket string) ([]string, error) 
 	for k := range lister.Keys() {
 		keys = append(keys, k)
 	}
+	// The lister's feed goroutine exits (closing the channel) on ctx expiry
+	// exactly as it does on completion, so a timed-out listing is otherwise
+	// indistinguishable from a complete one — a silently PARTIAL key set,
+	// which callers would act on as the full corpus (e.g. an installer
+	// concluding a package is absent). Surface the expiry as an error.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("substrate: KV list %s: interrupted (partial result discarded): %w", bucket, err)
+	}
 	return keys, nil
 }
 
@@ -231,6 +239,11 @@ func (c *Conn) KVListKeysPrefix(ctx context.Context, bucket, prefix string) ([]s
 	var keys []string
 	for k := range lister.Keys() {
 		keys = append(keys, k)
+	}
+	// Same silent-partial hazard as KVListKeys: ctx expiry closes the feed
+	// channel indistinguishably from completion.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("substrate: KV list %s prefix %q: interrupted (partial result discarded): %w", bucket, prefix, err)
 	}
 	return keys, nil
 }

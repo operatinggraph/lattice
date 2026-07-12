@@ -63,6 +63,17 @@ type bootstrapJSON struct {
 	PrimordialIDs map[string]string `json:"primordialIDs"`
 }
 
+// cliTimeout bounds every Installer call this CLI drives (pre-flight KV
+// reads through the final op submit). Every other cmd/lattice subcommand
+// wraps its context.Background() in a deadline before touching NATS/KV
+// (cmd/lattice/output.DefaultTimeout et al.) — this CLI is the one
+// outlier that used to pass an unbounded context, so a stalled JetStream
+// KV round-trip (e.g. checkCoreBucketExists / findInstalledPackage, both
+// run before the op is ever submitted) hung the process forever instead
+// of failing loudly. 60s gives headroom over pkgmgr.DefaultBatchTimeout's
+// 30s, which only covers the final submitOp leg.
+const cliTimeout = 60 * time.Second
+
 // packageRegistry maps a directory name to its Go Definition. Phase 1
 // is a static import map; future package discovery is out of scope.
 var packageRegistry = map[string]pkgmgr.Definition{
@@ -241,7 +252,9 @@ func runApply(cmd, pkgPath, natsURL, bootstrapPath string, opts pkgmgr.ApplyOpti
 
 	inst := pkgmgr.NewInstaller(conn, adminActor)
 	inst.RoleIDs = roleIDsFromBootstrap(bs)
-	res, err := inst.Apply(context.Background(), def, opts)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	res, err := inst.Apply(ctx, def, opts)
 	if err != nil {
 		return err
 	}
@@ -318,7 +331,9 @@ func runUninstall(packageName, natsURL, bootstrapPath string, logger *slog.Logge
 	defer conn.Close()
 
 	inst := pkgmgr.NewInstaller(conn, adminActor)
-	res, err := inst.Uninstall(context.Background(), packageName)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	res, err := inst.Uninstall(ctx, packageName)
 	if err != nil {
 		return err
 	}
@@ -359,7 +374,8 @@ func runApplyProposal(proposalID, natsURL, bootstrapPath string, logger *slog.Lo
 	}
 	defer conn.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
 	proposalKey := "vtx.capabilityproposal." + proposalID
 	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
 	if err != nil {
@@ -489,7 +505,9 @@ func runList(natsURL, bootstrapPath string, logger *slog.Logger) error {
 	defer conn.Close()
 
 	inst := pkgmgr.NewInstaller(conn, "")
-	pkgs, err := inst.List(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	pkgs, err := inst.List(ctx)
 	if err != nil {
 		return err
 	}

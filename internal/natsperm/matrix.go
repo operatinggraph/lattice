@@ -62,12 +62,27 @@ func protectedStreamDenies(stream string) []string {
 	}
 }
 
-// Allow returns c's full publish allow-list: its hand-authored extras plus,
-// for every non-bootstrap component, the registry-derived grant on each
-// platform bucket it owns or shares write of. Bootstrap is exempt (it
-// already holds the blanket $KV.> / $O.> provisioner grant).
+// Allow returns c's full publish allow-list: its hand-authored extras plus
+// the universal consumer-protocol grants, plus, for every non-bootstrap
+// component, the registry-derived grant on each platform bucket it owns or
+// shares write of. Bootstrap is exempt from the registry loop (it already
+// holds the blanket $KV.> / $O.> provisioner grant) but receives the
+// protocol grants like everyone else.
+//
+// $JS.FC.> is granted to every component unconditionally: it is the
+// flow-control ack subject of JetStream push consumers ("$JS.FC.<stream>.
+// <consumer>.<token>"), which nats.go's KV watcher — the machinery under
+// every KVListKeys / Watch — publishes empty replies to when the server
+// sends a flow-control or stalled-consumer control message. A connection
+// that cannot publish this ack stalls its own listing PERMANENTLY once a
+// bucket is large enough to trigger flow control mid-delivery (the server
+// pauses delivery waiting for the ack, and the stall-recovery heartbeat
+// response is the same denied subject). Like $JS.ACK.>, it is consumer
+// protocol plumbing scoped to consumers the connection itself receives
+// deliveries for — not a data-plane privilege.
 func (c Component) Allow(buckets []bootstrap.PlatformBucket) []string {
 	allow := append([]string{}, c.ExtraPubAllow...)
+	allow = append(allow, "$JS.FC.>")
 	if c.Name == bootstrapComponentName {
 		return allow
 	}
