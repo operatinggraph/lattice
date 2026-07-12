@@ -531,6 +531,18 @@ test-loupe-operator-tier:
 	@echo "==> Running the Loupe operator-tier e2e proof..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-loupe-operator-tier.go
 
+## test-edge-revocation-e2e — per-identity-nats-subscribe-acl-design.md Fire 3,
+## design §8 vector 4 proved against the REAL production wiring (RevokeActor op
+## -> the Gateway's outbox-driven revocation materializer -> token-revocation KV
+## -> the live cmd/gateway auth-callout responder), not the embedded-server
+## fakeRevocationChecker internal/natsperm/conf_test.go substitutes for. Requires
+## the shared dev stack (make up-full) already running with cmd/gateway
+## (GATEWAY_DEV_MODE=true — the default `make run-gateway` posture). Not
+## self-contained — targets the shared stack's NATS_URL, like verify-package-*.
+test-edge-revocation-e2e:
+	@echo "==> Running the edge-revocation e2e proof..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-edge-revocation-e2e.go
+
 ## up-loftspace — Full stack + the LoftSpace vertical + the applicant app on :7788.
 ## Runs up-full, installs the LoftSpace vertical (orchestration-base → location-domain
 ## → loftspace-domain → service-domain → lease-signing), and starts loftspace-app in
