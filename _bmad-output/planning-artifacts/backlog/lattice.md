@@ -189,7 +189,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-12 · `0829663` · [Edge,scripts] per-identity-nats-subscribe-acl Fire 3 CLOSED — live-stack revocation e2e proves vector 4 against real prod wiring; EDGE.3 gate flipped build-ready; CI green
+- 2026-07-12 · `3e345d1` · [Edge,scripts] per-identity-nats-subscribe-acl Fire 3 CLOSED — live-stack revocation e2e proves vector 4 against real prod wiring; EDGE.3 gate flipped build-ready; CI green
 - 2026-07-12 · `2f07d93` · [Edge,Refractor] per-identity-nats-subscribe-acl Fire 2 — cmd/edge EDGE_TOKEN connect + inbox scoping; Refractor personal.{register,deregister,hydrate} bind to the verified actor; CI green
 - 2026-07-11 · `a3ec8d5` · [Gateway,natsperm] per-identity-nats-subscribe-acl Fire 1 CLOSED — xkey day-one condition wired (UnsealRequest/SealResponse sealed-box round trip); CI green
 
