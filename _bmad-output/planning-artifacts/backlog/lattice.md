@@ -108,14 +108,16 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now** (this section only — check the **Arch-review intake** section above too, it
-> carries its own ✅ ratified / 📋 ready items): **Edge Lattice EDGE.1 + EDGE.2 CLOSED** (2026-07-10) —
-> the offline-first read loop AND the optimistic write path (`internal/edge/{store,sync,overlay,agent}` +
-> `cmd/edge`) are done. **per-identity NATS subscribe-ACL CLOSED** (2026-07-12, all 3 fires) — the one
-> open EDGE.3 gate leg. **EDGE.3 (untrusted multi-identity) is now build-ready**: D1/PL.3, the Gateway
-> write-path translator, and the subscribe-ACL are all shipped — see
-> [edge design §7](../../implementation-artifacts/edge-lattice-full-design.md). **sensitive-param-egress
-> CLOSED** (2026-07-11) — Fire 1 (disposition + emission guard) + Fire 2 (bridge unwrap + lease-signing
-> live consumer) both shipped, CI green.
+> carries its own ✅ ratified / 📋 ready items): **Edge Lattice EDGE.1 + EDGE.2 + EDGE.3 CLOSED**
+> (2026-07-12) — the offline-first read loop, the optimistic write path, and the untrusted
+> multi-identity security turn-on (Gateway-submit, Personal Lens PL.3 fan-out, per-identity
+> subscribe-ACL) are all done — see [edge design §7](../../implementation-artifacts/edge-lattice-full-design.md).
+> **Next Edge increment: EDGE.4** (Vault Proxy, gated on Vault Phase A + PL.5, both since shipped) or
+> **EDGE.5** (browser/mobile node, gated on the Gateway WS/push bridge) — either is build-ready; a full
+> multi-persona adversarial re-review of the EDGE.3 security boundary is flagged open in the design
+> doc §8 (not run this fire) and worth doing before EDGE.4 composes the transient-key path onto it.
+> **sensitive-param-egress CLOSED** (2026-07-11) — Fire 1 (disposition + emission guard) + Fire 2 (bridge
+> unwrap + lease-signing live consumer) both shipped, CI green.
 > **AI-caps Fire 4 materializer NOT yet build-ready** (verified 2026-07-11): sign-off condition 1
 > (Processor-MAC'd sensitive-refs, sensitive-param-egress-design.md §3.6) has no code anywhere
 > (`git log --all` shows only the ratification doc commit) — it needs its own design pass
@@ -150,7 +152,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1+2 (trusted-posture offline loop; PL.1/2 shipped) build first, EDGE.3–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1+2 done · next: EDGE.3 (build-ready 2026-07-12, all gate legs shipped) |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–3 done · next: EDGE.4 (Vault Proxy) or EDGE.5 (browser node), both build-ready |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ ratified 2026-07-11 · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · Fire 0 build-ready (nats_subject LensSpec + SYNC MaxAge + edge change-hook) |
 
 ### AI-native
@@ -189,6 +191,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-12 · `bd3f4b7` · [Edge,Gateway] Edge Lattice EDGE.3 CLOSED — agent.Submitter + GatewaySubmitter replace direct core-operations submit; Gate-3 e2e proves valid-submits/revoked-denies vs a real gateway.Server; CI green
 - 2026-07-12 · `eec08a6` · [identity-domain,Gateway] multi-credential-identity-linking Fire 4 CLOSED — UnlinkCredential + credentialindex revive-safety + materializer bucket-delete fold; Fires 1-4 all shipped; CI green
 - 2026-07-12 · `3e345d1` · [Edge,scripts] per-identity-nats-subscribe-acl Fire 3 CLOSED — live-stack revocation e2e proves vector 4 against real prod wiring; EDGE.3 gate flipped build-ready; CI green
 - 2026-07-12 · `2f07d93` · [Edge,Refractor] per-identity-nats-subscribe-acl Fire 2 — cmd/edge EDGE_TOKEN connect + inbox scoping; Refractor personal.{register,deregister,hydrate} bind to the verified actor; CI green
