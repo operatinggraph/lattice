@@ -1747,7 +1747,20 @@ def execute(state, op):
         require_matching_provider(appt_id, provider)
 
         patient = required_string(p, "patient")
-        require_matching_patient(appt_id, patient)
+        patient_id = require_matching_patient(appt_id, patient)
+
+        # Patient-self (consumer's scope=self grant only): the same gap-closing
+        # check CreateAppointment's script runs (ddls.go ~1573) — step 3 only
+        # proves authContext.target == actor, never that the target identity IS
+        # this appointment's patient. Empty for the standing operator grant
+        # (scope=any never sets authContext), so this is a no-op for staff.
+        if op.authContextTarget != "":
+            _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
+            identified_by_lnk = "lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id
+            # read-posture: (d) declared in contextHint.optionalReads by the
+            # self-service caller
+            if kv.Read(identified_by_lnk) == None:
+                fail("AuthDenied: a patient may only reschedule their own appointment")
 
         # New times: normalize to canonical whole-second UTC (parse-validates the
         # instants AND makes the convergence lens's lexical RFC3339 compares sound
@@ -1839,6 +1852,27 @@ def execute(state, op):
         if cls != "appointment":
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
         status = required_status(p)
+
+        # Patient-self (consumer's scope=self grant only): restricted to cancel —
+        # a self-service patient may cancel their own appointment but never mark
+        # confirmed/checkedIn/completed/noShow (those stay operator-only; this is
+        # a value restriction on TOP OF the identity binding, since a self grant
+        # binds WHO but says nothing about WHICH status). Checked, and identity
+        # bound, before the terminal/idempotent branching below so a self-scoped
+        # caller must prove ownership even on an idempotent re-cancel (empty for
+        # the standing operator grant — scope=any never sets authContext).
+        if op.authContextTarget != "":
+            if status != "cancelled":
+                fail("AuthDenied: a patient may only cancel their own appointment (status must be cancelled)")
+            self_patient = required_string(p, "patient")
+            self_patient_id = require_matching_patient(appt_id, self_patient)
+            _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
+            identified_by_lnk = "lnk.patient." + self_patient_id + ".identifiedBy.identity." + target_identity_id
+            # read-posture: (d) declared in contextHint.optionalReads by the
+            # self-service caller
+            if kv.Read(identified_by_lnk) == None:
+                fail("AuthDenied: a patient may only cancel their own appointment")
+
         # Terminal-status lifecycle guard: cancelled / completed / noShow are FINAL.
         # Re-setting the SAME terminal value is idempotent (re-run-safe under
         # at-least-once, and lets a noteless re-set clear a prior note); changing a

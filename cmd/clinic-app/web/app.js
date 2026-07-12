@@ -27,6 +27,7 @@ const state = {
   view: "book",
   highlight: null,
   rescheduling: null, // the appointment row being rescheduled (modal context)
+  reschedulingAsSelf: false, // whether the open reschedule modal was opened from the self-service toggle
   documenting: null, // { a, onDone } for the Document-visit (RecordEncounter) modal
   schedView: "week", // Schedule tab calendar mode: "week" | "day"
   schedAnchor: null, // a Date within the visible period (null → current week/day)
@@ -661,6 +662,21 @@ function syncBookPatient() {
     selfHint.textContent = state.patient && !linked
       ? "This patient has no linked identity yet — self-service booking needs one (add email/phone when creating a patient)."
       : "";
+  }
+  // My Appointments' self-service toggle shares the same precondition as
+  // Book's — RescheduleAppointment / SetAppointmentStatus's consumer
+  // scope=self grants both require the same identifiedBy link
+  // CreateAppointment's does (ddls.go).
+  const apptsSelfBox = $("#appts-self");
+  if (apptsSelfBox) {
+    const apptsSelfHint = $("#appts-self-hint");
+    apptsSelfBox.checked = false;
+    apptsSelfBox.disabled = !linked;
+    if (apptsSelfHint) {
+      apptsSelfHint.textContent = state.patient && !linked
+        ? "This patient has no linked identity yet — self-service needs one (add email/phone when creating a patient)."
+        : "";
+    }
   }
   refreshBookEnabled();
 }
@@ -2238,13 +2254,20 @@ function renderAppts() {
   }
   empty.hidden = true;
 
+  // Self-service (a real patient acting through their own linked identity,
+  // consumer scope=self) offers only Cancel/Reschedule — never the operator
+  // lifecycle buttons (confirm/check-in/complete/no-show) or clinical
+  // documentation, which stay staff-only regardless of the toggle.
+  const selfBox = $("#appts-self");
+  const asSelf = !!(selfBox && selfBox.checked && !selfBox.disabled);
+
   const section = (label, rows) => {
     if (rows.length === 0) return;
     const head = document.createElement("div");
     head.className = "appts-section-head";
     head.textContent = `${label} · ${rows.length}`;
     grid.append(head);
-    for (const a of rows) grid.append(renderApptCard(a, { showProvider: true, cancelable: true }));
+    for (const a of rows) grid.append(renderApptCard(a, { showProvider: true, cancelable: true, asSelf }));
   };
   section("Upcoming", upcoming);
   section("Past", past);
@@ -3408,18 +3431,18 @@ function renderApptCard(a, opts) {
     const btns = document.createElement("span");
     btns.className = "card-btns";
 
-    btns.append(lifecycleButtons(a, loadAppts));
+    if (!opts.asSelf) btns.append(lifecycleButtons(a, loadAppts));
 
     const reschedule = document.createElement("button");
     reschedule.className = "ghost";
     reschedule.textContent = "Reschedule";
-    reschedule.addEventListener("click", () => openReschedule(a));
+    reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf }));
     btns.append(reschedule);
 
     const cancel = document.createElement("button");
     cancel.className = "ghost danger";
     cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => setStatus(a, "cancelled", loadAppts));
+    cancel.addEventListener("click", () => setStatus(a, "cancelled", loadAppts, { asSelf: opts.asSelf }));
     btns.append(cancel);
 
     actions.append(btns);
@@ -3427,8 +3450,9 @@ function renderApptCard(a, opts) {
 
   // A completed visit can be documented (or its documentation corrected — the op is
   // a re-runnable upsert). The clinical note lives behind the modal; only the
-  // "documented" + follow-up signals show on the card.
-  if (opts.cancelable && (a.status || "").toLowerCase() === "completed") {
+  // "documented" + follow-up signals show on the card. Clinical documentation
+  // stays staff-only — never offered in the self-service view.
+  if (opts.cancelable && !opts.asSelf && (a.status || "").toLowerCase() === "completed") {
     const btns = document.createElement("span");
     btns.className = "card-btns";
     const doc = document.createElement("button");
@@ -3500,7 +3524,8 @@ function lifecycleTransitions(status) {
 // (a same-value re-set, e.g. correcting a note, has already released them).
 const TERMINAL_STATUS_VALUES = ["completed", "cancelled", "noShow"];
 
-async function setStatus(a, status, onDone) {
+async function setStatus(a, status, onDone, opts) {
+  const asSelf = !!(opts && opts.asSelf);
   const payload = { appointmentKey: a.appointmentKey, status };
   // read-posture: appt.status is (d) — absence is the legit first-set case
   // (optionalReads); the terminal-transition branch additionally reads (a)
@@ -3531,7 +3556,7 @@ async function setStatus(a, status, onDone) {
       "appointment",
       payload,
       reads,
-      { optionalReads },
+      { optionalReads, asSelf },
     );
     const msg = rejectionMessage(reply);
     if (msg) {
@@ -3570,8 +3595,9 @@ function lifecycleButtons(a, onDone) {
 // existing reason is round-tripped (the op clears it if omitted), and the
 // provider / patient links + status are untouched server-side.
 
-function openReschedule(a) {
+function openReschedule(a, opts) {
   state.rescheduling = a;
+  state.reschedulingAsSelf = !!(opts && opts.asSelf);
   const who = a.providerName || shortKey(a.providerKey);
   $("#reschedule-context").textContent = `${who} · currently ${fmtWhen(a.startsAt, a.endsAt)}`;
   $("#rs-startsAt").value = toLocalInputValue(a.startsAt);
@@ -3587,6 +3613,7 @@ function openReschedule(a) {
 function closeReschedule() {
   $("#reschedule-overlay").hidden = true;
   state.rescheduling = null;
+  state.reschedulingAsSelf = false;
 }
 
 async function submitReschedule(ev) {
@@ -3610,6 +3637,7 @@ async function submitReschedule(ev) {
 
   const payload = { appointmentKey: a.appointmentKey, provider: a.providerKey, patient: a.patientKey, startsAt, endsAt };
   if (a.reason) payload.reason = a.reason; // round-trip the existing reason (omitted → cleared)
+  const asSelf = !!state.reschedulingAsSelf;
 
   const submit = $("#reschedule-submit");
   submit.disabled = true;
@@ -3633,7 +3661,7 @@ async function submitReschedule(ev) {
         "lnk.appointment." + bareId(a.appointmentKey) + ".withProvider.provider." + bareId(a.providerKey),
         "lnk.appointment." + bareId(a.appointmentKey) + ".forPatient.patient." + bareId(a.patientKey),
       ],
-      { optionalReads },
+      { optionalReads, asSelf },
     );
     const msg = rejectionMessage(reply);
     if (msg) {
@@ -3871,6 +3899,7 @@ function init() {
   });
   $("#reload-appts").addEventListener("click", loadAppts);
   $("#appts-filter").addEventListener("change", renderAppts);
+  $("#appts-self").addEventListener("change", renderAppts);
   $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("DebitAccount", "record the charge"));
   $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("CreditAccount", "record the payment"));
   $("#reload-followups").addEventListener("click", loadFollowups);

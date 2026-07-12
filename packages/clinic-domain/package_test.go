@@ -137,8 +137,9 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 }
 
 // TestPackage_Permissions pins every op granted to operator (scope any) —
-// except CreateAppointment, which ALSO carries a consumer scope=self grant
-// (patient self-booking) — plus the ten projection lenses and the
+// except CreateAppointment, RescheduleAppointment, and SetAppointmentStatus,
+// which ALSO carry a consumer scope=self grant (patient self-booking /
+// self-reschedule / self-cancel) — plus the ten projection lenses and the
 // location-domain dependency.
 func TestPackage_Permissions(t *testing.T) {
 	type wantGrant struct {
@@ -150,8 +151,8 @@ func TestPackage_Permissions(t *testing.T) {
 		"CreatePatient": {{scope: "any", grantsTo: "operator"}}, "TombstonePatient": {{scope: "any", grantsTo: "operator"}},
 		"CreateProvider": {{scope: "any", grantsTo: "operator"}}, "TombstoneProvider": {{scope: "any", grantsTo: "operator"}},
 		"SetProviderProfile": {{scope: "any", grantsTo: "operator"}}, "SetProviderHours": {{scope: "any", grantsTo: "operator"}}, "SetProviderTimeOff": {{scope: "any", grantsTo: "operator"}},
-		"CreateAppointment": {{scope: "any", grantsTo: "operator"}, {scope: "self", grantsTo: "consumer"}}, "RescheduleAppointment": {{scope: "any", grantsTo: "operator"}},
-		"SetAppointmentStatus": {{scope: "any", grantsTo: "operator"}}, "RecordEncounter": {{scope: "any", grantsTo: "operator"}}, "TombstoneAppointment": {{scope: "any", grantsTo: "operator"}},
+		"CreateAppointment": {{scope: "any", grantsTo: "operator"}, {scope: "self", grantsTo: "consumer"}}, "RescheduleAppointment": {{scope: "any", grantsTo: "operator"}, {scope: "self", grantsTo: "consumer"}},
+		"SetAppointmentStatus": {{scope: "any", grantsTo: "operator"}, {scope: "self", grantsTo: "consumer"}}, "RecordEncounter": {{scope: "any", grantsTo: "operator"}}, "TombstoneAppointment": {{scope: "any", grantsTo: "operator"}},
 		"SetSiteProfile": {{scope: "any", grantsTo: "operator"}}, "AssignProviderSite": {{scope: "any", grantsTo: "operator"}}, "RemoveProviderSite": {{scope: "any", grantsTo: "operator"}},
 	}
 	wantCount := 0

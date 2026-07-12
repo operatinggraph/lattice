@@ -94,6 +94,8 @@ func clConsumerCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateAppointment", Scope: "self"},
+			{OperationType: "RescheduleAppointment", Scope: "self"},
+			{OperationType: "SetAppointmentStatus", Scope: "self"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -1582,6 +1584,231 @@ func TestClinic_CreateAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testin
 	if !clMissing(t, ctx, conn, "vtx.appointment."+clNanoIDFromRequestID(reqID)) {
 		t.Fatalf("an appointment was committed for a patient not linked to the caller's identity")
 	}
+}
+
+// TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed exercises the
+// consumer scope=self grant for RescheduleAppointment (permissions.go): a
+// patient linked (identifiedBy) to the caller's own identity reschedules
+// THEIR OWN appointment — step 3 authorizes scope=self via authContext.target
+// == actor (Contract #6), and the script's own identifiedBy-link check
+// (ddls.go), mirroring CreateAppointment's, confirms the target identity
+// actually owns the appointment's patient.
+func TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "resched-consumer-self")
+
+	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
+
+	patientID := clSubmit(t, ctx, conn, cp, cons, "reschpat0001", "CreatePatient", "patient",
+		`{"fullName":"Self Reschedule Patient","identityKey":"`+clConsumerKey+`"}`,
+		[]string{clConsumerKey}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerKey := createProvider(t, ctx, conn, cp, cons, "reschprv0001", "Dr. Alina Voss", "Family Medicine")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "reschappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	identifiedByLnk := "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID
+
+	reqID := testutil.GenReqID("selfresched1")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RescheduleAppointment",
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","provider":"` + providerKey + `","patient":"` + patientKey + `","startsAt":"2026-07-12T16:00:00Z","endsAt":"2026-07-12T16:30:00Z"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
+	sd, _ := sched["data"].(map[string]any)
+	if sd["startsAt"] != "2026-07-12T16:00:00Z" {
+		t.Fatalf("after self-reschedule, startsAt = %v, want 2026-07-12T16:00:00Z", sd["startsAt"])
+	}
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-12T16:00:00Z")
+}
+
+// TestClinic_RescheduleAppointmentConsumerNamesUnlinkedPatient_Rejected mirrors
+// TestClinic_CreateAppointmentConsumerNamesUnlinkedPatient_Rejected for
+// RescheduleAppointment: a consumer satisfying step 3 (target == actor) but
+// naming an appointment whose patient is NOT linked to their own identity must
+// still be rejected by the script's identifiedBy-link check, leaving the
+// appointment's schedule untouched.
+func TestClinic_RescheduleAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "resched-consumer-forge")
+
+	victimPatientKey := createPatient(t, ctx, conn, cp, cons, "vicrespat001", "Unlinked Reschedule Victim")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "vicresprv001", "Dr. Owen Reyes", "Pediatrics")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "vicreschap01", "CreateAppointment", "appointment",
+		`{"patient":"`+victimPatientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z"}`,
+		[]string{victimPatientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	victimPatientID := victimPatientKey[len("vtx.patient."):]
+	identifiedByLnk := "lnk.patient." + victimPatientID + ".identifiedBy.identity." + clConsumerID
+
+	reqID := testutil.GenReqID("forgeresched1")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "RescheduleAppointment",
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","provider":"` + providerKey + `","patient":"` + victimPatientKey + `","startsAt":"2026-07-12T16:00:00Z","endsAt":"2026-07-12T16:30:00Z"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
+	sd, _ := sched["data"].(map[string]any)
+	if sd["startsAt"] != "2026-07-10T15:00:00Z" {
+		t.Fatalf("appointment should be unchanged after a rejected forged reschedule; startsAt = %v", sd["startsAt"])
+	}
+}
+
+// TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed exercises the
+// consumer scope=self grant for SetAppointmentStatus (permissions.go): a
+// patient linked (identifiedBy) to the caller's own identity cancels THEIR OWN
+// appointment — the only status value the self grant permits.
+func TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "cancel-consumer-self")
+
+	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
+
+	patientID := clSubmit(t, ctx, conn, cp, cons, "cancelpat0001", "CreatePatient", "patient",
+		`{"fullName":"Self Cancel Patient","identityKey":"`+clConsumerKey+`"}`,
+		[]string{clConsumerKey}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerKey := createProvider(t, ctx, conn, cp, cons, "cancelprv0001", "Dr. Mara Chen", "Internal Medicine")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "cancelappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	identifiedByLnk := "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID
+
+	reqID := testutil.GenReqID("selfcancel001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "SetAppointmentStatus",
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"cancelled","provider":"` + providerKey + `","patient":"` + patientKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	if st, _ := status["data"].(map[string]any); st["value"] != "cancelled" {
+		t.Fatalf("status = %v after self-cancel, want cancelled", st["value"])
+	}
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
+}
+
+// TestClinic_SetAppointmentStatusConsumerSelfScope_NonCancelRejected proves the
+// self grant's value restriction: even a legitimate self-service caller (the
+// real patient, correctly identity-bound) may never set anything but
+// cancelled — confirmed/checkedIn/completed/noShow stay operator-only.
+func TestClinic_SetAppointmentStatusConsumerSelfScope_NonCancelRejected(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "noncancel-consumer-self")
+
+	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
+
+	patientID := clSubmit(t, ctx, conn, cp, cons, "nclpat0001", "CreatePatient", "patient",
+		`{"fullName":"Self NoShow Patient","identityKey":"`+clConsumerKey+`"}`,
+		[]string{clConsumerKey}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerKey := createProvider(t, ctx, conn, cp, cons, "nclprv0001", "Dr. Ines Rocha", "Family Medicine")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "nclappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	identifiedByLnk := "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID
+
+	reqID := testutil.GenReqID("selfnoshow01")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "SetAppointmentStatus",
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"noShow","provider":"` + providerKey + `","patient":"` + patientKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	if st, _ := status["data"].(map[string]any); st["value"] != "scheduled" {
+		t.Fatalf("status = %v after a rejected self noShow attempt, want scheduled (unchanged)", st["value"])
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
+}
+
+// TestClinic_SetAppointmentStatusConsumerSelfScope_UnlinkedPatientRejected
+// mirrors the reschedule/CreateAppointment forgery tests: a consumer
+// satisfying step 3 (target == actor) but naming an appointment whose patient
+// is NOT linked to their own identity must still be rejected, even for the
+// otherwise-permitted cancelled value.
+func TestClinic_SetAppointmentStatusConsumerSelfScope_UnlinkedPatientRejected(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "cancel-consumer-forge")
+
+	victimPatientKey := createPatient(t, ctx, conn, cp, cons, "viccanpat001", "Unlinked Cancel Victim")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "viccanprv001", "Dr. Owen Reyes", "Pediatrics")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "viccanappt01", "CreateAppointment", "appointment",
+		`{"patient":"`+victimPatientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z"}`,
+		[]string{victimPatientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	victimPatientID := victimPatientKey[len("vtx.patient."):]
+	identifiedByLnk := "lnk.patient." + victimPatientID + ".identifiedBy.identity." + clConsumerID
+
+	reqID := testutil.GenReqID("forgecancel1")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "SetAppointmentStatus",
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"cancelled","provider":"` + providerKey + `","patient":"` + victimPatientKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: []string{identifiedByLnk}},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	if st, _ := status["data"].(map[string]any); st["value"] != "scheduled" {
+		t.Fatalf("status = %v after a rejected self-cancel forgery attempt, want scheduled (unchanged)", st["value"])
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
 }
 
 // clCreateAppointmentWithLease submits CreateAppointment with an optional
