@@ -1,7 +1,8 @@
 // Package identitydomain is the identity-domain Capability Package. It
 // provides CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity,
-// RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink,
-// CompleteCredentialLink, and UnlinkCredential operations.
+// RotateClaimKey, RecordIdentityPII, ProvisionConsumerIdentity,
+// InitiateCredentialLink, CompleteCredentialLink, and UnlinkCredential
+// operations.
 //
 // Install via `lattice-pkg install packages/identity-domain`. The install
 // is ONE atomic commit routed through the Processor (Story 1.5.5):
