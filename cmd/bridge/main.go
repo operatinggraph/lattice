@@ -81,7 +81,6 @@ func run(logger *slog.Logger) error {
 	defer conn.Close()
 
 	cfg := bridge.Config{
-		CoreKVBucket:   bootstrap.CoreKVBucket,
 		EventsStream:   bootstrap.CoreEventsStreamName,
 		HealthKVBucket: bootstrap.HealthKVBucket,
 		ActorKey:       actorKey,

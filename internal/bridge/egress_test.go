@@ -350,7 +350,6 @@ func newTestEngineWithVault(t *testing.T, ctx context.Context, conn *substrate.C
 	provisionEnvelopeBucket(t, ctx, conn)
 	off := false
 	e := NewEngine(conn, Config{
-		CoreKVBucket:     "core-kv",
 		HealthKVBucket:   "health-kv",
 		ActorKey:         "vtx.identity.bridgeTestActor",
 		Lane:             egressHandlerLane,

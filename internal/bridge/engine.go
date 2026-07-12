@@ -26,10 +26,6 @@ const externalFilterSubject = "events.external.>"
 // platform-standard values; callers (cmd/bridge, tests) override only what they
 // need.
 type Config struct {
-	// CoreKVBucket backs the optional skip-on-redelivery probe (the Contract #4
-	// op tracker GET). Default "core-kv". The bridge only READS Core KV (P2 — the
-	// Processor is the sole Core KV writer).
-	CoreKVBucket string
 	// EventsStream is the core-events stream the external-call consumer attaches
 	// to. Default "core-events".
 	EventsStream string
@@ -57,11 +53,12 @@ type Config struct {
 	// observe redelivery-driven recovery without waiting out the production floor.
 	RedeliveryDelay time.Duration
 	// SkipOnRedelivery enables the optional skip-on-redelivery probe (mechanism
-	// #3): before dispatching, GET the Contract #4 tracker for the deterministic
-	// result-op requestId and skip the adapter call if the result already landed.
-	// It is a pure optimization — correctness holds via the deterministic
-	// requestId + the adapter's idempotencyKey dedup WITHOUT it. Defaults to true;
-	// callers (tests) may disable it to prove correctness without it.
+	// #3): before dispatching, ask the lattice.op.status RPC for the
+	// deterministic result-op requestId and skip the adapter call if the
+	// result already landed. It is a pure optimization — correctness holds
+	// via the deterministic requestId + the adapter's idempotencyKey dedup
+	// WITHOUT it. Defaults to true; callers (tests) may disable it to prove
+	// correctness without it.
 	SkipOnRedelivery *bool
 	// CoreSchedulesStream is the platform message-scheduling stream the poll/
 	// timeout lane binds to and arms @at schedules on (Contract #10 §10.4). The
@@ -115,9 +112,6 @@ func defaultInstance() string {
 }
 
 func (c *Config) withDefaults() {
-	if c.CoreKVBucket == "" {
-		c.CoreKVBucket = "core-kv"
-	}
 	if c.EventsStream == "" {
 		c.EventsStream = "core-events"
 	}
@@ -158,9 +152,10 @@ func (c *Config) withDefaults() {
 // by the Processor). It imports internal/substrate for all cross-component
 // interaction over NATS, plus internal/vault for the DecryptRequest/Response
 // wire types of the lattice.vault.decrypt RPC its egress-unwrap boundary calls
-// (design sensitive-param-egress §3.5) — the bridge still reads no Core KV;
-// its two new transport surfaces are that one RPC subject and one lens-bucket
-// read (P5).
+// (design sensitive-param-egress §3.5) — the bridge reads no Core KV; its
+// transport surfaces are the vault.decrypt RPC, one lens-bucket read (P5), and
+// the lattice.op.status RPC its skip-on-redelivery probe calls instead of a
+// direct KVGet (op-status-read-surface-design.md Fire 1).
 type Engine struct {
 	cfg        Config
 	conn       *substrate.Conn
@@ -237,7 +232,7 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 	go hb.run(ctx)
 
 	e.logger.Info("bridge engine started",
-		"coreKV", e.cfg.CoreKVBucket, "events", e.cfg.EventsStream, "schedules", e.cfg.CoreSchedulesStream, "lane", e.cfg.Lane,
+		"events", e.cfg.EventsStream, "schedules", e.cfg.CoreSchedulesStream, "lane", e.cfg.Lane,
 		"skipOnRedelivery", *e.cfg.SkipOnRedelivery, "pollInterval", e.cfg.PollInterval, "callDeadline", e.cfg.CallDeadline)
 	<-ctx.Done()
 	e.supervisor.Stop()

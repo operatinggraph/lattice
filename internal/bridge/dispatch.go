@@ -3,11 +3,11 @@ package bridge
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/asolgan/lattice/internal/opstatus"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -358,38 +358,43 @@ func isBareHandle(s string) bool {
 	return !strings.ContainsAny(s, ".*> \t\n")
 }
 
-// resultAlreadyLanded reports whether the result op for replyReqID has ALREADY
-// committed in Core KV — a generic Contract #4 op-tracker GET (vtx.op.<reqId>),
-// the same key shape for every op (never a typed claim-vertex read; the bridge
-// stays type-agnostic). The landed test mirrors Contract #4's dedup rule
-// exactly: "found AND isDeleted:false". Core KV holds logically-deleted entries
-// by design (§4.3 reserves isDeleted:true as an operator-driven retry signal —
-// "treat as not-found and proceed"), so a present-but-tombstoned tracker is NOT
-// a landed result: skipping on it would silently abandon a genuinely-incomplete
-// call. ErrKeyNotFound or an unparseable/tombstoned envelope ⇒ not landed (the
-// dispatch proceeds; the adapter dedups the reused idempotencyKey).
+// resultAlreadyLandedTimeout bounds the bridge's own wait on the
+// lattice.op.status RPC (op-status-read-surface-design.md Fire 1),
+// independent of the responder's internal handler timeout — a wedged or
+// unreachable Processor must not hang the dispatch/schedule handler
+// indefinitely. Mirrors vaultDecryptTimeout.
+const resultAlreadyLandedTimeout = 5 * time.Second
+
+// resultAlreadyLanded reports whether the result op for replyReqID has
+// ALREADY committed — via the lattice.op.status RPC (Processor-hosted, the
+// sole sanctioned Core-KV reader; op-status-read-surface-design.md Fire 1),
+// the same key shape for every op (never a typed claim-vertex read; the
+// bridge stays type-agnostic). The landed test mirrors Contract #4's dedup
+// rule exactly: "found AND isDeleted:false" — opstatus.Response.Committed
+// already encodes this (§4.3 reserves isDeleted:true as an operator-driven
+// retry signal, projected as not-committed by the responder). A transport
+// or responder-side error propagates (NakWithDelay + a Health issue at the
+// call site) rather than being swallowed — unlike an unparseable tracker,
+// which the responder itself already degrades to not-found.
 func (e *Engine) resultAlreadyLanded(ctx context.Context, replyReqID string) (bool, error) {
-	entry, err := e.conn.KVGet(ctx, e.cfg.CoreKVBucket, "vtx.op."+replyReqID)
+	reqBody, err := json.Marshal(opstatus.Request{RequestID: replyReqID})
 	if err != nil {
-		if errors.Is(err, substrate.ErrKeyNotFound) {
-			return false, nil
-		}
+		return false, fmt.Errorf("bridge: marshal op-status request: %w", err)
+	}
+	rctx, cancel := context.WithTimeout(ctx, resultAlreadyLandedTimeout)
+	defer cancel()
+	msg, err := e.conn.NATS().RequestWithContext(rctx, opstatus.Subject, reqBody)
+	if err != nil {
 		return false, fmt.Errorf("bridge: probe result tracker %q: %w", replyReqID, err)
 	}
-	var env substrate.DocumentEnvelope
-	if uerr := json.Unmarshal(entry.Value, &env); uerr != nil {
-		// An unparseable tracker is not trustworthy landed evidence; treat as
-		// not-landed and dispatch (the adapter dedups the reused idempotencyKey).
-		e.logger.Warn("bridge: result tracker unparseable; treating as not landed",
-			"requestId", replyReqID, "err", uerr)
-		return false, nil
+	var resp opstatus.Response
+	if uerr := json.Unmarshal(msg.Data, &resp); uerr != nil {
+		return false, fmt.Errorf("bridge: parse op-status reply for %q: %w", replyReqID, uerr)
 	}
-	if env.IsDeleted {
-		// Contract #4 §4.3: a tombstoned tracker is the operator-driven retry
-		// signal — treat as not-found, not landed.
-		return false, nil
+	if resp.Error != "" {
+		return false, fmt.Errorf("bridge: op-status RPC for %q: %s", replyReqID, resp.Error)
 	}
-	return true, nil
+	return resp.Committed, nil
 }
 
 // executeAdapter calls the adapter under panic containment. The bridge is the

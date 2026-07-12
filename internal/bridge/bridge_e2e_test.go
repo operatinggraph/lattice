@@ -18,6 +18,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/bridge"
 	"github.com/asolgan/lattice/internal/jsstore"
+	"github.com/asolgan/lattice/internal/opstatus"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -352,15 +353,27 @@ func publishRawExternalEvent(t *testing.T, ctx context.Context, conn *substrate.
 
 // --- Bridge starter ---------------------------------------------------------
 
+// startOpStatusResponder hosts the lattice.op.status RPC (Fire 1 of
+// op-status-read-surface-design.md) on conn, backed by coreKVBucket — the
+// stand-in for the Processor's responder, so the bridge's skip-on-redelivery
+// probe (now an RPC, not a direct KVGet) has something to answer it in these
+// embedded-NATS tests. Started once per test conn, alongside the fixture
+// Processor.
+func startOpStatusResponder(t *testing.T, ctx context.Context, conn *substrate.Conn) {
+	t.Helper()
+	svc := opstatus.NewService(conn, coreKVBucket, testLogger())
+	require.NoError(t, svc.StartNATSListener(ctx, conn.NATS()))
+}
+
 // startBridge constructs and starts a bridge engine with the FakeStripe adapter
 // registered as "stripe", returning the engine and the adapter handle. cfgMut
 // lets a test tweak the Config (e.g. disable the skip-probe, shorten the
 // redelivery floor) before Start.
 func startBridge(t *testing.T, ctx context.Context, conn *substrate.Conn, stripe *bridge.FakeStripe, cfgMut func(*bridge.Config)) *bridge.Engine {
 	t.Helper()
+	startOpStatusResponder(t, ctx, conn)
 	skip := true
 	cfg := bridge.Config{
-		CoreKVBucket:     coreKVBucket,
 		EventsStream:     eventsStream,
 		HealthKVBucket:   healthKVBucket,
 		ActorKey:         bridgeActorKey,
@@ -387,9 +400,9 @@ func startBridge(t *testing.T, ctx context.Context, conn *substrate.Conn, stripe
 // FakeAsyncCheck). Same Config defaults + cfgMut seam as startBridge.
 func startBridgeWithAdapter(t *testing.T, ctx context.Context, conn *substrate.Conn, name string, adapter bridge.Adapter, cfgMut func(*bridge.Config)) *bridge.Engine {
 	t.Helper()
+	startOpStatusResponder(t, ctx, conn)
 	skip := true
 	cfg := bridge.Config{
-		CoreKVBucket:     coreKVBucket,
 		EventsStream:     eventsStream,
 		HealthKVBucket:   healthKVBucket,
 		ActorKey:         bridgeActorKey,

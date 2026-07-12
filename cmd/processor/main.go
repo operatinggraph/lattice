@@ -50,6 +50,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/asolgan/lattice/internal/opstatus"
 	"github.com/asolgan/lattice/internal/privacyworker"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/processor/outbox"
@@ -277,6 +278,18 @@ func run(logger *slog.Logger) error {
 	if err := vaultSvc.StartNATSListener(ctx, conn.NATS()); err != nil {
 		cancel()
 		return fmt.Errorf("start vault decrypt responder: %w", err)
+	}
+
+	// Host the op-status RPC (lattice.op.status) — the sanctioned way for any
+	// op-submitting component to ask "did my operation land?" without a
+	// Core-KV read grant (op-status-read-surface-design.md Fire 1). It
+	// projects ONLY the Contract #4 tracker (vtx.op.<requestId>); caller
+	// authorization is at the NATS transport (bridge + future migrating
+	// callers hold the pub-allow, proven by internal/natsperm).
+	opStatusSvc := opstatus.NewService(conn, bootstrap.CoreKVBucket, logger)
+	if err := opStatusSvc.StartNATSListener(ctx, conn.NATS()); err != nil {
+		cancel()
+		return fmt.Errorf("start op-status responder: %w", err)
 	}
 
 	// Emit the Vault's own Health-KV heartbeat group (health.vault.<instance>,
