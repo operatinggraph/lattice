@@ -1,11 +1,14 @@
 # Op-status read surface — a sanctioned way to ask "did my operation land?"
 
-**Status: 🏗️ Fire 1 SHIPPED (`f12f4ce`, 2026-07-12)** — the `lattice.op.status` responder
-(`internal/opstatus`) + the bridge's skip-on-redelivery probe migration are live; the interim
-`BRIDGE_SKIP_ON_REDELIVERY=false` mitigation is REVERTED on the shared dev stack (bridge/processor
-restarted with the new binaries, `deploy/nats-server.conf` regenerated + `lattice-nats` restarted to
-pick up the bridge's `lattice.op.status` grant). Fires 2–4 (Gateway status endpoint, Loom probe
-migration, CLI) remain open. Ratified (Andrew, 2026-07-11): Fire 1 as designed; the Fires 2–4
+**Status: 🏗️ Fire 2 SHIPPED (`a4446d5`, 2026-07-12)** — Fire 1 (`f12f4ce`) shipped the
+`lattice.op.status` responder (`internal/opstatus`) + the bridge's skip-on-redelivery probe
+migration; the interim `BRIDGE_SKIP_ON_REDELIVERY=false` mitigation is REVERTED on the shared dev
+stack. Fire 2 adds `GET /v1/operations/{requestId}` (`internal/gateway`), backed by the same RPC:
+turns the write path's 202-fallback "poll Core KV" contract (unsatisfiable by browser actors, §1.5)
+into a real read-your-own-writes poll — bearer-authenticated, its own CORS/preflight handling (a
+bearer-token GET always triggers an OPTIONS preflight), Gateway granted `lattice.op.status`
+pub-allow, `deploy/nats-server.conf` regenerated. Fires 3–4 (Loom probe migration + §10.6
+reconciliation, CLI) remain open. Ratified (Andrew, 2026-07-11): Fire 1 as designed; the Fires 2–4
 sequencing accepted; the interim mitigation approved and APPLIED the same session (bridge restarted
 with `BRIDGE_SKIP_ON_REDELIVERY=false` — the env lever added in cmd/bridge — all 6 stuck events
 drained, result ops committed, bridge health clean). Designer: Winston (main session, 2026-07-11) ·
@@ -153,10 +156,11 @@ only component that touches Core KV" invariant.
 
 - **Fire 1 (this design):** responder + bridge migration + natsperm vector. Unblocks the live
   degradation; the stuck events drain on their next redelivery when the probe succeeds.
-- **Fire 2 — Gateway status endpoint (`GET /v1/operations/{requestId}`)**, backed by the RPC: turns
-  the 202 fallback's currently-unsatisfiable "the caller polls Core KV" contract (§1.5) into a real
-  read-your-own-writes poll for browser actors. The strongest product consumer of the surface; a
-  Vertical-PO demand row should pair with it (build-over-defer: the consumer is nameable today).
+- **Fire 2 — Gateway status endpoint (`GET /v1/operations/{requestId}`) SHIPPED (`a4446d5`,
+  2026-07-12)**, backed by the RPC: turns the 202 fallback's previously-unsatisfiable "the caller
+  polls Core KV" contract (§1.5) into a real read-your-own-writes poll for browser actors. The
+  strongest product consumer of the surface; a Vertical-PO demand row should pair with it
+  (build-over-defer: the consumer is nameable today).
 - **Fire 3 — Loom probe migration** (`trackerExists` ×3 → the RPC). Requires the Contract #10 §10.6
   wording reconciliation (it currently names a direct GET) — the contract edit rides the fire,
   staged uncommitted for Andrew per house rules. Loom's `taskVertexExists` (`vtx.task.<id>` — a
