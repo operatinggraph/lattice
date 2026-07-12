@@ -2,6 +2,17 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-11 · `3a2aa15` · [identity-hygiene] dedup-over-encrypted-pii Fire 2 — MergeIdentity duplicateOf both-direction tombstone + indexes-driven repoint + edge trust-gate real-class fix; CI green (incl. verify-package-identity-hygiene)
+- 2026-07-11 · `51a3f2e` · [identity-hygiene] dedup-over-encrypted-pii Fire 1 — duplicateOf/indexes links + dispatcher sweep fixes live RevisionConflict; PII-free lens; DiffRetraction on nats-kv; CI green
+- 2026-07-11 · `4258180` · [natsperm] natsperm-matrix-hygiene Fire 1 CLOSED — platform-bucket registry derives provisioning/guards/matrix; matrix hoisted to internal/natsperm; CI green
+- 2026-07-11 · `2a5459d` · [Gateway] natsperm-matrix-hygiene Fire 0 — credential-bindings publish grant + bucketguard reserved entry (live bug fix); CI green
+- 2026-07-11 · `474745b` · [Processor] AI-caps Fire 4 inc 1 / loom-starlark-guards Fire 1 — shared sandbox leaf `internal/starlarksandbox` extracted, zero behavior change, 3-layer reviewed; CI green
+- 2026-07-11 · `d713398` · [Bridge] sensitive-param-egress Fire 2 CLOSED — egress unwrap + vault.decrypt grant + lease-signing live consumer; CI green
+- 2026-07-11 · `d384015` · [Processor/Loom] sensitive-param-egress Fire 1 — egressReads disposition + external-emission guard; fixed a live docGen PII leak found while building; CI green
+- 2026-07-11 · `5489ab4` · [CI] AckResumeFromLastAck flake fixed — internal/substrate's 3s redelivery deadline too tight under `-p 4` load (CI: timed out at 3.09s; local: 0.1-0.15s ×10); widened to 8s; CI green
+- 2026-07-10 · `7eab200` · [Bridge] bridge-untested-arms — AdapterFunc.Execute/Poll + FakeBackgroundCheck/FakeStripe/FakeDocGen Poll unreachable-error arms covered; cov 85.3%→86.3%; CI green
+- 2026-07-10 · `e2a6a27` · [Processor] stub-auth-active-alert-ttl — `EmitAlert` joins Category B's `diagnosticTTL` (re-armed each write); self-clears instead of staying "warning" forever; CI green
+- 2026-07-10 · `c0875e6` · [Core] substrate-untested-arms — Wrap adapter (incl. closed-conn), IsConnectionError/IsInvalidKeyError classifiers, DocumentEnvelope.Update, KVPutWithTTL, KVDeleteRevision; cov 75.6%→77.5%; CI green
 - 2026-07-10 · `20b8707` · [Bootstrap] bootstrap-untested-arms — two-phase-commit recovery/error paths (nanoid.go) + toMap map/struct/marshal-error/non-object-error branches (envelope.go, no prior test file); cov 61.9%→65.5%; CI green
 - 2026-07-10 · `d6161aa` · [Refractor] natskv-guard-edge-branches (guardedWrite half) — kvStore seam + scripted-fake tests cover CAS retry (Create+Update) and exhaustion; CI green
 - 2026-07-10 · `9812231` · [Security] Contract #11 external actor authN — per-kid opaque/nanoid subject binding + IdP-provenance `.idpBinding` aspect; CI green
