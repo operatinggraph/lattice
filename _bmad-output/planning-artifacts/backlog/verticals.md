@@ -19,6 +19,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 |---|---|---|---|---|---|---|
 | **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | ✅ ratified 2026-07-11 (forks → recommended) · [design](../../implementation-artifacts/edge-showcase-app-design.md) · app fires 2/3/5; 🚧 blocked-on platform Fires 0/1 ([lattice.md](lattice.md)) + subscribe-ACL/whoami |
 | **Account settings — manage sign-in methods** | Live-verified: LoftSpace has no account/profile surface at all today (grepped `app.js`/`index.html` — only qualification-profile, no identity page). Page for the applicant to see linked credentials (`whoami`), link another (`InitiateCredentialLink`/`CompleteCredentialLink`), and remove one (`UnlinkCredential`, platform refuses removing the last). | LoftSpace | FE + pkg | ★★ | S | 🚧 blocked-on: [multi-credential identity linking](lattice.md) Fires 2+4 (whoami, link ops, unlink) — design names this row as the FE consumer, §9 |
+| **Apply to lease is broken for every applicant** | Live-verified 2026-07-11: every applicant identity in the picker (incl. a brand-new one created fresh this fire) gets `AuthDenied: no matching platformPermission` on Apply — the demo's core flow. Root cause is platform-side, not this package. | LoftSpace | platform | ★★★ | XS–S | 🚧 blocked-on: [ProvisionConsumerIdentity idempotency fix](lattice.md) — [finding](../../implementation-artifacts/provision-consumer-identity-idempotency-bug-finding.md) |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | 📋 ready (after Wellness) |
 | **Clinic patient picker doesn't scale** | `#provider` still has no search (lower-urgency half, left open). | Clinic | pkg + FE | ★ | XS | 📋 ready |
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
@@ -45,20 +46,17 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café, stagg
 joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no app to exercise; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×13, Clinic ×11, Café ×3.
+- **Rotation to date:** LoftSpace ×14, Clinic ×11, Café ×3.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All three apps exist + are exercisable live (`:7788` / `:7799` / `:7801`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-07-06:** Enriched Café+Wellness → 4 grounded, sequenced rows (Café first) + verified no platform block; spec = the go-live composition demo.
 - **2026-07-09:** LoftSpace — exercised Browse&Apply live; found + root-caused self-service identity never claims (blocks CreateLeaseApplication for every applicant); filed.
-- **2026-07-10:** Clinic — drove staff booking/schedule/ledger live on the shared stack; found + confirmed `/api/ledger` unauthenticated (any caller reads any patient's billing history); filed.
-- **2026-07-10:** Café — drove POS OpenTab/Charge/Settle + resident ledger live; found stale post-write state (no eventual-consistency re-fetch delay), mirrored LoftSpace's existing fix; filed.
-- **2026-07-10 — REQUEST fulfilled:** LoftSpace — live-verified no account surface exists; filed
-  "manage sign-in methods" (whoami/link/unlink), blocked-on multi-credential design Fires 2+4.
-- **2026-07-11:** Clinic — drove booking/schedule/ledger live; booking form is provider-first with no
-  specialty search, filed FE-only fix; no platform block.
-- **2026-07-11:** Café — drove OpenTab/Charge/Settle live on the shared stack; found no per-lease
-  open-tab guard (2 concurrent open tabs same lease), filed pkg fix; no platform block.
-- **Next:** LoftSpace.
+- **2026-07-10:** Clinic — drove staff booking/schedule/ledger live; found + confirmed `/api/ledger` unauthenticated (any caller reads any patient's billing history); filed.
+- **2026-07-10:** Café — drove POS OpenTab/Charge/Settle live; found stale post-write state, mirrored LoftSpace's existing fix; filed.
+- **2026-07-10 — REQUEST fulfilled:** LoftSpace — live-verified no account surface exists; filed "manage sign-in methods", blocked-on multi-credential design Fires 2+4.
+- **2026-07-11:** Clinic — drove booking/schedule/ledger live; booking form is provider-first with no specialty search, filed FE-only fix; no platform block.
+- **2026-07-11:** Café — drove OpenTab/Charge/Settle live; found no per-lease open-tab guard (2 concurrent open tabs same lease), filed pkg fix; no platform block.
+- **2026-07-11:** LoftSpace — Apply rejected for every applicant incl. a fresh one; root-caused `ProvisionConsumerIdentity`'s idempotency check to the platform, filed + blocked.
+- **Next:** Clinic.
 
 ## Done log — verticals (newest first)
 
