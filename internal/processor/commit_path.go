@@ -273,7 +273,7 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 
 	// --- Steps 4-8: hydrate → execute → validate → commit, with a bounded
 	// internal retry on a §3.2-OCC revision conflict. ---
-	return cp.commitPipeline(ctx, msg, env, resolvedPermission)
+	return cp.commitPipeline(ctx, msg, env, resolvedPermission, dedup.TombstonedRevision)
 }
 
 // commitPipeline runs steps 4-8 for one authorized operation and publishes the
@@ -296,7 +296,11 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 // pass (no expectedRevision carried over from a prior attempt's defaulting), so
 // applyHydratedRevisions re-conditions against the re-hydrated revision. The real
 // Starlark executor re-runs the script from scratch, satisfying this.
-func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission) (MessageOutcome, substrate.Decision) {
+// trackerSupersedes is the step-2-observed revision of an operator-tombstoned
+// tracker still occupying this requestId's subject (nil in the normal
+// no-residue case); it conditions the step-8 tracker write in place of
+// create-only (Tracker.SupersedesRevision).
+func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message, env *OperationEnvelope, resolvedPermission *ResolvedPermission, trackerSupersedes *uint64) (MessageOutcome, substrate.Decision) {
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
 			// A lane deadline already hit before we even re-enter — surface
@@ -408,6 +412,7 @@ func (cp *CommitPath) commitPipeline(ctx context.Context, msg substrate.Message,
 		// --- Step 8: commit (with §10.7 task auto-completion injection). ---
 		now := cp.deps.Clock()
 		tracker := NewTracker(env, now)
+		tracker.SupersedesRevision = trackerSupersedes
 		commitAck, err := cp.commitWithTaskAutoComplete(ctx, env, result, tracker, resolvedPermission)
 		if err == nil {
 			// Event publication is outbox-only: the faithful EventList was persisted

@@ -493,3 +493,139 @@ func TestNewCommitConflictEmitter_NoopWhenUnwired(t *testing.T) {
 	}
 	e.RecordCommitConflict(context.Background(), CommitConflictInfo{ConflictingKey: "k"}) // must not panic
 }
+
+// A resubmit of a requestId whose PRIOR incarnation's outbox aspect was
+// tombstoned by the outbox consumer (post-publish KV delete → a DEL marker
+// still occupying the subject) must commit. Contract #4 §4.3: after the 24h
+// tracker TTL, resubmission is a legitimate fresh execution — a conditioned
+// outbox write would collide with the marker and permanently brick every
+// deterministic-requestId reuse (e.g. same-version `lattice-pkg install
+// --force` refreshes).
+func TestRealCommitter_ResubmitAfterOutboxTombstone(t *testing.T) {
+	ctx := context.Background()
+	conn := occConn(t)
+	provisionHarness(t, ctx, conn)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+
+	rid := testNanoID1
+	env := newTestEnvelope(rid)
+	outboxKey := TrackerKey(rid) + ".events"
+
+	// Simulate the prior incarnation's residue: the tracker has TTL'd out
+	// (never written here), and the consumer's tombstone left a DEL marker
+	// on the outbox subject.
+	if _, err := conn.KVPut(ctx, testCoreBucket, outboxKey, []byte(`{"stale":"prior incarnation"}`)); err != nil {
+		t.Fatalf("seed stale outbox aspect: %v", err)
+	}
+	if err := conn.KVDelete(ctx, testCoreBucket, outboxKey); err != nil {
+		t.Fatalf("tombstone outbox aspect: %v", err)
+	}
+
+	res := ScriptResult{
+		Mutations: []MutationOp{{
+			Op: "create", Key: "vtx.identity." + testNanoID2,
+			Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "A"}},
+		}},
+		Events: []EventSpec{{Class: "identity.created", Data: map[string]any{"k": "v"}}},
+	}
+	if _, err := committer.Commit(ctx, env, res, NewTracker(env, time.Now())); err != nil {
+		t.Fatalf("resubmit over outbox tombstone residue must commit, got: %v", err)
+	}
+
+	// The fresh outbox aspect must be readable (the DEL marker superseded).
+	if _, err := conn.KVGet(ctx, testCoreBucket, outboxKey); err != nil {
+		t.Fatalf("outbox aspect not present after commit: %v", err)
+	}
+}
+
+// An operator-tombstoned tracker (in-body isDeleted: true — Contract #4 §4.5's
+// tombstone-then-resubmit retry signal) still occupies its subject, so the
+// re-execution's tracker write must supersede it by revision rather than
+// attempt a create-only write that can never succeed there.
+func TestRealCommitter_ResubmitSupersedesTombstonedTracker(t *testing.T) {
+	ctx := context.Background()
+	conn := occConn(t)
+	provisionHarness(t, ctx, conn)
+	committer := NewCommitter(conn, testCoreBucket, nil, testLogger(), time.Now)
+
+	rid := testNanoID2
+	env := newTestEnvelope(rid)
+
+	// Seed the operator-tombstoned tracker.
+	dead := NewTracker(env, time.Now())
+	dead.IsDeleted = true
+	deadVal, err := dead.Marshal()
+	if err != nil {
+		t.Fatalf("marshal tombstoned tracker: %v", err)
+	}
+	rev, err := conn.KVPut(ctx, testCoreBucket, dead.Key, deadVal)
+	if err != nil {
+		t.Fatalf("seed tombstoned tracker: %v", err)
+	}
+
+	// Without the supersede revision the create-only write must conflict —
+	// the guard this test locks in.
+	res := ScriptResult{Mutations: []MutationOp{{
+		Op: "create", Key: "vtx.identity." + testNanoID1,
+		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "B"}},
+	}}}
+	if _, err := committer.Commit(ctx, env, res, NewTracker(env, time.Now())); err == nil {
+		t.Fatalf("create-only tracker write over a live tombstoned value should conflict")
+	}
+
+	// With SupersedesRevision (what step 2 threads through) it commits.
+	fresh := NewTracker(env, time.Now())
+	fresh.SupersedesRevision = &rev
+	res2 := ScriptResult{Mutations: []MutationOp{{
+		Op: "create", Key: "vtx.identity." + testNanoID1 + ".profile",
+		Document: map[string]interface{}{"class": "identity", "data": map[string]any{"name": "C"}},
+	}}}
+	if _, err := committer.Commit(ctx, env, res2, fresh); err != nil {
+		t.Fatalf("supersede-conditioned tracker write must commit, got: %v", err)
+	}
+
+	// The live tracker replaced the tombstoned one.
+	entry, err := conn.KVGet(ctx, testCoreBucket, TrackerKey(rid))
+	if err != nil {
+		t.Fatalf("tracker read-back: %v", err)
+	}
+	tr, err := ParseTracker(entry.Value)
+	if err != nil {
+		t.Fatalf("ParseTracker: %v", err)
+	}
+	if tr.IsDeleted {
+		t.Fatalf("tracker still tombstoned after superseding commit")
+	}
+}
+
+// CheckDedup surfaces the tombstoned tracker's revision so the commit path
+// can thread it to the step-8 write (DedupResult.TombstonedRevision).
+func TestCheckDedup_TombstonedTrackerCarriesRevision(t *testing.T) {
+	ctx := context.Background()
+	conn := occConn(t)
+	provisionHarness(t, ctx, conn)
+
+	rid := testNanoID1
+	env := newTestEnvelope(rid)
+	dead := NewTracker(env, time.Now())
+	dead.IsDeleted = true
+	deadVal, err := dead.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rev, err := conn.KVPut(ctx, testCoreBucket, dead.Key, deadVal)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := CheckDedup(ctx, conn, testCoreBucket, rid)
+	if err != nil {
+		t.Fatalf("CheckDedup: %v", err)
+	}
+	if got.Outcome != DedupNotFound {
+		t.Fatalf("Outcome = %v, want DedupNotFound (§4.5 retry signal)", got.Outcome)
+	}
+	if got.TombstonedRevision == nil || *got.TombstonedRevision != rev {
+		t.Fatalf("TombstonedRevision = %v, want %d", got.TombstonedRevision, rev)
+	}
+}

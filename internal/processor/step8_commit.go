@@ -196,14 +196,28 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 		ops = append(ops, op)
 	}
 
-	// Tracker op — always CreateOnly with 24h TTL (Contract #4 §4.3).
-	ops = append(ops, substrate.BatchOp{
-		Bucket:     c.CoreBucket,
-		Key:        tracker.Key,
-		Value:      trackerVal,
-		CreateOnly: true,
-		TTL:        TrackerTTL,
-	})
+	// Tracker op — create-only with 24h TTL (Contract #4 §4.3). "Create" here
+	// carries the KV Create() semantics Contract #4 §4.5 names: when step 2
+	// observed an operator-tombstoned tracker value still occupying the subject
+	// (SupersedesRevision non-nil, the §4.5 retry signal), the write is
+	// conditioned on that revision — a raw expected-last-subject-sequence-of-0
+	// create can never succeed against a subject that still carries a message,
+	// which would brick the contracted tombstone-then-resubmit path. Either
+	// form is the batch's mutual-exclusion point for concurrent re-executions
+	// of the same requestId: exactly one racer's condition holds.
+	trackerOp := substrate.BatchOp{
+		Bucket: c.CoreBucket,
+		Key:    tracker.Key,
+		Value:  trackerVal,
+		TTL:    TrackerTTL,
+	}
+	if tracker.SupersedesRevision != nil {
+		trackerOp.HasRevision = true
+		trackerOp.Revision = *tracker.SupersedesRevision
+	} else {
+		trackerOp.CreateOnly = true
+	}
+	ops = append(ops, trackerOp)
 
 	// Transactional outbox: persist the faithful EventList as a sibling
 	// aspect (vtx.op.<id>.events) in the SAME atomic batch, so it is durable
@@ -211,6 +225,21 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 	// record. It carries NO per-key TTL — it must outlive the 24h tracker so a
 	// >24h Processor/consumer outage never drops events; the consumer tombstones
 	// it after a confirmed publish. Ops with zero events write no outbox aspect.
+	//
+	// The write is deliberately UNCONDITIONED. The tracker op above is the
+	// batch's sole mutual-exclusion point: a racing duplicate execution loses
+	// on the tracker condition and its whole batch — outbox write included —
+	// atomically fails, so the outbox needs no condition of its own for
+	// correctness. A condition here would instead BRICK every legitimate
+	// re-execution of a requestId whose prior incarnation's aspect was
+	// tombstoned by the outbox consumer after publish (the tombstone's DEL
+	// marker still occupies the subject long after the 24h tracker has
+	// expired — the exact state a Contract #4 §4.3 post-TTL resubmit of a
+	// deterministic requestId, e.g. every same-version `lattice-pkg install
+	// --force` refresh, encounters). In the residual edge where a prior
+	// incarnation's aspect is still LIVE-unpublished (>24h consumer outage +
+	// deterministic-requestId reuse), the overwrite supersedes it and the
+	// consumer publishes the newest event set.
 	if len(events) > 0 {
 		outboxAsp := NewOutboxAspect(rid, env.Actor, tracker.Key, substrate.FormatTimestamp(now), events)
 		outboxVal, err := outboxAsp.Marshal()
@@ -218,10 +247,9 @@ func (c *CommitterImpl) Commit(ctx context.Context, env *OperationEnvelope, resu
 			return CommitAck{}, fmt.Errorf("step 8: marshal outbox aspect: %w", err)
 		}
 		ops = append(ops, substrate.BatchOp{
-			Bucket:     c.CoreBucket,
-			Key:        outboxAsp.Key,
-			Value:      outboxVal,
-			CreateOnly: true,
+			Bucket: c.CoreBucket,
+			Key:    outboxAsp.Key,
+			Value:  outboxVal,
 		})
 	}
 

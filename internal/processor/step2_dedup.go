@@ -27,6 +27,15 @@ const (
 type DedupResult struct {
 	Outcome DedupOutcome
 	Tracker *Tracker
+
+	// TombstonedRevision is the Core KV revision of an operator-tombstoned
+	// tracker (present, isDeleted: true — the Contract #4 §4.5 retry signal,
+	// reported as DedupNotFound). The commit path threads it to the step-8
+	// tracker write as Tracker.SupersedesRevision so the re-execution's
+	// tracker supersedes the tombstoned value instead of attempting a
+	// create-only write against a subject that still carries a message.
+	// nil when the subject held no tracker value at all.
+	TombstonedRevision *uint64
 }
 
 // CheckDedup performs the step-2 tracker lookup for envelope.RequestID.
@@ -49,7 +58,8 @@ func CheckDedup(ctx context.Context, conn *substrate.Conn, bucket, requestID str
 		return DedupResult{}, fmt.Errorf("dedup: parse tracker %s: %w", key, err)
 	}
 	if t.IsDeleted {
-		return DedupResult{Outcome: DedupNotFound}, nil
+		rev := entry.Revision
+		return DedupResult{Outcome: DedupNotFound, TombstonedRevision: &rev}, nil
 	}
 	return DedupResult{Outcome: DedupDuplicate, Tracker: t}, nil
 }
