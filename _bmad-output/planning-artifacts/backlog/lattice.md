@@ -49,6 +49,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Weaver] `inflight_<g>`-as-external-gap-marker is unenforced** | The stale-mark reclaim relies on `inflight_<g>` only ever being lens-authored for a real outcome-driven external gap; true today but not install-time enforced. | ★ | S | 📋 needs-design (Designer) · install-time lens-schema check impossible as scoped (2026-07-10); runtime candidate: `staleMark` consults the gap's action class from the target spec — Weaver holds both at runtime |
 | **[Bridge/Processor] Op-status read surface — `lattice.op.status` responder** | Processor-hosted op-status RPC (vault.decrypt pattern); all 4 named submitters migrated. | ★★★ | S | ✅ all 4 fires shipped · [design](../../implementation-artifacts/op-status-read-surface-design.md) · §10.6 contract edit still UNCOMMITTED for Andrew · unblocks matrix-hygiene read-tightening follow-on |
+| **[Refractor/rbac-domain] service-location grants missing from `cap.roles` projection** | 8 operator permissions are `grantedBy`-linked in Core KV but absent from the live `cap.roles.<actor>` doc — ops wrongly denied; comparable grants from other packages DID propagate. | ★★★ | ? | 🔭 flag-for-Andrew · filed as spawn_task chip 2026-07-12 (task_cbc1d94b) |
 
 ### Survey log (round-robin rotation)
 
@@ -121,14 +122,13 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > **edge-manifest Fire 0 SHIPPED** (2026-07-12, `78955d0`) — `pkgmgr.LensSpec` can now declare a
 > `nats-subject` Personal Lens; SYNC stream carries the designed 24h MaxAge; `internal/edge/sync`
 > exports an `OnChange` hook + `UpdateInterest` passthrough.
-> **edge-manifest Fire 1 increment 1 SHIPPED** (2026-07-12, `cd5a077`) — `pkgmgr.OpMetaSpec` grows the
-> descriptor-vocabulary fields (presentation/inputSchema/fieldDescriptions/dispatch/sensitive, conditional
-> op-meta aspects); `RequestService` (service-domain) is the platform's first service-path consumer op —
-> no scope=self/operator grant, authorized structurally via `authContext.service` against the cap.svc
-> grant; `CreateServiceTemplate` gains an optional `.presentation` aspect. **Next: Fire 1 increment 2**
-> (the `packages/edge-manifest` 5-lens package + `docs/components/edge-manifest.md` vocab spec +
-> service-location's install-chain membership + `make seed-edge-demo` + `verify-package-edge-manifest`)
-> — build-ready, depends on nothing new.
+> **edge-manifest Fire 1 CLOSED** (2026-07-12, `f6be3b0`, final increment) — `install-edge-manifest` +
+> `make seed-edge-demo` + a genuine live e2e (`internal/refractor/edge_manifest_fire1_e2e_test.go`) close
+> Fire 1's own green bar; also fixed a real bug where the 5 shipped lenses lacked the `anchor` column
+> `projection.personalEnvelopeFn` requires, so they'd never have published a delta in production.
+> Live-stack `make seed-edge-demo` is currently blocked by a separately-filed capability-projection bug
+> (see the Security & trust boundary table) — not a fault of edge-manifest's own code. **Next: Fire 2**
+> `[verticals]` — Facet v0 dev host + renderer (own lane, not Lattice's).
 > **AI-caps Fire 4 materializer NOT yet build-ready** (verified 2026-07-11): sign-off condition 1
 > (Processor-MAC'd sensitive-refs, sensitive-param-egress-design.md §3.6) has no code anywhere
 > (`git log --all` shows only the ratification doc commit) — it needs its own design pass
@@ -163,7 +163,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
 | Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–3 done · next: EDGE.4 (Vault Proxy) or EDGE.5 (browser node), both build-ready |
-| Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | 🏗️ building · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · Fire 1 inc 2 shipped (5-lens `packages/edge-manifest`, structurally verified live) · next: `make seed-edge-demo` + a live projection e2e (Fire 2) |
+| Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ CLOSED (Fire 1) · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · next: Fire 2 `[verticals]` Facet v0 app |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |
@@ -201,6 +201,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-12 · `f6be3b0` · [edge-manifest,refractor] edge-manifest Fire 1 CLOSED — install-edge-manifest chain, seed-edge-demo, live e2e; fixed a lens anchor bug blocking all 5 lenses from ever publishing; CI green
 - 2026-07-12 · `1b778f9` · [pkgmgr,edge,edge-manifest] edge-manifest Fire 1 inc 2 — 5-lens `packages/edge-manifest` (first nats-subject Personal Lens package), edge/store.go manifest.* key exemption, verify-package-edge-manifest; CI green
 - 2026-07-12 · `17d6fbe` · [CI] unit job split into weight-balanced unit-1/unit-2 shards + a coverage-guard job; overall wall-clock 237s→145s (~39% faster), CI green
 - 2026-07-12 · `cd5a077` · [pkgmgr,Processor,service-domain] edge-manifest Fire 1 inc 1 — OpMetaSpec descriptor-vocabulary fields + RequestService service-path consumer op + template .presentation aspect; CI green
