@@ -212,7 +212,10 @@ read Core-KV CDC, run control responders, read their buckets); the security valu
 restriction. (Control responders additionally need **`allow_responses`** to publish their replies —
 see §3.4 "Request-reply / control-plane replies"; the matrix's publish-allow column lists only the
 *static* subjects.) v1 does **not** lock down subscribe (a future per-identity Edge model — Personal Lens —
-is where read-side subject scoping lands; out of scope here, and that's D1/Edge territory).
+is where read-side subject scoping lands; out of scope here, and that's D1/Edge territory). **That model
+has since shipped:** [per-identity-nats-subscribe-acl-design.md](per-identity-nats-subscribe-acl-design.md)
+(✅ CLOSED, all 3 fires) is the read-side twin this section predicted — the NATS auth-callout responder
+scoping each untrusted Edge connection to its own `lattice.sync.user.<id>` subject.
 
 The **invariant that does all the work**: *no user except `processor` may publish `$KV.core-kv.>`;
 no user except `refractor` may publish `$KV.capability-kv.>` or the lens-target buckets.* Everything

@@ -110,14 +110,12 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > 🎯 **Build-ready now** (this section only — check the **Arch-review intake** section above too, it
 > carries its own ✅ ratified / 📋 ready items): **Edge Lattice EDGE.1 + EDGE.2 CLOSED** (2026-07-10) —
 > the offline-first read loop AND the optimistic write path (`internal/edge/{store,sync,overlay,agent}` +
-> `cmd/edge`) are done. **Edge's own queue is now gated**: EDGE.3 (untrusted multi-identity) needs D1
-> (Personal Lens PL.3) + the Gateway write-path translator + NATS-account subscribe-ACL — not build-ready
-> yet (edge design §7 checkpoint) — but its gate is now owned + ratified. **sensitive-param-egress
+> `cmd/edge`) are done. **per-identity NATS subscribe-ACL CLOSED** (2026-07-12, all 3 fires) — the one
+> open EDGE.3 gate leg. **EDGE.3 (untrusted multi-identity) is now build-ready**: D1/PL.3, the Gateway
+> write-path translator, and the subscribe-ACL are all shipped — see
+> [edge design §7](../../implementation-artifacts/edge-lattice-full-design.md). **sensitive-param-egress
 > CLOSED** (2026-07-11) — Fire 1 (disposition + emission guard) + Fire 2 (bridge unwrap + lease-signing
-> live consumer) both shipped, CI green. **per-identity subscribe-ACL Fire 1 UNBLOCKED** (2026-07-11):
-> Andrew approved the seed commit WITH the xkey condition — both seeds already committed on `main`;
-> whoever picks this row next: wire the xkey (3 steps in the design checkpoint), then merge the
-> existing worktree — don't re-build it. Then Fires 2–3 of the same item (the EDGE.3 gate leg).
+> live consumer) both shipped, CI green.
 > **AI-caps Fire 4 materializer NOT yet build-ready** (verified 2026-07-11): sign-off condition 1
 > (Processor-MAC'd sensitive-refs, sensitive-param-egress-design.md §3.6) has no code anywhere
 > (`git log --all` shows only the ratification doc commit) — it needs its own design pass
@@ -130,7 +128,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | **Multi-credential identity linking + merge credential-awareness** | One human, N IdPs: no path binds a 2nd credential to a claimed U (claim is one-shot); MergeIdentity never repoints credentialindex/bindings and the materializers fold `identity.claimed` only → a merge strands A on the merged-loser. Link flow + merge rebind + provision probe + unlink + whoami. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/multi-credential-identity-linking-design.md) · next: Fire 4 (UnlinkCredential) |
-| **Per-identity NATS subscribe-ACL (Edge sync plane)** | Untrusted Edge connections may subscribe ONLY their own per-identity SYNC subject (`subjects.PersonalSync`), and revocation must cut subscribe. #75 v1 explicitly declined subscribe lockdown (§3.2); PL Fork 3 assumed #75 delivers it — un-owned gap, now owned. Dynamic per-identity NATS authN consuming Contract #11 tokens. | ★★ | M | 🏗️ Fires 1–2 CLOSED (2026-07-11/12) · [design](../../implementation-artifacts/per-identity-nats-subscribe-acl-design.md) · next: Fire 3 (revocation e2e + EDGE.3 handoff) |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 
 ### Privacy / Vault
@@ -153,7 +150,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1+2 (trusted-posture offline loop; PL.1/2 shipped) build first, EDGE.3–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7 checkpoint](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1+2 done · 🚧 next EDGE.3 blocked-on: per-identity subscribe-ACL (its D1/PL.3 + Gateway legs closed; gate re-verified 2026-07-10) |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1+2 (trusted-posture offline loop; PL.1/2 shipped) build first, EDGE.3–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1+2 done · next: EDGE.3 (build-ready 2026-07-12, all gate legs shipped) |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ ratified 2026-07-11 · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · Fire 0 build-ready (nats_subject LensSpec + SYNC MaxAge + edge change-hook) |
 
 ### AI-native
@@ -192,6 +189,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-12 · `<pending>` · [Edge,scripts] per-identity-nats-subscribe-acl Fire 3 CLOSED — live-stack revocation e2e proves vector 4 against real prod wiring; EDGE.3 gate flipped build-ready; CI green
 - 2026-07-12 · `2f07d93` · [Edge,Refractor] per-identity-nats-subscribe-acl Fire 2 — cmd/edge EDGE_TOKEN connect + inbox scoping; Refractor personal.{register,deregister,hydrate} bind to the verified actor; CI green
 - 2026-07-11 · `a3ec8d5` · [Gateway,natsperm] per-identity-nats-subscribe-acl Fire 1 CLOSED — xkey day-one condition wired (UnsealRequest/SealResponse sealed-box round trip); CI green
 
@@ -218,14 +216,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-10 · `7eab200` · [Bridge] bridge-untested-arms — AdapterFunc.Execute/Poll + FakeBackgroundCheck/FakeStripe/FakeDocGen Poll unreachable-error arms covered; cov 85.3%→86.3%; CI green
 - 2026-07-10 · `e2a6a27` · [Processor] stub-auth-active-alert-ttl — `EmitAlert` joins Category B's `diagnosticTTL` (re-armed each write); self-clears instead of staying "warning" forever; CI green
 - 2026-07-10 · `c0875e6` · [Core] substrate-untested-arms — Wrap adapter (incl. closed-conn), IsConnectionError/IsInvalidKeyError classifiers, DocumentEnvelope.Update, KVPutWithTTL, KVDeleteRevision; cov 75.6%→77.5%; CI green
-- 2026-07-10 · `20b8707` · [Bootstrap] bootstrap-untested-arms — two-phase-commit recovery/error paths (nanoid.go) + toMap map/struct/marshal-error/non-object-error branches (envelope.go, no prior test file); cov 61.9%→65.5%; CI green
-- 2026-07-10 · `d6161aa` · [Refractor] natskv-guard-edge-branches (guardedWrite half) — kvStore seam + scripted-fake tests cover CAS retry (Create+Update) and exhaustion; CI green
-- 2026-07-10 · `9812231` · [Security] Contract #11 external actor authN — per-kid opaque/nanoid subject binding + IdP-provenance `.idpBinding` aspect; CI green
-- 2026-07-10 · `61859e0` · [Refractor] convergence-lens-where-guard — `ValidateNoFilteringWhereForConvergence` activation-time guard; exempts actorAggregate lenses (unroutedTasks precedent); CI green
-- 2026-07-10 · `0fd7f3f` · [CI] unit-job worker-packing experiment — natsperm/lease-signing isolated onto a dedicated worker, measured no win vs. noisy baseline, reverted (c2f25bb → 0fd7f3f); CI green
-- 2026-07-10 · `63aab49` · [scripts] read-posture-debt-sweep-flip — §13 sequencing item 3, advisory→blocking (STRICT CI fails, 0 issues repo-wide); unblocks Edge Lattice EDGE.1
-- 2026-07-10 · `495476b` · [Loom] loom-untested-arms — resumeStepZero pattern-pin-missing branch + disarmDeadline re-entry/error arms covered; CI green
-- 2026-07-10 · `0103725` · [Weaver] weaver-untested-arms — 4/5 untested failure arms colocated-tested (control.go + evaluator.go); CI green
-- 2026-07-10 · `7372765` · [Weaver] augur-dispatch-§6-residual — mid-flight-kill + scope-escape-invalid e2e for Fire 2b's proposedOp dispatch; CI green
-- 2026-07-10 · `eb7243c` · [Weaver] weaver-admission-pkgmgr-authoring — `WeaverTargetSpec.Admission` authoring path + install-time validation; lease-signing paces backgroundCheck/stripe; CI green
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

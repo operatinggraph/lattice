@@ -2,6 +2,16 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-10 · `20b8707` · [Bootstrap] bootstrap-untested-arms — two-phase-commit recovery/error paths (nanoid.go) + toMap map/struct/marshal-error/non-object-error branches (envelope.go, no prior test file); cov 61.9%→65.5%; CI green
+- 2026-07-10 · `d6161aa` · [Refractor] natskv-guard-edge-branches (guardedWrite half) — kvStore seam + scripted-fake tests cover CAS retry (Create+Update) and exhaustion; CI green
+- 2026-07-10 · `9812231` · [Security] Contract #11 external actor authN — per-kid opaque/nanoid subject binding + IdP-provenance `.idpBinding` aspect; CI green
+- 2026-07-10 · `61859e0` · [Refractor] convergence-lens-where-guard — `ValidateNoFilteringWhereForConvergence` activation-time guard; exempts actorAggregate lenses (unroutedTasks precedent); CI green
+- 2026-07-10 · `0fd7f3f` · [CI] unit-job worker-packing experiment — natsperm/lease-signing isolated onto a dedicated worker, measured no win vs. noisy baseline, reverted (c2f25bb → 0fd7f3f); CI green
+- 2026-07-10 · `63aab49` · [scripts] read-posture-debt-sweep-flip — §13 sequencing item 3, advisory→blocking (STRICT CI fails, 0 issues repo-wide); unblocks Edge Lattice EDGE.1
+- 2026-07-10 · `495476b` · [Loom] loom-untested-arms — resumeStepZero pattern-pin-missing branch + disarmDeadline re-entry/error arms covered; CI green
+- 2026-07-10 · `0103725` · [Weaver] weaver-untested-arms — 4/5 untested failure arms colocated-tested (control.go + evaluator.go); CI green
+- 2026-07-10 · `7372765` · [Weaver] augur-dispatch-§6-residual — mid-flight-kill + scope-escape-invalid e2e for Fire 2b's proposedOp dispatch; CI green
+- 2026-07-10 · `eb7243c` · [Weaver] weaver-admission-pkgmgr-authoring — `WeaverTargetSpec.Admission` authoring path + install-time validation; lease-signing paces backgroundCheck/stripe; CI green
 - 2026-07-10 · `710f1f0` · [Weaver/Bridge/Gateway/Loom/objmgr] health-issue-since-field — stamp+persist Contract #5 §5.5 `since` on every health issue, platform-wide; CI green
 - 2026-07-09 · [Contract #6] §6.13 invalidation-amendment ratified — reconciled to retire-simple-engine's unconditional broad-BFS + auth-plane-guard reality (`6e0e205`); no narrow Invalidation member / construct gate
 - 2026-07-09 · `e35cc38` · [Contracts] §6.14 protected-Delete+M5 wildcard, §7.3 bootstrap.json example, §10 task-revive text ratified — reconciliation to shipped code (94087bd/128111f); no code change

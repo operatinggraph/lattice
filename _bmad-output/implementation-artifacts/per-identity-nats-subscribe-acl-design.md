@@ -81,6 +81,21 @@ miss — the same outcome this fire already produces by construction). A claimed
 device hydrates via `personal.hydrate` will bind to A, not U, until a future fire plumbs
 `credentialbinding` into the Refractor control plane — flagged here, not silently gapped, should the
 multi-credential-linking claim flow (a parallel in-flight item) need it before then.
+**✅ Fire 3 CLOSED (Steward, 2026-07-12) — the EDGE.3 handoff.** `scripts/verify-edge-revocation-e2e.go`
+(`make test-edge-revocation-e2e`) proves design §8 vector 4 against the **live dev stack's real
+production wiring** — a `RevokeActor` op through the real Gateway outbox-driven revocation
+materializer into the real `token-revocation` bucket, read by the real `cmd/gateway` auth-callout
+responder — the half `internal/natsperm`'s `TestAuthCallout_Revocation` (embedded server +
+`fakeRevocationChecker`) doesn't cover. Ran clean against the shared stack (5/5 OK): pre-revocation
+edge connect succeeds, `RevokeActor` folds into `token-revocation`, the same identity's next connect
+is denied (`Authorization Violation`), `UnrevokeActor` cleans up so repeat runs don't accumulate
+stale entries. The live-connection expiry-disconnect half of vector 4 stays covered by
+`natsauth.TestResponder_Handle_AuthorizationCappedAtMaxTTL` (unit-deterministic; a live 15-minute
+wait buys no additional proof). [nats-account-write-restriction-design.md](nats-account-write-restriction-design.md)
+§3.2 now points here; [edge-lattice-full-design.md](edge-lattice-full-design.md) §7's EDGE.3 gate is
+flipped to build-ready. `go build`/`make vet`/`golangci-lint run ./...`/`STRICT lint-conventions` all
+green (no DDL/keys touched, no `verify-package-*` needed). **This design is CLOSED — all three fires
+shipped.**
 **Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → Security & trust boundary → *Per-identity NATS subscribe-ACL (Edge sync plane)*
 **Consumers:** [Edge Lattice EDGE.3](edge-lattice-full-design.md) (§7 — the one open gate leg) · [Personal Lens Fork 3](personal-secure-lens-design.md) (subject subscribe-authorization)
 **Contracts:** #11 (external actor authN — build-to, plus one staged consumer-table row, see §6) · #1 (subject shapes — build-to) · #75 design's §3.2 matrix (extends, does not alter)
