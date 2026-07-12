@@ -175,6 +175,15 @@ async function authedGetAsProvider(path, providerKey) {
 // plane resolves cap.identity.<id>, never cap.patient.<id> — see
 // CreateAppointment's identifiedBy guard). Returns null when the selected
 // patient has no linked identity (no self-service possible yet for them).
+//
+// The linked identity is CreateUnclaimedIdentity's result — nothing may ever
+// authenticate AS it directly (it starts with no role); every actual request
+// must run the claim ceremony (ensureClaimedDevice, below) first and
+// authenticate as the resulting DEVICE identity instead. Minting a token for
+// the identity's own key here (the old shortcut) left it permanently
+// role-less: CreateAppointment's consumer scope=self grant never applied, and
+// every self-service booking 403'd (mirrors gateway-claim-flow-identity-
+// provisioning-design.md §11.1, same fix as LoftSpace's Apply claim ceremony).
 let selfTokenCache = { subject: null, token: null, exp: 0 };
 
 function patientIdentityKey() {
@@ -185,7 +194,7 @@ function patientIdentityKey() {
 async function selfWriteToken() {
   const identityKey = patientIdentityKey();
   if (!identityKey) return null;
-  const subject = bareId(identityKey);
+  const subject = await ensureClaimedDevice(identityKey);
   const now = Date.now();
   if (selfTokenCache.subject === subject && selfTokenCache.token && now < selfTokenCache.exp - 60000) {
     return selfTokenCache.token;
@@ -202,6 +211,153 @@ async function selfWriteToken() {
   selfTokenCache = { subject, token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
   return body.token;
 }
+
+// ---- Claim ceremony (gateway-claim-flow-identity-provisioning-design.md
+// §11.1 Scenario A / §11.1a — mirrors loftspace-app's Apply fix) ----
+//
+// A patient's linked identity U (CreateUnclaimedIdentity's result) can never
+// authenticate directly: U starts with no role, and ProvisionConsumerIdentity
+// refuses to touch a vertex some other op already created. Every self-service
+// write must instead authenticate as a separate DEVICE identity A that (1)
+// auto-provisions with the consumer role on its first Gateway touch, then (2)
+// calls ClaimIdentity to bind A -> U, which is what grants U the consumer role
+// and lets the Gateway's credential-bindings resolution turn a request
+// authenticated as A into env.Actor = U.
+const PATIENT_AUTH_KEY = "clinic.patientAuth"; // localStorage: {U-bareId: A-bareId}
+
+function loadPatientAuthMap() {
+  try {
+    return JSON.parse(localStorage.getItem(PATIENT_AUTH_KEY) || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+
+function savePatientAuthEntry(uBareId, aBareId) {
+  const m = loadPatientAuthMap();
+  m[uBareId] = aBareId;
+  localStorage.setItem(PATIENT_AUTH_KEY, JSON.stringify(m));
+}
+
+// pendingClaimSecrets holds a freshly client-minted (not yet claimed) secret
+// for a linked identity created THIS session (submitNewPatient) — in-memory
+// only, mirroring §11.1a: "the client retains the plaintext; it is the single
+// copy." A patient whose identity was linked in a prior session (or before
+// this ceremony was wired up) has no pending secret and falls back to
+// staff-gated RotateClaimKey (R4) to re-issue one.
+const pendingClaimSecrets = {};
+
+// mintDeviceToken mints a fresh, uncached dev-token for an arbitrary bare
+// subject — the one-off device-identity (A) calls the claim ceremony makes,
+// distinct from selfWriteToken()'s per-identity cache.
+async function mintDeviceToken(subject) {
+  const res = await fetch("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) throw new Error("mint device token: HTTP " + res.status);
+  const body = await res.json();
+  return body.token;
+}
+
+// postOpAsSubject submits an operation to the Gateway authenticated as a raw
+// bare-id subject — used only by the claim ceremony, which must authenticate
+// as the fresh device identity A itself (the Gateway's raw-credential
+// carve-out for ClaimIdentity), not through the self/staff token caches.
+async function postOpAsSubject(subject, body) {
+  const [base, token] = await Promise.all([gatewayURL(), mintDeviceToken(subject)]);
+  return api(base + "/v1/operations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify(body),
+  });
+}
+
+// claimCeremonyInFlight de-dupes concurrent ensureClaimedDevice callers for
+// the same linked identity onto the SAME promise — without this, two
+// concurrent first-touches for one never-claimed identity would each mint
+// their own device identity and race ClaimIdentity.
+const claimCeremonyInFlight = {};
+
+// ensureClaimedDevice runs the claim ceremony for identity uKey the first
+// time it's needed and returns its device identity's bare id (A) — the
+// subject every subsequent token for uKey mints against. Idempotent per uKey
+// via the persisted patientAuth map (both across calls and across reloads).
+async function ensureClaimedDevice(uKey) {
+  const uBareId = bareId(uKey);
+  const map = loadPatientAuthMap();
+  if (map[uBareId]) return map[uBareId];
+  if (claimCeremonyInFlight[uBareId]) return claimCeremonyInFlight[uBareId];
+  const promise = runClaimCeremony(uKey, uBareId).finally(() => {
+    delete claimCeremonyInFlight[uBareId];
+  });
+  claimCeremonyInFlight[uBareId] = promise;
+  return promise;
+}
+
+async function runClaimCeremony(uKey, uBareId) {
+  let secret = pendingClaimSecrets[uKey];
+  if (!secret) {
+    secret = mintClaimSecret();
+    const newHash = await sha256Hex(secret);
+    const rotateReply = await submitOp("RotateClaimKey", "identity", { identityKey: uKey, claimKeyHash: newHash }, [
+      uKey,
+      uKey + ".state",
+      uKey + ".claimKey",
+    ]);
+    const rotateMsg = rejectionMessage(rotateReply);
+    if (rotateMsg) throw new Error("could not prepare sign-in for this patient — " + rotateMsg);
+  }
+
+  const aBareId = await sha256NanoID(uBareId + ":device:" + mintClaimSecret());
+  const aKey = "vtx.identity." + aBareId;
+  const claimOp = {
+    operationType: "ClaimIdentity",
+    class: "identity",
+    reads: [uKey, uKey + ".state", uKey + ".claimKey"],
+    payload: { targetIdentityKey: uKey, claimKey: secret },
+    authContext: { target: aKey },
+  };
+
+  // A's ProvisionConsumerIdentity pre-flight (the Gateway's provisionActorIfNeeded,
+  // run inline just above by the fetch this postOpAsSubject makes) commits A's
+  // consumer-role grant to Core KV synchronously, but the CapabilityAuthorizer
+  // reads it via an asynchronously-projected Capability Lens — so THIS very next
+  // call, submitted milliseconds later under the same brand-new actor, can race
+  // ahead of that projection (isTransientAuthLag, below).
+  let claimReply;
+  for (let attempt = 0; ; attempt++) {
+    claimReply = await postOpAsSubject(aBareId, claimOp);
+    if (!isTransientAuthLag(claimReply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  const claimMsg = rejectionMessage(claimReply);
+  if (claimMsg) throw new Error("could not sign in this patient — " + claimMsg);
+  delete pendingClaimSecrets[uKey];
+  savePatientAuthEntry(uBareId, aBareId);
+  return aBareId;
+}
+
+// isTransientAuthLag reports whether a rejected reply is the known,
+// architecturally-expected async-projection race — the Capability Lens or the
+// credential-bindings materializer (both eventually-consistent CDC
+// projections, lattice-architecture.md's documented <500ms p99 lag) catching
+// up after a first-touch provision or claim, not yet visible to THIS
+// immediately-following request. Distinguishes it from a genuine, persistent
+// authorization denial, which should surface immediately rather than retry.
+function isTransientAuthLag(reply) {
+  if (!reply || reply.status !== "rejected" || !reply.error) return false;
+  if (reply.error.code !== "AuthDenied") return false;
+  const reason = reply.error.details && reply.error.details.reason;
+  return reason === "NoCapabilityEntry" || reason === "OperationNotPermitted";
+}
+
+// retryBackoffsMs is the bounded backoff schedule the isTransientAuthLag
+// retry loops in this file share — ~3s total, comfortably under the 5s
+// deadline the codebase's own Go E2E poll helper
+// (scripts/verify-real-actor-write-auth.go) uses for the same class of race.
+const retryBackoffsMs = [200, 400, 800, 1600];
 
 // staffReadToken (D1.5, the staff wildcard increment) mints/caches a demo
 // token for the clinic-wide STAFF view via POST /api/staff/dev-token — unlike
@@ -273,6 +429,11 @@ function shortKey(key) {
 // instead, with authContext.target naming that identity — the Gateway/Processor
 // authorize the write as the real patient, not staff-on-their-behalf. Returns
 // the reply (with .status) so callers can branch on rejected, same as before.
+// selfWriteToken() resolves the patient's linked identity through the claim
+// ceremony (ensureClaimedDevice), so an asSelf submit racing right behind a
+// fresh claim gets the same bounded isTransientAuthLag retry that ceremony
+// already uses — staff never races this (a long-lived, already-resolved
+// actor), so it submits once.
 let gatewayURLCache = null;
 async function gatewayURL() {
   if (gatewayURLCache) return gatewayURLCache;
@@ -288,11 +449,21 @@ async function submitOp(operationType, klass, payload, reads, opts) {
   const body = { operationType, class: klass, payload, reads };
   if (opts && opts.optionalReads) body.optionalReads = opts.optionalReads;
   if (asSelf) body.authContext = { target: patientIdentityKey() };
-  return api(base + "/v1/operations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify(body),
-  });
+  const post = () =>
+    api(base + "/v1/operations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify(body),
+    });
+  if (!asSelf) return post();
+
+  let reply;
+  for (let attempt = 0; ; attempt++) {
+    reply = await post();
+    if (!isTransientAuthLag(reply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  return reply;
 }
 
 function rejectionMessage(reply) {
@@ -507,8 +678,10 @@ async function sha256Hex(s) {
 }
 
 // mintClaimSecret returns a random claim-secret plaintext. It is hashed and only
-// the hash is sent; the plaintext never enters Lattice (and, in this demo, is
-// discarded — no claim ceremony for a clinic-registered patient).
+// the hash is sent; the plaintext never enters Lattice. Used both for a real
+// CreateUnclaimedIdentity claimKeyHash and, elsewhere, as raw entropy for
+// deriving a device identity's NanoID (ensureClaimedDevice) — a fresh
+// unpredictable value, not a secret that has to survive that second use.
 function mintClaimSecret() {
   const a = new Uint8Array(32);
   crypto.getRandomValues(a);
@@ -595,7 +768,8 @@ async function submitNewPatient(ev) {
   try {
     let identityKey = "";
     if (email || phone) {
-      const claimKeyHash = await sha256Hex(mintClaimSecret());
+      const claimSecret = mintClaimSecret();
+      const claimKeyHash = await sha256Hex(claimSecret);
       const idPayload = { name, claimKeyHash };
       if (email) idPayload.email = email;
       if (phone) idPayload.phone = phone;
@@ -607,6 +781,20 @@ async function submitNewPatient(ev) {
         return;
       }
       identityKey = idReply && idReply.primaryKey ? idReply.primaryKey : "";
+      if (identityKey) {
+        // Run the real claim ceremony now, while the plaintext secret still
+        // exists (§11.1a — Lattice never stores it): without this the linked
+        // identity is created but role-less, and every self-service booking
+        // 403s. Best-effort — a failure here still leaves the patient created
+        // (with a linked identity); the RotateClaimKey fallback in
+        // ensureClaimedDevice can retry it the first time self-service is used.
+        pendingClaimSecrets[identityKey] = claimSecret;
+        try {
+          await ensureClaimedDevice(identityKey);
+        } catch (e) {
+          toast("Patient created, but self-service sign-in setup failed — " + e.message, "err");
+        }
+      }
     }
 
     const payload = { fullName: name };
