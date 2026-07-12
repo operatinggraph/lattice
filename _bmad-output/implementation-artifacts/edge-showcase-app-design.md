@@ -1,7 +1,7 @@
 # Edge showcase app ("Facet") — the discovery-driven personal client — design
 
-**Status: 📐 awaiting-Andrew (design fire 2026-07-10, direct Andrew request).** Author: Winston (lead).
-**Backlog row:** [verticals.md](../planning-artifacts/backlog/verticals.md) → *Vertical demand backlog* → *Edge showcase app (Facet)*. Platform fires (0, 1, 4 below) execute in the **Lattice lane** post-ratification; app fires (2, 3, 5) in the **Verticals lane**.
+**Status: ✅ RATIFIED (Andrew, 2026-07-11) — "Approved, add to the backlog."** Blanket approval; the four forks stand at their RECOMMENDED options (FORK-1 B, FORK-2 A, FORK-3 A, FORK-4 A), rewritten as DECIDED below with the roads not taken — flag any single fork to override. No frozen-contract change. **Build runs through the fleet, not this session:** platform fires 0/1/4 → Lattice lane, app fires 2/3/5 → Verticals lane. Author: Winston (lead) · Designer fire 2026-07-10, ratified 2026-07-11.
+**Backlog rows:** [verticals.md](../planning-artifacts/backlog/verticals.md) → *Edge showcase app (Facet)* (app fires 2/3/5) · [lattice.md](../planning-artifacts/backlog/lattice.md) → *Edge & personal lenses* → *Edge-manifest + personal-lens consumer* (platform fires 0/1/4).
 **Consumers:** this app is the named consumer that un-defers **PL.6** (WebSocket/push bridge) and **EDGE.5** (browser/mobile node), and the demand driver for the per-actor write-surface migration.
 **Contracts:** build-to #1, #2 (§2.5 read posture), #6 (§6.5 service path, §6.10 availability, §6.14 read grants), #9 (claim), #10 (§10.1 tasks, §10.5, §10.7 auto-complete), #11 (external actor authn). **Frozen-contract change: NONE** (see FORK-1 — the descriptor vocabulary ships as a component spec, not a contract edit).
 
@@ -17,23 +17,17 @@
 
 **Frozen-contract change: NONE.**
 
-**FORK-1 — where the descriptor vocabulary lives.**
-- **A.** Freeze it now as a new Contract #12 (Edge Discovery & Descriptor Vocabulary).
-- **B. (RECOMMENDED)** Ship it as `docs/components/edge-manifest.md` (build-to spec, versioned `vocab: 1`); freeze as a contract when the **second renderer** (iOS/SwiftUI, Fire 5) proves client-neutrality. Freezing v0 guesses invites amendment churn; the freeze trigger is named, not open-ended.
+**FORK-1 — where the descriptor vocabulary lives. DECIDED: B (Andrew, 2026-07-11).** Ship it as `docs/components/edge-manifest.md` (build-to spec, versioned `vocab: 1`); freeze as a contract when the **second renderer** (iOS/SwiftUI, Fire 5) proves client-neutrality — the freeze trigger is named, not open-ended.
+- *Road not taken — A:* freeze now as a new Contract #12. Rejected for v1: freezing v0 guesses before a second renderer exists invites amendment churn.
 
-**FORK-2 — the browser engine (resolved at Fire 4, recorded now).**
-- **A. (RECOMMENDED)** Compile `internal/edge` to wasm (store interface → IndexedDB, transport → WebSocket). Aligns with EDGE.5's ratified "same engine, new host"; LWW/overlay/queue semantics stay single-sourced. Feasibility empirically verified 2026-07-02 (js/wasm builds; ~1.3 MB gz interpreter-only — the engine without Starlark is smaller).
-- **B.** A protocol-parity TypeScript mini-engine (hydrate + LWW apply + overlay + intent queue, ~small), pinned by shared conformance fixtures. Fallback if wasm ergonomics/size disappoint.
-- **C. (rejected)** A REST-only thin client against Gateway read models — builds a second read plane parallel to the Personal Lens and abandons the offline-first store; recorded as the road not taken.
+**FORK-2 — the browser engine. DECIDED: A (Andrew, 2026-07-11); confirmable at Fire 4.** Compile `internal/edge` to wasm (store interface → IndexedDB, transport → WebSocket) — EDGE.5's ratified "same engine, new host"; LWW/overlay/queue semantics stay single-sourced; wasm feasibility empirically verified 2026-07-02 (~1.3 MB gz interpreter-only, smaller without Starlark).
+- *Road not taken — B:* a protocol-parity TypeScript mini-engine pinned by shared conformance fixtures — kept as the **fallback** if wasm ergonomics/size disappoint when Fire 4 lands. *C (REST-only thin client):* rejected — a second read plane that abandons the offline-first store.
 
-**FORK-3 — manifest transport.**
-- **A. (RECOMMENDED)** Personal Lens only: the manifest is a set of `nats_subject` personal lenses; the app's world-feed is the SYNC stream + hydration, exactly as EDGE.1/2 consume it.
-- **B.** A + a Gateway REST snapshot (`GET /v1/manifest`, RLS-backed) as a cold-start/degraded fallback. Compatible extension; not v1.
-- **C. (rejected)** REST-primary (same second-plane smell as FORK-2 C).
+**FORK-3 — manifest transport. DECIDED: A (Andrew, 2026-07-11).** Personal Lens only: the manifest is a set of `nats_subject` personal lenses; the app's world-feed is the SYNC stream + hydration, exactly as EDGE.1/2 consume it.
+- *Road not taken — B:* add a Gateway REST snapshot (`GET /v1/manifest`, RLS-backed) as a cold-start/degraded fallback — a compatible later extension, not v1. *C (REST-primary):* rejected (same second-plane smell as FORK-2 C).
 
-**FORK-4 — first target platform.**
-- **A. (RECOMMENDED)** Browser/PWA first: App Store guideline 2.5.2 does not apply to the PWA route (edge design §6 addendum); NATS WebSocket is native to our pinned server (see §5); one link demos anywhere including phones; iOS/SwiftUI follows as the second renderer that triggers the FORK-1 freeze.
-- **B.** Native iOS first: better device story (push, biometrics) but pays TestFlight friction + the 2.5.2 open item immediately, and delays the two-renderer proof.
+**FORK-4 — first target platform. DECIDED: A (Andrew, 2026-07-11).** Browser/PWA first: App Store guideline 2.5.2 does not apply to the PWA route (edge design §6 addendum); NATS WebSocket is native to our pinned server (§5); one link demos anywhere including phones; iOS/SwiftUI follows as the second renderer that triggers the FORK-1 freeze.
+- *Road not taken — B:* native iOS first — better device story (push, biometrics) but pays TestFlight friction + the 2.5.2 open item immediately, and delays the two-renderer proof.
 
 ---
 

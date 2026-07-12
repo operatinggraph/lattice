@@ -154,6 +154,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
 | Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1+2 (trusted-posture offline loop; PL.1/2 shipped) build first, EDGE.3–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7 checkpoint](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1+2 done · 🚧 next EDGE.3 blocked-on: per-identity subscribe-ACL (its D1/PL.3 + Gateway legs closed; gate re-verified 2026-07-10) |
+| Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ ratified 2026-07-11 · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · Fire 0 build-ready (nats_subject LensSpec + SYNC MaxAge + edge change-hook) |
 
 ### AI-native
 | Item | What it is | Imp | Size | State |
