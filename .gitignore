@@ -24,6 +24,7 @@ coverage.html
 /lattice-processor
 # Stray top-level binaries from `go build ./cmd/<name>` without -o.
 # Canonical build target is bin/<name> (see Makefile).
+/bridge
 /refractor
 /processor
 /verify-package-rbac
