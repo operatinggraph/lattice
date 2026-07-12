@@ -1,0 +1,29 @@
+name: edge-manifest
+version: 0.1.0
+description: |
+  The Facet edge app's world manifest: five Personal Lenses (edgeIdentity/
+  edgeServices/edgeCatalog/edgeTasks/edgeInstances) projecting identity,
+  reachable services, the op descriptor vocabulary, open tasks, and service
+  instances into the manifest.* namespace over the per-actor SYNC transport.
+depends:
+  - identity-domain
+  - orchestration-base
+  - service-domain
+  - service-location
+declares:
+  lenses:
+    - canonicalName: edgeIdentity
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeServices
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeCatalog
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeTasks
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeInstances
+      adapter: nats-subject
+      engine: full

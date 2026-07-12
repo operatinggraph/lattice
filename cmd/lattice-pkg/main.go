@@ -38,6 +38,7 @@ import (
 	clinicreminders "github.com/asolgan/lattice/packages/clinic-reminders"
 	consoleoperator "github.com/asolgan/lattice/packages/console-operator"
 	controlauthz "github.com/asolgan/lattice/packages/control-authz"
+	edgemanifest "github.com/asolgan/lattice/packages/edge-manifest"
 	frontdesk "github.com/asolgan/lattice/packages/front-desk"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	identityhygiene "github.com/asolgan/lattice/packages/identity-hygiene"
@@ -88,6 +89,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"clinic-ledger":          clinicledger.Package,
 	"clinic-reminders":       clinicreminders.Package,
 	"service-location":       servicelocation.Package,
+	"edge-manifest":          edgemanifest.Package,
 	"lease-signing":          leasesigning.Package,
 	"loftspace-ledger":       loftspaceledger.Package,
 	"cafe-ledger":            cafeledger.Package,

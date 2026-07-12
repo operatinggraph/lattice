@@ -81,6 +81,12 @@ choices live HERE. Per-package capability definitions live under
   the component control planes, submit DDL-driven ops, install packages, upload blobs;
   a trusted single-identity, loopback-bound, auth-less inspector (the one application
   allowed to read Core KV directly — the P5 exception).
+- [Edge](./edge.md) — the sovereign per-user node reference implementation: a local VAL mirror kept
+  fresh by the Personal Lens delta stream, an optimistic write overlay, and reconcile-by-revision — the
+  cloud Processor stays the sole authority.
+- [edge-manifest](./edge-manifest.md) — the Capability Package supplying the Facet edge app's world
+  manifest: five Personal Lenses re-projecting identity/services/catalog/tasks/instances into the
+  `manifest.*` namespace over the per-actor SYNC transport.
 
 ## How to use these pages
 

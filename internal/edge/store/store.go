@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"go.etcd.io/bbolt"
 
@@ -39,7 +40,20 @@ const (
 	bucketIntents = "intents" // agent: durable FIFO of queued operation envelopes (§3.5).
 
 	cursorKey = "cursor"
+
+	// manifestKeyPrefix is the reserved projection-row key namespace for a
+	// Personal Lens's nats-subject deltas that are not themselves Core-KV
+	// keys (edge-showcase-app-design.md §3.1: "manifest row keys ... are
+	// projection-row keys, not Core-KV keys — same as my-tasks.* rows").
+	// The store mirrors these verbatim alongside Contract #1 entries.
+	manifestKeyPrefix = "manifest."
 )
+
+// isStorableKey reports whether key is either a valid Contract #1
+// vertex/aspect/link key or a reserved manifestKeyPrefix projection-row key.
+func isStorableKey(key string) bool {
+	return substrate.ClassifyKey(key) != substrate.KindUnknown || strings.HasPrefix(key, manifestKeyPrefix)
+}
 
 // Entry is one Local VAL Store record: the projected fragment last applied
 // for a Contract #1 key, plus the cloud revision that produced it.
@@ -86,10 +100,11 @@ func (s *Store) Close() error {
 // greater than or equal to the currently-stored revision for key (a
 // stale/duplicate/reordered delta — JetStream delivers at-least-once and can
 // reorder — is dropped). Returns applied=false for a dropped delta, with no
-// error. key must be a valid Contract #1 vertex/aspect/link key.
+// error. key must be a valid Contract #1 vertex/aspect/link key, or carry
+// the reserved manifestKeyPrefix.
 func (s *Store) ApplyUpsert(key string, revision uint64, data json.RawMessage) (applied bool, err error) {
-	if substrate.ClassifyKey(key) == substrate.KindUnknown {
-		return false, fmt.Errorf("edge/store: ApplyUpsert: %q is not a Contract #1 key", key)
+	if !isStorableKey(key) {
+		return false, fmt.Errorf("edge/store: ApplyUpsert: %q is not a Contract #1 or manifest key", key)
 	}
 	err = s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketVAL))
@@ -110,8 +125,8 @@ func (s *Store) ApplyUpsert(key string, revision uint64, data json.RawMessage) (
 // under the same last-writer-wins-by-revision gate as ApplyUpsert. Returns
 // applied=false for a dropped (stale/duplicate) delete, with no error.
 func (s *Store) ApplyDelete(key string, revision uint64) (applied bool, err error) {
-	if substrate.ClassifyKey(key) == substrate.KindUnknown {
-		return false, fmt.Errorf("edge/store: ApplyDelete: %q is not a Contract #1 key", key)
+	if !isStorableKey(key) {
+		return false, fmt.Errorf("edge/store: ApplyDelete: %q is not a Contract #1 or manifest key", key)
 	}
 	err = s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketVAL))

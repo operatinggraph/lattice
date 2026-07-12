@@ -117,6 +117,23 @@ func TestApplyUpsertAndDelete_RejectNonContract1Keys(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestApplyUpsertAndDelete_AcceptManifestKeys(t *testing.T) {
+	s := openTestStore(t)
+
+	applied, err := s.ApplyUpsert("manifest.me", 1, []byte(`{"displayName":"Riley"}`))
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	entry, ok, err := s.Get("manifest.me")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(1), entry.Revision)
+
+	applied, err = s.ApplyDelete("manifest.me", 2)
+	require.NoError(t, err)
+	require.True(t, applied)
+}
+
 func TestGet_AbsentKeyReturnsNotOK(t *testing.T) {
 	s := openTestStore(t)
 
