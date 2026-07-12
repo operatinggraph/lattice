@@ -4,8 +4,10 @@
 //
 // It declares:
 //
-//   - One DDL (`service`) defining the generic service vertex type + three
-//     lifecycle ops. A service vertex is either a TEMPLATE (an offering) or
+//   - One DDL (`service`) defining the generic service vertex type + four
+//     lifecycle ops (the fourth, RequestService, is the edge-manifest Fire 1
+//     consumer-invocable service-path counterpart to CreateServiceInstance —
+//     see below). A service vertex is either a TEMPLATE (an offering) or
 //     an INSTANCE (a run of an offering), discriminated by the vertex ENVELOPE
 //     class (`service.<x>.template` / `service.<x>.instance` — P7, no `.class`
 //     shadow aspect); the service family `<x>` ∈ {backgroundCheck, payment}.
@@ -29,12 +31,17 @@
 //     data in aspects, root minimal); no outcome aspect exists until
 //     RecordServiceOutcome writes it (absence = not-yet-complete).
 //
-//   - Permissions granting the three lifecycle ops to `operator`
+//   - Permissions granting three of the four lifecycle ops to `operator`
 //     (scope: any) — the vertical's installer/orchestrator submits them.
+//     RequestService carries NO permission grant: it authorizes structurally
+//     via authContext.service against the cap.svc availability grant
+//     (service-location's lens), never a standing role.
 //
-//   - Op-metas making CreateServiceInstance and RecordServiceOutcome
-//     `forOperation`-resolvable, so a downstream Loom externalTask step can
-//     bind them.
+//   - Op-metas making CreateServiceInstance, RecordServiceOutcome, and
+//     RequestService `forOperation`-resolvable. RequestService's op-meta also
+//     carries the descriptor-vocabulary aspects (presentation/inputSchema/
+//     dispatch) an edge client renders + submits it from with no hardcoded
+//     knowledge of this package (edge-showcase-app-design.md §3.3).
 //
 // It declares NO lens: the serviceAccess / cap.svc read-path auth plane and the
 // availableAt availability assertion it walks are owned by the service-location
@@ -51,8 +58,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "service-domain",
-	Version:     "0.2.0",
-	Description: "Service template + instance vertex type (service DDL + lifecycle ops); the instance records its external-call outcome as aspects (D5). No read-path lens (Phase-3 deferred).",
+	Version:     "0.3.0",
+	Description: "Service template + instance vertex type (service DDL + lifecycle ops incl. RequestService); the instance records its external-call outcome as aspects (D5). No read-path lens (Phase-3 deferred).",
 	Depends:     []string{"identity-domain", "orchestration-base"},
 	DDLs:        DDLs(),
 	Permissions: Permissions(),

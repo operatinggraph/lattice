@@ -24,10 +24,12 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 }
 
 // TestPackage_DDLAndOps pins the single service DDL, its lifecycle commands,
-// the three operator-scoped permission grants, the two op-metas, and — the
-// load-bearing scope assertion — that the package declares ZERO lenses
-// (sidesteps the carried pkgmgr canonicalName-uniqueness gap and honours the
-// Phase-3 read-path deferral).
+// the three operator-scoped permission grants (RequestService carries none —
+// its authorization is the structural service-path cap.svc grant, not a
+// standing PermissionSpec), the three op-metas, and — the load-bearing scope
+// assertion — that the package declares ZERO lenses (sidesteps the carried
+// pkgmgr canonicalName-uniqueness gap and honours the Phase-3 read-path
+// deferral).
 func TestPackage_DDLAndOps(t *testing.T) {
 	if got := len(Package.DDLs); got != 1 {
 		t.Fatalf("expected 1 DDL, got %d", got)
@@ -40,7 +42,7 @@ func TestPackage_DDLAndOps(t *testing.T) {
 		t.Fatalf("DDL[0] class = %q, want meta.ddl.vertexType", ddl.Class)
 	}
 
-	wantCmds := map[string]bool{"CreateServiceTemplate": false, "CreateServiceInstance": false, "RecordServiceOutcome": false}
+	wantCmds := map[string]bool{"CreateServiceTemplate": false, "CreateServiceInstance": false, "RecordServiceOutcome": false, "RequestService": false}
 	for _, c := range ddl.PermittedCommands {
 		if _, ok := wantCmds[c]; !ok {
 			t.Fatalf("unexpected permittedCommand %q", c)
@@ -78,8 +80,10 @@ func TestPackage_DDLAndOps(t *testing.T) {
 
 	// Op-metas: CreateServiceInstance + RecordServiceOutcome are
 	// forOperation-resolvable (14.4's externalTask path binds them);
-	// CreateServiceTemplate is install-time admin and declares none.
-	wantMetas := map[string]bool{"CreateServiceInstance": false, "RecordServiceOutcome": false}
+	// RequestService is forOperation-resolvable AND carries the
+	// descriptor-vocabulary aspects (edge-manifest Fire 1); CreateServiceTemplate
+	// is install-time admin and declares none.
+	wantMetas := map[string]bool{"CreateServiceInstance": false, "RecordServiceOutcome": false, "RequestService": false}
 	if got := len(Package.OpMetas); got != len(wantMetas) {
 		t.Fatalf("expected %d opMetas, got %d", len(wantMetas), got)
 	}

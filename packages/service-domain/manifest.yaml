@@ -1,13 +1,17 @@
 name: service-domain
-version: 0.2.0
+version: 0.3.0
 description: |
   Service template + instance vertex type (the service DDL + lifecycle ops
-  CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome). A
-  service instance is a real linked vertex (instanceOf a template, providedTo
-  an applicant identity) whose external-call outcome (status + completedAt)
-  is recorded as aspects per D5 — vertex root data minimal. Declares no lens
-  (the serviceAccess / cap.svc read-path auth plane is Phase-3 deferred).
-  Depends on identity-domain and orchestration-base.
+  CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome,
+  RequestService). A service instance is a real linked vertex (instanceOf a
+  template, providedTo an applicant identity) whose external-call outcome
+  (status + completedAt) is recorded as aspects per D5 — vertex root data
+  minimal. RequestService (edge-manifest Fire 1) is the consumer-invocable
+  service-path counterpart to CreateServiceInstance: authorized structurally
+  via authContext.service against the cap.svc availability grant, not a
+  standing PermissionSpec — it carries no permission grant below. Declares
+  no lens (the serviceAccess / cap.svc read-path auth plane is Phase-3
+  deferred). Depends on identity-domain and orchestration-base.
 depends:
   - identity-domain
   - orchestration-base
@@ -28,3 +32,4 @@ declares:
   opMetas:
     - operationType: CreateServiceInstance
     - operationType: RecordServiceOutcome
+    - operationType: RequestService
