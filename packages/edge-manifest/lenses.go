@@ -113,12 +113,20 @@ const (
 // a degenerate {key:null,...} entry when the identity holds no role / has
 // no residence is expected and, per the design's own renderer-obligations
 // note (§3.2, inherited from the my-tasks corpus), dropped client-side.
+// `anchor` (the identity's own key — this row is never degenerate, so
+// self-anchoring is correct, unlike a fan-out-reached neighbor) is
+// required by projection.personalEnvelopeFn: every Personal Lens row must
+// alias a Contract #1 vertex key to `anchor` or the row is silently
+// declined as a hollow/degenerate delegation row (personal.go's own doc:
+// "a personal lens's cypher must therefore always alias its neighbor's key
+// to anchor").
 const edgeIdentitySpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
 OPTIONAL MATCH (identity)-[:residesIn]->(loc)
 OPTIONAL MATCH (loc)-[:containedIn]->(container)
 RETURN
+  identity.key AS anchor,
   "manifest.me" AS ns,
   identity.key AS identityKey,
   identity.name.data.value AS displayName,
@@ -144,6 +152,7 @@ OPTIONAL MATCH (tpl)-[:providedBy]->(provider)
 WITH tpl, provider, container
 WHERE tpl.key <> null
 RETURN
+  tpl.key AS anchor,
   "manifest.svc" AS ns,
   nanoIdFromKey(tpl.key) AS entityId,
   tpl.key AS serviceKey,
@@ -170,6 +179,7 @@ OPTIONAL MATCH (tpl)-[:permitsOperation]->(op:meta)
 WITH op
 WHERE op.key <> null
 RETURN
+  op.key AS anchor,
   "manifest.op" AS ns,
   nanoIdFromKey(op.key) AS entityId,
   op.key AS opMetaKey,
@@ -202,6 +212,7 @@ WHERE task.data.status = "open"
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 RETURN
+  task.key AS anchor,
   "manifest.task" AS ns,
   nanoIdFromKey(task.key) AS entityId,
   task.key AS taskKey,
@@ -224,6 +235,7 @@ const edgeInstancesSpec = `
 MATCH (identity:identity {key: $actorKey})<-[:providedTo]-(inst:service)
 OPTIONAL MATCH (inst)-[:instanceOf]->(tpl:service)
 RETURN
+  inst.key AS anchor,
   "manifest.inst" AS ns,
   nanoIdFromKey(inst.key) AS entityId,
   inst.key AS instanceKey,

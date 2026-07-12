@@ -94,7 +94,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## up — Bring up NATS + Postgres, run bootstrap binary, block until readiness gate.
 ## Detects an already-healthy kernel first and reuses it — invoking this against a
@@ -889,6 +889,50 @@ up-wellness:
 		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
 	@sleep 1
 	@echo "==> Wellness ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · wellness app: http://127.0.0.1:7802"
+
+## install-edge-manifest — Install the edge-manifest personal-lens package
+## (edge-showcase-app-design.md Fire 1, G9) onto a running up-full stack, in
+## dependency order: orchestration-base → location-domain → service-domain →
+## service-location → edge-manifest (identity-domain is already installed by
+## install-packages/up-full). service-location is not vertical-specific — it's
+## the residence-based service-access scheme edge-manifest's catalog/services
+## lenses re-project — so it joins here rather than any single vertical's
+## install-<vertical> target. Drive it via `make seed-edge-demo` for a demo
+## topology, the lattice CLI, or Loupe.
+install-edge-manifest:
+	@echo "==> Building lattice-pkg..."
+	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Installing orchestration-base..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
+	@echo "==> Installing location-domain..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
+	@echo "==> Installing service-domain..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-domain
+	@echo "==> Installing service-location..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-location
+	@echo "==> Installing edge-manifest..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/edge-manifest
+	@echo "==> edge-manifest installed (service-location + edge-manifest). Run \`make seed-edge-demo\` for a demo topology."
+
+## seed-edge-demo — Dev-seed the edge-manifest Fire 1 demo topology
+## (edge-showcase-app-design.md §3.2/§7, G9): a building containing a unit, a
+## demo tenant identity holding \`consumer\` and residing in the unit, and a
+## service template (presented as "Maple Laundry") availableAt the building
+## with its RequestService op wired permitsOperation — enough for the
+## tenant's edge-manifest lenses to populate all five manifest.* row kinds and
+## for RequestService to be submittable under authContext.service. Family is
+## service-domain's real \`backgroundCheck\` enum member (branded via the
+## template's .presentation aspect) — service-domain's family enum is closed
+## to {backgroundCheck, payment}; adding a literal "laundry" family is out of
+## this fire's scope. Submits every op directly over NATS as the bootstrap
+## admin actor (mirroring dev-seed-staff / verify-real-actor-write-auth.go),
+## topology only — it does NOT itself submit RequestService (that's the
+## consumer-actor demo/e2e's job). Requires \`make install-edge-manifest\`
+## already run. NOT idempotent (mints fresh vertices each run), like
+## dev-seed-staff.
+seed-edge-demo:
+	@echo "==> Running the edge-manifest demo seed..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/seed-edge-demo.go
 
 ## install-onebill — Install the Café Inc 3 "one-bill" composition lens (Café
 ## vertical row, ★★★): re-projects loftspace-ledger's + cafe-ledger's posted

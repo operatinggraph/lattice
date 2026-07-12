@@ -95,6 +95,35 @@ func FindMetaByCanonical(ctx context.Context, kv jetstream.KeyValue, allKeys map
 	return "", nil
 }
 
+// FindOpMetaByOperationType scans vtx.meta.<id> ROOT vertices (excluding
+// aspect keys, which carry a further ".<localName>" segment) for one whose
+// data.operationType matches wantOperationType, returning its full key or ""
+// if none is found. Unlike a DDL/Lens/Role, an op-meta carries no
+// canonicalName aspect (internal/pkgmgr/build.go's op-meta install loop
+// writes only the vertex root {operationType} + optional descriptor-
+// vocabulary aspects) — so FindMetaByCanonical, which scans
+// vtx.meta.*.canonicalName aspects, can never find one.
+func FindOpMetaByOperationType(ctx context.Context, kv jetstream.KeyValue, allKeys map[string]struct{}, wantOperationType string) (string, error) {
+	const prefix = "vtx.meta."
+	for key := range allKeys {
+		if !strings.HasPrefix(key, prefix) || key == prefix {
+			continue
+		}
+		if strings.Contains(strings.TrimPrefix(key, prefix), ".") {
+			continue // an aspect key, not a root vertex
+		}
+		env, err := GetEnvelope(ctx, kv, key)
+		if err != nil {
+			continue
+		}
+		data, _ := env["data"].(map[string]any)
+		if ot, _ := data["operationType"].(string); ot == wantOperationType {
+			return key, nil
+		}
+	}
+	return "", nil
+}
+
 // FindPackageManifest scans vtx.package.*.manifest and returns
 // (pkgVertexKey, manifestKey) for the first non-tombstoned entry whose
 // data.name matches pkgName.
