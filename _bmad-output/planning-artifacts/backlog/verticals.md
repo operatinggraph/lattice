@@ -23,6 +23,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
 | **No-show doesn't cost anything** | `SetAppointmentStatus(status=noShow)` is purely a status flip — no consequence. Corrected 2026-07-12: the claimed `clinic-reminders` precedent doesn't hold (that gap never touches the ledger); real shape mirrors `cafe-domain`'s `missing_charge → directOp(DebitAccount)` — needs a new package spanning `clinic-domain`+`clinic-ledger`, a `DebitAccount` back-ref param, and a fee-amount decision. | Clinic | pkg | ★ | M | 📋 ready — needs a short design note first (package boundary + fee amount) |
 | **Clinic is a single-location, single-specialty silo** | `location-domain` is unused by `clinic-domain` (explicit in its own docs, unlike `loftspace-domain`); a provider has exactly one `specialty` and no site. A real multi-site practice group needs provider↔location + per-location scheduling — mirror `loftspace-domain`'s already-proven `location-domain` integration pattern. Bigger structural lift; sequence after the other Clinic items land. | Clinic | pkg | ★★ | L | 🏗️ Inc 1 done · [design](../../implementation-artifacts/clinic-multisite-design.md) · next: Inc 2 FE |
+| **Self-service patient can book but can never reschedule/cancel themselves** | Code-verified (`package_test.go:150-155`): only `CreateAppointment` carries a consumer scope=self grant; `RescheduleAppointment`/`SetAppointmentStatus` are operator-only, so a self-booked patient must call the front desk to change or cancel. | Clinic | pkg + FE | ★★ | M | 📋 ready — extend the shipped consumer-grant pattern to reschedule + cancel-only status, no new platform primitive |
 | **Booking is provider-first, no specialty-based search** | Booking form now has a specialty filter + a "soonest available" panel computing each matching provider's earliest open slot. | Clinic | FE | ★ | S | ✅ shipped `8315a88` |
 | **Café tab: no guard against a 2nd concurrent open tab per lease** | Live-verified: `OpenTab` (`cafe-domain/ddls.go:225`) mints unconditionally, no dedup — unlike this package's own `cafeLedgerAccountGuard` "one account per lease" precedent. POS's `renderPos` (`app.js:169`) picks one via `find()`, silently ignoring the other — a real revenue leak, not just a UI quirk. | Café | pkg | ★★ | S | ✅ shipped `3def314` |
 
@@ -44,7 +45,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café, stagg
 joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no app to exercise; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×14, Clinic ×11, Café ×3.
+- **Rotation to date:** LoftSpace ×14, Clinic ×12, Café ×3.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All three apps exist + are exercisable live (`:7788` / `:7799` / `:7801`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
 - **2026-07-09:** LoftSpace — exercised Browse&Apply live; found + root-caused self-service identity never claims (blocks CreateLeaseApplication for every applicant); filed.
@@ -54,7 +55,8 @@ joins once `cmd/wellness-app` (Inc 2) ships** — today it has a package but no 
 - **2026-07-11:** Clinic — drove booking/schedule/ledger live; booking form is provider-first with no specialty search, filed FE-only fix; no platform block.
 - **2026-07-11:** Café — drove OpenTab/Charge/Settle live; found no per-lease open-tab guard (2 concurrent open tabs same lease), filed pkg fix; no platform block.
 - **2026-07-11:** LoftSpace — Apply rejected for every applicant; root-caused to the demo skipping the claim ceremony (app-side, not platform), filed.
-- **Next:** Clinic.
+- **2026-07-12:** Clinic — drove booking/My Appointments live + code-verified permission pins; found self-service patients can book but never reschedule/cancel themselves (operator-only ops), filed.
+- **Next:** Café.
 
 ## Done log — verticals (newest first)
 
