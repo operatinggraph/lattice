@@ -2,7 +2,7 @@ name: identity-domain
 version: 0.3.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
-  CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity,
+  CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
   RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink,
   CompleteCredentialLink, UnlinkCredential. Depends on rbac-domain. The
   consumer, frontOfHouse, backOfHouse, and identityProvisioner roles are
@@ -57,6 +57,9 @@ declares:
     - operationType: ClaimIdentity
       scope: self
       grantsTo: [consumer]
+    - operationType: RotateClaimKey
+      scope: any
+      grantsTo: [frontOfHouse, backOfHouse, operator]
     - operationType: RecordIdentityPII
       scope: any
       grantsTo: [frontOfHouse, backOfHouse, operator]

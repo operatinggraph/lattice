@@ -6,20 +6,22 @@
 // identity-domain package has been correctly installed. Asserts:
 //
 //	1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//	8 DDL aspects: .canonicalName=identity, .permittedCommands (8 ops),
+//	8 DDL aspects: .canonicalName=identity, .permittedCommands (9 ops),
 //	               .description, .script,
 //	               .inputSchema, .outputSchema, .fieldDescription, .examples
 //	  Each aspect also validated for correct vertexKey + localName envelope fields.
 //	7 sensitive aspect-type DDLs (ssn, dob, name, email, phone, claimKey,
 //	  credentialBinding): class=meta.ddl.aspectType, each carrying a .sensitive
 //	  aspect with value=true
-//	8 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
-//	  UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity,
-//	  InitiateCredentialLink, CompleteCredentialLink, UnlinkCredential
-//	11 grantedBy link keys:
+//	9 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
+//	  UpdateIdentityState, ClaimIdentity, RotateClaimKey, RecordIdentityPII,
+//	  ProvisionConsumerIdentity, InitiateCredentialLink, CompleteCredentialLink,
+//	  UnlinkCredential
+//	16 grantedBy link keys:
 //	  CreateUnclaimedIdentity   → operator, frontOfHouse, backOfHouse
 //	  UpdateIdentityState       → operator
 //	  ClaimIdentity             → consumer
+//	  RotateClaimKey            → operator, frontOfHouse, backOfHouse
 //	  RecordIdentityPII         → operator, frontOfHouse, backOfHouse
 //	  ProvisionConsumerIdentity → identityProvisioner, operator
 //	  InitiateCredentialLink    → consumer
@@ -33,7 +35,7 @@
 //	1 package vertex (vtx.package.<NanoID>)
 //	1 package manifest aspect with name=identity-domain
 //
-// Total target: ~86 OK lines.
+// Total target: ~93 OK lines.
 //
 // Exit 0: all assertions pass.
 // Exit 1: one or more assertions failed.
@@ -67,6 +69,7 @@ var identityGrantTargets = map[string][]string{
 	"CreateUnclaimedIdentity":   {"operator", "frontOfHouse", "backOfHouse"},
 	"UpdateIdentityState":       {"operator"},
 	"ClaimIdentity":             {"consumer"},
+	"RotateClaimKey":            {"operator", "frontOfHouse", "backOfHouse"},
 	"RecordIdentityPII":         {"operator", "frontOfHouse", "backOfHouse"},
 	"ProvisionConsumerIdentity": {"identityProvisioner", "operator"},
 	"InitiateCredentialLink":    {"consumer"},
@@ -78,6 +81,7 @@ var identityExpectedOps = []string{
 	"CreateUnclaimedIdentity",
 	"UpdateIdentityState",
 	"ClaimIdentity",
+	"RotateClaimKey",
 	"RecordIdentityPII",
 	"ProvisionConsumerIdentity",
 	"InitiateCredentialLink",
@@ -89,6 +93,7 @@ var identityOpScopes = map[string]string{
 	"CreateUnclaimedIdentity":   "any",
 	"UpdateIdentityState":       "any",
 	"ClaimIdentity":             "self",
+	"RotateClaimKey":            "any",
 	"RecordIdentityPII":         "any",
 	"ProvisionConsumerIdentity": "any",
 	"InitiateCredentialLink":    "self",

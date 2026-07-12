@@ -49,6 +49,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"CreateUnclaimedIdentity",
 				"UpdateIdentityState",
 				"ClaimIdentity",
+				"RotateClaimKey",
 				"RecordIdentityPII",
 				"ProvisionConsumerIdentity",
 				"InitiateCredentialLink",
@@ -77,7 +78,10 @@ func DDLs() []pkgmgr.DDLSpec {
 				"caller-supplied key (the Gateway's first-authenticated-touch auto-provisioning pre-flight) — " +
 				"the deterministic ActorID a verified JWT subject maps to, not a minted key. Grants the consumer " +
 				"role via a holdsRole link; optionally records IdP provenance (.idpBinding) when the token was " +
-				"opaque-mode; otherwise no PII.",
+				"opaque-mode; otherwise no PII. " +
+				"RotateClaimKey: staff-gated re-issue of an unclaimed identity's claimKeyHash (the lost-secret " +
+				"recovery path — Lattice never held the plaintext to recover). Overwrites .claimKey; fails closed " +
+				"unless state==unclaimed.",
 			Script: identityDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"name":{"type":"string","maxLength":200,"description":"Person's display name. Required for CreateUnclaimedIdentity."},` +
@@ -134,6 +138,13 @@ func DDLs() []pkgmgr.DDLSpec {
 					Name:            "ClaimIdentity — actor claims their identity",
 					Payload:         map[string]any{"targetIdentityKey": "vtx.identity.<NanoID>", "claimKey": "<plaintextKey>"},
 					ExpectedOutcome: "Verifies claimKey hash, writes credentialBinding aspect, transitions state unclaimed→claimed, tombstones claimKey aspect, grants holdsRole→consumer to the claimed identity.",
+				},
+				{
+					Name:    "RotateClaimKey — staff re-issues a lost claim secret",
+					Payload: map[string]any{"identityKey": "vtx.identity.<NanoID>", "claimKeyHash": "<sha256-hex-of-a-new-client-minted-secret>"},
+					ExpectedOutcome: "Overwrites the identity's .claimKey aspect with the new hash. Rejects a " +
+						"claimed/merged/tombstoned identity (InvalidStateTransition) — only an unclaimed identity " +
+						"has a secret worth rotating.",
 				},
 				{
 					Name:    "InitiateCredentialLink — U arms a link secret for a second credential",
@@ -904,6 +915,65 @@ def execute(state, op):
             "mutations": mutations,
             "events": events,
             "response": {"primaryKey": target_identity_key},
+        }
+
+    if ot == "RotateClaimKey":
+        # R4 (gateway-claim-flow-identity-provisioning-design.md §11.5): a
+        # staff-gated re-issue for a lost claim secret. CreateUnclaimedIdentity's
+        # claimKeyHash is the only copy Lattice ever stores (hash-only), so an
+        # unclaimed identity whose secret never reached the applicant (or was
+        # discarded client-side) is otherwise permanently unclaimable. Mirrors
+        # CreateUnclaimedIdentity's own claimKeyHash validation; grant roles are
+        # identical (staff, not the identity itself, since it has no credential yet).
+        identity_key = p.identityKey if hasattr(p, "identityKey") else None
+        if identity_key == None or type(identity_key) != type("") or len(identity_key) == 0:
+            fail("InvalidArgument: identityKey: required")
+        if not identity_key.startswith("vtx.identity."):
+            fail("InvalidArgument: identityKey: must be a vtx.identity.<NanoID> key")
+
+        target_vtx = state[identity_key] if identity_key in state else None
+        if target_vtx == None or (hasattr(target_vtx, "isDeleted") and target_vtx.isDeleted):
+            fail("InvalidArgument: identityKey: no such identity")
+        current_state = read_state(state, identity_key)
+        if current_state != "unclaimed":
+            fail("InvalidStateTransition: RotateClaimKey requires state=unclaimed, got " + str(current_state))
+
+        new_hash = p.claimKeyHash if hasattr(p, "claimKeyHash") else None
+        if new_hash == None or type(new_hash) != type("") or len(new_hash) == 0:
+            fail("InvalidArgument: claimKeyHash: required non-empty lowercase hex sha256")
+        if len(new_hash) != 64:
+            fail("InvalidArgument: claimKeyHash: must be 64-char lowercase hex sha256")
+        for ch in new_hash.elems():
+            if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+                fail("InvalidArgument: claimKeyHash: must be lowercase hex")
+        new_algo = p.claimKeyAlgo if hasattr(p, "claimKeyAlgo") else None
+        if new_algo == None or new_algo == "":
+            new_algo = "sha256"
+        if new_algo != "sha256":
+            fail("InvalidArgument: claimKeyAlgo: only sha256 is supported")
+
+        # .claimKey is declared Reads: an unclaimed identity always has one
+        # (created together with the vertex by CreateUnclaimedIdentity, tombstoned
+        # only by a successful ClaimIdentity) -- absence here means the state and
+        # claimKey aspects have drifted, a wiring fault, not a normal case.
+        claim_key_aspect_key = identity_key + ".claimKey"
+        claim_key_aspect = state[claim_key_aspect_key] if claim_key_aspect_key in state else None
+        if claim_key_aspect == None or (hasattr(claim_key_aspect, "isDeleted") and claim_key_aspect.isDeleted):
+            fail("InvalidArgument: identityKey: no claimKey aspect to rotate")
+
+        mutations = [
+            {"op": "update", "key": claim_key_aspect_key,
+             "document": {"class": "claimKey", "vertexKey": identity_key, "localName": "claimKey",
+                          "isDeleted": False, "data": {"hash": new_hash, "algo": new_algo}}},
+        ]
+
+        # No event: mirrors claimKey's own no-event-on-write posture (see
+        # InitiateCredentialLink below) -- nothing consumes an armed-but-unused
+        # claim secret.
+        return {
+            "mutations": mutations,
+            "events": [],
+            "response": {"primaryKey": identity_key},
         }
 
     if ot == "InitiateCredentialLink":

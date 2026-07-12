@@ -64,6 +64,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateUnclaimedIdentity", Scope: "any"},
 			{OperationType: "UpdateIdentityState", Scope: "any"},
+			{OperationType: "RotateClaimKey", Scope: "any"},
 			{OperationType: "RecordIdentityPII", Scope: "any"},
 			{OperationType: "RevokeActor", Scope: "any"},
 			{OperationType: "UnrevokeActor", Scope: "any"},

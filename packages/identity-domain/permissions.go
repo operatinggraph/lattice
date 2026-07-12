@@ -9,6 +9,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //	CreateUnclaimedIdentity       → frontOfHouse, backOfHouse, operator
 //	UpdateIdentityState           → operator
 //	ClaimIdentity (self)          → consumer
+//	RotateClaimKey                → frontOfHouse, backOfHouse, operator
 //	RecordIdentityPII             → frontOfHouse, backOfHouse, operator
 //	ProvisionConsumerIdentity     → identityProvisioner, operator
 //	InitiateCredentialLink (self) → consumer
@@ -50,6 +51,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "self",
 			Note:          "Grants the right to claim an identity (scope=self via credentialindex).",
 			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "RotateClaimKey",
+			Scope:         "any",
+			Note:          "Grants staff the right to re-issue a lost claim secret for an unclaimed identity (R4 recovery — Lattice only ever stored the hash, never the plaintext).",
+			GrantsTo:      []string{"frontOfHouse", "backOfHouse", "operator"},
 		},
 		{
 			OperationType: "RecordIdentityPII",

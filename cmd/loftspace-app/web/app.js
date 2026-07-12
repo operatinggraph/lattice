@@ -199,10 +199,13 @@ async function api(path, opts) {
 // authenticated actor: RLS returns only the signed-in applicant's rows, so the
 // request must carry a verified JWT (there is no client-side applicant filter to
 // forge). In the trusted-tool DEMO posture the app mints a short-lived token for
-// the selected applicant via POST /api/dev-token (the explicit stand-in for the
-// deferred Gateway/IdP login); a production deployment wires a real IdP and the FE
-// would present that token instead. The token is cached per subject until shortly
-// before expiry.
+// the applicant's DEVICE identity (see "Claim ceremony" below) via POST
+// /api/dev-token (the explicit stand-in for the deferred Gateway/IdP login); a
+// production deployment wires a real IdP and the FE would present that token
+// instead. Both this app's read boundary and the Gateway's write path resolve a
+// device token to its claimed business identity via the same credential-bindings
+// seam (readauth.go's credBindings / gateway.go's resolveActor), so one token
+// works for both. The token is cached per subject until shortly before expiry.
 let readTokenCache = { subject: null, token: null, exp: 0 };
 
 // bareId extracts the bare identity NanoID (the RLS principal / JWT subject) from
@@ -214,7 +217,7 @@ function bareId(fullKey) {
 
 async function readToken() {
   if (!state.applicant) return null;
-  const subject = bareId(state.applicant);
+  const subject = await ensureClaimedDevice(state.applicant);
   const now = Date.now();
   if (readTokenCache.subject === subject && readTokenCache.token && now < readTokenCache.exp - 60000) {
     return readTokenCache.token;
@@ -300,12 +303,41 @@ async function gatewayURL() {
   return gatewayURLCache;
 }
 
+// isTransientAuthLag reports whether a rejected reply is the known,
+// architecturally-expected async-projection race — the Capability Lens or the
+// credential-bindings materializer (both eventually-consistent CDC
+// projections, lattice-architecture.md's documented <500ms p99 lag) catching
+// up after a first-touch provision or claim, not yet visible to THIS
+// immediately-following request. Distinguishes it from a genuine,
+// persistent authorization denial, which should surface immediately rather
+// than retry.
+function isTransientAuthLag(reply) {
+  if (!reply || reply.status !== "rejected" || !reply.error) return false;
+  if (reply.error.code !== "AuthDenied") return false;
+  const reason = reply.error.details && reply.error.details.reason;
+  return reason === "NoCapabilityEntry" || reason === "OperationNotPermitted";
+}
+
+// retryBackoffsMs is the bounded backoff schedule every isTransientAuthLag
+// retry loop in this file shares — ~3s total, comfortably under the 5s
+// deadline the codebase's own Go E2E poll helper
+// (scripts/verify-real-actor-write-auth.go) uses for the same class of race.
+const retryBackoffsMs = [200, 400, 800, 1600];
+
 // submitOp posts an operation to the Gateway as the given actor kind:
 // "staff" — this app's own admin/operator actor, the trusted-tool posture
 // almost every write already used (SignLease/SetApplicantProfile/etc. are
 // still operator-only ops; see permissions.go). "applicant" — the signed-in
-// applicant (state.applicant) themselves, used only for CreateLeaseApplication,
-// the one op with a real consumer scope=self grant (the design's proof case).
+// applicant's DEVICE identity (readToken() resolves state.applicant through
+// the claim ceremony below), used only for CreateLeaseApplication, the one op
+// with a real consumer scope=self grant (the design's proof case). The Gateway
+// resolves the device token to the applicant's business identity via the
+// credential-bindings seam, so payload.applicant/authContext.target still name
+// the business identity (state.applicant), not the device identity. Because
+// that seam is the same async projection ensureClaimedDevice's ClaimIdentity
+// retry already accounts for, an "applicant" submit racing right behind a
+// fresh claim gets the same bounded retry (see isTransientAuthLag) — "staff"
+// never races this (a long-lived, already-resolved actor), so it submits once.
 // opts may carry {authContext} for the scope=self path. Returns the same
 // {status, error, primaryKey} shape api() already returns, so callers branch
 // on reply.status unchanged.
@@ -314,12 +346,162 @@ async function submitOp(actorKind, body, opts) {
     gatewayURL(),
     actorKind === "applicant" ? readToken() : staffReadToken(),
   ]);
-  if (opts && opts.authContext) body = { ...body, authContext: opts.authContext };
+  const finalBody = opts && opts.authContext ? { ...body, authContext: opts.authContext } : body;
+  const post = () =>
+    api(base + "/v1/operations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify(finalBody),
+    });
+  if (actorKind !== "applicant") return post();
+
+  let reply;
+  for (let attempt = 0; ; attempt++) {
+    reply = await post();
+    if (!isTransientAuthLag(reply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  return reply;
+}
+
+// ---- Claim ceremony (gateway-claim-flow-identity-provisioning-design.md
+// §11.1 Scenario A / §11.1a) ----
+//
+// The picker's "signed-in applicant" is the business identity U
+// (CreateUnclaimedIdentity's result) — but nothing may ever authenticate AS U
+// directly: U starts with no role, and ProvisionConsumerIdentity refuses to
+// touch a vertex some other op already created. Every actual request must
+// authenticate as a separate DEVICE identity A that (1) auto-provisions with
+// the consumer role on its first Gateway touch, then (2) calls ClaimIdentity
+// to bind A -> U, which is what grants U the consumer role and is what lets
+// the Gateway's/readauth.go's credential-bindings resolution turn a request
+// authenticated as A into env.Actor = U. Skipping this (the old shortcut —
+// minting a token for U's own key) left U permanently role-less: every write
+// 403'd with AuthDenied.
+const APPLICANT_AUTH_KEY = "loftspace.applicantAuth"; // localStorage: {U-bareId: A-bareId}
+
+function loadApplicantAuthMap() {
+  try {
+    return JSON.parse(localStorage.getItem(APPLICANT_AUTH_KEY) || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveApplicantAuthEntry(uBareId, aBareId) {
+  const m = loadApplicantAuthMap();
+  m[uBareId] = aBareId;
+  localStorage.setItem(APPLICANT_AUTH_KEY, JSON.stringify(m));
+}
+
+// pendingClaimSecrets holds a freshly client-minted (not yet claimed) secret
+// for an applicant created THIS session (submitNewApplicant) — in-memory
+// only, mirroring §11.1a: "the client retains the plaintext; it is the single
+// copy." An applicant picked from the roster with no pending secret (a prior
+// session, or one created before this ceremony was wired up) falls back to
+// staff-gated RotateClaimKey (R4) to re-issue one.
+const pendingClaimSecrets = {};
+
+// mintDeviceToken mints a fresh, uncached dev-token for an arbitrary bare
+// subject — the one-off device-identity (A) calls the claim ceremony makes,
+// distinct from readToken()'s per-applicant cache.
+async function mintDeviceToken(subject) {
+  const res = await fetch("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) throw new Error("mint device token: HTTP " + res.status);
+  const body = await res.json();
+  return body.token;
+}
+
+// postOpAsSubject submits an operation to the Gateway authenticated as a raw
+// bare-id subject — used only by the claim ceremony, which must authenticate
+// as the fresh device identity A itself (the Gateway's raw-credential
+// carve-out for ClaimIdentity), not through the applicant/staff token caches.
+async function postOpAsSubject(subject, body) {
+  const [base, token] = await Promise.all([gatewayURL(), mintDeviceToken(subject)]);
   return api(base + "/v1/operations", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
     body: JSON.stringify(body),
   });
+}
+
+// claimCeremonyInFlight de-dupes concurrent ensureClaimedDevice callers for
+// the same applicant (e.g. setApplicant's back-to-back loadLandlord() +
+// loadRenewals(), each independently reaching readToken()) onto the SAME
+// promise — without this, two concurrent first-touches for one never-claimed
+// uKey each mint their own device identity and race ClaimIdentity; the loser
+// fails with a confusing error on what should be a normal first sign-in
+// (the underlying identity is never corrupted — the Processor's state check
+// rejects the second claim cleanly — but the UX is bad and it wastes an
+// orphaned device identity).
+const claimCeremonyInFlight = {};
+
+// ensureClaimedDevice runs the claim ceremony for applicant uKey the first
+// time it's needed and returns its device identity's bare id (A) — the
+// subject every subsequent token for uKey mints against. Idempotent per uKey
+// via the persisted applicantAuth map (both across calls and across reloads).
+async function ensureClaimedDevice(uKey) {
+  const uBareId = bareId(uKey);
+  const map = loadApplicantAuthMap();
+  if (map[uBareId]) return map[uBareId];
+  if (claimCeremonyInFlight[uBareId]) return claimCeremonyInFlight[uBareId];
+  const promise = runClaimCeremony(uKey, uBareId).finally(() => {
+    delete claimCeremonyInFlight[uBareId];
+  });
+  claimCeremonyInFlight[uBareId] = promise;
+  return promise;
+}
+
+async function runClaimCeremony(uKey, uBareId) {
+  let secret = pendingClaimSecrets[uKey];
+  if (!secret) {
+    secret = mintClaimSecret();
+    const newHash = await sha256Hex(secret);
+    const rotateReply = await submitOp("staff", {
+      operationType: "RotateClaimKey",
+      class: "identity",
+      payload: { identityKey: uKey, claimKeyHash: newHash },
+      reads: [uKey, uKey + ".state", uKey + ".claimKey"],
+    });
+    if (rotateReply && rotateReply.status === "rejected") {
+      const msg = rotateReply.error ? `${rotateReply.error.code}: ${rotateReply.error.message}` : "rejected";
+      throw new Error("could not prepare sign-in for this applicant — " + msg);
+    }
+  }
+
+  const aBareId = await sha256NanoID(uBareId + ":device:" + mintClaimSecret());
+  const aKey = "vtx.identity." + aBareId;
+  const claimOp = {
+    operationType: "ClaimIdentity",
+    class: "identity",
+    reads: [uKey, uKey + ".state", uKey + ".claimKey"],
+    payload: { targetIdentityKey: uKey, claimKey: secret },
+    authContext: { target: aKey },
+  };
+
+  // A's ProvisionConsumerIdentity pre-flight (the Gateway's provisionActorIfNeeded,
+  // run inline just above by the fetch this postOpAsSubject makes) commits A's
+  // consumer-role grant to Core KV synchronously, but the CapabilityAuthorizer
+  // reads it via an asynchronously-projected Capability Lens — so THIS very next
+  // call, submitted milliseconds later under the same brand-new actor, can race
+  // ahead of that projection (isTransientAuthLag; see submitOp's comment).
+  let claimReply;
+  for (let attempt = 0; ; attempt++) {
+    claimReply = await postOpAsSubject(aBareId, claimOp);
+    if (!isTransientAuthLag(claimReply) || attempt >= retryBackoffsMs.length) break;
+    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
+  }
+  if (claimReply && claimReply.status === "rejected") {
+    const msg = claimReply.error ? `${claimReply.error.code}: ${claimReply.error.message}` : "rejected";
+    throw new Error("could not sign in this applicant — " + msg);
+  }
+  delete pendingClaimSecrets[uKey];
+  saveApplicantAuthEntry(uBareId, aBareId);
+  return aBareId;
 }
 
 // ---- Object attach/detach: browser-direct (#75 Fire 2b increment 2) ----
@@ -562,8 +744,10 @@ function setApplicant(value) {
 // (email/phone) + a claimKeyHash = sha256-hex of a client-minted secret (Lattice
 // never holds the plaintext). This trusted-tool app mints a random secret, hashes
 // it in-browser (crypto.subtle — 127.0.0.1 is a secure context), and submits only
-// the hash; the applicant is created directly (no claim ceremony in this demo) and
-// becomes the active applicant. Mirrors clinic-app's in-app "New patient".
+// the hash. The plaintext secret is kept in-memory (pendingClaimSecrets) so
+// submitNewApplicant can immediately run the claim ceremony (ensureClaimedDevice)
+// on the new identity before it becomes the active applicant — without that step
+// the applicant would be created but role-less, and every write would 403.
 
 function openNewApplicant() {
   $("#applicant-form").reset();
@@ -583,7 +767,10 @@ async function sha256Hex(s) {
 }
 
 // mintClaimSecret returns a random claim-secret plaintext. It is hashed and only the
-// hash is sent; the plaintext never enters Lattice (and, in this demo, is discarded).
+// hash is sent; the plaintext never enters Lattice. Used both for a real
+// CreateUnclaimedIdentity claimKeyHash and, elsewhere, as raw entropy for deriving
+// a device identity's NanoID (ensureClaimedDevice) — a fresh unpredictable value,
+// not a secret that has to survive that second use.
 function mintClaimSecret() {
   const a = new Uint8Array(32);
   crypto.getRandomValues(a);
@@ -672,7 +859,8 @@ async function submitNewApplicant(ev) {
   const submit = $("#applicant-submit");
   submit.disabled = true;
   try {
-    const claimKeyHash = await sha256Hex(mintClaimSecret());
+    const claimSecret = mintClaimSecret();
+    const claimKeyHash = await sha256Hex(claimSecret);
     const payload = { name, claimKeyHash };
     if (email) payload.email = email;
     if (phone) payload.phone = phone;
@@ -684,6 +872,17 @@ async function submitNewApplicant(ev) {
       return;
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
+    if (key) {
+      // Run the real claim ceremony now, while the plaintext secret still
+      // exists (§11.1a — Lattice never stores it): without this the applicant
+      // is created but role-less, and every subsequent write 403s.
+      pendingClaimSecrets[key] = claimSecret;
+      try {
+        await ensureClaimedDevice(key);
+      } catch (e) {
+        toast("Applicant created, but sign-in setup failed — " + e.message, "err");
+      }
+    }
     closeNewApplicant();
     toast("Applicant created.", "ok", key);
     // Make the new applicant active (the roster lens may take a moment to project;
