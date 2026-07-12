@@ -229,3 +229,23 @@ func TestConnect_BothCredentials_Rejected(t *testing.T) {
 		t.Fatalf("error = %q, want the both-set guard message", err)
 	}
 }
+
+// A Token alongside another credential kind is rejected the same way —
+// Token is a third mutually-exclusive credential (per-identity subscribe-ACL
+// design §7: cmd/edge's bearer-token connect).
+func TestConnect_TokenWithNKeySeed_Rejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+
+	_, err := Connect(ctx, ConnectOpts{
+		URL:          "nats://127.0.0.1:1",
+		NKeySeedFile: writeUserSeed(t),
+		Token:        "some.jwt.token",
+	})
+	if err == nil {
+		t.Fatal("expected error when both NKeySeedFile and Token are set, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly one credential") {
+		t.Fatalf("error = %q, want the both-set guard message", err)
+	}
+}

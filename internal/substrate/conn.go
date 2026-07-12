@@ -40,6 +40,13 @@ type ConnectOpts struct {
 	// JWT + seed, for decentralized/operator mode). Empty ⇒ anonymous
 	// connect. At most one of NKeySeedFile / CredsFile is set.
 	CredsFile string
+	// Token is a bearer token presented as the CONNECT `auth_token` — the
+	// untrusted Edge connection's credential under the NATS auth-callout
+	// boundary (per-identity-nats-subscribe-acl-design.md §3.1a: "the bearer
+	// token arrives in `token`"), verified server-side by
+	// internal/gateway/natsauth. Empty ⇒ no token. At most one of
+	// NKeySeedFile / CredsFile / Token is set.
+	Token string
 }
 
 // Conn is substrate's opinionated NATS handle. It owns the underlying
@@ -74,8 +81,14 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	if opts.ReconnectWait > 0 {
 		natsOpts = append(natsOpts, nats.ReconnectWait(opts.ReconnectWait))
 	}
-	if opts.NKeySeedFile != "" && opts.CredsFile != "" {
-		return nil, fmt.Errorf("substrate: ConnectOpts has both NKeySeedFile and CredsFile set; exactly one credential may be supplied")
+	credCount := 0
+	for _, set := range []bool{opts.NKeySeedFile != "", opts.CredsFile != "", opts.Token != ""} {
+		if set {
+			credCount++
+		}
+	}
+	if credCount > 1 {
+		return nil, fmt.Errorf("substrate: ConnectOpts has more than one of NKeySeedFile/CredsFile/Token set; exactly one credential may be supplied")
 	}
 	if opts.NKeySeedFile != "" {
 		nkeyOpt, err := nats.NkeyOptionFromSeed(opts.NKeySeedFile)
@@ -86,6 +99,9 @@ func Connect(ctx context.Context, opts ConnectOpts) (*Conn, error) {
 	}
 	if opts.CredsFile != "" {
 		natsOpts = append(natsOpts, nats.UserCredentials(opts.CredsFile))
+	}
+	if opts.Token != "" {
+		natsOpts = append(natsOpts, nats.Token(opts.Token))
 	}
 	nc, err := nats.Connect(opts.URL, natsOpts...)
 	if err != nil {

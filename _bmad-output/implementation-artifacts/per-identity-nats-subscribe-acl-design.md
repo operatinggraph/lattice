@@ -7,6 +7,18 @@ The #11 §11.1 consumer-table row is committed with this ratification. Ratificat
 vendor claim against the pinned NATS 2.14 module source (issuer/auth_users requirements, fail-closed
 callout, expiry-disconnect, filtered-create pinning, NKey bypass, client filtered-create form) — zero
 corrections. The Steward builds Fires 1–3; Fire 3 flips EDGE.3 build-ready. · Designer fire 2026-07-10
+**🏗️ Fire 1 checkpoint (Steward, 2026-07-11) — scope correction from adversarial pass.** Fire 1 ships
+sync-plane READ confinement only (subscribe own `lattice.sync.user.<id>` + own JetStream
+consumer/inbox); the §3.3 table's `lattice.ctrl.refractor.personal.{register,deregister,hydrate}`
+row does **not** ship in Fire 1. A pre-commit adversarial pass found: `internal/refractor/control/
+service.go`'s `personalRegister`/`personalDeregister`/`personalHydrate` read `body.IdentityID`
+directly with no comparison to the control-plane's verified actor — the §3.4 binding this row's
+"identity-agnostic" reasoning depends on does not exist yet (it's Fire 2 scope, §10 item 2).
+Granting the transport subject without that binding would let identity A forge a
+register/deregister/hydrate call naming an arbitrary victim identity B. **Fire 2 must land the
+control-RPC grant and the §3.4 server-side override together** — granting one without the other
+reopens this gap. See `internal/gateway/natsauth.controlRPCs`' doc comment for the code-level
+detail.
 **🏗️ Fire 1 checkpoint (Steward, 2026-07-11).** Code COMPLETE + tested + gates green in worktree
 `/tmp/lattice-worktrees/per-identity-subscribe-acl-fire1` (branch `steward-per-identity-subscribe-acl-fire1`):
 `internal/gateway/natsauth` (the responder + §3.3 permission template), `substrate.ConnectOpts.Token`,
@@ -33,6 +45,17 @@ curve public key) in the `auth_callout` block via gen-dev-nkeys; (2) unseal the 
 request payload in the responder (`Nats-Server-Xkey` header path); (3) add a vector or unit assert
 that the committed conf's `auth_callout` block carries `xkey` — so the property cannot silently drop
 again. Nothing else is gated; the worktree merges once the xkey wiring is in and green.
+**✅ Fire 1 CLOSED (Steward, 2026-07-11).** The xkey condition's 3 steps landed: `internal/natsperm.
+RenderConf` renders `xkey:` alongside `issuer:` in the `auth_callout` block (`deploy/gen-dev-nkeys`
+mints/reuses `deploy/nkeys/auth-callout-xkey.nk` via `nkeys.CreateCurveKeys`, same idempotent-load
+convention as the issuer seed); `internal/gateway/natsauth` gained `UnsealRequest`/`SealResponse`
+(the `Nats-Server-Xkey`-header sealed-box round trip, vendor-grounded against the pinned
+`server/auth_callout.go`), wired into `cmd/gateway`'s subscription callback and mirrored exactly in
+`internal/natsperm/auth_callout_test.go`'s `startResponder`; `TestAuthCalloutConfigured` pins
+`opts.AuthCallout.XKey` (+ `.Issuer`, `.AuthUsers` count) so the property cannot silently drop again.
+All 7 conformance vectors + the natsauth unit suite pass against the real committed conf with live
+sealing/unsealing (not a bypassed fixture). `go build`/`make vet`/`golangci-lint`/`STRICT
+lint-conventions`/`go test ./...` all green. Merged to `main`.
 **Backlog row:** [lattice.md](../planning-artifacts/backlog/lattice.md) → Security & trust boundary → *Per-identity NATS subscribe-ACL (Edge sync plane)*
 **Consumers:** [Edge Lattice EDGE.3](edge-lattice-full-design.md) (§7 — the one open gate leg) · [Personal Lens Fork 3](personal-secure-lens-design.md) (subject subscribe-authorization)
 **Contracts:** #11 (external actor authN — build-to, plus one staged consumer-table row, see §6) · #1 (subject shapes — build-to) · #75 design's §3.2 matrix (extends, does not alter)

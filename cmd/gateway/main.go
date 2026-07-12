@@ -74,10 +74,26 @@
 //	                          topology (real-actor-write-auth-e2e-design.md §3.1). Unset/empty ⇒
 //	                          CORS off; a cross-origin browser call is refused by the browser.
 //
+// NATS AUTH-CALLOUT RESPONDER (per-identity-nats-subscribe-acl-design.md Fire 1): the Gateway
+// hosts internal/gateway/natsauth, subscribed to $SYS.REQ.USER.AUTH over its own (already
+// auth_users-bypass) NATS connection — every untrusted Edge sync-plane CONNECT the server
+// delegates is verified with the SAME Authenticator the HTTP write path uses, resolved through
+// the same credential-bindings seam, and issued a per-connection permission set scoped to its
+// own lattice.sync.user.<id> subject. Fails closed by construction (deny-by-default template);
+// a missing/unparseable issuer seed refuses to start the responder (logged), not the Gateway
+// itself — the write path stays up even if the sync-plane callout cannot.
+//
+//	NATS_AUTH_CALLOUT_ISSUER_SEED  path to the auth_callout.issuer account NKey seed
+//	                               (default: deploy/nkeys/auth-callout-issuer.nk)
+//	NATS_AUTH_CALLOUT_XKEY_SEED    path to the auth_callout.xkey curve seed sealing every
+//	                               request/response (default: deploy/nkeys/auth-callout-xkey.nk)
+//	EDGE_SYNC_AUTHZ_TTL            issued-authorization TTL, floor-clamped at 1m (default: 15m)
+//
 // Logs to stderr in slog text format.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/x509"
@@ -99,11 +115,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/nats-io/nkeys"
+
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/gateway"
 	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/gateway/credentialbinding"
 	"github.com/asolgan/lattice/internal/gateway/identityindexhint"
+	"github.com/asolgan/lattice/internal/gateway/natsauth"
 	"github.com/asolgan/lattice/internal/gateway/revocation"
 	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -336,6 +355,18 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
+	// NATS auth-callout responder (per-identity-nats-subscribe-acl-design.md
+	// Fire 1) — best-effort like the credential-bindings materializer above:
+	// a missing/unparseable issuer seed logs a warning and the Gateway starts
+	// without it (the write path is unaffected; only untrusted Edge sync-plane
+	// CONNECTs delegated to this responder are refused server-side until it is
+	// provisioned — fail-closed for THAT surface, not for the Gateway).
+	if authCalloutSub, err := startAuthCallout(conn.NATS(), authn, credentialBindingsResolver, logger); err != nil {
+		logger.Warn("gateway: auth-callout responder disabled", "error", err)
+	} else if authCalloutSub != nil {
+		defer authCalloutSub.Unsubscribe()
+	}
+
 	go hb.Run(ctx)
 
 	errCh := make(chan error, 1)
@@ -384,6 +415,116 @@ func validateJWKSURL(rawURL string, devMode bool) error {
 func parsePollInterval(raw string) (time.Duration, error) {
 	if strings.TrimSpace(raw) == "" {
 		return 0, nil
+	}
+	return time.ParseDuration(raw)
+}
+
+// defaultAuthCalloutIssuerSeedPath mirrors deploy/gen-dev-nkeys's
+// authCalloutIssuerSeedFile — the two are pinned together by
+// internal/natsperm's auth-callout conformance vectors, which fail loudly on
+// drift (there is no single shared Go constant across the two binaries'
+// otherwise-independent packages).
+const defaultAuthCalloutIssuerSeedPath = "deploy/nkeys/auth-callout-issuer.nk"
+
+// defaultAuthCalloutXkeySeedPath mirrors deploy/gen-dev-nkeys's
+// authCalloutXkeySeedFile — the curve keypair sealing every callout
+// request/response (design §7: "xkey payload encryption is enabled from day
+// one", not a deferred hardening pass).
+const defaultAuthCalloutXkeySeedPath = "deploy/nkeys/auth-callout-xkey.nk"
+
+// noopIdentityResolver is the deny-safe stand-in when the Gateway's own
+// credential-bindings resolver is unconfigured (bucket not yet provisioned,
+// same posture ConfigureCredentialBindings documents) — every actor acts as
+// its raw credential, exactly as if bound were always false.
+type noopIdentityResolver struct{}
+
+func (noopIdentityResolver) Resolve(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+// startAuthCallout wires internal/gateway/natsauth onto nc and subscribes it
+// to the server's well-known auth-callout request subject. A nil resolver
+// (credential-bindings bucket unavailable) falls back to noopIdentityResolver
+// — the same deny-safe posture the HTTP write path already applies. Returns
+// (nil, nil) is never produced on success; a non-nil error means the
+// responder was NOT started (the caller logs and continues without it).
+func startAuthCallout(nc *nats.Conn, authn *auth.Authenticator, resolver gateway.CredentialBindingResolver, logger *slog.Logger) (*nats.Subscription, error) {
+	seedPath := envOrDefault("NATS_AUTH_CALLOUT_ISSUER_SEED", defaultAuthCalloutIssuerSeedPath)
+	seed, err := os.ReadFile(seedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read auth-callout issuer seed %q: %w", seedPath, err)
+	}
+	issuer, err := nkeys.FromSeed(bytes.TrimSpace(seed))
+	if err != nil {
+		return nil, fmt.Errorf("parse auth-callout issuer seed %q: %w", seedPath, err)
+	}
+
+	xkeySeedPath := envOrDefault("NATS_AUTH_CALLOUT_XKEY_SEED", defaultAuthCalloutXkeySeedPath)
+	xkeySeed, err := os.ReadFile(xkeySeedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read auth-callout xkey seed %q: %w", xkeySeedPath, err)
+	}
+	xkp, err := nkeys.FromCurveSeed(bytes.TrimSpace(xkeySeed))
+	if err != nil {
+		return nil, fmt.Errorf("parse auth-callout xkey seed %q: %w", xkeySeedPath, err)
+	}
+
+	maxTTL, err := parseDurationEnv("EDGE_SYNC_AUTHZ_TTL", natsauth.DefaultMaxAuthzTTL)
+	if err != nil {
+		return nil, fmt.Errorf("parse EDGE_SYNC_AUTHZ_TTL: %w", err)
+	}
+
+	var idResolver natsauth.IdentityResolver = noopIdentityResolver{}
+	if resolver != nil {
+		idResolver = resolver
+	}
+
+	responder, err := natsauth.NewResponder(authn, idResolver, issuer, maxTTL)
+	if err != nil {
+		return nil, fmt.Errorf("build auth-callout responder: %w", err)
+	}
+
+	sub, err := nc.Subscribe(natsauth.AuthCalloutSubject, func(msg *nats.Msg) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		serverXkey := msg.Header.Get(natsauth.AuthRequestXKeyHeader)
+		reqToken, err := natsauth.UnsealRequest(msg.Data, serverXkey, xkp)
+		if err != nil {
+			logger.Error("gateway: auth-callout unseal failed", "error", err)
+			return
+		}
+
+		respTok, err := responder.Handle(ctx, reqToken)
+		if err != nil {
+			logger.Error("gateway: auth-callout handle failed", "error", err)
+			return
+		}
+
+		sealed, err := natsauth.SealResponse(respTok, serverXkey, xkp)
+		if err != nil {
+			logger.Error("gateway: auth-callout seal failed", "error", err)
+			return
+		}
+		if err := msg.Respond(sealed); err != nil {
+			logger.Error("gateway: auth-callout respond failed", "error", err)
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("subscribe %s: %w", natsauth.AuthCalloutSubject, err)
+	}
+	logger.Info("auth-callout responder started", "subject", natsauth.AuthCalloutSubject, "maxAuthzTTL", maxTTL)
+	return sub, nil
+}
+
+// parseDurationEnv parses a Go-duration env var, floor-clamping and
+// defaulting exactly like natsauth.NewResponder itself (that clamp is the
+// authoritative one — this parse just turns "" into the caller's default
+// without erroring).
+func parseDurationEnv(key string, def time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
 	}
 	return time.ParseDuration(raw)
 }

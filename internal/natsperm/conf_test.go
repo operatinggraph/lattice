@@ -183,6 +183,32 @@ func TestConfigParses(t *testing.T) {
 	}
 }
 
+// TestAuthCalloutConfigured pins the auth_callout block's presence and — per
+// per-identity-nats-subscribe-acl-design.md §7 ("xkey payload encryption is
+// enabled from day one, not a deferred hardening pass") — that xkey is set,
+// so a future regeneration that drops it (e.g. reverting to the pre-xkey
+// gen-dev-nkeys shape) fails loudly here instead of silently reopening the
+// bearer-token-in-cleartext gap the xkey condition closed.
+func TestAuthCalloutConfigured(t *testing.T) {
+	opts, err := server.ProcessConfigFile(confPath(t))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	ac := opts.AuthCallout
+	if ac == nil {
+		t.Fatal("auth_callout block is absent from the committed conf")
+	}
+	if !nkeys.IsValidPublicAccountKey(ac.Issuer) {
+		t.Errorf("auth_callout.issuer = %q, want a valid public ACCOUNT key", ac.Issuer)
+	}
+	if !nkeys.IsValidPublicCurveKey(ac.XKey) {
+		t.Errorf("auth_callout.xkey = %q, want a valid public CURVE key (day-one encryption, design §7)", ac.XKey)
+	}
+	if len(ac.AuthUsers) != 16 {
+		t.Errorf("auth_callout.auth_users = %d entries, want 16 (every component bypasses the callout)", len(ac.AuthUsers))
+	}
+}
+
 // TestCoreKVWriteIsolation: only the processor (and the bootstrap provisioner)
 // may write Core KV; every other component — including refractor, which holds a
 // broad $KV.> grant but an explicit $KV.core-kv.> deny — is rejected.
@@ -753,7 +779,33 @@ func TestConfMatchesMatrix(t *testing.T) {
 		pubKeys[c.Name] = pub
 	}
 
-	rendered := RenderConf(pubKeys)
+	issuerSeed, err := os.ReadFile(seedPath(t, "auth-callout-issuer"))
+	if err != nil {
+		t.Fatalf("read auth-callout issuer seed: %v", err)
+	}
+	issuerKP, err := nkeys.FromSeed(bytes.TrimSpace(issuerSeed))
+	if err != nil {
+		t.Fatalf("parse auth-callout issuer seed: %v", err)
+	}
+	issuerPub, err := issuerKP.PublicKey()
+	if err != nil {
+		t.Fatalf("auth-callout issuer public key: %v", err)
+	}
+
+	xkeySeed, err := os.ReadFile(seedPath(t, "auth-callout-xkey"))
+	if err != nil {
+		t.Fatalf("read auth-callout xkey seed: %v", err)
+	}
+	xkeyKP, err := nkeys.FromCurveSeed(bytes.TrimSpace(xkeySeed))
+	if err != nil {
+		t.Fatalf("parse auth-callout xkey seed: %v", err)
+	}
+	xkeyPub, err := xkeyKP.PublicKey()
+	if err != nil {
+		t.Fatalf("auth-callout xkey public key: %v", err)
+	}
+
+	rendered := RenderConf(pubKeys, issuerPub, xkeyPub)
 	committed, err := os.ReadFile(confPath(t))
 	if err != nil {
 		t.Fatalf("read committed conf: %v", err)

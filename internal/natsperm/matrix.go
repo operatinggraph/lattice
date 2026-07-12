@@ -2,6 +2,7 @@ package natsperm
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
@@ -287,8 +288,11 @@ var Matrix = []Component{
 		Name: "gateway",
 		Desc: "external write-path translator — verifies JWTs, stamps the verified actor, submits ops; mutates Core state only via ops (P2); " +
 			"owns token-revocation (materialized from its own events.gateway.> consumer, gateway-token-revocation-activation-design.md) and " +
-			"credential-bindings (materialized from its own credential→identity resolution set)",
-		ExtraPubAllow: []string{bootstrap.OpsWildcardSubject, "$JS.API.>", "$JS.ACK.>"},
+			"credential-bindings (materialized from its own credential→identity resolution set); hosts the auth-callout responder " +
+			"(internal/gateway/natsauth, per-identity-nats-subscribe-acl-design.md) — allow_responses covers its reply to the server's " +
+			"dynamic $SYS.REQ.USER.AUTH reply-to inbox",
+		ExtraPubAllow:  []string{bootstrap.OpsWildcardSubject, "$JS.API.>", "$JS.ACK.>"},
+		AllowResponses: true,
 	},
 	{
 		Name: "loftspace-app",
@@ -324,11 +328,14 @@ var Matrix = []Component{
 }
 
 // RenderConf renders deploy/nats-server.conf from Matrix + the platform-
-// bucket registry, given each component's minted public key. The sole
-// producer of the committed conf's authorization block — gen-dev-nkeys calls
-// this after minting/reusing seeds; the drift test (TestConfMatchesMatrix)
+// bucket registry, given each component's minted public key plus the
+// auth-callout responder's issuer (ACCOUNT) and xkey (CURVE) public keys
+// (per-identity-nats-subscribe-acl-design.md §3.1/§7 — xkey payload
+// encryption is enabled from day one, not a deferred hardening pass). The
+// sole producer of the committed conf's authorization block — gen-dev-nkeys
+// calls this after minting/reusing seeds; the drift test (TestConfMatchesMatrix)
 // calls it again at test time and diffs against the committed file.
-func RenderConf(pubKeys map[string]string) string {
+func RenderConf(pubKeys map[string]string, calloutIssuerPub, calloutXkeyPub string) string {
 	buckets := bootstrap.PlatformBuckets()
 	var b strings.Builder
 	b.WriteString(`# Lattice NATS transport-authorization config (NATS account-level write restriction).
@@ -343,12 +350,24 @@ func RenderConf(pubKeys map[string]string) string {
 # the sanctioned provisioning-time writer. The seeds here are dev credentials
 # (like POSTGRES_PASSWORD: lattice_dev); production injects real seeds via mounted
 # secrets and never commits them.
+#
+# auth_callout (per-identity-nats-subscribe-acl-design.md): every connection
+# NOT listed in auth_users below is delegated to internal/gateway/natsauth
+# (hosted in cmd/gateway) — the untrusted Edge sync-plane connections. The
+# component users here all bypass the callout unchanged. xkey seals every
+# callout request/response (§7 — enabled from day one, not a deferred
+# hardening pass).
 
 jetstream {
   store_dir: "/data/jetstream"
 }
 
 authorization {
+  auth_callout {
+    issuer: ` + fmt.Sprintf("%q", calloutIssuerPub) + `
+    xkey: ` + fmt.Sprintf("%q", calloutXkeyPub) + `
+    auth_users: [` + quoteList(sortedValues(pubKeys)) + `]
+  }
   users = [
 `)
 	for _, c := range Matrix {
@@ -379,4 +398,16 @@ func quoteList(items []string) string {
 		quoted[i] = fmt.Sprintf("%q", s)
 	}
 	return strings.Join(quoted, ", ")
+}
+
+// sortedValues returns m's values in sorted order — auth_users must list every
+// component's public key, and a deterministic order keeps regeneration a
+// stable, reviewable diff (map iteration order is not guaranteed).
+func sortedValues(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
