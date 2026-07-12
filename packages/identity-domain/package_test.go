@@ -53,10 +53,10 @@ func TestPackage_DDLsAndOps(t *testing.T) {
 	if identity.Class != "meta.ddl.vertexType" {
 		t.Fatalf("identity DDL class = %q, want meta.ddl.vertexType", identity.Class)
 	}
-	if got := len(identity.PermittedCommands); got != 7 {
-		t.Fatalf("identity permittedCommands: got %d, want 7 "+
+	if got := len(identity.PermittedCommands); got != 8 {
+		t.Fatalf("identity permittedCommands: got %d, want 8 "+
 			"(CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity, "+
-			"InitiateCredentialLink, CompleteCredentialLink)", got)
+			"InitiateCredentialLink, CompleteCredentialLink, UnlinkCredential)", got)
 	}
 }
 

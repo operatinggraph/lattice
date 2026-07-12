@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -204,6 +205,94 @@ func TestCredentialBindingsMaterializer_ReboundAfterClaimConverges(t *testing.T)
 		got, _ := doc["identityKey"].(string)
 		return got == primaryKey
 	}, 5*time.Second, 20*time.Millisecond, "rebound never converged over the prior claim")
+}
+
+// TestCredentialBindingsMaterializer_LiveUnbound proves identity.unbound
+// (packages/identity-domain/ddls.go's UnlinkCredential, multi-credential-
+// identity-linking-design.md §8) folds as the plane's one explicit
+// bucket-key DELETE — the one row-set shrink never covered by
+// overwrite-by-reprojection (Contract #11 §11.4).
+func TestCredentialBindingsMaterializer_LiveUnbound(t *testing.T) {
+	conn, ctx := newCredentialBindingsTestConn(t)
+	createCredentialBindingsBucket(t, ctx, conn)
+
+	hb := NewHeartbeater(conn, "health-kv", "gw-test", &Metrics{}, nil)
+	sup, err := StartCredentialBindingsMaterializer(ctx, conn, hb, nil)
+	require.NoError(t, err)
+	t.Cleanup(sup.Stop)
+
+	actorKey := "vtx.identity.UnboundActorXYZ"
+	identityKey := "vtx.identity.UnboundIdentXYZ"
+	publishIdentityEvent(t, ctx, conn, "identity.claimed", map[string]any{
+		"identityKey": identityKey, "actorKey": actorKey,
+	})
+	require.Eventually(t, func() bool {
+		_, err := conn.KVGet(ctx, credentialbinding.BucketName, actorKey)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "claimed binding never appeared")
+
+	publishIdentityEvent(t, ctx, conn, "identity.unbound", map[string]any{
+		"identityKey": identityKey, "actorKey": actorKey,
+	})
+	require.Eventually(t, func() bool {
+		_, err := conn.KVGet(ctx, credentialbinding.BucketName, actorKey)
+		return errors.Is(err, substrate.ErrKeyNotFound)
+	}, 5*time.Second, 20*time.Millisecond, "unbound binding was never deleted")
+}
+
+// TestCredentialBindingsMaterializer_UnboundRedeliveryIsIdempotent proves a
+// redelivered identity.unbound targeting an already-deleted key is a no-op
+// (KVDelete's ErrKeyNotFound guard, mirroring revocationMaterializer's own
+// redelivered-delete idempotency), not a poison-pill pause — a subsequent
+// unrelated claim must still fold normally, proving the consumer never got
+// stuck.
+func TestCredentialBindingsMaterializer_UnboundRedeliveryIsIdempotent(t *testing.T) {
+	conn, ctx := newCredentialBindingsTestConn(t)
+	createCredentialBindingsBucket(t, ctx, conn)
+
+	hb := NewHeartbeater(conn, "health-kv", "gw-test", &Metrics{}, nil)
+	sup, err := StartCredentialBindingsMaterializer(ctx, conn, hb, nil)
+	require.NoError(t, err)
+	t.Cleanup(sup.Stop)
+
+	actorKey := "vtx.identity.RedelUnboundActor"
+	identityKey := "vtx.identity.RedelUnboundIdent"
+	publishIdentityEvent(t, ctx, conn, "identity.claimed", map[string]any{
+		"identityKey": identityKey, "actorKey": actorKey,
+	})
+	require.Eventually(t, func() bool {
+		_, err := conn.KVGet(ctx, credentialbinding.BucketName, actorKey)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "claimed binding never appeared")
+
+	publishIdentityEvent(t, ctx, conn, "identity.unbound", map[string]any{
+		"identityKey": identityKey, "actorKey": actorKey,
+	})
+	require.Eventually(t, func() bool {
+		_, err := conn.KVGet(ctx, credentialbinding.BucketName, actorKey)
+		return errors.Is(err, substrate.ErrKeyNotFound)
+	}, 5*time.Second, 20*time.Millisecond, "unbound binding was never deleted")
+
+	// Redeliver the same unbind (at-least-once semantics) against the
+	// now-already-deleted key.
+	publishIdentityEvent(t, ctx, conn, "identity.unbound", map[string]any{
+		"identityKey": identityKey, "actorKey": actorKey,
+	})
+
+	// A subsequent, unrelated claim must still fold — proves the redelivered
+	// unbind didn't wedge or pause the consumer.
+	nextActor := "vtx.identity.AfterRedelActor"
+	nextIdentity := "vtx.identity.AfterRedelIdent"
+	publishIdentityEvent(t, ctx, conn, "identity.claimed", map[string]any{
+		"identityKey": nextIdentity, "actorKey": nextActor,
+	})
+	require.Eventually(t, func() bool {
+		_, err := conn.KVGet(ctx, credentialbinding.BucketName, nextActor)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "consumer stuck behind the redelivered unbind — next claim never folded")
+
+	_, err = conn.KVGet(ctx, credentialbinding.BucketName, actorKey)
+	require.ErrorIs(t, err, substrate.ErrKeyNotFound, "redelivered unbind must not resurrect the deleted key")
 }
 
 func TestCredentialBindingsMaterializer_IgnoresSiblingEvent(t *testing.T) {

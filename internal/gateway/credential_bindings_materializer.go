@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -35,12 +36,13 @@ const credentialBindingsIssueKey = "credential-bindings-consumer"
 // never-redelivered claim event is surfaced under.
 const credentialBindingsPoisonIssueKey = "credential-bindings-poison-key"
 
-// credentialBindingEventBody is the shape the outbox publishes for both
-// identity.claimed (packages/identity-domain/ddls.go's ClaimIdentity) and
+// credentialBindingEventBody is the shape the outbox publishes for
+// identity.claimed (packages/identity-domain/ddls.go's ClaimIdentity),
 // identity.rebound (packages/identity-hygiene/ddls.go's MergeIdentity,
-// multi-credential-identity-linking-design.md §3.3) — both fold the same
-// way (actorKey → identityKey); rebound's extra previousIdentityKey field
-// is audit-only and unused by the fold.
+// multi-credential-identity-linking-design.md §3.3), and identity.unbound
+// (packages/identity-domain/ddls.go's UnlinkCredential, design §8) — all
+// three carry the same {identityKey, actorKey} shape; rebound's extra
+// previousIdentityKey field is audit-only and unused by the fold.
 type credentialBindingEventBody struct {
 	EventType string `json:"eventType"`
 	Payload   struct {
@@ -101,14 +103,17 @@ func StartCredentialBindingsMaterializer(ctx context.Context, conn *substrate.Co
 	return sup, nil
 }
 
-// credentialBindingsHandler folds an identity.claimed or identity.rebound
-// event into the credential-bindings bucket, keyed by the raw credential
-// actor (A) so Resolve(actorID) is an O(1) point lookup. Must be idempotent
+// credentialBindingsHandler folds identity.claimed/identity.rebound
+// (write/overwrite) and identity.unbound (delete) events into the
+// credential-bindings bucket, keyed by the raw credential actor (A) so
+// Resolve(actorID) is an O(1) point lookup. Must be idempotent
 // (at-least-once delivery): a redelivered claim or rebound re-puts the same
-// key with the same value. A rebound after a claim folds last and wins —
-// stream-ordered, single writer (multi-credential-identity-linking-
-// design.md §3.3). There is no unbind path in this refinement's scope — a
-// bound key lives for the actor's lifetime.
+// key with the same value; a redelivered unbind re-deletes an already-absent
+// key (KVDelete is a no-op-safe soft delete). A rebound after a claim folds
+// last and wins — stream-ordered, single writer (multi-credential-identity-
+// linking-design.md §3.3). identity.unbound is the plane's one explicit
+// row-set shrink (Contract #11 §11.4, design §8) — every other fold here
+// only ever writes or overwrites.
 func credentialBindingsHandler(conn *substrate.Conn, hb *Heartbeater, logger *slog.Logger) substrate.SupervisedHandler {
 	return func(ctx context.Context, msg substrate.Message) (substrate.Decision, error) {
 		if len(msg.Body) == 0 {
@@ -121,17 +126,29 @@ func credentialBindingsHandler(conn *substrate.Conn, hb *Heartbeater, logger *sl
 				"credential-bindings event body unparseable, dropped: "+err.Error())
 			return substrate.Ack, nil
 		}
-		if eb.EventType != "identity.claimed" && eb.EventType != "identity.rebound" {
+		if eb.EventType != "identity.claimed" && eb.EventType != "identity.rebound" && eb.EventType != "identity.unbound" {
 			// FilterSubject scopes delivery to events.identity.>, so a
 			// sibling identity-domain event (e.g. identity.provisioned)
 			// legitimately arrives here too — ignore anything but a
-			// claim/rebound.
+			// claim/rebound/unbind.
 			return substrate.Ack, nil
 		}
 		if eb.Payload.ActorKey == "" || eb.Payload.IdentityKey == "" {
 			logger.Warn("gateway: "+eb.EventType+" event missing actorKey/identityKey; dropping")
 			hb.SetIssue(credentialBindingsPoisonIssueKey, severityError, "credentialBindings.missingFields",
 				eb.EventType+" event missing actorKey/identityKey, dropped")
+			return substrate.Ack, nil
+		}
+
+		if eb.EventType == "identity.unbound" {
+			// Mirrors the ErrKeyNotFound guard every sibling delete-fold in
+			// this codebase uses for the same redelivered-delete scenario
+			// (revocationMaterializer's actorUnrevoked fold, Loom's actuator,
+			// healthkv's consumer sink): a redelivered unbind targeting an
+			// already-deleted key is a no-op, not a failure.
+			if err := conn.KVDelete(ctx, credentialbinding.BucketName, eb.Payload.ActorKey); err != nil && !errors.Is(err, substrate.ErrKeyNotFound) {
+				return credentialBindingWriteFailed(hb, logger, eb.Payload.ActorKey, err)
+			}
 			return substrate.Ack, nil
 		}
 

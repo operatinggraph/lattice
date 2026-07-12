@@ -13,6 +13,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //	ProvisionConsumerIdentity     → identityProvisioner, operator
 //	InitiateCredentialLink (self) → consumer
 //	CompleteCredentialLink (self) → consumer
+//	UnlinkCredential (self)       → consumer
 //
 // Scope `self` for ClaimIdentity is enforced at step 3 (auth), before the
 // script ever runs: an existence gate (the actor must already hold some
@@ -26,6 +27,10 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Complete is submitted as the raw new credential A2 via the Gateway's
 // raw-credential carve-out (op.actor == A2 == target) — the same carve-out
 // class as ClaimIdentity, extended in internal/gateway/gateway.go.
+// UnlinkCredential (§8) is NOT in the carve-out: it is submitted through the
+// normal resolved path like Initiate (op.actor == U == target) — U is
+// removing an entry from its own credentials array, not proving control of
+// the credential being removed.
 func Permissions() []pkgmgr.PermissionSpec {
 	perms := []pkgmgr.PermissionSpec{
 		{
@@ -68,6 +73,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "CompleteCredentialLink",
 			Scope:         "self",
 			Note:          "Grants the right to bind a second credential to an identity by proving a link secret (scope=self via the raw new credential).",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "UnlinkCredential",
+			Scope:         "self",
+			Note:          "Grants the right to remove one of your own bound credentials (scope=self); the last remaining credential cannot be removed.",
 			GrantsTo:      []string{"consumer"},
 		},
 	}

@@ -1,7 +1,7 @@
 // Package identitydomain is the identity-domain Capability Package. It
 // provides CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity,
-// RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink, and
-// CompleteCredentialLink operations.
+// RecordIdentityPII, ProvisionConsumerIdentity, InitiateCredentialLink,
+// CompleteCredentialLink, and UnlinkCredential operations.
 //
 // Install via `lattice-pkg install packages/identity-domain`. The install
 // is ONE atomic commit routed through the Processor (Story 1.5.5):
@@ -29,7 +29,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "identity-domain",
-	Version:     "0.2.0",
+	Version:     "0.3.0",
 	Description: "Identity vertex creation, claim, and state-machine management, plus ProvisionConsumerIdentity — the Gateway's idempotent first-authenticated-touch auto-provisioning op (real-actor-write-auth-e2e Phase 1).",
 	Depends:     []string{"rbac-domain"},
 	DDLs:        DDLs(),

@@ -6,17 +6,17 @@
 // identity-domain package has been correctly installed. Asserts:
 //
 //	1 identity DDL meta-vertex (vtx.meta.<NanoID>) with class=meta.ddl.vertexType
-//	8 DDL aspects: .canonicalName=identity, .permittedCommands (7 ops),
+//	8 DDL aspects: .canonicalName=identity, .permittedCommands (8 ops),
 //	               .description, .script,
 //	               .inputSchema, .outputSchema, .fieldDescription, .examples
 //	  Each aspect also validated for correct vertexKey + localName envelope fields.
 //	7 sensitive aspect-type DDLs (ssn, dob, name, email, phone, claimKey,
 //	  credentialBinding): class=meta.ddl.aspectType, each carrying a .sensitive
 //	  aspect with value=true
-//	7 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
+//	8 permission vertices (vtx.permission.<NanoID>) — CreateUnclaimedIdentity,
 //	  UpdateIdentityState, ClaimIdentity, RecordIdentityPII, ProvisionConsumerIdentity,
-//	  InitiateCredentialLink, CompleteCredentialLink
-//	10 grantedBy link keys:
+//	  InitiateCredentialLink, CompleteCredentialLink, UnlinkCredential
+//	11 grantedBy link keys:
 //	  CreateUnclaimedIdentity   → operator, frontOfHouse, backOfHouse
 //	  UpdateIdentityState       → operator
 //	  ClaimIdentity             → consumer
@@ -24,6 +24,7 @@
 //	  ProvisionConsumerIdentity → identityProvisioner, operator
 //	  InitiateCredentialLink    → consumer
 //	  CompleteCredentialLink    → consumer
+//	  UnlinkCredential          → consumer
 //	4 role vertices (consumer, frontOfHouse, backOfHouse — user-facing;
 //	  identityProvisioner — system-only) seeded by PreInstall hook (vtx.role.<NanoID>)
 //	1 identityIndexHint Lens meta-vertex (vtx.meta.<NanoID>) with class=meta.lens
@@ -70,6 +71,7 @@ var identityGrantTargets = map[string][]string{
 	"ProvisionConsumerIdentity": {"identityProvisioner", "operator"},
 	"InitiateCredentialLink":    {"consumer"},
 	"CompleteCredentialLink":    {"consumer"},
+	"UnlinkCredential":          {"consumer"},
 }
 
 var identityExpectedOps = []string{
@@ -80,6 +82,7 @@ var identityExpectedOps = []string{
 	"ProvisionConsumerIdentity",
 	"InitiateCredentialLink",
 	"CompleteCredentialLink",
+	"UnlinkCredential",
 }
 
 var identityOpScopes = map[string]string{
@@ -90,6 +93,7 @@ var identityOpScopes = map[string]string{
 	"ProvisionConsumerIdentity": "any",
 	"InitiateCredentialLink":    "self",
 	"CompleteCredentialLink":    "self",
+	"UnlinkCredential":          "self",
 }
 
 // userFacingRoles are seeded by identity-domain's PreInstall hook.

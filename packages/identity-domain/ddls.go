@@ -53,6 +53,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"ProvisionConsumerIdentity",
 				"InitiateCredentialLink",
 				"CompleteCredentialLink",
+				"UnlinkCredential",
 			},
 			Description: "Identity domain DDL. " +
 				"Vertex shape: vtx.identity.<NanoID>, class=identity. " +
@@ -64,7 +65,8 @@ func DDLs() []pkgmgr.DDLSpec {
 				"linkKey (sensitive; stores the client-supplied linkKeyHash verbatim; armed by InitiateCredentialLink, " +
 				"tombstoned by CompleteCredentialLink; re-initiating overwrites), " +
 				"credentialBinding (sensitive; null pre-claim; data.credentials is the N-credential array a second " +
-				"CompleteCredentialLink appends to — multi-credential-identity-linking-design.md §3.1), " +
+				"CompleteCredentialLink appends to, and UnlinkCredential removes an entry from — " +
+				"multi-credential-identity-linking-design.md §3.1/§8), " +
 				"idpBinding (sensitive; the raw iss/sub of the external IdP token an opaque-mode ActorID was " +
 				"derived from — Contract #11 §3.3, written only by ProvisionConsumerIdentity, absent for a " +
 				"nanoid-mode/dev-provisioned actor), " +
@@ -95,7 +97,8 @@ func DDLs() []pkgmgr.DDLSpec {
 				`"idpSubject":{"type":"string","description":"Raw JWT sub claim (ProvisionConsumerIdentity, optional). Must accompany idpIssuer; written verbatim into the .idpBinding aspect."},` +
 				`"linkKeyHash":{"type":"string","description":"Lowercase hex sha256 of the client-minted link secret (InitiateCredentialLink, required). Lattice stores it verbatim; the plaintext never enters Lattice."},` +
 				`"linkKeyAlgo":{"type":"string","enum":["sha256"],"description":"Hash algorithm for linkKeyHash. Optional; defaults to sha256 (the only accepted value)."},` +
-				`"linkKey":{"type":"string","description":"One-time-use link key plaintext (CompleteCredentialLink). Its sha256 must match the stored hash on targetIdentityKey."}}}`,
+				`"linkKey":{"type":"string","description":"One-time-use link key plaintext (CompleteCredentialLink). Its sha256 must match the stored hash on targetIdentityKey."},` +
+				`"credentialActorKey":{"type":"string","description":"vtx.identity.<NanoID> of the bound credential to remove (UnlinkCredential, required). Submitted as U (op.actor==U, scope=self); names one entry in U's own credentials array."}}}`,
 			OutputSchema: `{"type":"object","properties":` +
 				`{"primaryKey":{"type":"string","description":"vtx.identity.<NanoID> of the created, claimed, or PII-recorded identity (the operation's principal key)."}}}`,
 			FieldDescription: map[string]string{
@@ -117,6 +120,7 @@ func DDLs() []pkgmgr.DDLSpec {
 				"linkKeyHash":       "Lowercase hex sha256 of the client-minted link secret. Required on InitiateCredentialLink. Stored verbatim; Lattice never holds the plaintext.",
 				"linkKeyAlgo":       "Hash algorithm for linkKeyHash. Optional; defaults to sha256 (the only accepted value).",
 				"linkKey":           "The plaintext one-time link key the client minted at InitiateCredentialLink. Used for CompleteCredentialLink verification (its sha256 is compared to the stored hash).",
+				"credentialActorKey": "vtx.identity.<NanoID> of the bound credential to remove (UnlinkCredential, required). Must name a live entry in the caller's own credentials array; the caller's implicit self-credential and the set's last remaining entry are both rejected.",
 			},
 			Examples: []pkgmgr.ExampleSpec{
 				{
@@ -150,6 +154,15 @@ func DDLs() []pkgmgr.DDLSpec {
 						"generic ClaimKeyInvalid wire code ClaimIdentity uses (NFR-S6 anti-enumeration; the " +
 						"Processor's classifier reclassifies any \"ClaimKeyInvalid: <outcome>\" fail() message the " +
 						"same way regardless of which op raised it — specific outcomes surface only via Health KV).",
+				},
+				{
+					Name:    "UnlinkCredential — U removes a bound credential",
+					Payload: map[string]any{"credentialActorKey": "vtx.identity.<NanoID-of-A>"},
+					ExpectedOutcome: "Submitted as U (op.actor == U, scope=self). Tombstones vtx.credentialindex.<hash(A)>, removes A " +
+						"from U.credentialBinding.credentials, emits identity.unbound{identityKey:U, actorKey:A} — the " +
+						"credential-bindings materializer deletes A's bucket entry (the one explicit row-set shrink in " +
+						"this plane). Rejects (generic CredentialUnlinkRejected) a credential not in U's set, or removing " +
+						"the set's last remaining entry — an identity must keep at least one sign-in path.",
 				},
 				{
 					Name:    "RecordIdentityPII — capture applicant SSN/DOB",
@@ -508,6 +521,21 @@ def index_vertex_mutation(index_key, contact_type, identity_key, existing):
         return {"op": "update", "key": index_key, "document": doc, "expectedRevision": existing.revision}
     return {"op": "create", "key": index_key, "document": doc}
 
+def credential_index_mutation(cred_index_key, existing, actor_key, identity_key, bound_at):
+    # multi-credential-identity-linking-design.md §8: UnlinkCredential is the
+    # first path that ever tombstones a credentialindex vertex, so a later
+    # (re)bind of the SAME actor -- to this identity or a different one --
+    # must be able to re-derive a live index. Same revive-on-CAS idiom as
+    # index_vertex_mutation above: a present-but-tombstoned index revives via
+    # a CAS-guarded update (declared optionalReads gives existing.revision);
+    # a truly absent (or undeclared -- the live-conflict security backstop is
+    # unchanged) one still gets a plain CreateOnly create.
+    doc = {"class": "credentialindex", "isDeleted": False,
+           "data": {"actorKey": actor_key, "identityKey": identity_key, "boundAt": bound_at}}
+    if existing != None:
+        return {"op": "update", "key": cred_index_key, "document": doc, "expectedRevision": existing.revision}
+    return {"op": "create", "key": cred_index_key, "document": doc}
+
 def read_state(state, identity_key):
     aspect_key = identity_key + ".state"
     if aspect_key in state:
@@ -856,11 +884,7 @@ def execute(state, op):
                           "localName": "state", "isDeleted": False,
                           "data": {"value": "claimed"}}},
             {"op": "tombstone", "key": target_identity_key + ".claimKey"},
-            {"op": "create", "key": cred_index_key,
-             "document": {"class": "credentialindex", "isDeleted": False,
-                          "data": {"actorKey": actor_key,
-                                   "identityKey": target_identity_key,
-                                   "boundAt": observed_at}}},
+            credential_index_mutation(cred_index_key, cred_index, actor_key, target_identity_key, observed_at),
             {"op": "create", "key": consumer_grant_key,
              "document": {"class": "holdsRole", "isDeleted": False,
                           "sourceVertex": target_identity_key, "targetVertex": consumer_role_key,
@@ -1002,11 +1026,7 @@ def execute(state, op):
         binding_absent = existing_binding == None or (hasattr(existing_binding, "isDeleted") and existing_binding.isDeleted)
 
         mutations = [
-            {"op": "create", "key": cred_index_key,
-             "document": {"class": "credentialindex", "isDeleted": False,
-                          "data": {"actorKey": actor_key,
-                                   "identityKey": target_identity_key,
-                                   "boundAt": observed_at}}},
+            credential_index_mutation(cred_index_key, cred_index, actor_key, target_identity_key, observed_at),
             {"op": "tombstone", "key": link_key_aspect_key},
         ]
 
@@ -1051,6 +1071,97 @@ def execute(state, op):
             "mutations": mutations,
             "events": events,
             "response": {"primaryKey": target_identity_key},
+        }
+
+    if ot == "UnlinkCredential":
+        # {Scope: self} as U -- the normal resolved path (op.actor == U ==
+        # target), not the raw-credential carve-out: U is removing an entry
+        # from its OWN credentials array, not proving control of the
+        # credential being removed (multi-credential-identity-linking-
+        # design.md §8).
+        def fail_unlink(outcome):
+            fail("CredentialUnlinkRejected: " + outcome)
+
+        u_key = op.actor
+        if not u_key.startswith("vtx.identity."):
+            fail_unlink("no-target")
+
+        u_vtx = state[u_key] if u_key in state else None
+        if u_vtx == None or (hasattr(u_vtx, "isDeleted") and u_vtx.isDeleted):
+            fail_unlink("no-target")
+        u_state = read_state(state, u_key)
+        u_merged_into = read_merged_into(state, u_key)
+        enforce_not_merged(u_state, u_merged_into)
+        if u_state != "claimed":
+            fail_unlink("wrong-state")
+
+        credential_actor_key = p.credentialActorKey if hasattr(p, "credentialActorKey") else None
+        if credential_actor_key == None or type(credential_actor_key) != type("") or len(credential_actor_key) == 0:
+            fail_unlink("not-found")
+
+        # U.credentialBinding is declared Reads (not optionalReads): a
+        # claimed U always has one (written by ClaimIdentity, or by
+        # CompleteCredentialLink's binding_absent branch for a Scenario-B
+        # identity's first linked credential). Absence here means U has
+        # nothing to unlink -- the implicit self-credential case (§8: "not
+        # an array entry, not unlinkable -- it IS the identity") folds into
+        # the same generic not-found outcome.
+        binding_key = u_key + ".credentialBinding"
+        existing_binding = state[binding_key] if binding_key in state else None
+        binding_absent = existing_binding == None or (hasattr(existing_binding, "isDeleted") and existing_binding.isDeleted)
+        if binding_absent:
+            fail_unlink("not-found")
+
+        existing_data = existing_binding.data if existing_binding.data != None else {}
+        existing_credentials = existing_data.get("credentials")
+        if existing_credentials == None or type(existing_credentials) != type([]):
+            first_actor = existing_data.get("actorKey")
+            if first_actor != None:
+                existing_credentials = [{"actorKey": first_actor, "boundAt": existing_data.get("boundAt")}]
+            else:
+                existing_credentials = []
+
+        remaining = []
+        removed_entry = None
+        for c in existing_credentials:
+            if c.get("actorKey") == credential_actor_key and removed_entry == None:
+                removed_entry = c
+                continue
+            remaining.append(c)
+
+        if removed_entry == None:
+            fail_unlink("not-found")
+        if len(remaining) == 0:
+            fail_unlink("last-credential")
+
+        singular_actor = existing_data.get("actorKey")
+        singular_bound = existing_data.get("boundAt")
+        if singular_actor == credential_actor_key:
+            singular_actor = remaining[0]["actorKey"]
+            singular_bound = remaining[0]["boundAt"]
+
+        mutations = [
+            {"op": "tombstone", "key": "vtx.credentialindex." + crypto.sha256NanoID(credential_actor_key)},
+            {"op": "update", "key": binding_key,
+             "document": {"class": "credentialBinding", "vertexKey": u_key, "localName": "credentialBinding",
+                          "isDeleted": False,
+                          "data": {"actorKey": singular_actor, "boundAt": singular_bound,
+                                   "credentials": remaining}}},
+        ]
+
+        # identity.unbound: the credential-bindings materializer's one
+        # explicit bucket-key DELETE fold (Contract #11 §11.4, design §8) --
+        # every other event this package emits (claimed/rebound) only ever
+        # writes/overwrites, never shrinks the bucket's row set.
+        events = [{"class": "identity.unbound", "data": {
+            "identityKey": u_key,
+            "actorKey": credential_actor_key,
+        }}]
+
+        return {
+            "mutations": mutations,
+            "events": events,
+            "response": {"primaryKey": u_key},
         }
 
     if ot == "RecordIdentityPII":
