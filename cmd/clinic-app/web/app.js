@@ -15,6 +15,8 @@ const state = {
   // narrower ?q= match while a front-desk search is active
   providers: [],
   providerSearch: "", // #provider-search term, filters the booking picker's roster client-side (name/specialty substring)
+  sites: [], // clinic-domain clinicSites lens rows: {siteKey, name}
+  providerSites: [], // clinic-domain providerSites lens rows: {providerKey, siteKey, providerName, siteName}
   appts: [],
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
@@ -414,6 +416,20 @@ function toast(msg, kind, extra) {
 function shortKey(key) {
   const i = (key || "").lastIndexOf(".");
   return i >= 0 ? key.slice(i + 1) : key || "—";
+}
+
+// vtxId extracts the bare NanoID from a full vtx.<type>.<NanoID> key.
+function vtxId(key) {
+  const parts = (key || "").split(".");
+  return parts.length === 3 ? parts[2] : "";
+}
+
+// practicesAtLinkKey mirrors clinic-domain's own deterministic per-pair key
+// (packages/clinic-domain/site.go) — declared as a (d) optionalReads for
+// AssignProviderSite / RemoveProviderSite (create/revive/tombstone idempotency
+// branch) and for CreateAppointment's site-membership check.
+function practicesAtLinkKey(providerKey, siteKey) {
+  return "lnk.provider." + vtxId(providerKey) + ".practicesAt.building." + vtxId(siteKey);
 }
 
 // ---- op submit helper ----
@@ -843,14 +859,225 @@ async function loadProviders() {
     state.providers = [];
   }
   populateSpecialtySelect();
-  populateProviderSelect("#provider", { specialty: $("#book-specialty") ? $("#book-specialty").value : "" });
+  populateProviderSelect("#provider", bookFilterOpts());
   populateProviderSelect("#sched-provider", { includeAll: true });
   populateProviderSelect("#avail-provider");
   populateProviderSelect("#series-provider");
+  populateProviderSelect("#assign-provider");
   refreshBookEnabled();
   renderSlotCalendar();
   renderAvailEditors();
   renderSoonest();
+}
+
+// bookFilterOpts reads the Book form's specialty + site filters, for both the
+// #provider picker and (via findSoonestSlots) the soonest-opening panel.
+function bookFilterOpts() {
+  return {
+    specialty: $("#book-specialty") ? $("#book-specialty").value : "",
+    site: $("#book-site") ? $("#book-site").value : "",
+  };
+}
+
+// ---- Sites (site directory + provider assignment, admin) ----
+
+async function loadSites() {
+  try {
+    const data = await api("/api/sites");
+    state.sites = data.sites || [];
+  } catch (_) {
+    state.sites = [];
+  }
+  try {
+    const data = await api("/api/provider-sites");
+    state.providerSites = data.providerSites || [];
+  } catch (_) {
+    state.providerSites = [];
+  }
+  populateSiteSelect();
+  populateProviderSelect("#provider", bookFilterOpts());
+  populateAssignSiteSelect();
+  renderSitesList();
+  renderProviderSitesList();
+}
+
+function siteByKey(key) {
+  return state.sites.find((s) => s.siteKey === key);
+}
+
+// populateSiteSelect fills the booking site filter from the site directory,
+// defaulting to "Any site" — mirrors populateSpecialtySelect exactly.
+function populateSiteSelect() {
+  const el = $("#book-site");
+  if (!el) return;
+  const prev = el.value;
+  el.innerHTML = "";
+  const any = document.createElement("option");
+  any.value = "";
+  any.textContent = "Any site";
+  el.append(any);
+  for (const s of state.sites) {
+    const o = document.createElement("option");
+    o.value = s.siteKey;
+    o.textContent = s.name;
+    el.append(o);
+  }
+  el.value = state.sites.some((s) => s.siteKey === prev) ? prev : "";
+}
+
+// populateAssignSiteSelect fills the Sites tab's site picker (for the
+// assign-a-provider form) from the site directory.
+function populateAssignSiteSelect() {
+  const el = $("#assign-site-select");
+  if (!el) return;
+  const prev = el.value;
+  el.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = state.sites.length ? "Select site…" : "No sites yet — add one above";
+  el.append(placeholder);
+  for (const s of state.sites) {
+    const o = document.createElement("option");
+    o.value = s.siteKey;
+    o.textContent = s.name;
+    el.append(o);
+  }
+  el.value = state.sites.some((s) => s.siteKey === prev) ? prev : "";
+}
+
+// renderSitesList shows the site directory as a plain read-only list.
+function renderSitesList() {
+  const box = $("#sites-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!state.sites.length) {
+    const m = document.createElement("p");
+    m.className = "muted";
+    m.textContent = "No sites yet — add one above.";
+    box.appendChild(m);
+    return;
+  }
+  for (const s of state.sites) {
+    const row = document.createElement("div");
+    row.className = "hours-row";
+    row.textContent = s.name;
+    box.appendChild(row);
+  }
+}
+
+// renderProviderSitesList shows every current provider↔site assignment, each
+// with a Remove button (RemoveProviderSite).
+function renderProviderSitesList() {
+  const box = $("#provider-sites-list");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!state.providerSites.length) {
+    const m = document.createElement("p");
+    m.className = "muted";
+    m.textContent = "No provider assignments yet.";
+    box.appendChild(m);
+    return;
+  }
+  for (const ps of state.providerSites) {
+    const row = document.createElement("div");
+    row.className = "hours-row";
+    const label = document.createElement("span");
+    label.textContent = `${ps.providerName} · ${ps.siteName}`;
+    row.appendChild(label);
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "ghost";
+    rm.textContent = "Remove";
+    rm.addEventListener("click", () => submitRemoveProviderSite(ps.providerKey, ps.siteKey));
+    row.appendChild(rm);
+    box.appendChild(row);
+  }
+}
+
+// submitAddSite chains CreateLocation(locationType=building) → SetSiteProfile
+// — mirrors loftspace-app's submitPostListing chain (CreateLocation →
+// AssignUnitOwner → ...): a clinic site IS a location-domain building, minted
+// fresh here rather than requiring the admin to already have a buildingKey.
+async function submitAddSite() {
+  const name = $("#np-site-name").value.trim();
+  if (!name) {
+    toast("Site name is required.", "err");
+    return;
+  }
+  const btn = $("#add-site-submit");
+  btn.disabled = true;
+  try {
+    const locReply = await submitOp("CreateLocation", "location", { locationType: "building" });
+    const msg1 = rejectionMessage(locReply);
+    if (msg1) {
+      toast("Could not create the site's location — " + msg1, "err");
+      return;
+    }
+    const buildingKey = locReply && locReply.primaryKey ? locReply.primaryKey : "";
+    if (!buildingKey) {
+      toast("Could not create the site's location — no key returned.", "err");
+      return;
+    }
+    const profileReply = await submitOp("SetSiteProfile", "clinicSite", { buildingKey, name }, [buildingKey]);
+    const msg2 = rejectionMessage(profileReply);
+    if (msg2) {
+      toast("Site location created, but naming it failed — " + msg2, "err");
+      return;
+    }
+    $("#np-site-name").value = "";
+    toast("Site added.", "ok");
+    setTimeout(loadSites, 700);
+  } catch (e) {
+    toast("Could not add site: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// submitAssignProviderSite submits AssignProviderSite(provider, building) —
+// both endpoints pre-exist, so ContextHint.Reads carries both (mirrors
+// AssignUnitOwner's own dispatcher).
+async function submitAssignProviderSite() {
+  const provider = $("#assign-provider").value;
+  const site = $("#assign-site-select").value;
+  if (!provider || !site) {
+    toast("Select a provider and a site.", "err");
+    return;
+  }
+  const btn = $("#assign-site-submit");
+  btn.disabled = true;
+  try {
+    const reply = await submitOp("AssignProviderSite", "clinicSiteAssignment", { provider, building: site }, [provider, site],
+      { optionalReads: [practicesAtLinkKey(provider, site)] });
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not assign provider to site — " + msg, "err");
+      return;
+    }
+    toast("Provider assigned to site.", "ok");
+    setTimeout(loadSites, 700);
+  } catch (e) {
+    toast("Could not assign provider to site: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// submitRemoveProviderSite tombstones an existing practicesAt assignment.
+async function submitRemoveProviderSite(provider, site) {
+  try {
+    const reply = await submitOp("RemoveProviderSite", "clinicSiteAssignment", { provider, building: site }, undefined,
+      { optionalReads: [practicesAtLinkKey(provider, site)] });
+    const msg = rejectionMessage(reply);
+    if (msg) {
+      toast("Could not remove assignment — " + msg, "err");
+      return;
+    }
+    toast("Assignment removed.", "ok");
+    setTimeout(loadSites, 700);
+  } catch (e) {
+    toast("Could not remove assignment: " + e.message, "err");
+  }
 }
 
 // renderAvailEditors re-seeds (only if the selected provider changed) and renders
@@ -940,7 +1167,7 @@ function wireProviderSearch() {
   if (!input) return;
   input.addEventListener("input", () => {
     state.providerSearch = input.value.trim();
-    populateProviderSelect("#provider", { specialty: $("#book-specialty") ? $("#book-specialty").value : "" });
+    populateProviderSelect("#provider", bookFilterOpts());
   });
 }
 
@@ -950,15 +1177,22 @@ function wireProviderSearch() {
 const SCHED_ALL = "__all__";
 
 // populateProviderSelect fills a provider picker from the roster, optionally
-// narrowed to opts.specialty — the booking picker's specialty filter uses this so
-// the dropdown only lists providers who can actually help, instead of a flat list
-// the patient has to already know a name to navigate.
+// narrowed to opts.specialty and/or opts.site — the booking picker's specialty
+// and site filters use this so the dropdown only lists providers who can
+// actually help at the chosen site, instead of a flat list the patient has to
+// already know a name to navigate. Site membership comes from the separate
+// providerSites join (a provider may practice at many sites), not the
+// providers roster itself.
 function populateProviderSelect(sel, opts) {
   const el = $(sel);
   if (!el) return;
   const prev = el.value;
   el.innerHTML = "";
   let roster = opts && opts.specialty ? state.providers.filter((p) => p.specialty === opts.specialty) : state.providers;
+  if (opts && opts.site) {
+    const atSite = new Set(state.providerSites.filter((ps) => ps.siteKey === opts.site).map((ps) => ps.providerKey));
+    roster = roster.filter((p) => atSite.has(p.providerKey));
+  }
   if (sel === "#provider" && state.providerSearch) {
     const q = state.providerSearch.toLowerCase();
     roster = roster.filter((p) => (p.name || "").toLowerCase().includes(q) || (p.specialty || "").toLowerCase().includes(q));
@@ -969,9 +1203,11 @@ function populateProviderSelect(sel, opts) {
     ? "Select provider…"
     : sel === "#provider" && state.providerSearch
       ? "No matches"
-      : opts && opts.specialty
-        ? `No ${opts.specialty} providers — try "Any specialty".`
-        : "No providers — add one in the Availability tab";
+      : opts && opts.site
+        ? "No providers assigned to that site."
+        : opts && opts.specialty
+          ? `No ${opts.specialty} providers — try "Any specialty".`
+          : "No providers — add one in the Availability tab";
   el.append(placeholder);
   if (opts && opts.includeAll && roster.length) {
     const all = document.createElement("option");
@@ -1678,14 +1914,19 @@ async function refreshSlots() {
 }
 
 // findSoonestSlots computes, for each provider matching the given specialty (all
-// providers if ""), their single earliest open slot within a bounded look-ahead
-// window — so a patient who only knows the specialty they need, not a specific
-// provider's name, can see who is soonest available. Stops scanning a provider's
-// days once its first open slot is found (only that provider's soonest matters
-// here); the full remaining-day picker is still computeOpenSlots via refreshSlots
-// once a specific provider is chosen. Mirrors computeOpenSlots' UTC-day grid.
-async function findSoonestSlots(specialty, durationMin, nowMs, daysAhead, limit) {
-  const candidates = state.providers.filter((p) => !specialty || p.specialty === specialty);
+// providers if "") and site (all sites if ""), their single earliest open slot
+// within a bounded look-ahead window — so a patient who only knows the specialty
+// they need, not a specific provider's name, can see who is soonest available.
+// Stops scanning a provider's days once its first open slot is found (only that
+// provider's soonest matters here); the full remaining-day picker is still
+// computeOpenSlots via refreshSlots once a specific provider is chosen. Mirrors
+// computeOpenSlots' UTC-day grid.
+async function findSoonestSlots(specialty, site, durationMin, nowMs, daysAhead, limit) {
+  let candidates = state.providers.filter((p) => !specialty || p.specialty === specialty);
+  if (site) {
+    const atSite = new Set(state.providerSites.filter((ps) => ps.siteKey === site).map((ps) => ps.providerKey));
+    candidates = candidates.filter((p) => atSite.has(p.providerKey));
+  }
   const patAppts = state.patient ? await patientAppointments(state.patient) : [];
   const results = [];
   for (const p of candidates) {
@@ -1716,14 +1957,17 @@ async function renderSoonest() {
   box.innerHTML = "";
   if ($("#provider").value) return;
   const specialty = $("#book-specialty").value;
+  const site = $("#book-site") ? $("#book-site").value : "";
   const durationMin = Number($("#duration").value || 30);
-  const results = await findSoonestSlots(specialty, durationMin, Date.now(), 14, 5);
-  // The specialty/duration/provider may have changed while awaiting the fetches.
-  if ($("#book-specialty").value !== specialty || Number($("#duration").value || 30) !== durationMin || $("#provider").value) return;
+  const results = await findSoonestSlots(specialty, site, durationMin, Date.now(), 14, 5);
+  // The specialty/site/duration/provider may have changed while awaiting the fetches.
+  if ($("#book-specialty").value !== specialty || ($("#book-site") ? $("#book-site").value : "") !== site ||
+      Number($("#duration").value || 30) !== durationMin || $("#provider").value) return;
   if (!results.length) {
     const m = document.createElement("p");
     m.className = "muted";
-    m.textContent = specialty ? `No open slots for ${specialty} in the next two weeks.` : "No open slots in the next two weeks.";
+    const label = specialty && site ? `${specialty} at ${siteByKey(site) ? siteByKey(site).name : "that site"}` : specialty || (site && siteByKey(site) ? siteByKey(site).name : "");
+    m.textContent = label ? `No open slots for ${label} in the next two weeks.` : "No open slots in the next two weeks.";
     box.appendChild(m);
     return;
   }
@@ -1857,6 +2101,11 @@ async function submitBook(ev) {
   const payload = { patient: state.patient, provider, startsAt, endsAt };
   const reason = $("#reason").value.trim();
   if (reason) payload.reason = reason;
+  // The Book form's site filter already narrows #provider to providers
+  // assigned to it, so a chosen site is guaranteed valid for this provider —
+  // still hard-validated server-side (require_site_membership, ddls.go).
+  const site = $("#book-site") ? $("#book-site").value : "";
+  if (site) payload.site = site;
 
   const asSelf = $("#book-self").checked && !$("#book-self").disabled;
 
@@ -1872,6 +2121,10 @@ async function submitBook(ev) {
     const optionalReads = slotClaimKeys(provider, startsAt, endsAt).concat(
       slotClaimKeys(state.patient, startsAt, endsAt),
     );
+    // Site membership (Increment 2): both reads require_site_membership makes
+    // are (d)-declared optionalReads — the site is itself optional, so neither
+    // can be a required contextHint.reads entry.
+    if (site) optionalReads.push(site, practicesAtLinkKey(provider, site));
     // Resident-visit confinement (Inc 5, mixed-use composition design):
     // if the selected patient's own linked identity matches a lease
     // applicant's identity, attach that lease so CreateAppointment can write
@@ -3486,7 +3739,7 @@ async function submitEncounter(ev) {
 
 // ---- Tabs ----
 
-const VIEWS = ["book", "appts", "schedule", "followups", "series", "availability"];
+const VIEWS = ["book", "appts", "schedule", "followups", "series", "availability", "sites"];
 
 function showView(view) {
   state.view = view;
@@ -3506,6 +3759,7 @@ function showView(view) {
   if (view === "appts" || view === "series") loadSeries();
   if (view === "appts") loadLedger();
   if (view === "availability") renderAvailEditors();
+  if (view === "sites") loadSites();
 }
 
 // ---- wire up ----
@@ -3514,6 +3768,7 @@ function init() {
   restorePatient();
   loadPatients();
   loadProviders();
+  loadSites();
 
   // Discourage a past booking from the picker itself; refresh on focus so a
   // long-open session never carries a stale floor. The op stays the authority.
@@ -3563,7 +3818,15 @@ function init() {
     renderSoonest();
   });
   $("#book-specialty").addEventListener("change", () => {
-    populateProviderSelect("#provider", { specialty: $("#book-specialty").value });
+    populateProviderSelect("#provider", bookFilterOpts());
+    refreshBookEnabled();
+    $("#slot-date").value = "";
+    renderSlotCalendar();
+    refreshSlots();
+    renderSoonest();
+  });
+  $("#book-site").addEventListener("change", () => {
+    populateProviderSelect("#provider", bookFilterOpts());
     refreshBookEnabled();
     $("#slot-date").value = "";
     renderSlotCalendar();
@@ -3575,6 +3838,8 @@ function init() {
     renderSoonest();
   });
   $("#add-provider-submit").addEventListener("click", submitAddProvider);
+  $("#add-site-submit").addEventListener("click", submitAddSite);
+  $("#assign-site-submit").addEventListener("click", submitAssignProviderSite);
   // Availability tab — its own provider picker drives both editors; a change
   // re-seeds each draft from the newly-selected provider's projected values.
   $("#avail-provider").addEventListener("change", renderAvailEditors);
@@ -3591,6 +3856,7 @@ function init() {
   $("#tab-followups").addEventListener("click", () => showView("followups"));
   $("#tab-series").addEventListener("click", () => showView("series"));
   $("#tab-availability").addEventListener("click", () => showView("availability"));
+  $("#tab-sites").addEventListener("click", () => showView("sites"));
   // The Book form's pointer link jumps to the Availability tab, carrying the
   // provider the user was about to book so the editor opens on that provider.
   $("#go-availability").addEventListener("click", (e) => {
@@ -3598,6 +3864,10 @@ function init() {
     const prov = $("#provider").value;
     if (prov) $("#avail-provider").value = prov;
     showView("availability");
+  });
+  $("#go-sites").addEventListener("click", (e) => {
+    e.preventDefault();
+    showView("sites");
   });
   $("#reload-appts").addEventListener("click", loadAppts);
   $("#appts-filter").addEventListener("change", renderAppts);

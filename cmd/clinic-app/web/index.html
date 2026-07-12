@@ -25,6 +25,7 @@
     <button id="tab-followups" class="tab" role="tab" aria-selected="false" aria-controls="view-followups">Follow-ups</button>
     <button id="tab-series" class="tab" role="tab" aria-selected="false" aria-controls="view-series">Series</button>
     <button id="tab-availability" class="tab" role="tab" aria-selected="false" aria-controls="view-availability">Availability</button>
+    <button id="tab-sites" class="tab" role="tab" aria-selected="false" aria-controls="view-sites">Sites</button>
   </nav>
 
   <main>
@@ -46,6 +47,11 @@
             <label for="book-specialty">Specialty <span class="opt">(optional)</span></label>
             <select id="book-specialty" aria-label="Filter providers by specialty"></select>
             <p class="hint">Narrow the provider list by specialty, or leave as "Any specialty" and see the soonest opening across everyone below.</p>
+          </div>
+          <div class="field">
+            <label for="book-site">Site <span class="opt">(optional)</span></label>
+            <select id="book-site" aria-label="Filter providers by clinic site"></select>
+            <p class="hint">Narrow the provider list by clinic site. Manage sites and provider assignments in the <a href="#" id="go-sites">Sites</a> tab.</p>
           </div>
           <div id="soonest" class="slots" aria-live="polite"></div>
           <div class="field">
@@ -310,6 +316,42 @@
             </div>
           </div>
           <button type="button" id="timeoff-save">Save time-off</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Clinic Sites (admin) -->
+    <section id="view-sites" role="tabpanel" aria-labelledby="tab-sites" hidden>
+      <div class="book">
+        <h2>Clinic sites</h2>
+        <p class="lead">Name the practice group's sites, and record which providers practice at each.</p>
+        <details class="inline-add" id="add-site">
+          <summary>＋ Add a site</summary>
+          <div class="field">
+            <label for="np-site-name">Site name</label>
+            <input type="text" id="np-site-name" placeholder="Downtown Clinic" />
+          </div>
+          <button type="button" id="add-site-submit">Add site</button>
+        </details>
+        <div id="sites-list" class="hours-list" aria-live="polite"></div>
+        <div class="avail-editor" id="assign-site">
+          <h3>🔗 Assign a provider to a site</h3>
+          <p class="hint">A provider may practice at many sites; a site may host many providers.</p>
+          <div class="field-row">
+            <div class="field">
+              <label for="assign-provider">Provider</label>
+              <select id="assign-provider" aria-label="Provider to assign"></select>
+            </div>
+            <div class="field">
+              <label for="assign-site-select">Site</label>
+              <select id="assign-site-select" aria-label="Site to assign the provider to"></select>
+            </div>
+            <div class="field hours-add-field">
+              <label>&nbsp;</label>
+              <button type="button" id="assign-site-submit">Assign</button>
+            </div>
+          </div>
+          <div id="provider-sites-list" class="hours-list" aria-live="polite"></div>
         </div>
       </div>
     </section>

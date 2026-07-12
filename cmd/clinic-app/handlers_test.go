@@ -124,3 +124,35 @@ func apptFixture() ([]string, kvGetter) {
 	})
 }
 
+func TestComputeSites_SortsAndSkips(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.building.b": map[string]any{"siteKey": "vtx.building.b", "name": "Uptown Clinic"},
+		"vtx.building.a": map[string]any{"siteKey": "vtx.building.a", "name": "Downtown Clinic"},
+		// A tombstoned projection row with no siteKey must be skipped.
+		"vtx.building.x": map[string]any{"name": "Ghost"},
+	})
+	rows := computeSites(keys, get)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 sites (the keyless row skipped), got %d", len(rows))
+	}
+	if rows[0].Name != "Downtown Clinic" || rows[1].Name != "Uptown Clinic" {
+		t.Fatalf("sites not sorted by name: %+v", rows)
+	}
+}
+
+func TestComputeProviderSites_SortsAndSkips(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"pair-2": map[string]any{"providerKey": "vtx.provider.sam", "siteKey": "vtx.building.uptown", "providerName": "Dr. Sam Okafor", "siteName": "Uptown Clinic"},
+		"pair-1": map[string]any{"providerKey": "vtx.provider.sam", "siteKey": "vtx.building.downtown", "providerName": "Dr. Sam Okafor", "siteName": "Downtown Clinic"},
+		// A tombstoned/retracted projection row missing an endpoint must be skipped.
+		"pair-x": map[string]any{"providerKey": "vtx.provider.sam"},
+	})
+	rows := computeProviderSites(keys, get)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 provider-site pairs (the endpoint-missing row skipped), got %d", len(rows))
+	}
+	if rows[0].SiteKey != "vtx.building.downtown" || rows[1].SiteKey != "vtx.building.uptown" {
+		t.Fatalf("provider-sites not sorted by (providerKey, siteKey): %+v", rows)
+	}
+}
+

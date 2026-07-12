@@ -205,6 +205,107 @@ func TestClinic_AssignProviderSiteRejectsDeadProvider(t *testing.T) {
 	}
 }
 
+// clCreateAppointmentWithSite submits CreateAppointment with an optional site
+// param (Increment 2) — the counterpart of integration_test.go's
+// clCreateAppointmentWithLease. When siteKey is non-empty, both it and the
+// provider→site practicesAt link are declared optionalReads
+// (require_site_membership, ddls.go).
+func clCreateAppointmentWithSite(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, patientKey, providerKey, siteKey string, want processor.MessageOutcome) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payloadMap := map[string]any{
+		"patient": patientKey, "provider": providerKey,
+		"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z",
+	}
+	optionalReads := []string{}
+	if siteKey != "" {
+		payloadMap["site"] = siteKey
+		optionalReads = append(optionalReads, siteKey, practicesAtLinkKey(providerKey, siteKey))
+	}
+	payload, _ := json.Marshal(payloadMap)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateAppointment",
+		Actor:         clStaffActorKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       payload,
+		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return clNanoIDFromRequestID(reqID)
+}
+
+// TestClinic_CreateAppointment_WithValidSite proves a provider who
+// practicesAt the given site books successfully and the appointment carries
+// an atSite link (appointment→building).
+func TestClinic_CreateAppointment_WithValidSite(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "appt-with-site")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "apwsitepat01", "Sam Sitebooker")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "apwsiteprv01", "Dr. Site Ready", "Cardiology")
+	buildingKey := clCreateBuilding(t, ctx, conn, cp, cons, "apwsitebld01")
+	clSubmit(t, ctx, conn, cp, cons, "apwsiteset01", "SetSiteProfile", "clinicSite",
+		`{"buildingKey":"`+buildingKey+`","name":"Downtown Clinic"}`, []string{buildingKey}, processor.OutcomeAccepted)
+	assignProviderSite(t, ctx, conn, cp, cons, "apwsiteasg01", providerKey, buildingKey, processor.OutcomeAccepted)
+
+	apptID := clCreateAppointmentWithSite(t, ctx, conn, cp, cons, "apwsiteappt1", patientKey, providerKey, buildingKey, processor.OutcomeAccepted)
+
+	_, buildingID, _ := substrate.ParseVertexKey(buildingKey)
+	atSiteLnk := "lnk.appointment." + apptID + ".atSite.building." + buildingID
+	doc := clReadDoc(t, ctx, conn, atSiteLnk)
+	if doc["class"] != "atSite" {
+		t.Fatalf("atSite link class = %v, want atSite", doc["class"])
+	}
+	if del, _ := doc["isDeleted"].(bool); del {
+		t.Fatalf("atSite link should be alive; got isDeleted=%v", del)
+	}
+}
+
+// TestClinic_CreateAppointment_RejectsProviderNotAtSite proves a site is
+// hard-validated, unlike leaseAppKey's silent fall-through: a provider not
+// assigned to the given site rejects the WHOLE booking (ProviderNotAtSite),
+// committing no appointment at all.
+func TestClinic_CreateAppointment_RejectsProviderNotAtSite(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "appt-wrong-site")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "apwrongpat01", "Nora Notassigned")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "apwrongprv01", "Dr. No Site", "Cardiology")
+	buildingKey := clCreateBuilding(t, ctx, conn, cp, cons, "apwrongbld01")
+	clSubmit(t, ctx, conn, cp, cons, "apwrongset01", "SetSiteProfile", "clinicSite",
+		`{"buildingKey":"`+buildingKey+`","name":"Uptown Clinic"}`, []string{buildingKey}, processor.OutcomeAccepted)
+	// Deliberately no AssignProviderSite — the provider does not practice here.
+
+	apptID := clCreateAppointmentWithSite(t, ctx, conn, cp, cons, "apwrongappt1", patientKey, providerKey, buildingKey, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "vtx.appointment."+apptID) {
+		t.Fatalf("no appointment should be committed when the provider is not assigned to the requested site")
+	}
+}
+
+// TestClinic_CreateAppointment_RejectsNonLocationSite proves a site key that
+// resolves to a non-location vertex is rejected (NotALocation), mirroring
+// SetSiteProfile's own guard.
+func TestClinic_CreateAppointment_RejectsNonLocationSite(t *testing.T) {
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "appt-badclass-site")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "apbadpat0001", "Gail Ghostsite")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "apbadprv0001", "Dr. Bad Class", "Cardiology")
+	fakeSite := "vtx.building.CLapbadsiteHJKMNP"
+	clSeedVertex(t, ctx, conn, fakeSite, "identity", false) // building-shaped key, wrong class
+
+	apptID := clCreateAppointmentWithSite(t, ctx, conn, cp, cons, "apbadappt001", patientKey, providerKey, fakeSite, processor.OutcomeRejected)
+
+	if !clMissing(t, ctx, conn, "vtx.appointment."+apptID) {
+		t.Fatalf("no appointment should be committed for a non-location site")
+	}
+}
+
 // TestClinic_ProviderMultipleSites proves a provider may practice at MANY
 // sites: two AssignProviderSite calls against two different buildings both
 // commit distinct, live links.

@@ -67,6 +67,8 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	mux.HandleFunc("/api/providers", s.handleProviders)
+	mux.HandleFunc("/api/sites", s.handleSites)
+	mux.HandleFunc("/api/provider-sites", s.handleProviderSites)
 	mux.HandleFunc("/api/residents", s.handleResidents)
 	mux.HandleFunc("/api/staff/patients", s.handleStaffPatients)
 	mux.HandleFunc("/api/appointments", s.handleAppointments)
