@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.16.0
+version: 0.17.0
 depends:
   - location-domain
 description: |
@@ -173,9 +173,15 @@ declares:
     - operationType: RescheduleAppointment
       scope: any
       grantsTo: [operator]
+    - operationType: RescheduleAppointment
+      scope: self
+      grantsTo: [consumer]
     - operationType: SetAppointmentStatus
       scope: any
       grantsTo: [operator]
+    - operationType: SetAppointmentStatus
+      scope: self
+      grantsTo: [consumer]
     - operationType: RecordEncounter
       scope: any
       grantsTo: [operator]

@@ -56,10 +56,12 @@ var clinicExpectedOps = []string{
 
 // permGrant is one expected (scope, grantee-role) pair for an operationType's
 // permission vertex. Every op here carries exactly one, except
-// CreateAppointment, which carries two distinct permission vertices —
-// packages/clinic-domain/permissions.go grants the operator role scope=any
-// AND the consumer role scope=self (the real-actor-write-auth-e2e idiom: a
-// patient books their own appointment).
+// CreateAppointment, RescheduleAppointment, and SetAppointmentStatus, which
+// each carry two distinct permission vertices — packages/clinic-domain/
+// permissions.go grants the operator role scope=any AND the consumer role
+// scope=self (the real-actor-write-auth-e2e idiom: a patient books,
+// reschedules, or cancels their own appointment; SetAppointmentStatus's self
+// grant is further restricted in-script to status=cancelled only).
 type permGrant struct {
 	scope   string
 	grantee string
@@ -74,8 +76,8 @@ var clinicOpGrants = map[string][]permGrant{
 	"SetProviderHours":      {{"any", "operator"}},
 	"SetProviderTimeOff":    {{"any", "operator"}},
 	"CreateAppointment":     {{"any", "operator"}, {"self", "consumer"}},
-	"RescheduleAppointment": {{"any", "operator"}},
-	"SetAppointmentStatus":  {{"any", "operator"}},
+	"RescheduleAppointment": {{"any", "operator"}, {"self", "consumer"}},
+	"SetAppointmentStatus":  {{"any", "operator"}, {"self", "consumer"}},
 	"RecordEncounter":       {{"any", "operator"}},
 	"TombstoneAppointment":  {{"any", "operator"}},
 	"SetSiteProfile":        {{"any", "operator"}},
