@@ -25,6 +25,19 @@ const ClinicProvidersBucket = "clinic-providers"
 // plane owns and are deliberately NOT fanned into a read model here.
 const ClinicPatientsBucket = "clinic-patients"
 
+// ClinicSitesBucket is the NATS-KV read model the clinicSites lens projects
+// into — the **P5 query surface** for "what clinic sites exist": a site
+// directory / (a later increment's) site-scoped booking picker reads THIS
+// bucket (one row per named site, keyed by the location-domain building key),
+// never Core KV.
+const ClinicSitesBucket = "clinic-sites"
+
+// ClinicProviderSitesBucket is the NATS-KV read model the providerSites lens
+// projects into — the **P5 query surface** for "which providers practice at
+// which sites": one row per (provider, site) pair, mirroring identity-
+// hygiene's duplicateCandidates shape (composite IntoKey, DiffRetraction).
+const ClinicProviderSitesBucket = "clinic-provider-sites"
+
 // Lenses returns the package's two projection lenses. Both are flat projections
 // (no aggregation / WITH), so OPTIONAL-matched neighbour bindings are live
 // directly in RETURN and the §4-B1 "WITH-drop" hazard does not apply. Aspect
@@ -57,6 +70,24 @@ func Lenses() []pkgmgr.LensSpec {
 			Bucket:        ClinicPatientsBucket,
 			Engine:        "full",
 			Spec:          clinicPatientsSpec,
+		},
+		{
+			CanonicalName: "clinicSites",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        ClinicSitesBucket,
+			Engine:        "full",
+			Spec:          clinicSitesSpec,
+		},
+		{
+			CanonicalName:  "providerSites",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         ClinicProviderSitesBucket,
+			Engine:         "full",
+			Spec:           providerSitesSpec,
+			IntoKey:        []string{"provider_id", "site_id"},
+			DiffRetraction: true,
 		},
 		{
 			// clinicAppointmentsRead — the protected Postgres read model for the
@@ -391,6 +422,35 @@ RETURN
   p.key AS key,
   p.key AS patientKey,
   p.demographics.data.fullName AS name`
+
+// clinicSitesSpec projects one row per NAMED clinic site — a location-domain
+// building carrying a `.site` aspect (SetSiteProfile). Same flat no-WITH shape
+// as clinicProviders/clinicPatients. The WHERE keeps only buildings carrying a
+// name (the `<> null` aspect-presence idiom). The per-row key is the building
+// key (the IntoKey default); `siteKey` repeats it in the body — the site
+// directory / (a later increment's) site-scoped booking picker reads this.
+const clinicSitesSpec = `MATCH (b:building)
+WHERE b.site.data.name <> null
+RETURN
+  b.key AS key,
+  b.key AS siteKey,
+  b.site.data.name AS name`
+
+// providerSitesSpec projects one row per (provider, site) practicesAt pair —
+// a provider may practice at many sites, a site may host many providers, so
+// this is a SEPARATE join lens rather than an array column folded into
+// clinicProviders (mirrors identity-hygiene's duplicateCandidates shape:
+// nats-kv full engine, no $actorKey, composite IntoKey [provider_id, site_id],
+// DiffRetraction so an unassign — RemoveProviderSite tombstoning the
+// practicesAt link — retracts the row instead of leaving it stale).
+const providerSitesSpec = `MATCH (pr:provider)-[:practicesAt]->(b:building)
+RETURN
+  nanoIdFromKey(pr.key) AS provider_id,
+  nanoIdFromKey(b.key)  AS site_id,
+  pr.key                AS providerKey,
+  b.key                 AS siteKey,
+  pr.profile.data.fullName AS providerName,
+  b.site.data.name         AS siteName`
 
 // clinicPatientsReadSpec is the protected Postgres read model's cypher for the
 // clinic-wide patient roster (D1.5, the staff-wildcard increment; Vault Fire 5

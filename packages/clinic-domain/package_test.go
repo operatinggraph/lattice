@@ -23,14 +23,16 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the thirteen DDLs: three vertexType owners (patient,
-// provider, appointment) and ten aspectType step-6 gates (nine attach to
-// patient/provider/appointment vertices; identityPatientClaim attaches onto an
-// identity-domain vertex, the clinic-reminders idiom). All ten aspect DDLs MUST
-// be NON-sensitive, and each names ONLY its writer op(s) in permittedCommands.
+// TestPackage_DDLs pins the sixteen DDLs: five vertexType owners (patient,
+// provider, appointment, clinicSite, clinicSiteAssignment) and eleven aspectType
+// step-6 gates (nine attach to patient/provider/appointment vertices;
+// identityPatientClaim attaches onto an identity-domain vertex, the clinic-
+// reminders idiom; clinicSiteProfile attaches onto a location-domain building,
+// the loftspace-domain aspect-contribution idiom). All aspect DDLs MUST be
+// NON-sensitive, and each names ONLY its writer op(s) in permittedCommands.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 13 {
-		t.Fatalf("expected 13 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 16 {
+		t.Fatalf("expected 16 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -39,9 +41,11 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	vertexCmds := map[string][]string{
-		"patient":     {"CreatePatient", "TombstonePatient"},
-		"provider":    {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff"},
-		"appointment": {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment"},
+		"patient":              {"CreatePatient", "TombstonePatient"},
+		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff"},
+		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment"},
+		"clinicSite":           {"SetSiteProfile"},
+		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
 	}
 	for name, wantCmds := range vertexCmds {
 		vertex, ok := byName[name]
@@ -79,6 +83,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"patientSlotClaim":     {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
 		"appointmentEncounter": {"RecordEncounter"},
 		"identityPatientClaim": {"CreatePatient"},
+		"clinicSiteProfile":    {"SetSiteProfile"},
 	}
 	for name, wantCmds := range aspectWriters {
 		asp, ok := byName[name]
@@ -133,8 +138,8 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 
 // TestPackage_Permissions pins every op granted to operator (scope any) —
 // except CreateAppointment, which ALSO carries a consumer scope=self grant
-// (patient self-booking) — plus the three projection lenses and no package
-// dependency.
+// (patient self-booking) — plus the ten projection lenses and the
+// location-domain dependency.
 func TestPackage_Permissions(t *testing.T) {
 	type wantGrant struct {
 		scope     string
@@ -147,6 +152,7 @@ func TestPackage_Permissions(t *testing.T) {
 		"SetProviderProfile": {{scope: "any", grantsTo: "operator"}}, "SetProviderHours": {{scope: "any", grantsTo: "operator"}}, "SetProviderTimeOff": {{scope: "any", grantsTo: "operator"}},
 		"CreateAppointment": {{scope: "any", grantsTo: "operator"}, {scope: "self", grantsTo: "consumer"}}, "RescheduleAppointment": {{scope: "any", grantsTo: "operator"}},
 		"SetAppointmentStatus": {{scope: "any", grantsTo: "operator"}}, "RecordEncounter": {{scope: "any", grantsTo: "operator"}}, "TombstoneAppointment": {{scope: "any", grantsTo: "operator"}},
+		"SetSiteProfile": {{scope: "any", grantsTo: "operator"}}, "AssignProviderSite": {{scope: "any", grantsTo: "operator"}}, "RemoveProviderSite": {{scope: "any", grantsTo: "operator"}},
 	}
 	wantCount := 0
 	for _, grants := range wantPerms {
@@ -183,12 +189,12 @@ func TestPackage_Permissions(t *testing.T) {
 		}
 	}
 
-	if len(Package.Depends) != 0 {
-		t.Fatalf("expected no Depends (self-contained), got %v", Package.Depends)
+	if got := Package.Depends; len(got) != 1 || got[0] != "location-domain" {
+		t.Fatalf("expected Depends=[location-domain], got %v", got)
 	}
 
-	if got := len(Package.Lenses); got != 8 {
-		t.Fatalf("expected 8 lenses, got %d", got)
+	if got := len(Package.Lenses); got != 10 {
+		t.Fatalf("expected 10 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -205,6 +211,15 @@ func TestPackage_Permissions(t *testing.T) {
 	if l, ok := lensByName["clinicPatients"]; !ok ||
 		l.Adapter != "nats-kv" || l.Bucket != ClinicPatientsBucket {
 		t.Fatalf("unexpected clinicPatients shape: %+v", lensByName["clinicPatients"])
+	}
+	if l, ok := lensByName["clinicSites"]; !ok ||
+		l.Adapter != "nats-kv" || l.Bucket != ClinicSitesBucket {
+		t.Fatalf("unexpected clinicSites shape: %+v", lensByName["clinicSites"])
+	}
+	if l, ok := lensByName["providerSites"]; !ok ||
+		l.Adapter != "nats-kv" || l.Bucket != ClinicProviderSitesBucket || !l.DiffRetraction ||
+		len(l.IntoKey) != 2 || l.IntoKey[0] != "provider_id" || l.IntoKey[1] != "site_id" {
+		t.Fatalf("unexpected providerSites shape: %+v", lensByName["providerSites"])
 	}
 	if l, ok := lensByName["clinicAppointmentsRead"]; !ok ||
 		l.Adapter != "postgres" || l.Table != "read_clinic_appointments" || !l.Protected {
@@ -237,7 +252,7 @@ func TestPackage_Permissions(t *testing.T) {
 // TestPackage_NoScans mirrors the known-key discipline guard: no script may use a
 // prefix scan.
 func TestPackage_NoScans(t *testing.T) {
-	for _, src := range []string{patientDDLScript, providerDDLScript, appointmentDDLScript} {
+	for _, src := range []string{patientDDLScript, providerDDLScript, appointmentDDLScript, clinicSiteDDLScript, clinicSiteAssignmentDDLScript} {
 		for _, forbidden := range []string{"KVListKeys", "list_keys", "scan(", "keys_with_prefix"} {
 			if strings.Contains(src, forbidden) {
 				t.Errorf("clinic script must not reference prefix-scan helper %q", forbidden)

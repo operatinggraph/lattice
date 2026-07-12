@@ -91,8 +91,19 @@
 //     platform owner-tombstone-cascade trigger (it is the deferred GC item), so
 //     no package builds a bespoke one.
 //
-// Install via `lattice-pkg install packages/clinic-domain`. Self-contained — no
-// package dependency. See _bmad-output/implementation-artifacts/clinic-domain-design.md.
+// Multi-site: a fourth vertexType DDL (clinicSite) + one aspectType DDL
+// (clinicSiteProfile) contribute a `.site` aspect {name} onto a location-domain
+// vtx.building (SetSiteProfile), and a fifth vertexType DDL (clinicSiteAssignment)
+// owns the provider→building `practicesAt` LINK (AssignProviderSite /
+// RemoveProviderSite) — mirroring loftspace-domain's aspect-contribution
+// (loftspaceListing) + link-contribution (loftspaceOwnership) pattern onto
+// location-domain's place graph exactly, including the create/revive-CAS/no-op
+// idempotency ownership.go uses. This package now DEPENDS on location-domain.
+//
+// Install via `lattice-pkg install packages/location-domain` THEN
+// `lattice-pkg install packages/clinic-domain`. See
+// _bmad-output/implementation-artifacts/clinic-domain-design.md +
+// clinic-multisite-design.md.
 package clinicdomain
 
 import "github.com/asolgan/lattice/internal/pkgmgr"
@@ -100,8 +111,9 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "clinic-domain",
-	Version:     "0.15.0",
-	Description: "Clinic bookable domain: patient / provider / appointment vertex types + their aspects and links, written by Create*/SetAppointmentStatus/RecordEncounter/Tombstone* ops. RecordEncounter captures the post-visit clinical record (.encounter — RAW PHI never projected, plus operational documentation/follow-up signals the lens does project). Eight projection lenses (clinicAppointments, clinicProviders, clinicPatients, clinicAppointmentsRead, providerAppointmentsRead, clinicPatientsRead, clinicPatientReadGrants, clinicProviderReadGrants) are the P5 read models a clinic FE reads; clinicAppointmentsRead, providerAppointmentsRead, and clinicPatientsRead are PROTECTED Postgres read models (Contract #6 §6.14 RLS, D1.5) — patient-self, provider-self, and staff-wildcard-only respectively. clinicPatientReadGrants / clinicProviderReadGrants are the package's own cap-read.clinic.patient / cap-read.clinic.provider GrantTable self-anchor producers, closing the gap the platform base cap-read self-anchor leaves (it only ever matches class=identity, never class=patient/class=provider). clinicPatientsRead's email/phone are Secure-Lens columns (Contract #3 §3.10, Vault Fire 5): decrypted at projection from the patient's optional identifiedBy identity, null for a patient with no linked identity or a shredded one. CreateAppointment ALSO grants consumer scope=self (real-actor-write-auth-e2e idiom): a real patient books their own appointment through the Gateway, gated on the named patient's identifiedBy link resolving to the caller's own identity. Self-contained — no package dependency.",
+	Depends:     []string{"location-domain"},
+	Version:     "0.16.0",
+	Description: "Clinic bookable domain: patient / provider / appointment vertex types + their aspects and links, written by Create*/SetAppointmentStatus/RecordEncounter/Tombstone* ops. RecordEncounter captures the post-visit clinical record (.encounter — RAW PHI never projected, plus operational documentation/follow-up signals the lens does project). Multi-site: SetSiteProfile writes a `.site` aspect {name} onto a location-domain vtx.building; AssignProviderSite/RemoveProviderSite own the provider→building `practicesAt` link (create/revive-CAS/no-op idempotency, mirrors loftspace-domain's AssignUnitOwner). Ten projection lenses (clinicAppointments, clinicProviders, clinicPatients, clinicSites, providerSites, clinicAppointmentsRead, providerAppointmentsRead, clinicPatientsRead, clinicPatientReadGrants, clinicProviderReadGrants) are the P5 read models a clinic FE reads; clinicAppointmentsRead, providerAppointmentsRead, and clinicPatientsRead are PROTECTED Postgres read models (Contract #6 §6.14 RLS, D1.5) — patient-self, provider-self, and staff-wildcard-only respectively. clinicPatientReadGrants / clinicProviderReadGrants are the package's own cap-read.clinic.patient / cap-read.clinic.provider GrantTable self-anchor producers, closing the gap the platform base cap-read self-anchor leaves (it only ever matches class=identity, never class=patient/class=provider). clinicPatientsRead's email/phone are Secure-Lens columns (Contract #3 §3.10, Vault Fire 5): decrypted at projection from the patient's optional identifiedBy identity, null for a patient with no linked identity or a shredded one. CreateAppointment ALSO grants consumer scope=self (real-actor-write-auth-e2e idiom): a real patient books their own appointment through the Gateway, gated on the named patient's identifiedBy link resolving to the caller's own identity. Depends on location-domain (the multi-site building).",
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),
 	Permissions: Permissions(),

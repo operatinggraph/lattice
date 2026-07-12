@@ -80,6 +80,8 @@ func DDLs() []pkgmgr.DDLSpec {
 		patientVertexTypeDDL(),
 		providerVertexTypeDDL(),
 		appointmentVertexTypeDDL(),
+		clinicSiteVertexTypeDDL(),
+		clinicSiteAssignmentVertexTypeDDL(),
 		demographicsAspectTypeDDL(),
 		profileAspectTypeDDL(),
 		scheduleAspectTypeDDL(),
@@ -90,6 +92,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		patientSlotClaimAspectTypeDDL(),
 		encounterAspectTypeDDL(),
 		identityPatientClaimAspectTypeDDL(),
+		clinicSiteProfileAspectTypeDDL(),
 	}
 }
 

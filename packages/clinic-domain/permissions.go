@@ -42,5 +42,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 		mk("SetAppointmentStatus"),
 		mk("RecordEncounter"),
 		mk("TombstoneAppointment"),
+		mk("SetSiteProfile"),
+		mk("AssignProviderSite"),
+		mk("RemoveProviderSite"),
 	}
 }

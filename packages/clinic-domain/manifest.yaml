@@ -1,7 +1,9 @@
 name: clinic-domain
-version: 0.15.0
+version: 0.16.0
+depends:
+  - location-domain
 description: |
-  Clinic bookable domain. Self-contained package owning three vertex types —
+  Clinic bookable domain. Owns three vertex types —
   patient, provider, appointment — with their aspects (.demographics, .profile,
   .schedule, .status, .encounter, provider/patient .slot<cellcode> claims) and
   links (forPatient, withProvider, identifiedBy), written by the
@@ -43,8 +45,8 @@ description: |
   deterministic providerSlotClaim/patientSlotClaim aspect per covered 15-minute
   grid cell — the write-path key collision (CreateOnly/expectedRevision) IS the
   lock, no read-time enumeration — and an out-of-hours booking (OutsideHours) via
-  the provider's opt-in .hours availability windows (SetProviderHours). No
-  package dependency. @every recurring schedules are the separate deferred item
+  the provider's opt-in .hours availability windows (SetProviderHours).
+  @every recurring schedules are the separate deferred item
   this vertical forces — out of scope here. The Vault plane it forces is fully
   wired for contact (identifiedBy link + Secure-Lens display); the clinical
   record's (.encounter raw PHI) right-to-be-forgotten + display remain
@@ -56,6 +58,20 @@ description: |
   separately requires the target identity to be the named patient's linked
   identity (via identifiedBy), since the op's endpoint is the patient vertex,
   not an identity.
+  Multi-site (depends on location-domain): SetSiteProfile writes a `.site`
+  aspect {name} onto a location-domain vtx.building (validated alive +
+  class=location) — the clinicSite vertexType DDL / clinicSiteProfile
+  aspectType DDL pair mirrors loftspace-domain's loftspaceListing aspect-
+  contribution pattern. AssignProviderSite / RemoveProviderSite (the
+  clinicSiteAssignment vertexType DDL) own the provider→building `practicesAt`
+  LINK (lnk.provider.<id>.practicesAt.building.<id>, source=provider,
+  target=building — the acting provider is the later-arriving source, mirroring
+  loftspace-domain's loftspaceOwnership AssignUnitOwner exactly, including its
+  create/revive-CAS/no-op idempotency). clinicSites projects one row per named
+  site (building); providerSites projects one row per (provider, site) pair
+  (mirrors identity-hygiene's duplicateCandidates: nats-kv, composite IntoKey,
+  DiffRetraction) — the FE site directory + site-scoped booking are the next
+  increment (clinic-multisite-design.md).
 declares:
   ddls:
     - canonicalName: patient
@@ -63,6 +79,10 @@ declares:
     - canonicalName: provider
       class: meta.ddl.vertexType
     - canonicalName: appointment
+      class: meta.ddl.vertexType
+    - canonicalName: clinicSite
+      class: meta.ddl.vertexType
+    - canonicalName: clinicSiteAssignment
       class: meta.ddl.vertexType
     - canonicalName: patientDemographics
       class: meta.ddl.aspectType
@@ -84,6 +104,8 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: identityPatientClaim
       class: meta.ddl.aspectType
+    - canonicalName: clinicSiteProfile
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: clinicAppointments
       adapter: nats-kv
@@ -96,6 +118,14 @@ declares:
     - canonicalName: clinicPatients
       adapter: nats-kv
       bucket: clinic-patients
+      engine: full
+    - canonicalName: clinicSites
+      adapter: nats-kv
+      bucket: clinic-sites
+      engine: full
+    - canonicalName: providerSites
+      adapter: nats-kv
+      bucket: clinic-provider-sites
       engine: full
     - canonicalName: clinicAppointmentsRead
       adapter: postgres
@@ -150,5 +180,14 @@ declares:
       scope: any
       grantsTo: [operator]
     - operationType: TombstoneAppointment
+      scope: any
+      grantsTo: [operator]
+    - operationType: SetSiteProfile
+      scope: any
+      grantsTo: [operator]
+    - operationType: AssignProviderSite
+      scope: any
+      grantsTo: [operator]
+    - operationType: RemoveProviderSite
       scope: any
       grantsTo: [operator]

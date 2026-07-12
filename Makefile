@@ -241,24 +241,28 @@ verify-package-loftspace-domain:
 	@echo "==> Running loftspace-domain package assertions..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-package-loftspace-domain.go
 
-## verify-package-clinic-domain — Install clinic-domain (self-contained) and
-## assert its KV state.
+## verify-package-clinic-domain — Install location-domain (dependency) +
+## clinic-domain (in dependency order) and assert clinic-domain's KV state.
 verify-package-clinic-domain:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
+	@echo "==> Installing location-domain (dependency)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
 	@echo "==> Installing clinic-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-domain
 	@echo "==> Running clinic-domain package assertions..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/verify-package-clinic-domain.go
 
 ## verify-package-clinic-reminders — Co-install the clinic vertical (orchestration-
-## base → clinic-domain → clinic-reminders) and assert clinic-reminders' KV state
-## (the 2 DDLs, the appointmentReminders lens, the weaverTarget playbook, the grant).
+## base → location-domain → clinic-domain → clinic-reminders) and assert clinic-
+## reminders' KV state (the 2 DDLs, the appointmentReminders lens, the
+## weaverTarget playbook, the grant).
 verify-package-clinic-reminders:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
-	@echo "==> Installing orchestration-base + clinic-domain + clinic-reminders..."
+	@echo "==> Installing orchestration-base + location-domain + clinic-domain + clinic-reminders..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-reminders
 	@echo "==> Running clinic-reminders package assertions..."
@@ -788,17 +792,19 @@ install-loftspace:
 	@echo "==> LoftSpace vertical installed. Drive it via the lattice CLI or Loupe."
 
 ## install-clinic — Install the clinic vertical onto a running up-full stack, in
-## dependency order: orchestration-base → clinic-domain → clinic-reminders →
-## clinic-ledger. clinic-domain is the bookable domain; clinic-reminders adds
-## the @at appointment-reminder orchestration (needs orchestration-base for
-## MarkExpired + the Weaver tier up-full runs); clinic-ledger adds the patient
-## payment ledger (depends clinic-domain). Drive it via the clinic-app, the
-## lattice CLI, or Loupe.
+## dependency order: orchestration-base → location-domain → clinic-domain (multi-
+## site) → clinic-reminders → clinic-ledger. clinic-domain is the bookable
+## domain; clinic-reminders adds the @at appointment-reminder orchestration
+## (needs orchestration-base for MarkExpired + the Weaver tier up-full runs);
+## clinic-ledger adds the patient payment ledger (depends clinic-domain). Drive
+## it via the clinic-app, the lattice CLI, or Loupe.
 install-clinic:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
 	@echo "==> Installing orchestration-base..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
+	@echo "==> Installing location-domain (dependency)..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
 	@echo "==> Installing clinic-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/clinic-domain
 	@echo "==> Installing clinic-reminders..."
@@ -924,6 +930,7 @@ refresh-clinic:
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
 	@echo "==> Diff-applying clinic packages in place..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-reminders
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/clinic-ledger

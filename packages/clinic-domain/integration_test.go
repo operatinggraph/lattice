@@ -32,6 +32,7 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 	"github.com/asolgan/lattice/internal/testutil"
 	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
+	locationdomain "github.com/asolgan/lattice/packages/location-domain"
 )
 
 const (
@@ -55,6 +56,11 @@ var clinicOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment",
+	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
+	// location-domain ops the multi-site tests need to mint a building directly
+	// (mirrors loftspace-domain's setupLoftspaceEnv installing location-domain
+	// and granting CreateLocation to the staff actor).
+	"CreateLocation",
 }
 
 func clStaffCapDoc() *processor.CapabilityDoc {
@@ -101,6 +107,10 @@ func setupClinicEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": clConsumerRoleID}
+	if _, err := inst.Install(ctx, locationdomain.Package); err != nil {
+		stop()
+		t.Fatalf("install location-domain: %v", err)
+	}
 	if _, err := inst.Install(ctx, clinicdomain.Package); err != nil {
 		stop()
 		t.Fatalf("install clinic-domain: %v", err)
@@ -109,6 +119,15 @@ func setupClinicEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	testutil.SeedCapDoc(t, ctx, conn, clStaffCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, clConsumerCapDoc())
 	return ctx, conn
+}
+
+// clCreateBuilding submits CreateLocation(building) and returns the minted
+// building key — the multi-site tests' location-domain endpoint.
+func clCreateBuilding(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label string) string {
+	t.Helper()
+	id := clSubmit(t, ctx, conn, cp, cons, label, "CreateLocation", "location",
+		`{"locationType":"building"}`, nil, processor.OutcomeAccepted)
+	return "vtx.building." + id
 }
 
 func newClinicPipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, durable string) (*processor.CommitPath, jetstream.Consumer) {

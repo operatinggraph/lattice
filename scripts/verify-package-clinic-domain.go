@@ -6,18 +6,21 @@
 // Connects to a running Lattice NATS instance and checks that the clinic-domain
 // package has been correctly installed. Asserts:
 //
-//	3 vertexType DDLs: patient (CreatePatient + TombstonePatient), provider
+//	5 vertexType DDLs: patient (CreatePatient + TombstonePatient), provider
 //	  (CreateProvider + TombstoneProvider + SetProviderProfile + SetProviderHours +
 //	  SetProviderTimeOff), appointment (CreateAppointment + RescheduleAppointment +
-//	  SetAppointmentStatus + RecordEncounter + TombstoneAppointment), each with its
-//	  self-description.
-//	9 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
+//	  SetAppointmentStatus + RecordEncounter + TombstoneAppointment), clinicSite
+//	  (SetSiteProfile), clinicSiteAssignment (AssignProviderSite +
+//	  RemoveProviderSite — the provider→building practicesAt link, mirroring
+//	  loftspace-domain's loftspaceOwnership), each with its self-description.
+//	10 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
 //	  appointmentStatus, providerHours, providerTimeOff, providerSlotClaim,
-//	  patientSlotClaim, appointmentEncounter — their step-6 write gates.
+//	  patientSlotClaim, appointmentEncounter, clinicSiteProfile (the .site aspect
+//	  a location-domain building carries) — their step-6 write gates.
 //	The retired providerBookingGuard / patientBookingGuard DDLs are asserted ABSENT
 //	(clinic-booking-write-path-slot-claims-design.md — write-path slot claims
 //	replaced the scalar OCC epoch + hasBooking-link enumeration).
-//	13 permission vertices: one per op (scope any, granted to operator), plus
+//	16 permission vertices: one per op (scope any, granted to operator), plus
 //	  a second CreateAppointment vertex (scope self, granted to consumer —
 //	  the real-actor-write-auth-e2e patient-books-their-own-appointment idiom).
 //	1 package vertex + manifest aspect (name=clinic-domain).
@@ -48,6 +51,7 @@ var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment",
+	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
 }
 
 // permGrant is one expected (scope, grantee-role) pair for an operationType's
@@ -74,6 +78,9 @@ var clinicOpGrants = map[string][]permGrant{
 	"SetAppointmentStatus":  {{"any", "operator"}},
 	"RecordEncounter":       {{"any", "operator"}},
 	"TombstoneAppointment":  {{"any", "operator"}},
+	"SetSiteProfile":        {{"any", "operator"}},
+	"AssignProviderSite":    {{"any", "operator"}},
+	"RemoveProviderSite":    {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -159,6 +166,9 @@ func main() {
 		{canonical: "providerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"}},
 		{canonical: "patientSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"}},
 		{canonical: "appointmentEncounter", class: "meta.ddl.aspectType", ops: []string{"RecordEncounter"}},
+		{canonical: "clinicSite", class: "meta.ddl.vertexType", ops: []string{"SetSiteProfile"}},
+		{canonical: "clinicSiteAssignment", class: "meta.ddl.vertexType", ops: []string{"AssignProviderSite", "RemoveProviderSite"}},
+		{canonical: "clinicSiteProfile", class: "meta.ddl.aspectType", ops: []string{"SetSiteProfile"}},
 	}
 
 	// The retired scalar-epoch DDLs must NOT exist — the write-path slot-claim
