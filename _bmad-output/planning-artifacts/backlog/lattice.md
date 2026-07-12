@@ -130,7 +130,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 |---|---|---|---|---|
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | **Multi-credential identity linking + merge credential-awareness** | One human, N IdPs: no path binds a 2nd credential to a claimed U (claim is one-shot); MergeIdentity never repoints credentialindex/bindings and the materializers fold `identity.claimed` only → a merge strands A on the merged-loser. Link flow + merge rebind + provision probe + unlink + whoami. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/multi-credential-identity-linking-design.md) · next: Fire 4 (UnlinkCredential) |
-| **Per-identity NATS subscribe-ACL (Edge sync plane)** | Untrusted Edge connections may subscribe ONLY their own per-identity SYNC subject (`subjects.PersonalSync`), and revocation must cut subscribe. #75 v1 explicitly declined subscribe lockdown (§3.2); PL Fork 3 assumed #75 delivers it — un-owned gap, now owned. Dynamic per-identity NATS authN consuming Contract #11 tokens. | ★★ | M | 🏗️ Fire 1 approved w/ xkey condition (seeds committed 2026-07-11) · [checkpoint](../../implementation-artifacts/per-identity-nats-subscribe-acl-design.md) · next: wire xkey, merge worktree |
+| **Per-identity NATS subscribe-ACL (Edge sync plane)** | Untrusted Edge connections may subscribe ONLY their own per-identity SYNC subject (`subjects.PersonalSync`), and revocation must cut subscribe. #75 v1 explicitly declined subscribe lockdown (§3.2); PL Fork 3 assumed #75 delivers it — un-owned gap, now owned. Dynamic per-identity NATS authN consuming Contract #11 tokens. | ★★ | M | 🏗️ Fire 1 CLOSED (xkey wired, 2026-07-11) · [design](../../implementation-artifacts/per-identity-nats-subscribe-acl-design.md) · next: Fire 2 (cmd/edge consumer + payload seam) |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 
 ### Privacy / Vault
@@ -190,6 +190,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 ## Done log — lattice (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
+
+- 2026-07-11 · `a3ec8d5` · [Gateway,natsperm] per-identity-nats-subscribe-acl Fire 1 CLOSED — xkey day-one condition wired (UnsealRequest/SealResponse sealed-box round trip); CI green
 
 - 2026-07-11 · `ce47946` · [CI] natsperm `t.Parallel()` experiment — local win (34.4s→25.9s) didn't hold in CI (unit job CPU-oversubscribed under `-p 4`); reverted (85b77a9→ce47946); CI green
 - 2026-07-11 · `232f9ea` · [Loupe] systemmap/lens-detail Core-KV listing scoped to vtx.package. subtree — false "RED — all absent" landing banner fixed, verified live on the 13K-key bucket
