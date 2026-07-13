@@ -16,6 +16,10 @@
 //	    cypherRule walks residesIn/availableAt/unavailableAt/permitsOperation and
 //	    is projectionKind actorAggregate keyed cap.svc.{actorSuffix}
 //	1 package vertex (vtx.package.<NanoID>) + 1 manifest aspect (name=service-location)
+//	all 8 ops actually landed in the live cap.roles.<actor> projection for the
+//	    primordial operator-holding identity (not just the grantedBy link in
+//	    Core KV) — the graph-link assertion above passed while the projection
+//	    itself was silently stale in the incident this closes
 //
 // Run via: go run ./scripts/verify-package-service-location.go
 package main
@@ -31,6 +35,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/capabilitykv"
+	"github.com/asolgan/lattice/internal/substrate"
 	"github.com/asolgan/lattice/scripts/pkgverify"
 )
 
@@ -39,6 +45,7 @@ const (
 	slDDLCanonical = "serviceLocation"
 	slLensCanon    = "capabilityServiceAccess"
 	slCoreKVBucket = "core-kv"
+	slCapKVBucket  = "capability-kv"
 )
 
 var slExpectedOps = []string{
@@ -87,6 +94,11 @@ func main() {
 	coreKV, err := js.KeyValue(ctx, slCoreKVBucket)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: cannot open Core KV bucket %q: %v\n", slCoreKVBucket, err)
+		os.Exit(1)
+	}
+	capKV, err := js.KeyValue(ctx, slCapKVBucket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: cannot open capability KV bucket %q: %v\n", slCapKVBucket, err)
 		os.Exit(1)
 	}
 
@@ -245,6 +257,44 @@ func main() {
 			fail(linkKey, "link is tombstoned")
 		} else {
 			ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<operator> exists", permID))
+		}
+	}
+
+	// 2b. The grantedBy links above only prove the graph state — the incident
+	// this closes had that link present while the live cap.roles.<actor>
+	// projection never picked it up (rbac-domain's capabilityRoles lens,
+	// Contract #6). Poll the primordial operator-holding identity's live
+	// projection (async per Contract #6 — no synchronous "projection done"
+	// signal) and fail if any of the 8 ops never lands within the deadline.
+	operatorActorKey := substrate.VertexKey("identity", bootstrap.BootstrapIdentityID)
+	rolesKey, err := capabilitykv.RolesKeyFromActor(operatorActorKey)
+	if err != nil {
+		fail("cap.roles key derivation", err.Error())
+	} else {
+		deadline := time.Now().Add(10 * time.Second)
+		remaining := map[string]bool{}
+		for _, op := range slExpectedOps {
+			remaining[op] = true
+		}
+		for len(remaining) > 0 && time.Now().Before(deadline) {
+			entry, err := capKV.Get(ctx, rolesKey)
+			if err == nil {
+				if doc, perr := capabilitykv.ParseCapabilityDoc(entry.Value()); perr == nil {
+					for _, p := range doc.PlatformPermissions {
+						delete(remaining, p.OperationType)
+					}
+				}
+			}
+			if len(remaining) > 0 {
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+		for _, op := range slExpectedOps {
+			if remaining[op] {
+				fail(rolesKey, fmt.Sprintf("operationType=%s never appeared in the live projection within 10s (grantedBy link exists in Core KV but the cap.roles reprojection didn't land)", op))
+			} else {
+				ok(fmt.Sprintf("%s: operationType=%s projected live", rolesKey, op))
+			}
 		}
 	}
 
