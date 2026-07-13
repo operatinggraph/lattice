@@ -135,7 +135,23 @@ func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 	const subjectPrefix = "lattice.sync.user"
 	const syncStream = "SYNC"
 
-	specs := edgemanifest.Lenses()
+	// edgemanifest.Lenses() now also returns edgeManifestReadGrants (Fire 2:
+	// a nats-kv/actorAggregate lens, no IntoKey, no subjectPrefix/stream) —
+	// a structurally different kind this Personal-Lens-only activation
+	// helper was never built to wire (TargetType/adapter below are
+	// nats_subject-specific throughout). h.capKV is nil in this harness, so
+	// the D1 read-grant gate this lens feeds is already bypassed for every
+	// row this test observes (personalEnvelopeFn's capKV!=nil check never
+	// runs) — testing the grant lens itself is packages/edge-manifest's own
+	// job (TestPackage_ReadGrantLensIsActorAggregateNatsKV), not this Fire-1
+	// e2e's, so it's excluded here rather than reworking this helper's
+	// nats-subject-only wiring to also cover a second lens shape.
+	var specs []pkgmgr.LensSpec
+	for _, ls := range edgemanifest.Lenses() {
+		if ls.Adapter == "nats-subject" {
+			specs = append(specs, ls)
+		}
+	}
 	lensIDs := make(map[string]string, len(specs))
 	for _, ls := range specs {
 		require.GreaterOrEqual(t, len(ls.IntoKey), 1, "%s IntoKey must include __actor", ls.CanonicalName)
