@@ -134,18 +134,17 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > Live-stack `make seed-edge-demo` is currently blocked by a separately-filed capability-projection bug
 > (see the Component-maintenance table's [Refractor/rbac-domain] row) — not a fault of edge-manifest's own code. **Next: Fire 2**
 > `[verticals]` — Facet v0 dev host + renderer (own lane, not Lattice's).
-> **AI-caps Fire 4 materializer NOT yet build-ready** (verified 2026-07-11): sign-off condition 1
-> (Processor-MAC'd sensitive-refs, sensitive-param-egress-design.md §3.6) has no code anywhere
-> (`git log --all` shows only the ratification doc commit) — it needs its own design pass
-> (lattice-designer), not an inline build. Fire 4's vertexTypeDDL/opMeta materializer stays blocked
-> until that lands; do not pick it up as "build-ready" without re-verifying.
+> **AI-caps Fire 4 materializer NOT yet build-ready**: sign-off condition 1's design pass is done —
+> **Processor-MAC'd sensitive-refs is 📐 awaiting-Andrew** (2026-07-12, see the Security & trust
+> boundary row) — but its 2 fires must be ratified + built first; Fire 4's vertexTypeDDL/opMeta
+> materializer stays blocked until they land. Do not pick Fire 4 up as "build-ready" before that.
 > Whoever ships the named pick updates this callout to the next one — a stale callout starves the lane.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
-| **Processor-MAC'd sensitive-refs (ref provenance)** | `$sensitiveRef` values are trusted at the package-DDL boundary; a hand-crafted ref names another identity's aspect and the bridge unwraps it. MAC the refs the Processor authors, verify before decrypt — the ratified trigger gating AI-caps Fire 4 (AI-authored DDLs). | ★★★ | M | 🏗️ designing (Designer, 2026-07-12) |
+| **Processor-MAC'd sensitive-refs (ref provenance)** | `$sensitiveRef` values are trusted at the package-DDL boundary; a fabricated ref names another identity's aspect and the bridge unwraps it. Processor MACs the refs it authors; a new ref-verified decrypt RPC + bridge grant swap — the ratified trigger gating AI-caps Fire 4. | ★★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/sensitive-ref-mac-provenance-design.md) · #2/#3/#10 contract edits staged uncommitted |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 
 ### Privacy / Vault
@@ -174,7 +173,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### AI-native
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| AI-authored capabilities | A Lattice-aware agent proposes DDL/Starlark/lenses/workflows through human review + deterministic validation + rollback. | ★★–★★★ | L | 🏗️ building · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) · Fire 4 inc 1 (sandbox leaf) SHIPPED `474745b` · 🚧 blocked-on: MAC-hardening design (see callout above) before the materializer kinds · Loupe UI is Stream 3's lane |
+| AI-authored capabilities | A Lattice-aware agent proposes DDL/Starlark/lenses/workflows through human review + deterministic validation + rollback. | ★★–★★★ | L | 🏗️ building · [design](../../implementation-artifacts/ai-authored-capabilities-design.md) · 🚧 blocked-on: sensitive-ref-MAC ratification+build (Security table row) before the Fire-4 materializer kinds · Loupe UI is Stream 3's lane |
 | **The Augur** (AI reasoning tier — L3 evaluator) | Weaver's AI-assisted reasoning tier for ambiguous/novel convergence gaps. The marquee AI-native feature. | ★★ | M–L | ✅ Fires 1+2a+2b shipped incl. §6 residual e2e (loop closes: escalate→review→dispatch) · [design](../../implementation-artifacts/augur-design.md) + [dispatch design](../../implementation-artifacts/augur-dispatch-pickup-design.md) · 🚧 Fire 3 autoApply Andrew-gated |
 | Starlark guards (Loom) | The reserved `{reads, starlark}` guard escape hatch needs a verified-pure sandbox. | ★ | M | ✅ ratified (split) · [design](../../implementation-artifacts/loom-starlark-guards-design.md) · Fire 1 (shared sandbox) SHIPPED `474745b` via AI-caps · 📋 Fire 2 ready — stays Loom-side per Andrew's no-new-engine-KV-read directive (2026-06-29) |
 | **Weaver planner mandate (dispatcher → solver)** | Remediation stops being a static gap→action lookup: deterministic planner (per-gap candidate selection, then goal-regression synthesis over op-declared effects) with contraction/oscillation diagnostics and admission control; shadow mode + per-target cutover; the Augur stays the AI boundary. | ★★★ | XL | ✅ effectively done · [design](../../implementation-artifacts/weaver-planner-mandate-design.md) · Fires 1-9(Inc1)+R1-R3 shipped, consumed by LoftSpace renewals; Fire 9 AI tail deferred - needs a novel Augur gap, not renewals |
