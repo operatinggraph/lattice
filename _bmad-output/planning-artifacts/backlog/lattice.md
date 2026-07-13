@@ -206,7 +206,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-13 · `3e3c993` · [controlauth,natsauth,control-authz] per-identity-nats-subscribe-acl Fire 2 tail — opened personal.hydrate/register/deregister (op table + consumer grant + transport); EDGE.4 unblocked; CI green
+- 2026-07-13 · `ca9affe` · [controlauth,natsauth,control-authz] per-identity-nats-subscribe-acl Fire 2 tail — opened personal.hydrate/register/deregister (op table + consumer grant + transport); EDGE.4 unblocked; CI green
 - 2026-07-13 · `9a86a01` · [Refractor] projection-package coverage sweep — Install{ActorAggregate,PersonalLens} wiring + personalEnvelopeFn D1/Interest-Set branches; 59.2%→93.0%; CI green
 - 2026-07-13 · `a6c3802` · [Core/bootstrap] test-coverage sweep — Persist, PrivacyActorKey (incl. pre-v15 absent case), seedPrimordialPerKey concurrent-bootstrap fallback; 65.7%→69.3%; CI green
 - 2026-07-12 · `4b8e815` · [Weaver] registry-cleanup-edge-branches-uncovered SHIPPED — CDC malformed-input paths covered, 84.8%→86.2%; CI green
