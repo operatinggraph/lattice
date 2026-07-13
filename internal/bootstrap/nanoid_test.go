@@ -64,6 +64,38 @@ func TestLoadOrGenerate_FreshThenRecoverThenCommitted(t *testing.T) {
 	}
 }
 
+// TestPersist_WritesCommittedStatus verifies the legacy single-phase Persist
+// entry point (retained for callers that predate the two-phase
+// LoadOrGenerate/PersistCommitted protocol) writes status="committed" and
+// that a subsequent LoadOrGenerate reads it back as already-seeded.
+func TestPersist_WritesCommittedStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lattice.bootstrap.json")
+
+	if _, err := bootstrap.LoadOrGenerate(path); err != nil {
+		t.Fatalf("LoadOrGenerate (no file): unexpected error: %v", err)
+	}
+
+	if err := bootstrap.Persist(path); err != nil {
+		t.Fatalf("Persist: unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), `"status": "committed"`) {
+		t.Fatalf("bootstrap file after Persist: want status=committed, got %s", data)
+	}
+
+	fresh, err := bootstrap.LoadOrGenerate(path)
+	if err != nil {
+		t.Fatalf("LoadOrGenerate (post-Persist): unexpected error: %v", err)
+	}
+	if fresh {
+		t.Fatalf("LoadOrGenerate (post-Persist): freshlyGenerated = true, want false (Persist wrote status=committed)")
+	}
+}
+
 // TestLoadOrGenerate_MalformedJSON verifies a corrupt bootstrap file (e.g.
 // truncated by a crash mid-write) surfaces a parse error rather than
 // silently regenerating a fresh key space.

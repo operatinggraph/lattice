@@ -96,3 +96,49 @@ func TestSystemActorKeys_DiscoversByOperatorTopology(t *testing.T) {
 	require.ElementsMatch(t, want, got,
 		"a revoked (tombstoned) holdsRole->operator link must no longer be discovered")
 }
+
+// TestPrivacyActorKey_DiscoversSeeded proves PrivacyActorKey finds the
+// kernel-seeded privacy-plane service actor by class, matching the identity
+// primordial.go seeds under bootstrap.PrivacyIdentityKey.
+func TestPrivacyActorKey_DiscoversSeeded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	nc := startBootstrapNATS(t)
+	seedFresh(t, nc, logger)
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	got, err := bootstrap.PrivacyActorKey(ctx, conn)
+	require.NoError(t, err)
+	require.Equal(t, bootstrap.PrivacyIdentityKey, got)
+}
+
+// TestPrivacyActorKey_AbsentReturnsEmpty proves the pre-version-15
+// deployment case (no privacy-plane actor seeded yet): PrivacyActorKey
+// returns "" with no error rather than failing the caller's startup —
+// crypto-shred finalization recording is disabled, not a hard requirement.
+func TestPrivacyActorKey_AbsentReturnsEmpty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	nc := startBootstrapNATS(t)
+
+	seeder, err := bootstrap.NewSeeder(nc, logger)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, seeder.ProvisionBuckets(ctx))
+
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+
+	got, err := bootstrap.PrivacyActorKey(ctx, conn)
+	require.NoError(t, err)
+	require.Equal(t, "", got, "no identities seeded yet — must return empty, not error")
+}
