@@ -114,6 +114,19 @@ The Refractor heartbeat embeds per-lens metrics under `metrics.lensLags` (map of
 {count, meanNs, p95Ns, p99Ns}`). These appear inline in the heartbeat document rather than
 as separate keys.
 
+`metrics.lensesRegistered` (int, the started-pipeline registry size) is emitted every
+heartbeat, always present once `LensCountProvider` is wired — the counterpart to
+`lensLags`/`lensLatency` that stays a legitimate `0` instead of vanishing when the registry
+is empty (`refractor-lens-registry-restart-integrity-design.md` §4 Fire B step 1).
+
+`LensRegistryIncomplete` (severity `error`) is a heartbeat issue code: a lens declared in
+Core KV (a `meta.lens` vertex + spec) but absent from the running registry, raised by a
+background registry-reconciliation probe (`internal/refractor/health/registry_probe.go`,
+`RegistryProbe`) on a 60s boot-grace-window + 10min tick cadence, `since`-persisted like the
+other Refractor heartbeat issues below and cleared once the registry catches up. The direct
+detection for the cold-registry incident class — a healthy heartbeat with a silently empty or
+partial pipeline set (same design, §4 Fire B step 2).
+
 ### Refractor (per-lens status)
 
 Source package: `internal/refractor/health/`
@@ -406,6 +419,7 @@ currently reserved-but-unemitted.
   "startedAt": "<RFC3339>",
   "uptime": "<ISO-8601-duration>",
   "metrics": {
+    "lensesRegistered": <int>,
     "lensLags": {"<lensCanonicalName>": <uint64>, ...},
     "lensLatency": {
       "<lensCanonicalName>": {
@@ -426,7 +440,8 @@ currently reserved-but-unemitted.
     {"code": "CapabilityLensPaused", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityLensLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
-    {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"}
+    {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
   ]
 }
 ```
@@ -665,6 +680,11 @@ Default: `60s`. Configurable via:
    - `"paused"` → yellow
    - `"rebuilding"` → yellow
    - `"active"` → check `consumerLag` (> 0 → yellow) and `errorCount` for detail
+   - Independent of `status`: extract `lastUpdated`; `age > staleThreshold` → status
+     `"stale"`, yellow at minimum (worst-of with whatever the status branch above already
+     computed) — an unregistered pipeline's reporter entry freezes at its last-written
+     `status`/`consumerLag` forever, so this is the only signal that catches it
+     (lens-registry-restart-integrity-design.md §4 Fire B step 3).
 3. **Alert keys** (`health.alerts.security.*`): check `severity`.
    - `"error"` → red
    - `"warning"` → yellow
@@ -685,7 +705,8 @@ Default: `60s`. Configurable via:
 COMPONENT             STATUS      FRESHNESS     DETAILS
 processor.<instance>  green       12s ago       ops_consumed=142 ops_committed=141
 refractor.<instance>  green       8s ago        lensLags: capability=0
-<lensId> (lens)       active      -             consumerLag=0 errorCount=0
+<lensId> (lens)       active      3s ago        consumerLag=0 errorCount=0
+<lensId2> (lens)      stale       50400s ago    consumerLag=0 errorCount=0
 health.bootstrap.comp green       -             one-shot complete
 Gates passed: 2/2  (gate4=pass gate5=pass gate1=absent)
 Alerts: none

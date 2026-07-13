@@ -51,6 +51,13 @@ const (
 	issueLensProjectionLagging = "LensProjectionLagging"
 )
 
+// issueLensRegistryIncomplete is the registry-reconciliation-probe issue
+// code (refractor-lens-registry-restart-integrity-design.md §4 Fire B): a
+// lens declared in Core KV (`meta.lens` vertex + spec) is absent from the
+// running registry — the direct detection for the cold-registry incident
+// class (a healthy heartbeat with a silently empty or partial pipeline set).
+const issueLensRegistryIncomplete = "LensRegistryIncomplete"
+
 // CapabilityLensStatus is one auth-plane (capability-kv) lens's liveness snapshot,
 // supplied by CapabilityLensProvider for the per-heartbeat threshold evaluation.
 // The provider reads it from the lens's health Reporter (status / pauseReason) and
@@ -159,6 +166,23 @@ type LatticeHeartbeater struct {
 	// Manager.HandledTotal. nil before the listener is wired.
 	KeyShreddedHandledTotalProvider func() uint64
 
+	// LensCountProvider optionally returns the current registry size (started
+	// pipelines) — emitted as metrics.lensesRegistered
+	// (refractor-lens-registry-restart-integrity-design.md §4 Fire B step 1),
+	// the counterpart to lensLags that stays a legitimate 0 rather than
+	// vanishing when the registry is empty. nil omits the field.
+	LensCountProvider func() int
+
+	// RegistryReconciliationProvider optionally returns the lens IDs
+	// currently declared in Core KV (a `meta.lens` vertex + spec) but absent
+	// from the running registry — the latest snapshot from a
+	// RegistryProbe.Missing (§4 Fire B step 2). The probe owns its own
+	// boot-grace-window + slow-tick cadence independent of the 10s heartbeat
+	// interval; this hook only reads its current snapshot each cycle. nil
+	// (or an always-empty snapshot) means no LensRegistryIncomplete issue is
+	// raised.
+	RegistryReconciliationProvider func() []string
+
 	// CapabilityLensLagThreshold is the consumer-lag (pending count) above which
 	// an active capability lens is flagged CapabilityLensLagging (warning).
 	// Zero selects defaultCapabilityLensLagThreshold.
@@ -211,6 +235,14 @@ type LatticeHeartbeater struct {
 	openLensIssues map[string]string
 	lensLagMu      sync.Mutex
 	lensLagState   map[string]*lagHysteresis
+
+	// registryIssueMu guards openRegistryIssueSince — its own SEPARATE
+	// since-persistence state (not folded into openLensIssues, which
+	// reconcileLensIssues clears any code absent from its own active map
+	// each cycle; a single shared map called from two independent eval
+	// paths would have each clear the other's code).
+	registryIssueMu        sync.Mutex
+	openRegistryIssueSince string // "" when LensRegistryIncomplete is not open
 
 	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
 	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL. Defaults to
@@ -340,6 +372,14 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 	if h.KeyShreddedHandledTotalProvider != nil {
 		metrics["keyshreddedHandledTotal"] = h.KeyShreddedHandledTotalProvider()
 	}
+	// Registry size (refractor-lens-registry-restart-integrity-design.md §4 Fire
+	// B step 1) — the counterpart to lensLags that stays a legitimate 0 instead
+	// of vanishing when the registry is empty, so "healthy heartbeat, empty
+	// registry" is visible in the metric itself, not just in the reconciliation
+	// issue below.
+	if h.LensCountProvider != nil {
+		metrics["lensesRegistered"] = h.LensCountProvider()
+	}
 	// Capability-lens liveness backstop: surface a §5.5 issue (and degrade status)
 	// when an auth-plane lens is paused or lagging beyond threshold. The
 	// metrics.capabilityLens sub-map is emitted on every cycle (including healthy
@@ -357,9 +397,15 @@ func (h *LatticeHeartbeater) emit(ctx context.Context, status string) {
 	if len(lensMetric) > 0 {
 		metrics["lensLiveness"] = lensMetric
 	}
-	allIssues := make([]issueRecord, 0, len(capIssues)+len(lensIssues))
+	// Registry-reconciliation probe (§4 Fire B step 2) — a lens declared in
+	// Core KV but absent from the running registry, the direct detection for
+	// the cold-registry incident class. Own since-persistence (not folded
+	// into evalLenses' openLensIssues, an independent eval path).
+	registryIssues := h.evalRegistryReconciliation(now)
+	allIssues := make([]issueRecord, 0, len(capIssues)+len(lensIssues)+len(registryIssues))
 	allIssues = append(allIssues, capIssues...)
 	allIssues = append(allIssues, lensIssues...)
+	allIssues = append(allIssues, registryIssues...)
 	issues := make([]any, 0, len(allIssues))
 	for _, is := range allIssues {
 		issues = append(issues, is)
@@ -671,6 +717,48 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 		}
 	}
 	return metric, h.reconcileLensIssues(active, now)
+}
+
+// evalRegistryReconciliation surfaces the RegistryReconciliationProvider's
+// latest snapshot as a LensRegistryIncomplete issue (§4 Fire B step 2).
+// Severity error (⇒ unhealthy, not just degraded): an incomplete registry
+// means real lens data is not being projected, the same class of outage a
+// paused capability lens represents. Returns nil when no provider is wired
+// or the latest snapshot is empty (registry complete); the empty case also
+// clears any previously-open issue, so `since` does not persist past
+// resolution.
+func (h *LatticeHeartbeater) evalRegistryReconciliation(now time.Time) []issueRecord {
+	if h.RegistryReconciliationProvider == nil {
+		return nil
+	}
+	missing := h.RegistryReconciliationProvider()
+
+	h.registryIssueMu.Lock()
+	defer h.registryIssueMu.Unlock()
+	if len(missing) == 0 {
+		h.openRegistryIssueSince = ""
+		return nil
+	}
+	if h.openRegistryIssueSince == "" {
+		h.openRegistryIssueSince = substrate.FormatTimestamp(now)
+	}
+
+	const capN = 10
+	shown := missing
+	suffix := ""
+	if len(shown) > capN {
+		shown = shown[:capN]
+		suffix = ", ..."
+	}
+	message := fmt.Sprintf("%d lens(es) declared in Core KV but not registered: %s%s",
+		len(missing), strings.Join(shown, ", "), suffix)
+
+	return []issueRecord{{
+		Code:     issueLensRegistryIncomplete,
+		Severity: "error",
+		Message:  message,
+		Since:    h.openRegistryIssueSince,
+	}}
 }
 
 // reconcileLensIssues is the general-lens sibling of reconcileCapIssues — same
