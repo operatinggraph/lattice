@@ -107,7 +107,7 @@ func TestPersonalLens_PL1_E2E_MutationFansToActorSubject(t *testing.T) {
 	go p.Run(pipelineCtx)
 	t.Cleanup(pipelineCancel)
 
-	src := lens.NewCoreKVSource(conn, coreBucket, logger)
+	src := lens.NewCoreKVSource(conn, coreBucket, "test", logger)
 	lensActivated := make(chan struct{}, 1)
 	src.SetLoadCallback(func(_ *lens.Rule) {
 		select {

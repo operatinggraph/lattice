@@ -159,7 +159,7 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 		return entry.Revision
 	}
 
-	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, logger)
+	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, "test", logger)
 	loaded := make(chan *lens.Rule, 8)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})

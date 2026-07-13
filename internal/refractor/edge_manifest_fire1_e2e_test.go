@@ -125,12 +125,11 @@ func emWriteLink(t *testing.T, ctx context.Context, coreKV *substrate.KV, srcTyp
 // hand-copies) in one batch against h. It reproduces
 // personal_lens_pl2_e2e_test.go's activatePersonalLens wiring (meta-vertex +
 // spec write, CoreKVSource detection, full-engine compile,
-// projection.InstallPersonalLens, RunOn+Run), but batched: activatePersonalLens
-// binds its detector to lens.CoreKVSource's single shared durable consumer
-// name ("refractor-lens-source"), so calling it five times in the same test
-// would have five CoreKVSource instances rebind that one durable in turn —
-// this instead writes all five specs first, then runs ONE CoreKVSource pass
-// that discovers and wires all five, matched by CanonicalName.
+// projection.InstallPersonalLens, RunOn+Run), but batched: rather than five
+// separate activatePersonalLens calls (each its own CoreKVSource, matching
+// only its own lensID), this writes all five specs first, then runs ONE
+// CoreKVSource pass that discovers and wires all five, matched by
+// CanonicalName — simpler than reconciling five independent load channels.
 func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 	t.Helper()
 	const subjectPrefix = "lattice.sync.user"
@@ -143,7 +142,7 @@ func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 		lensIDs[ls.CanonicalName] = pl2NanoID("em-fire1-lens-" + ls.CanonicalName)
 	}
 
-	src := lens.NewCoreKVSource(h.conn, "core-kv", h.logger)
+	src := lens.NewCoreKVSource(h.conn, "core-kv", "test", h.logger)
 	activated := make(chan *lens.Rule, len(specs)*2)
 	src.SetLoadCallback(func(r *lens.Rule) {
 		select {
@@ -309,13 +308,11 @@ func TestEdgeManifest_Fire1_E2E_FiveRowKindsAndRequestService(t *testing.T) {
 	require.NotEmpty(t, opMetaKey, "RequestService op-meta must exist after installing service-domain")
 
 	// --- activate the five REAL edge-manifest Personal Lenses (the actual
-	// production package.Lenses(), not hand-copied cyphers). activatePersonalLens
-	// (PL2's helper) binds its detector to the single shared durable
-	// "refractor-lens-source" (internal/refractor/lens.lensSourceDurableName) —
-	// calling it once per lens would have five CoreKVSource instances fight
-	// over that one durable in turn, so all five specs are written up front
-	// and a single CoreKVSource activates all five in one pass, matched by
-	// CanonicalName (mirroring activatePersonalLens's own wiring, batched). ---
+	// production package.Lenses(), not hand-copied cyphers) via
+	// activateEdgeManifestLenses: all five specs are written up front and a
+	// single CoreKVSource activates all five in one pass, matched by
+	// CanonicalName — simpler than reconciling activatePersonalLens's
+	// (PL2's helper) five independent load channels one lens at a time. ---
 	h := &pl2Harness{ctx: ctx, conn: conn, js: js, coreKV: coreKV, adjKV: adjKV, interestKV: interestKV, capKV: nil, logger: logger}
 	activateEdgeManifestLenses(t, h)
 

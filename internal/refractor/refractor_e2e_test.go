@@ -185,7 +185,7 @@ func TestRefractor_E2E_P99(t *testing.T) {
 	// --- Lens activation via CoreKVSource (Story 2.1b Gap 1 path) ---
 	// Write the meta-lens vertex first (vtx.meta.<id> with class meta.lens)
 	// + the spec aspect. Verifies the corrected key-shape end-to-end.
-	src := lens.NewCoreKVSource(conn, coreBucket, logger)
+	src := lens.NewCoreKVSource(conn, coreBucket, "test", logger)
 	lensActivated := make(chan struct{}, 1)
 	src.SetLoadCallback(func(r *lens.Rule) {
 		select {

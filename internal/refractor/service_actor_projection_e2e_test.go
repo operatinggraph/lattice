@@ -97,7 +97,7 @@ func TestRefractor_ServiceActorRootEquivalence_E2E(t *testing.T) {
 		t.Fatal("adjacency bootstrapper did not reach Ready within 10s")
 	}
 
-	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, logger)
+	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, "test", logger)
 	loaded := make(chan *lens.Rule, 4)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})

@@ -21,15 +21,22 @@ import (
 
 // TestPatternSource_StartPrunesStalePriorBootDurable proves the fix for the
 // per-boot durable leak: a durable left behind by a prior boot under the
-// loom-pattern-source-<instance> prefix is deleted when a new instance's
-// patternSource.start runs, and the new instance's own durable is deleted in
-// turn once its context is cancelled (clean shutdown), so it does not become
-// the next boot's stale entry.
+// loom-pattern-source-<instance> prefix is deleted, once it ages past
+// substrate.PruneStaleDurableAge, when a new instance's patternSource.start
+// runs; and the new instance's own durable is deleted in turn once its
+// context is cancelled (clean shutdown), so it does not become the next
+// boot's stale entry. Not t.Parallel(): it shrinks the package-level
+// substrate.PruneStaleDurableAge, which every concurrent patternSource.start
+// in this package reads (the age guard — refractor-lens-registry-restart-
+// integrity-design.md §4.1 — protects a live sibling's durable from a
+// concurrent boot's prune; a real 10-minute wait isn't practical here).
 func TestPatternSource_StartPrunesStalePriorBootDurable(t *testing.T) {
-	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
+	origAge := substrate.PruneStaleDurableAge
+	substrate.PruneStaleDurableAge = 100 * time.Millisecond
+	t.Cleanup(func() { substrate.PruneStaleDurableAge = origAge })
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -63,6 +70,10 @@ func TestPatternSource_StartPrunesStalePriorBootDurable(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, consumerExists(ctx, t, js, "KV_"+bucket, staleDurable), "stale durable should exist before start")
+
+	// Age the stale durable past the (shrunk) threshold so the age guard lets
+	// PruneStaleDurables remove it below.
+	time.Sleep(2 * substrate.PruneStaleDurableAge)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	subCtx, subCancel := context.WithCancel(ctx)
@@ -146,10 +157,14 @@ func TestPatternSource_StableInstanceGetsFreshDurableEachBoot(t *testing.T) {
 	second := newPatternSource(conn, bucket, "stable-instance", logger)
 	require.NoError(t, second.start(secondCtx))
 
+	// The first boot's durable is still within substrate.PruneStaleDurableAge
+	// (age-guarded — §4.1), so it survives the second boot's prune call
+	// alongside the new one; look for a durable other than durable1 rather
+	// than assuming only one match exists.
 	var durable2 string
 	require.Eventually(t, func() bool {
-		durable2 = durableWithPrefix(ctx, t, js, "KV_"+bucket, durablePrefix)
-		return durable2 != "" && durable2 != durable1
+		durable2 = durableWithPrefixExcluding(ctx, t, js, "KV_"+bucket, durablePrefix, durable1)
+		return durable2 != ""
 	}, 5*time.Second, 50*time.Millisecond, "second boot should create a durable distinct from the first")
 
 	require.NotEqual(t, durable1, durable2,
@@ -180,6 +195,27 @@ func durableWithPrefix(ctx context.Context, t *testing.T, js jetstream.JetStream
 	found := ""
 	for name := range lister.Name() {
 		if strings.HasPrefix(name, prefix) {
+			found = name
+		}
+	}
+	require.NoError(t, lister.Err())
+	return found
+}
+
+// durableWithPrefixExcluding returns the name of a JetStream durable
+// consumer on stream whose name starts with prefix and is not exclude, or ""
+// if none exists yet. Used where more than one durable under the prefix may
+// legitimately coexist (e.g. an age-guarded prior-boot durable alongside a
+// fresh one) and the test cares about "a distinct one exists", not "the
+// only one".
+func durableWithPrefixExcluding(ctx context.Context, t *testing.T, js jetstream.JetStream, stream, prefix, exclude string) string {
+	t.Helper()
+	st, err := js.Stream(ctx, stream)
+	require.NoError(t, err)
+	lister := st.ConsumerNames(ctx)
+	found := ""
+	for name := range lister.Name() {
+		if strings.HasPrefix(name, prefix) && name != exclude {
 			found = name
 		}
 	}

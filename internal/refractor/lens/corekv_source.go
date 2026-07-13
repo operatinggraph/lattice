@@ -16,10 +16,28 @@ import (
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
-// lensSourceDurableName is the JetStream durable consumer name shared by
-// the per-instance lens-definition subscription. Multi-cell deployments
-// (Phase 3) will include a cell-id segment.
-const lensSourceDurableName = "refractor-lens-source"
+// lensSourceDurablePrefix is the JetStream durable-consumer name prefix for
+// the lens-definition subscription. An instance segment plus a per-boot
+// nonce are appended (see Start) so each boot gets a never-before-seen
+// durable name and replays the full installed lens set via IncludeHistory —
+// mirroring internal/loom/source.go's patternSourceDurablePrefix verbatim
+// (refractor-lens-registry-restart-integrity-design.md §4 Fire A).
+//
+// Why a per-boot durable rather than one ack-floor-resuming name: the lens
+// registry is DERIVED in-memory state rebuilt from vtx.meta.> replay. A
+// durable that resumes from its ack floor replays nothing once caught up,
+// leaving the registry (and every pipeline it should have started) silently
+// empty across every subsequent restart — the exact incident this design
+// fixes. The nonce is load-bearing: JetStream only honors DeliverPolicy when
+// a durable is first created, so a stable instance-only name would still
+// defeat full-replay-on-every-connect after the first boot.
+//
+// Deliberately no trailing dash: PruneStaleDurables(ctx, bucket,
+// lensSourceDurablePrefix, ...) then also matches the legacy fixed durable
+// name "refractor-lens-source" (pre-2026-07-13 code), so the first boot's
+// prune doubles as the one-time migration off it — no separate migration
+// step. Multi-cell deployments (Phase 3) will include a cell-id segment.
+const lensSourceDurablePrefix = "refractor-lens-source"
 
 // UpdateCallback is called when an existing rule is updated (not on first load).
 // old is a snapshot of the previous version; new is the updated version.
@@ -38,13 +56,14 @@ type UpdateCallback func(old, new *Rule, kind UpdateKind)
 // `vtx.meta.<NanoID>` (vertex, class `meta.lens`) + a
 // `vtx.meta.<NanoID>.spec` aspect carrying the LensSpec body.
 //
-// The durable consumer (substrate.SubscribeKVChanges) persists its ack
-// floor across restarts. IncludeHistory=true is passed so the first
-// connect after a fresh deployment still loads the entire installed lens
-// set; subsequent restarts pick up from the ack floor.
+// Each boot subscribes on a fresh per-boot durable name (instance segment +
+// nonce) with IncludeHistory=true, so every boot — fresh deployment or
+// restart alike — replays the entire installed lens set; see
+// lensSourceDurablePrefix.
 type CoreKVSource struct {
 	conn     *substrate.Conn
 	bucket   string
+	instance string
 	loadCB   func(*Rule)
 	updateCB UpdateCallback
 	logger   *slog.Logger
@@ -269,14 +288,18 @@ type TargetNATSSubjectConfig struct {
 	Personal bool `json:"personal,omitempty"`
 }
 
-// NewCoreKVSource constructs a watcher. logger may be nil.
-func NewCoreKVSource(conn *substrate.Conn, bucket string, logger *slog.Logger) *CoreKVSource {
+// NewCoreKVSource constructs a watcher. instance names the boot for the
+// per-boot durable (attributability in logs/dashboards; see
+// lensSourceDurablePrefix — uniqueness comes from the nonce Start appends,
+// not from instance). logger may be nil.
+func NewCoreKVSource(conn *substrate.Conn, bucket, instance string, logger *slog.Logger) *CoreKVSource {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &CoreKVSource{
 		conn:         conn,
 		bucket:       bucket,
+		instance:     instance,
 		logger:       logger,
 		known:        make(map[string]*Rule),
 		lensVertices: make(map[string]struct{}),
@@ -313,16 +336,29 @@ func (s *CoreKVSource) Get(ruleID string) (*Rule, bool) {
 // distinguished by envelope class `meta.lens`; the subscription filter
 // is the prefix only, and class-based routing happens inside handle().
 //
-// IncludeHistory=true preserves the pre-2.4b "replay all meta vertices
-// on first connect" behaviour. On subsequent restarts the durable
-// consumer's ack floor picks up where the previous session left off, so
-// re-replay is bounded by the unacked tail.
+// Each boot's durable name carries the instance segment (attributability)
+// plus a fresh per-boot nonce (uniqueness — see lensSourceDurablePrefix), so
+// IncludeHistory=true replays the entire installed lens set on every boot,
+// not just a fresh deployment's first connect. Before creating its own
+// durable, Start prunes any stale "<prefix>*" durables left behind by
+// no-longer-running instances (age-guarded — a live sibling's durable is
+// never pruned, substrate.PruneStaleDurables); the durable created here is
+// then deleted on clean shutdown (consume's ctx.Done branch) so it never
+// becomes next boot's stale entry.
 func (s *CoreKVSource) Start(ctx context.Context) error {
+	bootNonce, err := substrate.NewNanoID()
+	if err != nil {
+		return fmt.Errorf("lens source: boot nonce: %w", err)
+	}
+	durable := lensSourceDurablePrefix + "-" + s.instance + "-" + bootNonce
+	if err := s.conn.PruneStaleDurables(ctx, s.bucket, lensSourceDurablePrefix, durable, s.logger); err != nil {
+		s.logger.Warn("prune stale lens-source durables failed", "err", err)
+	}
 	events, err := s.conn.SubscribeKVChanges(
 		ctx,
 		s.bucket,
 		"vtx.meta.",
-		lensSourceDurableName,
+		durable,
 		substrate.SubscribeKVOptions{
 			IncludeHistory: true,
 			Logger:         s.logger,
@@ -331,14 +367,15 @@ func (s *CoreKVSource) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("subscribe core KV vtx.meta.>: %w", err)
 	}
-	go s.consume(ctx, events)
+	go s.consume(ctx, events, durable)
 	return nil
 }
 
-func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEvent) {
+func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEvent, durable string) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.deleteOwnDurable(durable)
 			return
 		case evt, ok := <-events:
 			if !ok {
@@ -346,6 +383,18 @@ func (s *CoreKVSource) consume(ctx context.Context, events <-chan substrate.KVEv
 			}
 			s.handle(evt)
 		}
+	}
+}
+
+// deleteOwnDurable removes this boot's per-instance durable on clean
+// shutdown so it never lingers as a stale entry for the next boot's
+// PruneStaleDurables to clean up. Best-effort: ctx is already cancelled, so
+// a fresh background context with a short bound is used for the delete call.
+func (s *CoreKVSource) deleteOwnDurable(durable string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.conn.DeleteDurable(ctx, s.bucket, durable); err != nil {
+		s.logger.Warn("delete own lens-source durable failed", "durable", durable, "err", err)
 	}
 }
 

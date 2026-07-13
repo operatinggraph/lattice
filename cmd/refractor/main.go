@@ -783,7 +783,7 @@ func main() {
 
 	// Source 1: Core KV watch on `vtx.meta.>`, routed by envelope class
 	// `meta.lens` (Decision #5; data-contracts.md §1.2 line 70).
-	src := lens.NewCoreKVSource(conn, coreKVBucket, logger)
+	src := lens.NewCoreKVSource(conn, coreKVBucket, instance, logger)
 	src.SetLoadCallback(func(r *lens.Rule) {
 		mu.Lock()
 		_, exists := registry[r.ID]

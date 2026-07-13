@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -135,17 +136,38 @@ func (c *Conn) SubscribeKVChanges(
 	return out, nil
 }
 
+// PruneStaleDurableAge is the recency threshold below which a candidate
+// durable is treated as a live sibling's, not a crashed boot's leftover, and
+// skipped by PruneStaleDurables. A live sibling's consumer is continuously
+// created/delivered-to well inside this window; a crashed boot's durable
+// stops updating the instant its process died, so it only ever lingers one
+// threshold longer than before — negligible catalog cost (design
+// refractor-lens-registry-restart-integrity-design.md §4 Fire A step 2).
+// A var, not a const, and exported: PruneStaleDurables' callers (Loom,
+// Weaver, Chronicler, Refractor) each need their own tests to shrink it
+// rather than waiting out the real window — production code never
+// reassigns it.
+var PruneStaleDurableAge = 10 * time.Minute
+
 // PruneStaleDurables deletes every durable JetStream consumer on the named
 // KV bucket's backing stream (KV_<bucket>) whose name starts with namePrefix,
-// except keep. It is intended for the per-boot-durable pattern used by
-// SubscribeKVChanges callers that derive a fresh durable name on every
-// process start (e.g. "<prefix>-<instance>"): each boot prunes durables left
-// behind by prior, no-longer-running instances before creating its own.
+// except keep, AND whose ConsumerInfo shows no creation or delivery activity
+// within PruneStaleDurableAge. It is intended for the per-boot-durable
+// pattern used by SubscribeKVChanges callers that derive a fresh durable
+// name on every process start (e.g. "<prefix>-<instance>-<nonce>"): each
+// boot prunes durables left behind by prior, no-longer-running instances
+// before creating its own. The age guard is what makes this safe under
+// concurrent instances of the same prefix — without it, instance A's boot
+// would delete instance B's still-live durable mid-run, and B's watch dies
+// silently (the exact failure class this pattern exists to prevent,
+// inflicted by a sibling instead of a stale ack floor).
 //
 // A consumer-not-found error from a concurrent deletion (another instance
-// pruning the same stale name) is not an error. Any other deletion error is
-// logged and otherwise ignored — pruning is best-effort cleanup, never a
-// reason to fail startup.
+// pruning the same stale name) is not an error. A ConsumerInfo lookup
+// failure is treated as "recently active" (skip, don't prune) — fail-closed
+// against wrongly deleting a live sibling on a transient info-fetch error.
+// Any other deletion error is logged and otherwise ignored — pruning is
+// best-effort cleanup, never a reason to fail startup.
 func (c *Conn) PruneStaleDurables(ctx context.Context, bucket, namePrefix, keep string, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -158,6 +180,9 @@ func (c *Conn) PruneStaleDurables(ctx context.Context, bucket, namePrefix, keep 
 	lister := stream.ConsumerNames(ctx)
 	for name := range lister.Name() {
 		if name == keep || !strings.HasPrefix(name, namePrefix) {
+			continue
+		}
+		if c.durableRecentlyActive(ctx, streamName, name, logger) {
 			continue
 		}
 		if err := c.js.DeleteConsumer(ctx, streamName, name); err != nil {
@@ -174,6 +199,34 @@ func (c *Conn) PruneStaleDurables(ctx context.Context, bucket, namePrefix, keep 
 		return fmt.Errorf("substrate: PruneStaleDurables: list consumers on %q: %w", streamName, err)
 	}
 	return nil
+}
+
+// durableRecentlyActive reports whether the named consumer was created or
+// last delivered a message within PruneStaleDurableAge. An info-fetch error
+// (including consumer-not-found — already gone, nothing to prune) is treated
+// as "recently active" so the caller skips it rather than risking a wrongful
+// delete.
+func (c *Conn) durableRecentlyActive(ctx context.Context, streamName, name string, logger *slog.Logger) bool {
+	cons, err := c.js.Consumer(ctx, streamName, name)
+	if err != nil {
+		logger.Warn("substrate: PruneStaleDurables: consumer lookup failed, skipping",
+			"stream", streamName, "durable", name, "err", err)
+		return true
+	}
+	info, err := cons.Info(ctx)
+	if err != nil {
+		logger.Warn("substrate: PruneStaleDurables: consumer info failed, skipping",
+			"stream", streamName, "durable", name, "err", err)
+		return true
+	}
+	now := time.Now()
+	if now.Sub(info.Created) < PruneStaleDurableAge {
+		return true
+	}
+	if info.Delivered.Last != nil && now.Sub(*info.Delivered.Last) < PruneStaleDurableAge {
+		return true
+	}
+	return false
 }
 
 // DeleteDurable removes a single named durable JetStream consumer from the

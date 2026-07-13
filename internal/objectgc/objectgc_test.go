@@ -188,7 +188,7 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 		}
 		return entry.Revision
 	}
-	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, h.logger)
+	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, "test", h.logger)
 	loaded := make(chan *lens.Rule, 32)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})

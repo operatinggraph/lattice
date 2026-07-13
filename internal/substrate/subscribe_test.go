@@ -183,6 +183,52 @@ func TestSubscribeKVChanges_DurableResume(t *testing.T) {
 	expectNoEvent(t, ch2, 250*time.Millisecond)
 }
 
+// TestPruneStaleDurables_AgeGuard proves the age-guard property Fire A adds
+// (refractor-lens-registry-restart-integrity-design.md §4/§4.1): a durable
+// matching namePrefix survives PruneStaleDurables while it is recently
+// active, and is only removed once it ages past the threshold — the
+// property that makes the per-boot-durable pattern safe under concurrent
+// instances (instance A's boot must never delete instance B's live
+// durable).
+func TestPruneStaleDurables_AgeGuard(t *testing.T) {
+	c, ctx := newTestConn(t)
+	bucket := "core-kv"
+	provisionCoreBucket(ctx, t, c, bucket)
+
+	origAge := PruneStaleDurableAge
+	PruneStaleDurableAge = 200 * time.Millisecond
+	t.Cleanup(func() { PruneStaleDurableAge = origAge })
+
+	const prefix = "prune-age-test"
+	const sibling = prefix + "-sibling-nonce1"
+	const keep = prefix + "-me-nonce2"
+
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if _, err := c.SubscribeKVChanges(subCtx, bucket, "vtx.meta.", sibling, SubscribeKVOptions{}); err != nil {
+		t.Fatalf("create sibling durable: %v", err)
+	}
+
+	// Immediately after creation, the sibling is well inside the (shrunk)
+	// age window — PruneStaleDurables must NOT delete it.
+	if err := c.PruneStaleDurables(ctx, bucket, prefix, keep, nil); err != nil {
+		t.Fatalf("PruneStaleDurables (recent): %v", err)
+	}
+	if _, err := c.js.Consumer(ctx, "KV_"+bucket, sibling); err != nil {
+		t.Fatalf("recently-created sibling durable was pruned (age guard failed): %v", err)
+	}
+
+	// Once the sibling ages past the threshold with no further activity,
+	// PruneStaleDurables must remove it.
+	time.Sleep(300 * time.Millisecond)
+	if err := c.PruneStaleDurables(ctx, bucket, prefix, keep, nil); err != nil {
+		t.Fatalf("PruneStaleDurables (stale): %v", err)
+	}
+	if _, err := c.js.Consumer(ctx, "KV_"+bucket, sibling); err == nil {
+		t.Fatalf("stale sibling durable was not pruned")
+	}
+}
+
 // TestSubscribeKVChanges_Tombstone writes a value with isDeleted=true in
 // the envelope and asserts IsDeleted is surfaced.
 func TestSubscribeKVChanges_Tombstone(t *testing.T) {

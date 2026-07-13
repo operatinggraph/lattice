@@ -195,7 +195,7 @@ func (h *harness) startCapabilitySource(ctx context.Context, adjKV, coreKV *subs
 		"capabilityRoles": make(chan struct{}),
 	}
 
-	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, h.logger)
+	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, "test", h.logger)
 	src.SetLoadCallback(func(rule *lens.Rule) {
 		ready, want := h.wired[rule.CanonicalName]
 		if !want {

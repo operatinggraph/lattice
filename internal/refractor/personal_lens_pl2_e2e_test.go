@@ -111,7 +111,7 @@ func activatePersonalLens(t *testing.T, h *pl2Harness, lensID, cypher string, bu
 	p, err := pipeline.New(lensID, "nats_subject", "core-kv", h.adjKV, h.coreKV, adpt, nil)
 	require.NoError(t, err)
 
-	src := lens.NewCoreKVSource(h.conn, "core-kv", h.logger)
+	src := lens.NewCoreKVSource(h.conn, "core-kv", "test", h.logger)
 	activated := make(chan *lens.Rule, 1)
 	src.SetLoadCallback(func(r *lens.Rule) {
 		select {

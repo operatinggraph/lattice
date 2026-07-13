@@ -121,7 +121,7 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 	// We capture the activated *lens.Rule so we can construct the
 	// pipeline using the same engine routing cmd/refractor's
 	// startPipeline performs.
-	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, logger)
+	src := lens.NewCoreKVSource(conn, bootstrap.CoreKVBucket, "test", logger)
 	loaded := make(chan *lens.Rule, 4)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})

@@ -123,13 +123,11 @@ type harnessConfig struct {
 	bridgePollInterval time.Duration
 	bridgeCallDeadline time.Duration
 	// extraLenses names additional actor-aggregate lenses (beyond
-	// leaseApplicationComplete) to activate off the SAME shared CoreKVSource at
-	// boot (the renewal targets, leaseExpiry/renewalComplete). A second,
-	// independently-Start'ed CoreKVSource would compete for
-	// lensSourceDurableName's shared JetStream durable with the first — each
-	// vtx.meta.> delivery goes to only ONE of the two competing consumers, so a
-	// lens discovered only by the second source can starve. One shared source
-	// avoids that structurally.
+	// leaseApplicationComplete) to activate off the ONE CoreKVSource this
+	// harness starts (the renewal targets, leaseExpiry/renewalComplete) —
+	// the simpler shape; each CoreKVSource boot gets its own per-boot
+	// JetStream durable, so a second source would work too, it's just
+	// unnecessary here.
 	extraLenses []string
 }
 
@@ -373,13 +371,10 @@ func (h *harness) startAdjacencyBootstrapper(ctx context.Context, adjKV *substra
 }
 
 // startRefractor discovers the installed leaseApplicationComplete lens (plus
-// any extraLenses, e.g. the renewal targets) via ONE shared CoreKVSource watch
-// and wires each through projection.InstallActorAggregate (the production
-// actor-aggregate path) onto the weaver-targets bucket. A second,
-// independently-started CoreKVSource would compete with this one for
-// lensSourceDurableName's single shared JetStream durable — see harnessConfig
-// extraLenses' doc — so every activated lens in this test binary must be
-// discovered off this ONE source.
+// any extraLenses, e.g. the renewal targets) via ONE CoreKVSource watch and
+// wires each through projection.InstallActorAggregate (the production
+// actor-aggregate path) onto the weaver-targets bucket — see harnessConfig
+// extraLenses' doc for why this test binary uses a single source.
 func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *substrate.KV, extraLenses []string) {
 	fullEngine := full.New()
 	projectionRevision := func(k string) uint64 {
@@ -395,7 +390,7 @@ func (h *harness) startRefractor(ctx context.Context, adjKV, coreKV, convKV *sub
 		want[n] = true
 	}
 
-	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, h.logger)
+	src := lens.NewCoreKVSource(h.conn, bootstrap.CoreKVBucket, "test", h.logger)
 	loaded := make(chan *lens.Rule, 16)
 	src.SetLoadCallback(func(r *lens.Rule) { loaded <- r })
 	src.SetUpdateCallback(func(_, _ *lens.Rule, _ lens.UpdateKind) {})
