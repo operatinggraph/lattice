@@ -151,6 +151,93 @@ func Execute(ctx context.Context, source, entrypoint string, args starlarklib.Tu
 	return out, nil
 }
 
+// Validate compiles source with globals as the predeclared-name set, runs its
+// top-level statements (Init — under the same `load`-disabled, predeclared-only,
+// budget-bounded sandbox Execute uses for Init+Call), and checks that
+// entrypoint is defined and callable with exactly nParams positional
+// parameters. It does NOT call entrypoint — callers that need to validate a
+// script before any input value exists to call it with (e.g. at package-data
+// load time, ahead of any invocation) use this instead of Execute.
+//
+// budget bounds Init exactly as Execute bounds Init+Call: Init runs arbitrary
+// top-level script statements (not just the entrypoint body), so an unbounded
+// Validate would let a pathological top-level statement (an infinite loop
+// outside the entrypoint function) hang the caller indefinitely — load-bearing
+// for a caller like Loom's parseGuard, which re-validates a Starlark guard on
+// EVERY step-transition attempt, not just once at pattern-install time.
+// Validate has no caller-supplied context (there is no in-flight request at
+// validate time), so it always derives its own bounded one from
+// context.Background() when budget.Wall > 0 — unlike Execute, a Wall <= 0
+// here leaves Init genuinely unbounded, so callers MUST pass a real budget.
+//
+// Returns nil on success, or a *SandboxError classifying the same failure
+// families Execute's compile/Init phase would (SandboxViolation / ScriptError
+// / ScriptTimeout), plus InvalidReturnShape for a missing/wrong-arity/
+// non-callable entrypoint.
+func Validate(source, entrypoint string, nParams int, globals starlarklib.StringDict, budget Budget) *SandboxError {
+	//nolint:staticcheck // SA1019: SourceProgramOptions migration deferred; current API verified safe for the sandboxed use case
+	_, prog, err := starlarklib.SourceProgram("<script>", source, globals.Has)
+	if err != nil {
+		return classify(err)
+	}
+
+	ctx := context.Background()
+	if budget.Wall > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget.Wall)
+		defer cancel()
+	}
+
+	thread := &starlarklib.Thread{Name: "starlarksandbox-validate"}
+	thread.SetLocal(ctxLocalKey, ctx)
+	if budget.MaxSteps > 0 {
+		thread.SetMaxExecutionSteps(uint64(budget.MaxSteps))
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			thread.Cancel(ctx.Err().Error())
+		case <-done:
+		}
+	}()
+
+	defined, err := prog.Init(thread, globals)
+	if err != nil {
+		if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return &SandboxError{
+				Code:    ScriptTimeout,
+				Message: fmt.Sprintf("script exceeded wall budget %s during validate", budget.Wall),
+			}
+		}
+		return classify(err)
+	}
+
+	entryVal, ok := defined[entrypoint]
+	if !ok {
+		return &SandboxError{
+			Code:    InvalidReturnShape,
+			Message: fmt.Sprintf("script must define a %q function", entrypoint),
+		}
+	}
+	fn, ok := entryVal.(*starlarklib.Function)
+	if !ok {
+		return &SandboxError{
+			Code:    InvalidReturnShape,
+			Message: fmt.Sprintf("%q must be a function, got %s", entrypoint, entryVal.Type()),
+		}
+	}
+	if fn.NumParams() != nParams {
+		return &SandboxError{
+			Code:    InvalidReturnShape,
+			Message: fmt.Sprintf("%q must take exactly %d parameter(s), got %d", entrypoint, nParams, fn.NumParams()),
+		}
+	}
+	return nil
+}
+
 // classify maps a go.starlark.net error onto ErrorCode + extracts a
 // line/column when the error type exposes one.
 func classify(err error) *SandboxError {

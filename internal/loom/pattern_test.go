@@ -3,7 +3,6 @@ package loom
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -120,9 +119,9 @@ func TestPatternValidate_AcceptsSystemOpAndUserTask_RejectsGuardsAndUnknownKinds
 			wantErr: true,
 		},
 		{
-			name:    "starlark guard rejected",
+			name:    "well-formed starlark guard accepted",
 			pattern: Pattern{PatternID: "p3g", SubjectType: "identity", Steps: []Step{{Kind: "systemOp", Operation: "X", Guard: json.RawMessage(`{"reads":["profile"],"starlark":"def guard(subject): return True"}`)}}},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name:    "empty subjectType rejected",
@@ -145,24 +144,34 @@ func TestPatternValidate_AcceptsSystemOpAndUserTask_RejectsGuardsAndUnknownKinds
 	}
 }
 
-// TestPatternValidate_StarlarkGuardRejectedAsReserved asserts the reserved
-// Starlark escape hatch rejects with the reserved-specific sentinel/message —
-// NOT a generic malformed-guard error (§10.5: the Starlark evaluator is reserved
-// until the first such guard is authored).
-func TestPatternValidate_StarlarkGuardRejectedAsReserved(t *testing.T) {
+// TestPatternValidate_StarlarkGuardCompilesAtLoad asserts a well-formed
+// {reads, starlark} guard is ACCEPTED by pattern validate() — it compiles at
+// pattern-load time (§10.5, guard.go's parseStarlarkGuard) rather than being
+// rejected as reserved.
+func TestPatternValidate_StarlarkGuardCompilesAtLoad(t *testing.T) {
 	t.Parallel()
 	p := Pattern{PatternID: "ps", SubjectType: "identity", Steps: []Step{
 		{Kind: "systemOp", Operation: "X", Guard: json.RawMessage(`{"reads":["profile"],"starlark":"def guard(subject): return True"}`)},
 	}}
+	if err := p.validate(); err != nil {
+		t.Fatalf("validate() with a well-formed starlark guard err=%v, want accept", err)
+	}
+}
+
+// TestPatternValidate_StarlarkGuardSyntaxErrorRejected asserts a starlark
+// guard that fails to compile is rejected at pattern-load time, same doctrine
+// as a malformed declarative guard.
+func TestPatternValidate_StarlarkGuardSyntaxErrorRejected(t *testing.T) {
+	t.Parallel()
+	p := Pattern{PatternID: "ps", SubjectType: "identity", Steps: []Step{
+		{Kind: "systemOp", Operation: "X", Guard: json.RawMessage(`{"starlark":"def guard(subject)\n    return True"}`)},
+	}}
 	err := p.validate()
 	if err == nil {
-		t.Fatalf("validate() accepted a starlark guard, want rejection")
+		t.Fatalf("validate() accepted a syntax-error starlark guard, want rejection")
 	}
-	if !errors.Is(err, errStarlarkReserved) {
-		t.Fatalf("validate() err=%v, want errStarlarkReserved", err)
-	}
-	if !strings.Contains(err.Error(), "reserved") {
-		t.Fatalf("validate() err=%q, want a 'reserved' message", err.Error())
+	if !errors.Is(err, errMalformedGuard) {
+		t.Fatalf("validate() err=%v, want errMalformedGuard", err)
 	}
 }
 

@@ -6,30 +6,25 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/asolgan/lattice/internal/starlarksandbox"
 )
 
-// Guard grammar (Contract #10 §10.5). A guard is a pure declarative predicate
-// over the subject's current state — atoms {absent|present: <path>} and
-// {equals: {path, value}}, composable with {allOf|anyOf|not} into ONE boolean
-// (never branching). A guard is rebuildable by replaying it against current
-// Core KV state, which is what makes the instance cursor crash-recoverable
-// (§10.6): a guard has no side effects and is deterministic.
-//
-// The Starlark escape hatch ({reads, starlark}) is RESERVED: it is recognized
-// at parse time and rejected with a precise sentinel — the shared pure-evaluator
-// extraction lands only when the first Starlark guard is authored (§10.5), so it
-// is out of scope here.
+// Guard grammar (Contract #10 §10.5). A guard is a pure predicate over the
+// subject's current state, either DECLARATIVE — atoms {absent|present: <path>}
+// and {equals: {path, value}}, composable with {allOf|anyOf|not} into ONE
+// boolean (never branching) — or the Starlark escape hatch ({reads, starlark},
+// guard.go's guardStarlark branch + guard_eval.go + guard_starlark.go). Either
+// way a guard is rebuildable by replaying it against current Core KV state,
+// which is what makes the instance cursor crash-recoverable (§10.6): a guard
+// has no side effects and is deterministic.
 
 // errMalformedGuard is the generic parse failure for a guard whose shape does
-// not match the declarative grammar (unknown key, multiple keys, wrong types,
-// empty composition list, bad path shape). It is wrapped with positional detail
-// by validate(); callers match it via errors.Is.
+// not match the grammar (unknown key, multiple keys, wrong types, empty
+// composition list, bad path shape, a starlark script that fails to compile
+// or has the wrong entrypoint shape). It is wrapped with positional detail by
+// validate(); callers match it via errors.Is.
 var errMalformedGuard = errors.New("malformed guard")
-
-// errStarlarkReserved is the distinct sentinel for the reserved Starlark escape
-// hatch ({reads, starlark}). It is NOT a generic malformed-guard error: a
-// Starlark guard is well-formed but its evaluator is not yet built (§10.5).
-var errStarlarkReserved = errors.New("starlark guards are reserved, not yet supported")
 
 // guardKind discriminates a parsed guard node.
 type guardKind int
@@ -41,10 +36,11 @@ const (
 	guardAllOf
 	guardAnyOf
 	guardNot
+	guardStarlark
 )
 
-// guard is the parsed AST of a §10.5 declarative guard. Exactly one shape is
-// populated per node, selected by kind.
+// guard is the parsed AST of a §10.5 guard. Exactly one shape is populated
+// per node, selected by kind.
 type guard struct {
 	kind guardKind
 
@@ -59,6 +55,15 @@ type guard struct {
 
 	// children is set for guardAllOf / guardAnyOf (>= 1) and guardNot (exactly 1).
 	children []*guard
+
+	// starlarkSource / starlarkReads are set for kind guardStarlark — the
+	// {reads, starlark} escape hatch (§10.5). starlarkSource is the raw
+	// `def guard(subject): ...` script text, already compile-checked by
+	// parseStarlarkGuard (starlarksandbox.Validate). starlarkReads names the
+	// subject aspect localNames evalGuard hydrates before calling it (root is
+	// always hydrated regardless of this list).
+	starlarkSource string
+	starlarkReads  []string
 }
 
 // guardPath is a parsed §10.5 path. Exactly two shapes are legal:
@@ -96,10 +101,13 @@ type equalsBody struct {
 }
 
 // parseGuard parses one §10.5 guard from raw JSON. It rejects (errMalformedGuard)
-// any object that is not exactly one declarative shape, and recognizes the
-// reserved Starlark pair as errStarlarkReserved. Composition is parsed
-// recursively. parseGuard does NO Core KV access — it is a pure shape/validate
-// pass run at pattern-load time (validate()).
+// any object that is not exactly one declarative shape, or (for the {reads,
+// starlark} escape hatch) fails to compile-check as a well-formed
+// `def guard(subject): ...` predicate. Composition is parsed recursively.
+// parseGuard does NO Core KV access — it is a pure shape/validate pass, run
+// both at pattern-load time (validate()) and, cheaply, on every step
+// evaluation (engine.go's advanceToRunnableStep re-parses from the step's raw
+// JSON each time, same as every other guard kind — no cross-call cache).
 func parseGuard(raw json.RawMessage) (*guard, error) {
 	// Reject anything that is not a JSON object up front (an atom path is carried
 	// as a string VALUE under a key, never a bare string guard).
@@ -127,10 +135,12 @@ func parseGuard(raw json.RawMessage) (*guard, error) {
 		return nil, fmt.Errorf("%w: %v", errMalformedGuard, err)
 	}
 
-	// The reserved Starlark shape: either key present routes to the reserved
-	// sentinel (well-formed-but-unsupported, NOT generic malformed).
+	// Either key present routes to the Starlark escape hatch — recognized
+	// distinctly from the declarative atoms below so a malformed starlark
+	// guard (e.g. `reads` with no `starlark`) gets a precise error instead of
+	// falling through to "exactly one of absent|present|...".
 	if env.Reads != nil || env.Starlark != nil {
-		return nil, errStarlarkReserved
+		return parseStarlarkGuard(env.Reads, env.Starlark)
 	}
 
 	// Exactly one declarative key must be set.
@@ -309,6 +319,42 @@ func parseEquals(raw json.RawMessage) (*guard, error) {
 		return nil, fmt.Errorf("%w: equals value must be a JSON scalar (string, number, bool, or null), got %T", errMalformedGuard, body.Value)
 	}
 	return &guard{kind: guardEquals, path: p, value: body.Value, hasValue: true}, nil
+}
+
+// parseStarlarkGuard parses the {reads, starlark} escape hatch. `starlark`
+// must be a non-empty script defining `def guard(subject): ...` (checked by
+// compiling it — starlarksandbox.Validate — against the same pure-module
+// globals AND budget evalGuard evaluates it with, guardStarlarkGlobals() /
+// guardStarlarkWallBudget / guardStarlarkMaxSteps, so a script that
+// compile-checks here is guaranteed to resolve identically at eval time, and
+// a pathological top-level statement — Validate's Init phase runs the
+// script's top-level statements, not just the entrypoint body — fails fast
+// rather than hanging: parseGuard re-parses (and so re-validates) a Starlark
+// guard on EVERY step-transition attempt, not just once at pattern-install
+// time, so an unbudgeted Validate would hang the engine's transition loop on
+// every single attempt). `reads` is optional — omitted or empty means the
+// guard reads only the subject root (still always hydrated); when present,
+// every entry must be a non-empty aspect localName.
+func parseStarlarkGuard(rawReads json.RawMessage, starlark *string) (*guard, error) {
+	if starlark == nil || strings.TrimSpace(*starlark) == "" {
+		return nil, fmt.Errorf("%w: a starlark guard requires a non-empty \"starlark\" script", errMalformedGuard)
+	}
+	var reads []string
+	if rawReads != nil {
+		if err := json.Unmarshal(rawReads, &reads); err != nil {
+			return nil, fmt.Errorf("%w: \"reads\" must be an array of aspect names: %v", errMalformedGuard, err)
+		}
+		for _, r := range reads {
+			if strings.TrimSpace(r) == "" {
+				return nil, fmt.Errorf("%w: \"reads\" entries must be non-empty aspect names", errMalformedGuard)
+			}
+		}
+	}
+	if sErr := starlarksandbox.Validate(*starlark, "guard", 1, guardStarlarkGlobals(),
+		starlarksandbox.Budget{Wall: guardStarlarkWallBudget, MaxSteps: guardStarlarkMaxSteps}); sErr != nil {
+		return nil, fmt.Errorf("%w: starlark guard %s: %s", errMalformedGuard, sErr.Code, sErr.Message)
+	}
+	return &guard{kind: guardStarlark, starlarkSource: *starlark, starlarkReads: reads}, nil
 }
 
 // rawHasKey reports whether a JSON object literal contains the named top-level

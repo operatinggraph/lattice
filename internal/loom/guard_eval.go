@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"strings"
 
+	starlarklib "go.starlark.net/starlark"
+
+	"github.com/asolgan/lattice/internal/starlarksandbox"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -101,6 +104,8 @@ func (r *guardResolver) eval(g *guard) (bool, error) {
 			return false, err
 		}
 		return !ok, nil
+	case guardStarlark:
+		return r.evalStarlark(g)
 	default:
 		return false, fmt.Errorf("loom: unknown guard kind %d", g.kind)
 	}
@@ -178,6 +183,48 @@ func (r *guardResolver) equals(g *guard) (bool, error) {
 		return false, nil
 	}
 	return jsonValuesEqual(v, g.value), nil
+}
+
+// evalStarlark evaluates a §10.5 {reads, starlark} guard: hydrates the
+// subject root + each aspect named in g.starlarkReads via r.envelope (so it
+// shares the resolver's one-snapshot-per-key memoization with any
+// declarative sibling in the same composite guard), builds the frozen
+// `subject` value (guard_starlark.go), and calls the shared sandbox leaf with
+// entrypoint "guard". parseGuard already compile-checked the script
+// (starlarksandbox.Validate, at parse time), so a sandbox failure here can
+// only be a data-dependent runtime failure inside the predicate body (e.g. a
+// guard that dereferences `.data` on a None aspect without checking presence
+// first — the documented authoring hazard, design doc §2.2) or a wall/step
+// budget trip on a pathological guard; either is a genuine evaluation error,
+// not a false result.
+func (r *guardResolver) evalStarlark(g *guard) (bool, error) {
+	rootBody, err := r.envelope(r.subjectKey)
+	if err != nil {
+		return false, err
+	}
+	aspectBodies := make(map[string]map[string]any, len(g.starlarkReads))
+	for _, aspect := range g.starlarkReads {
+		body, err := r.envelope(r.subjectKey + "." + aspect)
+		if err != nil {
+			return false, err
+		}
+		aspectBodies[aspect] = body
+	}
+
+	subjectVal := buildStarlarkSubject(rootBody, aspectBodies)
+	subjectVal.Freeze()
+
+	out, sErr := starlarksandbox.Execute(r.ctx, g.starlarkSource, "guard",
+		starlarklib.Tuple{subjectVal}, guardStarlarkGlobals(),
+		starlarksandbox.Budget{Wall: guardStarlarkWallBudget, MaxSteps: guardStarlarkMaxSteps})
+	if sErr != nil {
+		return false, fmt.Errorf("loom: starlark guard eval %s: %s", sErr.Code, sErr.Message)
+	}
+	b, ok := out.(starlarklib.Bool)
+	if !ok {
+		return false, fmt.Errorf("loom: starlark guard must return a bool, got %s", out.Type())
+	}
+	return bool(b), nil
 }
 
 // envelope point-reads a Core KV key once per evaluation and returns its decoded

@@ -56,8 +56,9 @@ all-userTask onboarding pattern declares `completionDomains: ["orchestration"]` 
 
 - **Linear only** — no branches, no loops, no fan-out. Conditional *paths* → Weaver.
 - **Guards are pure, deterministic predicates over current state.** This is what makes the
-  instance cursor rebuildable (see State). No side effects, no external reads, no Starlark
-  with I/O.
+  instance cursor rebuildable (see State). No side effects, no external reads — the Starlark
+  escape hatch carries the same purity/determinism obligation as the declarative grammar (no
+  `kv.Read`, no I/O, no host clock, no `load(...)`).
 - Guard semantics give the **"collect vs verify" reuse**: the same `[name, phone, address]`
   pattern serves first-time collection (guards false → all become tasks) and re-verification
   (guards skip fields already present).
@@ -108,14 +109,27 @@ time and rejected wholesale if malformed (`internal/loom/pattern.go` `validate()
   soft-deleted aspect (`isDeleted`) / (for strings) empty-after-trim**; `present` = not absent. An
   empty-string-after-trim is **absent**; `"0"` / `false` / `0` are **present** (never "falsy"). An
   absent path never `equals` anything (including a `null`/`""` comparand).
-- **Starlark escape hatch (`{"reads": […], "starlark": "…"}`) is RESERVED** — recognized at parse
-  time and rejected with a precise "reserved, not yet supported" error. The shared verified-pure
-  sandbox (`internal/starlarksandbox`) has landed — it builds WITH its first consumer per
-  loom-starlark-guards-design.md Fire 1, which turned out to be the Processor's own script runner
-  (refactored to consume it, zero behavior change) plus the AI-authored-capabilities Fire 4
-  generated-script dry-run, not a Loom guard — but Loom-side consumption (parsing + evaluating a
-  `{reads, starlark}` guard via that same sandbox, Fire 2) is still HELD pending the
-  guard-evaluation-location decision; declarative-only ships without it until then.
+- **Starlark escape hatch (`{"reads": […], "starlark": "def guard(subject): …"}`) is SUPPORTED**
+  (loom-starlark-guards-design.md Fire 2, `internal/loom/guard.go` / `guard_eval.go` /
+  `guard_starlark.go`), built on the shared verified-pure sandbox (`internal/starlarksandbox`) Fire 1
+  landed for the Processor's own script runner. `reads` names the subject aspect localNames to
+  hydrate (root is always hydrated regardless); the script must define `def guard(subject) -> bool`.
+  `subject` mirrors the declarative path grammar 1:1 (dot **or** bracket access —
+  `subject.<aspect>.data.<field>` / `subject.data.<field>`, same as `subject.<aspect>.data["<field>"]`)
+  and is `Freeze()`d before the call, so the predicate physically cannot mutate the snapshot. An
+  aspect that is absent, soft-deleted, or simply not in `reads` reads as `None` — but `subject`
+  itself is **never** `None`, even when the root vertex was never created: only an aspect collapses
+  to absence, mirroring how the declarative grammar's `subject.data.<field>` never requires the root
+  to exist. The globals a guard predicate may reference are a **strict subset** of the Processor's
+  `execute` globals — the pure modules only (`crypto`, `time`, `json`); no `kv.Read` (a live read
+  would break replay determinism), no host clock, no `nanoid`, no mutations/events output (a guard
+  returns a `bool`, not a writer). The script compiles (and its top-level statements run, under the
+  same sandbox) at **pattern-load time** (`validate()`) — a syntax error or a forbidden name
+  (`os`/`http`/`load(...)`) rejects the whole pattern, same doctrine as a malformed declarative
+  guard — and is re-validated cheaply on every step evaluation (no cross-call cache, matching every
+  other guard kind). A guard-eval-time failure (a non-bool return, or a runtime error inside the
+  predicate body — e.g. dereferencing `.data` on a `None` aspect without checking presence first) is
+  a genuine evaluation error, never coerced to `false`.
 
 Hydration is **per-evaluation** (no cross-step cache): at step entry the engine JIT-reads the subject
 root + the referenced aspects from Core KV and resolves the path. The loom-local resolver
@@ -402,8 +416,9 @@ pause/resume is a fact about the lane, not about which process happens to run it
 - **P1** — tasks are vertices (business state); the instance cursor is operational state (`loom-state`),
   with **no** Core-KV instance vertex.
 - **Decision #10** — engine is minimal/generic; flows are packages.
-- **Module boundary** — `loom` imports only `substrate/*`; talks to Weaver/Processor via NATS,
-  never Go calls.
+- **Module boundary** — `loom` imports only `substrate/*`, with ONE sanctioned exception —
+  `internal/starlarksandbox` (the shared verified-pure Starlark leaf; zero internal deps of its own)
+  for the guard Starlark escape hatch; talks to Weaver/Processor via NATS, never Go calls.
 
 ## Implementation status
 
@@ -416,16 +431,13 @@ placement (Contract #10 §10.3/§10.8).
 
 **Built (Phase 3).** The operator-facing control plane (`internal/loom/control`): the
 `lattice.ctrl.loom.*` micro-service — `list` / `consumers` / `inspect` / `pause` / `resume` — reading
-`loom-state` and the supervisor's pause state, driven by the `lattice loom` CLI.
+`loom-state` and the supervisor's pause state, driven by the `lattice loom` CLI. The Starlark guard
+escape hatch (`{reads, starlark}`, loom-starlark-guards-design.md Fire 2) — parse-time compile-check
++ eval against the shared verified-pure sandbox (`internal/starlarksandbox`, Fire 1), for a predicate
+the declarative grammar can't express.
 
 **Deferred (Phase 3+).**
 
-- Starlark guard evaluation — the reserved `{reads, starlark}` escape hatch is recognized and rejected
-  at parse time. The shared verified-pure sandbox (`internal/starlarksandbox`) has landed (its first
-  consumers are the Processor's own refactored script runner + the AI-authored-capabilities Fire 4
-  dry-run, not Loom); Loom-side consumption (Fire 2 — parseGuard/evalGuard against that sandbox) is
-  HELD pending the guard-evaluation-location decision. The declarative grammar above covers the
-  field-presence / equality predicates the current flows need. It must remain side-effect-free.
 - A durable `loom.*` read model beyond the control plane's live `loom-state` reads — the
   operator-facing control API (`lattice.ctrl.loom.*`: list / consumers / inspect / pause / resume) ships
   today; a Refractor lens over the `loom.*` event stream for a queryable historical read model is future work.

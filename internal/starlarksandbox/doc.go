@@ -2,8 +2,9 @@
 // leaf: the compile+thread+cancellation harness, the pure (I/O-free,
 // deterministic) builtin modules, and the Go<->Starlark converters used by
 // every write-path script surface on the platform. The Processor's DDL
-// scripts are its first consumer; a Loom predicate guard is a designed,
-// not-yet-built, second consumer (loom-starlark-guards-design.md Fire 2).
+// scripts are its first consumer; a Loom predicate guard (internal/loom,
+// `{reads, starlark}`, loom-starlark-guards-design.md Fire 2) is the second,
+// using Validate at pattern-load time and Execute at guard-eval time.
 //
 // Purity charter: this package imports only go.starlark.net and the Go
 // standard library — zero internal Lattice packages. It is a primitive

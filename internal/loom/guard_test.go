@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
-// TestParseGuard_GrammarShapes exercises the §10.5 declarative grammar parser:
-// valid atoms/composites parse, malformed shapes reject with errMalformedGuard,
-// and the reserved Starlark pair rejects with errStarlarkReserved (distinct).
+// TestParseGuard_GrammarShapes exercises the §10.5 guard parser: valid
+// declarative atoms/composites parse, malformed shapes reject with
+// errMalformedGuard, and the {reads, starlark} escape hatch parses when it
+// compile-checks clean (a well-formed `def guard(subject)`) and rejects
+// (errMalformedGuard) when it doesn't. Starlark eval-time behavior (the
+// actual bool result, absence semantics, hydration dedup, determinism) is
+// TestEvalGuard_Starlark* below — this test is parse/load only.
 func TestParseGuard_GrammarShapes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -53,10 +58,26 @@ func TestParseGuard_GrammarShapes(t *testing.T) {
 		{"root empty field", `{"absent":"subject.data."}`, errMalformedGuard},
 		{"bare subject", `{"absent":"subject"}`, errMalformedGuard},
 
-		// --- reserved starlark ---
-		{"starlark full", `{"reads":["profile"],"starlark":"def guard(subject): return True"}`, errStarlarkReserved},
-		{"starlark only key", `{"starlark":"def guard(s): return True"}`, errStarlarkReserved},
-		{"reads only key", `{"reads":["profile"]}`, errStarlarkReserved},
+		// --- starlark escape hatch: valid ---
+		{"starlark full", `{"reads":["profile"],"starlark":"def guard(subject): return True"}`, nil},
+		{"starlark no reads (root-only)", `{"starlark":"def guard(s): return True"}`, nil},
+		{"starlark empty reads array", `{"reads":[],"starlark":"def guard(subject): return True"}`, nil},
+		{"starlark multiple reads", `{"reads":["profile","lease"],"starlark":"def guard(subject): return subject.profile != None and subject.lease != None"}`, nil},
+		{"starlark uses pure modules", `{"starlark":"def guard(subject): return crypto.sha256('x') != '' and time.rfc3339_utc('2026-01-01T00:00:00Z') != '' and json.encode({'a':1}) != ''"}`, nil},
+
+		// --- starlark escape hatch: malformed ---
+		{"reads only key (no starlark)", `{"reads":["profile"]}`, errMalformedGuard},
+		{"starlark empty string", `{"starlark":""}`, errMalformedGuard},
+		{"starlark syntax error", `{"starlark":"def guard(subject)\n    return True"}`, errMalformedGuard},
+		{"starlark sandbox violation (os)", `{"starlark":"def guard(subject): return os.getenv('X') != ''"}`, errMalformedGuard},
+		{"starlark sandbox violation (load)", `{"starlark":"load('x.star','y')\ndef guard(subject): return True"}`, errMalformedGuard},
+		{"starlark missing guard func", `{"starlark":"def notguard(subject): return True"}`, errMalformedGuard},
+		{"starlark guard not callable", `{"starlark":"guard = 1"}`, errMalformedGuard},
+		{"starlark guard wrong arity (0)", `{"starlark":"def guard(): return True"}`, errMalformedGuard},
+		{"starlark guard wrong arity (2)", `{"starlark":"def guard(subject, extra): return True"}`, errMalformedGuard},
+		{"starlark reads non-string entry", `{"reads":[1,2],"starlark":"def guard(subject): return True"}`, errMalformedGuard},
+		{"starlark reads empty entry", `{"reads":[""],"starlark":"def guard(subject): return True"}`, errMalformedGuard},
+		{"starlark reads not array", `{"reads":"profile","starlark":"def guard(subject): return True"}`, errMalformedGuard},
 
 		// --- duplicate keys (BH-1): encoding/json silently last-wins on a
 		// repeated object key; reject at load time instead. ---
@@ -83,6 +104,32 @@ func TestParseGuard_GrammarShapes(t *testing.T) {
 				t.Fatalf("parseGuard(%s) err=%v, want errors.Is %v", tc.raw, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestParseGuard_StarlarkUnboundedTopLevelStatementFailsFast proves parseGuard
+// never hangs on a pathological Starlark guard: Validate's Init phase runs a
+// script's TOP-LEVEL statements (not just the `def guard(subject):` body), and
+// parseGuard re-parses (so re-validates) a Starlark guard on EVERY
+// step-transition attempt (engine.go's advanceToRunnableStep), not just once
+// at pattern-install time — so an unbudgeted Validate would hang the whole
+// engine transition loop on every single attempt against a script with an
+// infinite top-level loop. The wall/step budget must catch this at PARSE
+// time, same as it does at eval time.
+func TestParseGuard_StarlarkUnboundedTopLevelStatementFailsFast(t *testing.T) {
+	t.Parallel()
+	raw := `{"starlark":"x = 0\nfor i in range(100000000):\n    x += i\ndef guard(subject): return True"}`
+	start := time.Now()
+	_, err := parseGuard(json.RawMessage(raw))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("parseGuard accepted a script with an unbounded top-level statement, want rejection")
+	}
+	if !errors.Is(err, errMalformedGuard) {
+		t.Fatalf("parseGuard err=%v, want errMalformedGuard", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("parseGuard took %s to reject a pathological top-level statement, want it bounded by the wall/step budget", elapsed)
 	}
 }
 

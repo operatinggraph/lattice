@@ -2,16 +2,29 @@ package starlarksandbox
 
 import (
 	"fmt"
+	"sort"
 
 	starlarklib "go.starlark.net/starlark"
 )
 
 // GoMapToStarlarkDict converts a json.Unmarshal-style generic map into a
-// Starlark dict, recursively.
+// Starlark dict, recursively. Keys are inserted in SORTED order rather than
+// Go's randomized map-iteration order: go.starlark.net's Dict preserves
+// insertion order for iteration (`for k in d`, `.keys()`/`.items()`,
+// `json.encode(d)`), so an unsorted insertion would make a script that
+// observes iteration order see a different result across two calls over the
+// byte-identical input map — this leaf is used by callers (the Loom guard
+// predicate, guard_starlark.go) that require the SAME output every time for
+// the SAME input, not merely per-key value correctness.
 func GoMapToStarlarkDict(m map[string]interface{}) *starlarklib.Dict {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	d := new(starlarklib.Dict)
-	for k, v := range m {
-		_ = d.SetKey(starlarklib.String(k), GoValueToStarlark(v))
+	for _, k := range keys {
+		_ = d.SetKey(starlarklib.String(k), GoValueToStarlark(m[k]))
 	}
 	return d
 }

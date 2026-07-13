@@ -3,16 +3,22 @@
 // completion. The engine ships zero domain knowledge — patterns are package
 // data (meta.loomPattern meta-vertices) and the engine interprets them.
 //
-// Steps are systemOp or userTask, each optionally carrying a §10.5 declarative
-// guard (a pure on/off predicate over the subject's current Core KV state;
-// guard.go / guard_eval.go). A false guard skips its step (cursor advances, no
-// op); replaying guards forward over a partially-populated subject rebuilds the
-// cursor, which is what makes a lost loom-state recoverable (§10.6). The loader
-// spine, per-domain completion consumers, write-ahead cursor, and crash-safe
-// restart are fully present.
+// Steps are systemOp or userTask, each optionally carrying a §10.5 guard (a
+// pure on/off predicate over the subject's current Core KV state — either the
+// declarative atom/composition grammar, or the {reads, starlark} escape hatch;
+// guard.go / guard_eval.go / guard_starlark.go). A false guard skips its step
+// (cursor advances, no op); replaying guards forward over a partially-populated
+// subject rebuilds the cursor, which is what makes a lost loom-state
+// recoverable (§10.6) — a Starlark guard carries the same purity/determinism
+// obligation as the declarative grammar (loom-starlark-guards-design.md §2.3).
+// The loader spine, per-domain completion consumers, write-ahead cursor, and
+// crash-safe restart are fully present.
 //
 // Module boundary (Contract / Story 8.1 AC #8): loom imports ONLY
-// internal/substrate + stdlib. Every cross-component interaction is via NATS:
+// internal/substrate + stdlib, with ONE sanctioned exception —
+// internal/starlarksandbox (the shared verified-pure Starlark leaf; zero
+// internal deps of its own beyond go.starlark.net + stdlib) for the guard
+// Starlark escape hatch. Every OTHER cross-component interaction is via NATS:
 //
 //   - patterns are loaded from Core KV via a durable KV-changes subscription
 //     (the same mechanism Refractor uses for lens defs);
