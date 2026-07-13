@@ -549,6 +549,24 @@ feature*.
 > the Gateway-stamped actor and a revoked token is denied before ever reaching it, leaving the intent
 > queued rather than discarded. `docs/components/edge.md` updated in the same commit. **Next: EDGE.4**
 > (Vault Proxy, gated on Vault Phase A + PL.5) or EDGE.5 (browser node, gated on the Gateway WS bridge).
+>
+> **🏗️ EDGE.4 increment 1 SHIPPED** — the identity-bound `sessionkey` control RPC
+> (`lattice.ctrl.refractor.personal.sessionkey`), the server-side half of §3.6's `IssueSessionKey`
+> call: mirrors `register`/`deregister`/`hydrate` exactly — `dispatchEndpoint`'s §3.4 binding confines
+> `body.IdentityID` to the verified actor for `sessionkey` too, so a `scope=any` grant to `consumer`
+> never lets one identity mint another's session key (proven by a Gate-3-style identity-binding test,
+> the hydrate vector's twin). Refractor already holds its own `*vault.LocalBackend` in-process (the
+> Secure-Lens decryptor's vault) — no new NATS RPC to the Processor-hosted `lattice.vault.*` subjects
+> was needed; `personalSessionKey` reads the caller's own `piiKey` envelope off its existing `coreKV`
+> handle and calls `IssueSessionKey` directly. Grants added in lockstep at all 3 required places
+> (`internal/controlauth.RefractorOps`, `packages/control-authz` + `packages/console-operator`
+> manifests, `internal/gateway/natsauth.controlRPCs`) — `TestPackage_GrantedCtrlVerbsMatchControlauthOpTables`
+> catches a future miss here automatically. **§8's "dedicated review fire before EDGE.4" point (d) is
+> now addressed for the trust-boundary half**: the transient-key path's authorization is proven at the
+> control layer against a real verified-actor JWT binding. **Not yet built**: the `internal/edge/vault`
+> client package (request + TTL-cache the session key, decrypt ciphertext deltas in-memory, never
+> persist plaintext, discard on TTL) and its wiring into the Edge node's local read path — that's
+> increment 2. §8 points (b)/(e) remain open for a future review pass.
 
 Ordered so the security-inert local-first loop lands first (co-built with its cloud producer), the security
 turn-on is its own gated fire, and confidentiality + the real device extend it. **Dependency gates explicit.**

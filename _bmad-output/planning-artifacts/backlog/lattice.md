@@ -170,7 +170,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–3 done · next: EDGE.4 (Vault Proxy) or EDGE.5 (browser node), both build-ready |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–3 done · EDGE.4 inc 1 (sessionkey control RPC) shipped · next: EDGE.4 inc 2 (`internal/edge/vault` client) or EDGE.5 |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ CLOSED (Fire 1) · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · next: Fire 2 `[verticals]` Facet v0 app |
 
 ### AI-native
@@ -209,6 +209,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-13 · `fb557cb` · [refractor,gateway,control-authz] EDGE.4 increment 1 — identity-bound `sessionkey` control RPC (Vault Proxy trust boundary), grants in lockstep across 3 places; CI green
 - 2026-07-13 · `182d751` · [weaver] fixed CI-caught TestTargetSource_StableInstanceGetsFreshDurableEachBoot flake from the age-guarded prune (Loom's sibling test was fixed in Fire A, Weaver's copy was missed); CI green
 - 2026-07-13 · `8ccdfff` · [refractor,cmd/lattice] lens-registry-restart-integrity Fire B CLOSED — lensesRegistered metric + RegistryProbe reconciliation + health-summary lens staleness; live-stack verified; CI green
 - 2026-07-13 · `6503f22` · [refractor,substrate,loom] lens-registry-restart-integrity Fire A — CoreKVSource per-boot durable (fixes the live P0 cold-registry incident) + age-guarded PruneStaleDurables (all 4 meta-sources inherit it); CI green
