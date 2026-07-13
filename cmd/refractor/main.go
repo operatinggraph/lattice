@@ -220,6 +220,16 @@ func main() {
 		wg       sync.WaitGroup
 	)
 
+	// Registry size for the heartbeater's metrics.lensesRegistered
+	// (lens-registry-restart-integrity-design.md §4 Fire B step 1) — the
+	// exact started-pipeline set every other registry-scoped provider below
+	// already reads.
+	hb.LensCountProvider = func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(registry)
+	}
+
 	// Per-Lens latency stats provider for the heartbeater.
 	// Falls back to a no-op when no pipeline has a latency buffer.
 	hb.LensLatencyProvider = func() map[string]health.LensLatencySnapshot {
@@ -799,6 +809,25 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("core kv lens source started", "watchPrefix", "vtx.meta.>", "classFilter", "meta.lens")
+
+	// Registry-reconciliation probe (lens-registry-restart-integrity-design.md
+	// §4 Fire B step 2) — the detection half: after a boot grace window, and
+	// then on a slow tick, diff Core KV's declared lens set against the
+	// registry above and raise LensRegistryIncomplete when something is
+	// missing, so a cold-registry incident is a red heartbeat issue instead
+	// of an invisible one.
+	registeredLensIDs := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		ids := make([]string, 0, len(registry))
+		for id := range registry {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	registryProbe := health.NewRegistryProbe(conn, coreKVBucket, registeredLensIDs, logger)
+	go registryProbe.Run(ctx)
+	hb.RegistryReconciliationProvider = registryProbe.Missing
 
 	// Bootstrap lens (env-gated). Activates only if no meta-lens has loaded
 	// after a short grace window AND the env var is set. Decision #7.

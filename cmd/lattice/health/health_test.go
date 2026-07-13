@@ -148,6 +148,60 @@ func TestHealthSummary_Rollup_StaleYellow(t *testing.T) {
 	}
 }
 
+// TestHealthSummary_Rollup_StaleLensRow is the regression test for
+// lens-registry-restart-integrity-design.md §4 Fire B step 3: a per-lens
+// reporter entry an unregistered pipeline stopped updating freezes
+// status="active"/consumerLag=0 forever — exactly what looked "green" before
+// this fix (Freshness rendered "-", no age evaluated at all). A frozen entry
+// past staleThreshold must now read Status "stale" and a non-"-" Freshness,
+// escalating the rollup, even though its own status/consumerLag fields still
+// claim "active".
+func TestHealthSummary_Rollup_StaleLensRow(t *testing.T) {
+	lensID := "StaleLensRowTestId1"
+	staleLastUpdated := time.Now().UTC().Add(-14 * time.Hour).Format(time.RFC3339)
+
+	docs := map[string]map[string]any{
+		lensID: {
+			"ruleId":      lensID,
+			"status":      "active",
+			"consumerLag": float64(0),
+			"errorCount":  float64(0),
+			"lastUpdated": staleLastUpdated,
+		},
+		"health.bootstrap.complete": {
+			"status":      "complete",
+			"completedAt": staleLastUpdated,
+		},
+	}
+	allKeys := []string{lensID, "health.bootstrap.complete"}
+	readFn := func(k string) (map[string]any, bool) {
+		d, ok := docs[k]
+		return d, ok
+	}
+
+	rollup, overallLevel := computeSummaryRollup(allKeys, readFn, 60*time.Second)
+
+	if overallLevel != rollupYellow {
+		t.Errorf("overall = %v, want YELLOW (a frozen lens row must escalate the rollup)", overallLevel)
+	}
+
+	found := false
+	for _, row := range rollup.Components {
+		if strings.Contains(row.Component, lensID) {
+			found = true
+			if row.Status != "stale" {
+				t.Errorf("lens row status = %q, want \"stale\" (status=active/consumerLag=0 alone must not mask a frozen entry)", row.Status)
+			}
+			if row.Freshness == "-" || row.Freshness == "" {
+				t.Errorf("lens row Freshness = %q, want a real age (e.g. \"...s ago\"), not \"-\"", row.Freshness)
+			}
+		}
+	}
+	if !found {
+		t.Error("lens row not found in rollup components")
+	}
+}
+
 // TestClassifyKey_WeaverLoom verifies Weaver/Loom heartbeat and event keys are
 // classified distinctly. Regression: they previously fell through to "lens" and
 // were never staleness-checked in the rollup.

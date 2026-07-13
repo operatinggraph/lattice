@@ -289,7 +289,7 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 
 		case "lens":
 			// Per-lens reporter key (bare NanoID).
-			row := componentRow{Component: k + " (lens)", Freshness: "-"}
+			row := componentRow{Component: k + " (lens)"}
 			status, _ := doc["status"].(string)
 			consumerLag, _ := doc["consumerLag"].(float64)
 			errorCount, _ := doc["errorCount"].(float64)
@@ -309,6 +309,22 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 			default:
 				row.Status = "unknown"
 				row.level = rollupYellow
+			}
+			// Freshness (lens-registry-restart-integrity-design.md §4 Fire B
+			// step 3): an entry an unregistered pipeline stopped updating
+			// freezes status/consumerLag at their last-written values forever
+			// — the cold-registry incident's exact shape. Evaluating
+			// lastUpdated age the same way the heartbeat rows above already
+			// do turns "frozen, still reads active" into "stale Xh ago" at
+			// minimum, regardless of the frozen snapshot's own fields.
+			if ts, ok := parseTimestamp(doc, "lastUpdated"); ok {
+				row.Freshness = freshnessStr(ts)
+				if time.Since(ts) > staleThreshold {
+					row.Status = "stale"
+					row.level = worstOf(row.level, rollupYellow)
+				}
+			} else {
+				row.Freshness = "-"
 			}
 			overall = worstOf(overall, row.level)
 			rows = append(rows, row)
