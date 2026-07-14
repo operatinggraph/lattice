@@ -17,6 +17,7 @@ import (
 // mutation runs through hydrate→execute→validate→commit, and the result
 // lands in Core KV.
 func TestE2E_FullCommitWithRealMutation(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 
 	// Replace the noop script with one that creates a real identity.
@@ -57,6 +58,7 @@ func TestE2E_FullCommitWithRealMutation(t *testing.T) {
 // class whose DDL forbids the operationType, the commit path rejects
 // with DDLViolation.
 func TestE2E_DDLViolationRejects(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 
 	// identity DDL permittedCommands = ["CreateIdentity"]; we publish

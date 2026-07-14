@@ -63,6 +63,7 @@ func seedCiphertextAspect(t *testing.T, ctx context.Context, conn *substrate.Con
 // under contextHint.egressReads hydrates as a $sensitiveRef marker (ciphertext
 // verbatim), never plaintext — design sensitive-param-egress §3.2/§3.3.
 func TestEgressReads_SensitiveKey_HydratesAsRef(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := newEgressTestHydrator(t, ctx, conn, nil) // no Vault wired — proves ref authoring needs none.
 
@@ -101,6 +102,7 @@ func TestEgressReads_SensitiveKey_HydratesAsRef(t *testing.T) {
 // egressReads hydrates identically to a plain read — the disposition is
 // ref-if-sensitive, not a blanket transform.
 func TestEgressReads_NonSensitiveKey_HydratesPlain(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := newEgressTestHydrator(t, ctx, conn, nil)
 
@@ -127,6 +129,7 @@ func TestEgressReads_NonSensitiveKey_HydratesPlain(t *testing.T) {
 // like reads — an absent declared key faults HydrationMiss, never a silent
 // absence branch (a param template's target is by definition required).
 func TestEgressReads_MissingKey_HydrationMiss(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := newEgressTestHydrator(t, ctx, conn, nil)
 
@@ -150,6 +153,7 @@ func TestEgressReads_MissingKey_HydrationMiss(t *testing.T) {
 // working Vault could have decrypted it — the disposition is a submitter
 // choice, not a Vault-availability accident.
 func TestEgressReads_SensitiveKeyRealVault_DecryptsToRefNotPlaintext(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	v, err := vault.NewLocalBackend([]byte("lattice-testutil-vault-master-ke"), "test-v1")
 	if err != nil {
@@ -327,6 +331,7 @@ func TestValidateExternalEgressGuard_NilTracker_Committed(t *testing.T) {
 // read paths") — a key present in egressKeys authors a ref even when reached
 // through the lazy path rather than pre-hydration.
 func TestConnKVReader_EgressKey_ReturnsRefNotPlaintext(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	seedSensitiveAspectClassDDL(t, ctx, conn, "ssn", true)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())

@@ -31,6 +31,7 @@ func TestEventSubject_Sanitization(t *testing.T) {
 }
 
 func TestEventPublisher_NoEventsShortCircuits(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setup(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	pub := NewEventPublisher(conn, logger)
@@ -41,6 +42,7 @@ func TestEventPublisher_NoEventsShortCircuits(t *testing.T) {
 }
 
 func TestEventPublisher_HappyPath(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setup(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	pub := NewEventPublisher(conn, logger)
@@ -91,6 +93,7 @@ func TestEventPublisher_HappyPath(t *testing.T) {
 // at the substrate level is invasive, so this test instead temporarily
 // removes the stream, then re-creates it after the first attempt.
 func TestEventPublisher_RetriesOnTransientFailure(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setup(t)
 	// core-events is already provisioned by setup(t).
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -113,6 +116,7 @@ func TestEventPublisher_RetriesOnTransientFailure(t *testing.T) {
 // where core-events is NOT provisioned so PublishBatch fails repeatedly; the
 // wrapper surfaces a *PublicationError after MaxRetries.
 func TestEventPublisher_FailureSurfacesPublicationError(t *testing.T) {
+	t.Parallel()
 	// Use a fresh NATS server without core-events so PublishBatch fails.
 	ctx, cancel := func() (context.Context, func()) {
 		c, cc := context.WithCancel(context.Background())

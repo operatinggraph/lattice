@@ -31,7 +31,7 @@ const (
 	capTestActorKey   = "vtx.identity." + capTestActorID
 	capTestActorCap   = "cap.identity." + capTestActorID
 	capTestActorEph   = "cap.ephemeral.identity." + capTestActorID // disjoint ephemeral key
-	capTestActorSvc   = "cap.svc.identity." + capTestActorID        // disjoint service-access key
+	capTestActorSvc   = "cap.svc.identity." + capTestActorID       // disjoint service-access key
 	capTestServiceKey = "vtx.service.executive-cleaning-NanoID"
 	capTestTaskKey    = "vtx.task.Rm7q3pntwzkfbcxv5p9j"
 	capTestTargetKey  = "vtx.lease.Op4Nb2mPq6rTwzKxVyP7"
@@ -167,8 +167,8 @@ func freshDoc(projectedAt time.Time) *CapabilityDoc {
 		},
 		ServiceAccess: []ServiceAccessEntry{
 			{
-				Service:      capTestServiceKey,
-				ResolvedVia:  []string{"vtx.unit.penthouse"},
+				Service:     capTestServiceKey,
+				ResolvedVia: []string{"vtx.unit.penthouse"},
 				AllowedOperations: []AllowedOperation{
 					{OperationType: "BookExecutiveCleaning"},
 					{OperationType: "ViewSchedule"},

@@ -23,6 +23,7 @@ import (
 //     is absorbed by the commit retry loop (re-hydrate → present → re-branch).
 
 func TestHydrate_OptionalReads_PresentIsHydrated(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -52,6 +53,7 @@ func TestHydrate_OptionalReads_PresentIsHydrated(t *testing.T) {
 }
 
 func TestHydrate_OptionalReads_AbsentIsKnownAbsent(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -76,6 +78,7 @@ func TestHydrate_OptionalReads_AbsentIsKnownAbsent(t *testing.T) {
 // structural: a key in `reads` faults on absence even if a (redundant)
 // optionalReads entry also names it. optionalReads can never soften `reads`.
 func TestHydrate_OptionalReads_ReadsStayFailClosed(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 	_ = conn
@@ -132,6 +135,7 @@ def execute(state, op):
 // TestCommitPipeline_CreateOnceCollisionSurfacesWithoutRetry pins as
 // surfaced-not-retried).
 func TestCommitPipeline_AbsentConditionedCreateRetries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -193,6 +197,7 @@ func (r *raceCommitter) Commit(ctx context.Context, env *OperationEnvelope, resu
 // present, served from the snapshot), the script re-branches no-op, and the
 // operation commits cleanly WITHOUT overwriting the winner.
 func TestOptionalReads_SameCommitRace_E2E(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)

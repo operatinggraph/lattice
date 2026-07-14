@@ -50,6 +50,7 @@ func sensitiveMutation(key, class string, value string) MutationOp {
 // batch as an extra create), reports mintedPiiKey=true, and the mutation's
 // data is opaque ciphertext, never plaintext.
 func TestEncryptSensitiveMutations_MintsKeyAndEncrypts(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -112,6 +113,7 @@ func TestEncryptSensitiveMutations_MintsKeyAndEncrypts(t *testing.T) {
 // for the SAME identity in one batch mint the piiKey only once — the second
 // reuses the cached envelope, so only one extra create mutation is appended.
 func TestEncryptSensitiveMutations_ReusesKeyWithinBatch(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -153,6 +155,7 @@ func TestEncryptSensitiveMutations_ReusesKeyWithinBatch(t *testing.T) {
 // for an identity that already has a piiKey aspect reuses it — mintedPiiKey
 // is false and no extra mutation is appended.
 func TestEncryptSensitiveMutations_ExistingPiiKey_NoMint(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, v := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -179,6 +182,7 @@ func TestEncryptSensitiveMutations_ExistingPiiKey_NoMint(t *testing.T) {
 // TestEncryptSensitiveMutations_NonSensitiveClass_PassesThrough: a mutation
 // whose DDL class is not declared sensitive is left byte-for-byte unchanged.
 func TestEncryptSensitiveMutations_NonSensitiveClass_PassesThrough(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -204,6 +208,7 @@ func TestEncryptSensitiveMutations_NonSensitiveClass_PassesThrough(t *testing.T)
 // TestEncryptSensitiveMutations_Tombstone_PassesThrough: a tombstone mutation
 // has no data to encrypt and is left unchanged regardless of class.
 func TestEncryptSensitiveMutations_Tombstone_PassesThrough(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -227,6 +232,7 @@ func TestEncryptSensitiveMutations_Tombstone_PassesThrough(t *testing.T) {
 // already rejects a non-identity-anchored sensitive aspect ahead of this
 // stage, so a malformed key surviving to 6.5 must not panic or encrypt).
 func TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -249,6 +255,7 @@ func TestEncryptSensitiveMutations_NonIdentityAnchor_PassesThrough(t *testing.T)
 // directly for an identity that already has a piiKey returns the stored
 // envelope and appends nothing to extra.
 func TestEnsureIdentityKey_ExistingKey_NoExtraMutation(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, v := newEncryptTestCommitPath(t, ctx, conn)
 
@@ -278,6 +285,7 @@ func TestEnsureIdentityKey_ExistingKey_NoExtraMutation(t *testing.T) {
 // mints a fresh envelope via the Vault and appends exactly one create
 // mutation for the piiKey aspect to extra.
 func TestEnsureIdentityKey_NoKey_MintsAndAppends(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cp, _ := newEncryptTestCommitPath(t, ctx, conn)
 

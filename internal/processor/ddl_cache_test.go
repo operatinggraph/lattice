@@ -9,6 +9,7 @@ import (
 )
 
 func TestDDLCache_RefreshAndLookup_ShadowKey(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -31,6 +32,7 @@ func TestDDLCache_RefreshAndLookup_ShadowKey(t *testing.T) {
 }
 
 func TestDDLCache_Invalidate_AfterPut(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -52,6 +54,7 @@ func TestDDLCache_Invalidate_AfterPut(t *testing.T) {
 }
 
 func TestDDLCache_Lookup_MissReturnsFalse(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -63,6 +66,7 @@ func TestDDLCache_Lookup_MissReturnsFalse(t *testing.T) {
 }
 
 func TestDDLCache_Invalidate_EvictsTombstonedRoot(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -102,6 +106,7 @@ func TestDDLCache_Invalidate_EvictsTombstonedRoot(t *testing.T) {
 }
 
 func TestDDLCache_LoadMetaVertex_TombstonedRootAbsent(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	key := "vtx.meta.deadload"
@@ -131,6 +136,7 @@ func TestDDLCache_LoadMetaVertex_TombstonedRootAbsent(t *testing.T) {
 // vertexType DDL carries the executing script; the aspectType entries are step-6
 // write gates and must not be class-inference targets.
 func TestDDLCache_ClassForCommand_VertexTypeOnly(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 
@@ -168,6 +174,7 @@ func TestDDLCache_ClassForCommand_VertexTypeOnly(t *testing.T) {
 // (the caller falls through to the explicit-class requirement) — inferring a
 // class for an ambiguous op could run the wrong script, so it fails closed.
 func TestDDLCache_ClassForCommand_AmbiguityGuard(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 
@@ -197,6 +204,7 @@ func TestDDLCache_ClassForCommand_AmbiguityGuard(t *testing.T) {
 // TestDDLCache_ClassForCommand_Unindexed confirms an unknown / empty op misses
 // (the explicit-class requirement then stands — unchanged behavior).
 func TestDDLCache_ClassForCommand_Unindexed(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -217,6 +225,7 @@ func TestDDLCache_ClassForCommand_Unindexed(t *testing.T) {
 // op from the index (ClassForCommand now MISSES). The whole-index rebuild on
 // Invalidate makes this work — this locks it.
 func TestDDLCache_Invalidate_AddingSecondAdmitterEvictsFromIndex(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 
@@ -261,6 +270,7 @@ func TestDDLCache_Invalidate_AddingSecondAdmitterEvictsFromIndex(t *testing.T) {
 // the remaining single owner makes the op unambiguous again and ClassForCommand
 // resolves. The complement of the ADD case — both rely on the whole-index rebuild.
 func TestDDLCache_Invalidate_RemovingOneAdmitterReindexes(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 
@@ -317,6 +327,7 @@ func seedMetaDDL(t *testing.T, ctx context.Context, conn *substrate.Conn, key, m
 }
 
 func TestDDLCache_Invalidate_AspectKeyResolvesToRoot(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {

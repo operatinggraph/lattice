@@ -93,6 +93,7 @@ func readHealthDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, buck
 // and the verbatim details, and a re-emit must overwrite (same key, "currently
 // happening", not an audit log).
 func TestEmitAlert_LiveKV(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -145,6 +146,7 @@ func TestEmitAlert_LiveKV(t *testing.T) {
 // at 1 and each subsequent write for the same outcome increments, while a
 // different outcome tracks its own counter independently.
 func TestRecordClaimAttempt_LiveKVCounter(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -200,6 +202,7 @@ func TestRecordClaimAttempt_LiveKVCounter(t *testing.T) {
 // signal only when a CapabilityAuthorizer is attached: nil authorizer (stub
 // mode) emits nothing, an attached authorizer emits the zero-sample doc.
 func TestEmitCapabilityAuthSignals_LiveKV(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)

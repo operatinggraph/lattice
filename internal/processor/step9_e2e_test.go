@@ -25,6 +25,7 @@ import (
 // Step ordering is asserted at the log level (steps 1-9 in order) by
 // counting structured log lines via a capture handler.
 func TestE2E_FullNineStepCommitPath(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	provisionEvents(t, ctx, conn)
 

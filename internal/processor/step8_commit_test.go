@@ -25,6 +25,7 @@ func buildCommitterPipeline(t *testing.T) (context.Context, *CommitterImpl, *DDL
 }
 
 func TestCommit_CleanWriteTrackerAndMutation(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -67,6 +68,7 @@ func TestCommit_CleanWriteTrackerAndMutation(t *testing.T) {
 }
 
 func TestCommit_RevisionConflictSurfacesConflictError(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	key := "vtx.identity." + testNanoID2
@@ -100,6 +102,7 @@ func TestCommit_RevisionConflictSurfacesConflictError(t *testing.T) {
 // surfaces as a typed *BatchTooLargeError{Reason:"mutationCount"}, not a raw
 // substrate rejection (Contract #3 §3.9.1).
 func TestCommit_BatchTooLarge_MutationCount(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 
@@ -144,6 +147,7 @@ func TestCommit_BatchTooLarge_MutationCount(t *testing.T) {
 // value exceeds the negotiated payload ceiling surfaces as a typed
 // *BatchTooLargeError{Reason:"valueSize"} naming the offending key.
 func TestCommit_BatchTooLarge_ValueSize(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	key := "vtx.identity." + testNanoID2
@@ -180,6 +184,7 @@ func TestCommit_BatchTooLarge_ValueSize(t *testing.T) {
 }
 
 func TestCommit_MetaVertexMutation_InvalidatesCache(t *testing.T) {
+	t.Parallel()
 	ctx, c, cache := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "RegisterDDL"
@@ -206,6 +211,7 @@ func TestCommit_MetaVertexMutation_InvalidatesCache(t *testing.T) {
 }
 
 func TestCommit_TombstoneSetsIsDeleted(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	key := "vtx.identity." + testNanoID2
@@ -236,6 +242,7 @@ func TestCommit_TombstoneSetsIsDeleted(t *testing.T) {
 }
 
 func TestCommit_MixedTTLBatch_TrackerHasTTLOthersDont(t *testing.T) {
+	t.Parallel()
 	// A single op in a batch may carry a TTL while siblings do not.
 	// This test exercises that mixed shape end-to-end through the
 	// CommitterImpl.
@@ -267,6 +274,7 @@ func TestCommit_MixedTTLBatch_TrackerHasTTLOthersDont(t *testing.T) {
 }
 
 func TestCommit_TrackerCarriesMutationKeysAndEventClasses(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -306,6 +314,7 @@ func TestCommit_TrackerCarriesMutationKeysAndEventClasses(t *testing.T) {
 // faithful EventList (eventId, payload, targetKey, timestamp), and that the
 // outbox aspect carries NO Nats-TTL header (so it outlives the 24h tracker).
 func TestCommit_WritesOutboxAspectWithFaithfulEvents(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -382,6 +391,7 @@ func TestCommit_WritesOutboxAspectWithFaithfulEvents(t *testing.T) {
 // TestCommit_ZeroEventsWritesNoOutboxAspect asserts an op with no events writes
 // no outbox aspect (the extra BatchOp is skipped).
 func TestCommit_ZeroEventsWritesNoOutboxAspect(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -406,6 +416,7 @@ func TestCommit_ZeroEventsWritesNoOutboxAspect(t *testing.T) {
 // accept the zero-mutation case: no upstream guard rejects an empty mutation set
 // when result.Events is non-empty.
 func TestCommit_ZeroMutationEventOnly(t *testing.T) {
+	t.Parallel()
 	ctx, c, _ := buildCommitterPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{

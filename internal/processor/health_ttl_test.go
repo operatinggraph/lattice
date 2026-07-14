@@ -69,6 +69,7 @@ func newShortIntervalHeartbeater(conn *substrate.Conn, instance string, interval
 // crashed" signal works, while a live, continuously-heartbeating instance's key
 // never disappears (each write re-arms the TTL clock).
 func TestHeartbeat_TTLExpiryAndRearm(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTTLHarness(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -151,6 +152,7 @@ func newTestHealthAlertEmitter(conn *substrate.Conn, instance string, ttl time.D
 // dead instance's breadcrumbs clear within the window instead of persisting
 // forever (health-kv-ttl-orphan-expiry-design.md Fire 1's second half).
 func TestDiagnosticKeys_TTLExpiryAndRearm(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTTLHarness(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -246,6 +248,7 @@ func TestDiagnosticKeys_TTLExpiryAndRearm(t *testing.T) {
 // refuses a stub-mode start — the key self-clears instead of reading
 // "warning" forever until an operator wipes the bucket by hand.
 func TestEmitAlert_TTLExpiryAndRearm(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTTLHarness(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 

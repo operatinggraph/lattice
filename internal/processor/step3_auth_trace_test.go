@@ -88,12 +88,12 @@ func parseTraceRecord(t *testing.T, raw []byte) AuthTraceRecord {
 
 func traceTestDoc(projectedAt time.Time) *CapabilityDoc {
 	return &CapabilityDoc{
-		Key:     capTestActorCap,
-		Actor:   capTestActorKey,
-		Version: "1.0",
+		Key:         capTestActorCap,
+		Actor:       capTestActorKey,
+		Version:     "1.0",
 		ProjectedAt: projectedAt.Format(time.RFC3339Nano),
 		ProjectedFromRevisions: map[string]uint64{
-			capTestActorKey:                 42,
+			capTestActorKey:                  42,
 			lensDefinitionKeyForCapabilityKV: 7,
 			"vtx.role.penthouseResident":     3,
 		},

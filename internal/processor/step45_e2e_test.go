@@ -10,6 +10,7 @@ import (
 // by setupTestPipeline returns an empty mutation set. Story 1.6's
 // stubbed step 6+8 swallow the empty result; step 9 acks.
 func TestE2E_FullPipelineCleanExecution(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	publishEnvelope(t, conn, env)
@@ -27,6 +28,7 @@ func TestE2E_FullPipelineCleanExecution(t *testing.T) {
 // references a missing key. Step 4 returns *HydrationError; the commit
 // path emits a HydrationFailed reply and terms the message.
 func TestE2E_HydrationMissTerminates(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	env.ContextHint = &ContextHint{Reads: []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}}
@@ -44,6 +46,7 @@ func TestE2E_HydrationMissTerminates(t *testing.T) {
 // TestE2E_ScriptErrorTerminates seeds a script that calls fail(). Step 5
 // returns *ScriptError; the commit path emits a ScriptFailed reply.
 func TestE2E_ScriptErrorTerminates(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 	// Replace the noop script with a failing one.
 	failingScript := []byte(`{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    fail(\"deliberate test failure\")\n"}}`)
@@ -66,6 +69,7 @@ func TestE2E_ScriptErrorTerminates(t *testing.T) {
 // the commit path terms the message before step 6+8 ever run, so the
 // rogue mutation must never reach Core KV.
 func TestE2E_SandboxViolationTerminates(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 	rogueKey := "vtx.identity.rogueSandboxTargetAAAA"
 	violating := []byte(`{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    x = os.getenv(\"SECRET\")\n    return {\"mutations\": [{\"op\": \"create\", \"key\": \"` + rogueKey + `\", \"document\": {\"class\": \"identity\"}}], \"events\": []}\n"}}`)
@@ -90,6 +94,7 @@ func TestE2E_SandboxViolationTerminates(t *testing.T) {
 // TestE2E_ContextHintHydratedAndPassedToScript proves the script can
 // read hydrated state placed there by step 4.
 func TestE2E_ContextHintHydratedAndPassedToScript(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	actorKey := "vtx.identity." + testNanoID2
 	if _, err := conn.KVPut(ctx, testCoreBucket, actorKey,

@@ -320,6 +320,7 @@ func TestKVRead_ArgValidation(t *testing.T) {
 // doc with the read revision; a logically-deleted vertex → a non-nil doc with
 // isDeleted=true (NOT not-found — Conn.KVGet returns logical deletes normally).
 func TestConnKVReader_AgainstCoreKV(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	r := connKVReader{conn: conn, bucket: testCoreBucket}
@@ -704,6 +705,7 @@ def execute(state, op):
 // wildcard the "in" filter relies on), returns tombstoned links, respects the
 // key-token boundary (hasBooking ≠ hasBookingExtra), and pages deterministically.
 func TestConnLinkLister_AgainstCoreKV(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	lister := connLinkLister{conn: conn, bucket: testCoreBucket}

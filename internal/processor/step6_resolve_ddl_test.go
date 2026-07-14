@@ -82,6 +82,7 @@ func instanceOfLinkMut(srcID, tType, tID string) MutationOp {
 // (a) 1-hop, in-batch instanceOf → type DDL: an admitted op PASSes; a
 // non-admitted op is rejected exactly as a coarse-class write-scope violation.
 func TestResolveGoverningDDL_InBatchOneHop(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 
 	pass := newTestEnvelope(testNanoID1)
@@ -109,6 +110,7 @@ func TestResolveGoverningDDL_InBatchOneHop(t *testing.T) {
 // (b) 2-hop instance → template (in-batch) → type (committed, resolved by the
 // on-demand connInstanceOfReader). Proves batch + committed state compose.
 func TestResolveGoverningDDL_TwoHopBatchPlusCommitted(t *testing.T) {
+	t.Parallel()
 	v, ctx, conn := buildWidgetValidator(t)
 	// template → type, committed (the template pre-exists the instance op).
 	seedCommittedLink(t, ctx, conn,
@@ -128,6 +130,7 @@ func TestResolveGoverningDDL_TwoHopBatchPlusCommitted(t *testing.T) {
 // (b') the same 2-hop chain, but the template → type link is resolved from the
 // hydrated working set rather than an on-demand read.
 func TestResolveGoverningDDL_TwoHopWorkingSet(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 
 	env := newTestEnvelope(testNanoID1)
@@ -149,6 +152,7 @@ func TestResolveGoverningDDL_TwoHopWorkingSet(t *testing.T) {
 // → the §1.5 permissive default (parity with today's coarse-miss behavior): a
 // non-admitted op PASSes because nothing gates it.
 func TestResolveGoverningDDL_NoInstanceOfPermissive(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "DeleteWidgetInstance" // not admitted, but no DDL resolves
@@ -160,6 +164,7 @@ func TestResolveGoverningDDL_NoInstanceOfPermissive(t *testing.T) {
 
 // (c') a tombstoned instanceOf link is no link → permissive default.
 func TestResolveGoverningDDL_TombstonedLinkPermissive(t *testing.T) {
+	t.Parallel()
 	v, ctx, conn := buildWidgetValidator(t)
 	seedCommittedLink(t, ctx, conn,
 		fmt.Sprintf("lnk.widget.%s.instanceOf.meta.%s", instID, svcTypeID), true /*deleted*/)
@@ -174,6 +179,7 @@ func TestResolveGoverningDDL_TombstonedLinkPermissive(t *testing.T) {
 // (d-cycle) a crafted instanceOf cycle terminates via the visited guard and
 // resolves permissive — never into a wrong DDL, never an infinite loop.
 func TestResolveGoverningDDL_CycleTerminates(t *testing.T) {
+	t.Parallel()
 	v, ctx, conn := buildWidgetValidator(t)
 	// instID → cycB → instID, both committed.
 	seedCommittedLink(t, ctx, conn,
@@ -191,6 +197,7 @@ func TestResolveGoverningDDL_CycleTerminates(t *testing.T) {
 // (d-depth) a chain deeper than maxInstanceOfHops never reaches the type
 // authority sitting beyond the bound → permissive default (the bound bites).
 func TestResolveGoverningDDL_DepthBound(t *testing.T) {
+	t.Parallel()
 	v, ctx, conn := buildWidgetValidator(t)
 	// instID → h1 → h2 → h3 → h4 → meta(widget). meta sits at hop 5; with
 	// maxInstanceOfHops == 4 the walk stops before traversing h4 → meta.
@@ -217,6 +224,7 @@ func TestResolveGoverningDDL_DepthBound(t *testing.T) {
 // resolves directly, no instanceOf link involved — admitted PASSes, non-admitted
 // is rejected.
 func TestResolveGoverningDDL_ExactFastPath(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	coarse := MutationOp{
 		Op:  "create",
@@ -266,6 +274,7 @@ func seedVertexTypeDDLAs(t *testing.T, ctx context.Context, conn substrateConn, 
 // disables enforcement (the op now passes) — proving ambiguity is not a guessed
 // pick. Run repeatedly so a map-iteration-random pick would flake.
 func TestResolveGoverningDDL_MultipleLiveLinksAreAmbiguous(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	seedWidgetTypeDDL(t, ctx, conn) // widget (svcTypeID) admits CreateWidgetInstance, not Delete
 	seedVertexTypeDDLAs(t, ctx, conn, gadgetTypeID, "gadget", `["CreateGadget"]`)
@@ -304,6 +313,7 @@ func TestResolveGoverningDDL_MultipleLiveLinksAreAmbiguous(t *testing.T) {
 // E2a — a create-then-tombstone of the SAME instanceOf link in one batch nets to
 // no link → permissive default (a non-admitted op passes).
 func TestResolveGoverningDDL_BatchCreateThenTombstoneNetDead(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	lk := fmt.Sprintf("lnk.widget.%s.instanceOf.meta.%s", instID, svcTypeID)
 	env := newTestEnvelope(testNanoID1)
@@ -321,6 +331,7 @@ func TestResolveGoverningDDL_BatchCreateThenTombstoneNetDead(t *testing.T) {
 // E2b — a batch tombstone of an instanceOf link SUPPRESSES the same link that is
 // still live in committed state (the batch is the in-flight truth).
 func TestResolveGoverningDDL_BatchTombstoneSuppressesCommitted(t *testing.T) {
+	t.Parallel()
 	v, ctx, conn := buildWidgetValidator(t)
 	lk := fmt.Sprintf("lnk.widget.%s.instanceOf.meta.%s", instID, svcTypeID)
 	seedCommittedLink(t, ctx, conn, lk, false) // committed-live
@@ -338,6 +349,7 @@ func TestResolveGoverningDDL_BatchTombstoneSuppressesCommitted(t *testing.T) {
 // E3 — an instanceOf target that IS a meta-vertex but NOT a vertexType DDL
 // (aspectType) is not a governing authority → break to permissive default.
 func TestResolveGoverningDDL_MetaTargetNonVertexType(t *testing.T) {
+	t.Parallel()
 	_, ctx, conn := buildWidgetValidator(t)
 	// Seed an aspectType meta-vertex and refresh a fresh cache that holds it.
 	doc := []byte(`{"class":"meta.ddl.aspectType","isDeleted":false,"data":{"canonicalName":"someAspect","permittedCommands":["CreateWidgetInstance"]}}`)
@@ -369,6 +381,7 @@ func (errLinkReader) LiveInstanceOfTargets(context.Context, string) ([]instanceO
 }
 
 func TestResolveGoverningDDL_OnDemandReadErrorFailsOpen(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	v.linkReader = errLinkReader{} // override the conn-backed reader
 	env := newTestEnvelope(testNanoID1)
@@ -383,6 +396,7 @@ func TestResolveGoverningDDL_OnDemandReadErrorFailsOpen(t *testing.T) {
 // E6 — the one-hop instance→type terminal where the target's OWN class is a
 // registered vertexType DDL (resolved via classOf), not a meta key.
 func TestResolveGoverningDDL_OneHopClassOfTerminal(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	tgtKey := "vtx.widget." + tgtID
 	// The target business vertex's class is the registered `widget` DDL name.
@@ -410,6 +424,7 @@ func TestResolveGoverningDDL_OneHopClassOfTerminal(t *testing.T) {
 // E7 — a fine-grained-class ASPECT mutation walks its PARENT vertex's instanceOf
 // chain and is gated by the parent's type DDL's permittedCommands.
 func TestResolveGoverningDDL_AspectMutationWalksParent(t *testing.T) {
+	t.Parallel()
 	v, ctx, _ := buildWidgetValidator(t)
 	aspectMut := MutationOp{
 		Op:  "create",

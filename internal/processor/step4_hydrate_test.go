@@ -11,6 +11,7 @@ import (
 // reusing the integration test helpers from integration_test.go.
 
 func TestHydrate_HappyPath_ContextHintAndDDL(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -47,6 +48,7 @@ func TestHydrate_HappyPath_ContextHintAndDDL(t *testing.T) {
 }
 
 func TestHydrate_HydrationMiss_ContextHintKey(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -76,6 +78,7 @@ func TestHydrate_HydrationMiss_ContextHintKey(t *testing.T) {
 // dispatch envelope omits. The harness seeds vtx.meta.identity admitting
 // CreateIdentity, so the dispatched op hydrates as class=identity.
 func TestHydrate_ClassInferredFromOperationType(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -103,6 +106,7 @@ func TestHydrate_ClassInferredFromOperationType(t *testing.T) {
 // class whose operationType is admitted by no DDL still errors MissingClass
 // (unchanged behavior).
 func TestHydrate_MissingClass_UnindexedOpStillFails(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	cache := NewDDLCache(conn, testCoreBucket, testLogger())
 	if err := cache.Refresh(ctx); err != nil {
@@ -126,6 +130,7 @@ func TestHydrate_MissingClass_UnindexedOpStillFails(t *testing.T) {
 }
 
 func TestHydrate_NoScriptForClass(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -149,6 +154,7 @@ func TestHydrate_NoScriptForClass(t *testing.T) {
 }
 
 func TestHydrate_NoDDLForClass(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -166,6 +172,7 @@ func TestHydrate_NoDDLForClass(t *testing.T) {
 }
 
 func TestHydrate_EmptyContextHintAllowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -185,6 +192,7 @@ func TestHydrate_EmptyContextHintAllowed(t *testing.T) {
 }
 
 func TestHydrate_ClassFromPayload(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -202,6 +210,7 @@ func TestHydrate_ClassFromPayload(t *testing.T) {
 }
 
 func TestHydrate_MissingClass(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 
@@ -221,6 +230,7 @@ func TestHydrate_MissingClass(t *testing.T) {
 
 // Ensure the parsed VertexDoc carries the key for downstream consumers.
 func TestHydrate_VertexDocCarriesKey(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
 

@@ -20,6 +20,7 @@ import (
 // outside the ops.default.>/ops.urgent.>/ops.system.> filter set and asserts
 // the Processor's durable consumer never receives it.
 func TestBypass2_OffNamespacePublish_NotConsumed(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -85,6 +86,7 @@ func TestBypass2_OffNamespacePublish_NotConsumed(t *testing.T) {
 // consumer. This confirms FilterSubjects is correctly scoped and not vacuously
 // blocking everything.
 func TestBypass2_ValidLanePublish_IsConsumed(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
@@ -136,6 +138,7 @@ func TestBypass2_ValidLanePublish_IsConsumed(t *testing.T) {
 // trailing segments and does not cover the two-segment form by itself.
 // This test fails if the defaults change without updating the bypass test.
 func TestBypass2_FilterSubjects_CoverageCheck(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)

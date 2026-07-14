@@ -217,6 +217,7 @@ func awaitReply(t *testing.T, sub *nats.Subscription) OperationReply {
 // mutates Core KV. This is the in-code enforcement that the write path is not a
 // read channel.
 func TestConformance_PrimaryKeyMustBeCommitted(t *testing.T) {
+	t.Parallel()
 	t.Run("valid primaryKey is surfaced", func(t *testing.T) {
 		ctx, conn, _, _, _ := setupTestPipeline(t)
 		script := `{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    k = \"vtx.identity.` + testNanoID2 + `\"\n    return {\"mutations\": [{\"op\": \"create\", \"key\": k, \"document\": {\"class\": \"identity\", \"data\": {}}}], \"events\": [], \"response\": {\"primaryKey\": k}}\n"}}`
@@ -309,12 +310,12 @@ func TestConformance_PrimaryKeyInCommit_RootFallback(t *testing.T) {
 		key  string
 		want bool
 	}{
-		{"vtx.identity.AbCdEfGhJkLmNpQrStUv.state", true},   // direct mutation aspect
-		{"vtx.identity.AbCdEfGhJkLmNpQrStUv", true},         // 3-seg root of a mutation aspect
+		{"vtx.identity.AbCdEfGhJkLmNpQrStUv.state", true},                              // direct mutation aspect
+		{"vtx.identity.AbCdEfGhJkLmNpQrStUv", true},                                    // 3-seg root of a mutation aspect
 		{"lnk.role.RrRrRrRrRrRrRrRrRrRr.assigned.identity.IiIiIiIiIiIiIiIiIiIi", true}, // direct mutation link
-		{"vtx.identity.ZzZzZzZzZzZzZzZzZzZz", false},        // unrelated vertex
-		{"vtx.identity.AbCdEfGhJkLmNpQrStUv.email", false},  // sibling aspect not in the mutation set
-		{"", false},                                          // empty
+		{"vtx.identity.ZzZzZzZzZzZzZzZzZzZz", false},                                   // unrelated vertex
+		{"vtx.identity.AbCdEfGhJkLmNpQrStUv.email", false},                             // sibling aspect not in the mutation set
+		{"", false}, // empty
 	}
 	for _, c := range cases {
 		if got := primaryKeyInCommit(c.key, muts); got != c.want {
@@ -328,9 +329,9 @@ func TestConformance_PrimaryKeyInCommit_RootFallback(t *testing.T) {
 func TestConformance_CoreKVKeyShapes(t *testing.T) {
 	id := "AbCdEfGhJkLmNpQrStUv"
 	canonical := map[string]substrate.KeyKind{
-		"vtx.identity." + id:                          substrate.KindVertex,
-		"vtx.identity." + id + ".state":               substrate.KindAspect,
-		"vtx.meta." + id:                              substrate.KindVertex,
+		"vtx.identity." + id:                           substrate.KindVertex,
+		"vtx.identity." + id + ".state":                substrate.KindAspect,
+		"vtx.meta." + id:                               substrate.KindVertex,
 		"lnk.identity." + id + ".holdsRole.role." + id: substrate.KindLink,
 	}
 	for key, want := range canonical {

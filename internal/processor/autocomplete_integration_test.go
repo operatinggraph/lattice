@@ -96,6 +96,7 @@ func committedHasTaskCompletion(result ScriptResult, taskKey string) (hasMut, ha
 // the task is open injects the conditional status→complete mutation (with the
 // CAS revision) + exactly one TaskCompleted into the SAME committed batch.
 func TestAutoComplete_OpenTask_InjectsCompletion(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	taskKey := seedTaskRoot(t, ctx, conn, "AaOpenTaskJKMNPQRSTUV", "open")
@@ -130,6 +131,7 @@ func TestAutoComplete_OpenTask_InjectsCompletion(t *testing.T) {
 // CompleteTask left the task complete → no second TaskCompleted (CAS-on-open
 // makes re-injection a no-op).
 func TestAutoComplete_AlreadyComplete_NoInjection(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	taskKey := seedTaskRoot(t, ctx, conn, "AaDoneTaskJKMNPQRSTUV", "complete")
@@ -149,6 +151,7 @@ func TestAutoComplete_AlreadyComplete_NoInjection(t *testing.T) {
 // task cancelled → the op still commits, the task is NOT resurrected, and no
 // TaskCompleted is emitted.
 func TestAutoComplete_Cancelled_NotResurrected(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	taskKey := seedTaskRoot(t, ctx, conn, "AaCancTaskJKMNPQRSTUV", "cancelled")
@@ -172,6 +175,7 @@ func TestAutoComplete_Cancelled_NotResurrected(t *testing.T) {
 // TestAutoComplete_NonTaskPath_NoInjection: a role/platform-authorized op (no
 // task path) injects nothing.
 func TestAutoComplete_NonTaskPath_NoInjection(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	// Seed an open task that is NOT named by the (platform) permission.
@@ -205,6 +209,7 @@ func TestAutoComplete_NonTaskPath_NoInjection(t *testing.T) {
 // touch that did not close it). The injection re-reads the fresh CAS handle and
 // the retry succeeds — the user's op is never bounced (Adjudication #2).
 func TestAutoComplete_OCCRace_StillOpen_RetriesSucceeds(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	taskKey := seedTaskRoot(t, ctx, conn, "AaRcOpTaskJKMNPQRSTUV", "open")
@@ -237,6 +242,7 @@ func TestAutoComplete_OCCRace_StillOpen_RetriesSucceeds(t *testing.T) {
 // the asserted revision), it is a conflict on one of the USER's own mutations
 // and is surfaced unchanged (the existing RevisionConflict branch handles it).
 func TestAutoComplete_ConflictOnUserMutation_Surfaces(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	taskKey := seedTaskRoot(t, ctx, conn, "AaUsrCnflJKMNPQRSTUVW", "open")
@@ -267,6 +273,7 @@ func TestAutoComplete_ConflictOnUserMutation_Surfaces(t *testing.T) {
 // transition), the injection is dropped and the user's op commits alone — no
 // RevisionConflict surfaced to the user.
 func TestAutoComplete_OCCRace_TaskClosed_DropsInjection(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, conn := acConnect(t, url)
 	taskKey := seedTaskRoot(t, ctx, conn, "AaRcClTaskJKMNPQRSTUV", "open")

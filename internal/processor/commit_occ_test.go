@@ -89,6 +89,7 @@ func TestApplyHydratedRevisions(t *testing.T) {
 // NATS does not name the failing key, so we re-read the conditioned keys) ---
 
 func TestMovedDefaultedKeys(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -251,6 +252,7 @@ func occUpdateState(t *testing.T, ctx context.Context, conn *substrate.Conn, key
 }
 
 func TestCommitPipeline_RetryAbsorbsBenignConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -281,6 +283,7 @@ func TestCommitPipeline_RetryAbsorbsBenignConflict(t *testing.T) {
 }
 
 func TestCommitPipeline_ExhaustionSurfaces(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -310,6 +313,7 @@ func TestCommitPipeline_ExhaustionSurfaces(t *testing.T) {
 }
 
 func TestCommitPipeline_CreateOnceCollisionSurfacesWithoutRetry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -341,6 +345,7 @@ func TestCommitPipeline_CreateOnceCollisionSurfacesWithoutRetry(t *testing.T) {
 }
 
 func TestCommitPipeline_ExplicitRevisionConflictNotRetried(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -385,6 +390,7 @@ func (a *countingAuthorizer) Authorize(ctx context.Context, env *OperationEnvelo
 }
 
 func TestCommitPipeline_AuthRunsOnceAcrossRetries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -411,6 +417,7 @@ func TestCommitPipeline_AuthRunsOnceAcrossRetries(t *testing.T) {
 // hydrated revision succeeds; the same revision, asserted after the root moved,
 // is rejected by the substrate (the lost-update guard §3.2 closes).
 func TestRealCommitter_Section32Conditioning(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -458,6 +465,7 @@ func TestRealCommitter_Section32Conditioning(t *testing.T) {
 }
 
 func TestRecordCommitConflict_HealthKV(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -502,6 +510,7 @@ func TestNewCommitConflictEmitter_NoopWhenUnwired(t *testing.T) {
 // deterministic-requestId reuse (e.g. same-version `lattice-pkg install
 // --force` refreshes).
 func TestRealCommitter_ResubmitAfterOutboxTombstone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -543,6 +552,7 @@ func TestRealCommitter_ResubmitAfterOutboxTombstone(t *testing.T) {
 // re-execution's tracker write must supersede it by revision rather than
 // attempt a create-only write that can never succeed there.
 func TestRealCommitter_ResubmitSupersedesTombstonedTracker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)
@@ -601,6 +611,7 @@ func TestRealCommitter_ResubmitSupersedesTombstonedTracker(t *testing.T) {
 // CheckDedup surfaces the tombstoned tracker's revision so the commit path
 // can thread it to the step-8 write (DedupResult.TombstonedRevision).
 func TestCheckDedup_TombstonedTrackerCarriesRevision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conn := occConn(t)
 	provisionHarness(t, ctx, conn)

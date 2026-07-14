@@ -225,6 +225,7 @@ func runNFRWithDeps(t *testing.T, label string, buildDeps func(d Deps) Deps, fir
 // but for completeness we run it here as the canonical step-1 case
 // by stopping the consumer before HandleMessage runs at all.
 func TestNFR_R1_FaultAtStep1(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	provisionEvents(t, ctx, conn)
 	seedNFRScript(t, ctx, conn)
@@ -290,6 +291,7 @@ func TestNFR_R1_FaultAtStep1(t *testing.T) {
 // step 2 to short-circuit the redelivered message — exactly the
 // NFR-R1 invariant).
 func TestNFR_R1_FaultAtStep2(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	provisionEvents(t, ctx, conn)
 	seedNFRScript(t, ctx, conn)
@@ -316,6 +318,7 @@ func TestNFR_R1_FaultAtStep2(t *testing.T) {
 // as a transient authorizer error → reject + term. To model "restart
 // then succeed" we manually publish twice with the same envelope.
 func TestNFR_R1_FaultAtStep3(t *testing.T) {
+	t.Parallel()
 	tripDone := false
 	runNFRWithDeps(t, "step3", func(d Deps) Deps {
 		// Wrap with FaultyAuthorizer that errors first call then passes.
@@ -328,6 +331,7 @@ func TestNFR_R1_FaultAtStep3(t *testing.T) {
 // emits a HydrationFailed reject + term; on redelivery, the trip flag
 // is set and the Hydrator passes through.
 func TestNFR_R1_FaultAtStep4(t *testing.T) {
+	t.Parallel()
 	trip := nfrOneShotTrip(nfrFaultStep4Hydrate)
 	runNFRWithDeps(t, "step4", func(d Deps) Deps {
 		d.Hydrator = &nfrHydrator{inner: d.Hydrator, trip: trip}
@@ -337,6 +341,7 @@ func TestNFR_R1_FaultAtStep4(t *testing.T) {
 
 // TestNFR_R1_FaultAtStep5: Executor fails first call.
 func TestNFR_R1_FaultAtStep5(t *testing.T) {
+	t.Parallel()
 	trip := nfrOneShotTrip(nfrFaultStep5Execute)
 	runNFRWithDeps(t, "step5", func(d Deps) Deps {
 		d.Executor = &nfrExecutor{inner: d.Executor, trip: trip}
@@ -346,6 +351,7 @@ func TestNFR_R1_FaultAtStep5(t *testing.T) {
 
 // TestNFR_R1_FaultAtStep6: Validator fails first call.
 func TestNFR_R1_FaultAtStep6(t *testing.T) {
+	t.Parallel()
 	trip := nfrOneShotTrip(nfrFaultStep6Validate)
 	runNFRWithDeps(t, "step6", func(d Deps) Deps {
 		d.Validator = &nfrValidator{inner: d.Validator, trip: trip}
@@ -361,6 +367,7 @@ func TestNFR_R1_FaultAtStep6(t *testing.T) {
 // interface seam yet; this captures the "crash between validate and
 // commit" recovery property.)
 func TestNFR_R1_FaultAtStep7(t *testing.T) {
+	t.Parallel()
 	trip := nfrOneShotTrip(nfrFaultStep7Events)
 	runNFRWithDeps(t, "step7", func(d Deps) Deps {
 		d.Committer = &nfrCommitter{inner: d.Committer, trip: trip}
@@ -374,6 +381,7 @@ func TestNFR_R1_FaultAtStep7(t *testing.T) {
 // batch failed), so step 2 doesn't short-circuit; step 8 commits on
 // the redelivery.
 func TestNFR_R1_FaultAtStep8(t *testing.T) {
+	t.Parallel()
 	trip := nfrOneShotTrip(nfrFaultStep8Commit)
 	runNFRWithDeps(t, "step8", func(d Deps) Deps {
 		d.Committer = &nfrCommitter{inner: d.Committer, trip: trip}
@@ -391,6 +399,7 @@ func TestNFR_R1_FaultAtStep8(t *testing.T) {
 // persisted with the FULL faithful event (non-empty payload, original eventId)
 // and survives the redelivery.
 func TestNFR_R1_CrashBeforeOutboxPublish(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	provisionEvents(t, ctx, conn)
 	seedNFRScript(t, ctx, conn)
@@ -445,6 +454,7 @@ func TestNFR_R1_CrashBeforeOutboxPublish(t *testing.T) {
 // redelivers (no ack received); the redelivered message hits step 2,
 // finds the tracker, short-circuits with Duplicate.
 func TestNFR_R1_FaultAtStep9(t *testing.T) {
+	t.Parallel()
 	trip := nfrOneShotTrip(nfrFaultStep9Ack)
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	provisionEvents(t, ctx, conn)
@@ -498,6 +508,7 @@ func TestNFR_R1_FaultAtStep9(t *testing.T) {
 // runs subtests in source order before this; if any failed, this
 // won't print VERIFIED.
 func TestNFR_R1_Summary(t *testing.T) {
+	t.Parallel()
 	// Establish a baseline run so the assertion helper imports are
 	// exercised when the suite is run in isolation.
 	_ = nfrCleanBaseline(t)

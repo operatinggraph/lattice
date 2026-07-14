@@ -87,6 +87,7 @@ func buildWriteScopeValidator(t *testing.T) (*ValidatorImpl, *DDLCache, context.
 // TestWriteScope_PermittedOpAccepted (AC bullet 1):
 // DDL declares permittedCommands=["create","update"]; op type "create" → ACCEPTED.
 func TestWriteScope_PermittedOpAccepted(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildWriteScopeValidator(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "create"
@@ -110,6 +111,7 @@ func TestWriteScope_PermittedOpAccepted(t *testing.T) {
 // DDL declares permittedCommands=["create","update"]; op type "tombstone" → DDLViolation.
 // Error message must contain: "permittedCommands", "tombstone", and the DDL meta-vertex key.
 func TestWriteScope_ForbiddenOpRejected(t *testing.T) {
+	t.Parallel()
 	v, cache, ctx := buildWriteScopeValidator(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "tombstone"
@@ -165,6 +167,7 @@ func TestWriteScope_ForbiddenOpRejected(t *testing.T) {
 // TestWriteScope_MissingPermittedCommandsIsPermissive (AC bullet 3):
 // DDL present but declares no permittedCommands → all op types ACCEPTED.
 func TestWriteScope_MissingPermittedCommandsIsPermissive(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildWriteScopeValidator(t)
 	for _, opType := range []string{"create", "update", "tombstone", "SomeArbitraryOp"} {
 		t.Run("opType="+opType, func(t *testing.T) {
@@ -192,6 +195,7 @@ func TestWriteScope_MissingPermittedCommandsIsPermissive(t *testing.T) {
 // DDL present with explicit empty permittedCommands array → all op types ACCEPTED.
 // Per Deliverable #4 note: "empty treated same as missing".
 func TestWriteScope_EmptyPermittedCommandsIsPermissive(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildWriteScopeValidator(t)
 	for _, opType := range []string{"create", "tombstone", "AnyOp"} {
 		t.Run("opType="+opType, func(t *testing.T) {
@@ -218,6 +222,7 @@ func TestWriteScope_EmptyPermittedCommandsIsPermissive(t *testing.T) {
 // TestWriteScope_SensitiveAspectOnIdentityAccepted:
 // sensitiveNote (sensitive=true) attached to an identity vertex → ACCEPTED.
 func TestWriteScope_SensitiveAspectOnIdentityAccepted(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildWriteScopeValidator(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "create"
@@ -241,6 +246,7 @@ func TestWriteScope_SensitiveAspectOnIdentityAccepted(t *testing.T) {
 // TestWriteScope_SensitiveAspectOnNonIdentityRejected:
 // sensitiveNote (sensitive=true) attached to a non-identity vertex → DDLViolation(sensitiveAspectScope).
 func TestWriteScope_SensitiveAspectOnNonIdentityRejected(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildWriteScopeValidator(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "create"
@@ -271,6 +277,7 @@ func TestWriteScope_SensitiveAspectOnNonIdentityRejected(t *testing.T) {
 // decision "rejected"; mutation key absent from Core KV; tracker absent.
 // This is the AC story-level integration test for FR57.
 func TestWriteScope_E2E_ForbiddenOpRejectsWithNoMutation(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 
 	// Seed a "resource" DDL: permittedCommands=["create","update"].
@@ -306,6 +313,7 @@ func TestWriteScope_E2E_ForbiddenOpRejectsWithNoMutation(t *testing.T) {
 // All prior TestWriteScope_* tests must pass before this runs.
 // Run with: go test ./internal/processor/... -run WriteScope -v
 func TestWriteScope_FR57_Summary(t *testing.T) {
+	t.Parallel()
 	if t.Failed() {
 		return
 	}

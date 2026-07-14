@@ -284,6 +284,7 @@ func setupTestPipeline(t *testing.T) (context.Context, *substrate.Conn, *CommitP
 // AC1: first delivery accepted — envelope consumed, dedup checks empty,
 // auth allows, stubbed steps run, tracker is written, message acked.
 func TestIntegration_FirstDeliveryAccepted(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 	publishEnvelope(t, conn, env)
@@ -311,6 +312,7 @@ func TestIntegration_FirstDeliveryAccepted(t *testing.T) {
 
 // AC2: duplicate short-circuited at step 2.
 func TestIntegration_DuplicateShortCircuited(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 	env := newTestEnvelope(testNanoID1)
 
@@ -334,6 +336,7 @@ func TestIntegration_DuplicateShortCircuited(t *testing.T) {
 
 // AC3: malformed envelope nack-with-term.
 func TestIntegration_MalformedNackTerminated(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
 
 	// Publish a raw payload that is not a valid envelope.
@@ -369,6 +372,7 @@ func TestIntegration_MalformedNackTerminated(t *testing.T) {
 // (CreateOnly conflict); the commit path then re-probes and finds the
 // tracker, acks, and emits a duplicate reply. Net: no double-commit.
 func TestIntegration_TrackerWriteConflictIsAckedAsDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	logger := testLogger()
 

@@ -21,6 +21,7 @@ func TestAckerImpl_NilMsg(t *testing.T) {
 // pull it via Fetch, wrap it in NewAcker, call Ack, then verify the
 // consumer's AckFloor advanced (NumAckPending → 0).
 func TestAckerImpl_E2E(t *testing.T) {
+	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	js := conn.JetStream()
 

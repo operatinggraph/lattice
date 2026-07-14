@@ -21,6 +21,7 @@ import (
 // no supervised pump runs, so the measurement is deterministic (a running pump
 // pre-fetches the backlog into the client and would hide it).
 func TestLaneSpecs_PerLaneBacklogIsolation(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

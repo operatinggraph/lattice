@@ -41,6 +41,7 @@ func (denyAuthorizer) Authorize(context.Context, *OperationEnvelope) (Decision, 
 // success/duplicate → Ack, a permanent rejection → Term, a transient commit
 // failure → NakWithDelay (bounded redelivery floor, never a hot-loop).
 func TestDispatch_DecisionMapping(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, _, _ := setupTestPipeline(t)
 	logger := testLogger()
 
@@ -136,6 +137,7 @@ func TestDispatch_DecisionMapping(t *testing.T) {
 // PendingForConsumer — the same reader the heartbeat's lane_lag uses — drains to
 // zero. This exercises the real delivery path the in-process adapter tests do not.
 func TestSupervisedHandler_CommitsThroughSupervisor(t *testing.T) {
+	t.Parallel()
 	ctx, conn, cp, _, metrics := setupTestPipeline(t)
 
 	sup := substrate.NewConsumerSupervisor(conn)

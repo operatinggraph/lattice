@@ -141,6 +141,7 @@ func runConsumerUntil(t *testing.T, ctx context.Context, conn *substrate.Conn, c
 // regression: a committed-but-unpublished outbox aspect is published faithfully
 // — byte-identical payload, original eventId — NOT a reconstruction.
 func TestOutbox_CrashBetweenCommitAndPublish_RepublishesRealEvents(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setup(t)
 
 	want := processor.Event{
@@ -187,6 +188,7 @@ func TestOutbox_CrashBetweenCommitAndPublish_RepublishesRealEvents(t *testing.T)
 // TestOutbox_NoDoublePublish: a second consumer pass over the now-tombstoned
 // aspect publishes nothing more.
 func TestOutbox_NoDoublePublish(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setup(t)
 	rid := "Cj4kPmRtw9nbCxz5vQ2y"
 	ev := processor.Event{
@@ -220,6 +222,7 @@ func TestOutbox_NoDoublePublish(t *testing.T) {
 // TestOutbox_EmptyBodySkipped: a tombstone/PURGE marker (empty body) is acked
 // and skipped without error.
 func TestOutbox_EmptyBodySkipped(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setup(t)
 	rid := "Ej4kPmRtw9nbCxz5vQ2y"
 	persistOutbox(t, ctx, conn, rid, processor.EventList{{

@@ -37,6 +37,7 @@ func buildValidatorWithCache(t *testing.T) (*ValidatorImpl, *DDLCache, context.C
 }
 
 func TestValidate_CleanPass(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -56,6 +57,7 @@ func TestValidate_CleanPass(t *testing.T) {
 }
 
 func TestValidate_PermittedCommandsViolation(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	env.OperationType = "DeleteIdentity" // not in identity DDL's list
@@ -80,6 +82,7 @@ func TestValidate_PermittedCommandsViolation(t *testing.T) {
 }
 
 func TestValidate_SensitiveAspectOnNonIdentityRejected(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	// Aspect attached to a "lease" vertex — should fail (email is sensitive).
@@ -106,6 +109,7 @@ func TestValidate_SensitiveAspectOnNonIdentityRejected(t *testing.T) {
 }
 
 func TestValidate_SensitiveAspectOnIdentityAllowed(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -126,6 +130,7 @@ func TestValidate_SensitiveAspectOnIdentityAllowed(t *testing.T) {
 }
 
 func TestValidate_KeyPatternViolation(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -148,6 +153,7 @@ func TestValidate_KeyPatternViolation(t *testing.T) {
 }
 
 func TestValidate_UnknownOpRejected(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	result := ScriptResult{
@@ -170,6 +176,7 @@ func TestValidate_UnknownOpRejected(t *testing.T) {
 }
 
 func TestValidate_UndeclaredClassIsPermissive(t *testing.T) {
+	t.Parallel()
 	v, _, ctx := buildValidatorWithCache(t)
 	env := newTestEnvelope(testNanoID1)
 	// "anomalyFlag" is not in the DDL cache. The validator should
