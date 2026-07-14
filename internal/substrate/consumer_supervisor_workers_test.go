@@ -34,6 +34,7 @@ func provisionWorkStream(ctx context.Context, t *testing.T, c *Conn) string {
 // pump. Bounded prefetch (fanOutPullMaxMessages) keeps any one worker from
 // hoarding the whole burst, which is exactly what makes the fan-out real.
 func TestSupervisor_Workers_FanOutConcurrency(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	stream := provisionWorkStream(ctx, t, c)
 

@@ -12,6 +12,7 @@ import (
 // JetStream consumer (1 ⇒ server-side serialization for the Processor meta lane,
 // Contract #2 §3.7) and leaves it at the JetStream default when unset.
 func TestSupervisor_MaxAckPending(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	stream := "ops-maxack"
 	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"ops.>"}}); err != nil {
@@ -51,6 +52,7 @@ func TestSupervisor_MaxAckPending(t *testing.T) {
 // as success — so the Processor's one-time processor-main retirement is safe to
 // run on every startup.
 func TestConn_DeleteStreamConsumer(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	stream := "ops-delete"
 	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"ops.>"}}); err != nil {

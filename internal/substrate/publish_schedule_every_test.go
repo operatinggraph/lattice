@@ -69,6 +69,7 @@ func drainFired(t *testing.T, cons jetstream.Consumer) {
 // sub-second / zero interval (below the server's @every floor) all error BEFORE
 // any publish.
 func TestScheduleEvery_Validation(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	cases := []struct {
 		name, subject, target string
@@ -95,6 +96,7 @@ func TestScheduleEvery_Validation(t *testing.T) {
 // re-arming the same subject REPLACES the prior schedule (the server rolls a
 // schedule message up on its subject) rather than accumulating a second one.
 func TestScheduleEvery_FiresRepeatedlyAndReplaces(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionSchedulesStream(ctx, t, c)
 
@@ -155,6 +157,7 @@ func TestScheduleEvery_FiresRepeatedlyAndReplaces(t *testing.T) {
 // both the no-stream branch (a subject bound to no stream) and the
 // purge-no-messages branch (an already-cancelled subject).
 func TestCancelSchedule(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionSchedulesStream(ctx, t, c)
 

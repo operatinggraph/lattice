@@ -8,6 +8,7 @@ import (
 )
 
 func TestOpenKV_MissingBucket(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	if _, err := c.OpenKV(ctx, "no-such-bucket"); err == nil {
 		t.Fatal("expected error opening a non-existent bucket, got nil")
@@ -15,6 +16,7 @@ func TestOpenKV_MissingBucket(t *testing.T) {
 }
 
 func TestKVHandle_RoundTrip(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -84,6 +86,7 @@ func TestKVHandle_RoundTrip(t *testing.T) {
 }
 
 func TestKVHandle_PurgeAndStatus(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -121,6 +124,7 @@ func TestKVHandle_PurgeAndStatus(t *testing.T) {
 }
 
 func TestKVHandle_WatchUpdates(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

@@ -69,6 +69,7 @@ func consumerInfoByName(ctx context.Context, t *testing.T, c *Conn, stream, dura
 // durable has no MaxDeliver bound and a repeatedly-Nak'd message keeps
 // redelivering past any small bound (AC6b).
 func TestSupervisor_NoMaxDeliver_UnboundedRedelivery(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -110,6 +111,7 @@ func TestSupervisor_NoMaxDeliver_UnboundedRedelivery(t *testing.T) {
 // through the sink and a new supervisor instance restores into PausedManual and
 // does not pump until Resume (AC6c).
 func TestSupervisor_ManualPause_SurvivesRestart(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -182,6 +184,7 @@ func TestSupervisor_ManualPause_SurvivesRestart(t *testing.T) {
 // enters the probe loop, recovers on a passing probe, and the sink shows active.
 // Composability: while PausedManual, a probe success does NOT resume the pump (AC6d).
 func TestSupervisor_InfraPause_ProbeRecovers(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -246,6 +249,7 @@ func TestSupervisor_InfraPause_ProbeRecovers(t *testing.T) {
 // pause holds even when infra would clear — operator pause is not cleared by a
 // passing probe.
 func TestSupervisor_ManualPause_BlocksProbeResume(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -288,6 +292,7 @@ func TestSupervisor_ManualPause_BlocksProbeResume(t *testing.T) {
 // TestSupervisor_Reset_RecreatesWithNewFilter proves Add with filter A, then a
 // spec filter change to B + Reset, recreates the durable with filter B (AC6e).
 func TestSupervisor_Reset_RecreatesWithNewFilter(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -334,6 +339,7 @@ func TestSupervisor_Reset_RecreatesWithNewFilter(t *testing.T) {
 // TestSupervisor_Remove_DeletesDurable_StopPreserves verifies Remove deletes the
 // server-side durable while Stop preserves it (Winston Q3 ruling).
 func TestSupervisor_Remove_DeletesDurable_StopPreserves(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

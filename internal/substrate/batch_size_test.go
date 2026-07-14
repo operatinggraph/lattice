@@ -10,6 +10,7 @@ import (
 // nothing is published — the batch is provably all-or-nothing at the guard,
 // not just at the server.
 func TestAtomicBatch_MessageCountCeiling(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -40,6 +41,7 @@ func TestAtomicBatch_MessageCountCeiling(t *testing.T) {
 // rejected pre-flight with ErrValueTooLarge, and that the boundary value
 // (exactly at the derived ceiling) is accepted.
 func TestAtomicBatch_ValueSizeCeiling(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -71,6 +73,7 @@ func TestAtomicBatch_ValueSizeCeiling(t *testing.T) {
 // TestAtomicBatch_DeleteSkipsValueCheck proves a Delete op (no body) is
 // exempt from the value-size guard regardless of the ceiling.
 func TestAtomicBatch_DeleteSkipsValueCheck(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -95,6 +98,7 @@ func TestAtomicBatch_DeleteSkipsValueCheck(t *testing.T) {
 // TestPublishBatch_MessageCountCeiling mirrors the AtomicBatch count guard
 // for the outbox publisher.
 func TestPublishBatch_MessageCountCeiling(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionEventsStream(ctx, t, c)
 
@@ -110,6 +114,7 @@ func TestPublishBatch_MessageCountCeiling(t *testing.T) {
 // TestPublishBatch_ValueSizeCeiling mirrors the AtomicBatch value-size guard
 // for the outbox publisher.
 func TestPublishBatch_ValueSizeCeiling(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionEventsStream(ctx, t, c)
 

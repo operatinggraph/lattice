@@ -31,6 +31,7 @@ func TestDecisionEnumValues(t *testing.T) {
 // delivery must be at least the floor, with a generous lower-bound tolerance
 // for CI scheduling jitter.
 func TestRunDurableConsumer_NakWithDelay_NoHotLoop(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

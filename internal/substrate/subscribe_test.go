@@ -43,6 +43,7 @@ func expectNoEvent(t *testing.T, ch <-chan KVEvent, within time.Duration) {
 // one value under the prefix, and asserts the event surfaces with the
 // expected key/value/Sequence.
 func TestSubscribeKVChanges_HappyPath(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -79,6 +80,7 @@ func TestSubscribeKVChanges_HappyPath(t *testing.T) {
 // TestSubscribeKVChanges_IncludeHistory pre-seeds two values, then
 // subscribes with IncludeHistory=true and asserts both replay.
 func TestSubscribeKVChanges_IncludeHistory(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -121,6 +123,7 @@ func TestSubscribeKVChanges_IncludeHistory(t *testing.T) {
 // state at first connect. We use IncludeHistory=false here to verify
 // the durable-position behaviour cleanly.
 func TestSubscribeKVChanges_DurableResume(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -191,6 +194,7 @@ func TestSubscribeKVChanges_DurableResume(t *testing.T) {
 // instances (instance A's boot must never delete instance B's live
 // durable).
 func TestPruneStaleDurables_AgeGuard(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -232,6 +236,7 @@ func TestPruneStaleDurables_AgeGuard(t *testing.T) {
 // TestSubscribeKVChanges_Tombstone writes a value with isDeleted=true in
 // the envelope and asserts IsDeleted is surfaced.
 func TestSubscribeKVChanges_Tombstone(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

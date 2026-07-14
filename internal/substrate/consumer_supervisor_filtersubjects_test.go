@@ -15,6 +15,7 @@ import (
 // the multi-filter the Processor's processor-main durable needs to cover all four
 // operation lanes from one supervised consumer.
 func TestSupervisor_FilterSubjects_MultiSubjectDelivery(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	stream := "ops-filtersubjects"
 	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"ops.>"}}); err != nil {
@@ -78,6 +79,7 @@ func TestSupervisor_FilterSubjects_MultiSubjectDelivery(t *testing.T) {
 // delivered-message headers via Message.Header — the seam the Processor commit
 // path uses to read the caller's Lattice-Reply-Inbox for a request-reply answer.
 func TestSupervisor_Message_HeaderReplyInbox(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	stream := "ops-header"
 	if err := c.EnsureStream(ctx, StreamSpec{Name: stream, Subjects: []string{"ops.>"}}); err != nil {

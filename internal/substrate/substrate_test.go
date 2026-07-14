@@ -72,6 +72,7 @@ func newTestConn(t *testing.T) (*Conn, context.Context) {
 }
 
 func TestKV_PutGetCreateUpdateDelete(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -145,6 +146,7 @@ func TestKV_PutGetCreateUpdateDelete(t *testing.T) {
 // The bucket is LimitMarkerTTL-provisioned (provisionCoreBucket), the
 // per-key-TTL prerequisite.
 func TestKVCreateWithTTL(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -208,6 +210,7 @@ func TestKVCreateWithTTL(t *testing.T) {
 // governs, superseding the prior entry's), and ttl <= 0 falls back to a plain
 // revision-conditioned update.
 func TestKVUpdateWithTTL(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -272,6 +275,7 @@ func TestKVUpdateWithTTL(t *testing.T) {
 // back to a plain unconditional KVPut (no expiry, preserved by CAS on a
 // subsequent KVCreate of the same key only after it actually expires).
 func TestKVPutWithTTL(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -317,6 +321,7 @@ func TestKVPutWithTTL(t *testing.T) {
 // expectedRevision conflicts and leaves the entry live, while the current
 // revision deletes it (subsequent KVGet returns ErrKeyNotFound).
 func TestKVDeleteRevision(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -345,6 +350,7 @@ func TestKVDeleteRevision(t *testing.T) {
 }
 
 func TestAtomicBatch_Commits(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -393,6 +399,7 @@ func TestAtomicBatch_Commits(t *testing.T) {
 // transition: update instance.<id> + write the new token + delete the prior
 // token, all-or-nothing).
 func TestAtomicBatch_DeleteMarkerInBatch(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -420,6 +427,7 @@ func TestAtomicBatch_DeleteMarkerInBatch(t *testing.T) {
 }
 
 func TestAtomicBatch_AllOrNothing(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -462,6 +470,7 @@ func TestAtomicBatch_AllOrNothing(t *testing.T) {
 }
 
 func TestAtomicBatch_RejectsCrossBucket(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	ops := []BatchOp{
 		{Bucket: "a", Key: "k1", Value: []byte(`x`)},
@@ -488,6 +497,7 @@ func indexOf(s, sub string) int {
 var _ = fmt.Println
 
 func TestKVListKeysPrefix(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -541,6 +551,7 @@ func TestKVListKeysPrefix(t *testing.T) {
 // wildcard filter (the load-bearing "in"-direction case), the token boundary,
 // and deterministic cursor paging.
 func TestKVListKeysFilter(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -673,6 +684,7 @@ func TestPageFilteredKeys(t *testing.T) {
 // success — and a set guard would evaluate a constraint over an incomplete
 // neighbor set.
 func TestKVListKeysFilter_CancelledContext(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

@@ -12,6 +12,7 @@ import (
 // control surface's name validation (Pause/Resume are silent no-ops on an unknown
 // name, so the caller validates against this registry first).
 func TestSupervisor_IsManaged_ManagedNames(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

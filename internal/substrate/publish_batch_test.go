@@ -30,6 +30,7 @@ func provisionEventsStream(ctx context.Context, t *testing.T, c *Conn) {
 // TestPublishBatch_HappyPath publishes three events in one batch and
 // asserts all three land on the stream in publish order.
 func TestPublishBatch_HappyPath(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionEventsStream(ctx, t, c)
 
@@ -81,6 +82,7 @@ func TestPublishBatch_HappyPath(t *testing.T) {
 
 // TestPublishBatch_EmptyRejected confirms the helper rejects empty op lists.
 func TestPublishBatch_EmptyRejected(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	if _, err := c.PublishBatch(ctx, nil); err == nil {
 		t.Fatalf("PublishBatch(nil) should error")
@@ -89,6 +91,7 @@ func TestPublishBatch_EmptyRejected(t *testing.T) {
 
 // TestPublishBatch_HeaderForwarded confirms custom headers reach the wire.
 func TestPublishBatch_HeaderForwarded(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionEventsStream(ctx, t, c)
 

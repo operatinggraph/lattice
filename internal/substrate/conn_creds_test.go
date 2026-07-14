@@ -70,6 +70,7 @@ func startEmbeddedNATSWithNKey(t *testing.T, publicKey string) (url string) {
 // Empty credential fields ⇒ today's anonymous connect: the compatibility
 // hinge that keeps the embedded harness (and every existing test) unchanged.
 func TestConnect_EmptyCredentials_AnonymousRoundTrip(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -100,6 +101,7 @@ func TestConnect_EmptyCredentials_AnonymousRoundTrip(t *testing.T) {
 // actually applies the credential — a dropped option would fail the positive
 // case, and a credential that wasn't required would pass the negative one.
 func TestConnect_NKeyAuthenticatedServer(t *testing.T) {
+	t.Parallel()
 	seedFile, pub := newUserNKey(t)
 	url := startEmbeddedNATSWithNKey(t, pub)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -146,6 +148,7 @@ func TestConnect_BadNKeySeed_Errors(t *testing.T) {
 // A missing credentials file surfaces as a connect error rather than a silent
 // anonymous fallback.
 func TestConnect_MissingCredsFile_Errors(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -160,6 +163,7 @@ func TestConnect_MissingCredsFile_Errors(t *testing.T) {
 // does not expose via ConnectOpts) into a working *Conn: KV operations must
 // round-trip exactly as they do through Connect.
 func TestWrap_RoundTrip(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	nc, err := nats.Connect(url, nats.Name("wrap-test"))
 	if err != nil {
@@ -192,6 +196,7 @@ func TestWrap_RoundTrip(t *testing.T) {
 // the connection, so it succeeds even against an already-closed *nats.Conn.
 // The closed connection surfaces at the first actual KV operation instead.
 func TestWrap_ClosedConn_FailsOnUse(t *testing.T) {
+	t.Parallel()
 	url := startEmbeddedNATS(t)
 	nc, err := nats.Connect(url)
 	if err != nil {

@@ -24,6 +24,7 @@ func provisionObjectStore(ctx context.Context, t *testing.T, c *Conn, bucket str
 }
 
 func TestObject_PutGetRoundTrip(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionObjectStore(ctx, t, c, "core-objects")
 
@@ -65,6 +66,7 @@ func TestObject_PutGetRoundTrip(t *testing.T) {
 }
 
 func TestObject_DeleteIdempotent(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionObjectStore(ctx, t, c, "core-objects")
 
@@ -85,6 +87,7 @@ func TestObject_DeleteIdempotent(t *testing.T) {
 }
 
 func TestObject_PutCapRejectsOversize(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionObjectStore(ctx, t, c, "core-objects")
 
@@ -107,6 +110,7 @@ func TestObject_PutCapRejectsOversize(t *testing.T) {
 }
 
 func TestObject_StoreExists(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	if err := c.ObjectStoreExists(ctx, "core-objects"); !errors.Is(err, ErrBucketNotFound) {
 		t.Fatalf("missing store: err = %v want ErrBucketNotFound", err)
@@ -118,6 +122,7 @@ func TestObject_StoreExists(t *testing.T) {
 }
 
 func TestObject_List(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionObjectStore(ctx, t, c, "core-objects")
 
@@ -166,6 +171,7 @@ func TestObject_List(t *testing.T) {
 }
 
 func TestObject_GetMissingReturnsNotFound(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	provisionObjectStore(ctx, t, c, "core-objects")
 	if _, _, err := c.ObjectGet(ctx, "core-objects", "nope"); !errors.Is(err, ErrObjectNotFound) {

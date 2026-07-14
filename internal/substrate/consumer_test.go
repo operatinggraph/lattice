@@ -54,6 +54,7 @@ func awaitDurableQuiesced(ctx context.Context, t *testing.T, c *Conn, stream, du
 // and a re-run with the same Durable resumes at the next unacked message rather
 // than replaying from the start.
 func TestRunDurableConsumer_AckResumeFromLastAck(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -134,6 +135,7 @@ func TestRunDurableConsumer_AckResumeFromLastAck(t *testing.T) {
 // (at-least-once): the handler Naks once, then Acks, and the same message is
 // delivered at least twice.
 func TestRunDurableConsumer_NakRedelivers(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -173,6 +175,7 @@ func TestRunDurableConsumer_NakRedelivers(t *testing.T) {
 // TestRunDurableConsumer_TermDoesNotRedeliver verifies Term drops the message
 // (no redelivery) while a subsequent message still flows.
 func TestRunDurableConsumer_TermDoesNotRedeliver(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -218,6 +221,7 @@ func TestRunDurableConsumer_TermDoesNotRedeliver(t *testing.T) {
 // TestRunDurableConsumer_CleanShutdown verifies ctx cancellation unblocks
 // RunDurableConsumer promptly (the mc.Stop()-on-ctx watcher) and it returns.
 func TestRunDurableConsumer_CleanShutdown(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -254,6 +258,7 @@ func TestRunDurableConsumer_CleanShutdown(t *testing.T) {
 // body and that Message.Subject is the raw stream subject (so a caller can
 // strip a "$KV.<bucket>." prefix for key recovery).
 func TestRunDurableConsumer_ReadFromBody(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)

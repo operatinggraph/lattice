@@ -14,6 +14,7 @@ import (
 // Probe passes — the precondition gate the protected-lens verify-and-pause relies
 // on. Once the Probe recovers, the message drains.
 func TestSupervisor_InitialPause_GatesFirstDrainUntilProbePasses(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
@@ -88,6 +89,7 @@ func TestSupervisor_InitialPause_GatesFirstDrainUntilProbePasses(t *testing.T) {
 // first iteration without entering the probe loop — even if a Probe is set, it is
 // never consulted because there is no infra pause to recover from.
 func TestSupervisor_NoInitialPause_DrainsImmediately(t *testing.T) {
+	t.Parallel()
 	c, ctx := newTestConn(t)
 	bucket := "core-kv"
 	provisionCoreBucket(ctx, t, c, bucket)
