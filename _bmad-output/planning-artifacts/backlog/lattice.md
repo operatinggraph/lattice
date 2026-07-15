@@ -209,6 +209,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-15 · `91a614f` · [CI] fixed natsperm auth-callout flake (unit-1 run 29383547635, Authorization Violation) — test-server auth_timeout 2s→10s under shard CPU contention; prod conf untouched
 - 2026-07-14 · `59f4881` · [CI] tried isolating natsperm into its own step + raised `-parallel`; reverted — CI wall-clock 139s→140s, no net win (`-p 4` was already CPU-bin-packed, not natsperm-bound)
 - 2026-07-14 · `ea2b48b` · [CI] internal/substrate's 63 tests now `t.Parallel()` (20.4s→9s local); CI shard flat — ceiling confirmed 2x
 - 2026-07-14 · `c22b3a6` · [CI] processor+outbox `t.Parallel()` (29s→9s, 17s→10s); found real `internal/bootstrap.populate()` global-state race blocking the same fix elsewhere
