@@ -67,6 +67,14 @@ func startServerFromConf(t *testing.T) string {
 	opts.StoreDir = jsstore.Dir(t)
 	opts.NoLog = true
 	opts.NoSigs = true
+	// deploy/nats-server.conf sets no auth_timeout, so nats-server defaults
+	// to 2s (no TLS). Under CI CPU contention (this package's 32
+	// t.Parallel() tests plus sibling packages sharing the runner), a
+	// slow-but-correct auth-callout round trip can exceed 2s and the
+	// server closes the connection as an Authorization Violation before
+	// the test ever exercises the permission model. Test-only override —
+	// deploy/nats-server.conf itself is untouched.
+	opts.AuthTimeout = 10
 	s := natsserver.RunServer(opts)
 	t.Cleanup(s.Shutdown)
 	return s.ClientURL()
