@@ -238,14 +238,15 @@ jobs:
         # sharing the service container above (unique per-test table/role names
         # keep them -p-parallel-safe, per their own doc comments). This shard's
         # package list is weight-balanced against unit-2 by per-package
-        # test-file line count (~53k LOC each half).
+        # test-file line count (~53k LOC each half). internal/natsperm runs
+        # separately below (see that step for why).
         env:
           POSTGRES_TEST_DSN: postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable
         run: >-
           go test -count=1 -p 4 -timeout 10m
           ./cmd/cafe-app/... ./cmd/clinic-app/... ./cmd/lattice/...
           ./internal/aiagent/... ./internal/bypass/... ./internal/chronicler/...
-          ./internal/controlauth/... ./internal/natsperm/... ./internal/opstatus/...
+          ./internal/controlauth/... ./internal/opstatus/...
           ./internal/pkgmgr/... ./internal/processor/... ./internal/starlarksandbox/...
           ./internal/substrate/... ./internal/testutil/... ./internal/vault/...
           ./packages/clinic-domain/... ./packages/control-authz/...
@@ -255,6 +256,22 @@ jobs:
           ./packages/one-bill/... ./packages/orchestration-base/...
           ./packages/privacy-operator-grant/... ./packages/service-domain/...
           ./packages/wellness-domain/...
+
+      - name: Run internal/natsperm tests (isolated, raised -parallel)
+        # natsperm's two matrix-wide conformance tests (registry-driven write
+        # isolation + stream-admin side channel) are I/O-wait-bound, not CPU-
+        # bound: each of their ~150 per-bucket/per-component subtests either
+        # returns fast or blocks on a fixed 500ms denial timeout (a permission
+        # violation gets no reply, so the client just waits out its context —
+        # see conf_test.go's deniedTimeout doc comment). Go's default
+        # -parallel equals GOMAXPROCS, so those ~150 waiters serialize into
+        # small batches instead of overlapping. Running natsperm alone (no
+        # -p 4 cross-package contention) with -parallel raised well past core
+        # count collapses that wait; -parallel raised further while sharing a
+        # runner with other packages' concurrent test binaries risks CPU
+        # starvation flaking unrelated tests, so this only stays safe in its
+        # own isolated step.
+        run: go test -count=1 -parallel 16 -timeout 5m ./internal/natsperm/...
 
   unit-2:
     runs-on: ubuntu-latest
