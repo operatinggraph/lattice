@@ -1,6 +1,9 @@
 # Processor-MAC'd sensitive-refs — ref provenance for the external-egress unwrap
 
-**Status: 📐 awaiting-Andrew (ratification).**
+**Status: ✅ RATIFIED (Andrew, 2026-07-16) — Alternative B as designed: dedicated mandatory-MAC
+`lattice.vault.decryptref` RPC + bridge grant swap. The #2/#3/#10 contract edits were committed by
+Andrew himself (`d55c185`, "contract changes reviewed"). The Lattice Steward builds Fires 1–2 (§8);
+AI-caps Fire 4 unblocks when both land.**
 Author: Winston (Designer fire, 2026-07-12).
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Security & trust boundary → Processor-MAC'd
 sensitive-refs (ref provenance)*.
@@ -48,8 +51,8 @@ both live in `cmd/processor`, which already holds the master KEK; the MAC key is
 the shelved *keyed identity-index hashes* row (`dedup-over-encrypted-pii-design.md` §10-C) said it would
 need — that item stays shelved; only the ref consumer is built.
 
-**Frozen-contract changes — three small edits, staged UNCOMMITTED in `main` (the diffs are the
-proposal):** #10 §10.5 loom-shard (the marker shape gains `mac`; the bridge unwraps via the ref-verified
+**Frozen-contract changes — three small edits, COMMITTED (`d55c185`, Andrew, 2026-07-16):** #10 §10.5
+loom-shard (the marker shape gains `mac`; the bridge unwraps via the ref-verified
 RPC), #3 §3.10 (the **ref-provenance rule** joins the live-envelope rule; the egress consumer decrypts
 only through the verified RPC), #2 §2.3/§2.5(f) (one-phrase: the sensitive-ref is Processor-
 authenticated). Details §5. Two fires for the Steward (§8); Fire 4 of AI-caps builds its lint against
@@ -269,13 +272,13 @@ open.
   scaffolding before AI DDLs exist); the trigger has now fired — Fire 4 is signed off and blocked on
   this. Building it now is the ratified sequencing, not a reversal.
 
-## 5. Contract surface (edits staged UNCOMMITTED in `main`; diffs are the proposal)
+## 5. Contract surface (ratified — committed `d55c185`)
 
 | Contract § | Change vs build-to | Detail |
 |---|---|---|
-| **#10 §10.5 (loom shard) — externalTask `params`** | **CHANGE (staged)** | The sensitive-ref sentence: marker shape `{ref, ciphertext, mac, field}` — the Processor authenticates `{ref, requestId, ciphertext}` at hydration; the bridge unwraps via the **ref-verified Vault decrypt RPC**; an unverifiable ref is a permanent data error (converge, never dispatch). |
-| **#3 §3.10 — Readers + rules** | **CHANGE (staged)** | The **ref-provenance rule** joins the live-envelope rule: a sensitive-ref carries a Processor-minted MAC binding `{ref, requestId, ciphertext}`; the external-egress unwrap consumer decrypts **only** through the ref-verified RPC (mandatory verification); the wholesale decrypt RPC remains for the inspector class (Loupe). |
-| **#2 §2.3 table + §2.5 class (f)** | **CHANGE (staged, one phrase each)** | The sensitive-ref parenthetical gains "Processor-authenticated (MAC'd) — see §3.10 ref-provenance". |
+| **#10 §10.5 (loom shard) — externalTask `params`** | **CHANGE (committed)** | The sensitive-ref sentence: marker shape `{ref, ciphertext, mac, field}` — the Processor authenticates `{ref, requestId, ciphertext}` at hydration; the bridge unwraps via the **ref-verified Vault decrypt RPC**; an unverifiable ref is a permanent data error (converge, never dispatch). |
+| **#3 §3.10 — Readers + rules** | **CHANGE (committed)** | The **ref-provenance rule** joins the live-envelope rule: a sensitive-ref carries a Processor-minted MAC binding `{ref, requestId, ciphertext}`; the external-egress unwrap consumer decrypts **only** through the ref-verified RPC (mandatory verification); the wholesale decrypt RPC remains for the inspector class (Loupe). |
+| **#2 §2.3 table + §2.5 class (f)** | **CHANGE (committed, one phrase each)** | The sensitive-ref parenthetical gains "Processor-authenticated (MAC'd) — see §3.10 ref-provenance". |
 | #5 §5.4 Health | build-to | `egress_unverified_total` (bridge) is author-discretion metric space. |
 | #4 idempotency / #10 §10.6 | build-to | Unchanged — same-requestId redelivery verifies; correlation/async SPI untouched. |
 
@@ -412,5 +415,5 @@ change. **The pre-build gate is discharged; no deferred gate is left for the Ste
 
 ---
 
-*Designed by Winston (Designer fire, 2026-07-12). Awaiting Andrew's ratification; the Lattice Steward
-builds Fires 1–2 after ✅; AI-caps Fire 4 unblocks on Fire 1+2 landing (its own lane builds the §7 lint).*
+*Designed by Winston (Designer fire, 2026-07-12); ratified by Andrew 2026-07-16. The Lattice Steward
+builds Fires 1–2; AI-caps Fire 4 unblocks on Fire 1+2 landing (its own lane builds the §7 lint).*
