@@ -49,6 +49,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -56,6 +57,7 @@ import (
 
 	"github.com/asolgan/lattice/cmd/lattice/output"
 	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/asolgan/lattice/internal/capabilitykv"
 	"github.com/asolgan/lattice/internal/pkgmgr"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -173,6 +175,17 @@ func main() {
 	fmt.Println("    A subsequent RequestService as the tenant, with authContext.service ==",
 		templateKey, ", is now authorized via the cap.svc availability grant once it projects.")
 
+	// `make up-facet` launches `bin/facet` immediately after this script
+	// returns, and facet's first act is the `personal.register` control op —
+	// gated on `cap.roles.<tenant>` carrying `ctrl.refractor.register`
+	// (packages/control-authz/permissions.go's consumer grant), which the
+	// AssignRole above only re-projects asynchronously (Contract #6). Wait
+	// for it here so a cold `make up-facet` doesn't race the projection and
+	// fail facet's registration (verticals.md "Facet cold-start races the
+	// cap projection"); the other seed steps above already gave the
+	// projection a head start, so this is typically an immediate check.
+	waitForRoleGrant(ctx, conn, tenantKey, "ctrl.refractor.register")
+
 	// Machine-readable line for `make up-facet` (facet-app-ux.md §7): the
 	// bare NanoID (not the full vtx.identity.<id> key) is what EDGE_IDENTITY_ID
 	// and `bin/gateway dev-token -sub <NanoID>` both expect.
@@ -255,4 +268,36 @@ func must(err error, context string) {
 func mustSHA256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// waitForRoleGrant polls actorKey's cap.roles.<actor> projection (Refractor's
+// capabilityRoles lens re-projects asynchronously after a holdsRole change,
+// per Contract #6 — there is no synchronous "projection done" signal) until
+// it carries operationType, mirroring verify-real-actor-write-auth.go's
+// helper of the same name.
+func waitForRoleGrant(ctx context.Context, conn *substrate.Conn, actorKey, operationType string) {
+	rolesKey, err := capabilitykv.RolesKeyFromActor(actorKey)
+	must(err, "derive roles key")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entry, err := conn.KVGet(ctx, bootstrap.CapabilityKVBucket, rolesKey)
+		if err == nil {
+			doc, perr := capabilitykv.ParseCapabilityDoc(entry.Value)
+			must(perr, "parse "+rolesKey)
+			for _, p := range doc.PlatformPermissions {
+				if p.OperationType == operationType {
+					fmt.Printf("==> projected:       %s: %s in %s (rev=%d)\n", actorKey, operationType, rolesKey, entry.Revision)
+					return
+				}
+			}
+		} else if !errors.Is(err, substrate.ErrKeyNotFound) {
+			fmt.Fprintf(os.Stderr, "FATAL poll %s: %v\n", rolesKey, err)
+			os.Exit(1)
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr, "FATAL %s never appeared in %s within 5s\n", operationType, rolesKey)
+			os.Exit(1)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
