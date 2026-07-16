@@ -19,6 +19,10 @@
 //	EDGE_TOKEN         bearer JWT (Contract #11) authenticating the NATS connection
 //	                   and every Gateway submit (required)
 //	FACET_HTTP_ADDR    HTTP listen address (default: 127.0.0.1:7810)
+//	FACET_DEV_AUTH     set to enable POST /api/claim (Fire 3, claim.go) — mints a
+//	                   throwaway device credential in-process to run the real
+//	                   ClaimIdentity ceremony; loopback-only, demo posture only
+//	FACET_DEV_PRIVATE_KEY_PATH  overrides the shared dev signing key path (optional)
 //
 // No Health-KV reporting: EDGE.3's per-identity NATS connection is confined
 // by natsauth's issued permission set to exactly `lattice.sync.user.<U>` +
@@ -76,6 +80,11 @@ func run(logger *slog.Logger) error {
 	token := os.Getenv("EDGE_TOKEN")
 	if token == "" {
 		return errors.New("EDGE_TOKEN must be set")
+	}
+
+	signer, err := setupDevSigner(logger, isLoopbackHost(hostOf(httpAddr)))
+	if err != nil {
+		return err
 	}
 
 	st, err := store.Open(storePath)
@@ -165,6 +174,8 @@ func run(logger *slog.Logger) error {
 		feed:       fd,
 		logger:     logger,
 		identityID: identityID,
+		gatewayURL: gatewayURL,
+		devSigner:  signer,
 	}
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)

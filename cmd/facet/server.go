@@ -31,6 +31,11 @@ type server struct {
 	feed       *feed
 	logger     *slog.Logger
 	identityID string
+	// gatewayURL and devSigner back /api/claim (claim.go, Fire 3) — a
+	// standalone Gateway call authenticated by a freshly-minted throwaway
+	// credential, independent of this process's own identityID/agent.
+	gatewayURL string
+	devSigner  *devSigner
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -41,6 +46,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 	mux.HandleFunc("/api/feed", s.handleFeed)
 	mux.HandleFunc("/api/enqueue", s.handleEnqueue)
+	mux.HandleFunc("/api/claim", s.handleClaim)
 }
 
 // handleFeed implements GET /api/feed (SSE) — see feed.go's writeSSE.
