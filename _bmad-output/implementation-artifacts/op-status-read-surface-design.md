@@ -13,10 +13,8 @@ tracker's COMMITTED verdict — disposition (a) from §4, one probe instead of t
 `lattice.op.status` pub-allow (`deploy/nats-server.conf` regenerated); `TestOpStatusReachability`
 gains the loom positive vector. Contract #10 §10.6's wording (GET the tracker/task-vertex → ask the
 RPC) is reconciled in `docs/contracts/10-orchestration-loom.md` — committed locally (`c5221f9`) per
-house rules (paired with this already-ratified design), but the **push is held**: the auto-mode git
-gate treats any push touching a `docs/contracts/*` file as needing Andrew's own confirmation it can
-verify directly, rather than accepting the ratification recorded in this doc. Andrew: `git push` to
-land it. Fire 4 (`8d4ebd9`) migrates
+house rules (paired with this already-ratified design), and confirmed landed: `main`/`origin/main`
+are in sync (audited 2026-07-16), so the prior "push held" caveat no longer applies. Fire 4 (`8d4ebd9`) migrates
 `lattice op status` (`cmd/lattice/op/op.go`) off its raw Core-KV `KVGet` of the tracker onto the same
 RPC — the last of the four named submitters in §1.5 to migrate. `lattice` gains the
 `lattice.op.status` pub-allow (`deploy/nats-server.conf` regenerated, applied live via

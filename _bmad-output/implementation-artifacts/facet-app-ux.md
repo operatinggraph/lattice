@@ -4,8 +4,8 @@
 > the seeded demo stack: Home → Service Detail → descriptor form → submit → Outbox confirmed → instance
 > appears in both Activity and Service Detail. Not live-clicked this fire: the offline/reconnect banner and
 > task-completion auto-clear (no task was seeded) — same proven SSE/agent-retry code paths `cmd/edge` already
-> exercises, not a gap in what shipped. Next: Fire 3 (real auth turn-on), gated on subscribe-ACL Fires 1-3 +
-> multi-credential Fire 2 (both ratified, queued in `lattice.md`).
+> exercises, not a gap in what shipped. Next: Fire 3 (real auth turn-on) — subscribe-ACL Fires 1-3 +
+> multi-credential Fire 2 both shipped 2026-07-11/12 (audited 2026-07-16: no longer gated).
 >
 > **Platform gaps this fire also closed** (surfaced by live verification, not anticipated by this spec):
 > `packages/edge-manifest` never shipped its D1 read-grant producer (added `edgeManifestReadGrants`, an
@@ -22,9 +22,9 @@ Facet's **Fire 2** is Transport Stage 0 from the design (§5): "dev showcase (bu
 (`cmd/facet`) embeds `internal/edge` in the same **trusted posture** `cmd/edge` already runs today
 (env-configured `EDGE_IDENTITY_ID` / `EDGE_TOKEN`, no real login), and serves a **PWA renderer** that
 draws its entire UI from that one identity's `manifest.*` rows. There is no OIDC, no `whoami`, no claim
-UX here — that is explicitly **Fire 3**, gated behind subscribe-ACL + multi-credential Fire 2 (a
-different, already-ratified, still-unbuilt Fire 2 belonging to the *multi-credential-identity-linking*
-design; do not confuse the two "Fire 2"s across designs).
+UX here — that is explicitly **Fire 3**, which rides on subscribe-ACL + multi-credential Fire 2 (a
+different Fire 2 belonging to the *multi-credential-identity-linking* design; do not confuse the two
+"Fire 2"s across designs) — both now shipped, so Fire 3 is unblocked.
 
 So structurally Facet v0 is single-identity-per-process like `loupe` / `loftspace-app` / `clinic-app` — but
 unlike those three (which are CRUD-over-a-lens apps with hand-authored forms), Facet's entire point is that
@@ -320,8 +320,8 @@ the design doc is exactly steps 1–3 plus step 4 (offline queue+drain) plus ste
 
 ## 6. Out of scope (Fire 2 guardrails)
 
-- **No OIDC login, no `whoami`, no claim/link UX** — Fire 3 (gated on subscribe-ACL Fires 1–3 +
-  multi-credential Fire 2, both already ratified but unbuilt). The Me screen's "claim your identity" and
+- **No OIDC login, no `whoami`, no claim/link UX** — Fire 3 (rode on subscribe-ACL Fires 1–3 +
+  multi-credential Fire 2, both shipped 2026-07-11/12 — no longer gated). The Me screen's "claim your identity" and
   "manage sign-in methods" affordances are placeholders only.
 - **No browser-native NATS / WebSocket** — Fire 4. The browser only speaks HTTP/SSE to `cmd/facet`.
 - **No vertical-specific screens beyond generic service instances** (a lease detail view, an appointment

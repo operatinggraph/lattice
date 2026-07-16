@@ -47,7 +47,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
-| **[Bridge/Processor] Op-status read surface — `lattice.op.status` responder** | Processor-hosted op-status RPC (vault.decrypt pattern); all 4 named submitters migrated. | ★★★ | S | ✅ all 4 fires shipped · [design](../../implementation-artifacts/op-status-read-surface-design.md) · 🔭 §10.6 contract edit push-held for Andrew (see design doc Status) · unblocks matrix-hygiene read-tightening follow-on |
 
 ### Survey log (round-robin rotation)
 
@@ -115,13 +114,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > (2026-07-12) — the offline-first read loop, the optimistic write path, and the untrusted
 > multi-identity security turn-on (Gateway-submit, Personal Lens PL.3 fan-out, per-identity
 > subscribe-ACL) are all done — see [edge design §7](../../implementation-artifacts/edge-lattice-full-design.md).
-> **Next Edge increment: EDGE.4** (Vault Proxy, gated on Vault Phase A + PL.5, both since shipped) —
-> the `personal.hydrate`/register/deregister capability-auth gap that additionally gated it is now
-> CLOSED (2026-07-12): `ctrl.refractor.{register,deregister,hydrate}` grant scope=any to the `consumer`
-> role (identity-domain dependency added to `packages/control-authz`), the missing `hydrate` op-table
-> entry is in, and the matching transport subjects are open in `natsauth.go`'s `controlRPCs` — safe
-> because the §3.4 server-side identity-binding override confines each op to the caller's own identity
-> regardless of capability scope. EDGE.4 is unblocked. **EDGE.5** (browser/mobile node, gated
+> **EDGE.4 SHIPPED** (2026-07-13, `fb557cb` inc 1 + `3c61feb` inc 2 — identity-bound `sessionkey`
+> control RPC + `internal/edge/vault` client, local AEAD decrypt via `vault.OpenWithSessionKey`).
+> EDGE.1–4 are now all done (see the Edge Lattice row below). **EDGE.5** (browser/mobile node, gated
 > on the Gateway WS/push bridge) remains a separate, larger, Designer-scoped item. A full multi-persona
 > adversarial re-review of the EDGE.3 security boundary is still flagged open in the design doc §8.
 > **sensitive-param-egress CLOSED** (2026-07-11) — Fire 1 (disposition + emission guard) + Fire 2 (bridge
@@ -133,9 +128,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > `make seed-edge-demo` + a genuine live e2e (`internal/refractor/edge_manifest_fire1_e2e_test.go`) close
 > Fire 1's own green bar; also fixed a real bug where the 5 shipped lenses lacked the `anchor` column
 > `projection.personalEnvelopeFn` requires, so they'd never have published a delta in production.
-> Live-stack `make seed-edge-demo` is currently blocked by a separately-filed capability-projection bug
-> (see the Component-maintenance table's [Refractor/rbac-domain] row) — not a fault of edge-manifest's own code. **Next: Fire 2**
-> `[verticals]` — Facet v0 dev host + renderer (own lane, not Lattice's).
+> The `[Refractor/rbac-domain]` capability-projection bug that had been blocking live-stack
+> `make seed-edge-demo` is CLOSED (`0b72492`, 2026-07-13) — no longer a caveat.
+> **`[verticals]` Facet Fire 2 SHIPPED** (`f5b3031`, 2026-07-13, dev host + PWA renderer, live-verified).
+> Facet's own next is Fire 3 (auth turn-on), now unblocked — see verticals.md.
 > **AI-caps Fire 4 materializer NOT yet build-ready**: sign-off condition 1's design pass is done —
 > **Processor-MAC'd sensitive-refs is 📐 awaiting-Andrew** (2026-07-12, see the Security & trust
 > boundary row) — but its 2 fires must be ratified + built first; Fire 4's vertexTypeDDL/opMeta
@@ -190,7 +186,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x, isolating natsperm into its own step reconfirmed it (Done log) · next: propose paid larger runners to Andrew, or fix the `internal/bootstrap` globals race (row above) to unlock more `t.Parallel()` |
-| **`internal/bootstrap` primordial-ID globals race** | `populate()` (nanoid.go) writes package-level globals per call; `testutil.SetupPackageTestEnv` calls it per-test, so `t.Parallel()` races (confirmed `-race`). Blocks parallelizing lease-signing/clinic-domain/identity-domain tests. Fix: thread IDs via a returned struct, not package vars. | ★★ | S | 🆕 filed (Whetstone) · repro `-race` on identity-domain w/ `t.Parallel()` added |
+| **`internal/bootstrap` primordial-ID globals race** | `populate()` (nanoid.go) writes ~64 package-level globals per call; `SetupPackageTestEnv` calls it per-test, so `t.Parallel()` races (confirmed `-race`). Blocks parallelizing lease-signing/clinic-domain/identity-domain tests. | ★★ | M | 🔭 needs a design note first — audit found ~90 call sites, not a same-fire rename as filed; scope: test-scoped vs. universal fix + return-shape change |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ Fires 1–2 shipped · [design §12](../../implementation-artifacts/script-read-posture-design.md) · Fire 3 (guards) deferred to its first consumer; debt sweep + warn→block flip SHIPPED `63aab49` |
 
