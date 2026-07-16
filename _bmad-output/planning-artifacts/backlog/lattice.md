@@ -116,9 +116,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > subscribe-ACL) are all done — see [edge design §7](../../implementation-artifacts/edge-lattice-full-design.md).
 > **EDGE.4 SHIPPED** (2026-07-13, `fb557cb` inc 1 + `3c61feb` inc 2 — identity-bound `sessionkey`
 > control RPC + `internal/edge/vault` client, local AEAD decrypt via `vault.OpenWithSessionKey`).
-> EDGE.1–4 are now all done (see the Edge Lattice row below). **EDGE.5** (browser/mobile node) is now
-> designed — 📐 awaiting-Andrew, [edge-browser-node-design.md](../../implementation-artifacts/edge-browser-node-design.md)
-> (native NATS WS listener + wasm engine host; no Gateway bridge). A full multi-persona
+> EDGE.1–4 are now all done (see the Edge Lattice row below). **EDGE.5** (browser/mobile node) is
+> ✅ ratified (2026-07-16, FORK-W A′) — [edge-browser-node-design.md](../../implementation-artifacts/edge-browser-node-design.md);
+> fires W1–W4 ALL run in THIS lane (Andrew: single-lane, incl. W4's Facet renderer swap — do not
+> park W4 as "verticals"). A full multi-persona
 > adversarial re-review of the EDGE.3 security boundary is still flagged open in the design doc §8.
 > **sensitive-param-egress CLOSED** (2026-07-11) — Fire 1 (disposition + emission guard) + Fire 2 (bridge
 > unwrap + lease-signing live consumer) both shipped, CI green.
@@ -165,8 +166,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 (multicast dedup, WebSocket bridge) deferred, no Edge consumer yet |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · EDGE.5 📐 awaiting-Andrew · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) |
+| Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 WS half subsumed by the ratified [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md); multicast dedup stays deferred (bandwidth trigger) |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · EDGE.5 ✅ ratified 2026-07-16, W1–W4 all this lane · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ CLOSED (Fire 1) · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) · next: Fire 2 `[verticals]` Facet v0 app |
 
 ### AI-native

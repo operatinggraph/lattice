@@ -1,6 +1,10 @@
 # EDGE.5 — the browser Edge node (browser-native transport + the engine's second host) — design
 
-**Status: 📐 awaiting-Andrew (ratification).** Author: Winston (Designer fire, 2026-07-16).
+**Status: ✅ RATIFIED (Andrew, 2026-07-16) — FORK-W A′ (wasm semantics core + JS transport shell;
+B stays the pre-approved tripwire fallback). Single-lane directive (Andrew, at ratification):
+fires W1–W4 ALL run in the lattice lane — the whole chain in one lane so neither steward can see
+itself blocked on the other; this also restores the Facet design's own fire-4→Lattice routing.
+No frozen-contract change.** Author: Winston (Designer fire, 2026-07-16).
 **Backlog rows:** [lattice.md](../planning-artifacts/backlog/lattice.md) → *Edge & personal lenses → Edge Lattice (full)* (EDGE.5 is its §7 item 5) · realizes **Facet Fire 4 `[lattice]`** ([edge-showcase-app-design.md](edge-showcase-app-design.md) §7) and **Facet transport Stage 2** (its §5).
 **Consumers:** Facet (the ratified PWA client — Fire 2 shipped `f5b3031`, Fire 3 📋 ready in the verticals lane) is the named, already-built consumer; the wasm engine host is what lets it drop the Go host and run on any browser device.
 **Contracts:** #11 (external actor authN — build-to; the same bearer JWT authenticates the WS connect via the shipped auth callout) · #1 (subject shapes — build-to) · #2 (envelope — build-to via the shipped Gateway door). **Frozen-contract change: NONE.**
@@ -121,7 +125,7 @@ After W2, `internal/edge`'s semantics packages have no bbolt/substrate imports a
 
 ### 3.4 Fire W4 — Facet goes browser-native (the verticals hand-off)
 
-The PWA drops the Go host: renderer binds to the engine's JS API, `cmd/facet` shrinks to a static file server (or the PWA is served by anything). Green bar = **Facet Fire 4's ratified acceptance**: the PWA on a second machine completes the Fire-2 e2e — hydrate → order laundry → pending→confirmed → task auto-complete → offline queue → reconnect drain — under confined WS permissions, **no local binary**. This fire belongs to the verticals lane (it is Facet Fire 4's app half; W1–W3 are its lattice half).
+The PWA drops the Go host: renderer binds to the engine's JS API, `cmd/facet` shrinks to a static file server (or the PWA is served by anything). Green bar = **Facet Fire 4's ratified acceptance**: the PWA on a second machine completes the Fire-2 e2e — hydrate → order laundry → pending→confirmed → task auto-complete → offline queue → reconnect drain — under confined WS permissions, **no local binary**. Ratification routed this fire to the **lattice lane with W1–W3** (Andrew's single-lane directive — the whole W1→W4 chain runs in one lane so neither steward reads itself as blocked on the other; this matches the Facet design's own fire-4→Lattice routing). The verticals lane consumes the result; it does not build it.
 
 ### 3.5 Read/write/state summary (unchanged invariants)
 
@@ -180,7 +184,7 @@ The PWA drops the Go host: renderer binds to the engine's JS API, `cmd/facet` sh
 1. **W1 `[lattice]` — WS listener + transport-parity vectors.** `RenderConf` websocket block (explicit port, dev `no_tls`, non-empty `allowed_origins`) + regenerated conf + compose port + the seven WS auth-callout vectors + the config-shape pin. *Green:* vectors pass over `ws://`; `TestConfMatchesMatrix` green. *Depends on: nothing.*
 2. **W2 `[lattice]` — engine seams.** `store.Store` interface + `DeltaSource`/`ControlClient` seams; substrate/bbolt adapters; conformance harness extracted; CI `GOOS=js` compile check. *Green:* existing suites untouched-green. *Depends on: nothing (parallel with W1).*
 3. **W3 `[lattice]` — the browser host.** IndexedDB store (syscall/js) + wasm build target + the JS shell (vendored nats.js, leader election, token-refresh reconnect, `InactiveThreshold`) + the wire-form parity test + vendors.md row. *Green:* conformance harness on IndexedDB; parity test; size budget. *Depends on: W1 + W2.*
-4. **W4 `[verticals]` — Facet browser-native (= Facet Fire 4).** Renderer binds the engine JS API; Go host dropped. *Green:* the ratified Fire-4 acceptance (cross-machine, confined, no binary). *Depends on: W3 + Facet Fire 3 (auth turn-on, 📋 ready).*
+4. **W4 `[lattice]` — Facet browser-native (= Facet Fire 4).** Renderer binds the engine JS API; Go host dropped. *Green:* the ratified Fire-4 acceptance (cross-machine, confined, no binary). *Depends on: W3 + Facet Fire 3 (auth turn-on, 🏗️ building — Inc 1 shipped).* Single-lane: built here, not handed to the verticals steward.
 
 **Deferred, named (unchanged dispositions):** the **push-waker** (Facet G13 — file as its own lattice design when Stage 2 lands = when W4 ships); **PL.6 multicast dedup** (bandwidth trigger); **EDGE.6** local authority (Andrew-gated); native iOS host (re-opens the 2.5.2 store-policy item; the PWA route ships first per Facet FORK-4).
 
@@ -192,4 +196,6 @@ Run as a self-adversarial pass this fire (the substantial-design gate); findings
 
 ---
 
-*Designer fire 2026-07-16 — Winston. One design, flagged for Andrew. Executes Facet Fire 4's lattice half + EDGE.5; corrects one ratified premise (FORK-2 A's in-engine transport) with the vendor-grounded split; **no frozen-contract change**. Board: 🏗️ designing → 📐 awaiting-Andrew.*
+*Designer fire 2026-07-16 — Winston; ratified by Andrew same day (FORK-W A′; W1–W4 single-lane in
+lattice). Executes Facet Fire 4 + EDGE.5; corrects one ratified premise (FORK-2 A's in-engine
+transport) with the vendor-grounded split; **no frozen-contract change**.*
