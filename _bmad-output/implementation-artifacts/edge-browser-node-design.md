@@ -105,7 +105,21 @@ Two mechanical extractions, no behavior change:
    - `ControlClient` — "request-reply a payload on a control subject with an optional `Lattice-Actor` header" (what `NATS().RequestMsgWithContext` provides today).
    The substrate-backed implementations are thin adapters in the same files; **`cmd/edge` and `cmd/facet` compile against them unchanged** — the proof of no-behavior-change is the untouched existing test suites staying green.
 
-After W2, `internal/edge`'s semantics packages have no bbolt/substrate imports and compile under `GOOS=js GOARCH=wasm` (a CI build check, no runtime yet).
+After W2, `internal/edge`'s semantics packages hold no host-coupled concrete type and compile under `GOOS=js GOARCH=wasm` (a CI build check, no runtime yet).
+
+**W2 SHIPPED (2026-07-17).** `store.Store` is an interface (`*BoltStore` behind `//go:build !js`, `Open` unchanged for the Go hosts); `internal/edge/transport` carries the `DeltaSource`/`ControlClient` pair in plain types, with the substrate adapter isolated in `internal/edge/transport/natstransport` (`!js`-tagged, so a browser build cannot dial NATS and bypass the Gateway); `agent/submit_nats.go` (the trusted pre-Gateway submitter) is `!js`-tagged for the same reason; the store tests are now the `storetest` conformance harness (bbolt passes it; IndexedDB answers to it at W3). The pure Contract-#1 key/NanoID helpers moved to the leaf package `internal/substrate/keys`, re-exported from `internal/substrate` so no call site changed.
+
+**Correction — the "no substrate imports" acceptance was necessary but not sufficient, and W3's size budget is the thing at stake.** Measured this fire (`GOOS=js` probe binaries, gzip -9):
+
+| wasm probe | raw | gz |
+|---|---|---|
+| hello-world baseline | 1.84 MB | 0.55 MB |
+| `store`+`overlay`+`transport` (NATS-free after this fire) | 3.04 MB | **0.87 MB** |
+| full engine incl. `sync`/`agent`/`vault` | 8.32 MB | **2.28 MB** |
+
+`sync`/`agent`/`vault` still link `nats.go` — not through `substrate`, which W2 removed, but through the **wire-type packages** they need for DTOs: `internal/refractor/control` (`ControlRequest`/`ControlResponse`), `internal/processor` (`OperationEnvelope`), `internal/vault` (`Ciphertext`/`SessionKey`). Each bundles server-side machinery beside its types, so importing a struct links a NATS client. That is ~1.4 MB gz of dead transport in the browser artifact, against FORK-W's tripwire of ~2× the 1.3 MB-gz baseline (~2.6 MB): **the engine alone is already at 2.28 MB before `syscall/js`, the IndexedDB store, or the JS shell** — so W3 would likely trip the fallback to FORK-W B on dead code rather than on a real limit. The same root cause blocks a dependency-level CI assertion (`go list -deps` must not reach `nats.go`), which is why the js gate today can only catch what fails to compile (bbolt) and is commented to say exactly that: `nats.go` builds for js/wasm, so the build check cannot see it.
+
+**W3 prerequisite (named, not optional):** extract the DTOs these three packages expose to the Edge into leaf packages (std-lib only), leaving the server machinery behind — then the engine drops to ~0.9 MB gz, the FORK-W tripwire measures the artifact rather than the debt, and the js gate can be upgraded from "compiles" to "cannot reach nats.go", which is the assertion that actually confines the browser build to the Gateway door.
 
 ### 3.3 Fire W3 — the browser host (wasm engine + JS shell)
 
@@ -183,7 +197,7 @@ The PWA drops the Go host: renderer binds to the engine's JS API, `cmd/facet` sh
 
 1. **W1 `[lattice]` — WS listener + transport-parity vectors.** `RenderConf` websocket block (explicit port, dev `no_tls`, non-empty `allowed_origins`) + regenerated conf + compose port + the seven WS auth-callout vectors + the config-shape pin. *Green:* vectors pass over `ws://`; `TestConfMatchesMatrix` green. *Depends on: nothing.*
 2. **W2 `[lattice]` — engine seams.** `store.Store` interface + `DeltaSource`/`ControlClient` seams; substrate/bbolt adapters; conformance harness extracted; CI `GOOS=js` compile check. *Green:* existing suites untouched-green. *Depends on: nothing (parallel with W1).*
-3. **W3 `[lattice]` — the browser host.** IndexedDB store (syscall/js) + wasm build target + the JS shell (vendored nats.js, leader election, token-refresh reconnect, `InactiveThreshold`) + the wire-form parity test + vendors.md row. *Green:* conformance harness on IndexedDB; parity test; size budget. *Depends on: W1 + W2.*
+3. **W3 `[lattice]` — the browser host.** **First: the DTO extraction named in §3.2** — without it the engine carries ~1.4 MB gz of unreachable NATS client and the size tripwire measures the debt, not the artifact. Then: IndexedDB store (syscall/js) + wasm build target + the JS shell (vendored nats.js, leader election, token-refresh reconnect, `InactiveThreshold`) + the wire-form parity test + vendors.md row. *Green:* conformance harness on IndexedDB; parity test; size budget; the js CI gate upgraded from "compiles" to "`go list -deps` cannot reach nats.go". *Depends on: W1 + W2.*
 4. **W4 `[lattice]` — Facet browser-native (= Facet Fire 4).** Renderer binds the engine JS API; Go host dropped. *Green:* the ratified Fire-4 acceptance (cross-machine, confined, no binary). *Depends on: W3 + Facet Fire 3 (auth turn-on, 🏗️ building — Inc 1 shipped).* Single-lane: built here, not handed to the verticals steward.
 
 **Deferred, named (unchanged dispositions):** the **push-waker** (Facet G13 — file as its own lattice design when Stage 2 lands = when W4 ships); **PL.6 multicast dedup** (bandwidth trigger); **EDGE.6** local authority (Andrew-gated); native iOS host (re-opens the 2.5.2 store-policy item; the PWA route ships first per Facet FORK-4).
