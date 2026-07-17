@@ -65,16 +65,21 @@ type devSigner struct {
 
 const devTokenTTL = 30 * time.Minute
 
-func (d *devSigner) mint(subject string) (string, error) {
+func (d *devSigner) mint(subject string) (string, time.Time, error) {
 	now := d.now()
+	exp := now.Add(d.ttl)
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
 		Subject:   subject,
 		IssuedAt:  jwt.NewNumericDate(now),
 		NotBefore: jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(d.ttl)),
+		ExpiresAt: jwt.NewNumericDate(exp),
 	})
 	tok.Header["kid"] = d.kid
-	return tok.SignedString(d.priv)
+	signed, err := tok.SignedString(d.priv)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return signed, exp, nil
 }
 
 // setupDevSigner mirrors readauth.go's DEMO posture (same shared dev key,
@@ -175,7 +180,7 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "generate device credential: "+err.Error())
 		return
 	}
-	token, err := s.devSigner.mint(deviceBareID)
+	token, _, err := s.devSigner.mint(deviceBareID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint device credential: "+err.Error())
 		return

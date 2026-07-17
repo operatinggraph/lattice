@@ -9,20 +9,32 @@
 // a localhost HTTP/SSE feed. The browser never talks NATS directly (that is
 // Stage 2 / Fire 4) — it only ever calls this process's own HTTP surface.
 //
+// Inc 2 (design §7.2): Facet is no longer per-process single-tenant. Each
+// signed-in identity gets its own engine (engine.go), multiplexed by
+// engineManager (enginemanager.go) and selected per-request by a session
+// cookie (session.go) — "same binary, different identity, different app"
+// (design §1) now has a runtime delivery vehicle, not just the claim
+// ceremony's one-shot unclaimed→claimed transition.
+//
 // Environment (mirrors cmd/edge's flat layout, plus an HTTP listener):
 //
-//	EDGE_STORE_PATH    path to the local bbolt store file (default: ./facet.db)
+//	FACET_STORE_DIR    directory holding one bbolt store file per signed-in
+//	                   identity (<dir>/<identityId>.db; default: ./facet-store)
 //	NATS_URL           NATS server URL (default: nats://localhost:4222)
 //	EDGE_GATEWAY_URL   the Gateway's base URL intents submit through (default: http://localhost:8080)
-//	EDGE_IDENTITY_ID   the identity NanoID this node mirrors (required)
-//	EDGE_DEVICE_ID     this device's id (required)
-//	EDGE_TOKEN         bearer JWT (Contract #11) authenticating the NATS connection
-//	                   and every Gateway submit (required)
+//	EDGE_IDENTITY_ID   OPTIONAL boot-time single-user fallback identity — seeds
+//	                   one engine at startup from an externally-minted
+//	                   credential (see EDGE_DEVICE_ID/EDGE_TOKEN), reachable
+//	                   with no login at all. Requires EDGE_DEVICE_ID + EDGE_TOKEN.
+//	EDGE_DEVICE_ID     this device's id, required alongside EDGE_IDENTITY_ID
+//	EDGE_TOKEN         bearer JWT (Contract #11) for the boot fallback identity,
+//	                   required alongside EDGE_IDENTITY_ID
 //	FACET_HTTP_ADDR    HTTP listen address (default: 127.0.0.1:7810)
-//	FACET_DEV_AUTH     set to enable POST /api/claim (Fire 3, claim.go) — mints a
-//	                   throwaway device credential in-process to run the real
-//	                   ClaimIdentity ceremony; loopback-only, demo posture only
+//	FACET_DEV_AUTH     set to enable POST /api/claim + the /login session flow
+//	                   (session.go, claim.go) — mints demo JWTs in-process for
+//	                   any caller-named identity; loopback-only, demo posture only
 //	FACET_DEV_PRIVATE_KEY_PATH  overrides the shared dev signing key path (optional)
+//	FACET_DEV_PUBLIC_KEY_PATH   overrides the shared dev trust key path (optional)
 //
 // No Health-KV reporting: EDGE.3's per-identity NATS connection is confined
 // by natsauth's issued permission set to exactly `lattice.sync.user.<U>` +
@@ -37,6 +49,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -47,15 +60,12 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/edge/sync"
-	"github.com/asolgan/lattice/internal/substrate"
 )
 
 const (
 	defaultHTTPAddr    = "127.0.0.1:7810"
 	defaultGatewayURL  = "http://localhost:8080"
+	defaultStoreDir    = "./facet-store"
 	agentDrainInterval = 5 * time.Second
 )
 
@@ -68,114 +78,55 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
-	storePath := envOrDefault("EDGE_STORE_PATH", "./facet.db")
+	storeDir := envOrDefault("FACET_STORE_DIR", defaultStoreDir)
 	natsURL := envOrDefault("NATS_URL", nats.DefaultURL)
 	gatewayURL := envOrDefault("EDGE_GATEWAY_URL", defaultGatewayURL)
 	httpAddr := envOrDefault("FACET_HTTP_ADDR", defaultHTTPAddr)
-	identityID := os.Getenv("EDGE_IDENTITY_ID")
-	deviceID := os.Getenv("EDGE_DEVICE_ID")
-	if identityID == "" || deviceID == "" {
-		return errors.New("EDGE_IDENTITY_ID and EDGE_DEVICE_ID must both be set")
-	}
-	token := os.Getenv("EDGE_TOKEN")
-	if token == "" {
-		return errors.New("EDGE_TOKEN must be set")
+
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return fmt.Errorf("create store dir %q: %w", storeDir, err)
 	}
 
-	signer, err := setupDevSigner(logger, isLoopbackHost(hostOf(httpAddr)))
+	loopback := isLoopbackHost(hostOf(httpAddr))
+	signer, err := setupDevSigner(logger, loopback)
 	if err != nil {
 		return err
 	}
-
-	st, err := store.Open(storePath)
+	authn, err := setupSessionAuthn(logger, signer)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = st.Close() }()
-	logger.Info("local VAL store opened", "path", storePath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	conn, err := substrate.Connect(ctx, substrate.ConnectOpts{
-		URL: natsURL,
-		// Must be the BARE device id: natsauth.go's Handle reads
-		// req.ClientInformation.Name (this CONNECT option) directly as
-		// deviceID and splices it into the allowed durable-consumer subject
-		// as fmt.Sprintf("edge-sync-%s-%s", identityID, deviceID) —
-		// PermissionsFor's exact literal, matching sync.Manager's own
-		// "edge-sync-"+IdentityID+"-"+DeviceID durable name. A composite
-		// "facet-<id>-<device>" string here breaks that match (permissions
-		// violation on $JS.API.CONSUMER.CREATE) — the same latent mismatch
-		// exists in cmd/edge/main.go's identical "edge-"+id+"-"+device Name.
-		Name:          deviceID,
-		MaxReconnects: -1,
-		ReconnectWait: 2 * time.Second,
-		Token:         token,
-		// Must be "_INBOX.edge." (not "_INBOX.facet.") — natsauth's issued
-		// permission set grants exactly this literal prefix regardless of
-		// which app connects (internal/gateway/natsauth/natsauth.go's
-		// inboxPrefix constant), keyed off the verified identity, not the
-		// connecting app's name.
-		InboxPrefix: "_INBOX.edge." + identityID,
+	engines := newEngineManager(ctx, engineManagerDeps{
+		engineConfig: engineConfig{NATSURL: natsURL, GatewayURL: gatewayURL, StoreDir: storeDir, Logger: logger},
+		Signer:       signer,
 	})
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	logger.Info("connected to NATS", "natsURL", natsURL)
+	defer engines.CloseAll()
 
-	fd := newFeed()
-	overlayStore := overlay.New(st)
-
-	mgr, err := sync.New(conn, st, sync.Config{
-		IdentityID: identityID,
-		DeviceID:   deviceID,
-		// The control-plane's ActorVerifier is a separate opt-in from the
-		// Gateway's (internal/controlauth.WireActorVerifierFromEnv needs
-		// LATTICE_CONTROL_JWT_DEV_MODE/_KEYS_DIR on the Refractor process;
-		// make up-full's dev stack doesn't set it) — until an operator
-		// enables it, the control plane runs Fire 1's documented
-		// self-asserted-header fallback (internal/edge/sync's own doc:
-		// "no verifier configured preserves the self-asserted body"), which
-		// expects the literal actor key here, not the bearer JWT (that
-		// still authenticates the NATS connection itself via Token above,
-		// and every Gateway submit via agent.GatewaySubmitter).
-		ActorHeader: "vtx.identity." + identityID,
-		Logger:      logger,
-		OnChange: func(key string, deleted bool) {
-			fd.publishManifestKey(overlayStore, key, deleted)
-		},
-		OnHydrationComplete: func(revision uint64) {
-			fd.publishReady(revision)
-		},
-	})
-	if err != nil {
-		return err
+	bootIdentityID := os.Getenv("EDGE_IDENTITY_ID")
+	if bootIdentityID != "" {
+		deviceID := os.Getenv("EDGE_DEVICE_ID")
+		token := os.Getenv("EDGE_TOKEN")
+		if deviceID == "" || token == "" {
+			return errors.New("EDGE_DEVICE_ID and EDGE_TOKEN must both be set alongside EDGE_IDENTITY_ID")
+		}
+		if err := engines.Seed(bootIdentityID, deviceID, token); err != nil {
+			return fmt.Errorf("seed boot identity engine: %w", err)
+		}
+		logger.Info("boot identity engine seeded (single-user fallback, no login required)", "identityId", bootIdentityID, "deviceId", deviceID)
 	}
-
-	submitter := &trackingSubmitter{
-		inner: &agent.GatewaySubmitter{URL: gatewayURL, Token: token},
-		feed:  fd,
-	}
-	ag := agent.New(submitter, st, overlayStore, mgr, agent.Config{
-		Logger: logger,
-		Conflict: func(c agent.ConflictInfo) {
-			logger.Warn("facet agent: intent rejected", "requestId", c.RequestID, "keys", c.Keys)
-		},
-	})
-	go runAgentLoop(ctx, ag, logger)
 
 	srv := &server{
-		conn:       conn,
-		store:      st,
-		overlay:    overlayStore,
-		agent:      ag,
-		feed:       fd,
-		logger:     logger,
-		identityID: identityID,
-		gatewayURL: gatewayURL,
-		devSigner:  signer,
+		logger:         logger,
+		gatewayURL:     gatewayURL,
+		devSigner:      signer,
+		authn:          authn,
+		engines:        engines,
+		bootIdentityID: bootIdentityID,
+		loopback:       loopback,
 	}
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
@@ -189,7 +140,7 @@ func run(logger *slog.Logger) error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	logger.Info("facet listening", "addr", httpAddr, "identityId", identityID, "deviceId", deviceID, "gatewayUrl", gatewayURL)
+	logger.Info("facet listening", "addr", httpAddr, "gatewayUrl", gatewayURL, "bootIdentityId", bootIdentityID, "devAuth", signer != nil)
 
 	httpErrCh := make(chan error, 1)
 	go func() {
@@ -200,9 +151,6 @@ func run(logger *slog.Logger) error {
 		httpErrCh <- nil
 	}()
 
-	syncErrCh := make(chan error, 1)
-	go func() { syncErrCh <- mgr.Run(ctx) }()
-
 	select {
 	case <-ctx.Done():
 		logger.Info("signal received; shutting down")
@@ -211,17 +159,15 @@ func run(logger *slog.Logger) error {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			logger.Error("graceful shutdown failed", "error", err)
 		}
-		<-syncErrCh
 		return nil
 	case err := <-httpErrCh:
-		return err
-	case err := <-syncErrCh:
 		return err
 	}
 }
 
 // runAgentLoop periodically drains the intent queue and sweeps the
-// overlay's local GC — identical cadence/shape to cmd/edge's own loop.
+// overlay's local GC — identical cadence/shape to cmd/edge's own loop. Used
+// by every engine (engine.go), not just a single boot-time one.
 func runAgentLoop(ctx context.Context, ag *agent.Agent, logger *slog.Logger) {
 	ticker := time.NewTicker(agentDrainInterval)
 	defer ticker.Stop()

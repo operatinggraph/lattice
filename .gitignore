@@ -50,6 +50,7 @@ lattice.bootstrap.json
 loupe-operator.json
 facet.db
 facet.db-*
+/facet-store/
 /.agents
 processor.log
 /loupe

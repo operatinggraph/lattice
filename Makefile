@@ -983,43 +983,39 @@ seed-showcase:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/seed-showcase.go
 
 ## up-facet — build + start facet (:7810) in the background alongside Loupe
-## (:7777): ensures edge-manifest is installed, reseeds the demo topology
-## (seed-edge-demo is NOT idempotent — a fresh tenant every run, same as
-## dev-seed-staff), mints that tenant a dev bearer JWT via
-## `bin/gateway dev-token` (EDGE.3 is live — facet needs a real token, not a
-## trusted-posture placeholder), and launches facet against it.
+## (:7777): ensures edge-manifest is installed, loads the showcase dataset
+## (idempotent — `make seed-showcase`, edge-showcase-app-design.md §7.3's
+## two-tenant world), and launches facet with FACET_DEV_AUTH=1 — no boot
+## identity: sign in at /login as either showcase tenant (Inc 2, §7.2's
+## "two browsers, two sessions, two identities" green bar). Superseded
+## seed-edge-demo's single non-idempotent tenant + boot-env token minting.
 ## facet-app-ux.md §7.
 up-facet:
 	@$(MAKE) up-full
 	@$(MAKE) install-edge-manifest
-	@echo "==> Building gateway (dev-token minter)..."
-	go build -o bin/gateway ./cmd/gateway
 	@echo "==> Building facet binary..."
 	go build -o bin/facet ./cmd/facet
-	@echo "==> Seeding the edge-manifest demo topology + minting a dev token..."
-	@SEED_OUT="$$(NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/seed-edge-demo.go)"; \
-	echo "$$SEED_OUT"; \
-	TENANT_ID=$$(echo "$$SEED_OUT" | grep '^FACET_TENANT_NANOID=' | cut -d= -f2); \
-	if [ -z "$$TENANT_ID" ]; then echo "FATAL: could not parse tenant NanoID from seed output"; exit 1; fi; \
-	FACET_TOKEN=$$(./bin/gateway dev-token -sub "$$TENANT_ID" -ttl 24h); \
-	echo "==> Killing any prior facet process..."; \
-	pkill -f "bin/facet" 2>/dev/null || true; \
-	echo "==> Starting facet in background (tenant $$TENANT_ID)..."; \
-	EDGE_STORE_PATH=./facet.db NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 \
-		EDGE_IDENTITY_ID="$$TENANT_ID" EDGE_DEVICE_ID=facet-dev-1 EDGE_TOKEN="$$FACET_TOKEN" \
+	@echo "==> Loading the showcase dataset (idempotent)..."
+	@$(MAKE) seed-showcase
+	@echo "==> Killing any prior facet process..."
+	@pkill -f "bin/facet" 2>/dev/null || true
+	@echo "==> Starting facet in background (FACET_DEV_AUTH=1 — sign in at /login as a showcase tenant)..."
+	@FACET_STORE_DIR=./facet-store NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 \
+		FACET_DEV_AUTH=1 \
 		./bin/facet >facet.log 2>&1 </dev/null & \
 	sleep 1; \
-	echo "==> Facet ready: http://127.0.0.1:7810 (tenant $$TENANT_ID)"
+	echo "==> Facet ready: http://127.0.0.1:7810/login (sign in with a showcase tenant NanoID from 'make seed-showcase' output)"
 
 ## run-facet — Build + run the Facet app in the FOREGROUND against an
-## already-up + already-seeded stack. Requires EDGE_IDENTITY_ID and
-## EDGE_TOKEN in the environment (see `make up-facet`'s seed+dev-token
-## steps for how to derive them for a given tenant).
+## already-up + already-seeded stack, with FACET_DEV_AUTH=1 (sign in at
+## /login) unless EDGE_IDENTITY_ID/EDGE_DEVICE_ID/EDGE_TOKEN are set for the
+## boot-env single-user fallback instead (see `make up-facet`'s seed step
+## for a showcase tenant NanoID).
 run-facet:
 	@echo "==> Building facet binary..."
 	go build -o bin/facet ./cmd/facet
 	@echo "==> Facet app on http://127.0.0.1:7810 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 EDGE_DEVICE_ID=$${EDGE_DEVICE_ID:-facet-dev-1} ./bin/facet
+	NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 FACET_DEV_AUTH=$${FACET_DEV_AUTH:-1} ./bin/facet
 
 ## install-onebill — Install the Café Inc 3 "one-bill" composition lens (Café
 ## vertical row, ★★★): re-projects loftspace-ledger's + cafe-ledger's posted

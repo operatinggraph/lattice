@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Facet — Sign in</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --bg-raised: #171a21;
+      --bg-input: #1e222b;
+      --border: #2a2f3a;
+      --text: #d7dce4;
+      --text-dim: #8a93a3;
+      --accent: #5aa9e6;
+      --accent-dim: #3d6e96;
+      --red: #e0564a;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .card {
+      width: 380px;
+      max-width: calc(100vw - 48px);
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 28px;
+    }
+    .brand { font-weight: 600; font-size: 18px; letter-spacing: 0.3px; margin: 0 0 2px; }
+    .brand-sub { color: var(--text-dim); font-weight: 400; }
+    .lede { color: var(--text-dim); margin: 0 0 20px; }
+    label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+    input[type=text] {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: 13px var(--mono);
+      margin-bottom: 12px;
+    }
+    button {
+      width: 100%;
+      background: var(--accent-dim);
+      border: 1px solid var(--accent);
+      color: var(--text);
+      padding: 9px 14px;
+      border-radius: 6px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent); }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text-dim);
+      margin: 20px 0;
+      font-size: 12px;
+    }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+    .hint { font-size: 12px; color: var(--text-dim); margin: 6px 0 0; }
+    .status { margin-top: 14px; font-size: 12px; color: var(--text-dim); min-height: 1.5em; }
+    .status.error { color: var(--red); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p class="brand">Facet <span class="brand-sub">· Lattice Edge</span></p>
+    <p class="lede">Sign in as an identity to open its own view — same app, different data per identity.</p>
+
+    <form id="login-form" novalidate>
+      <label for="identity-id">Identity id</label>
+      <input type="text" id="identity-id" spellcheck="false" autocomplete="off"
+        placeholder="the bare NanoID (e.g. from make seed-showcase)">
+      <button type="submit" id="login-submit">Sign in</button>
+    </form>
+
+    <div class="divider">new here?</div>
+
+    <form id="claim-form" novalidate>
+      <label for="claim-target">Identity to claim</label>
+      <input type="text" id="claim-target" spellcheck="false" autocomplete="off" placeholder="vtx.identity.<id> or bare id">
+      <label for="claim-key">Claim key</label>
+      <input type="text" id="claim-key" spellcheck="false" autocomplete="off" placeholder="the secret handed to you out-of-band">
+      <button type="submit" id="claim-submit">Claim &amp; sign in</button>
+    </form>
+    <p class="hint">Claiming binds this identity to a fresh credential, then signs you straight in.</p>
+
+    <p class="status" id="status"></p>
+  </div>
+
+  <script>
+    (function () {
+      var statusEl = document.getElementById("status");
+      var loginForm = document.getElementById("login-form");
+      var identityInput = document.getElementById("identity-id");
+      var loginSubmit = document.getElementById("login-submit");
+      var claimForm = document.getElementById("claim-form");
+      var claimTarget = document.getElementById("claim-target");
+      var claimKey = document.getElementById("claim-key");
+      var claimSubmit = document.getElementById("claim-submit");
+
+      function setStatus(msg, isError) {
+        statusEl.textContent = msg || "";
+        statusEl.className = "status" + (isError ? " error" : "");
+      }
+
+      // Already signed in (a cookie survived a reload)? Bounce straight to
+      // the app rather than making a returning user sign in again.
+      fetch("/api/whoami", { credentials: "same-origin" })
+        .then(function (res) { return res.json(); })
+        .then(function (body) { if (body && body.loggedIn) location.replace("/"); })
+        .catch(function () { /* stay on this page */ });
+
+      function devLogin(identityId) {
+        return fetch("/api/dev-login", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identityId: identityId }),
+        }).then(function (res) {
+          if (res.ok) { location.replace("/"); return; }
+          return res.json().then(function (body) {
+            setStatus((body && body.error) || "Sign-in failed (" + res.status + ")", true);
+          });
+        });
+      }
+
+      loginForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        var id = identityInput.value.trim();
+        if (!id) { setStatus("Enter an identity id first.", true); return; }
+        loginSubmit.disabled = true;
+        setStatus("Signing in…");
+        devLogin(id)
+          .catch(function (e) { setStatus("Request failed: " + e.message, true); })
+          .finally(function () { loginSubmit.disabled = false; });
+      });
+
+      claimForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        var target = claimTarget.value.trim();
+        var key = claimKey.value.trim();
+        if (!target || !key) { setStatus("Fill in both fields first.", true); return; }
+        if (target.indexOf("vtx.identity.") !== 0) { target = "vtx.identity." + target; }
+        claimSubmit.disabled = true;
+        setStatus("Claiming…");
+        fetch("/api/claim", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetIdentityKey: target, claimKey: key }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok) { setStatus((body && body.error) || "Claim failed (" + res.status + ")", true); return; }
+              setStatus("Claimed — signing in…");
+              return devLogin(body.claimedIdentityKey.replace("vtx.identity.", ""));
+            });
+          })
+          .catch(function (e) { setStatus("Request failed: " + e.message, true); })
+          .finally(function () { claimSubmit.disabled = false; });
+      });
+    })();
+  </script>
+</body>
+</html>

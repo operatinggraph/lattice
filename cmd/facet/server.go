@@ -7,9 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
+	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
 )
@@ -22,20 +20,28 @@ var webFS embed.FS
 // browser never talks to the Gateway or NATS itself — every read is the SSE
 // feed and every write is POST /api/enqueue, both mediated by this process's
 // own embedded edge engine (design §4's Stage 0: "the browser only ever
-// talks to cmd/facet's own localhost HTTP surface").
+// talks to cmd/facet's own localhost HTTP surface"). Inc 2 (§7.2) replaced
+// the single process-lifetime engine Fire 2/3 held here with one engine per
+// signed-in identity, multiplexed by engines and resolved per-request by
+// requireSession — see engine.go/enginemanager.go/session.go.
 type server struct {
-	conn       *substrate.Conn
-	store      *store.Store
-	overlay    *overlay.Overlay
-	agent      *agent.Agent
-	feed       *feed
-	logger     *slog.Logger
-	identityID string
-	// gatewayURL and devSigner back /api/claim (claim.go, Fire 3) — a
-	// standalone Gateway call authenticated by a freshly-minted throwaway
-	// credential, independent of this process's own identityID/agent.
+	logger *slog.Logger
+	// gatewayURL and devSigner back /api/claim (claim.go, Fire 3) and
+	// /api/dev-login (session.go, Inc 2) — standalone Gateway calls / engine
+	// credentials authenticated by a freshly-minted JWT, independent of any
+	// one engine.
 	gatewayURL string
 	devSigner  *devSigner
+	// authn verifies a session cookie's token (session.go); nil when
+	// devSigner is nil (no minter configured ⇒ nothing to verify).
+	authn   *auth.Authenticator
+	engines *engineManager
+	// bootIdentityID is the boot-env EDGE_IDENTITY_ID fallback identity —
+	// see resolveSessionIdentity.
+	bootIdentityID string
+	// loopback gates the session cookie's Secure flag, mirroring
+	// cmd/loupe/readauth.go's setOperatorSessionCookie.
+	loopback bool
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -43,27 +49,49 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	if err != nil {
 		panic("facet: embed web sub-fs: " + err.Error())
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
-	mux.HandleFunc("/api/feed", s.handleFeed)
-	mux.HandleFunc("/api/enqueue", s.handleEnqueue)
-	mux.HandleFunc("/api/claim", s.handleClaim)
+	inner := http.NewServeMux()
+	inner.Handle("/", http.FileServer(http.FS(sub)))
+	inner.HandleFunc("/api/feed", s.handleFeed)
+	inner.HandleFunc("/api/enqueue", s.handleEnqueue)
+	inner.HandleFunc("/api/claim", s.handleClaim)
+	inner.HandleFunc(loginPagePath, s.handleLoginPage)
+	inner.HandleFunc(devLoginPath, s.handleDevLogin)
+	inner.HandleFunc(logoutPath, s.handleLogout)
+	inner.HandleFunc(whoamiPath, s.handleWhoami)
+	mux.Handle("/", s.requireSession(inner))
 }
 
 // handleFeed implements GET /api/feed (SSE) — see feed.go's writeSSE.
+// Acquires the session identity's engine for the SSE connection's whole
+// lifetime (a long-lived hold, not a per-request one — released only when
+// the browser disconnects), so its manifest reads always hit the SAME warm
+// engine that OnChange publishes into.
 func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
-	writeSSE(w, r, s.logger, s.feed, func() []frame {
-		entries, err := s.store.ScanPrefix("manifest.")
+	identityID, ok := sessionIdentity(r.Context())
+	if !ok {
+		s.writeError(w, http.StatusUnauthorized, "no session identity")
+		return
+	}
+	eng, err := s.engines.Acquire(identityID)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "start engine: "+err.Error())
+		return
+	}
+	defer s.engines.Release(identityID)
+
+	writeSSE(w, r, s.logger, eng.feed, func() []frame {
+		entries, err := eng.store.ScanPrefix("manifest.")
 		if err != nil {
-			s.logger.Error("facet: scan manifest prefix failed", "err", err)
+			s.logger.Error("facet: scan manifest prefix failed", "identityId", identityID, "err", err)
 			return nil
 		}
 		frames := make([]frame, 0, len(entries))
 		for _, e := range entries {
-			v, ok, err := s.overlay.Read(e.Key)
+			v, ok, err := eng.overlay.Read(e.Key)
 			if err != nil || !ok {
 				continue
 			}
@@ -99,10 +127,18 @@ type enqueueRequest struct {
 // requestId immediately. The actual Gateway round-trip happens on the
 // existing drain loop; its outcome arrives back over the SSE feed as an
 // "outbox" frame (design §4's "the browser does not block on the actual
-// Gateway round-trip").
+// Gateway round-trip"). Acquires the session identity's engine only for the
+// duration of this one request — unlike handleFeed, there is no long-lived
+// connection to hold it open for, but a live SSE connection for the same
+// identity keeps it warm regardless (ref-counted).
 func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	identityID, ok := sessionIdentity(r.Context())
+	if !ok {
+		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return
 	}
 	var req enqueueRequest
@@ -115,6 +151,13 @@ func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	eng, err := s.engines.Acquire(identityID)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, "start engine: "+err.Error())
+		return
+	}
+	defer s.engines.Release(identityID)
+
 	requestID, err := substrate.NewNanoID()
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "generate requestId: "+err.Error())
@@ -125,7 +168,7 @@ func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		RequestID:     requestID,
 		Lane:          processor.LaneDefault,
 		OperationType: req.OperationType,
-		Actor:         s.identityID,
+		Actor:         identityID,
 		Payload:       req.Payload,
 		Class:         req.Class,
 		AuthContext:   req.AuthContext,
@@ -136,19 +179,19 @@ func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 
 	var touched []string
 	if req.TouchedKey != "" {
-		if err := s.overlay.Apply(req.TouchedKey, requestID, req.Payload, false); err != nil {
+		if err := eng.overlay.Apply(req.TouchedKey, requestID, req.Payload, false); err != nil {
 			s.logger.Warn("facet: optimistic overlay apply failed, continuing without it", "key", req.TouchedKey, "err", err)
 		} else {
 			touched = []string{req.TouchedKey}
 		}
 	}
 
-	if err := s.agent.Enqueue(env, touched); err != nil {
+	if err := eng.agent.Enqueue(env, touched); err != nil {
 		s.writeError(w, http.StatusInternalServerError, "enqueue failed: "+err.Error())
 		return
 	}
 
-	s.feed.enqueueOutbox(&outboxEntry{
+	eng.feed.enqueueOutbox(&outboxEntry{
 		RequestID:     requestID,
 		OperationType: req.OperationType,
 		Payload:       req.Payload,
