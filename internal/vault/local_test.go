@@ -494,3 +494,96 @@ func TestLocalBackend_IssueSessionKey_TTLClamped(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, skOver.ExpiresAt.Before(time.Now().Add(2*time.Hour)), "an over-ceiling ttl must clamp down to the 1h ceiling")
 }
+
+// TestLocalBackend_MAC_Deterministic proves MAC is a pure function of
+// (purpose, data) — unlike Encrypt's random nonce, a verifier must be able to
+// recompute and compare (design sensitive-ref-mac-provenance-design.md §3.1).
+func TestLocalBackend_MAC_Deterministic(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	mac1, err := b.MAC(ctx, vault.RefMACPurpose, []byte("same data"))
+	require.NoError(t, err)
+	mac2, err := b.MAC(ctx, vault.RefMACPurpose, []byte("same data"))
+	require.NoError(t, err)
+	assert.Equal(t, mac1, mac2, "MAC must be deterministic for the same purpose+data")
+	assert.NotEmpty(t, mac1)
+}
+
+// TestLocalBackend_MAC_PurposeSeparation proves distinct purposes yield
+// independent keys — the same data MACs differently under a different
+// purpose (design §3.1's domain-separation requirement).
+func TestLocalBackend_MAC_PurposeSeparation(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	macA, err := b.MAC(ctx, "purpose-a", []byte("data"))
+	require.NoError(t, err)
+	macB, err := b.MAC(ctx, "purpose-b", []byte("data"))
+	require.NoError(t, err)
+	assert.NotEqual(t, macA, macB, "distinct purposes must derive independent keys")
+}
+
+// TestLocalBackend_MAC_DifferentDataDifferentMAC proves MAC is sensitive to
+// its input — changing data under the same purpose changes the MAC (the
+// basic integrity property a verifier's hmac.Equal comparison relies on).
+func TestLocalBackend_MAC_DifferentDataDifferentMAC(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	mac1, err := b.MAC(ctx, vault.RefMACPurpose, []byte("data one"))
+	require.NoError(t, err)
+	mac2, err := b.MAC(ctx, vault.RefMACPurpose, []byte("data two"))
+	require.NoError(t, err)
+	assert.NotEqual(t, mac1, mac2)
+}
+
+// TestLocalBackend_MAC_DistinctBackendsDistinctMACs proves the MAC key
+// derives from the backend's own KEK, not a fixed constant — two backends
+// with different KEKs produce different MACs for identical purpose+data.
+func TestLocalBackend_MAC_DistinctBackendsDistinctMACs(t *testing.T) {
+	ctx := context.Background()
+	b1 := newTestBackend(t)
+	b2 := newTestBackend(t)
+
+	mac1, err := b1.MAC(ctx, vault.RefMACPurpose, []byte("data"))
+	require.NoError(t, err)
+	mac2, err := b2.MAC(ctx, vault.RefMACPurpose, []byte("data"))
+	require.NoError(t, err)
+	assert.NotEqual(t, mac1, mac2, "distinct KEKs must derive distinct MAC keys")
+}
+
+// TestLocalBackend_MAC_EmptyPurposeRejected guards against silently deriving
+// a MAC key under an empty purpose label, which would collapse
+// domain-separation for any caller that forgot to pass one.
+func TestLocalBackend_MAC_EmptyPurposeRejected(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	_, err := b.MAC(ctx, "", []byte("data"))
+	require.Error(t, err)
+}
+
+// TestLocalBackend_MAC_NotGatedByShred proves MAC is platform-scoped, not
+// per-identity: it stays callable after ShredKey — a shred must kill
+// decryption, not the ability to recognize a Processor-minted marker (design
+// §3.1's explicit "deliberately NOT gated by the shredded-set").
+func TestLocalBackend_MAC_NotGatedByShred(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+
+	require.NoError(t, b.ShredKey(ctx, "identity-1"))
+	mac, err := b.MAC(ctx, vault.RefMACPurpose, []byte("vtx.identity.identity-1.ssn"))
+	require.NoError(t, err, "MAC must remain callable after an identity is shredded")
+	assert.NotEmpty(t, mac)
+}
+
+// TestRefMACInput_FieldBoundariesUnambiguous proves the length-prefixed
+// encoding cannot be confused by shifting bytes across a field boundary —
+// e.g. "ab"+"c" must MAC differently from "a"+"bc" (design §3.2's "never
+// JSON" rationale: an unprefixed concatenation would be ambiguous here).
+func TestRefMACInput_FieldBoundariesUnambiguous(t *testing.T) {
+	in1 := vault.RefMACInput("ab", "c", vault.Ciphertext{})
+	in2 := vault.RefMACInput("a", "bc", vault.Ciphertext{})
+	assert.NotEqual(t, in1, in2)
+}

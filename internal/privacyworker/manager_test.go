@@ -53,6 +53,10 @@ func (f *fakeVault) IssueSessionKey(context.Context, string, vault.Envelope, str
 	panic("fakeVault: IssueSessionKey not used by privacyworker")
 }
 
+func (f *fakeVault) MAC(context.Context, string, []byte) ([]byte, error) {
+	panic("fakeVault: MAC not used by privacyworker")
+}
+
 func (f *fakeVault) ShredKey(_ context.Context, identityKey string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

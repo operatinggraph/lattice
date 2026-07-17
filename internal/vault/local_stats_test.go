@@ -79,3 +79,20 @@ func TestLocalBackendStats(t *testing.T) {
 		t.Errorf("DecryptCalls after refused call = %d, want 2", got)
 	}
 }
+
+// TestLocalBackend_MAC_NilMacKeysMapDoesNotPanic proves MAC derives correctly
+// even for a LocalBackend assembled via a struct literal that skips
+// NewLocalBackend and so never initializes macKeys — a defensive guard, not
+// a supported construction path (NewLocalBackend remains the only sanctioned
+// constructor), but one bad struct literal must not panic the process on
+// "assignment to entry in nil map."
+func TestLocalBackend_MAC_NilMacKeysMapDoesNotPanic(t *testing.T) {
+	b := &LocalBackend{kek: make([]byte, dekKeySize), kekVersion: "v1"}
+	mac, err := b.MAC(context.Background(), "purpose", []byte("data"))
+	if err != nil {
+		t.Fatalf("MAC on a nil macKeys map: %v", err)
+	}
+	if len(mac) == 0 {
+		t.Fatalf("MAC returned an empty result")
+	}
+}

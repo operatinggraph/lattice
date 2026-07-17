@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
+
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // DecryptSubject is the NATS Services subject the decrypt RPC responds on
@@ -36,6 +39,15 @@ const UnwrapKeySubject = "lattice.vault.unwrapkey"
 // personal-secure-lens-design.md §3.6 "Transient Decryption").
 const IssueSessionKeySubject = "lattice.vault.issuesessionkey"
 
+// DecryptRefSubject is the NATS Services subject the ref-verified decrypt RPC
+// responds on (design sensitive-ref-mac-provenance-design.md §3.3) — the
+// external-egress unwrap consumer's (bridge's) sole decrypt authority once
+// Fire 2 swaps its natsperm grant off DecryptSubject: unlike the wholesale
+// DecryptSubject, this endpoint mandatorily verifies the caller-supplied MAC
+// before decrypting, so a fabricated or harvested-and-spliced ref is refused
+// rather than honored.
+const DecryptRefSubject = "lattice.vault.decryptref"
+
 // decryptServiceName is the NATS Services registration name (exposed via
 // $SRV.PING/$SRV.INFO/$SRV.STATS alongside the endpoint).
 const decryptServiceName = "vault-decrypt"
@@ -47,6 +59,7 @@ const (
 	wrapKeyServiceName         = "vault-wrapkey"
 	unwrapKeyServiceName       = "vault-unwrapkey"
 	issueSessionKeyServiceName = "vault-issuesessionkey"
+	decryptRefServiceName      = "vault-decryptref"
 )
 
 // handlerTimeout bounds a single decrypt call so a wedged backend fails the
@@ -122,6 +135,28 @@ type IssueSessionKeyResponse struct {
 	Error     string    `json:"error,omitempty"`
 }
 
+// DecryptRefRequest is the JSON payload for a DecryptRefSubject request — the
+// bridge's egress unwrap supplies the sensitive-ref marker's fields plus the
+// minting operation's requestId (read from the external event's envelope,
+// never caller-chosen at unwrap time) and its own live-fetched piiKey
+// Envelope. Unlike DecryptRequest, there is no IdentityKey field: it is
+// derived server-side from Ref once the MAC verifies (design §3.3) — one
+// less attacker-controlled input.
+type DecryptRefRequest struct {
+	Ref        string     `json:"ref"`
+	RequestID  string     `json:"requestId"`
+	Envelope   Envelope   `json:"envelope"`
+	Ciphertext Ciphertext `json:"ciphertext"`
+	MAC        []byte     `json:"mac"`
+}
+
+// DecryptRefResponse is the JSON reply for a DecryptRefSubject request.
+// Exactly one of Plaintext or Error is set.
+type DecryptRefResponse struct {
+	Plaintext []byte `json:"plaintext,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // Service is the NATS Services responder exposing a Vault's Decrypt method
 // to trusted-tool callers (Loupe).
 type Service struct {
@@ -184,6 +219,12 @@ func (s *Service) StartNATSListener(ctx context.Context, nc *nats.Conn) error {
 		micro.WithEndpointSubject(IssueSessionKeySubject)); err != nil {
 		_ = svc.Stop()
 		return fmt.Errorf("vault: AddEndpoint %q: %w", IssueSessionKeySubject, err)
+	}
+	if err := svc.AddEndpoint(decryptRefServiceName,
+		micro.HandlerFunc(func(req micro.Request) { s.handleDecryptRef(req) }),
+		micro.WithEndpointSubject(DecryptRefSubject)); err != nil {
+		_ = svc.Stop()
+		return fmt.Errorf("vault: AddEndpoint %q: %w", DecryptRefSubject, err)
 	}
 
 	s.mu.Lock()
@@ -399,6 +440,79 @@ func (s *Service) respondIssueSessionKey(req micro.Request, resp IssueSessionKey
 	data, err := json.Marshal(resp)
 	if err != nil {
 		s.logger.Error("vault: marshal issueSessionKey response", "err", err)
+		if rErr := req.Respond([]byte(`{"error":"vault: response marshal failure"}`)); rErr != nil {
+			s.logger.Error("vault: send error response", "err", rErr)
+		}
+		return
+	}
+	if err := req.Respond(data); err != nil {
+		s.logger.Error("vault: send response", "err", err)
+	}
+}
+
+// handleDecryptRef is DecryptRefSubject's responder (design
+// sensitive-ref-mac-provenance-design.md §3.3): (1) parse the request and
+// validate Ref is a well-formed identity-anchored aspect key, deriving
+// identityKey from it server-side (the caller no longer supplies one — one
+// less attacker-controlled field); (2) recompute the MAC over
+// {ref, requestId, ciphertext} and reject on mismatch or an empty MAC with
+// ErrRefUnverified — checked BEFORE any decrypt attempt, so a fabricated ref
+// never reaches the shred/DEK-unwrap machinery; (3) delegate to the same
+// Vault.Decrypt the wholesale RPC uses, unchanged — the live-envelope shred
+// gate, DEK unwrap, and AAD check all apply identically, so a shredded
+// identity is refused even with a genuinely valid MAC. Same panic-recovery +
+// generic-error-detail posture as handleDecrypt.
+func (s *Service) handleDecryptRef(req micro.Request) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("vault: decryptRef handler panic", "panic", r)
+			s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: decrypt failed"})
+		}
+	}()
+
+	var in DecryptRefRequest
+	if err := json.Unmarshal(req.Data(), &in); err != nil {
+		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: invalid request"})
+		return
+	}
+	identityKey, vertexType, _, _, ok := substrate.ParseAspectKey(in.Ref)
+	if !ok || vertexType != "identity" {
+		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: ref is not a well-formed identity-anchored aspect key"})
+		return
+	}
+
+	macCtx, macCancel := context.WithTimeout(context.Background(), handlerTimeout)
+	expected, err := s.vault.MAC(macCtx, RefMACPurpose, RefMACInput(in.Ref, in.RequestID, in.Ciphertext))
+	macCancel()
+	if err != nil {
+		s.logger.Error("vault: decryptRef MAC recompute failed", "ref", in.Ref, "err", err)
+		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: decrypt failed"})
+		return
+	}
+	if len(in.MAC) == 0 || !hmac.Equal(expected, in.MAC) {
+		s.respondDecryptRef(req, DecryptRefResponse{Error: ErrRefUnverified.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), handlerTimeout)
+	defer cancel()
+	plaintext, err := s.vault.Decrypt(ctx, identityKey, in.Envelope, in.Ciphertext)
+	if err != nil {
+		s.logger.Warn("vault: decryptRef request failed", "ref", in.Ref, "err", err)
+		if errors.Is(err, ErrKeyShredded) {
+			s.respondDecryptRef(req, DecryptRefResponse{Error: ErrKeyShredded.Error()})
+			return
+		}
+		s.respondDecryptRef(req, DecryptRefResponse{Error: "vault: decrypt failed"})
+		return
+	}
+	s.respondDecryptRef(req, DecryptRefResponse{Plaintext: plaintext})
+}
+
+func (s *Service) respondDecryptRef(req micro.Request, resp DecryptRefResponse) {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		s.logger.Error("vault: marshal decryptRef response", "err", err)
 		if rErr := req.Respond([]byte(`{"error":"vault: response marshal failure"}`)); rErr != nil {
 			s.logger.Error("vault: send error response", "err", rErr)
 		}

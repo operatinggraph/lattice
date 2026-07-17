@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -23,6 +24,11 @@ const LocalAlg = "AES-256-GCM"
 
 // dekKeySize is the DEK and KEK size in bytes (AES-256).
 const dekKeySize = 32
+
+// macKeyPurposePrefix domain-separates a purpose-derived MAC key from the
+// KEK's direct use elsewhere (AES-GCM wrapping) — the KEK never directly MACs
+// data (design §2, NIST SP 800-108 KDF-in-HMAC form).
+const macKeyPurposePrefix = "lattice/mac/"
 
 // dekCacheTTL bounds how long an unwrapped (plaintext) DEK is kept in
 // memory. Steady-state Encrypt/Decrypt hit this cache and make zero calls to
@@ -44,6 +50,7 @@ type LocalBackend struct {
 	mu       sync.Mutex
 	dekCache map[string]cachedDEK // identityKey -> unwrapped DEK
 	shredded map[string]time.Time // identityKey -> ShredKey call time
+	macKeys  map[string][]byte    // purpose -> derived MAC key (memoized, platform-scoped)
 
 	// Operational counters for the Vault's own Health-KV heartbeat group
 	// (health.vault.<instance>, emitted by the Processor that hosts this
@@ -126,6 +133,7 @@ func NewLocalBackend(kek []byte, kekVersion string) (*LocalBackend, error) {
 		kekVersion: kekVersion,
 		dekCache:   make(map[string]cachedDEK),
 		shredded:   make(map[string]time.Time),
+		macKeys:    make(map[string][]byte),
 	}, nil
 }
 
@@ -294,6 +302,48 @@ func (b *LocalBackend) IssueSessionKey(_ context.Context, identityKey string, en
 	key := make([]byte, len(dek))
 	copy(key, dek)
 	return SessionKey{Key: key, ExpiresAt: time.Now().UTC().Add(ttl)}, nil
+}
+
+// MAC implements Vault. It computes HMAC-SHA256(macKey(purpose), data) where
+// macKey(purpose) is itself HMAC-SHA256(kek, macKeyPurposePrefix+purpose) —
+// a single-block NIST SP 800-108 KDF-in-HMAC derivation, domain-separated
+// from the KEK's direct AES-GCM use (design §2). Deterministic (same
+// purpose+data always yields the same MAC, unlike Encrypt's random nonce) —
+// that determinism is exactly what lets a verifier recompute-and-compare.
+// Platform-scoped: unlike Encrypt/Decrypt/IssueSessionKey, MAC consults
+// neither the DEK cache nor the shredded deny-list — a shred must kill
+// decryption, not the ability to recognize a Processor-minted marker.
+func (b *LocalBackend) MAC(_ context.Context, purpose string, data []byte) ([]byte, error) {
+	if purpose == "" {
+		return nil, fmt.Errorf("vault: MAC purpose required")
+	}
+	key := b.macKey(purpose)
+	mac := hmac.New(sha256.New, key)
+	mac.Write(data)
+	return mac.Sum(nil), nil
+}
+
+// macKey returns purpose's derived MAC key, deriving and memoizing it on
+// first use. Held under b.mu like every other piece of this backend's
+// mutable state, but the derivation itself is cheap in-memory HMAC (no I/O),
+// so the lock is held only briefly. Lazily initializes macKeys so a
+// LocalBackend assembled via a struct literal that skips NewLocalBackend
+// (a nil macKeys map) derives correctly instead of panicking on the
+// map-assignment below.
+func (b *LocalBackend) macKey(purpose string) []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if key, ok := b.macKeys[purpose]; ok {
+		return key
+	}
+	if b.macKeys == nil {
+		b.macKeys = make(map[string][]byte)
+	}
+	mac := hmac.New(sha256.New, b.kek)
+	mac.Write([]byte(macKeyPurposePrefix + purpose))
+	key := mac.Sum(nil)
+	b.macKeys[purpose] = key
+	return key
 }
 
 // checkAndDeriveDEK returns the plaintext DEK for identityKey, or

@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -33,10 +34,16 @@ type sensitiveReadTracker struct {
 // pipeline that never wired a Vault, most test harnesses that do not
 // exercise PII) and marks tracker plaintext-read; true never decrypts —
 // instead doc.Data becomes a `$sensitiveRef` marker (the aspect's at-rest
-// ciphertext verbatim, keyed by its own aspect key) that the bridge unwraps
-// at the external-egress boundary (design sensitive-param-egress §3.2). A
-// non-sensitive doc is unaffected by egress either way.
-func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket string, ddls *DDLCache, v vault.Vault, doc *VertexDoc, egress bool, tracker *sensitiveReadTracker) error {
+// ciphertext verbatim, keyed by its own aspect key, Processor-authenticated
+// with a MAC when a Vault is wired — design sensitive-ref-mac-provenance
+// §3.2) that the bridge unwraps at the external-egress boundary (design
+// sensitive-param-egress §3.2). A non-sensitive doc is unaffected by egress
+// either way.
+//
+// requestID is the minting operation's request ID, bound into the egress
+// marker's MAC (splice-resistance, §3.2); ignored for the non-egress
+// disposition.
+func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket string, ddls *DDLCache, v vault.Vault, doc *VertexDoc, egress bool, tracker *sensitiveReadTracker, requestID string) error {
 	if ddls == nil || doc == nil {
 		return nil
 	}
@@ -57,12 +64,30 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		// key envelope is deliberately NOT carried: a consumer must always
 		// resolve it live at decrypt time (the restart-/replay-proof shred
 		// gate), never from a frozen copy.
-		doc.Data = map[string]interface{}{
-			"$sensitiveRef": map[string]interface{}{
-				"ref":        doc.Key,
-				"ciphertext": doc.Data,
-			},
+		marker := map[string]interface{}{
+			"ref":        doc.Key,
+			"ciphertext": doc.Data,
 		}
+		if v != nil {
+			// MAC over the decoded ciphertext bytes (ciphertextFromData), never
+			// doc.Data's base64-string JSON shape directly — the responder
+			// recomputes over the same decoded bytes it receives in
+			// DecryptRefRequest.Ciphertext, so mint and verify must agree
+			// byte-for-byte (the canonicalization trap, design §3.2).
+			ct, err := ciphertextFromData(doc.Data)
+			if err != nil {
+				return fmt.Errorf("parse ciphertext for ref-mac %s: %w", doc.Key, err)
+			}
+			mac, err := v.MAC(ctx, vault.RefMACPurpose, vault.RefMACInput(doc.Key, requestID, ct))
+			if err != nil {
+				// A live Vault that fails to mint a MAC must never author an
+				// unauthenticated ref — fail closed (design §3.2, the D1
+				// direction), not silently degrade to an unmarked marker.
+				return fmt.Errorf("mint ref-mac for %s: %w", doc.Key, err)
+			}
+			marker["mac"] = base64.StdEncoding.EncodeToString(mac)
+		}
+		doc.Data = map[string]interface{}{"$sensitiveRef": marker}
 		return nil
 	}
 	if v == nil {

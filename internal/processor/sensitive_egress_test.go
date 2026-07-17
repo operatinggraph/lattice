@@ -1,7 +1,9 @@
 package processor
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -357,5 +359,252 @@ func TestConnKVReader_EgressKey_ReturnsRefNotPlaintext(t *testing.T) {
 	}
 	if tracker.plaintextRead {
 		t.Fatalf("lazy egress read must never mark plaintextRead")
+	}
+}
+
+// TestEgressReads_NoVault_MarkerCarriesNoMAC proves the vaultless-harness
+// posture (design sensitive-ref-mac-provenance-design.md §3.2): ref
+// authoring with no live Vault mints a marker with no `mac` field at all —
+// not an empty string, absent entirely.
+func TestEgressReads_NoVault_MarkerCarriesNoMAC(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	h := newEgressTestHydrator(t, ctx, conn, nil)
+
+	aspectKey := "vtx.identity." + testNanoID2 + ".ssn"
+	seedCiphertextAspect(t, ctx, conn, aspectKey, "ssn")
+
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
+
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	sref := state.Context.Hydrated[aspectKey].Data["$sensitiveRef"].(map[string]interface{})
+	if _, ok := sref["mac"]; ok {
+		t.Fatalf("marker = %+v, want no mac field when no Vault is wired", sref)
+	}
+}
+
+// TestEgressReads_WithVault_MarkerCarriesValidMAC proves the mint side of
+// the ref-provenance rule (design §3.2): a live Vault stamps the marker with
+// a MAC that the Vault's own MAC recomputation (what the decryptref
+// responder does server-side) verifies — over the SAME requestId the
+// hydrating operation carries.
+func TestEgressReads_WithVault_MarkerCarriesValidMAC(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	v, err := vault.NewLocalBackend([]byte("lattice-testutil-vault-master-ke"), "test-v1")
+	if err != nil {
+		t.Fatalf("NewLocalBackend: %v", err)
+	}
+	h := newEgressTestHydrator(t, ctx, conn, v)
+
+	identityKey := "vtx.identity." + testNanoID2
+	envelope, err := v.CreateIdentityKey(ctx, identityKey)
+	if err != nil {
+		t.Fatalf("CreateIdentityKey: %v", err)
+	}
+	seedPiiKeyAspect(t, ctx, conn, identityKey, envelope)
+	ct, err := v.Encrypt(ctx, identityKey, envelope, []byte(`{"value":"123-45-6789"}`))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	aspectKey := identityKey + ".ssn"
+	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
+
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
+
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	sref := state.Context.Hydrated[aspectKey].Data["$sensitiveRef"].(map[string]interface{})
+	macB64, ok := sref["mac"].(string)
+	if !ok || macB64 == "" {
+		t.Fatalf("marker = %+v, want a non-empty base64 mac field", sref)
+	}
+	gotMAC, err := base64.StdEncoding.DecodeString(macB64)
+	if err != nil {
+		t.Fatalf("mac not valid base64: %v", err)
+	}
+
+	// The verifier's own recomputation (what the decryptref responder does)
+	// must match — mint and verify must agree byte-for-byte on the same
+	// requestId the hydrating envelope carries (testNanoID1).
+	wantMAC, err := v.MAC(ctx, vault.RefMACPurpose, vault.RefMACInput(aspectKey, testNanoID1, ct))
+	if err != nil {
+		t.Fatalf("MAC: %v", err)
+	}
+	if !bytes.Equal(gotMAC, wantMAC) {
+		t.Fatalf("mint-side MAC does not match the verifier's independent recomputation")
+	}
+}
+
+// TestConnKVReader_EgressKeyWithVault_MarkerCarriesValidMAC proves the lazy
+// kv.Read seam applies the same MAC-mint disposition as step 4 (design §3.1
+// "one disposition, both read paths") — including the requestID threading.
+func TestConnKVReader_EgressKeyWithVault_MarkerCarriesValidMAC(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	v, err := vault.NewLocalBackend([]byte("lattice-testutil-vault-master-ke"), "test-v1")
+	if err != nil {
+		t.Fatalf("NewLocalBackend: %v", err)
+	}
+	seedSensitiveAspectClassDDL(t, ctx, conn, "ssn", true)
+	cache := NewDDLCache(conn, testCoreBucket, testLogger())
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	identityKey := "vtx.identity." + testNanoID2
+	envelope, err := v.CreateIdentityKey(ctx, identityKey)
+	if err != nil {
+		t.Fatalf("CreateIdentityKey: %v", err)
+	}
+	seedPiiKeyAspect(t, ctx, conn, identityKey, envelope)
+	ct, err := v.Encrypt(ctx, identityKey, envelope, []byte(`{"value":"123-45-6789"}`))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	aspectKey := identityKey + ".ssn"
+	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
+
+	tracker := &sensitiveReadTracker{}
+	r := connKVReader{
+		conn: conn, bucket: testCoreBucket, ddls: cache, vault: v,
+		egressKeys: map[string]struct{}{aspectKey: {}},
+		tracker:    tracker,
+		requestID:  testNanoID1,
+	}
+	doc, err := r.ReadVertex(ctx, aspectKey)
+	if err != nil {
+		t.Fatalf("ReadVertex: %v", err)
+	}
+	sref := doc.Data["$sensitiveRef"].(map[string]interface{})
+	macB64, ok := sref["mac"].(string)
+	if !ok || macB64 == "" {
+		t.Fatalf("marker = %+v, want a non-empty mac field", sref)
+	}
+	gotMAC, err := base64.StdEncoding.DecodeString(macB64)
+	if err != nil {
+		t.Fatalf("mac not valid base64: %v", err)
+	}
+	wantMAC, err := v.MAC(ctx, vault.RefMACPurpose, vault.RefMACInput(aspectKey, testNanoID1, ct))
+	if err != nil {
+		t.Fatalf("MAC: %v", err)
+	}
+	if !bytes.Equal(gotMAC, wantMAC) {
+		t.Fatalf("lazy-seam MAC does not match the verifier's independent recomputation")
+	}
+}
+
+// TestEgressReads_MarkerMAC_JSONRoundTripsToRawBytes proves the mint-side
+// base64-STRING encoding of the marker's mac field (chosen to match its
+// ciphertext siblings' already-base64-string representation in doc.Data) is
+// exactly the wire shape a []byte-typed field expects: marshaling the whole
+// marker to JSON (as an external event's params eventually are) and
+// unmarshaling "mac" into a []byte field recovers the identical raw MAC —
+// no double-encoding, no caller-side base64 handling required.
+func TestEgressReads_MarkerMAC_JSONRoundTripsToRawBytes(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	v, err := vault.NewLocalBackend([]byte("lattice-testutil-vault-master-ke"), "test-v1")
+	if err != nil {
+		t.Fatalf("NewLocalBackend: %v", err)
+	}
+	h := newEgressTestHydrator(t, ctx, conn, v)
+
+	identityKey := "vtx.identity." + testNanoID2
+	envelope, err := v.CreateIdentityKey(ctx, identityKey)
+	if err != nil {
+		t.Fatalf("CreateIdentityKey: %v", err)
+	}
+	seedPiiKeyAspect(t, ctx, conn, identityKey, envelope)
+	ct, err := v.Encrypt(ctx, identityKey, envelope, []byte(`{"value":"123-45-6789"}`))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	aspectKey := identityKey + ".ssn"
+	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
+
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	sref := state.Context.Hydrated[aspectKey].Data["$sensitiveRef"]
+
+	// Marshal the whole marker to JSON — exactly what happens when this doc
+	// is eventually re-serialized as an external event's params
+	// (packages/orchestration-base's dict(sref) copy, then JSON over the
+	// wire) — then unmarshal into a typed struct with a []byte mac field.
+	raw, err := json.Marshal(sref)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	var wire struct {
+		Ref        string           `json:"ref"`
+		Ciphertext vault.Ciphertext `json:"ciphertext"`
+		MAC        []byte           `json:"mac"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal marker: %v", err)
+	}
+
+	wantMAC, err := v.MAC(ctx, vault.RefMACPurpose, vault.RefMACInput(aspectKey, testNanoID1, ct))
+	if err != nil {
+		t.Fatalf("MAC: %v", err)
+	}
+	if !bytes.Equal(wire.MAC, wantMAC) {
+		t.Fatalf("JSON round-tripped mac = %x, want %x (no double-encoding)", wire.MAC, wantMAC)
+	}
+}
+
+// macFailingVault wraps a real Vault but fails every MAC call — proving the
+// mint-failure fail-closed invariant (design §3.2: "a live Vault that fails
+// to mint a MAC must never author an unauthenticated ref").
+type macFailingVault struct {
+	vault.Vault
+}
+
+func (macFailingVault) MAC(_ context.Context, _ string, _ []byte) ([]byte, error) {
+	return nil, errors.New("macFailingVault: MAC always fails")
+}
+
+// TestEgressReads_MACMintFailure_HydrationFailsClosed proves a live Vault
+// that cannot mint a MAC fails the hydration loudly rather than falling back
+// to an unauthenticated marker.
+func TestEgressReads_MACMintFailure_HydrationFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	real, err := vault.NewLocalBackend([]byte("lattice-testutil-vault-master-ke"), "test-v1")
+	if err != nil {
+		t.Fatalf("NewLocalBackend: %v", err)
+	}
+	v := macFailingVault{Vault: real}
+	h := newEgressTestHydrator(t, ctx, conn, v)
+
+	identityKey := "vtx.identity." + testNanoID2
+	envelope, err := real.CreateIdentityKey(ctx, identityKey)
+	if err != nil {
+		t.Fatalf("CreateIdentityKey: %v", err)
+	}
+	seedPiiKeyAspect(t, ctx, conn, identityKey, envelope)
+	ct, err := real.Encrypt(ctx, identityKey, envelope, []byte(`{"value":"123-45-6789"}`))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	aspectKey := identityKey + ".ssn"
+	seedRealCiphertextAspect(t, ctx, conn, aspectKey, "ssn", ct)
+
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{EgressReads: []string{aspectKey}}
+
+	if _, err := h.Hydrate(ctx, env); err == nil {
+		t.Fatalf("expected Hydrate to fail closed when Vault.MAC errors, got nil")
 	}
 }

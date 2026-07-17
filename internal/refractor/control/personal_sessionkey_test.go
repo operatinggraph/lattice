@@ -94,6 +94,10 @@ func (f *fakeSessionVault) IssueSessionKey(_ context.Context, identityKey string
 	return vault.SessionKey{Key: []byte(f.key.IdentityKey + "-dek"), ExpiresAt: time.Unix(1000, 0).UTC()}, nil
 }
 
+func (f *fakeSessionVault) MAC(context.Context, string, []byte) ([]byte, error) {
+	panic("fakeSessionVault: MAC not used by the sessionkey op")
+}
+
 func TestControl_PersonalSessionKey_NotConfigured_FailsClosed(t *testing.T) {
 	nc, _ := startControlTestServerConn(t)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -71,6 +71,13 @@ var (
 	// ErrDecryptFailed is returned when authenticated decryption fails (bad
 	// key, tampered ciphertext, or — for an AEAD — a wrong nonce/AAD).
 	ErrDecryptFailed = errors.New("vault: decrypt failed")
+	// ErrRefUnverified is returned by the ref-verified decrypt RPC responder
+	// (DecryptRefSubject) when a sensitive-ref marker's MAC is absent or does
+	// not match Vault.MAC's recomputation — a fabricated or corrupted ref,
+	// never decrypted (design sensitive-ref-mac-provenance-design.md §3.3).
+	// Echoed over the wire and matched via errors.Is, exactly like
+	// ErrKeyShredded.
+	ErrRefUnverified = errors.New("vault: ref unverified")
 )
 
 // Vault is the key-custody + crypto interface the Processor's commit-path
@@ -139,4 +146,16 @@ type Vault interface {
 	// aspect, so it does not select a different key. Fails with
 	// ErrInvalidEnvelope on the same conditions as Decrypt.
 	IssueSessionKey(ctx context.Context, identityKey string, envelope Envelope, aspectScope string, ttl time.Duration) (SessionKey, error)
+
+	// MAC computes a keyed MAC over data under a purpose-scoped key derived
+	// from the backend's platform secret (design
+	// sensitive-ref-mac-provenance-design.md §3.1) — the primitive behind a
+	// sensitive-ref marker's Processor-authentication (§3.2/§3.3). Purpose
+	// strings are frozen constants (e.g. RefMACPurpose); distinct purposes
+	// yield independent keys. Platform-scoped, not per-identity —
+	// deliberately NOT gated by ShredKey's deny-list: a shred must kill
+	// decryption (Decrypt does), not the ability to recognize a
+	// Processor-minted marker. Verification is recompute-and-compare by the
+	// caller; there is no separate Verify method.
+	MAC(ctx context.Context, purpose string, data []byte) ([]byte, error)
 }

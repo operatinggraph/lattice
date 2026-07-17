@@ -320,6 +320,10 @@ func parseLinkDoc(data []byte, key string) (LinkDoc, error) {
 // Hydrated cache (kv.Read is cache-first), so this lazy path only matters for
 // consistency — a key present in egressKeys but reached here anyway gets the
 // same ref-if-sensitive disposition, never plaintext.
+//
+// requestID is the hydrating operation's request ID, threaded into an egress
+// marker's MAC exactly as step 4's own egressReads seam does (design
+// sensitive-ref-mac-provenance §3.2).
 type connKVReader struct {
 	conn       *substrate.Conn
 	bucket     string
@@ -327,6 +331,7 @@ type connKVReader struct {
 	vault      vault.Vault
 	egressKeys map[string]struct{}
 	tracker    *sensitiveReadTracker
+	requestID  string
 }
 
 // ReadVertex implements ScriptKVReader.
@@ -344,7 +349,7 @@ func (r connKVReader) ReadVertex(ctx context.Context, key string) (*VertexDoc, e
 	}
 	doc.Revision = entry.Revision
 	_, egress := r.egressKeys[key]
-	if err := decryptSensitiveDoc(ctx, r.conn, r.bucket, r.ddls, r.vault, &doc, egress, r.tracker); err != nil {
+	if err := decryptSensitiveDoc(ctx, r.conn, r.bucket, r.ddls, r.vault, &doc, egress, r.tracker, r.requestID); err != nil {
 		return nil, err
 	}
 	return &doc, nil
