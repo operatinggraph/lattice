@@ -256,11 +256,32 @@ browser) is a clean no-op; `Stop` unregisters the follower handler before releas
 in-Chrome against real IndexedDB (`make test-edge-idb-conformance`): a landed delta signals peers with the
 touched key; firing the registered handler republishes that key's frame from the store.
 
-**W4 remaining increments (each independently green):** **inc 3** — the
-renderer swap: `cmd/facet/web`'s `EventSource("/api/feed")` → `latticeEdge.start({shell})` + `onFrame`, the
-enqueue `POST /api/enqueue` → `api.enqueue`, and a wasm+shell boot module the page loads. **inc 4** —
-`cmd/facet` shrinks to a static file server + the ratified Fire-4 cross-machine, no-binary e2e (the W4
-green bar, Gate-3 class).
+**W4 increment 3 — the renderer feed-source swap — SHIPPED (2026-07-17, `b67612a`).** The PWA's reducer
+(`cmd/facet/web/app.js`) stops reading a hardcoded `EventSource` and reads a pluggable **feed source** —
+`{start(handlers), enqueue(request), close()}` — so the swap is a source swap, not a rewrite. Two sources
+implement it: **`sseSource`** (in `app.js`) is the shipped Go-host path, byte-for-byte unchanged in
+behaviour (`/api/feed` SSE for frames, `POST /api/enqueue` for writes); **`edgeSource`**
+(`edge-source.mjs`) is the browser-native host — the wasm engine's in-page `onFrame` + `snapshot()` for
+frames, `enqueue()` for writes, `stop()` for close. The one adaptation is the frame kind: the SSE host
+carries it as the event name (`frame.Kind` is `json:"-"`), the engine carries it in-body (`json:"kind"`),
+so `edgeSource` dispatches by `fr.kind`; the frame *shapes* are the same struct on both hosts
+(`internal/edge/browser/feed.go` == `cmd/facet/feed.go`). **`boot.mjs`** is the config-gated wasm+shell
+boot: absent a `window.__EDGE_BOOT__` session bootstrap it is a cheap no-op and the renderer uses
+`sseSource` (the shipped Go-host page is unchanged, and the ~440 KB nats.js bundle is never fetched);
+present, it loads the wasm artifact, dynamically imports the shell, calls `latticeEdge.start(...)`, wires
+`shell.deliver = api.deliver` (the push target the shell's consume loop delivers into), and hands the
+renderer an `edgeSource`. Green (each `node --test`, no live stack): the SSE source's event→handler
+translation + enqueue + close (regression-covering the refactor of the shipped path); `edgeSource`'s
+snapshot replay + live `onFrame` dispatch + enqueue-forwarding + close; `boot.mjs`'s config gate + the
+`assembleEdgeSource` wiring (shell config, `start()` args, and the `shell.deliver` wire) against fakes;
+plus the pre-existing degraded-render contract — all gated by a new `make test-facet-web` in the
+Node-equipped `edge-consumer-parity` CI job (which previously ran nothing for the Facet renderer). The
+`window.__EDGE_BOOT__` token bootstrap it consumes is minted by **Facet Fire 3** (auth turn-on) and
+served by **inc 4**, so the edge source's live path is exercised at inc 4's cross-machine e2e, not here.
+
+**W4 remaining increment:** **inc 4** — `cmd/facet` shrinks to a static file server (serving the wasm +
+shell assets and injecting the `window.__EDGE_BOOT__` config) + the ratified Fire-4 cross-machine,
+no-binary e2e (the W4 green bar, Gate-3 class). Depends on Facet Fire 3 (auth turn-on, 🏗️ building).
 
 ### 3.5 Read/write/state summary (unchanged invariants)
 

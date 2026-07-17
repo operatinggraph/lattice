@@ -2,6 +2,7 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-13 · `9a86a01` · [Refractor] projection-package coverage sweep — Install{ActorAggregate,PersonalLens} wiring + personalEnvelopeFn D1/Interest-Set branches; 59.2%→93.0%; CI green
 - 2026-07-12 · `cd5a077` · [pkgmgr,Processor,service-domain] edge-manifest Fire 1 inc 1 — OpMetaSpec descriptor-vocabulary fields + RequestService service-path consumer op + template .presentation aspect; CI green
 - 2026-07-12 · `78955d0` · [pkgmgr,Refractor,Edge] edge-manifest Fire 0 — nats-subject LensSpec adapter, SYNC stream 24h MaxAge, edge/sync OnChange + UpdateInterest; CI green
 - 2026-07-12 · `8d4ebd9` · [CLI] op-status-read-surface Fire 4 CLOSED — `lattice op status` migrates off raw Core-KV KVGet onto the lattice.op.status RPC; live-stack smoke-verified; CI green
