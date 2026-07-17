@@ -73,11 +73,20 @@ func startTestVault(t *testing.T, ctx context.Context, conn *substrate.Conn) *va
 	return v
 }
 
+// testRequestID is the minting op's requestId used across this file's
+// happy-path / real-decrypt tests — both the mint (test-side MAC
+// computation) and the unwrap call (unwrapEgressParams' requestID argument)
+// must agree on it, exactly as the Processor and the bridge agree on it
+// via the event envelope in production (design §3.2).
+const testRequestID = "test-request-id"
+
 // seedSensitiveAspect mints an identity key, encrypts plaintext under it,
 // writes the (real, non-projected) envelope into the envelope-lens bucket,
 // and returns the aspect's ref key + the $sensitiveRef-shaped ciphertext —
 // exactly the marker shape orchestration-base's resolve_subject_params
-// produces (design §3.2/§3.3).
+// produces (design §3.2/§3.3). The returned marker carries no `mac`; a test
+// that reaches the decryptref RPC must stamp one via mintRefMAC first
+// (mirroring the Processor's own mint seam).
 func seedSensitiveAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, v *vault.LocalBackend, identityID, aspect string, plaintext map[string]any) (ref string, marker sensitiveRefMarker) {
 	t.Helper()
 	identityKey := "vtx.identity." + identityID
@@ -106,6 +115,18 @@ func seedSensitiveAspect(t *testing.T, ctx context.Context, conn *substrate.Conn
 	return ref, sensitiveRefMarker{Ref: ref, Ciphertext: ct}
 }
 
+// mintRefMAC computes the Processor-side MAC binding {ref, requestId,
+// ciphertext} a genuine mint stamps on a sensitive-ref marker (design §3.2)
+// — tests use it to build a marker the decryptref RPC will actually verify.
+func mintRefMAC(t *testing.T, ctx context.Context, v vault.Vault, ref, requestID string, ct vault.Ciphertext) []byte {
+	t.Helper()
+	mac, err := v.MAC(ctx, vault.RefMACPurpose, vault.RefMACInput(ref, requestID, ct))
+	if err != nil {
+		t.Fatalf("MAC: %v", err)
+	}
+	return mac
+}
+
 func sensitiveRefParam(t *testing.T, marker sensitiveRefMarker, field string) json.RawMessage {
 	t.Helper()
 	marker.Field = field
@@ -129,13 +150,14 @@ func TestUnwrapEgressParams_HappyPath(t *testing.T) {
 	v := startTestVault(t, ctx, conn)
 	e := &Engine{conn: conn, logger: slog.Default()}
 
-	_, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "name", map[string]any{"value": "Alice Smith"})
+	ref, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "name", map[string]any{"value": "Alice Smith"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
 	raw, _ := json.Marshal(map[string]json.RawMessage{
 		"name":   sensitiveRefParam(t, marker, "value"),
 		"family": json.RawMessage(`"backgroundCheck"`),
 	})
 
-	out, ferr := e.unwrapEgressParams(ctx, raw, 1)
+	out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
 	if ferr != nil {
 		t.Fatalf("unwrapEgressParams: %v", ferr)
 	}
@@ -157,7 +179,7 @@ func TestUnwrapEgressParams_NonMarkerPassthrough(t *testing.T) {
 	e := &Engine{conn: conn, logger: slog.Default()}
 
 	raw := json.RawMessage(`{"family":"backgroundCheck","count":3,"nested":{"a":1}}`)
-	out, ferr := e.unwrapEgressParams(ctx, raw, 1)
+	out, ferr := e.unwrapEgressParams(ctx, raw, testRequestID, 1)
 	if ferr != nil {
 		t.Fatalf("unwrapEgressParams: %v", ferr)
 	}
@@ -172,7 +194,7 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 	t.Run("malformed ref", func(t *testing.T) {
 		conn := egressTestConn(t)
 		e := &Engine{conn: conn, logger: slog.Default()}
-		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "not-a-key", Field: "value"}, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "not-a-key", Field: "value"}, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("malformed ref: want permanent failure, got %v", ferr)
 		}
@@ -181,7 +203,7 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 	t.Run("non-identity ref", func(t *testing.T) {
 		conn := egressTestConn(t)
 		e := &Engine{conn: conn, logger: slog.Default()}
-		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "vtx.leaseapp.abc.status", Field: "value"}, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "vtx.leaseapp.abc.status", Field: "value"}, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("non-identity ref: want permanent failure, got %v", ferr)
 		}
@@ -190,7 +212,7 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 	t.Run("no field", func(t *testing.T) {
 		conn := egressTestConn(t)
 		e := &Engine{conn: conn, logger: slog.Default()}
-		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "vtx.identity.abc.ssn"}, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, sensitiveRefMarker{Ref: "vtx.identity.abc.ssn"}, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("empty field: want permanent failure, got %v", ferr)
 		}
@@ -203,12 +225,13 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		e := &Engine{conn: conn, logger: slog.Default()}
 
 		id := testIdentityID(t)
-		_, marker := seedSensitiveAspect(t, ctx, conn, v, id, "ssn", map[string]any{"value": "123-45-6789"})
+		ref, marker := seedSensitiveAspect(t, ctx, conn, v, id, "ssn", map[string]any{"value": "123-45-6789"})
+		marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
 		if err := v.ShredKey(ctx, "vtx.identity."+id); err != nil {
 			t.Fatalf("ShredKey: %v", err)
 		}
 		marker.Field = "value"
-		_, ferr := e.resolveSensitiveRef(ctx, marker, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("shredded identity: want permanent failure, got %v", ferr)
 		}
@@ -220,11 +243,31 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		v := startTestVault(t, ctx, conn)
 		e := &Engine{conn: conn, logger: slog.Default()}
 
-		_, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "ssn", map[string]any{"value": "123-45-6789"})
+		ref, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "ssn", map[string]any{"value": "123-45-6789"})
+		marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
 		marker.Field = "notAField"
-		_, ferr := e.resolveSensitiveRef(ctx, marker, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("absent field: want permanent failure, got %v", ferr)
+		}
+	})
+
+	t.Run("bad mac (fabricated or spliced marker)", func(t *testing.T) {
+		// Proves the fabrication channel this design exists to close (§For-
+		// Andrew): a marker whose MAC does not verify — never minted by the
+		// Processor for this exact (ref, requestId, ciphertext) — is refused
+		// at the Vault, never decrypted, regardless of a valid envelope.
+		conn := egressTestConn(t)
+		provisionEnvelopeBucket(t, ctx, conn)
+		v := startTestVault(t, ctx, conn)
+		e := &Engine{conn: conn, logger: slog.Default()}
+
+		ref, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "ssn", map[string]any{"value": "123-45-6789"})
+		marker.MAC = mintRefMAC(t, ctx, v, ref, "a-different-request-id", marker.Ciphertext)
+		marker.Field = "value"
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
+		if ferr == nil || ferr.class != egressPermanent {
+			t.Fatalf("bad mac: want permanent failure, got %v", ferr)
 		}
 	})
 
@@ -236,7 +279,7 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		id := testIdentityID(t)
 		marker := sensitiveRefMarker{Ref: "vtx.identity." + id + ".ssn", Field: "value",
 			Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y"), KeyID: "vtx.identity." + id}}
-		_, ferr := e.resolveSensitiveRef(ctx, marker, maxEgressUnwrapAttempts)
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, maxEgressUnwrapAttempts)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("absent envelope row past the retry budget: want permanent failure, got %v", ferr)
 		}
@@ -259,7 +302,7 @@ func TestResolveSensitiveRef_Permanent(t *testing.T) {
 		}
 		marker := sensitiveRefMarker{Ref: identityKey + ".ssn", Field: "value",
 			Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y"), KeyID: identityKey}}
-		_, ferr := e.resolveSensitiveRef(ctx, marker, maxEgressUnwrapAttempts)
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, maxEgressUnwrapAttempts)
 		if ferr == nil || ferr.class != egressPermanent {
 			t.Fatalf("unparseable envelope row past the retry budget: want permanent failure, got %v", ferr)
 		}
@@ -277,7 +320,7 @@ func TestResolveSensitiveRef_Transient(t *testing.T) {
 		id := testIdentityID(t)
 		marker := sensitiveRefMarker{Ref: "vtx.identity." + id + ".ssn", Field: "value",
 			Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y"), KeyID: "vtx.identity." + id}}
-		_, ferr := e.resolveSensitiveRef(ctx, marker, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
 		if ferr == nil || ferr.class != egressTransient {
 			t.Fatalf("envelope not yet projected (attempt 1 of %d): want transient failure, got %v", maxEgressUnwrapAttempts, ferr)
 		}
@@ -295,7 +338,7 @@ func TestResolveSensitiveRef_Transient(t *testing.T) {
 		}
 		marker := sensitiveRefMarker{Ref: identityKey + ".ssn", Field: "value",
 			Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y"), KeyID: identityKey}}
-		_, ferr := e.resolveSensitiveRef(ctx, marker, 1)
+		_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
 		if ferr == nil || ferr.class != egressTransient {
 			t.Fatalf("unparseable envelope (attempt 1 of %d): want transient failure, got %v", maxEgressUnwrapAttempts, ferr)
 		}
@@ -316,12 +359,18 @@ func TestDetectSensitiveRef(t *testing.T) {
 	if ok || ferr == nil {
 		t.Errorf("malformed inner marker: want a permanent parse failure, got ok=%v ferr=%v", ok, ferr)
 	}
-	marker, ok, ferr := detectSensitiveRef(json.RawMessage(`{"$sensitiveRef":{"ref":"vtx.identity.x.ssn","field":"value","ciphertext":{"ct":"YQ==","nonce":"Yg==","keyId":"k"}}}`))
-	if !ok || ferr != nil {
-		t.Fatalf("well-formed marker: want ok=true, got ok=%v ferr=%v", ok, ferr)
+	// A well-formed marker shape carrying NO mac — pre-MAC-era or fabricated —
+	// must fail closed here, before any Vault RPC (design §3.4).
+	_, ok, ferr = detectSensitiveRef(json.RawMessage(`{"$sensitiveRef":{"ref":"vtx.identity.x.ssn","field":"value","ciphertext":{"ct":"YQ==","nonce":"Yg==","keyId":"k"}}}`))
+	if ok || ferr == nil {
+		t.Errorf("marker with no mac: want a permanent fail-closed rejection, got ok=%v ferr=%v", ok, ferr)
 	}
-	if marker.Ref != "vtx.identity.x.ssn" || marker.Field != "value" {
-		t.Errorf("marker = %+v, want ref/field populated", marker)
+	marker, ok, ferr := detectSensitiveRef(json.RawMessage(`{"$sensitiveRef":{"ref":"vtx.identity.x.ssn","field":"value","ciphertext":{"ct":"YQ==","nonce":"Yg==","keyId":"k"},"mac":"YWJj"}}`))
+	if !ok || ferr != nil {
+		t.Fatalf("well-formed marker with mac: want ok=true, got ok=%v ferr=%v", ok, ferr)
+	}
+	if marker.Ref != "vtx.identity.x.ssn" || marker.Field != "value" || len(marker.MAC) == 0 {
+		t.Errorf("marker = %+v, want ref/field/mac populated", marker)
 	}
 }
 
@@ -392,9 +441,9 @@ func awaitReplyOp(t *testing.T, ctx context.Context, conn *substrate.Conn, reply
 	return opEnvelope{}
 }
 
-func externalEventBody(t *testing.T, ev externalEvent) []byte {
+func externalEventBody(t *testing.T, requestID string, ev externalEvent) []byte {
 	t.Helper()
-	body, err := json.Marshal(eventBody{Payload: ev})
+	body, err := json.Marshal(eventBody{RequestID: requestID, Payload: ev})
 	if err != nil {
 		t.Fatalf("marshal event body: %v", err)
 	}
@@ -414,13 +463,14 @@ func TestHandleExternal_EgressPermanentFailure_PostsFailedReplyOp(t *testing.T) 
 	}
 
 	id := testIdentityID(t)
-	_, marker := seedSensitiveAspect(t, ctx, conn, v, id, "ssn", map[string]any{"value": "123-45-6789"})
+	ref, marker := seedSensitiveAspect(t, ctx, conn, v, id, "ssn", map[string]any{"value": "123-45-6789"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
 	if err := v.ShredKey(ctx, "vtx.identity."+id); err != nil {
 		t.Fatalf("ShredKey: %v", err)
 	}
 	params, _ := json.Marshal(map[string]json.RawMessage{"ssn": sensitiveRefParam(t, marker, "value")})
 	ev := externalEvent{InstanceKey: "perm-handle-1", Adapter: "stripe", ReplyOp: "ResolveCharge", Params: params}
-	msg := substrate.Message{Body: externalEventBody(t, ev), NumDelivered: 1}
+	msg := substrate.Message{Body: externalEventBody(t, testRequestID, ev), NumDelivered: 1}
 
 	decision := e.handleExternal(ctx, msg)
 	if decision != substrate.Ack {
@@ -457,14 +507,19 @@ func TestHandleExternal_EgressTransientFailure_NaksThenEscalates(t *testing.T) {
 	}
 
 	transID := testIdentityID(t)
-	marker := sensitiveRefMarker{Ref: "vtx.identity." + transID + ".ssn", Field: "value",
+	// MAC is a non-empty placeholder, not a genuinely minted one: this test's
+	// failure path is fetchLiveEnvelope (the envelope row is never seeded),
+	// which runs BEFORE the decryptref RPC's MAC verification — only the
+	// bridge-side fail-closed-on-empty gate (detectSensitiveRef) needs to be
+	// satisfied to reach that path at all.
+	marker := sensitiveRefMarker{Ref: "vtx.identity." + transID + ".ssn", Field: "value", MAC: []byte("placeholder"),
 		Ciphertext: vault.Ciphertext{CT: []byte("x"), Nonce: []byte("y"), KeyID: "vtx.identity." + transID}}
 	inner, _ := json.Marshal(marker)
 	params, _ := json.Marshal(map[string]json.RawMessage{"ssn": json.RawMessage(`{"$sensitiveRef":` + string(inner) + `}`)})
 	ev := externalEvent{InstanceKey: "trans-handle-1", Adapter: "stripe", ReplyOp: "ResolveCharge", Params: params}
 
 	// Below the retry budget: NakWithDelay, adapter never called.
-	msg := substrate.Message{Body: externalEventBody(t, ev), NumDelivered: 1}
+	msg := substrate.Message{Body: externalEventBody(t, testRequestID, ev), NumDelivered: 1}
 	if decision := e.handleExternal(ctx, msg); decision != substrate.NakWithDelay {
 		t.Fatalf("Decision (attempt 1) = %v, want NakWithDelay", decision)
 	}
@@ -474,7 +529,7 @@ func TestHandleExternal_EgressTransientFailure_NaksThenEscalates(t *testing.T) {
 
 	// At/past the retry budget: escalates to permanent — a terminal failed
 	// replyOp posts and the pattern converges (never parks forever).
-	msg2 := substrate.Message{Body: externalEventBody(t, ev), NumDelivered: maxEgressUnwrapAttempts}
+	msg2 := substrate.Message{Body: externalEventBody(t, testRequestID, ev), NumDelivered: maxEgressUnwrapAttempts}
 	if decision := e.handleExternal(ctx, msg2); decision != substrate.Ack {
 		t.Fatalf("Decision (attempt %d) = %v, want Ack (escalated to permanent)", maxEgressUnwrapAttempts, decision)
 	}
@@ -552,8 +607,14 @@ func TestFetchLiveEnvelope_ShredThenVaultRestart_DecryptStillRefuses(t *testing.
 	}
 
 	e := &Engine{conn: conn, logger: slog.Default()}
-	marker := sensitiveRefMarker{Ref: identityKey + ".ssn", Field: "value", Ciphertext: ct}
-	_, ferr := e.resolveSensitiveRef(ctx, marker, 1)
+	ref := identityKey + ".ssn"
+	// The MAC key derives from the shared KEK, not per-backend-instance state
+	// — v1 (pre-restart) and v2 (post-restart) compute the identical MAC for
+	// the same purpose+data, exactly as the real Processor's mint and the
+	// real Vault's post-restart verify agree without any shared runtime state.
+	mac := mintRefMAC(t, ctx, v1, ref, testRequestID, ct)
+	marker := sensitiveRefMarker{Ref: ref, Field: "value", Ciphertext: ct, MAC: mac}
+	_, ferr := e.resolveSensitiveRef(ctx, marker, testRequestID, 1)
 	if ferr == nil || ferr.class != egressPermanent {
 		t.Fatalf("post-restart decrypt of a shredded identity: want permanent failure, got %v", ferr)
 	}
@@ -573,13 +634,14 @@ func TestHandleExternal_EgressHappyPath_AdapterReceivesPlaintext(t *testing.T) {
 		t.Fatalf("RegisterAdapter: %v", err)
 	}
 
-	_, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "ssn", map[string]any{"value": "123-45-6789"})
+	ref, marker := seedSensitiveAspect(t, ctx, conn, v, testIdentityID(t), "ssn", map[string]any{"value": "123-45-6789"})
+	marker.MAC = mintRefMAC(t, ctx, v, ref, testRequestID, marker.Ciphertext)
 	params, _ := json.Marshal(map[string]json.RawMessage{
 		"ssn":    sensitiveRefParam(t, marker, "value"),
 		"family": json.RawMessage(`"backgroundCheck"`),
 	})
 	ev := externalEvent{InstanceKey: "happy-handle-1", Adapter: "stripe", ReplyOp: "ResolveCharge", Params: params}
-	msg := substrate.Message{Body: externalEventBody(t, ev), NumDelivered: 1}
+	msg := substrate.Message{Body: externalEventBody(t, testRequestID, ev), NumDelivered: 1}
 
 	if decision := e.handleExternal(ctx, msg); decision != substrate.Ack {
 		t.Fatalf("Decision = %v, want Ack", decision)

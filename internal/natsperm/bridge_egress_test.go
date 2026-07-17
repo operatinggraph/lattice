@@ -8,11 +8,49 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// TestBridgeVaultDecryptReachability proves the egress-unwrap transport gate
-// (sensitive-param-egress-design.md §3.5/§For-Andrew #1): the bridge is now a
-// named trusted plaintext consumer of lattice.vault.decrypt, alongside Loupe —
-// the mirror of TestVaultDecryptReachability with "bridge" in place of "loupe".
-func TestBridgeVaultDecryptReachability(t *testing.T) {
+// vaultDecryptRefSubject is the ref-verified decrypt RPC subject
+// (internal/vault.DecryptRefSubject). Hardcoded here — like vaultDecryptSubject
+// in the sibling file — so the assertion is against the committed
+// deploy/nats-server.conf, not a shared Go constant.
+const vaultDecryptRefSubject = "lattice.vault.decryptref"
+
+// TestBridgeVaultDecryptRefReachability proves the Fire 2 grant swap (design
+// sensitive-ref-mac-provenance-design.md §3.3/§8): the bridge is now a named
+// trusted caller of the ref-verified lattice.vault.decryptref RPC — the
+// mirror of TestVaultDecryptReachability with "bridge"/"decryptref" in place
+// of "loupe"/"decrypt".
+func TestBridgeVaultDecryptRefReachability(t *testing.T) {
+	t.Parallel()
+	url := startServerFromConf(t)
+
+	resp := connectAs(t, url, "processor")
+	sub, err := resp.NATS().Subscribe(vaultDecryptRefSubject, func(m *nats.Msg) {
+		_ = m.Respond([]byte(`{"plaintext":"b2s="}`))
+	})
+	if err != nil {
+		t.Fatalf("processor subscribe %q: %v", vaultDecryptRefSubject, err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := resp.NATS().Flush(); err != nil {
+		t.Fatalf("flush responder: %v", err)
+	}
+
+	bridge := connectAs(t, url, "bridge")
+	reply, err := bridge.NATS().Request(vaultDecryptRefSubject, []byte(`{"ref":"vtx.identity.x.ssn"}`), 3*time.Second)
+	if err != nil {
+		t.Fatalf("bridge request %q: want reply, got %v", vaultDecryptRefSubject, err)
+	}
+	if len(reply.Data) == 0 {
+		t.Fatalf("bridge request %q: empty reply", vaultDecryptRefSubject)
+	}
+}
+
+// TestBridgeVaultDecryptWholesaleDenied proves the OLD grant does not linger
+// (design §3.3: "a new DENY vector — the old grant must not linger"): the
+// bridge's decrypt authority shrank to exactly lattice.vault.decryptref, so a
+// publish to the wholesale lattice.vault.decrypt (still granted to Loupe,
+// TestVaultDecryptReachability) must now be rejected at the transport.
+func TestBridgeVaultDecryptWholesaleDenied(t *testing.T) {
 	t.Parallel()
 	url := startServerFromConf(t)
 
@@ -29,13 +67,23 @@ func TestBridgeVaultDecryptReachability(t *testing.T) {
 	}
 
 	bridge := connectAs(t, url, "bridge")
-	reply, err := bridge.NATS().Request(vaultDecryptSubject, []byte(`{"identityKey":"vtx.identity.x"}`), 3*time.Second)
-	if err != nil {
-		t.Fatalf("bridge request %q: want reply, got %v", vaultDecryptSubject, err)
+	ctx, cancel := context.WithTimeout(context.Background(), deniedTimeout)
+	defer cancel()
+	if _, err := bridge.NATS().RequestWithContext(ctx, vaultDecryptSubject, []byte(`{"identityKey":"vtx.identity.x"}`)); err == nil {
+		t.Errorf("bridge request %q: want transport denial (timeout), got a reply", vaultDecryptSubject)
 	}
-	if len(reply.Data) == 0 {
-		t.Fatalf("bridge request %q: empty reply", vaultDecryptSubject)
-	}
+}
+
+// TestVaultDecryptRefAppsDenied proves the third vector design §3.3 names
+// ("apps denied on both"): an ordinary vertical app holds neither the
+// wholesale lattice.vault.decrypt grant (Loupe-only) nor the new ref-verified
+// lattice.vault.decryptref grant (bridge-only) — completing the vector table
+// alongside TestBridgeVaultDecryptRefReachability (bridge allowed) and
+// TestBridgeVaultDecryptWholesaleDenied (bridge denied on the old subject).
+func TestVaultDecryptRefAppsDenied(t *testing.T) {
+	t.Parallel()
+	url := startServerFromConf(t)
+	assertDeniedPublish(t, url, vaultDecryptRefSubject, []string{"clinic-app", "loftspace-app"})
 }
 
 // TestBridgeCoreKVReadIsolation proves the read-side half of the egress grant

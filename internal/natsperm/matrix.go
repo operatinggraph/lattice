@@ -197,15 +197,19 @@ var Matrix = []Component{
 		// rendered executed-lease artifact is ObjectPut by the adapter and stays
 		// inert until an AttachObject op anchors it. Bridge is one of the four
 		// sanctioned object-plane writers (TestObjectStoreWriteAccess).
-		// lattice.vault.decrypt — the egress-unwrap boundary (design
-		// sensitive-param-egress-design.md §3.5/§For-Andrew #1): the bridge is a
-		// named trusted plaintext consumer alongside Loupe/the apps, decrypting a
-		// sensitive-ref param at the last possible moment before a vendor call.
+		// lattice.vault.decryptref — the egress-unwrap boundary (design
+		// sensitive-ref-mac-provenance-design.md §3.3/§8 Fire 2): the bridge's
+		// decrypt authority shrinks from the wholesale lattice.vault.decrypt
+		// (Loupe's inspector RPC) to this ref-verified endpoint, which
+		// mandatorily checks the Processor-minted MAC before decrypting a
+		// sensitive-ref param at the last possible moment before a vendor call —
+		// a compromised bridge can no longer decrypt arbitrary ciphertext, only
+		// tuples the Processor actually minted for egress.
 		// lattice.op.status — the skip-on-redelivery probe's RPC to the
 		// Processor-hosted Contract #4 tracker projection (Fire 1 of
 		// op-status-read-surface-design.md); replaces the direct core-kv
 		// DIRECT.GET the B2 read-tightening denied below.
-		ExtraPubAllow: []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.vault.decrypt", "lattice.op.status"},
+		ExtraPubAllow: []string{bootstrap.OpsWildcardSubject, bootstrap.SchedulesWildcardSubject, "$O.core-objects.>", "$JS.API.>", "$JS.ACK.>", "lattice.vault.decryptref", "lattice.op.status"},
 		// The registry-derived denies (Deny) cover the core-kv/capability-kv
 		// WRITE side (the $KV.<b>.> publish subject + every registered bucket's
 		// backing-stream admin verbs). The two extra denies below close the

@@ -68,12 +68,15 @@ type sensitiveRefWrapper struct {
 }
 
 // sensitiveRefMarker is the inner `$sensitiveRef` shape: the sensitive
-// aspect's canonical key, its at-rest ciphertext, and the plaintext field name
-// the resolver appended for the bridge's post-decrypt extraction.
+// aspect's canonical key, its at-rest ciphertext, the plaintext field name
+// the resolver appended for the bridge's post-decrypt extraction, and the
+// Processor-minted MAC binding {ref, requestId, ciphertext} (design
+// sensitive-ref-mac-provenance-design.md §3.2) that proves provenance.
 type sensitiveRefMarker struct {
 	Ref        string           `json:"ref"`
 	Ciphertext vault.Ciphertext `json:"ciphertext"`
 	Field      string           `json:"field"`
+	MAC        []byte           `json:"mac"`
 }
 
 // detectSensitiveRef reports whether raw carries a `$sensitiveRef` marker. ok
@@ -81,7 +84,11 @@ type sensitiveRefMarker struct {
 // the ordinary "ignore me" case for every literal and plain-field param value.
 // When the key IS present, its inner shape is unmarshaled into a
 // sensitiveRefMarker; a malformed inner shape is a genuine authoring error,
-// surfaced via ferr rather than silently ignored.
+// surfaced via ferr rather than silently ignored. A marker carrying no `mac`
+// — pre-MAC-era or fabricated by a script that assembles the shape without
+// ever going through Processor hydration — fails closed HERE, before any
+// Vault RPC (design §3.4: "a pre-MAC marker or a fabricated one never leaves
+// the bridge").
 func detectSensitiveRef(raw json.RawMessage) (marker sensitiveRefMarker, ok bool, ferr *egressFailure) {
 	var w sensitiveRefWrapper
 	if err := json.Unmarshal(raw, &w); err != nil || w.SensitiveRef == nil {
@@ -90,6 +97,10 @@ func detectSensitiveRef(raw json.RawMessage) (marker sensitiveRefMarker, ok bool
 	if err := json.Unmarshal(w.SensitiveRef, &marker); err != nil {
 		return sensitiveRefMarker{}, false, permanentEgressFailure(
 			fmt.Errorf("bridge: malformed $sensitiveRef marker: %w", err))
+	}
+	if len(marker.MAC) == 0 {
+		return sensitiveRefMarker{}, false, permanentEgressFailure(
+			fmt.Errorf("bridge: $sensitiveRef marker for %q carries no mac", marker.Ref))
 	}
 	return marker, true, nil
 }
@@ -107,8 +118,11 @@ func detectSensitiveRef(raw json.RawMessage) (marker sensitiveRefMarker, ok bool
 // (maxEgressUnwrapAttempts): an envelope-lens row not yet projected for a
 // just-created identity, or a Vault RPC hiccup, is retried a bounded number of
 // times before escalating to a permanent failure — never an unbounded Nak
-// loop (design §3.5).
-func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, numDelivered uint64) (json.RawMessage, *egressFailure) {
+// loop (design §3.5). requestID is the minting op's requestId, read from the
+// external event's top-level envelope (never caller-chosen at unwrap time) —
+// it splice-binds every marker's MAC verification to its minting execution
+// (design §3.2).
+func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, requestID string, numDelivered uint64) (json.RawMessage, *egressFailure) {
 	if len(raw) == 0 {
 		return raw, nil
 	}
@@ -128,7 +142,7 @@ func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, nu
 		if !ok {
 			continue
 		}
-		plaintext, ferr := e.resolveSensitiveRef(ctx, marker, numDelivered)
+		plaintext, ferr := e.resolveSensitiveRef(ctx, marker, requestID, numDelivered)
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -152,10 +166,11 @@ func (e *Engine) unwrapEgressParams(ctx context.Context, raw json.RawMessage, nu
 // resolveSensitiveRef unwraps one sensitive-ref marker to its plaintext field
 // value: derive the anchoring identity from the ref, fetch its LIVE key
 // envelope from the piiKeyEnvelope lens (never a stored/carried copy — the
-// restart-/replay-proof shred gate, design §3.2/§3.5), call the Vault decrypt
-// RPC, and extract the requested field. Every failure is classified permanent
-// (do not retry) or transient (redeliver, bounded).
-func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMarker, numDelivered uint64) (string, *egressFailure) {
+// restart-/replay-proof shred gate, design §3.2/§3.5), call the ref-verified
+// Vault decrypt RPC (mandatory MAC verification), and extract the requested
+// field. Every failure is classified permanent (do not retry) or transient
+// (redeliver, bounded).
+func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMarker, requestID string, numDelivered uint64) (string, *egressFailure) {
 	identityKey, vertexType, _, _, ok := substrate.ParseAspectKey(marker.Ref)
 	if !ok || vertexType != "identity" {
 		return "", permanentEgressFailure(
@@ -183,8 +198,14 @@ func (e *Engine) resolveSensitiveRef(ctx context.Context, marker sensitiveRefMar
 			fmt.Errorf("bridge: piiKeyEnvelope for %s unusable after %d attempts: %w", identityKey, numDelivered, err))
 	}
 
-	plaintext, verr := e.vaultDecrypt(ctx, identityKey, envelope, marker.Ciphertext)
+	plaintext, verr := e.vaultDecryptRef(ctx, marker.Ref, requestID, envelope, marker.Ciphertext, marker.MAC)
 	if verr != nil {
+		if errors.Is(verr, vault.ErrRefUnverified) {
+			// A bad MAC cannot become good on redelivery — the mint-time
+			// binding to this exact (ref, requestId, ciphertext) tuple is
+			// permanent, so retrying never helps (design §3.4).
+			return "", permanentEgressFailure(fmt.Errorf("bridge: %s ref unverified: %w", marker.Ref, verr))
+		}
 		if errors.Is(verr, vault.ErrKeyShredded) {
 			return "", permanentEgressFailure(fmt.Errorf("bridge: %s is shredded: %w", identityKey, verr))
 		}
@@ -233,38 +254,45 @@ func (e *Engine) fetchLiveEnvelope(ctx context.Context, identityKey string) (vau
 	return env, nil
 }
 
-// vaultDecrypt calls the lattice.vault.decrypt RPC (design §3.5, the bridge's
-// one sanctioned Vault-decrypt consumer role alongside Loupe/the apps) and
-// returns the plaintext bytes, mirroring cmd/loupe/vault.go's caller pattern.
-// A shredded identity's decrypt returns vault.ErrKeyShredded (matched by
-// errors.Is against the wire-carried error string, mirroring
+// vaultDecryptRef calls the lattice.vault.decryptref RPC (design
+// sensitive-ref-mac-provenance-design.md §3.3) — the bridge's sole decrypt
+// authority once Fire 2's natsperm grant swap lands: unlike the wholesale
+// lattice.vault.decrypt (Loupe's inspector RPC, unchanged), this endpoint
+// mandatorily verifies the caller-supplied MAC against {ref, requestId,
+// ciphertext} before decrypting, so a fabricated or harvested-and-spliced ref
+// is refused rather than honored. A bad or missing MAC returns
+// vault.ErrRefUnverified; a shredded identity returns vault.ErrKeyShredded
+// (both matched by errors.Is against the wire-carried error string, mirroring
 // internal/vault/service.go's own sentinel comparison).
-func (e *Engine) vaultDecrypt(ctx context.Context, identityKey string, envelope vault.Envelope, ct vault.Ciphertext) ([]byte, error) {
-	reqBody, err := json.Marshal(vault.DecryptRequest{IdentityKey: identityKey, Envelope: envelope, Ciphertext: ct})
+func (e *Engine) vaultDecryptRef(ctx context.Context, ref, requestID string, envelope vault.Envelope, ct vault.Ciphertext, mac []byte) ([]byte, error) {
+	reqBody, err := json.Marshal(vault.DecryptRefRequest{Ref: ref, RequestID: requestID, Envelope: envelope, Ciphertext: ct, MAC: mac})
 	if err != nil {
-		return nil, fmt.Errorf("marshal decrypt request: %w", err)
+		return nil, fmt.Errorf("marshal decryptref request: %w", err)
 	}
 	rctx, cancel := context.WithTimeout(ctx, vaultDecryptTimeout)
 	defer cancel()
-	msg, err := e.conn.NATS().RequestWithContext(rctx, vault.DecryptSubject, reqBody)
+	msg, err := e.conn.NATS().RequestWithContext(rctx, vault.DecryptRefSubject, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("vault decrypt RPC: %w", err)
+		return nil, fmt.Errorf("vault decryptref RPC: %w", err)
 	}
-	var resp vault.DecryptResponse
+	var resp vault.DecryptRefResponse
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		return nil, fmt.Errorf("parse vault decrypt reply: %w", err)
+		return nil, fmt.Errorf("parse vault decryptref reply: %w", err)
 	}
 	if resp.Error != "" {
 		if resp.Error == vault.ErrKeyShredded.Error() {
 			return nil, vault.ErrKeyShredded
 		}
-		return nil, fmt.Errorf("vault decrypt RPC: %s", resp.Error)
+		if resp.Error == vault.ErrRefUnverified.Error() {
+			return nil, vault.ErrRefUnverified
+		}
+		return nil, fmt.Errorf("vault decryptref RPC: %s", resp.Error)
 	}
 	if len(resp.Plaintext) == 0 {
 		// The wire contract guarantees exactly one of Plaintext/Error set; an
 		// empty reply body unmarshals to both fields zero-valued, which is never
 		// a genuine "decrypted to nothing" — treat as a malformed reply.
-		return nil, errors.New("vault decrypt RPC: empty reply")
+		return nil, errors.New("vault decryptref RPC: empty reply")
 	}
 	return resp.Plaintext, nil
 }

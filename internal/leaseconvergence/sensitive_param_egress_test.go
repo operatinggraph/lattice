@@ -11,6 +11,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/bootstrap"
 	"github.com/asolgan/lattice/internal/processor"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // lastExternalEventBody returns the raw body of the most recent
@@ -132,4 +133,66 @@ func TestLeaseConvergence_SensitiveParamEgress_ShredThenReplay_NeverDecrypts(t *
 	time.Sleep(2 * time.Second)
 	require.Equal(t, callsBeforeShred, h.bgFake.SideEffects(handle),
 		"a shred must permanently block further vendor calls for this identity — no post-shred plaintext reached the adapter")
+}
+
+// TestLeaseConvergence_SensitiveParamEgress_FabricatedRef_NeverDecrypts is the
+// Fire 2 DEFENDED e2e arm (design sensitive-ref-mac-provenance-design.md §8):
+// a bare external.backgroundCheck event is injected carrying a `$sensitiveRef`
+// marker naming a real applicant's aspect — mimicking a compromised or
+// AI-authored artifact that computed the marker shape at runtime instead of
+// receiving it from Processor hydration. No CreateLeaseServiceInstance call
+// precedes it (that op's own outbox would emit a SECOND, legitimate event for
+// the same instanceKey, which the bridge's skip-on-redelivery probe would then
+// treat this fabricated one as an already-landed redelivery of — never
+// re-evaluating it). With the handle never seen before, the bridge's
+// ref-verified decrypt RPC must refuse the bad MAC: the dispatch never reaches
+// FakeBackgroundCheck, at any point across a bounded observation window (the
+// same "never decrypts" property the shred-replay arm above proves for a
+// harvested-but-genuine marker, here proven for a marker that was never
+// genuine at all).
+func TestLeaseConvergence_SensitiveParamEgress_FabricatedRef_NeverDecrypts(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
+	}
+	h := newHarness(t)
+	_, _, applicantKey := h.seedApplicant()
+
+	handle := mustNanoID(t)
+	require.Equal(t, 0, h.bgFake.SideEffects(handle), "a never-dispatched handle starts with no vendor calls")
+
+	// A fabricated marker: syntactically valid $sensitiveRef shape naming a
+	// real applicant identity's aspect, but its `mac` was never minted by the
+	// Processor for this ref/requestId/ciphertext — no live Vault key material
+	// was ever involved in producing it, exactly what a runtime-computed
+	// AI/malicious marker would look like.
+	fabricated := map[string]any{
+		"$sensitiveRef": map[string]any{
+			"ref":        applicantKey + ".ssn",
+			"ciphertext": map[string]any{"ct": "ZmFrZQ==", "nonce": "bm9uY2U=", "keyId": applicantKey},
+			"field":      "value",
+			"mac":        "ZmFrZS1tYWM=",
+		},
+	}
+	payload := map[string]any{
+		"instanceKey": handle, "adapter": "backgroundCheck", "replyOp": "RecordLeaseServiceOutcome",
+		"externalRef": handle, "idempotencyKey": handle,
+		"params": map[string]any{"ssn": fabricated, "family": "backgroundCheck"},
+	}
+	ev := map[string]any{
+		"eventId": mustNanoID(t), "requestId": mustNanoID(t), "eventType": "external.backgroundCheck",
+		"payload": payload, "timestamp": substrate.FormatTimestamp(time.Now()),
+	}
+	data, err := json.Marshal(ev)
+	require.NoError(t, err)
+	_, err = h.conn.JetStream().Publish(h.ctx, "events.external.backgroundCheck", data)
+	require.NoError(t, err)
+
+	// Give the bridge several beats to (fail to) process the fabricated event
+	// — across the whole window the vendor must never be called.
+	for i := 0; i < 20; i++ {
+		require.Equal(t, 0, h.bgFake.SideEffects(handle),
+			"a fabricated $sensitiveRef must never reach the vendor with decrypted plaintext")
+		time.Sleep(150 * time.Millisecond)
+	}
 }

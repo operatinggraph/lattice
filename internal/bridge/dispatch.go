@@ -16,9 +16,14 @@ import (
 // object, and the business fields live under payload (read-from-body discipline,
 // never from the subject). The external.<adapter> event is emitted by the
 // instanceOp's transactional outbox as an ordinary business event, so its body
-// is {requestId, …, payload:{instanceKey, adapter, …}}.
+// is {requestId, …, payload:{instanceKey, adapter, …}}. RequestID is the
+// emitting op's requestId (step7_events.go sets Event.RequestID = env.RequestID)
+// — the bridge reads it here, never lets a script substitute one, and forwards
+// it to the ref-verified decrypt RPC as the MAC's splice-binding input (design
+// sensitive-ref-mac-provenance-design.md §3.2).
 type eventBody struct {
-	Payload externalEvent `json:"payload"`
+	RequestID string        `json:"requestId"`
+	Payload   externalEvent `json:"payload"`
 }
 
 // externalEvent is the external.<adapter> envelope's payload (bridge.md). The
@@ -195,7 +200,7 @@ func (e *Engine) handleExternal(ctx context.Context, msg substrate.Message) subs
 	// the bounded-attempts budget.
 	var dispatch Dispatch
 	var execErr error
-	substitutedParams, ferr := e.unwrapEgressParams(ctx, ev.Params, msg.NumDelivered)
+	substitutedParams, ferr := e.unwrapEgressParams(ctx, ev.Params, body.RequestID, msg.NumDelivered)
 	if ferr != nil {
 		if ferr.class == egressTransient {
 			e.logger.Warn("bridge: egress unwrap transient failure; nak with delay + health issue",
