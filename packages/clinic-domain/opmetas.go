@@ -29,6 +29,11 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // `availableAt` a clinic building, `permitsOperation`-linked to these op-metas
 // — is the named next increment; this one lands the metadata layer so that
 // wiring has descriptors to link to.
+//
+// Dispatch.Class on each entry is "appointment" — the appointment DDL's own
+// CanonicalName (appointmentVertexDDL), the Contract #2 §2.1 envelope `class`
+// DDL-hint (mirrors service-domain's RequestService op-meta doc comment:
+// Dispatch.Class = the owning DDL's CanonicalName, never the vertical name).
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -55,7 +60,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"reason":   "Optional visit reason / chief complaint.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:       "clinic",
+				Class:       "appointment",
 				AuthContext: "self",
 				TargetField: "provider",
 			},
@@ -86,7 +91,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"reason":         "Optional visit reason. Omitted clears the appointment's existing reason.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:       "clinic",
+				Class:       "appointment",
 				AuthContext: "self",
 				TargetField: "appointmentKey",
 			},
@@ -115,7 +120,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"note":           "Optional cancellation reason, stored on the appointment's .status aspect.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:       "clinic",
+				Class:       "appointment",
 				AuthContext: "self",
 				TargetField: "appointmentKey",
 			},
