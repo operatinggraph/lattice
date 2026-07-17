@@ -32,5 +32,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit RecordServiceOutcome operations.",
 			GrantsTo:      []string{"operator"},
 		},
+		{
+			OperationType: "RetireServiceTemplate",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit RetireServiceTemplate operations (§7.3 admin-only cleanup).",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }

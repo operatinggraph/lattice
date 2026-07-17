@@ -114,12 +114,13 @@ func serviceDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "service",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateServiceTemplate", "CreateServiceInstance", "RecordServiceOutcome", "RequestService"},
+		PermittedCommands: []string{"CreateServiceTemplate", "CreateServiceInstance", "RecordServiceOutcome", "RequestService", "RetireServiceTemplate"},
 		Description: "Service domain DDL. Vertex shape: vtx.service.<NanoID>, root data = {} " +
 			"(minimal, D5). A service vertex is a TEMPLATE (an offering) or an INSTANCE (a run of an " +
 			"offering), discriminated by the vertex ENVELOPE class (service.<x>.template / " +
 			"service.<x>.instance — P7, no .class shadow aspect); the service family <x> is one of " +
-			"{backgroundCheck, payment}. Relationships are LINKS: providedBy (template→provider: who " +
+			"{backgroundCheck, payment, laundry, fitness} (edge-showcase-app-design.md §7.3 — widened honestly " +
+			"for the showcase dataset rather than branding a closed-enum member via presentation). Relationships are LINKS: providedBy (template→provider: who " +
 			"provides it), instanceOf (template→the service DDL meta, and instance→template: the " +
 			"write-gate type-authority chain + the offering this run is of), providedTo (instance→identity: " +
 			"the applicant this run is for). All links: the service vertex is the later-arriving source, the " +
@@ -145,10 +146,13 @@ func serviceDDL() pkgmgr.DDLSpec {
 			"RecordServiceOutcome records the external-call result as the .outcome aspect {status " +
 			"(completed|failed), completedAt (canonical-UTC RFC3339)} on the instance; the outcome lives " +
 			"in the aspect, never on root data (D5). It rejects a non-existent / template (not instance) / " +
-			"already-recorded target and asserts the instance root revision (OCC, Contract #2 §2.6).",
+			"already-recorded target and asserts the instance root revision (OCC, Contract #2 §2.6). " +
+			"RetireServiceTemplate (§7.3, admin-only cleanup) soft-deletes (tombstones) a live template that no " +
+			"longer belongs — e.g. one presenting a family its envelope class contradicts; it rejects a " +
+			"non-existent or already-retired template and a target that is an instance, not a template.",
 		Script: serviceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"family":{"type":"string","enum":["backgroundCheck","payment"],"description":"The service family <x> (backgroundCheck|payment). Sets the vertex envelope class service.<x>.template|instance."},` +
+			`{"family":{"type":"string","enum":["backgroundCheck","payment","laundry","fitness"],"description":"The service family <x> (backgroundCheck|payment|laundry|fitness). Sets the vertex envelope class service.<x>.template|instance."},` +
 			`"templateId":{"type":"string","description":"Optional bare NanoID for the template vertex (CreateServiceTemplate); absent → minted."},` +
 			`"providedBy":{"type":"string","description":"Optional vtx.<provType>.<NanoID> that provides the template; the providedBy link is written only when supplied (CreateServiceTemplate)."},` +
 			`"presentation":{"type":"object","description":"Optional client-facing display metadata (CreateServiceTemplate): {name, description?, icon, category?}. Written as the template's .presentation aspect.",` +
@@ -165,12 +169,12 @@ func serviceDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.service.<NanoID> of the created/updated service vertex (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"family":           "The service family <x>, one of {backgroundCheck, payment}. Determines the vertex envelope class (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
+			"family":           "The service family <x>, one of {backgroundCheck, payment, laundry, fitness}. Determines the vertex envelope class (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
 			"templateId":       "Optional bare NanoID (no dots / key segments) for the template vertex (vtx.service.<templateId>) created by CreateServiceTemplate. Absent → minted with nanoid.new().",
 			"providedBy":       "Optional full vtx.<provType>.<NanoID> key of the provider of the template offering. CreateServiceTemplate validates it is alive and writes the providedBy link only when supplied.",
 			"presentation":     "Optional client-facing display metadata {name, description?, icon, category?} (CreateServiceTemplate). Written verbatim as the template's .presentation aspect; absent → no aspect written (a template stays undescribed, per edge-showcase-app-design.md §3.3's degrade-gracefully rule).",
 			"instanceId":       "Optional bare NanoID (no dots / key segments) for the instance vertex (vtx.service.<instanceId>) created by CreateServiceInstance or RequestService. Supplied by a caller that must know the instance key before the op commits — e.g. a Loom externalTask step write-aheading its token.<instanceKey> handle. Absent → minted with nanoid.new(). A crash-retry with the same id collapses on the Contract #4 tracker.",
-			"template":         "Full vtx.service.<NanoID> key of the template this instance is a run of. CreateServiceInstance requires it, validates it is alive and is a template (its envelope class ends in .template), and writes the instanceOf link.",
+			"template":         "Full vtx.service.<NanoID> key of the template this instance is a run of (CreateServiceInstance), or the template to retire (RetireServiceTemplate). Validated alive and a template.",
 			"providedTo":       "Full vtx.identity.<NanoID> key of the applicant this instance is provided to. CreateServiceInstance requires it, validates the identity is alive, and writes the providedTo link (the convergence link a downstream lens reads across).",
 			"service":          "Full vtx.service.<NanoID> key of the template being requested (RequestService). Required, must be alive + a template, and must equal the authorized authContext.service — a mismatch is rejected (the payload cannot name a different template than the one step 3 authorized).",
 			"instanceKey":      "Full vtx.service.<NanoID> key of the instance to record an outcome for. RecordServiceOutcome validates it is alive, is an instance (not a template), and has no outcome yet.",
@@ -225,6 +229,15 @@ func serviceDDL() pkgmgr.DDLSpec {
 					"completedAt: 2026-06-18T14:00:00Z (canonical UTC)} on the instance and touches the instance root under an OCC " +
 					"revision guard. Returns primaryKey (the instance key). Rejects with ScriptError if the instance is absent, is a " +
 					"template, or already has an outcome.",
+			},
+			{
+				Name: "RetireServiceTemplate — soft-delete a template that no longer belongs",
+				Payload: map[string]any{
+					"template": "vtx.service.<templateNanoID>",
+				},
+				ExpectedOutcome: "Validates the template (alive + a template) and tombstones it (isDeleted: true). Returns " +
+					"primaryKey (the template key). Rejects with ScriptError if the template is absent, already retired, or is " +
+					"an instance, not a template.",
 			},
 		},
 	}
@@ -306,13 +319,15 @@ def optional_presentation(p):
 # The service families this package admits (<x> in the class string
 # service.<x>.template | service.<x>.instance). One service DDL handles all
 # families; the family is carried by the vertex envelope class + an op payload field, not
-# a DDL per family.
-SERVICE_FAMILIES = ["backgroundCheck", "payment"]
+# a DDL per family. laundry/fitness (edge-showcase-app-design.md §7.3) are the
+# showcase dataset's own honest families, widened rather than branding a
+# closed-enum member (backgroundCheck) via .presentation as something it isn't.
+SERVICE_FAMILIES = ["backgroundCheck", "payment", "laundry", "fitness"]
 
 def required_family(p):
     fam = required_string(p, "family")
     if fam not in SERVICE_FAMILIES:
-        fail("InvalidArgument: family: must be one of backgroundCheck, payment; got " + fam)
+        fail("InvalidArgument: family: must be one of backgroundCheck, payment, laundry, fitness; got " + fam)
     return fam
 
 # The terminal outcome values RecordServiceOutcome admits. completed = the
@@ -606,6 +621,32 @@ def execute(state, op):
                             "completedAt": completed_at}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": inst_key}}
+
+    if ot == "RetireServiceTemplate":
+        # Admin-only cleanup (§7.3): soft-deletes a live template that no
+        # longer belongs — e.g. one whose .presentation aspect brands a
+        # family its envelope class contradicts. A tombstone mutation carries
+        # no document (the runtime writes isDeleted:true + the lastModified*
+        # stamps only, regardless of what a script's document field supplies
+        # — starlark_runner.go's parseMutations parses the document field for
+        # create/update only). The write is self-OCC'd on the hydrated
+        # revision so a concurrent mutation of the same template aborts
+        # instead of racing.
+        tpl_key = required_string(p, "template")
+        parts_of(tpl_key, "template", "service")
+        if not vertex_alive(state, tpl_key):
+            fail("UnknownTemplate: " + tpl_key)
+        tpl_class = vertex_class(state, tpl_key)
+        if tpl_class == None or not tpl_class.endswith(".template"):
+            fail("NotATemplate: " + tpl_key + " is not a service template")
+
+        mutations = [
+            {"op": "tombstone", "key": tpl_key,
+             "expectedRevision": state[tpl_key].revision},
+        ]
+        events = [{"class": "service.templateRetired", "data": {"serviceKey": tpl_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": tpl_key}}
 
     fail("service DDL: unknown operationType: " + ot)
 `

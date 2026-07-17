@@ -94,7 +94,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo up-facet run-facet verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo seed-showcase up-facet run-facet verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -955,18 +955,32 @@ install-edge-manifest:
 ## with its RequestService op wired permitsOperation — enough for the
 ## tenant's edge-manifest lenses to populate all five manifest.* row kinds and
 ## for RequestService to be submittable under authContext.service. Family is
-## service-domain's real \`backgroundCheck\` enum member (branded via the
-## template's .presentation aspect) — service-domain's family enum is closed
-## to {backgroundCheck, payment}; adding a literal "laundry" family is out of
-## this fire's scope. Submits every op directly over NATS as the bootstrap
-## admin actor (mirroring dev-seed-staff / verify-real-actor-write-auth.go),
-## topology only — it does NOT itself submit RequestService (that's the
-## consumer-actor demo/e2e's job). Requires \`make install-edge-manifest\`
-## already run. NOT idempotent (mints fresh vertices each run), like
-## dev-seed-staff.
+## service-domain's \`backgroundCheck\` enum member branded via the template's
+## .presentation aspect — a family/presentation mismatch \`make seed-showcase\`
+## (below) exists to replace with a curated, honestly-labeled world. Submits
+## every op directly over NATS as the bootstrap admin actor (mirroring
+## dev-seed-staff / verify-real-actor-write-auth.go), topology only — it does
+## NOT itself submit RequestService (that's the consumer-actor demo/e2e's
+## job). Requires \`make install-edge-manifest\` already run. NOT idempotent
+## (mints fresh vertices each run), like dev-seed-staff.
 seed-edge-demo:
 	@echo "==> Running the edge-manifest demo seed..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/seed-edge-demo.go
+
+## seed-showcase — Dev-load the curated showcase world (edge-showcase-app-
+## design.md §7.3): two tenants sharing one building (each their own unit),
+## two service templates with HONEST families (laundry, fitness — widened
+## into service-domain's enum alongside {backgroundCheck, payment}) both
+## availableAt the building, and one completed instance (tenant1's laundry
+## order) seeding the Activity timeline. IDEMPOTENT: every vertex is minted
+## with a fixed, checked-in NanoID handle, so a rerun recognizes the existing
+## world (via the building) and recovers + reprints the two tenant ids
+## instead of minting a disjoint one. Also retires the two backgroundCheck-
+## classed templates \`make seed-edge-demo\` mislabeled "Maple Laundry", if
+## still alive. Requires \`make install-edge-manifest\` already run.
+seed-showcase:
+	@echo "==> Loading the showcase dataset..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_CLI) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) go run ./scripts/seed-showcase.go
 
 ## up-facet — build + start facet (:7810) in the background alongside Loupe
 ## (:7777): ensures edge-manifest is installed, reseeds the demo topology

@@ -47,6 +47,7 @@ func staffCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateServiceTemplate", Scope: "any"},
 			{OperationType: "CreateServiceInstance", Scope: "any"},
 			{OperationType: "RecordServiceOutcome", Scope: "any"},
+			{OperationType: "RetireServiceTemplate", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -224,7 +225,7 @@ func TestServiceInstance_OutcomeInAspect_RootMinimal(t *testing.T) {
 		Actor:         svcStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
-		Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"` + completedAt + `"}`),
+		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"` + completedAt + `"}`),
 		// The .outcome aspect does not exist yet, so it is NOT listed in Reads
 		// (a not-yet-written key is a hydration miss). The CreateOnly write is
 		// the once-only guarantee.
@@ -449,7 +450,7 @@ func TestRecordServiceOutcome_UnknownInstance_Rejected(t *testing.T) {
 		Actor:         svcStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
-		Payload: json.RawMessage(`{"instanceKey":"` + missing + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
+		Payload:       json.RawMessage(`{"instanceKey":"` + missing + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
 		// The instance does not exist; the root read alone is a hydration miss
 		// (the absent instance is rejected before the outcome is written).
 		ContextHint: &processor.ContextHint{Reads: []string{missing}},
@@ -472,7 +473,7 @@ func TestRecordServiceOutcome_OnTemplate_Rejected(t *testing.T) {
 		Actor:         svcStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
-		Payload: json.RawMessage(`{"instanceKey":"` + tplKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
+		Payload:       json.RawMessage(`{"instanceKey":"` + tplKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"}`),
 		// The template is alive + hydratable but its .class ends in .template,
 		// so the structured NotAnInstance guard fires. A template has no
 		// .outcome aspect, so it is not listed.
@@ -572,7 +573,7 @@ func TestRecordServiceOutcome_StaleRevision_Rejected(t *testing.T) {
 		Actor:         svcStaffActorKey,
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "service",
-		Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z","expectedRevision":99}`),
+		Payload:       json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z","expectedRevision":99}`),
 		// No .outcome yet; the stale expectedRevision=99 makes the OCC-guarded
 		// root touch conflict and reject.
 		ContextHint: &processor.ContextHint{Reads: []string{instKey}},
@@ -739,7 +740,8 @@ func TestRecordServiceOutcome_StatusOutOfEnum_Rejected(t *testing.T) {
 }
 
 // TestCreateServiceTemplate_FamilyOutOfEnum_Rejected: a create op family outside
-// {backgroundCheck, payment} (e.g. "inspection") is rejected with InvalidArgument.
+// {backgroundCheck, payment, laundry, fitness} (e.g. "inspection") is rejected
+// with InvalidArgument.
 func TestCreateServiceTemplate_FamilyOutOfEnum_Rejected(t *testing.T) {
 	ctx, conn := setupServiceEnv(t)
 	cp, cons := newServicePipeline(t, ctx, conn, "family-enum")
@@ -961,4 +963,126 @@ func createLiveInstance(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 	return instKey
+}
+
+// TestCreateServiceTemplate_ShowcaseFamilies_Accepted proves the §7.3 enum
+// widening: laundry and fitness (the showcase dataset's own honest families)
+// are accepted exactly like the original two, minting the matching envelope
+// class.
+func TestCreateServiceTemplate_ShowcaseFamilies_Accepted(t *testing.T) {
+	for _, fam := range []string{"laundry", "fitness"} {
+		t.Run(fam, func(t *testing.T) {
+			ctx, conn := setupServiceEnv(t)
+			cp, cons := newServicePipeline(t, ctx, conn, "showcase-fam-"+fam)
+
+			tplKey := createTemplate(t, ctx, conn, cp, cons, fam)
+			doc := readDoc(t, ctx, conn, tplKey)
+			wantClass := "service." + fam + ".template"
+			if cls, _ := doc["class"].(string); cls != wantClass {
+				t.Fatalf("template class = %q, want %q", cls, wantClass)
+			}
+		})
+	}
+}
+
+// TestRetireServiceTemplate_Success proves the §7.3 admin cleanup op:
+// tombstones a live template (isDeleted=true) — a tombstone mutation carries
+// no document (starlark_runner.go's parseMutations parses `document` for
+// create/update only), so no other field survives to assert on.
+func TestRetireServiceTemplate_Success(t *testing.T) {
+	ctx, conn := setupServiceEnv(t)
+	cp, cons := newServicePipeline(t, ctx, conn, "retire-ok")
+
+	tplKey := createTemplate(t, ctx, conn, cp, cons, "laundry")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("retireOk0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RetireServiceTemplate",
+		Actor:         svcStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "service",
+		Payload:       json.RawMessage(`{"template":"` + tplKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, tplKey) {
+		t.Fatalf("template %s must be tombstoned (isDeleted=true) after RetireServiceTemplate", tplKey)
+	}
+	doc := readDoc(t, ctx, conn, tplKey)
+	if del, _ := doc["isDeleted"].(bool); !del {
+		t.Fatalf("tombstoned template isDeleted = %v, want true", doc["isDeleted"])
+	}
+}
+
+// TestRetireServiceTemplate_UnknownTemplate_Rejected: retiring a non-existent
+// template is rejected (structured ScriptError), not a silent no-op.
+func TestRetireServiceTemplate_UnknownTemplate_Rejected(t *testing.T) {
+	ctx, conn := setupServiceEnv(t)
+	cp, cons := newServicePipeline(t, ctx, conn, "retire-unknown")
+
+	missing := "vtx.service.BBmissingtplHJKMNPQ"
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("retireMiss001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RetireServiceTemplate",
+		Actor:         svcStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "service",
+		Payload:       json.RawMessage(`{"template":"` + missing + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestRetireServiceTemplate_OnInstance_Rejected: retiring an instance (not a
+// template) is rejected — RetireServiceTemplate is template-only.
+func TestRetireServiceTemplate_OnInstance_Rejected(t *testing.T) {
+	ctx, conn := setupServiceEnv(t)
+	cp, cons := newServicePipeline(t, ctx, conn, "retire-on-instance")
+
+	instKey := createLiveInstance(t, ctx, conn, cp, cons, "BBretireinstHJKMNPQR")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("retireInst001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RetireServiceTemplate",
+		Actor:         svcStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "service",
+		Payload:       json.RawMessage(`{"template":"` + instKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{instKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestRetireServiceTemplate_AlreadyRetired_Rejected: a second retire against
+// an already-tombstoned template is rejected, not a silent duplicate no-op.
+func TestRetireServiceTemplate_AlreadyRetired_Rejected(t *testing.T) {
+	ctx, conn := setupServiceEnv(t)
+	cp, cons := newServicePipeline(t, ctx, conn, "retire-twice")
+
+	tplKey := createTemplate(t, ctx, conn, cp, cons, "fitness")
+
+	mkEnv := func(reqSuffix string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID("retireTwice" + reqSuffix),
+			Lane:          processor.LaneDefault,
+			OperationType: "RetireServiceTemplate",
+			Actor:         svcStaffActorKey,
+			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			Class:         "service",
+			Payload:       json.RawMessage(`{"template":"` + tplKey + `"}`),
+			ContextHint:   &processor.ContextHint{Reads: []string{tplKey}},
+		}
+	}
+	testutil.PublishOp(t, conn, mkEnv("1"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	testutil.PublishOp(t, conn, mkEnv("2"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }

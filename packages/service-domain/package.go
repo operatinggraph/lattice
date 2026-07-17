@@ -10,7 +10,11 @@
 //     see below). A service vertex is either a TEMPLATE (an offering) or
 //     an INSTANCE (a run of an offering), discriminated by the vertex ENVELOPE
 //     class (`service.<x>.template` / `service.<x>.instance` — P7, no `.class`
-//     shadow aspect); the service family `<x>` ∈ {backgroundCheck, payment}.
+//     shadow aspect); the service family `<x>` ∈ {backgroundCheck, payment,
+//     laundry, fitness} (edge-showcase-app-design.md §7.3 — widened honestly
+//     for the showcase dataset). A fifth op, RetireServiceTemplate (§7.3),
+//     is admin-only cleanup that soft-deletes a template that no longer
+//     belongs.
 //     Root data is minimal ({}); relationships are LINKS:
 //
 //     lnk.service.<tplId>.providedBy.<provType>.<provId>     # offering's provider
@@ -58,8 +62,8 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "service-domain",
-	Version:     "0.3.0",
-	Description: "Service template + instance vertex type (service DDL + lifecycle ops incl. RequestService); the instance records its external-call outcome as aspects (D5). No read-path lens (Phase-3 deferred).",
+	Version:     "0.4.0",
+	Description: "Service template + instance vertex type (service DDL + lifecycle ops incl. RequestService, RetireServiceTemplate); the instance records its external-call outcome as aspects (D5). No read-path lens (Phase-3 deferred).",
 	Depends:     []string{"identity-domain", "orchestration-base"},
 	DDLs:        DDLs(),
 	Permissions: Permissions(),
