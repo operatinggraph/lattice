@@ -79,6 +79,18 @@
 //     than silently activate as a plain unguarded table. Mirrors the same gate
 //     Refractor's translateSpec and pkgmgr's validateLensReadPath enforce at
 //     runtime/install-time; this is the earliest (edit-time) tripwire.
+//   - Per-test primordial-globals repopulation (bootstrap-primordial-globals-
+//     race-design.md §4). A `bootstrap.LoadOrGenerate(` call in a `*_test.go`
+//     file outside `internal/bootstrap/` and `internal/testutil/` re-populates
+//     internal/bootstrap's ~64 package-level globals per test, which races
+//     under t.Parallel() and silently stomps another test's in-flight ID set —
+//     use `testutil.EnsurePrimordials(t)` instead (populates once per test
+//     process, mirroring every production binary's boot-once lifecycle).
+//     `internal/pkgmgr/installer_test.go` is exempted: it is `package pkgmgr`
+//     (internal test), and testutil imports pkgmgr, so importing testutil
+//     there closes an import cycle — it stays on the direct call.
+//     `bootstrap.Load` (read-only, no globals repopulation) is un-gated:
+//     hellolattice's live-stack load and one-shot scripts are legitimate.
 //
 // Markdown/docs are intentionally out of scope: they discuss the conventions
 // (e.g. "never an asp.* prefix") and would false-positive. The 6-segment link
@@ -125,7 +137,18 @@ var (
 	// postures a lens entry may declare to opt out of the fail-closed default.
 	lensAdapterPostgres = regexp.MustCompile(`Adapter:\s*"postgres"`)
 	lensPostureFlag     = regexp.MustCompile(`\b(Protected|Public|GrantTable):`)
+	// loadOrGenerateCall anchors a bootstrap.LoadOrGenerate call site (the
+	// per-test-populate hazard bootstrap-primordial-globals-race-design.md §4
+	// closes via testutil.EnsurePrimordials).
+	loadOrGenerateCall = regexp.MustCompile(`bootstrap\.LoadOrGenerate\(`)
 )
+
+// loadOrGenerateExemptFile is the one test file that legitimately keeps the
+// direct bootstrap.LoadOrGenerate call: internal/pkgmgr/installer_test.go is
+// `package pkgmgr` (internal test), and internal/testutil imports pkgmgr
+// (install_phase1_packages.go), so testutil.EnsurePrimordials(t) would close
+// an import cycle there.
+const loadOrGenerateExemptFile = "internal/pkgmgr/installer_test.go"
 
 // readPostureWindow is how many lines above a kv.Read/kv.Links call the
 // `# read-posture:` annotation may sit (the call's own comment block).
@@ -296,6 +319,10 @@ func scanFile(path string) []finding {
 	if !isTest {
 		out = append(out, checkLensProtectedByDefault(path, string(data))...)
 	}
+	loadOrGenerateScoped := isTest &&
+		!strings.HasPrefix(slash, "internal/bootstrap/") &&
+		!strings.HasPrefix(slash, "internal/testutil/") &&
+		slash != loadOrGenerateExemptFile
 	// window holds the last readPostureWindow raw lines, for locating a
 	// `# read-posture:` annotation in the call's own comment block.
 	var window []string
@@ -316,6 +343,9 @@ func scanFile(path string) []finding {
 		}
 		if !isTest && p7Discriminator.MatchString(line) {
 			out = append(out, finding{file: path, line: ln, msg: "P7 violation — discriminator aspect (.class/.family/.kind) shadows the envelope class; the type belongs on the vertex class field, resolved behind a fine-grained class by the step-6 instanceOf chain (lattice-architecture.md P7, Contract #1 §1.5)"})
+		}
+		if loadOrGenerateScoped && loadOrGenerateCall.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, window, fileMutates)...)

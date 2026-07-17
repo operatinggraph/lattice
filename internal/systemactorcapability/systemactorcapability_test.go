@@ -53,6 +53,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/testutil"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
 	objectsbase "github.com/asolgan/lattice/packages/objects-base"
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
@@ -94,9 +95,7 @@ func newHarness(t *testing.T) *harness {
 	// --- real bootstrap substrate (buckets + streams + primordial identities,
 	// incl. the holdsRole->operator links for admin + every kernel service
 	// actor) ---
-	bsJSONPath := t.TempDir() + "/lattice.bootstrap.json"
-	_, err = bootstrap.LoadOrGenerate(bsJSONPath)
-	require.NoError(t, err)
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(nc, logger)
 	require.NoError(t, err)
 	require.NoError(t, seeder.ProvisionBuckets(ctx))

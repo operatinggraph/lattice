@@ -97,10 +97,7 @@ func bareKernelEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Cleanup(conn.Close)
 	testutil.ProvisionHarness(t, ctx, conn)
 
-	tmpPath := t.TempDir() + "/lattice-test-bootstrap.json"
-	if _, err := bootstrap.LoadOrGenerate(tmpPath); err != nil {
-		t.Fatalf("bootstrap.LoadOrGenerate: %v", err)
-	}
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(conn.NATS(), testutil.TestLogger())
 	if err != nil {
 		t.Fatalf("bootstrap.NewSeeder: %v", err)

@@ -44,6 +44,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/testutil"
 )
 
 // stableNanoID returns a deterministic 20-char Contract #1 NanoID for
@@ -91,11 +92,7 @@ func TestRefractor_CapabilityLens_E2E(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	// --- provision buckets + run primordial bootstrap ---
-	// Generate a fresh primordial key space per test (the bootstrap
-	// JSON path is t.TempDir-scoped so tests stay hermetic).
-	bsJSONPath := t.TempDir() + "/lattice.bootstrap.json"
-	_, err = bootstrap.LoadOrGenerate(bsJSONPath)
-	require.NoError(t, err)
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(nc, logger)
 	require.NoError(t, err)
 	require.NoError(t, seeder.ProvisionBuckets(ctx))

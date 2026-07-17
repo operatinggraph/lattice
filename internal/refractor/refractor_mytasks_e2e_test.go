@@ -34,6 +34,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/pipeline"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/testutil"
 	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
 )
 
@@ -60,9 +61,7 @@ func TestRefractor_MyTasksLens_E2E(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	js := conn.JetStream()
 
-	bsJSONPath := t.TempDir() + "/lattice.bootstrap.json"
-	_, err = bootstrap.LoadOrGenerate(bsJSONPath)
-	require.NoError(t, err)
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(nc, logger)
 	require.NoError(t, err)
 	require.NoError(t, seeder.ProvisionBuckets(ctx))

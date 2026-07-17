@@ -96,6 +96,11 @@ func newInstallerHarness(t *testing.T) (context.Context, *substrate.Conn, *Insta
 	// Seed primordials so the InstallPackage / UninstallPackage DDLs +
 	// admin identity + operator role exist and installs can route through
 	// the Processor.
+	//
+	// Stays on the direct call (not testutil.EnsurePrimordials): this file is
+	// `package pkgmgr` (internal test), and testutil imports pkgmgr
+	// (install_phase1_packages.go) — importing testutil here closes an import
+	// cycle. Exempted the same way internal/bootstrap's own suite is.
 	tmpPath := t.TempDir() + "/lattice-test-bootstrap.json"
 	if _, err := bootstrap.LoadOrGenerate(tmpPath); err != nil {
 		t.Fatalf("bootstrap.LoadOrGenerate: %v", err)

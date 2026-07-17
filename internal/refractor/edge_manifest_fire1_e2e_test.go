@@ -261,9 +261,7 @@ func TestEdgeManifest_Fire1_E2E_FiveRowKindsAndRequestService(t *testing.T) {
 	// refractor-adjacency/personal-lens-interest) + core-operations stream +
 	// the primordial admin identity + operator role, mirroring the
 	// actoraggregate proof test's setup. ---
-	bsJSONPath := t.TempDir() + "/lattice.bootstrap.json"
-	_, err = bootstrap.LoadOrGenerate(bsJSONPath)
-	require.NoError(t, err)
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(nc, logger)
 	require.NoError(t, err)
 	require.NoError(t, seeder.ProvisionBuckets(ctx))

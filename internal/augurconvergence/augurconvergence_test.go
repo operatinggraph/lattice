@@ -58,6 +58,7 @@ import (
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/processor/outbox"
 	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/testutil"
 	"github.com/asolgan/lattice/internal/weaver"
 	augurpkg "github.com/asolgan/lattice/packages/augur"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
@@ -100,9 +101,7 @@ func newHarness(t *testing.T, prepare func(*bridge.FakeAugur)) *harness {
 	js := conn.JetStream()
 
 	// Real bootstrap substrate (buckets + streams + primordials).
-	bsJSONPath := t.TempDir() + "/lattice.bootstrap.json"
-	_, err = bootstrap.LoadOrGenerate(bsJSONPath)
-	require.NoError(t, err)
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(nc, logger)
 	require.NoError(t, err)
 	require.NoError(t, seeder.ProvisionBuckets(ctx))

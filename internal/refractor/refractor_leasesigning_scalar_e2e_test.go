@@ -46,6 +46,7 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/projection"
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/testutil"
 	leasesigning "github.com/asolgan/lattice/packages/lease-signing"
 )
 
@@ -99,9 +100,7 @@ func TestRefractor_LeaseSigningConvergence_ProjectsScalarColumns(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	js := conn.JetStream()
 
-	bsJSONPath := t.TempDir() + "/lattice.bootstrap.json"
-	_, err = bootstrap.LoadOrGenerate(bsJSONPath)
-	require.NoError(t, err)
+	testutil.EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(nc, logger)
 	require.NoError(t, err)
 	require.NoError(t, seeder.ProvisionBuckets(ctx))
