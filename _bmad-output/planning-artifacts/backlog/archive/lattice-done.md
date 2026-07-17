@@ -2,6 +2,16 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-12 · `cd5a077` · [pkgmgr,Processor,service-domain] edge-manifest Fire 1 inc 1 — OpMetaSpec descriptor-vocabulary fields + RequestService service-path consumer op + template .presentation aspect; CI green
+- 2026-07-12 · `78955d0` · [pkgmgr,Refractor,Edge] edge-manifest Fire 0 — nats-subject LensSpec adapter, SYNC stream 24h MaxAge, edge/sync OnChange + UpdateInterest; CI green
+- 2026-07-12 · `8d4ebd9` · [CLI] op-status-read-surface Fire 4 CLOSED — `lattice op status` migrates off raw Core-KV KVGet onto the lattice.op.status RPC; live-stack smoke-verified; CI green
+- 2026-07-12 · `3bd743c` · [Loom] op-status-read-surface Fire 3 — trackerExists migrates to the lattice.op.status RPC; taskVertexExists retired; §10.6 contract edit staged uncommitted; CI green
+- 2026-07-12 · `a4446d5` · [Gateway] op-status-read-surface Fire 2 — GET /v1/operations/{requestId} backs the 202-fallback poll onto the lattice.op.status RPC; CI green
+- 2026-07-12 · `f12f4ce` · [Processor,Bridge] op-status-read-surface Fire 1 — lattice.op.status responder replaces the bridge's direct Core-KV skip-probe read; CI green
+- 2026-07-12 · `bd3f4b7` · [Edge,Gateway] Edge Lattice EDGE.3 CLOSED — agent.Submitter + GatewaySubmitter replace direct core-operations submit; Gate-3 e2e proves valid-submits/revoked-denies vs a real gateway.Server; CI green
+- 2026-07-12 · `eec08a6` · [identity-domain,Gateway] multi-credential-identity-linking Fire 4 CLOSED — UnlinkCredential + credentialindex revive-safety + materializer bucket-delete fold; Fires 1-4 all shipped; CI green
+- 2026-07-12 · `3e345d1` · [Edge,scripts] per-identity-nats-subscribe-acl Fire 3 CLOSED — live-stack revocation e2e proves vector 4 against real prod wiring; EDGE.3 gate flipped build-ready; CI green
+- 2026-07-12 · `2f07d93` · [Edge,Refractor] per-identity-nats-subscribe-acl Fire 2 — cmd/edge EDGE_TOKEN connect + inbox scoping; Refractor personal.{register,deregister,hydrate} bind to the verified actor; CI green
 - 2026-07-11 · `a3ec8d5` · [Gateway,natsperm] per-identity-nats-subscribe-acl Fire 1 CLOSED — xkey day-one condition wired (UnsealRequest/SealResponse sealed-box round trip); CI green
 - 2026-07-11 · `ce47946` · [CI] natsperm `t.Parallel()` experiment — local win (34.4s→25.9s) didn't hold in CI (unit job CPU-oversubscribed under `-p 4`); reverted (85b77a9→ce47946); CI green
 - 2026-07-11 · `232f9ea` · [Loupe] systemmap/lens-detail Core-KV listing scoped to vtx.package. subtree — false "RED — all absent" landing banner fixed, verified live on the 13K-key bucket
