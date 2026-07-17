@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
 
+	"github.com/asolgan/lattice/internal/bootstrap"
 	gwauth "github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/gateway/natsauth"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -187,6 +188,32 @@ func connectEdge(t *testing.T, url, bearerToken, identity, deviceName string) (*
 	return nc, nil
 }
 
+// forEachEdgeTransport runs body once per transport an Edge node can dial: the
+// TCP listener the Go node uses, and the WebSocket listener the browser node
+// uses (edge-browser-node-design.md §3.1).
+//
+// This is what makes the WS listener's security story a proof rather than an
+// assertion. The callout consumes exactly two request fields — the bearer token
+// and the device name — and splices every allowed subject from the *verified*
+// identity; nothing in it names a listener type (design §2.2), and the issued
+// user JWTs set no AllowedConnectionTypes, which jwt/v2 reads as "all types".
+// So the boundary *should* be transport-invariant. Running every vector over
+// both listeners is what holds that claim to account: if turning WS on ever
+// widens the grant — here, or in a future conf regeneration — a twin fails.
+//
+// Only the Edge dial URL varies. Component connections (refractor, processor,
+// bootstrap) stay on TCP throughout: they authenticate with NKey seeds and
+// bypass the callout, and only the untrusted Edge plane is browser-facing.
+func forEachEdgeTransport(t *testing.T, tcpURL, wsURL string, body func(t *testing.T, edgeURL string)) {
+	t.Helper()
+	for _, tc := range []struct{ name, url string }{
+		{"tcp", tcpURL},
+		{"ws", wsURL},
+	} {
+		t.Run(tc.name, func(t *testing.T) { body(t, tc.url) })
+	}
+}
+
 const syncStream = "SYNC"
 
 func provisionSyncStream(t *testing.T, url string) {
@@ -201,54 +228,56 @@ func provisionSyncStream(t *testing.T, url string) {
 // message.
 func TestAuthCallout_OwnSliceSubscribeAllowed(t *testing.T) {
 	t.Parallel()
-	url := startServerFromConf(t)
+	url, wsURL := startServerFromConfDual(t)
 	provisionSyncStream(t, url)
 
 	priv, pub := rsaKeypair(t)
 	startResponder(t, url, "test-kid", pub, "")
 
-	identity := nanoID(t)
-	tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
-	nc, err := connectEdge(t, url, tok, identity, "device-1")
-	if err != nil {
-		t.Fatalf("edge connect: want success, got %v", err)
-	}
+	forEachEdgeTransport(t, url, wsURL, func(t *testing.T, edgeURL string) {
+		identity := nanoID(t)
+		tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
+		nc, err := connectEdge(t, edgeURL, tok, identity, "device-1")
+		if err != nil {
+			t.Fatalf("edge connect: want success, got %v", err)
+		}
 
-	js, err := jetstream.New(nc)
-	if err != nil {
-		t.Fatalf("jetstream context: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	durable := "edge-sync-" + identity + "-device-1"
-	cons, err := js.CreateOrUpdateConsumer(ctx, syncStream, jetstream.ConsumerConfig{
-		Durable:       durable,
-		FilterSubject: "lattice.sync.user." + identity,
-		AckPolicy:     jetstream.AckExplicitPolicy,
+		js, err := jetstream.New(nc)
+		if err != nil {
+			t.Fatalf("jetstream context: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		durable := "edge-sync-" + identity + "-device-1"
+		cons, err := js.CreateOrUpdateConsumer(ctx, syncStream, jetstream.ConsumerConfig{
+			Durable:       durable,
+			FilterSubject: "lattice.sync.user." + identity,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+		})
+		if err != nil {
+			t.Fatalf("create own-slice consumer: want success, got %v", err)
+		}
+
+		// Publish a delta as refractor (the sanctioned publisher) and confirm the
+		// consumer actually delivers it.
+		ref := connectAs(t, url, "refractor")
+		if err := ref.Publish(ctx, "lattice.sync.user."+identity, []byte("{}"), nil); err != nil {
+			t.Fatalf("refractor publish delta: %v", err)
+		}
+
+		msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(3*time.Second))
+		if err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		got := 0
+		for m := range msgs.Messages() {
+			got++
+			_ = m.Ack()
+		}
+		if got != 1 {
+			t.Fatalf("delivered messages = %d, want 1", got)
+		}
 	})
-	if err != nil {
-		t.Fatalf("create own-slice consumer: want success, got %v", err)
-	}
-
-	// Publish a delta as refractor (the sanctioned publisher) and confirm the
-	// consumer actually delivers it.
-	ref := connectAs(t, url, "refractor")
-	if err := ref.Publish(ctx, "lattice.sync.user."+identity, []byte("{}"), nil); err != nil {
-		t.Fatalf("refractor publish delta: %v", err)
-	}
-
-	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(3*time.Second))
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	got := 0
-	for m := range msgs.Messages() {
-		got++
-		_ = m.Ack()
-	}
-	if got != 1 {
-		t.Fatalf("delivered messages = %d, want 1", got)
-	}
 }
 
 // TestAuthCallout_CrossIdentityDenied is design §8 vector 2: identity A's
@@ -256,16 +285,24 @@ func TestAuthCallout_OwnSliceSubscribeAllowed(t *testing.T) {
 // filtered on B's subject, and cannot pull from B's durable.
 func TestAuthCallout_CrossIdentityDenied(t *testing.T) {
 	t.Parallel()
-	url := startServerFromConf(t)
+	url, wsURL := startServerFromConfDual(t)
 	provisionSyncStream(t, url)
 
 	priv, pub := rsaKeypair(t)
 	startResponder(t, url, "test-kid", pub, "")
 
+	forEachEdgeTransport(t, url, wsURL, func(t *testing.T, edgeURL string) {
+		crossIdentityDeniedVector(t, url, edgeURL, priv)
+	})
+}
+
+// crossIdentityDeniedVector is vector 2's body, run once per Edge transport.
+func crossIdentityDeniedVector(t *testing.T, url, edgeURL string, priv *rsa.PrivateKey) {
+	t.Helper()
 	identityA := nanoID(t)
 	identityB := nanoID(t)
 	tokA := mintBearerToken(t, priv, "test-kid", identityA, time.Now().Add(time.Hour))
-	ncA, err := connectEdge(t, url, tokA, identityA, "device-1")
+	ncA, err := connectEdge(t, edgeURL, tokA, identityA, "device-1")
 	if err != nil {
 		t.Fatalf("edge A connect: want success, got %v", err)
 	}
@@ -304,7 +341,7 @@ func TestAuthCallout_CrossIdentityDenied(t *testing.T) {
 	// cannot even look it up, let alone pull from it — both verbs are
 	// exact-pinned to the connection's OWN durable name (§3.3).
 	tokB := mintBearerToken(t, priv, "test-kid", identityB, time.Now().Add(time.Hour))
-	ncB, err := connectEdge(t, url, tokB, identityB, "device-1")
+	ncB, err := connectEdge(t, edgeURL, tokB, identityB, "device-1")
 	if err != nil {
 		t.Fatalf("edge B connect: want success, got %v", err)
 	}
@@ -339,7 +376,7 @@ func TestAuthCallout_CrossIdentityDenied(t *testing.T) {
 // re-proven here against a live server to avoid an auth_timeout-bound test).
 func TestAuthCallout_FailClosed(t *testing.T) {
 	t.Parallel()
-	url := startServerFromConf(t)
+	url, wsURL := startServerFromConfDual(t)
 	priv, pub := rsaKeypair(t)
 	startResponder(t, url, "test-kid", pub, "")
 
@@ -352,13 +389,15 @@ func TestAuthCallout_FailClosed(t *testing.T) {
 		{"expired", mintBearerToken(t, priv, "test-kid", nanoID(t), time.Now().Add(-time.Minute))},
 		{"unknown-kid", mintBearerToken(t, priv, "wrong-kid", nanoID(t), time.Now().Add(time.Hour))},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if _, err := connectEdge(t, url, c.token, "", "device-1"); err == nil {
-				t.Fatalf("%s token: want connect denial, got success", c.name)
-			}
-		})
-	}
+	forEachEdgeTransport(t, url, wsURL, func(t *testing.T, edgeURL string) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				if _, err := connectEdge(t, edgeURL, c.token, "", "device-1"); err == nil {
+					t.Fatalf("%s token: want connect denial, got success", c.name)
+				}
+			})
+		}
+	})
 }
 
 // TestAuthCallout_Revocation is design §8 vector 4 (new-connect half — the
@@ -367,15 +406,17 @@ func TestAuthCallout_FailClosed(t *testing.T) {
 // revoked actor's identity cannot establish a new connection.
 func TestAuthCallout_Revocation(t *testing.T) {
 	t.Parallel()
-	url := startServerFromConf(t)
+	url, wsURL := startServerFromConfDual(t)
 	priv, pub := rsaKeypair(t)
 	identity := nanoID(t)
 	startResponder(t, url, "test-kid", pub, gwauth.IdentityKeyPrefix+identity)
 
 	tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
-	if _, err := connectEdge(t, url, tok, identity, "device-1"); err == nil {
-		t.Fatal("revoked identity: want connect denial, got success")
-	}
+	forEachEdgeTransport(t, url, wsURL, func(t *testing.T, edgeURL string) {
+		if _, err := connectEdge(t, edgeURL, tok, identity, "device-1"); err == nil {
+			t.Fatal("revoked identity: want connect denial, got success")
+		}
+	})
 }
 
 // TestAuthCallout_DeltaForgeryDenied is design §8 vector 6: the edge
@@ -383,43 +424,66 @@ func TestAuthCallout_Revocation(t *testing.T) {
 // Refractor publishes there) nor core-operations.
 func TestAuthCallout_DeltaForgeryDenied(t *testing.T) {
 	t.Parallel()
-	url := startServerFromConf(t)
+	url, wsURL := startServerFromConfDual(t)
 	provisionSyncStream(t, url)
+	// The core-operations stream must exist for the ops.default assertion below
+	// to mean anything: against an unbound subject a publish fails with "no
+	// stream responded" no matter what the connection is permitted to do, so
+	// the vector would pass identically if the Edge grant included ops.>.
+	boot := connectAs(t, url, "bootstrap")
+	provisionStream(t, boot, bootstrap.CoreOpsStreamName, []string{bootstrap.OpsWildcardSubject})
+
 	priv, pub := rsaKeypair(t)
 	startResponder(t, url, "test-kid", pub, "")
 
-	identity := nanoID(t)
-	tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
-	nc, err := connectEdge(t, url, tok, identity, "device-1")
-	if err != nil {
-		t.Fatalf("edge connect: %v", err)
-	}
-	c, err := substrate.Wrap(nc)
-	if err != nil {
-		t.Fatalf("wrap: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), deniedTimeout)
-	defer cancel()
-	if err := c.Publish(ctx, "lattice.sync.user."+identity, []byte("forged"), nil); err == nil {
-		t.Fatal("edge publish to its own sync subject: want denial, got success")
-	}
-	if err := c.Publish(ctx, "ops.default", []byte("forged"), nil); err == nil {
-		t.Fatal("edge publish to core-operations: want denial, got success")
-	}
+	forEachEdgeTransport(t, url, wsURL, func(t *testing.T, edgeURL string) {
+		identity := nanoID(t)
+		tok := mintBearerToken(t, priv, "test-kid", identity, time.Now().Add(time.Hour))
+		nc, err := connectEdge(t, edgeURL, tok, identity, "device-1")
+		if err != nil {
+			t.Fatalf("edge connect: %v", err)
+		}
+		c, err := substrate.Wrap(nc)
+		if err != nil {
+			t.Fatalf("wrap: %v", err)
+		}
+		// One context per denied publish. A denied JetStream publish receives no
+		// PubAck and burns its whole budget waiting, so a shared context would
+		// leave the second assertion observing the first one's exhausted
+		// deadline rather than its own denial.
+		syncCtx, syncCancel := context.WithTimeout(context.Background(), deniedTimeout)
+		defer syncCancel()
+		if err := c.Publish(syncCtx, "lattice.sync.user."+identity, []byte("forged"), nil); err == nil {
+			t.Fatal("edge publish to its own sync subject: want denial, got success")
+		}
+		opsCtx, opsCancel := context.WithTimeout(context.Background(), deniedTimeout)
+		defer opsCancel()
+		if err := c.Publish(opsCtx, "ops.default", []byte("forged"), nil); err == nil {
+			t.Fatal("edge publish to core-operations: want denial, got success")
+		}
+	})
 }
 
 // TestAuthCallout_InboxIsolation is design §8 vector 7: identity A may not
 // subscribe identity B's reply-inbox namespace.
 func TestAuthCallout_InboxIsolation(t *testing.T) {
 	t.Parallel()
-	url := startServerFromConf(t)
+	url, wsURL := startServerFromConfDual(t)
 	priv, pub := rsaKeypair(t)
 	startResponder(t, url, "test-kid", pub, "")
 
+	forEachEdgeTransport(t, url, wsURL, func(t *testing.T, edgeURL string) {
+		inboxIsolationVector(t, url, edgeURL, priv)
+	})
+}
+
+// inboxIsolationVector is vector 7's body, run once per Edge transport.
+func inboxIsolationVector(t *testing.T, url, edgeURL string, priv *rsa.PrivateKey) {
+	t.Helper()
 	identityA := nanoID(t)
 	identityB := nanoID(t)
 	tokA := mintBearerToken(t, priv, "test-kid", identityA, time.Now().Add(time.Hour))
-	ncA, err := connectEdge(t, url, tokA, identityA, "device-1")
+	ncA, err := connectEdge(t, edgeURL, tokA, identityA, "device-1")
 	if err != nil {
 		t.Fatalf("edge A connect: %v", err)
 	}

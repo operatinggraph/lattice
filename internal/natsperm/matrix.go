@@ -348,6 +348,33 @@ var Matrix = []Component{
 	},
 }
 
+// WebsocketPort is the port the WebSocket listener binds. Explicit, never a
+// default: NATS's own default (8080) collides with the Gateway.
+const WebsocketPort = 9222
+
+// WebsocketAllowedOrigins is the browser Origin allow-set for the WS
+// handshake — the dev hosts that serve the PWA. It is a second, independent
+// origin surface from the Gateway's CORS allow-set (which gates the PWA's
+// HTTP writes and never sees the WS handshake).
+//
+// It must never render empty: NATS treats an empty allowed_origins as
+// allow-any-origin, so an empty list is fail-open. TestWebsocketConfigured
+// pins non-emptiness structurally. That fail-open default is also why this is
+// a static list rather than an env-var expansion in the conf: an unset
+// variable would silently render the allow-any shape.
+//
+// The origin gate is CSRF-class hardening for browser-initiated connects, not
+// the trust boundary — a non-browser client sends no Origin header and NATS
+// accepts it (RFC 6455 §1.6). The bearer token remains the authn.
+//
+// These track cmd/facet's FACET_HTTP_ADDR default: serving the PWA from a
+// non-default address needs a matching entry here plus a
+// `go run ./deploy/gen-dev-nkeys`, or its WS handshake draws a bare 403.
+var WebsocketAllowedOrigins = []string{
+	"http://localhost:7810",
+	"http://127.0.0.1:7810",
+}
+
 // RenderConf renders deploy/nats-server.conf from Matrix + the platform-
 // bucket registry, given each component's minted public key plus the
 // auth-callout responder's issuer (ACCOUNT) and xkey (CURVE) public keys
@@ -381,6 +408,17 @@ func RenderConf(pubKeys map[string]string, calloutIssuerPub, calloutXkeyPub stri
 
 jetstream {
   store_dir: "/data/jetstream"
+}
+
+# websocket (edge-browser-node-design.md §3.1) — the browser Edge node's
+# transport. A native NATS listener, not a bridge component: WS clients are
+# authorized by the same authorization block + auth_callout below, which
+# derive every subject from the verified token and never see the listener
+# type. no_tls is DEV-ONLY; production ships a tls{} block here.
+websocket {
+  port: ` + fmt.Sprintf("%d", WebsocketPort) + `
+  no_tls: true
+  allowed_origins: [` + quoteList(WebsocketAllowedOrigins) + `]
 }
 
 authorization {

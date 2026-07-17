@@ -3,6 +3,9 @@ package natsperm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -55,6 +58,16 @@ func seedPath(t *testing.T, c string) string {
 // makes the test a proof of the real artifact, not a hand-built fixture.
 func startServerFromConf(t *testing.T) string {
 	t.Helper()
+	url, _ := startServerFromConfDual(t)
+	return url
+}
+
+// startServerFromConfDual is startServerFromConf returning both listeners' dial
+// URLs: the TCP one every component connects over, and the WebSocket one the
+// browser Edge node connects over (edge-browser-node-design.md §3.1). The Edge
+// auth vectors run over both to prove the callout is transport-invariant.
+func startServerFromConfDual(t *testing.T) (tcpURL, wsURL string) {
+	t.Helper()
 	opts, err := server.ProcessConfigFile(confPath(t))
 	if err != nil {
 		t.Fatalf("parse deploy/nats-server.conf: %v", err)
@@ -63,6 +76,22 @@ func startServerFromConf(t *testing.T) string {
 		t.Fatal("config parsed but defined no NKey users")
 	}
 	opts.Port = -1
+	// The WS listener must come from the committed conf, not from this harness:
+	// overriding the port unconditionally would happily fabricate a listener the
+	// real artifact never declares, and every WS vector would then pass against
+	// a server the test invented. Assert the conf declared one before touching
+	// it, so this helper's "proof of the real artifact" claim holds for the WS
+	// half too.
+	if opts.Websocket.Port == 0 {
+		t.Fatal("deploy/nats-server.conf declares no websocket listener — the WS vectors would prove nothing; regenerate with `go run ./deploy/gen-dev-nkeys`")
+	}
+	// The conf binds a fixed port (9222); every server this package starts must
+	// take an ephemeral one instead or parallel tests collide on it — the same
+	// parallel-safety reason opts.Port is overridden above. -1 makes the server
+	// pick a free port and write it back into opts under the same lock the
+	// readiness check reads, and RunServer does not return until the listener is
+	// bound, so the port below is settled and race-free.
+	opts.Websocket.Port = -1
 	opts.JetStream = true
 	opts.StoreDir = jsstore.Dir(t)
 	opts.NoLog = true
@@ -77,7 +106,7 @@ func startServerFromConf(t *testing.T) string {
 	opts.AuthTimeout = 10
 	s := natsserver.RunServer(opts)
 	t.Cleanup(s.Shutdown)
-	return s.ClientURL()
+	return s.ClientURL(), fmt.Sprintf("ws://127.0.0.1:%d", opts.Websocket.Port)
 }
 
 // connectAs opens an authenticated connection using a component's committed dev
@@ -214,6 +243,91 @@ func TestAuthCalloutConfigured(t *testing.T) {
 	}
 	if len(ac.AuthUsers) != 16 {
 		t.Errorf("auth_callout.auth_users = %d entries, want 16 (every component bypasses the callout)", len(ac.AuthUsers))
+	}
+}
+
+// TestWebsocketConfigured pins the websocket block's shape (edge-browser-node-design.md
+// §3.1) — the browser Edge node's listener. The load-bearing assertion is the
+// origins one: NATS treats an empty allowed_origins as ALLOW-ANY-ORIGIN, so a
+// regeneration that drops the list does not fail loudly, it silently opens the
+// handshake to every origin. Pinning non-emptiness here makes that fail-open
+// vendor default structurally unreachable.
+func TestWebsocketConfigured(t *testing.T) {
+	opts, err := server.ProcessConfigFile(confPath(t))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	ws := opts.Websocket
+	if ws.Port != WebsocketPort {
+		t.Errorf("websocket.port = %d, want %d (explicit — NATS's own 8080 default collides with the Gateway)", ws.Port, WebsocketPort)
+	}
+	if len(ws.AllowedOrigins) == 0 {
+		t.Error("websocket.allowed_origins is empty — NATS reads that as allow-ANY-origin (fail-open); the conf must always render an explicit list")
+	}
+	if !ws.NoTLS {
+		t.Error("websocket.no_tls = false but the conf ships no tls block — the server would fail to start")
+	}
+}
+
+// TestWebsocketOriginEnforced is TestWebsocketConfigured's behavioral half.
+// The config-shape pin proves the allow-list is non-empty; it cannot prove the
+// server ENFORCES it — a websocket block in the wrong scope, or an origins key
+// the vendor stops honoring, would satisfy the shape pin while every origin
+// sailed through. This drives the real handshake against the real committed
+// conf instead.
+//
+// The no-Origin case is not an oversight, it is the documented vendor contract
+// (RFC 6455 §1.6 — a non-browser client can forge any origin, so NATS accepts a
+// missing one): it is what lets the Go node and these tests dial ws:// at all,
+// and it is why the origin gate is CSRF-class hardening for browsers rather
+// than the trust boundary. The bearer token is the boundary, and none of these
+// handshakes carries one — an accepted upgrade here is not an authorized
+// session; the callout still runs on CONNECT.
+func TestWebsocketOriginEnforced(t *testing.T) {
+	t.Parallel()
+	if len(WebsocketAllowedOrigins) == 0 {
+		t.Fatal("no allowed origins to exercise — see TestWebsocketConfigured for the real diagnosis")
+	}
+	_, wsURL := startServerFromConfDual(t)
+	endpoint := strings.Replace(wsURL, "ws://", "http://", 1)
+	// Bounded: a wedged handshake must fail this test, not hang until the
+	// package-level go-test timeout.
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Handshake with a bad Origin must be refused before any NATS protocol.
+	for _, tc := range []struct {
+		name   string
+		origin string
+		want   int
+	}{
+		{"disallowed-origin", "http://evil.example.com", http.StatusForbidden},
+		{"allowed-origin", WebsocketAllowedOrigins[0], http.StatusSwitchingProtocols},
+		{"no-origin-header", "", http.StatusSwitchingProtocols},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			// Any 16-byte base64 value; the server echoes a derived accept key.
+			req.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString(make([]byte, 16)))
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("websocket handshake: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("handshake with origin %q: status = %d, want %d", tc.origin, resp.StatusCode, tc.want)
+			}
+		})
 	}
 }
 

@@ -20,6 +20,7 @@ services:
       - ./deploy/nats-server.conf:/etc/nats/nats-server.conf:ro
     ports:
       - "${NATS_PORT:-4222}:4222"   # client
+      - "${NATS_WS_PORT:-9222}:9222" # websocket (browser Edge node; dev no_tls)
       - "${NATS_HTTP_PORT:-8222}:8222" # monitoring
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
