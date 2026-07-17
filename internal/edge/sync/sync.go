@@ -20,7 +20,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/edge/store"
 	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/refractor/control"
+	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 )
 
@@ -233,7 +233,7 @@ func (m *Manager) hydrate(ctx context.Context) error {
 }
 
 func (m *Manager) registerInterest(ctx context.Context) error {
-	resp, err := m.controlRequest(ctx, "register", control.ControlRequest{
+	resp, err := m.controlRequest(ctx, "register", controlwire.ControlRequest{
 		IdentityID: m.cfg.IdentityID,
 		DeviceID:   m.cfg.DeviceID,
 		Types:      m.cfg.Types,
@@ -252,7 +252,7 @@ func (m *Manager) registerInterest(ctx context.Context) error {
 }
 
 func (m *Manager) callHydrate(ctx context.Context) (revision uint64, err error) {
-	resp, err := m.controlRequest(ctx, "hydrate", control.ControlRequest{
+	resp, err := m.controlRequest(ctx, "hydrate", controlwire.ControlRequest{
 		IdentityID: m.cfg.IdentityID,
 		DeviceID:   m.cfg.DeviceID,
 	})
@@ -270,18 +270,18 @@ func (m *Manager) callHydrate(ctx context.Context) (revision uint64, err error) 
 
 // controlRequest issues one request-reply against the "personal" pseudo-lens
 // op, carrying cfg.ActorHeader as the actor the control plane authorizes.
-func (m *Manager) controlRequest(ctx context.Context, op string, body control.ControlRequest) (control.ControlResponse, error) {
+func (m *Manager) controlRequest(ctx context.Context, op string, body controlwire.ControlRequest) (controlwire.ControlResponse, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return control.ControlResponse{}, fmt.Errorf("marshal %s request: %w", op, err)
+		return controlwire.ControlResponse{}, fmt.Errorf("marshal %s request: %w", op, err)
 	}
-	reply, err := m.tr.Request(ctx, control.ControlSubject("personal", op), data, m.cfg.ActorHeader)
+	reply, err := m.tr.Request(ctx, controlwire.ControlSubject("personal", op), data, m.cfg.ActorHeader)
 	if err != nil {
-		return control.ControlResponse{}, fmt.Errorf("%s request: %w", op, err)
+		return controlwire.ControlResponse{}, fmt.Errorf("%s request: %w", op, err)
 	}
-	var resp control.ControlResponse
+	var resp controlwire.ControlResponse
 	if err := json.Unmarshal(reply, &resp); err != nil {
-		return control.ControlResponse{}, fmt.Errorf("decode %s response: %w", op, err)
+		return controlwire.ControlResponse{}, fmt.Errorf("decode %s response: %w", op, err)
 	}
 	return resp, nil
 }

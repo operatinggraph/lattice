@@ -15,7 +15,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/asolgan/lattice/internal/processor/opwire"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -35,7 +35,7 @@ type NATSSubmitter struct {
 }
 
 // Submit implements Submitter.
-func (s *NATSSubmitter) Submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+func (s *NATSSubmitter) Submit(ctx context.Context, env *opwire.OperationEnvelope) (*opwire.OperationReply, error) {
 	data, err := json.Marshal(env)
 	if err != nil {
 		return nil, fmt.Errorf("marshal envelope: %w", err)
@@ -62,7 +62,7 @@ func (s *NATSSubmitter) Submit(ctx context.Context, env *processor.OperationEnve
 	if err != nil {
 		return nil, fmt.Errorf("wait for reply: %w", err)
 	}
-	var reply processor.OperationReply
+	var reply opwire.OperationReply
 	if err := json.Unmarshal(replyMsg.Data, &reply); err != nil {
 		return nil, fmt.Errorf("parse reply: %w", err)
 	}

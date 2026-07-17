@@ -22,9 +22,9 @@ import (
 
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/refractor/control"
+	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
 	"github.com/asolgan/lattice/internal/substrate/keys"
-	corevault "github.com/asolgan/lattice/internal/vault"
+	corevault "github.com/asolgan/lattice/internal/vault/vaultwire"
 )
 
 // sessionKeyMargin is subtracted from a cached session key's ExpiresAt when
@@ -117,7 +117,7 @@ func (c *Client) sessionKey(ctx context.Context) ([]byte, error) {
 // requestSessionKey issues one "sessionkey" control-plane request, mirroring
 // internal/edge/sync.Manager.controlRequest's subject-building + actor pattern.
 func (c *Client) requestSessionKey(ctx context.Context) (corevault.SessionKey, error) {
-	body := control.ControlRequest{
+	body := controlwire.ControlRequest{
 		IdentityID: c.cfg.IdentityID,
 		TTLSeconds: int64(c.cfg.TTL / time.Second),
 	}
@@ -125,11 +125,11 @@ func (c *Client) requestSessionKey(ctx context.Context) (corevault.SessionKey, e
 	if err != nil {
 		return corevault.SessionKey{}, fmt.Errorf("edge/vault: marshal sessionkey request: %w", err)
 	}
-	reply, err := c.ctrl.Request(ctx, control.ControlSubject("personal", "sessionkey"), data, c.cfg.ActorHeader)
+	reply, err := c.ctrl.Request(ctx, controlwire.ControlSubject("personal", "sessionkey"), data, c.cfg.ActorHeader)
 	if err != nil {
 		return corevault.SessionKey{}, fmt.Errorf("edge/vault: sessionkey request: %w", err)
 	}
-	var resp control.ControlResponse
+	var resp controlwire.ControlResponse
 	if err := json.Unmarshal(reply, &resp); err != nil {
 		return corevault.SessionKey{}, fmt.Errorf("edge/vault: decode sessionkey response: %w", err)
 	}

@@ -56,15 +56,30 @@ jobs:
         # runs this target yet; the check exists so an import that cannot build
         # for a browser — bbolt above all — can never re-enter the engine
         # unnoticed between here and the browser host landing.
-        #
-        # Scope, precisely: this catches imports that FAIL to compile under
-        # js/wasm. It does NOT prove the engine is free of NATS — nats.go
-        # builds for js/wasm quite happily, so a trusted transport could
-        # re-enter and this step would stay green. Keeping NATS out of the
-        # browser build is enforced by build tags today, not by this gate; the
-        # dependency-level assertion needs the wire-type packages untangled
-        # first (see edge-browser-node-design.md §3.3, W3 prerequisite).
         run: GOOS=js GOARCH=wasm go build ./internal/edge/...
+
+      - name: Assert the browser Edge engine cannot reach a NATS client
+        # The browser node's only sanctioned write door is the Gateway (Fetch)
+        # and its only read door is the JS shell's WebSocket; a linked nats.go
+        # is both dead weight in the artifact and a trusted transport waiting to
+        # be wired around that boundary. The build check above cannot see this —
+        # nats.go compiles for js/wasm quite happily — so the confinement is
+        # asserted here, at the dependency level, over the same package set.
+        #
+        # This is the assertion the wire-type extraction bought: the DTOs the
+        # engine needs live in leaf packages (opwire / controlwire / healthwire /
+        # vaultwire / substrate keys), so reaching a NATS client now takes a
+        # deliberate import rather than a struct reference.
+        run: |
+          deps=$(GOOS=js GOARCH=wasm go list -deps ./internal/edge/...)
+          if echo "$deps" | grep -q '^github.com/nats-io/'; then
+            echo "::error::the js/wasm Edge engine reaches a NATS client:"
+            echo "$deps" | grep '^github.com/nats-io/'
+            echo "The browser engine talks to the Gateway, not to NATS directly."
+            echo "See edge-browser-node-design.md §3.2/§3.3."
+            exit 1
+          fi
+          echo "OK: no github.com/nats-io/* in the js/wasm engine dependency graph."
 
       - name: Vet
         run: make vet

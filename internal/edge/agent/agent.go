@@ -34,14 +34,14 @@ import (
 
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/asolgan/lattice/internal/processor/opwire"
 )
 
 // Submitter delivers one operation envelope to the platform and waits for
 // its terminal reply. Implementations decide the transport and trust
 // posture — see GatewaySubmitter and NATSSubmitter.
 type Submitter interface {
-	Submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error)
+	Submit(ctx context.Context, env *opwire.OperationEnvelope) (*opwire.OperationReply, error)
 }
 
 // Rehydrator triggers a full cold re-projection of the identity's slice.
@@ -57,7 +57,7 @@ type Rehydrator interface {
 type ConflictInfo struct {
 	RequestID string
 	Keys      []string
-	Reply     *processor.OperationReply
+	Reply     *opwire.OperationReply
 }
 
 // Config configures an Agent.
@@ -96,15 +96,15 @@ func New(submitter Submitter, st store.Store, ov *overlay.Overlay, rehydrate Reh
 // envelope plus the keys overlay.Apply already installed a pending overlay
 // for, so Drain's reject path knows what to Discard.
 type intentRecord struct {
-	Envelope    *processor.OperationEnvelope `json:"envelope"`
-	TouchedKeys []string                     `json:"touchedKeys,omitempty"`
+	Envelope    *opwire.OperationEnvelope `json:"envelope"`
+	TouchedKeys []string                  `json:"touchedKeys,omitempty"`
 }
 
 // Enqueue durably queues env for upload (§3.5's "queue the intent"). Call
 // AFTER overlay.Apply installs the optimistic value for every key in
 // touchedKeys, so the UI sees the change before the intent is even queued,
 // let alone submitted.
-func (a *Agent) Enqueue(env *processor.OperationEnvelope, touchedKeys []string) error {
+func (a *Agent) Enqueue(env *opwire.OperationEnvelope, touchedKeys []string) error {
 	b, err := json.Marshal(intentRecord{Envelope: env, TouchedKeys: touchedKeys})
 	if err != nil {
 		return fmt.Errorf("edge/agent: encode intent %s: %w", env.RequestID, err)
@@ -157,12 +157,12 @@ func (a *Agent) Drain(ctx context.Context) error {
 // nothing further (the overlay retires itself once the mirror catches up);
 // rejected re-hydrates on RevisionConflict, discards the intent's overlays
 // unconditionally, and reports the conflict.
-func (a *Agent) resolve(ctx context.Context, ir intentRecord, reply *processor.OperationReply) error {
+func (a *Agent) resolve(ctx context.Context, ir intentRecord, reply *opwire.OperationReply) error {
 	switch reply.Status {
-	case processor.ReplyStatusAccepted, processor.ReplyStatusDuplicate:
+	case opwire.ReplyStatusAccepted, opwire.ReplyStatusDuplicate:
 		return nil
-	case processor.ReplyStatusRejected:
-		if reply.Error != nil && reply.Error.Code == processor.ErrCodeRevisionConflict && a.rehydrate != nil {
+	case opwire.ReplyStatusRejected:
+		if reply.Error != nil && reply.Error.Code == opwire.ErrCodeRevisionConflict && a.rehydrate != nil {
 			if err := a.rehydrate.Rehydrate(ctx); err != nil {
 				a.logger.Error("edge/agent: re-audit rehydrate failed", "requestId", ir.Envelope.RequestID, "err", err)
 			}
@@ -179,7 +179,7 @@ func (a *Agent) resolve(ctx context.Context, ir intentRecord, reply *processor.O
 	}
 }
 
-func (a *Agent) reportConflict(ir intentRecord, reply *processor.OperationReply) {
+func (a *Agent) reportConflict(ir intentRecord, reply *opwire.OperationReply) {
 	if a.cfg.Conflict != nil {
 		a.cfg.Conflict(ConflictInfo{RequestID: ir.Envelope.RequestID, Keys: ir.TouchedKeys, Reply: reply})
 		return

@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/asolgan/lattice/internal/processor/opwire"
 )
 
 // ErrCredentialRejected marks a submit the Gateway refused at the DOOR — the
@@ -38,15 +38,15 @@ var ErrCredentialRejected = errors.New("edge/agent: gateway rejected the credent
 // send. AuthContext DOES forward (unlike actor/submittedAt) — it selects
 // which auth path step-3 evaluates (Contract #2 §2.8), not who the actor is.
 type gatewayOperationRequest struct {
-	RequestID     string                      `json:"requestId,omitempty"`
-	Lane          string                      `json:"lane,omitempty"`
-	OperationType string                      `json:"operationType"`
-	Class         string                      `json:"class,omitempty"`
-	Payload       json.RawMessage             `json:"payload,omitempty"`
-	Reads         []string                    `json:"reads,omitempty"`
-	OptionalReads []string                    `json:"optionalReads,omitempty"`
-	Enumerations  []processor.EnumerationHint `json:"enumerations,omitempty"`
-	AuthContext   *processor.AuthContext      `json:"authContext,omitempty"`
+	RequestID     string                   `json:"requestId,omitempty"`
+	Lane          string                   `json:"lane,omitempty"`
+	OperationType string                   `json:"operationType"`
+	Class         string                   `json:"class,omitempty"`
+	Payload       json.RawMessage          `json:"payload,omitempty"`
+	Reads         []string                 `json:"reads,omitempty"`
+	OptionalReads []string                 `json:"optionalReads,omitempty"`
+	Enumerations  []opwire.EnumerationHint `json:"enumerations,omitempty"`
+	AuthContext   *opwire.AuthContext      `json:"authContext,omitempty"`
 }
 
 type gatewayErrorBody struct {
@@ -72,7 +72,7 @@ type GatewaySubmitter struct {
 }
 
 // Submit implements Submitter.
-func (g *GatewaySubmitter) Submit(ctx context.Context, env *processor.OperationEnvelope) (*processor.OperationReply, error) {
+func (g *GatewaySubmitter) Submit(ctx context.Context, env *opwire.OperationEnvelope) (*opwire.OperationReply, error) {
 	if g.Token == "" {
 		return nil, fmt.Errorf("edge/agent: no gateway credential available to submit with")
 	}
@@ -114,7 +114,7 @@ func (g *GatewaySubmitter) Submit(ctx context.Context, env *processor.OperationE
 		return nil, fmt.Errorf("read gateway response: %w", err)
 	}
 
-	var reply processor.OperationReply
+	var reply opwire.OperationReply
 	if err := json.Unmarshal(raw, &reply); err == nil && reply.Status != "" {
 		return &reply, nil
 	}

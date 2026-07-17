@@ -18,67 +18,51 @@ package vault
 
 import (
 	"context"
-	"errors"
 	"time"
+
+	"github.com/asolgan/lattice/internal/vault/vaultwire"
 )
 
+// The wire types, the sentinel errors, and the session-key open are defined in
+// internal/vault/vaultwire, a leaf package that depends on nothing but the
+// standard library. They are re-exported here because they read as vault
+// vocabulary at every call site in the platform, and because importing this
+// package means linking a NATS client (service.go) — which a browser-hosted
+// Edge engine (edge-browser-node-design.md §3.2) must not do for the sake of a
+// Ciphertext struct. Code that needs only these types imports
+// internal/vault/vaultwire directly.
+//
+// These are aliases, not new types: a vaultwire.Ciphertext IS a vault.Ciphertext,
+// and errors.Is matches across the boundary.
+
 // Envelope is the wrapped-DEK reference persisted in an identity's
-// vtx.identity.<id>.piiKey aspect (design §2.1, Contract #3 §3.10). WrappedDEK
-// is ciphertext — the DEK wrapped under the backend's master key (KEK) — never
-// plaintext key material.
-type Envelope struct {
-	WrappedDEK []byte    `json:"wrappedDEK"`
-	KeyID      string    `json:"keyId"`
-	KEKVersion string    `json:"kekVersion"`
-	Alg        string    `json:"alg"`
-	CreatedAt  time.Time `json:"createdAt"`
-	Shredded   bool      `json:"shredded"`
-}
+// vtx.identity.<id>.piiKey aspect (design §2.1, Contract #3 §3.10).
+type Envelope = vaultwire.Envelope
 
 // Ciphertext is the encrypted form of a sensitive aspect's data, stored in
 // Core KV in place of the plaintext (Contract #3 §3.10).
-type Ciphertext struct {
-	CT    []byte `json:"ct"`
-	Nonce []byte `json:"nonce"`
-	KeyID string `json:"keyId"`
-}
+type Ciphertext = vaultwire.Ciphertext
 
 // SessionKey is the transient decryption key IssueSessionKey mints for an
 // Edge node's local, in-memory decrypt of ciphertext deltas (Personal Lens
-// Fire 5, personal-secure-lens-design.md §3.6 — "Transient Decryption",
-// Edge Lattice.md §5). Key is the same per-identity DEK Decrypt/UnwrapKey use
-// (there is one DEK per identity, not one per aspect); ExpiresAt is a
-// hygiene bound the caller enforces locally, not the security boundary — the
-// real revocation guarantee is ShredKey, checked fresh on every issuance.
-type SessionKey struct {
-	Key       []byte    `json:"key"`
-	ExpiresAt time.Time `json:"expiresAt"`
-}
+// Fire 5, personal-secure-lens-design.md §3.6).
+type SessionKey = vaultwire.SessionKey
 
-// Sentinel errors a Vault backend returns. Callers (the Processor's
-// commit-path hooks, the decrypt RPC responder) match on these with
+// Sentinel errors a Vault backend returns. Callers match on these with
 // errors.Is rather than backend-specific error values.
 var (
-	// ErrKeyShredded is returned by Encrypt/Decrypt once ShredKey has been
-	// called for the identity (or the caller-supplied Envelope already
-	// carries Shredded=true) — the crypto-shred guarantee: no further
-	// plaintext, in either direction, once shredded.
-	ErrKeyShredded = errors.New("vault: identity key shredded")
-	// ErrInvalidEnvelope is returned when a caller-supplied Envelope cannot
-	// have been produced by CreateIdentityKey (malformed WrappedDEK, unknown
-	// KEKVersion, …).
-	ErrInvalidEnvelope = errors.New("vault: invalid envelope")
-	// ErrDecryptFailed is returned when authenticated decryption fails (bad
-	// key, tampered ciphertext, or — for an AEAD — a wrong nonce/AAD).
-	ErrDecryptFailed = errors.New("vault: decrypt failed")
-	// ErrRefUnverified is returned by the ref-verified decrypt RPC responder
-	// (DecryptRefSubject) when a sensitive-ref marker's MAC is absent or does
-	// not match Vault.MAC's recomputation — a fabricated or corrupted ref,
-	// never decrypted (design sensitive-ref-mac-provenance-design.md §3.3).
-	// Echoed over the wire and matched via errors.Is, exactly like
-	// ErrKeyShredded.
-	ErrRefUnverified = errors.New("vault: ref unverified")
+	ErrKeyShredded     = vaultwire.ErrKeyShredded
+	ErrInvalidEnvelope = vaultwire.ErrInvalidEnvelope
+	ErrDecryptFailed   = vaultwire.ErrDecryptFailed
+	ErrRefUnverified   = vaultwire.ErrRefUnverified
 )
+
+// OpenWithSessionKey AEAD-opens ct under sessionKey — a SessionKey.Key
+// returned by IssueSessionKey — binding identityKey as associated data
+// exactly as LocalBackend.Decrypt does server-side.
+func OpenWithSessionKey(sessionKey []byte, identityKey string, ct Ciphertext) ([]byte, error) {
+	return vaultwire.OpenWithSessionKey(sessionKey, identityKey, ct)
+}
 
 // Vault is the key-custody + crypto interface the Processor's commit-path
 // hooks and the trusted-tool decrypt RPC depend on. Implementations must

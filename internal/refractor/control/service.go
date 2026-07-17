@@ -15,6 +15,7 @@ import (
 
 	"github.com/asolgan/lattice/internal/controlauth"
 	"github.com/asolgan/lattice/internal/gateway/auth"
+	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
 	"github.com/asolgan/lattice/internal/refractor/health"
 	"github.com/asolgan/lattice/internal/refractor/lens"
 	"github.com/asolgan/lattice/internal/refractor/personalinterest"
@@ -115,130 +116,55 @@ type RowNullifier interface {
 	Delete(ctx context.Context, keys map[string]any, projectionSeq uint64) error
 }
 
-// ControlRequest is the JSON payload sent to control endpoints. Op and RuleID
-// are now expressed in the request subject (lattice.ctrl.refractor.<lensId>.<op>),
-// so on the wire only the operation-specific fields (Truncate) carry
-// meaning. The Op and RuleID fields are retained for backwards compatibility
-// with tooling that still constructs the legacy single-subject payload — when
-// the subject path provides values the subject path wins.
-type ControlRequest struct {
-	Op       string `json:"op,omitempty"`       // legacy; subject path is authoritative
-	RuleID   string `json:"ruleId,omitempty"`   // legacy; subject path is authoritative
-	Truncate bool   `json:"truncate,omitempty"` // used by "rebuild" op; default false
+// The control-plane wire format is defined in
+// internal/refractor/control/controlwire, a leaf package that depends on
+// nothing but the standard library. It is re-exported here because it reads as
+// control vocabulary at every server-side call site, and because importing this
+// package means linking a NATS client + the micro service — which a
+// browser-hosted Edge engine (edge-browser-node-design.md §3.2) must not do to
+// call an endpoint through the Gateway. Code that needs only the payloads
+// imports internal/refractor/control/controlwire directly.
+//
+// These are aliases, not new types: a controlwire.ControlRequest IS a
+// control.ControlRequest, so the Edge client and this service marshal one
+// definition rather than two that can drift (edge-lattice-full-design.md §8.1
+// RR-4).
 
-	// IdentityID, DeviceID, Types, Anchors are used by the "register"/
-	// "deregister" ops (personal-secure-lens-design.md §3.3, Fire PL.2): a
-	// Personal Lens device Interest Set registration. Sent on
-	// lattice.ctrl.refractor.personal.{register,deregister} — the "personal"
-	// subject segment is a fixed pseudo-lensId, not a real lens.
-	IdentityID string   `json:"identityId,omitempty"`
-	DeviceID   string   `json:"deviceId,omitempty"`
-	Types      []string `json:"types,omitempty"`
-	Anchors    []string `json:"anchors,omitempty"`
-
-	// AspectScope and TTLSeconds are used by the "sessionkey" op
-	// (edge-lattice-full-design.md §3.6, EDGE.4), sent on
-	// lattice.ctrl.refractor.personal.sessionkey. AspectScope is carried
-	// through to vault.IssueSessionKey for audit/API-shape only (there is one
-	// DEK per identity, not one per aspect). TTLSeconds <= 0 lets the Vault
-	// backend pick its own default/ceiling.
-	AspectScope string `json:"aspectScope,omitempty"`
-	TTLSeconds  int64  `json:"ttlSeconds,omitempty"`
-}
+// ControlRequest is the JSON payload sent to control endpoints.
+type ControlRequest = controlwire.ControlRequest
 
 // ControlResponse is the JSON payload returned by the control service.
-// On success (health op): Entry fields are present (promoted from embedded *health.Entry).
-// On success (validate op): Validate field is present; Entry fields are absent.
-// On success (rebuild op): Rebuild field is present; Entry fields are absent.
-// On success (pause op): Pause field is present; Entry fields are absent.
-// On success (resume op): Resume field is present; Entry fields are absent.
-// On success (delete op): Delete field is present; Entry fields are absent.
-// On error: only "error" field is present.
-type ControlResponse struct {
-	*health.Entry                                // embedded; nil on non-health ops → fields absent in JSON
-	Error              string                    `json:"error,omitempty"`
-	Validate           *ValidateResult           `json:"validate,omitempty"`           // present only for "validate" op
-	Rebuild            *RebuildResult            `json:"rebuild,omitempty"`            // present only for "rebuild" op
-	Pause              *PauseResult              `json:"pause,omitempty"`              // present only for "pause" op
-	Resume             *ResumeResult             `json:"resume,omitempty"`             // present only for "resume" op
-	Delete             *DeleteResult             `json:"delete,omitempty"`             // present only for "delete" op
-	PersonalRegister   *PersonalRegisterResult   `json:"personalRegister,omitempty"`   // present only for "register" op
-	PersonalDeregister *PersonalDeregisterResult `json:"personalDeregister,omitempty"` // present only for "deregister" op
-	PersonalHydrate    *PersonalHydrateResult    `json:"personalHydrate,omitempty"`    // present only for "hydrate" op
-	PersonalSessionKey *PersonalSessionKeyResult `json:"personalSessionKey,omitempty"` // present only for "sessionkey" op
-}
+type ControlResponse = controlwire.ControlResponse
 
 // RebuildResult is the async acknowledgement returned by the "rebuild" op.
-// Started is always true when the op is accepted; the rebuild runs asynchronously.
-type RebuildResult struct {
-	Started bool `json:"started"`
-}
+type RebuildResult = controlwire.RebuildResult
 
 // PauseResult is the synchronous acknowledgement returned by the "pause" op.
-// Paused is always true when the op is accepted.
-type PauseResult struct {
-	Paused bool `json:"paused"`
-}
+type PauseResult = controlwire.PauseResult
 
 // ResumeResult is the synchronous acknowledgement returned by the "resume" op.
-// Resumed is always true when the op is accepted.
-type ResumeResult struct {
-	Resumed bool `json:"resumed"`
-}
+type ResumeResult = controlwire.ResumeResult
 
 // DeleteResult is the synchronous acknowledgement returned by the "delete" op.
-// Deleted is always true when the op is accepted.
-type DeleteResult struct {
-	Deleted bool `json:"deleted"`
-}
+type DeleteResult = controlwire.DeleteResult
 
-// PersonalRegisterResult is the synchronous acknowledgement returned by the
-// "register" op (personal-secure-lens-design.md §3.3, Fire PL.2).
-type PersonalRegisterResult struct {
-	Registered bool `json:"registered"`
-}
+// PersonalRegisterResult is the acknowledgement returned by the "register" op.
+type PersonalRegisterResult = controlwire.PersonalRegisterResult
 
-// PersonalDeregisterResult is the synchronous acknowledgement returned by the
-// "deregister" op.
-type PersonalDeregisterResult struct {
-	Deregistered bool `json:"deregistered"`
-}
+// PersonalDeregisterResult is the acknowledgement returned by the "deregister" op.
+type PersonalDeregisterResult = controlwire.PersonalDeregisterResult
 
-// PersonalHydrateResult is the synchronous acknowledgement returned by the
-// "hydrate" op (personal-secure-lens-design.md §3.5, Fire PL.4): the cold
-// bulk projection has completed and every row has been published; Revision
-// is the high-water mark the requesting device should resume incremental
-// delivery from.
-type PersonalHydrateResult struct {
-	Hydrated bool   `json:"hydrated"`
-	Revision uint64 `json:"revision"`
-}
+// PersonalHydrateResult is the acknowledgement returned by the "hydrate" op.
+type PersonalHydrateResult = controlwire.PersonalHydrateResult
 
-// PersonalSessionKeyResult is the synchronous acknowledgement returned by the
-// "sessionkey" op (edge-lattice-full-design.md §3.6, EDGE.4): a transient
-// session key for the requesting identity's own DEK, for the Edge node to
-// decrypt ciphertext deltas locally and in-memory. ExpiresAt is a hygiene
-// bound the caller enforces locally, not the security boundary — the Vault's
-// ShredKey, checked fresh on every "sessionkey" call, is (vault.SessionKey).
-type PersonalSessionKeyResult struct {
-	Key       []byte    `json:"key"`
-	ExpiresAt time.Time `json:"expiresAt"`
-}
+// PersonalSessionKeyResult is the acknowledgement returned by the "sessionkey" op.
+type PersonalSessionKeyResult = controlwire.PersonalSessionKeyResult
 
-// ValidateResult is returned by the "validate" op. It contains a best-effort
-// field-presence report based on a sample of current Core KV entries.
-type ValidateResult struct {
-	SampleSize   int           `json:"sampleSize"`
-	FieldReports []FieldReport `json:"fieldReports"`
-	Warnings     []string      `json:"warnings,omitempty"` // fields absent from all sampled entries
-}
+// ValidateResult is returned by the "validate" op.
+type ValidateResult = controlwire.ValidateResult
 
 // FieldReport describes the presence of one referenced field in the Core KV sample.
-type FieldReport struct {
-	Field   string `json:"field"`   // full expression, e.g. "a.id"
-	FoundIn int    `json:"foundIn"` // number of sampled entries containing this property
-	Present bool   `json:"present"` // true if foundIn > 0
-}
+type FieldReport = controlwire.FieldReport
 
 // Service coordinates control operations (pause, resume, health query, validate, rebuild, delete).
 // It maintains a registry of active pipeline interfaces keyed by ruleID.
@@ -542,7 +468,7 @@ func (s *Service) NullifyRow(ctx context.Context, ruleID string, keys map[string
 // endpoint handler serve all lens IDs — necessary because the Refractor
 // does not know the full set of lens IDs at startup (handoff brief
 // Decision #6).
-const controlSubjectPrefix = "lattice.ctrl.refractor"
+const controlSubjectPrefix = controlwire.SubjectPrefix
 
 // supportedOps enumerates the per-op endpoint suffixes registered under
 // the NATS Services framework. The op name is taken from the trailing
@@ -733,9 +659,7 @@ func lensIDFromSubject(subject string) (string, bool) {
 
 // ControlSubject returns the canonical request subject for the given
 // lens ID + op. Exposed for tests and tooling.
-func ControlSubject(lensID, op string) string {
-	return controlSubjectPrefix + "." + lensID + "." + op
-}
+func ControlSubject(lensID, op string) string { return controlwire.ControlSubject(lensID, op) }
 
 // getHealth returns the health KV entry for ruleID as a ControlResponse.
 // Returns an error response if the rule is not registered or the KV read fails.
