@@ -51,6 +51,7 @@ func assertOutboxEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 }
 
 func TestRevokeActor_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-revoke-success")
 
@@ -91,6 +92,7 @@ func TestRevokeActor_Success(t *testing.T) {
 }
 
 func TestRevokeActor_ReasonOptional(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-revoke-noreason")
 
@@ -115,6 +117,7 @@ func TestRevokeActor_ReasonOptional(t *testing.T) {
 }
 
 func TestUnrevokeActor_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-unrevoke-success")
 
@@ -145,6 +148,7 @@ func TestUnrevokeActor_Success(t *testing.T) {
 // self-scoped — the consumer fixture (ClaimIdentity scope=self only) has no
 // RevokeActor grant and is denied at step 3.
 func TestRevokeActor_NonOperatorDenied(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-revoke-denied")
 
@@ -164,6 +168,7 @@ func TestRevokeActor_NonOperatorDenied(t *testing.T) {
 // TestRevokeActor_MissingActorRejected: the Starlark validates actor is
 // present and identity-shaped before building any event.
 func TestRevokeActor_MissingActorRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-revoke-missing")
 
@@ -184,6 +189,7 @@ func TestRevokeActor_MissingActorRejected(t *testing.T) {
 // vtx.identity.<NanoID> key — the only shape the Gateway's read-path checker
 // and the identity-domain's own actor space use.
 func TestRevokeActor_NonIdentityActorRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-revoke-badshape")
 
@@ -207,6 +213,7 @@ func TestRevokeActor_NonIdentityActorRejected(t *testing.T) {
 // materializer's KVPut, so the script is the fail-closed gate that keeps a
 // poison key from ever reaching the outbox.
 func TestRevokeActor_BadCharsetActorRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRevocationPipeline(t, ctx, conn, "rev-revoke-badcharset")
 

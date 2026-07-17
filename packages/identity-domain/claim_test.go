@@ -102,6 +102,7 @@ func readClaimHealthCounter(t *testing.T, ctx context.Context, conn *substrate.C
 }
 
 func TestClaimIdentity_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "succ")
 
@@ -184,6 +185,7 @@ func TestClaimIdentity_Success(t *testing.T) {
 }
 
 func TestClaimIdentity_WrongKey_GenericError(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "wrkey")
 
@@ -231,6 +233,7 @@ func TestClaimIdentity_WrongKey_GenericError(t *testing.T) {
 }
 
 func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "alrcl")
 
@@ -271,6 +274,7 @@ func TestClaimIdentity_AlreadyClaimed_GenericError(t *testing.T) {
 }
 
 func TestClaimIdentity_Flagged_GenericError(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "flagged")
 
@@ -311,6 +315,7 @@ func TestClaimIdentity_Flagged_GenericError(t *testing.T) {
 }
 
 func TestClaimIdentity_Merged_GenericError(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "merged")
 
@@ -357,6 +362,7 @@ func TestClaimIdentity_Merged_GenericError(t *testing.T) {
 }
 
 func TestClaimIdentity_CredentialAlreadyBound_GenericError(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "credbnd")
 
@@ -415,6 +421,7 @@ func TestClaimIdentity_CredentialAlreadyBound_GenericError(t *testing.T) {
 }
 
 func TestClaimIdentity_FR5_GrandfatheredFlow(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "fr5gf")
 
@@ -496,6 +503,7 @@ func TestClaimIdentity_FR5_GrandfatheredFlow(t *testing.T) {
 }
 
 func TestClaimIdentity_FR5_ImmediateAccess(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newClaimPipeline(t, ctx, conn, "fr5ia")
 

@@ -142,6 +142,7 @@ func completeLinkEnv(reqID, a2Key, uKey, linkKeyPlaintext string) *processor.Ope
 }
 
 func TestInitiateCredentialLink_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "init-succ")
 
@@ -162,6 +163,7 @@ func TestInitiateCredentialLink_Success(t *testing.T) {
 }
 
 func TestInitiateCredentialLink_Unclaimed_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "init-unclaimed")
 
@@ -179,6 +181,7 @@ func TestInitiateCredentialLink_Unclaimed_Rejected(t *testing.T) {
 }
 
 func TestInitiateCredentialLink_Merged_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "init-merged")
 
@@ -192,6 +195,7 @@ func TestInitiateCredentialLink_Merged_Rejected(t *testing.T) {
 }
 
 func TestInitiateCredentialLink_ReArm_Overwrites(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "init-rearm")
 
@@ -213,6 +217,7 @@ func TestInitiateCredentialLink_ReArm_Overwrites(t *testing.T) {
 }
 
 func TestCompleteCredentialLink_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-succ")
 
@@ -262,6 +267,7 @@ func TestCompleteCredentialLink_Success(t *testing.T) {
 }
 
 func TestCompleteCredentialLink_WrongKey_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-wrong")
 
@@ -280,6 +286,7 @@ func TestCompleteCredentialLink_WrongKey_Rejected(t *testing.T) {
 }
 
 func TestCompleteCredentialLink_SpentKey_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-spent")
 	testutil.SeedCapDoc(t, ctx, conn, thirdCredCapDoc())
@@ -305,6 +312,7 @@ func TestCompleteCredentialLink_SpentKey_Rejected(t *testing.T) {
 }
 
 func TestCompleteCredentialLink_AlreadyBoundCredential_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-bound")
 
@@ -333,6 +341,7 @@ func TestCompleteCredentialLink_AlreadyBoundCredential_Rejected(t *testing.T) {
 }
 
 func TestCompleteCredentialLink_UnclaimedTarget_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-unclaimed")
 
@@ -357,6 +366,7 @@ func TestCompleteCredentialLink_UnclaimedTarget_Rejected(t *testing.T) {
 // CompleteCredentialLink's binding_absent branch must create one fresh
 // rather than assume it always exists.
 func TestCompleteCredentialLink_ScenarioB_CreatesAspect(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-scenb")
 
@@ -415,6 +425,7 @@ func TestCompleteCredentialLink_ScenarioB_CreatesAspect(t *testing.T) {
 // into the caller-visible reply's error.details.message instead of being
 // stripped and routed to Health KV.
 func TestCompleteCredentialLink_GenericError_NoEnumeration(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	logger := testutil.TestLogger()
 	instance := claimInstance + "-cmpl-generr"
@@ -455,6 +466,7 @@ func TestCompleteCredentialLink_GenericError_NoEnumeration(t *testing.T) {
 // writes the N-credential array (not just the singular actorKey/boundAt
 // fields) so a subsequent CompleteCredentialLink has something to append to.
 func TestClaimIdentity_WritesCredentialsArray(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "claim-array")
 

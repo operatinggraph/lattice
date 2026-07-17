@@ -56,6 +56,7 @@ func linkSecondCredential(t *testing.T, ctx context.Context, conn *substrate.Con
 }
 
 func TestUnlinkCredential_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-succ")
 
@@ -96,6 +97,7 @@ func TestUnlinkCredential_Success(t *testing.T) {
 }
 
 func TestUnlinkCredential_LastCredential_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-last")
 
@@ -128,6 +130,7 @@ func TestUnlinkCredential_LastCredential_Rejected(t *testing.T) {
 }
 
 func TestUnlinkCredential_NeverLinked_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-never")
 
@@ -154,6 +157,7 @@ func TestUnlinkCredential_NeverLinked_Rejected(t *testing.T) {
 // "create" on A2's now-tombstoned credentialindex vertex would RevisionConflict
 // forever, permanently locking A2 out of ever relinking anywhere.
 func TestUnlinkCredential_UnlinkThenRelink_RoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-relink")
 
@@ -198,6 +202,7 @@ func TestUnlinkCredential_UnlinkThenRelink_RoundTrip(t *testing.T) {
 // credentials remain, the singular fields must promote to the new first
 // entry rather than go stale.
 func TestUnlinkCredential_PromotesSingularOnRemovalOfOriginalHolder(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-promote")
 	testutil.SeedCapDoc(t, ctx, conn, thirdCredCapDoc())
@@ -238,6 +243,7 @@ func TestUnlinkCredential_PromotesSingularOnRemovalOfOriginalHolder(t *testing.T
 // in this package (InitiateCredentialLink, CompleteCredentialLink): a merged
 // identity can no longer mutate its own credentialBinding.
 func TestUnlinkCredential_MergedIdentity_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-merged")
 

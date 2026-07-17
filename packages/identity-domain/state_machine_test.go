@@ -79,6 +79,7 @@ func seedIdentityVertex(t *testing.T, ctx context.Context, conn *substrate.Conn,
 // for the single allowed transition (unclaimed -> claimed) and asserts
 // step-8 commit + IdentityStateChanged event.
 func TestIdentity_StateMachine_AllowedTransitions(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		fromState  string
@@ -127,6 +128,7 @@ func TestIdentity_StateMachine_AllowedTransitions(t *testing.T) {
 // TestIdentity_StateMachine_RejectsDisallowed asserts ScriptError on
 // illegal transitions; no state mutation occurs.
 func TestIdentity_StateMachine_RejectsDisallowed(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		fromState string
@@ -177,6 +179,7 @@ func TestIdentity_StateMachine_RejectsDisallowed(t *testing.T) {
 // TestIdentity_MergedGuard_RejectsMutation seeds a merged identity
 // and asserts UpdateIdentityState rejects it with no mutation.
 func TestIdentity_MergedGuard_RejectsMutation(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newIdentityPipeline(t, ctx, conn, "ids-merged")
 
@@ -213,6 +216,7 @@ func TestIdentity_MergedGuard_RejectsMutation(t *testing.T) {
 // tombstoning a vtx.lease.<X> linked to an identity does NOT mutate
 // the identity vertex, its state aspect, or the link envelope.
 func TestIdentity_FR7_LeaseTombstoneDoesNotCascade(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 
 	identityID := testutil.GenReqID("FR7IdVtx")
@@ -308,6 +312,7 @@ func TestIdentity_FR7_LeaseTombstoneDoesNotCascade(t *testing.T) {
 // production the same shape comes from the Capability Lens projection
 // over the rbac-domain + identity-domain installed packages.
 func TestIdentity_RolePermissionGrantsProjected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 
 	js := conn.JetStream()

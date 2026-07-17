@@ -266,6 +266,7 @@ func createApplication(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 // meta-vertices land. setupLeaseEnv's install IS the round-trip; this test
 // additionally asserts the meta-vertices committed.
 func TestLeaseSigning_InstallRoundTrip_PlaybookAndPatternsValidate(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 
 	// The lens meta-vertex carries the actorAggregate spec (lenses carry a
@@ -341,6 +342,7 @@ func assertMetaBySpecField(t *testing.T, ctx context.Context, conn *substrate.Co
 // claim vertex is minted (root {}, .class + .family aspects, providedTo link)
 // and the external.<adapter> event was emitted with the bridge-reader shape.
 func TestLeaseServiceInstance_MintsClaimVertex_EmitsExternalEvent(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "instanceop")
 
@@ -504,6 +506,7 @@ func assertNoEmittedEvent(t *testing.T, ctx context.Context, conn *substrate.Con
 // the BARE handle; and a second reply is rejected by the create-only .outcome
 // guard, also with no Reads.
 func TestLeaseServiceReply_RecordsOutcome_EmitsExternalTaskCompleted(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "replyop")
 
@@ -613,6 +616,7 @@ func TestLeaseServiceReply_RecordsOutcome_EmitsExternalTaskCompleted(t *testing.
 // stays parked), only the service.dispatchRecorded provenance. A second dispatch
 // for the same handle is rejected by the create-only .dispatch guard.
 func TestLeaseServiceDispatch_RecordsPendingMarker_NoCompletion(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "dispatchop")
 
@@ -708,6 +712,7 @@ func TestLeaseServiceDispatch_RecordsPendingMarker_NoCompletion(t *testing.T) {
 // dispatch with no vendorRef is rejected (InvalidArgument), read-free, and writes
 // no .dispatch aspect.
 func TestLeaseServiceDispatch_VendorRefRequired_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "dispatch-vendorref-required")
 
@@ -735,6 +740,7 @@ func TestLeaseServiceDispatch_VendorRefRequired_Rejected(t *testing.T) {
 // aspect {status: failed, completedAt} read-free and still emits the completion +
 // provenance events. The free-form result stays OFF the projection-plane aspect.
 func TestLeaseServiceReply_FailedStatus_RecordsFailedOutcome(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "reply-failed")
 
@@ -777,6 +783,7 @@ func TestLeaseServiceReply_FailedStatus_RecordsFailedOutcome(t *testing.T) {
 // default. A reply with no status (the old bridge shape) and a reply with an
 // out-of-enum status are both rejected (InvalidArgument), read-free.
 func TestLeaseServiceReply_StatusRequired_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "reply-status-required")
 
@@ -829,6 +836,7 @@ func TestLeaseServiceReply_StatusRequired_Rejected(t *testing.T) {
 // vertex_alive / .class checks that referenced unhydrated state). The op commits
 // and emits the completion signal.
 func TestLeaseServiceReply_ReadFree_CommitsWithoutHydration(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "reply-readfree")
 
@@ -865,6 +873,7 @@ func TestLeaseServiceReply_ReadFree_CommitsWithoutHydration(t *testing.T) {
 // application root data is {} and the applicationFor link is sentence-valid
 // (leaseapp is the source, identity the target).
 func TestCreateLeaseApplication_RootMinimal_LinkSentenceValid(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "create-app")
 
@@ -893,6 +902,7 @@ func TestCreateLeaseApplication_RootMinimal_LinkSentenceValid(t *testing.T) {
 // TestCreateLeaseApplication_UnknownApplicant_Rejected: an application for a
 // non-existent applicant is rejected (no-orphan, FR29).
 func TestCreateLeaseApplication_UnknownApplicant_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-orphan")
 
@@ -919,6 +929,7 @@ func TestCreateLeaseApplication_UnknownApplicant_Rejected(t *testing.T) {
 // source, unit is target — sentence-valid, Contract #1 §1.1), and writes the
 // optional .terms aspect when moveInDate is supplied (root data stays {} — D5).
 func TestCreateLeaseApplication_AppliesToUnit_LinkSentenceValid(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-unit")
 
@@ -965,6 +976,7 @@ func TestCreateLeaseApplication_AppliesToUnit_LinkSentenceValid(t *testing.T) {
 // TestCreateLeaseApplication_UnknownUnit_Rejected: an application naming a
 // non-existent unit is rejected (no-orphan; unit is required + alive-checked).
 func TestCreateLeaseApplication_UnknownUnit_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-unit-orphan")
 
@@ -994,6 +1006,7 @@ func TestCreateLeaseApplication_UnknownUnit_Rejected(t *testing.T) {
 // authContext.target == actor (the scope=self step-3 requirement, Contract
 // #6) and is accepted.
 func TestCreateLeaseApplication_ConsumerSelfScope_Allowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-consumer-self")
 
@@ -1022,6 +1035,7 @@ func TestCreateLeaseApplication_ConsumerSelfScope_Allowed(t *testing.T) {
 // actor) but naming a DIFFERENT identity as the applicant must still be
 // rejected, by the Starlark applicant-self guard (scripts.go).
 func TestCreateLeaseApplication_ConsumerNamesDifferentApplicant_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-consumer-forge")
 
@@ -1081,6 +1095,7 @@ func applyToUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pr
 // (DuplicateApplication), so a unit never accumulates duplicate live
 // applications for one applicant (the bare-shell that pinned Weaver red).
 func TestCreateLeaseApplication_DuplicateSameApplicantSameUnit_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "dup-same-applicant")
 
@@ -1103,6 +1118,7 @@ func TestCreateLeaseApplication_DuplicateSameApplicantSameUnit_Rejected(t *testi
 // applicants applying to one unit both commit — normal leasing (the landlord
 // chooses among applicants); the guard is per-applicant, not a unit lock.
 func TestCreateLeaseApplication_DifferentApplicantsSameUnit_Allowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "diff-applicants")
 
@@ -1129,6 +1145,7 @@ func TestCreateLeaseApplication_DifferentApplicantsSameUnit_Allowed(t *testing.T
 // TestCreateLeaseApplication_SameApplicantDifferentUnits_Allowed: one applicant
 // may apply to two DIFFERENT units (the index is per-unit).
 func TestCreateLeaseApplication_SameApplicantDifferentUnits_Allowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "same-app-diff-unit")
 
@@ -1150,6 +1167,7 @@ func TestCreateLeaseApplication_SameApplicantDifferentUnits_Allowed(t *testing.T
 // application commits. The guard link is the authoritative uniqueness record,
 // freed only by WithdrawLeaseApplication.
 func TestCreateLeaseApplication_ReapplyAfterWithdraw_RevivesGuardLink(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "guard-revive")
 
@@ -1229,6 +1247,7 @@ func guardLinkKey(applicantKey, unitKey string) string {
 // per-(applicant, unit) guard link; the applicant can then re-apply to the same
 // unit; an unknown / already-withdrawn application is rejected.
 func TestWithdrawLeaseApplication(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "withdraw")
 
@@ -1284,6 +1303,7 @@ func TestWithdrawLeaseApplication(t *testing.T) {
 // SignLease writes the .signature aspect (root stays {}); a second SignLease is
 // rejected (once-only).
 func TestSignLease_WritesSignatureAspect(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "sign")
 
@@ -1401,6 +1421,7 @@ func signLease(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proc
 // decision is terminal, no silent flip); a bad enum is rejected (BadDecision); a
 // tombstoned application is rejected (UnknownLeaseApplication). Root stays {} (D5).
 func TestDecideLeaseApplication(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "decide")
 
@@ -1486,6 +1507,7 @@ func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 // (idempotent) clears the reason. The reason is applicant feedback + a fair-housing
 // record, projected by the lens as declineReason.
 func TestDecideLeaseApplication_Reason(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "decidereason")
 
@@ -1558,6 +1580,7 @@ func setProfile(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 // incomeToRentMet is computed against the unit's listing rent, an unconditioned
 // re-submit overwrites, and a wrong unit is rejected (UnitMismatch).
 func TestSetApplicantProfile(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "setprofile")
 

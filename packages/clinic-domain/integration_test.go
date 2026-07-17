@@ -302,6 +302,7 @@ func createProvider(t *testing.T, ctx context.Context, conn *substrate.Conn, cp 
 // the full bookable shape: vertices class-correct + root {}, the aspects (incl.
 // status=scheduled), and the forPatient / withProvider links.
 func TestClinic_CreateBookable(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "create")
 
@@ -370,6 +371,7 @@ func TestClinic_CreateBookable(t *testing.T) {
 // specialty required (the roster lens keys on fullName), and rejects an unknown
 // provider.
 func TestClinic_SetProviderProfile(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "set-profile")
 
@@ -426,6 +428,7 @@ func TestClinic_SetProviderProfile(t *testing.T) {
 // claim/release behavior via sequential submissions, exactly as the retired mechanism's
 // suite did.
 func TestClinic_DoubleBookRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "double-book")
 
@@ -497,6 +500,7 @@ func TestClinic_DoubleBookRejected(t *testing.T) {
 // forPatient links (WrongProvider / WrongPatient) before any cell is released — a
 // wrong / fabricated endpoint must not release someone else's slot claims.
 func TestClinic_TombstoneAppointmentValidatesEndpoints(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "tomb-validate")
 
@@ -545,6 +549,7 @@ func TestClinic_TombstoneAppointmentValidatesEndpoints(t *testing.T) {
 // a different patient, a back-to-back slot, and a freed (cancelled) slot. This is
 // the exact PO live-repro: one patient cannot be in two rooms at once.
 func TestClinic_PatientDoubleBook(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "patient-double-book")
 
@@ -602,6 +607,7 @@ func TestClinic_PatientDoubleBook(t *testing.T) {
 // TestClinic_SetAppointmentStatus proves the unconditioned-upsert idiom: a
 // SetAppointmentStatus overwrites the .status aspect in place (scheduled→confirmed).
 func TestClinic_SetAppointmentStatus(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "status")
 
@@ -631,6 +637,7 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 // only NON-terminal statuses so the note record/clear mechanism is exercised
 // independently of the terminal-status guard (see TestClinic_TerminalStatusGuard).
 func TestClinic_StatusCheckedInAndNote(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "status-note")
 
@@ -679,6 +686,7 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 // Re-setting the SAME terminal value stays accepted (idempotent under at-least-once,
 // and clears a stale note). Non-terminal statuses are unaffected (covered above).
 func TestClinic_TerminalStatusGuard(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "status-terminal")
 
@@ -730,6 +738,7 @@ func TestClinic_TerminalStatusGuard(t *testing.T) {
 // followUpRequested=false) overwrites the whole aspect and drops followUpDate
 // (unconditioned upsert). A non-appointment target is rejected (WrongClass).
 func TestClinic_RecordEncounter(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "encounter")
 
@@ -818,6 +827,7 @@ func TestClinic_RecordEncounter(t *testing.T) {
 // A re-supplied reason is preserved; an omitted reason clears it; a non-Z offset is
 // normalized to canonical UTC; a tombstoned target is rejected.
 func TestClinic_RescheduleAppointment(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "reschedule")
 
@@ -892,6 +902,7 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 // rejection, the endsAt<=startsAt guard, that a cancelled appointment frees its
 // slot for a reschedule, and that the moved interval frees its old slot.
 func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "reschedule-conflict")
 
@@ -950,6 +961,7 @@ func TestClinic_RescheduleIntoConflictRejected(t *testing.T) {
 // unconstrained; windows=[] clears the constraint; and SetProviderHours validates
 // its windows. Weekdays (UTC): 2026-06-28=Sun, 06-29=Mon, 07-01=Wed, 07-04=Sat.
 func TestClinic_ProviderHoursEnforced(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "provider-hours")
 
@@ -1029,6 +1041,7 @@ func TestClinic_ProviderHoursEnforced(t *testing.T) {
 // before / equal to that anchor is "in the past"; a clearly-future startsAt is
 // accepted (the guard never blocks a valid booking).
 func TestClinic_PastTimeRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "past-time")
 
@@ -1069,6 +1082,7 @@ func TestClinic_PastTimeRejected(t *testing.T) {
 // outside every range is accepted; a provider with no .timeOff is unrestricted;
 // ranges=[] clears all blackouts; and SetProviderTimeOff validates its ranges.
 func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "provider-timeoff")
 
@@ -1144,6 +1158,7 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 // second, truly conflicting booking against those same cells still correctly
 // rejects.
 func TestClinic_RescheduleToSameInterval(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "reschedule-same")
 
@@ -1182,6 +1197,7 @@ func TestClinic_RescheduleToSameInterval(t *testing.T) {
 // span exceeding 96 cells (24h) is rejected (AppointmentTooLong) rather than
 // silently truncated.
 func TestClinic_SlotGridAndTooLong(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "grid-toolong")
 
@@ -1228,6 +1244,7 @@ func TestClinic_SlotGridAndTooLong(t *testing.T) {
 // / forPatient links (WrongProvider / WrongPatient) — a missing or wrong endpoint
 // must not silently leave the cells claimed, nor release someone else's cells.
 func TestClinic_TerminalStatusRequiresEndpoints(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "terminal-endpoints")
 
@@ -1260,6 +1277,7 @@ func TestClinic_TerminalStatusRequiresEndpoints(t *testing.T) {
 
 // TestClinic_RejectsBadStatus proves the status enum guard.
 func TestClinic_RejectsBadStatus(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "bad-status")
 
@@ -1284,6 +1302,7 @@ func TestClinic_RejectsBadStatus(t *testing.T) {
 // patient slot pointed at a vtx.patient-shaped key that is alive but the WRONG
 // class is rejected (no appointment is committed).
 func TestClinic_RejectsWrongClass(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "wrong-class")
 
@@ -1304,6 +1323,7 @@ func TestClinic_RejectsWrongClass(t *testing.T) {
 // TestClinic_RejectsDeadEndpoint proves the no-orphan guard: CreateAppointment
 // against an absent patient is rejected.
 func TestClinic_RejectsDeadEndpoint(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "dead-endpoint")
 
@@ -1321,6 +1341,7 @@ func TestClinic_RejectsDeadEndpoint(t *testing.T) {
 
 // TestClinic_TombstonePatient proves a patient soft-deletes.
 func TestClinic_TombstonePatient(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "tombstone")
 
@@ -1337,6 +1358,7 @@ func TestClinic_TombstonePatient(t *testing.T) {
 // identityKey wires a live identifiedBy link to a pre-minted identity, and
 // that .demographics carries only fullName (no contact PII).
 func TestClinic_CreatePatientWithIdentity(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "create-with-identity")
 
@@ -1373,6 +1395,7 @@ func TestClinic_CreatePatientWithIdentity(t *testing.T) {
 // identityKey. Without the guard, two roster rows would decrypt and display the
 // same person's email/phone as if each patient individually owned that contact.
 func TestClinic_CreatePatientRejectsDuplicateIdentityClaim(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "dup-identity-claim")
 
@@ -1404,6 +1427,7 @@ func TestClinic_CreatePatientRejectsDuplicateIdentityClaim(t *testing.T) {
 // TestClinic_CreatePatientRejectsDeadIdentity proves an absent identityKey is
 // never wired — no patient is committed against a dead/absent identity.
 func TestClinic_CreatePatientRejectsDeadIdentity(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "create-dead-identity")
 
@@ -1421,6 +1445,7 @@ func TestClinic_CreatePatientRejectsDeadIdentity(t *testing.T) {
 // TestClinic_CreatePatientRejectsWrongClassIdentity proves a live but
 // wrong-class identityKey (e.g. another patient's key) is never wired.
 func TestClinic_CreatePatientRejectsWrongClassIdentity(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "create-wrongclass-identity")
 
@@ -1438,6 +1463,7 @@ func TestClinic_CreatePatientRejectsWrongClassIdentity(t *testing.T) {
 
 // TestClinic_UnauthorizedDenied proves a consumer with no clinic ops is rejected.
 func TestClinic_UnauthorizedDenied(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "unauth")
 
@@ -1466,6 +1492,7 @@ func TestClinic_UnauthorizedDenied(t *testing.T) {
 // and the script's own identifiedBy-link check (ddls.go) confirms the target
 // identity actually owns the named patient.
 func TestClinic_CreateAppointmentConsumerSelfScope_Allowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "appt-consumer-self")
 
@@ -1511,6 +1538,7 @@ func TestClinic_CreateAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 // the declaration still gets the same correct outcome — only OCC-snapshot
 // consistency, not correctness, depends on declaring it.
 func TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "appt-consumer-self-lazy")
 
@@ -1550,6 +1578,7 @@ func TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead(t 
 // linked to their own identity — no identifiedBy link, or linked to someone
 // else — must still be rejected, by the script's identifiedBy-link check.
 func TestClinic_CreateAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "appt-consumer-forge")
 
@@ -1594,6 +1623,7 @@ func TestClinic_CreateAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testin
 // (ddls.go), mirroring CreateAppointment's, confirms the target identity
 // actually owns the appointment's patient.
 func TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "resched-consumer-self")
 
@@ -1643,6 +1673,7 @@ func TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 // still be rejected by the script's identifiedBy-link check, leaving the
 // appointment's schedule untouched.
 func TestClinic_RescheduleAppointmentConsumerNamesUnlinkedPatient_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "resched-consumer-forge")
 
@@ -1684,6 +1715,7 @@ func TestClinic_RescheduleAppointmentConsumerNamesUnlinkedPatient_Rejected(t *te
 // patient linked (identifiedBy) to the caller's own identity cancels THEIR OWN
 // appointment — the only status value the self grant permits.
 func TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "cancel-consumer-self")
 
@@ -1729,6 +1761,7 @@ func TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed(t *testing.T
 // real patient, correctly identity-bound) may never set anything but
 // cancelled — confirmed/checkedIn/completed/noShow stay operator-only.
 func TestClinic_SetAppointmentStatusConsumerSelfScope_NonCancelRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "noncancel-consumer-self")
 
@@ -1775,6 +1808,7 @@ func TestClinic_SetAppointmentStatusConsumerSelfScope_NonCancelRejected(t *testi
 // is NOT linked to their own identity must still be rejected, even for the
 // otherwise-permitted cancelled value.
 func TestClinic_SetAppointmentStatusConsumerSelfScope_UnlinkedPatientRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "cancel-consumer-forge")
 
@@ -1849,6 +1883,7 @@ func clCreateAppointmentWithLease(t *testing.T, ctx context.Context, conn *subst
 // aspect, gets a residentVisit link (appointment→leaseapp) — mirrors
 // wellness-domain's TestCreateBooking_ResidentRateWhenLeaseMatchesBooker.
 func TestClinic_CreateAppointment_ResidentVisitWhenLeaseMatchesPatient(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "resident-visit-match")
 
@@ -1881,6 +1916,7 @@ func TestClinic_CreateAppointment_ResidentVisitWhenLeaseMatchesPatient(t *testin
 // confinement hint, never a hard requirement) — mirrors wellness-domain's
 // TestCreateBooking_MismatchedLeaseFallsBackToStandardRate.
 func TestClinic_CreateAppointment_MismatchedLeaseFallsBack(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "resident-visit-mismatch")
 
@@ -1911,6 +1947,7 @@ func TestClinic_CreateAppointment_MismatchedLeaseFallsBack(t *testing.T) {
 // residentVisit link — mirrors wellness-domain's
 // TestCreateBooking_PendingLeaseFallsBackToStandardRate.
 func TestClinic_CreateAppointment_PendingLeaseFallsBack(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "resident-visit-pending")
 

@@ -84,6 +84,7 @@ func recordPIIReads(identityKey string) *processor.ContextHint {
 // Sensitive field travelled through build.go's `.sensitive` aspect to the
 // cache. A non-PII class (no DDL shipped) is a Lookup miss → not sensitive.
 func TestRecordPII_SSNDOBAreSensitive_AfterInstall(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cache := freshDDLCache(t, ctx, conn)
 
@@ -110,6 +111,7 @@ func TestRecordPII_SSNDOBAreSensitive_AfterInstall(t *testing.T) {
 // invariant b). RecordIdentityPII writes ssn (normalized) + dob as aspects on
 // an existing identity; the identity vertex root data stays minimal ({}).
 func TestRecordPII_WritesAspects_RootMinimal_D5(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newPIIPipeline(t, ctx, conn, "pii-write")
 
@@ -172,6 +174,7 @@ func TestRecordPII_WritesAspects_RootMinimal_D5(t *testing.T) {
 // leap-year Feb 29 is accepted and stored verbatim (proves the calendar gate
 // admits valid dates, not just rejects bad ones).
 func TestRecordPII_AcceptsLeapDayDOB(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newPIIPipeline(t, ctx, conn, "pii-leapday")
 
@@ -201,6 +204,7 @@ func TestRecordPII_AcceptsLeapDayDOB(t *testing.T) {
 // (the aspects are written op:"create" → create-only → the atomic batch
 // conflicts), and the original stored values are left UNCHANGED (not clobbered).
 func TestRecordPII_ResubmitRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newPIIPipeline(t, ctx, conn, "pii-resubmit")
 
@@ -247,6 +251,7 @@ func TestRecordPII_ResubmitRejected(t *testing.T) {
 // TestRecordPII_RejectsBadFormats — format validation (AC #1 / Item D). Bad
 // ssn/dob are rejected; the aspect keys are absent from Core KV afterward.
 func TestRecordPII_RejectsBadFormats(t *testing.T) {
+	t.Parallel()
 	// suffix makes each case's identity key and op RequestID unique within the
 	// shared environment (GenReqID is deterministic in its label, so distinct
 	// labels are required to avoid idempotent-dedup collisions).
@@ -314,6 +319,7 @@ func TestRecordPII_RejectsBadFormats(t *testing.T) {
 // TestRecordPII_RejectsBadTarget — missing / non-identity identityKey is
 // rejected (the existing-identity guard).
 func TestRecordPII_RejectsBadTarget(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newPIIPipeline(t, ctx, conn, "pii-badtarget")
 
@@ -356,6 +362,7 @@ func TestRecordPII_RejectsBadTarget(t *testing.T) {
 // (ref.Sensitive==true), the UNCHANGED step-6 validator rejects a ssn aspect
 // on a non-identity vertex and permits it on an identity vertex.
 func TestRecordPII_SensitiveSSNOnNonIdentityRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cache := freshDDLCache(t, ctx, conn)
 	validator := processor.NewValidator(cache, conn, testutil.HarnessCoreBucket, testutil.TestLogger())
@@ -433,6 +440,7 @@ func TestRecordPII_SensitiveSSNOnNonIdentityRejected(t *testing.T) {
 // aspect-type DDL meta-vertices and their `.sensitive` aspects landed in Core
 // KV via the real InstallPackage path.
 func TestRecordPII_AspectTypeDDLsInstalled(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cache := freshDDLCache(t, ctx, conn)
 
@@ -461,6 +469,7 @@ var sensitivePIIClasses = []string{"name", "email", "phone", "claimKey", "creden
 // permittedCommands MUST be empty (multiple writers across packages) — a
 // non-empty list would reject MergeIdentity writing name/email/phone.
 func TestRecordPII_PIIClassesAreSensitive_AfterInstall(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cache := freshDDLCache(t, ctx, conn)
 
@@ -491,6 +500,7 @@ func TestRecordPII_PIIClassesAreSensitive_AfterInstall(t *testing.T) {
 // a name/email/claimKey aspect on a non-identity vertex with
 // sensitiveAspectScope, and permits the same class on an identity vertex.
 func TestRecordPII_SensitivePIIOnNonIdentityRejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cache := freshDDLCache(t, ctx, conn)
 	validator := processor.NewValidator(cache, conn, testutil.HarnessCoreBucket, testutil.TestLogger())
@@ -556,6 +566,7 @@ func TestRecordPII_SensitivePIIOnNonIdentityRejected(t *testing.T) {
 // identity-anchored, so they pass the step-6 sensitiveAspectScope check on the
 // real commit path.
 func TestRecordPII_CreateIdentityWritesSensitiveAspects(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newPIIPipeline(t, ctx, conn, "pii-backfill-create")
 

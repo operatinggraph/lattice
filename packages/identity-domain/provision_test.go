@@ -56,6 +56,7 @@ func provisionPayload(t *testing.T, targetActorKey, roleKey string) json.RawMess
 }
 
 func TestProvisionConsumerIdentity_FreshActor_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-success")
 	roleKey := consumerRoleKey(t)
@@ -101,6 +102,7 @@ func TestProvisionConsumerIdentity_FreshActor_Success(t *testing.T) {
 }
 
 func TestProvisionConsumerIdentity_AlreadyProvisioned_Idempotent(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-idem")
 	roleKey := consumerRoleKey(t)
@@ -137,6 +139,7 @@ func TestProvisionConsumerIdentity_AlreadyProvisioned_Idempotent(t *testing.T) {
 }
 
 func TestProvisionConsumerIdentity_MalformedTargetActorKey_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-malformed")
 	roleKey := consumerRoleKey(t)
@@ -155,6 +158,7 @@ func TestProvisionConsumerIdentity_MalformedTargetActorKey_Rejected(t *testing.T
 }
 
 func TestProvisionConsumerIdentity_UnknownConsumerRoleKey_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-badrole")
 
@@ -178,6 +182,7 @@ func TestProvisionConsumerIdentity_UnknownConsumerRoleKey_Rejected(t *testing.T)
 // denied at step 3 — mirrored here by the consumer fixture, which holds no
 // such grant.
 func TestProvisionConsumerIdentity_NonGatewayActor_Denied(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-nongateway")
 	roleKey := consumerRoleKey(t)
@@ -201,6 +206,7 @@ func TestProvisionConsumerIdentity_NonGatewayActor_Denied(t *testing.T) {
 // opaque-mode token's raw provenance), the script writes a sensitive
 // .idpBinding aspect verbatim alongside the usual fresh-actor mutations.
 func TestProvisionConsumerIdentity_WithIdpProvenance_WritesIdpBindingAspect(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-idp")
 	roleKey := consumerRoleKey(t)
@@ -240,6 +246,7 @@ func TestProvisionConsumerIdentity_WithIdpProvenance_WritesIdpBindingAspect(t *t
 // wiring fault, not a partial-provenance case, and must be rejected before
 // any mutation lands.
 func TestProvisionConsumerIdentity_MismatchedIdpFields_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-idp-mismatch")
 	roleKey := consumerRoleKey(t)
@@ -275,6 +282,7 @@ func TestProvisionConsumerIdentity_MismatchedIdpFields_Rejected(t *testing.T) {
 // consumerRoleKey to the package's own consumer role, this op could be used
 // to provision a first-touch actor straight into operator (root-equivalent).
 func TestProvisionConsumerIdentity_OtherLiveRoleKey_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newProvisionPipeline(t, ctx, conn, "pci-wrongrole")
 

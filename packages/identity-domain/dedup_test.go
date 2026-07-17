@@ -79,6 +79,7 @@ func criteriaStrings(t *testing.T, data map[string]any) []string {
 }
 
 func TestCreateUnclaimed_DuplicateContact_NoRevisionConflict_EmitsDuplicateOfLink(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-dupflow")
 
@@ -147,6 +148,7 @@ func TestCreateUnclaimed_DuplicateContact_NoRevisionConflict_EmitsDuplicateOfLin
 }
 
 func TestCreateUnclaimed_NameCollision_EmitsExactNameLink(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-namecol")
 
@@ -181,6 +183,7 @@ func TestCreateUnclaimed_NameCollision_EmitsExactNameLink(t *testing.T) {
 }
 
 func TestCreateUnclaimed_MultiCriteriaMatch_UnionsCriteria(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-multicrit")
 
@@ -218,6 +221,7 @@ func TestCreateUnclaimed_MultiCriteriaMatch_UnionsCriteria(t *testing.T) {
 }
 
 func TestCreateUnclaimed_DistinctIncumbents_DistinctLinks(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-distinct")
 
@@ -261,6 +265,7 @@ func TestCreateUnclaimed_DistinctIncumbents_DistinctLinks(t *testing.T) {
 }
 
 func TestCreateUnclaimed_NoCollision_CreatesIndexesLinksOnly(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-noncoll")
 

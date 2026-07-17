@@ -80,6 +80,7 @@ func removeProviderSite(t *testing.T, ctx context.Context, conn *substrate.Conn,
 }
 
 func TestClinic_SetSiteProfile(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "site-profile")
 
@@ -111,6 +112,7 @@ func TestClinic_SetSiteProfile(t *testing.T) {
 // whose class is not location is rejected (NotALocation) and no aspect is
 // committed.
 func TestClinic_SetSiteProfileRejectsNonLocationBuilding(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "site-profile-badclass")
 
@@ -126,6 +128,7 @@ func TestClinic_SetSiteProfileRejectsNonLocationBuilding(t *testing.T) {
 }
 
 func TestClinic_AssignProviderSite(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "assign-site")
 
@@ -151,6 +154,7 @@ func TestClinic_AssignProviderSite(t *testing.T) {
 }
 
 func TestClinic_AssignProviderSiteIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "assign-site-idem")
 
@@ -168,6 +172,7 @@ func TestClinic_AssignProviderSiteIdempotent(t *testing.T) {
 }
 
 func TestClinic_RemoveThenReassignProviderSite(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "remove-reassign-site")
 
@@ -192,6 +197,7 @@ func TestClinic_RemoveThenReassignProviderSite(t *testing.T) {
 }
 
 func TestClinic_AssignProviderSiteRejectsDeadProvider(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "assign-site-dead")
 
@@ -242,6 +248,7 @@ func clCreateAppointmentWithSite(t *testing.T, ctx context.Context, conn *substr
 // practicesAt the given site books successfully and the appointment carries
 // an atSite link (appointment→building).
 func TestClinic_CreateAppointment_WithValidSite(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "appt-with-site")
 
@@ -270,6 +277,7 @@ func TestClinic_CreateAppointment_WithValidSite(t *testing.T) {
 // assigned to the given site rejects the WHOLE booking (ProviderNotAtSite),
 // committing no appointment at all.
 func TestClinic_CreateAppointment_RejectsProviderNotAtSite(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "appt-wrong-site")
 
@@ -291,6 +299,7 @@ func TestClinic_CreateAppointment_RejectsProviderNotAtSite(t *testing.T) {
 // resolves to a non-location vertex is rejected (NotALocation), mirroring
 // SetSiteProfile's own guard.
 func TestClinic_CreateAppointment_RejectsNonLocationSite(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "appt-badclass-site")
 
@@ -310,6 +319,7 @@ func TestClinic_CreateAppointment_RejectsNonLocationSite(t *testing.T) {
 // sites: two AssignProviderSite calls against two different buildings both
 // commit distinct, live links.
 func TestClinic_ProviderMultipleSites(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
 	cp, cons := newClinicPipeline(t, ctx, conn, "multi-site")
 

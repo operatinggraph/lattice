@@ -74,6 +74,7 @@ func signedDocGenApp(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 // providedTo→LEASEAPP), and emits external.docGen whose params carry the
 // Processor-side-resolved document fields.
 func TestLeaseDocInstance_MintsClaim_EmitsDocGenEvent(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "docinstop")
 
@@ -223,6 +224,7 @@ func submitShredIdentityKey(t *testing.T, ctx context.Context, conn *substrate.C
 // applicant key instead of failing the op — the same degrade rule as an
 // unnamed identity.
 func TestLeaseDocInstance_ShreddedApplicant_OmitsNameNoFailure(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	v := testutil.TestVault(t)
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
@@ -273,6 +275,7 @@ func TestLeaseDocInstance_ShreddedApplicant_OmitsNameNoFailure(t *testing.T) {
 // TestLeaseDocInstance_UnsignedSubject_Rejected: the signature gate — an
 // unsigned application fails the op with NO claim and NO dispatch.
 func TestLeaseDocInstance_UnsignedSubject_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "docinstunsigned")
 
@@ -332,6 +335,7 @@ func mintDocGenClaim(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 // emits orchestration.externalTaskCompleted with the BARE handle, and rejects a
 // second reply.
 func TestLeaseDocReply_RecordsPointerOutcome_EmitsCompletion(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "docreplyop")
 
@@ -406,6 +410,7 @@ func TestLeaseDocReply_RecordsPointerOutcome_EmitsCompletion(t *testing.T) {
 // completedAt} only — the reason stays off the aspect (provenance carries it) —
 // and still emits the completion signal (Loom's token must advance).
 func TestLeaseDocReply_Failed_NoPointers(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "docreplyfail")
 
@@ -444,6 +449,7 @@ func TestLeaseDocReply_Failed_NoPointers(t *testing.T) {
 // result is absent or not the pointer object is rejected — the aspect never
 // records a completed outcome without the pointer set the lens/playbook read.
 func TestLeaseDocReply_CompletedWithoutPointers_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "docreplybadptr")
 
@@ -478,6 +484,7 @@ func TestLeaseDocReply_CompletedWithoutPointers_Rejected(t *testing.T) {
 // vtx.service.<handle> generically (no family/class knowledge), so a future
 // async docGen vendor rides the §10.4 poll/timeout lane with no package change.
 func TestServiceDispatch_OnDocGenClaim_RecordsMarker(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "docdispatch")
 

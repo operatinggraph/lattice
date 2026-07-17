@@ -167,6 +167,7 @@ func cancelRenewal(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 // renewalOpensAt from the unit's .listing; a re-approve never re-derives it
 // (idempotent re-submit does not require unit and does not overwrite).
 func TestDecideLeaseApplication_StampsTenancyOnFirstApproveOnly(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "tenancystamp")
 
@@ -206,6 +207,7 @@ func TestDecideLeaseApplication_StampsTenancyOnFirstApproveOnly(t *testing.T) {
 // fire for the same leaseapp+cycle collides (CreateOnly) rather than minting a
 // second cycle vertex.
 func TestOpenRenewal_CreatesVertexAndLink_IdempotentOnDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "openrenewal")
 
@@ -263,6 +265,7 @@ func TestOpenRenewal_CreatesVertexAndLink_IdempotentOnDuplicate(t *testing.T) {
 // with no .tenancy aspect (an approved-but-never-decided-via-DecideLease
 // leaseapp, or a leaseapp approved before this shipped — no backfill).
 func TestOpenRenewal_NoTenancy_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "openrennotenancy")
 
@@ -287,6 +290,7 @@ func TestOpenRenewal_NoTenancy_Rejected(t *testing.T) {
 // be positive; termMonths must meet the renewal-window floor; terms are
 // writable while open+unsigned; and TermsLocked once signed.
 func TestSetRenewalTerms_ValidatesAndLocksAfterSignature(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "setterms")
 
@@ -317,6 +321,7 @@ func TestSetRenewalTerms_ValidatesAndLocksAfterSignature(t *testing.T) {
 // truncated by SignRenewal's later add_months call — require_number alone
 // allows int-or-float, so the whole-number check must be explicit.
 func TestSetRenewalTerms_FractionalTermMonths_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "termsfrac")
 
@@ -358,6 +363,7 @@ func openRenewalHelper(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 // rejects when the applicant's profile has no guarantor (or no profile at
 // all).
 func TestVerifyGuarantor_NoGuarantorToVerify_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "verifynog")
 
@@ -375,6 +381,7 @@ func TestVerifyGuarantor_NoGuarantorToVerify_Rejected(t *testing.T) {
 // declares a guarantor, and that the leaseApp/applicant payload fields are
 // link-verified (a mismatched applicant is rejected).
 func TestVerifyGuarantor_WithGuarantor_WritesVerification(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "verifywithg")
 
@@ -407,6 +414,7 @@ func TestVerifyGuarantor_WithGuarantor_WritesVerification(t *testing.T) {
 // status=complete + the leaseapp's .tenancy extension (leaseEnd +=
 // termMonths, renewalOpensAt recomputed).
 func TestSignRenewal_GatesOnTermsAndGuarantor_ThenExtendsTenancy(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "signrenewal")
 
@@ -476,6 +484,7 @@ func TestSignRenewal_GatesOnTermsAndGuarantor_ThenExtendsTenancy(t *testing.T) {
 // vacuous-satisfaction path: an applicant with hasGuarantor=false never needs
 // VerifyGuarantor at all.
 func TestSignRenewal_NoGuarantor_SignsWithoutVerification(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "signnoguar")
 
@@ -497,6 +506,7 @@ func TestSignRenewal_NoGuarantor_SignsWithoutVerification(t *testing.T) {
 // rejected (RenewalNotOpen) and leaves .tenancy.leaseEnd at the exact value
 // the first sign produced — not extended a second time.
 func TestSignRenewal_RejectsWhenNotOpen_NoDoubleExtension(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "signnotopen")
 
@@ -528,6 +538,7 @@ func TestSignRenewal_RejectsWhenNotOpen_NoDoubleExtension(t *testing.T) {
 // target is rejected, so a tampered payload cannot extend an arbitrary
 // leaseapp's .tenancy.
 func TestSignRenewal_LeaseAppMismatch_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "signmismatch")
 
@@ -550,6 +561,7 @@ func TestSignRenewal_LeaseAppMismatch_Rejected(t *testing.T) {
 // CancelRenewal flips status=cancelled (+ optional reason) while open, and
 // rejects once signed (a signed cycle cannot be cancelled).
 func TestCancelRenewal_TerminalAfterSignature_OtherwiseCancels(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
 	cp, cons := newLeasePipeline(t, ctx, conn, "cancelrenewal")
 
@@ -578,4 +590,3 @@ func TestCancelRenewal_TerminalAfterSignature_OtherwiseCancels(t *testing.T) {
 		t.Fatalf("a rejected CancelRenewal on a signed cycle must leave status unchanged; got %q", got)
 	}
 }
-

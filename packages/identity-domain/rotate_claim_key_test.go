@@ -31,6 +31,7 @@ func newRotatePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 // rotates the claim key, and confirms the OLD plaintext no longer claims
 // while the NEW one does.
 func TestRotateClaimKey_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRotatePipeline(t, ctx, conn, "succ")
 
@@ -117,6 +118,7 @@ func TestRotateClaimKey_Success(t *testing.T) {
 // TestRotateClaimKey_RejectsClaimed: a claimed identity's secret can't be
 // rotated — it has no secret left to rotate (the aspect is tombstoned).
 func TestRotateClaimKey_RejectsClaimed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRotatePipeline(t, ctx, conn, "alrcl")
 
@@ -150,6 +152,7 @@ func TestRotateClaimKey_RejectsClaimed(t *testing.T) {
 // TestRotateClaimKey_RejectsMalformedHash: a non-hex/short hash is rejected
 // before any mutation, mirroring CreateUnclaimedIdentity's own validation.
 func TestRotateClaimKey_RejectsMalformedHash(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newRotatePipeline(t, ctx, conn, "badhash")
 

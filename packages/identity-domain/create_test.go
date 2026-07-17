@@ -42,6 +42,7 @@ func newCreatePipeline(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 // step-8 commit, all aspects exist, index vertices exist, IdentityCreated
 // recorded in the tracker.
 func TestCreateUnclaimed_Success(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-success")
 
@@ -110,6 +111,7 @@ func TestCreateUnclaimed_Success(t *testing.T) {
 }
 
 func TestCreateUnclaimed_MissingName_Rejected(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-missname")
 	env := &processor.OperationEnvelope{
@@ -126,6 +128,7 @@ func TestCreateUnclaimed_MissingName_Rejected(t *testing.T) {
 }
 
 func TestCreateUnclaimed_MissingBothContacts(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-missctct")
 	env := &processor.OperationEnvelope{
@@ -142,6 +145,7 @@ func TestCreateUnclaimed_MissingBothContacts(t *testing.T) {
 }
 
 func TestCreateUnclaimed_NormalizesEmailCase(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-normalize")
 
@@ -174,6 +178,7 @@ func TestCreateUnclaimed_NormalizesEmailCase(t *testing.T) {
 // NOT change state. State stays unclaimed; only the IdentityCreated event's
 // `duplicate` flag is set.
 func TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-dupemail")
 
@@ -225,6 +230,7 @@ func TestCreateUnclaimed_DuplicateEmail_RemainsUnclaimed(t *testing.T) {
 // TestCreateUnclaimed_NonStaffActor_Denied: consumer actor (ClaimIdentity
 // only) submits CreateUnclaimedIdentity -> step-3 denies.
 func TestCreateUnclaimed_NonStaffActor_Denied(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-nonstaff")
 
@@ -244,6 +250,7 @@ func TestCreateUnclaimed_NonStaffActor_Denied(t *testing.T) {
 // TestCreateUnclaimed_Idempotent: same requestId twice; the second
 // short-circuits at step 2 (tracker present).
 func TestCreateUnclaimed_Idempotent(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons1 := newCreatePipeline(t, ctx, conn, "ici-idem-1")
 
@@ -281,6 +288,7 @@ func TestCreateUnclaimed_Idempotent(t *testing.T) {
 // the claimKey aspect must store only that hash. The plaintext is never
 // submitted to Lattice (Option C), so it must appear nowhere in Core KV.
 func TestCreateUnclaimed_ClaimKeyHashOnly(t *testing.T) {
+	t.Parallel()
 	ctx, conn := setupTestEnv(t)
 	cp, cons := newCreatePipeline(t, ctx, conn, "ici-hashonly")
 

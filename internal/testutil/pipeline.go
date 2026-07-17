@@ -269,13 +269,7 @@ func SetupPackageTestEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Cleanup(conn.Close)
 	ProvisionHarness(t, ctx, conn)
 
-	// Bootstrap primordials in-memory only. The test harness owns its
-	// own NATS instance; the JSON persistence step (lattice.bootstrap.json)
-	// is skipped because nothing else here reads it.
-	tmpPath := t.TempDir() + "/lattice-test-bootstrap.json"
-	if _, err := bootstrap.LoadOrGenerate(tmpPath); err != nil {
-		t.Fatalf("bootstrap.LoadOrGenerate: %v", err)
-	}
+	EnsurePrimordials(t)
 	seeder, err := bootstrap.NewSeeder(conn.NATS(), TestLogger())
 	if err != nil {
 		t.Fatalf("bootstrap.NewSeeder: %v", err)
