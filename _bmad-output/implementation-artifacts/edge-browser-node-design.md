@@ -243,9 +243,20 @@ poster; `close()` tears the channel down and releases the lock so a still-open l
 sign-out). New `createCore`/`channel` injection seams make `createShell` unit-testable (it never was —
 only `electLeader` was); wired into the `edge-consumer-parity` gate.
 
-**W4 remaining increments (each independently green):** **inc 2** — host-side consumption: `host.go`
-calls `shell.signalChange` from its `OnChange` (leader) and registers an `onPeerChange` handler that
-re-reads + republishes a manifest frame (follower), verified in-Chrome via the store gate. **inc 3** — the
+**W4 increment 2 — host-side consumption — SHIPPED (2026-07-17, `e7a81c6`).** The wasm host closes the
+loop inc 1's shell change-signal opened. Leader path: `OnChange` (which the shell's leadership gate ensures
+fires only on the consumer-holding tab — `handle()` runs only off the delta feed, never hydration) now also
+calls `shell.signalChange`, posting each landed key to peers. Follower path: `Start` registers an
+`onPeerChange` handler that re-reads the touched key from the shared IndexedDB through the overlay and
+republishes its manifest frame — the re-read spawned on a goroutine, not run inline, because the handler is
+invoked from the JS event loop and `publishManifestKey` blocks on an IndexedDB read whose completion is
+itself an event-loop callback (inline would deadlock; the `onFrame` goroutine takes the same care). Both
+guard on the shell exposing the function, so a single-context host (parity harness, no-BroadcastChannel
+browser) is a clean no-op; `Stop` unregisters the follower handler before releasing its `js.Func`. Verified
+in-Chrome against real IndexedDB (`make test-edge-idb-conformance`): a landed delta signals peers with the
+touched key; firing the registered handler republishes that key's frame from the store.
+
+**W4 remaining increments (each independently green):** **inc 3** — the
 renderer swap: `cmd/facet/web`'s `EventSource("/api/feed")` → `latticeEdge.start({shell})` + `onFrame`, the
 enqueue `POST /api/enqueue` → `api.enqueue`, and a wasm+shell boot module the page loads. **inc 4** —
 `cmd/facet` shrinks to a static file server + the ratified Fire-4 cross-machine, no-binary e2e (the W4
