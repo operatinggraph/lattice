@@ -17,7 +17,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | 🏗️ building · [design §7.2](../../implementation-artifacts/edge-showcase-app-design.md) · Inc 4 Fire-2 fidelity tail ✅ shipped · next: Fire 5 adoption + second renderer |
+| **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | 🏗️ building · [design §7.4](../../implementation-artifacts/edge-showcase-app-design.md) · Fire 5 Inc 1 ✅ shipped (clinic op-meta descriptors) · next: catalog-path wiring (service template + permitsOperation) so they're Facet-visible |
 | **Account settings — manage sign-in methods** | Live-verified: LoftSpace has no account/profile surface at all today (grepped `app.js`/`index.html` — only qualification-profile, no identity page). Page for the applicant to see linked credentials (`whoami`), link another (`InitiateCredentialLink`/`CompleteCredentialLink`), and remove one (`UnlinkCredential`, platform refuses removing the last). | LoftSpace | FE + pkg | ★★ | S | ✅ shipped `25623d9` |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | ✅ shipped `e86ab45` |
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
@@ -62,6 +62,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-17 · `cd8696d` · Facet Fire 5 Inc 1 — edge-manifest descriptor metadata (presentation/inputSchema/dispatch) on clinic-domain's 3 self-scope consumer ops; café/wellness have no self-scope ops yet (named, not built)
 - 2026-07-17 · `9f46554` · Facet Inc 4 — Fire-2 fidelity tail: R3 touchedKey/pending-chip, dead Retry removed, connectivity-keyed offline banner, Outbox history collapse, degraded-render regression test
 - 2026-07-17 · `0d55b2a` · Facet Inc 3 — Me-screen claim/link UX + revocation UX; linked credential now signs in via `/v1/actor` (G10's first consumer); sign-out purges the local mirror
 - 2026-07-16 · `2696321` · Showcase dataset (§7.3) CLOSED — honest family enum + `RetireServiceTemplate` + idempotent `make seed-showcase` loader; retired both mislabeled live templates
@@ -90,10 +91,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-07-10 · `b5744a9` · Read-posture sweep Fire 3 — lease-signing 19/19 (scripts.go 7 + renewal_scripts.go 12), closes lease-signing entirely — [design §13](../../implementation-artifacts/script-read-posture-design.md)
 - 2026-07-10 · `41e3bcf` · Read-posture sweep Fire 2 — wellness+loftspace 13/44 + hard case 4 — [design §13](../../implementation-artifacts/script-read-posture-design.md)
 - 2026-07-10 · `5263c2b` · Read-posture sweep Fire 1 — Gateway optionalReads wiring + clinic-domain 8/44 — [design §13](../../implementation-artifacts/script-read-posture-design.md)
-- 2026-07-09 · `441ad1c` · semantic-contracts rename (was `bespoke-contracts`) — package identity + README shipped-status sync — [design](../../implementation-artifacts/semantic-contracts-executable-paper-design.md)
-- 2026-07-09 · `1b47e0a` · Clinic reminders notification CLOSED — real `FakeNotification` bridge adapter wired, no Loom pattern needed — [design](../../implementation-artifacts/clinic-reminders-notification-adapter-design.md)
-- 2026-07-09 · `ff748ef` · Café payment-collection UI CLOSED — resident-view "Record Payment" form wired to `CreditAccount`, live-verified (balance $35.50→$25.50)
-- 2026-07-09 · `—` · Café tab settlement regression CLOSED — re-verified live post-`659c635`; all tabs now `posted:true` — [design](../../implementation-artifacts/cafe-ledger-design.md)
-- 2026-07-09 · `86212c9` · Clinic patient self-service booking CLOSED — `cmd/clinic-app` self-book FE, live-verified — [design](../../implementation-artifacts/clinic-patient-self-service-booking-design.md)
-- 2026-07-09 · `a7f5b52` · Wellness vertical CLOSED (Inc 1+2 — `wellness-domain` + `cmd/wellness-app` thin FE); live lens reads verified on :7802 — [design](../../implementation-artifacts/wellness-vertical-design.md)
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
