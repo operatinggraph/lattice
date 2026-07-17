@@ -658,24 +658,127 @@ before EDGE.1. Lenses: Winston (architect), Mary (root-cause), Amelia (impl), Qu
 Barry (lean). **8 findings folded in** (F1 speculation-DAG, F2 inert predicted-events, F3 the predict-iff-reads⊆mirror
 gate, F4 enumeration-not-predictable, F5 security-holds/accuracy-degrades, F6 ciphertext-prediction-is-sensitive,
 F7 conflict-re-present-as-a-set, F8 the cross-cutting "scripts-read-Core-KV smell" flagged for Andrew) — see the
-*Ratified + party-mode findings* block. **EDGE.3 shipped 2026-07-12 (Steward fire) with targeted tests, not a
-full `bmad-party-mode` re-review**: `TestEdgeGate3_ValidTokenSubmitsThroughGateway` /
-`TestEdgeGate3_RevokedTokenNeverSubmits` (`internal/gateway/edge_gate3_e2e_test.go`) prove points **(a)**-partial
-(no local commit — every accepted path still routes through the real Gateway+Processor reply contract) and
-**(c)** (a revoked/invalid token is denied before any envelope reaches submit) against a real
-`gateway.Server`+`auth.Authenticator`, plus the full `go test ./...` suite green. **The full multi-persona
-adversarial pass this note calls for — (b) reconcile-by-revision soundness, (d) the transient-key path, (e) the
-PL.1 co-build seam — is still open**; flag for a dedicated review fire before EDGE.4 (which composes the
-transient-key path directly onto this boundary). Highest-leverage things to attack: **(a)** the P2 boundary — is there *any* path,
-including the optimistic overlay + the intent queue + a conflict re-audit, where the Edge becomes an
-authoritative writer or a local commit escapes the cloud Processor? (the whole FORK-A rationale rests on "no");
-**(b)** reconcile-by-revision soundness — can a stale/reordered/duplicate delta or an OCC-conflicting offline
-intent leave the local mirror permanently divergent or silently lose/keep a rejected user edit? (R2/R3/FORK-C);
-**(c)** the trusted→untrusted boundary — can the SYNC stream or an intent submission leak past the trust
-boundary before EDGE.3 + the subscribe-ACL land? (R5); **(d)** the transient-key path — any route where
-plaintext is persisted, a session key outlives a shred, or the cloud decrypts for the Edge? (R4 / §3.6);
-**(e)** the co-build seam with Personal Lens PL.1 — does the consumer assume anything the producer doesn't
-deliver (envelope fields, hydration markers, retention)? Fold findings in before the gated fires.
+*Ratified + party-mode findings* block.
+
+### 8.1 EDGE.3 boundary re-review — ✅ COMPLETE (Designer fire, 2026-07-16)
+
+The full multi-persona adversarial pass this note called for is **now discharged**, against the *live shipped
+boundary* (EDGE.1–4 all shipped 2026-07-12/13). Five parallel adversarial lenses ran against the actual code
+(`internal/edge/{sync,store,overlay,agent,vault}`, `internal/gateway/{auth,natsauth,gateway.go}`,
+`internal/refractor/{control,capabilityread,personalinterest,projection,pipeline,adapter}`): (a)+(c) P2
+write-authority + trust boundary; (b) reconcile-by-revision soundness; (d) the transient-key path; the core
+EDGE.3 authorization boundary (subscribe-ACL + PL.3 fail-closed + control-op confinement); and (e) the PL.1
+producer/consumer seam. Every reported finding was re-verified in code by the Designer before crediting.
+
+**Verdict: no CRITICAL or HIGH finding; the EDGE.3 security boundary holds.** The Edge is a genuinely untrusted
+client — it cannot become an authoritative writer, cannot forge `env.Actor`, cannot subscribe to or hydrate
+another identity's slice, and cannot decrypt past a shred. The findings are correctness/robustness hardening on
+the offline-first *reconcile* and *producer-seam* surfaces, not boundary breaches.
+
+**Points cleared SAFE (with the enforcing mechanism):**
+
+- **(a) P2 — no local commit escapes the Processor.** The optimistic overlay lives in a separate bbolt bucket
+  (`bucketPending`) and is never promoted into the confirmed `bucketVAL`, which is written **only** by the CDC
+  sync-apply path (`store.ApplyUpsert/ApplyDelete` ← `sync.handle`, never a write-path caller). An accepted reply
+  does nothing to the overlay; it retires only when a fresher *confirmed* revision lands (`overlay.Read`
+  supersession, `overlay.go:94-103`). "Cleared by the authoritative cloud value, never local success alone" holds
+  in code.
+- **(c) Actor spoofing is structurally impossible.** The Gateway's `operationRequest` has **no `actor` field**
+  (`gateway.go:378-389`); a client-sent `"actor"` is dropped by `json.Unmarshal`. `buildEnvelope` stamps only the
+  JWT-verified (then credential-resolved) actor (`gateway.go:725`). Defense-in-depth: the Edge NATS account has
+  **no `ops.>` publish grant** (`natsauth.PermissionsFor`), so even the trusted-only `NATSSubmitter` (never wired
+  in any production binary — `cmd/edge/main.go:130` hardcodes `GatewaySubmitter`) could not publish
+  `core-operations` directly. A revoked token is denied at the Gateway *before* any envelope reaches submit, with
+  the intent left **queued not discarded** (`TestEdgeGate3_RevokedTokenNeverSubmits`). Step-3 `scope=self` requires
+  `target == env.Actor` (`step3_auth_capability.go:520-526`), so A cannot mutate B's data.
+- **Core authorization (EDGE.3's heart).** Subscribe-ACL is an **exact** `lattice.sync.user.<verifiedActor>`
+  subject with **no wildcard** (`natsauth.go:350-356`), the identity derived from the verified actor and
+  NanoID-revalidated. PL.3 `capabilityread.IsReadable` is **fail-closed by construction** — omission/absent-grant/
+  all-tombstoned all fall through to `return false` (`capabilityread.go:110`); no-grant ⇒ empty slice (e2e-proven).
+  All **four** control ops (`register`/`deregister`/`hydrate`/`sessionkey`) **force** `body.IdentityID` to the
+  verified actor and *reject* a disagreeing value (`control/service.go:668-682`), so the broad `scope=any →
+  consumer` grant cannot let A act as B (per-op binding tests present, incl. `personal_sessionkey_test.go`).
+  Cold hydrate reuses the **same** filtered envelope path (no un-filtered bulk path).
+- **(d) Transient-key path.** No plaintext is written back (the `vault.Reader` decrypts into a value-copy only;
+  no store `Put`). The server **clamps** the requested TTL to `maxSessionKeyTTL = 1h` (`vault/local.go:291-293`),
+  so a client cannot request an arbitrarily long key. A shred is enforced by a dual barrier (durable
+  `envelope.Shredded` + in-memory deny-list, under one lock) and the client clears its cache on a denied reissue,
+  never falling back to ciphertext. AAD (= the caller's own `identityKey`) fails a cross-identity decrypt closed;
+  `keyId` is advisory, not the crypto selector.
+
+**Confirmed findings — hardening follow-ons (all re-verified in code; filed on the Lattice board):**
+
+- **RR-1 (MEDIUM, Edge correctness) — `Revision==0` adjacency-watch deltas reach the Edge and are ordered by
+  arrival.** The personal lens's adjacency-watch reprojection (`pipeline.handleAdjNode` →
+  `evaluateForEntryRaw` → `evaluateFanOut` → `executeFullForActor`) **does** run `personalEnvelopeFn`, which
+  injects a valid `__actor` (`projection/personal.go:142`), so `natssubject.Upsert` publishes a `Revision: 0`
+  delta to `lattice.sync.user.<actor>` (the adjacency path writes with sentinel seq `0`, `pipeline.go:1284-1286`).
+  The server's **guarded** read-model adapters deliberately *skip* these seq-0 writes ("could resurrect a
+  tombstoned/absent guarded key", `pipeline.go:1271-1274`) — but `natssubject` does **not** implement `Guarded()`,
+  so the Edge receives them, and the Edge LWW gate (`revision < cur` → **applies on equal**, `store.go:115,137`)
+  treats `0` as order-by-arrival: a redelivered/reordered rev-0 upsert can transiently resurrect a rev-0
+  tombstone, or vice-versa. Bounded (self-heals when the real-seq stream-consumer twin reprojects the same actors,
+  which the adjacency write is documented-redundant with) and **not a security/cross-identity issue** — but the
+  Edge is trusting a Refractor-internal "every seq-0 has a real-seq twin" invariant it cannot see.
+  **Note — this corrected a mis-read shared by two lenses** (both claimed `evaluateForEntry` is a non-fan-out path
+  that never runs `personalEnvelopeFn`, so the write would be dropped for a missing `__actor`; in fact
+  `evaluateForEntry` *is* the fan-out path when an `ActorEnumerator` is installed, which the personal lens always
+  does — `personal.go:67`). **Recommended fix (simplest, mirrors the shipped guarded-skip):** skip the seq-0
+  adjacency-watch write for the personal/edge SYNC adapter too (it is redundant with the real-seq fan-out), rather
+  than teaching the Edge to special-case rev-0 — the Edge should never receive an unordered delta. Alternatively/
+  additionally, the Edge treats `Revision==0` as non-authoritative (never overwrites/resurrects an existing entry).
+- **RR-2 (MEDIUM, Edge robustness) — Sync/agent reconcile hardening (three coupled defects, one fire).**
+  (i) **Poison-key `Nak` hot-loop:** a delivered delta whose key is neither Contract #1 nor `manifest.`-prefixed
+  deterministically errors in `store.ApplyUpsert` → `sync.handle` returns `Nak` (`sync.go:301-305`) → infinite
+  redelivery — **inconsistent** with the `Term` the same handler uses for a malformed envelope (`sync.go:296-297`).
+  A deterministically-unstorable key must `Term`, not `Nak`. Reachable for any future non-`manifest.` personal lens
+  or a lens `ns` typo. (ii) **Unrecognized terminal `ReplyStatus` loses a durable edit:** `agent.Drain`
+  unconditionally `DeleteIntent`s after `resolve`, but `resolve`'s `default` branch returns an error (only logged)
+  *without* discarding the overlay or surfacing a conflict (`agent.go:146-152,177-179`) — the edit is dropped from
+  the only durable record and a phantom overlay is stranded. Latent today (three statuses exist) but a trap for the
+  async-reply path; the `default` case must **leave the intent queued**. (iii) **Overlay `Discard` ignores
+  `RequestID`:** it deletes the per-key pending entry (`overlay.go:75-77`, keyed by `Key` only), so a rejected
+  *older* intent discards a *newer* intent's still-valid overlay for the same key (self-heals on the newer commit).
+  Discard should match the stored `RequestID`.
+- **RR-3 (LOW, security hardening) — PL.3 gate is disabled (runs OPEN) on `capKV == nil` with only a WARN.**
+  `projection/personal.go:69-72,113` makes the `IsReadable` security gate conditional on `capKV != nil`; a nil
+  handle logs a warning and installs the lens open. Production is safe today (`cmd/refractor/main.go` `os.Exit(1)`
+  on KV-open failure, threads `capKV` unconditionally), so the open path is genuinely test-only — but a future
+  personal lens wired without threading `capKV` would run fully open on a WARN. **Fail closed:** refuse to register
+  a `personal:true` lens without `capKV`, rather than warn-and-open. (Mirrors the design's own §3.4 rule: "the
+  security door is the explicit gate, not a silent default.")
+- **RR-4 (LOW, test-coverage) — the re-declared `deltaEnvelope` has no producer→consumer round-trip test.** The
+  Edge deliberately re-declares the wire struct (`sync.go:36-42`) rather than importing the producer's unexported
+  type; today the only guards are incidental e2e string-literal assertions (`op`/`key`/`data`/`revision`) in three
+  separate Refractor tests, none of which decode a **real `NatsSubjectAdapter` envelope through the consumer's
+  struct + `edge/store`**. A producer-side rename of an unasserted field, or a key-shape the consumer rejects,
+  passes CI. Add one focused test that publishes via the real adapter and applies via `edge/sync` + `edge/store`.
+- **RR-5 (LOW, deployment guard) — assert the `ActorVerifier` is wired on the Edge-facing Refractor control
+  plane.** The §3.4 control-op identity binding (RR-cleared above) is gated on `verifier != nil`
+  (`control/service.go:668`); with **no** verifier configured, `body.IdentityID` is trusted as self-asserted (the
+  documented dev/e2e posture). This is correct for dev but MUST hold in any untrusted-Edge deployment. Not a code
+  bug — a startup assertion / ops guard: the control service, when serving an untrusted-Edge posture, should refuse
+  to start without a verifier rather than silently degrade to self-asserted identity.
+
+**Accepted-by-design (re-confirmed, no action):**
+
+- **Per-anchor revocation rides CDC lag (no delete-delta).** A revoked anchor's already-delivered delta lingers on
+  the device until a cold re-hydrate; `natssubject` implements no `KeyLister`, so no retraction delta is emitted.
+  **Not a cross-identity leak** — A only ever holds stale data for an anchor A *used to be* authorized to read;
+  never B's data. Ratified R3 (`personal-secure-lens-design.md`); the 15-min JWT TTL is the instant whole-actor
+  cut. The multicast-dedup/retraction primitive stays deferred to its bandwidth trigger.
+- **Transient-key window.** A shred that lands *after* a key is cached is observed only on the next cache miss, so
+  a still-cached key decrypts already-delivered ciphertext for up to `TTL − margin` (≤~1h). This is the intended
+  transient-key tradeoff; the security boundary is at-rest ciphertext + no post-shred *re-issuance*. Reconcile the
+  `edge/vault/client.go` header's "permanent gibberish" wording (which reads as immediate) with this bounded window.
+- **Re-hydrate is upsert-only.** Deletions that occurred while offline past the 24h retention window are not
+  reconciled by hydrate; they clear via local GC (`sync.go:159-161`) — the named dependency of the re-hydrate
+  correctness claim.
+- **Rejected-edit visibility depends on the host `Conflict` hook** (`agent.go:66-69`) — by design; nothing in the
+  Edge preserves the rejected envelope beyond the hook. Worth a UX note for whoever wires the Facet host.
+
+The R1/R2/R4/R5 highest-leverage attack list this note previously enumerated is now answered by the five lenses
+above; the residual RR-1…RR-5 are hardening rows on the board, none blocking, none an EDGE.5 gate.
 
 ---
 
