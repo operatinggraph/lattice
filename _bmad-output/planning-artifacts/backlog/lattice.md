@@ -142,10 +142,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > the condition-2 lint, and a live-catalog `SensitiveAspectResolver`; AI-authored-capabilities is now
 > effectively done (Fire 5 stays design-only per Andrew's recommendation; a Loupe UI affordance is
 > Stream 3's lane) — see the AI-native table row below.
-> **`[bootstrap] internal/bootstrap primordial-ID globals race` Fire 1 SHIPPED** (2026-07-16, `0e8ecfd`) —
-> `testutil.EnsurePrimordials` (sync.Once, once-per-process) + `t.Parallel()` re-applied across
-> `packages/{lease-signing,clinic-domain,identity-domain}`; CI green. Fire 2 (migrate the ~20 suite-local
-> harnesses + the lint gate) is the next named build-ready pick — see the Refinements & ops row.
+> **`[bootstrap] internal/bootstrap primordial-ID globals race` CLOSED** (2026-07-16) — Fire 1 (`0e8ecfd`,
+> `testutil.EnsurePrimordials` + `t.Parallel()` on lease-signing/clinic-domain/identity-domain) + Fire 2
+> (`2a5ee60`, migrated the ~20 suite-local harnesses + the lint-conventions gate) both shipped, CI green.
+> Next named build-ready pick: **EDGE.5** W1–W4 (this lane) — see the callout above.
 > Whoever ships the named pick updates this callout to the next one — a stale callout starves the lane.
 
 ### Security & trust boundary
@@ -200,8 +200,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x, isolating natsperm into its own step reconfirmed it (Done log) · next: propose paid larger runners to Andrew, or Fire 2 of the globals-race row above |
-| **`internal/bootstrap` primordial-ID globals race** | `populate()` (nanoid.go) writes ~64 package-level globals per call; `SetupPackageTestEnv` calls it per-test, so `t.Parallel()` races (confirmed `-race`). Blocks parallelizing lease-signing/clinic-domain/identity-domain tests. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/bootstrap-primordial-globals-race-design.md) · next: Fire 2 (harness migration + lint gate) |
+| **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x, isolating natsperm into its own step reconfirmed it (Done log) · next: propose paid larger runners to Andrew |
+| **`internal/bootstrap` primordial-ID globals race** | `populate()` (nanoid.go) writes ~64 package-level globals per call; `SetupPackageTestEnv` calls it per-test, so `t.Parallel()` races (confirmed `-race`). Blocked parallelizing lease-signing/clinic-domain/identity-domain tests. | ★★ | M | ✅ CLOSED · [design](../../implementation-artifacts/bootstrap-primordial-globals-race-design.md) · Fires 1–2 shipped, CI green |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
 | **Script-read posture — declared+hydrated vs live `kv.get`/`kv.Links`** | Declared+hydrated reads as the write-path norm: `optionalReads` folds read-before-create in; `kv.Links` declared-as-metadata (Edge-gate + best-effort lint, not hydrated); guards become a generic Processor-side operation feature (supersedes Loom's engine read). | ★★ | L | ✅ Fires 1–2 shipped · [design §12](../../implementation-artifacts/script-read-posture-design.md) · Fire 3 (guards) deferred to its first consumer; debt sweep + warn→block flip SHIPPED `63aab49` |
 
@@ -220,6 +220,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-16 · `2a5ee60` · [testutil,lint-conventions] bootstrap-globals-race Fire 2 CLOSED — migrated ~20 suite-local harnesses to EnsurePrimordials + added the lint gate; CI green
 - 2026-07-16 · `0e8ecfd` · [testutil] bootstrap-globals-race Fire 1 — EnsurePrimordials (sync.Once) + t.Parallel() re-applied on lease-signing/clinic-domain/identity-domain; CI green
 - 2026-07-16 · `219fa0c` · [pkgmgr,capability-author] AI-caps Fire 4 SHIPPED — vertexTypeDDL/opMeta kinds + condition-2 lint + live SensitiveAspectResolver; adversarially reviewed, fixed a real fail-open bug; CI green
 - 2026-07-16 · `8a34fe4` · [bridge,vault,natsperm] sensitive-ref-mac-provenance Fire 2 CLOSED — bridge requires+verifies the MAC via lattice.vault.decryptref, natsperm grant swap, DEFENDED fabricated-ref e2e; adversarially reviewed; CI green
