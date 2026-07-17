@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rsa"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,12 +17,14 @@ import (
 )
 
 // wellness-app has no protected read boundary (every wellness lens is plain
-// NATS-KV, P5) — the only auth concern is minting the staff Bearer token the
-// Gateway's write path verifies (real-actor-write-auth-e2e-design.md §3.1's
+// NATS-KV, P5) — the auth concern is minting Bearer tokens the Gateway's
+// write path verifies (real-actor-write-auth-e2e-design.md §3.1's
 // shared-dev-IdP posture, mirroring cafe-app/loftspace-app/clinic-app's own
-// handleStaffDevToken). Every wellness op (CreateBooking/CancelBooking/etc.)
-// is grantsTo:[operator] scope:any, so a single staff token — minted for
-// this app's own admin actor — covers every write.
+// handleStaffDevToken/handleDevToken). Most wellness ops are
+// grantsTo:[operator] scope:any, so a single staff token covers those
+// writes; CreateBooking/CancelBooking additionally grant consumer scope=self
+// (packages/wellness-domain/permissions.go), so a resident acting as
+// themselves mints a token for their own identity via handleDevToken.
 
 const devTokenTTL = 30 * time.Minute
 
@@ -92,6 +95,47 @@ func (s *server) handleStaffDevToken(w http.ResponseWriter, r *http.Request) {
 	_, subject, ok := substrate.ParseVertexKey(s.adminActor)
 	if !ok {
 		s.writeError(w, http.StatusInternalServerError, "admin actor key is malformed")
+		return
+	}
+	token, exp, err := s.devSigner.mint(subject)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"token":     token,
+		"expiresAt": exp.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleDevToken implements POST /api/dev-token {subject} → {token, expiresAt} —
+// the demo-only self-service login stand-in, mirroring cmd/clinic-app's
+// handleDevToken. subject is the bare identity id (no "vtx.identity." prefix)
+// of the resident's OWN identity — CreateBooking/CancelBooking's consumer
+// scope=self grant targets the identity vertex itself (no device-credential
+// indirection: ClaimIdentity already grants holdsRole->consumer to the
+// identity, packages/identity-domain/ddls.go), so minting directly for that
+// subject is sufficient; no claim/link ceremony is needed here. Available
+// only when dev-auth is enabled.
+func (s *server) handleDevToken(w http.ResponseWriter, r *http.Request) {
+	if s.devSigner == nil {
+		s.writeError(w, http.StatusNotFound, "dev-token minting is disabled (WELLNESS_APP_DEV_AUTH not set)")
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	var req struct {
+		Subject string `json:"subject"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	subject := strings.TrimSpace(req.Subject)
+	if subject == "" {
+		s.writeError(w, http.StatusBadRequest, "subject (the bare identity id) is required")
 		return
 	}
 	token, exp, err := s.devSigner.mint(subject)

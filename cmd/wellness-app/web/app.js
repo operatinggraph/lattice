@@ -32,16 +32,58 @@ async function staffReadToken() {
   return body.token;
 }
 
-// submitOp posts one operation to the Gateway, browser-direct, with the
-// staff Bearer token — every wellness-domain op (CreateBooking/CancelBooking/
-// CreateSession/…) is grantsTo:[operator] scope:any, so the fixed staff
-// identity covers every write (no per-resident login exists in this thin FE).
-async function submitOp(body) {
-  const [base, token] = await Promise.all([gatewayURL(), staffReadToken()]);
+// ---- self-service session -------------------------------------------
+
+// selfBookerKey is the signed-in resident's own identity key (the "Me" bar),
+// persisted across reloads. CreateBooking/CancelBooking's consumer
+// scope=self grant targets the identity vertex directly (no device-claim
+// indirection — wellness-domain permissions.go), so signing in is just
+// picking which resident you are, not a claim/link ceremony.
+const SELF_BOOKER_STORAGE_KEY = "wellness.selfBookerKey";
+let selfBookerKey = localStorage.getItem(SELF_BOOKER_STORAGE_KEY) || null;
+
+function signInAsSelf(bookerKey) {
+  selfBookerKey = bookerKey;
+  selfTokenCache = null;
+  localStorage.setItem(SELF_BOOKER_STORAGE_KEY, bookerKey);
+}
+
+function signOutSelf() {
+  selfBookerKey = null;
+  selfTokenCache = null;
+  localStorage.removeItem(SELF_BOOKER_STORAGE_KEY);
+}
+
+let selfTokenCache = null;
+async function selfWriteToken() {
+  if (!selfBookerKey) throw new Error("not signed in");
+  if (selfTokenCache && selfTokenCache.subject === selfBookerKey &&
+      Date.parse(selfTokenCache.expiresAt) - Date.now() > 5000) {
+    return selfTokenCache.token;
+  }
+  const body = await api("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject: idOf(selfBookerKey) }),
+  });
+  selfTokenCache = { subject: selfBookerKey, token: body.token, expiresAt: body.expiresAt };
+  return body.token;
+}
+
+// submitOp posts one operation to the Gateway, browser-direct. By default it
+// uses the staff Bearer token (operator scope:any covers most ops); passing
+// opts.asSelf instead submits with a token minted for the signed-in
+// resident's own identity, and stamps authContext.target so the platform's
+// scope=self check (op.actor == authContext.target) and wellness-domain's
+// own booker/bookedBy check both resolve to that resident.
+async function submitOp(body, opts) {
+  const asSelf = !!(opts && opts.asSelf);
+  const [base, token] = await Promise.all([gatewayURL(), asSelf ? selfWriteToken() : staffReadToken()]);
+  const withAuth = asSelf ? Object.assign({}, body, { authContext: { target: selfBookerKey } }) : body;
   return api(base + "/v1/operations", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withAuth),
   });
 }
 
@@ -63,8 +105,8 @@ function seatKeys(sessionKey, capacity) {
   return keys;
 }
 
-async function opOrThrow(body, what) {
-  const reply = await submitOp(body);
+async function opOrThrow(body, what, opts) {
+  const reply = await submitOp(body, opts);
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
     throw new Error(`Could not ${what} — ${msg}`);
@@ -157,6 +199,14 @@ function fillResidentSelect(select, residents, allowAll) {
   if (prev && residents.some((r) => r.bookerKey === prev)) select.value = prev;
 }
 
+// leaseAppKeyForBooker looks up a booker's lease application key from the
+// resident roster (the resident-rate hint payload param), uniformly for both
+// the staff picker and a signed-in self-service booker.
+function leaseAppKeyForBooker(bookerKey, residents) {
+  const r = residents.find((x) => x.bookerKey === bookerKey);
+  return r ? r.leaseAppKey : "";
+}
+
 // ---- Schedule view ------------------------------------------------
 
 async function loadSchedule() {
@@ -198,18 +248,18 @@ async function renderSchedule() {
     return;
   }
   const residents = await loadResidents();
-  grid.innerHTML = sessions.map(scheduleCard).join("");
+  const selfMode = !!selfBookerKey;
+  grid.innerHTML = sessions.map((se) => scheduleCard(se, selfMode)).join("");
   sessions.forEach((se) => {
     const id = domId(se.sessionKey);
     const bookBtn = document.getElementById("book-" + id);
     const select = document.getElementById("booker-" + id);
-    fillResidentSelect(select, residents, true);
+    if (select) fillResidentSelect(select, residents, true);
     if (!bookBtn) return;
     bookBtn.addEventListener("click", async () => {
-      const bookerKey = select.value;
+      const bookerKey = selfBookerKey || (select ? select.value : "");
       if (!bookerKey) { toast("Pick a resident to book.", false); return; }
-      const opt = select.options[select.selectedIndex];
-      const leaseAppKey = opt ? opt.dataset.leaseAppKey : "";
+      const leaseAppKey = leaseAppKeyForBooker(bookerKey, residents);
       bookBtn.disabled = true;
       try {
         const payload = { session: se.sessionKey, booker: bookerKey };
@@ -225,9 +275,12 @@ async function renderSchedule() {
             "lnk.leaseapp." + idOf(leaseAppKey) + ".applicationFor.identity." + idOf(bookerKey),
           );
         }
+        // booker is an (a)-declared required read (require_live_typed, ddls.go)
+        // — CreateBooking fails UnknownEndpoint without it, staff or self alike.
         await opOrThrow(
-          { operationType: "CreateBooking", class: "booking", reads: [se.sessionKey, se.sessionKey + ".schedule"], optionalReads, payload },
-          "book the class"
+          { operationType: "CreateBooking", class: "booking", reads: [se.sessionKey, se.sessionKey + ".schedule", bookerKey], optionalReads, payload },
+          "book the class",
+          { asSelf: selfMode }
         );
         toast("Booked.", true);
         setTimeout(renderSchedule, 700);
@@ -243,9 +296,10 @@ function domId(key) {
   return key.replace(/[^a-zA-Z0-9]/g, "");
 }
 
-function scheduleCard(se) {
+function scheduleCard(se, selfMode) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
+  const picker = selfMode ? '<span class="me-inline">booking as you</span>' : '<select id="booker-' + id + '"></select>';
   return (
     '<div class="card">' +
     '<span class="badge ' + (full ? "settled" : "open") + '">' + se.bookedCount + " / " + se.capacity + " seats</span>" +
@@ -253,7 +307,7 @@ function scheduleCard(se) {
     '<div class="meta">' + (se.studioName || shortKey(se.studioKey)) + "</div>" +
     '<div class="meta">' + fmtRange(se.startsAt, se.endsAt) + "</div>" +
     '<div class="field-row">' +
-    '<select id="booker-' + id + '"></select>' +
+    picker +
     '<button id="book-' + id + '"' + (full ? " disabled" : "") + ">Book</button>" +
     "</div>" +
     "</div>"
@@ -344,14 +398,22 @@ function rosterCard(b, sessionKey) {
 
 async function loadMyClasses() {
   const select = document.getElementById("myclasses-resident");
-  const residents = await loadResidents();
-  fillResidentSelect(select, residents, true);
+  const label = document.getElementById("myclasses-resident-label");
+  if (selfBookerKey) {
+    select.hidden = true;
+    label.hidden = true;
+  } else {
+    select.hidden = false;
+    label.hidden = false;
+    const residents = await loadResidents();
+    fillResidentSelect(select, residents, true);
+  }
   await renderMyClasses();
 }
 
 async function renderMyClasses() {
   const body = document.getElementById("myclasses-body");
-  const bookerKey = document.getElementById("myclasses-resident").value;
+  const bookerKey = selfBookerKey || document.getElementById("myclasses-resident").value;
   body.innerHTML = "";
   if (!bookerKey) {
     body.innerHTML = '<div class="empty">Pick a resident to see their booked classes.</div>';
@@ -377,9 +439,15 @@ async function renderMyClasses() {
       btn.disabled = true;
       try {
         const forSessionLnk = "lnk.booking." + idOf(b.bookingKey) + ".forSession.session." + idOf(b.sessionKey);
+        // asSelf's self-cancel guard needs the bookedBy link as a (d)-declared
+        // optionalReads — the script checks it names THIS booker (ddls.go).
+        const optionalReads = selfBookerKey
+          ? ["lnk.booking." + idOf(b.bookingKey) + ".bookedBy.identity." + idOf(selfBookerKey)]
+          : [];
         await opOrThrow(
-          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", forSessionLnk], payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
-          "cancel the booking"
+          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
+          "cancel the booking",
+          { asSelf: !!selfBookerKey }
         );
         toast("Booking cancelled.", true);
         setTimeout(renderMyClasses, 700);
@@ -403,6 +471,53 @@ function myClassCard(b) {
   );
 }
 
+// ---- Me bar ---------------------------------------------------------
+
+// refreshCurrentView re-renders whichever tab is active — called after
+// signing in/out so the Schedule and My Classes views pick up the new
+// self-service mode without a full page reload.
+function refreshCurrentView() {
+  const active = document.querySelector(".tab.active");
+  if (active) showView(active.dataset.view);
+}
+
+async function initMeBar() {
+  const status = document.getElementById("me-status");
+  const select = document.getElementById("me-resident");
+  const signinBtn = document.getElementById("me-signin");
+  const signoutBtn = document.getElementById("me-signout");
+
+  function refreshMeUI() {
+    if (selfBookerKey) {
+      status.textContent = "Signed in as " + shortKey(selfBookerKey);
+      select.hidden = true;
+      signinBtn.hidden = true;
+      signoutBtn.hidden = false;
+    } else {
+      status.textContent = "Not signed in";
+      select.hidden = false;
+      signinBtn.hidden = false;
+      signoutBtn.hidden = true;
+    }
+  }
+
+  const residents = await loadResidents();
+  fillResidentSelect(select, residents, true);
+  refreshMeUI();
+
+  signinBtn.addEventListener("click", () => {
+    if (!select.value) { toast("Pick a resident first.", false); return; }
+    signInAsSelf(select.value);
+    refreshMeUI();
+    refreshCurrentView();
+  });
+  signoutBtn.addEventListener("click", () => {
+    signOutSelf();
+    refreshMeUI();
+    refreshCurrentView();
+  });
+}
+
 // ---- init --------------------------------------------------------
 
 function init() {
@@ -422,6 +537,7 @@ function init() {
   });
   document.getElementById("myclasses-resident").addEventListener("change", renderMyClasses);
   document.getElementById("myclasses-refresh").addEventListener("click", () => { residentsCache = null; loadMyClasses(); });
+  initMeBar();
   loadSchedule();
 }
 

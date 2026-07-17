@@ -60,6 +60,19 @@ body {
 .tab:hover { background: transparent; color: var(--text); border-color: transparent; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
+.me-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px;
+  max-width: 1000px;
+  margin: 0 auto;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.me-status { color: var(--text-dim); }
+.me-inline { color: var(--text-dim); font-style: italic; }
+
 main { padding: 18px; max-width: 1000px; margin: 0 auto; }
 
 .panel-controls {
