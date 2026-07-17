@@ -143,9 +143,16 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > build-tag `edgeparity`) proving nats.js emits the ACL-granted filtered-create form (fail-closed, non-vacuous)
 > + the nats.js `vendors.md` row. Two grounded findings: `$JS.API.INFO` probe fixed with `{checkAPI:false}`
 > (wire parity with nats.go); a pre-existing STREAM.INFO gap filed (Security row). **W3 is now inc 1–3b done.**
-> **Next named build-ready pick: EDGE.5 W4** — the renderer/in-page integration (Facet's EventSource →
-> the wasm host's `onFrame`; the shell's BroadcastChannel follower change-signal completes there)
-> ([§3.3](../../implementation-artifacts/edge-browser-node-design.md)). The §8 full multi-persona
+> **EDGE.5 W4 inc 1 SHIPPED** (2026-07-17, `fa99b34`) — the shell's multi-tab correctness layer
+> (`internal/edge/browser/shell`): fixed a latent inc-3b bug where `createShell`'s `electLeader(...).catch`
+> was a TypeError on the non-thenable handle, so the Web-Locks leader tab never opened its consumer
+> (uncaught — the parity harness only drives the no-locks path); + built the **follower change-signal**
+> (BroadcastChannel `signalChange`/`onPeerChange`, §3.3, deferred here from inc 3b) with the first
+> `createShell` unit vectors (`shell.test.mjs`, wired into `edge-consumer-parity`). **Next named
+> build-ready pick: EDGE.5 W4 inc 2** — host-side consumption (`host.go` calls `signalChange` from
+> `OnChange`, registers `onPeerChange` → re-read + republish), then inc 3 renderer swap (EventSource →
+> `latticeEdge`/`onFrame`), inc 4 `cmd/facet`→static + the Fire-4 cross-machine e2e
+> ([§3.4](../../implementation-artifacts/edge-browser-node-design.md)). The §8 full multi-persona
 > adversarial re-review of the EDGE.3 security boundary is ✅ COMPLETE (2026-07-16, Designer, 5 lenses) —
 > boundary holds, no CRITICAL/HIGH; 5 hardening follow-ons filed (RR-1…RR-5 below), none an EDGE.5 gate.
 > See [edge design §8.1](../../implementation-artifacts/edge-lattice-full-design.md).
@@ -203,7 +210,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 WS half subsumed by the ratified [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md); multicast dedup stays deferred (bandwidth trigger) |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) W1 ✅ W2 ✅ W3 inc 1–3b ✅ · next: W4 — renderer/in-page integration |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) W1–W3 ✅ · W4 inc 1 ✅ (shell multi-tab layer) · next: W4 inc 2 host-side consumption |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ CLOSED (Fires 0–1; +6th read-grant lens at Fire 2) · [design §3.2 amendment](../../implementation-artifacts/edge-showcase-app-design.md) · app half continues as Facet Fire 3 (verticals.md) |
 | **RR-1 — Edge `Revision==0` delta ordering hazard** | Personal-lens adjacency-watch reprojection publishes sentinel seq-0 deltas to the Edge; the Edge LWW gate applies-on-equal so a reordered rev-0 upsert/tombstone transiently resurrects/drops a key. Guarded server adapters already skip seq-0; the Edge SYNC adapter doesn't. | ★★ | S–M | 📋 ready · [design §8.1 RR-1](../../implementation-artifacts/edge-lattice-full-design.md) · fix: skip seq-0 adj-watch write for the natssubject adapter |
 | **RR-2 — Edge Sync/agent reconcile hardening** | Three coupled defects: poison-key `Nak` hot-loop (should `Term` like a malformed envelope); unrecognized terminal `ReplyStatus` dequeues + loses a durable edit (must stay queued); overlay `Discard` ignores `RequestID` (drops a newer intent's overlay). | ★★ | M | 📋 ready · [design §8.1 RR-2](../../implementation-artifacts/edge-lattice-full-design.md) |
@@ -247,6 +254,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-17 · `fa99b34` · [edge] EDGE.5 W4 inc 1 — shell multi-tab layer: fixed the latent `electLeader(...).catch` leader-path TypeError + built the BroadcastChannel follower change-signal + first `createShell` unit vectors; CI green
 - 2026-07-17 · `86d29c9` · [edge,ci] EDGE.5 W3 inc 3b — JS transport shell over vendored nats.js 3.4.0 + consumer-create wire-form parity test (`edge-consumer-parity` CI job) + vendors.md row; CI green
 - 2026-07-17 · `2127e27` · [edge,ci] EDGE.5 W3 inc 3a — wasm host entry (`internal/edge/browser` + `cmd/edge-wasm`) + `make build-edge-wasm`, driven over its JS API on real IndexedDB in Chrome; fetch submitter → 1.71 MB gz; CI green
 - 2026-07-17 · `ee270f7` · [edge,ci] EDGE.5 W3 inc 2 — IndexedDB store (`syscall/js`) passing the storetest conformance suite on real IndexedDB in headless Chrome (wasmbrowsertest, pinned); vendors.md rows; CI job `edge-browser-store`; CI green

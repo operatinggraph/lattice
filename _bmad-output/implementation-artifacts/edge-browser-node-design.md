@@ -230,6 +230,27 @@ JS-side (it does not grow the wasm). The tripwire stands un-tripped, now on a re
 
 The PWA drops the Go host: renderer binds to the engine's JS API, `cmd/facet` shrinks to a static file server (or the PWA is served by anything). Green bar = **Facet Fire 4's ratified acceptance**: the PWA on a second machine completes the Fire-2 e2e — hydrate → order laundry → pending→confirmed → task auto-complete → offline queue → reconnect drain — under confined WS permissions, **no local binary**. Ratification routed this fire to the **lattice lane with W1–W3** (Andrew's single-lane directive — the whole W1→W4 chain runs in one lane so neither steward reads itself as blocked on the other; this matches the Facet design's own fire-4→Lattice routing). The verticals lane consumes the result; it does not build it.
 
+**W4 increment 1 — the shell's multi-tab correctness layer — SHIPPED (2026-07-17, `fa99b34`).** The
+in-page integration's two browser-only coordination mechanisms, self-contained in the JS shell with
+`node --test` vectors (no live stack): (a) fixed a latent bug in the shipped inc 3b `createShell` —
+`electLeader({...}).catch(...)` was a TypeError on the non-thenable election handle, so the **Web-Locks
+leader path threw and the leader tab never opened its consumer** (uncaught because the parity harness only
+drives the no-locks path); now watches `handle.settled` for a real election failure, acquisition stays via
+`onAcquire`. (b) the **follower change-signal** (§3.3, deferred here from inc 3b): the leader posts each
+landed change on a per-identity BroadcastChannel (`signalChange`), every other tab hears it via
+`onPeerChange` and re-reads the touched key from the shared IndexedDB (a channel never echoes to its
+poster; `close()` tears the channel down and releases the lock so a still-open leader hands off on
+sign-out). New `createCore`/`channel` injection seams make `createShell` unit-testable (it never was —
+only `electLeader` was); wired into the `edge-consumer-parity` gate.
+
+**W4 remaining increments (each independently green):** **inc 2** — host-side consumption: `host.go`
+calls `shell.signalChange` from its `OnChange` (leader) and registers an `onPeerChange` handler that
+re-reads + republishes a manifest frame (follower), verified in-Chrome via the store gate. **inc 3** — the
+renderer swap: `cmd/facet/web`'s `EventSource("/api/feed")` → `latticeEdge.start({shell})` + `onFrame`, the
+enqueue `POST /api/enqueue` → `api.enqueue`, and a wasm+shell boot module the page loads. **inc 4** —
+`cmd/facet` shrinks to a static file server + the ratified Fire-4 cross-machine, no-binary e2e (the W4
+green bar, Gate-3 class).
+
 ### 3.5 Read/write/state summary (unchanged invariants)
 
 | Concern | Mechanism | Invariant |
