@@ -11,14 +11,20 @@ The Software is made publicly visible solely for the purposes of demonstration,
 evaluation, and personal reference. Making the source visible does NOT place it
 in the public domain and does NOT grant any license to use it.
 
-NO LICENSE IS GRANTED. Except for the limited permission below, no rights of any
-kind are granted, expressly or by implication, estoppel, or otherwise.
+NO LICENSE IS GRANTED. Except for the limited permissions below, no rights of
+any kind are granted, expressly or by implication, estoppel, or otherwise.
 
-Limited permission. You MAY view and read the Software through the hosting
-platform (e.g., GitHub) and create the incidental, temporary copies a web
-browser or git client makes in the course of viewing it.
+Limited permission (viewing). You MAY view and read the Software through the
+hosting platform (e.g., GitHub) and create the incidental, temporary copies a
+web browser or git client makes in the course of viewing it.
 
-You MAY NOT, without the Author's prior written permission:
+Limited permission (evaluation). You MAY clone the repository and build and run
+the Software, unmodified, on machines you control, solely to evaluate it. This
+permission does not extend to any production, commercial, or hosted use, to
+creating derivative works, or to any redistribution.
+
+You MAY NOT, except as expressly permitted above or with the Author's prior
+written permission:
 
   1. use the Software, in whole or in part, for any purpose, commercial or
      non-commercial;
