@@ -1,8 +1,8 @@
 //go:build ignore
 
 // seed-showcase.go — dev-seed for `make seed-showcase` (edge-showcase-app-
-// design.md §7.3): loads a curated two-persona demo world using
-// service-domain's real families ({laundry, fitness} among the enum) —
+// design.md §7.3, §7.4): loads a curated two-persona demo world using
+// service-domain's real families ({laundry, fitness, clinic} among the enum) —
 // P7 makes the envelope class the machine truth, so a template's family must
 // match what it's presented as, or a completed run of it reads as a
 // different real thing to any family-matching consumer (e.g. lease-signing's
@@ -67,6 +67,7 @@ const (
 	unit2ID      = "eM2RNxs5S5rDFr6i8cfa"
 	laundryTplID = "z1vfcNcXdkdyHhJoFz55"
 	fitnessTplID = "xeY6h9HU3MYWUuiUZhcA"
+	clinicTplID  = "hqYJYTcdwtPPfD2pPG8c"
 	instance1ID  = "w3wX6tCr9EQMDo7zKu6P"
 
 	// CreateLocation mints vtx.<locationType>.<id> — the type-specific prefix,
@@ -76,6 +77,7 @@ const (
 	unit2Key      = "vtx.unit." + unit2ID
 	laundryTplKey = "vtx.service." + laundryTplID
 	fitnessTplKey = "vtx.service." + fitnessTplID
+	clinicTplKey  = "vtx.service." + clinicTplID
 
 	tenant1Name  = "Riley Chen"
 	tenant1Email = "riley.chen@showcase.dev.lattice.local"
@@ -105,14 +107,22 @@ func main() {
 	must(err, "connect to NATS")
 	defer conn.Close()
 
+	adminKey := bootstrap.BootstrapIdentityKey
+
 	if alive(ctx, conn, buildingKey) {
 		fmt.Println("==> showcase world already loaded (building", buildingKey, "is alive) — recovering tenant keys, no ops submitted.")
 		recoverAndPrint(ctx, conn)
 		retireLegacyTemplates(ctx, conn)
+		// The building's liveness only proves the ORIGINAL world loaded; a
+		// later increment (e.g. the §7.4 clinic template) can still be
+		// missing — or partially wired — on an already-seeded stack.
+		// seedClinicTemplate is internally idempotent per-mutation, so
+		// calling it unconditionally here layers in whatever's missing
+		// without re-submitting anything already committed.
+		seedClinicTemplate(ctx, conn, adminKey)
+		fmt.Println("==> template clinic: " + clinicTplKey + " availableAt building, permits CreateAppointment/RescheduleAppointment/SetAppointmentStatus")
 		return
 	}
-
-	adminKey := bootstrap.BootstrapIdentityKey
 	consumerRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
 
 	// --- building + two units --------------------------------------------
@@ -144,7 +154,7 @@ func main() {
 
 	// --- two service templates, correct families, both availableAt the building --
 
-	requestServiceMeta := findRequestServiceOpMeta(ctx, conn)
+	requestServiceMeta := findOpMetaByType(ctx, conn, "RequestService")
 
 	seedTemplate(ctx, conn, adminKey, requestServiceMeta, laundryTplID, "laundry",
 		map[string]any{"name": "Maple Laundry", "description": "Wash-and-fold, 24h turnaround", "icon": "laundry", "category": "home"})
@@ -153,6 +163,17 @@ func main() {
 	seedTemplate(ctx, conn, adminKey, requestServiceMeta, fitnessTplID, "fitness",
 		map[string]any{"name": "Riverside Fitness Studio", "description": "Drop-in classes + open gym", "icon": "fitness", "category": "wellness"})
 	fmt.Println("==> template fitness: " + fitnessTplKey + " availableAt building")
+
+	// --- clinic "book an appointment" template, mixed-use in the same building
+	// (mirrors mixed-use-composition-design.md's front-desk clinic precedent;
+	// catalog reachability needs the availableAt container on the actor's own
+	// containedIn chain — a separate, unrelated clinic building would never
+	// surface) — permits the three clinic self-scope ops directly rather than
+	// RequestService, so they carry their own auth (edge-showcase-app-design.md
+	// §7.4) --
+
+	seedClinicTemplate(ctx, conn, adminKey)
+	fmt.Println("==> template clinic: " + clinicTplKey + " availableAt building, permits CreateAppointment/RescheduleAppointment/SetAppointmentStatus")
 
 	// --- one completed instance for tenant1 (the Activity timeline seed) --
 
@@ -220,6 +241,51 @@ func seedTemplate(ctx context.Context, conn *substrate.Conn, adminKey, requestSe
 	submitOp(ctx, conn, adminKey, "WirePermitsOperation", "serviceLocation",
 		map[string]any{"service": tplKey, "operation": requestServiceMeta},
 		&processor.ContextHint{Reads: []string{tplKey, requestServiceMeta}})
+}
+
+// seedClinicTemplate mints the clinic "book an appointment" service
+// template, wires it availableAt the showcase building, and
+// permitsOperation-links it directly to clinic-domain's three self-scope
+// consumer ops (CreateAppointment, RescheduleAppointment,
+// SetAppointmentStatus) — the catalog-path wiring named in
+// edge-showcase-app-design.md §7.4's residual note. Unlike laundry/fitness,
+// these ops don't dispatch through service-domain's authContext.service
+// (they carry their own scope=self grants), so the template links straight
+// to each op-meta rather than to RequestService.
+//
+// Each of the four mutations is individually idempotency-checked (not just
+// the template's own existence) so a rerun after a partial failure — e.g.
+// the template + availableAt link landed but an op-meta lookup then failed
+// — resumes exactly where it left off rather than either erroring on a
+// duplicate create or silently skipping the still-missing links.
+func seedClinicTemplate(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	if !alive(ctx, conn, clinicTplKey) {
+		submitOp(ctx, conn, adminKey, "CreateServiceTemplate", "service",
+			map[string]any{"family": "clinic", "templateId": clinicTplID, "presentation": map[string]any{
+				"name":        "Riverside Clinic",
+				"description": "Book, reschedule, or cancel a clinic appointment",
+				"icon":        "clinic",
+				"category":    "health",
+			}}, nil)
+	}
+
+	availableAtLnk := "lnk.service." + clinicTplID + ".availableAt." + strings.TrimPrefix(buildingKey, "vtx.")
+	if !alive(ctx, conn, availableAtLnk) {
+		submitOp(ctx, conn, adminKey, "WireAvailableAt", "serviceLocation",
+			map[string]any{"service": clinicTplKey, "location": buildingKey},
+			&processor.ContextHint{Reads: []string{clinicTplKey, buildingKey}})
+	}
+
+	for _, opType := range []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus"} {
+		opMeta := findOpMetaByType(ctx, conn, opType)
+		permitsLnk := "lnk.service." + clinicTplID + ".permitsOperation." + strings.TrimPrefix(opMeta, "vtx.")
+		if alive(ctx, conn, permitsLnk) {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "WirePermitsOperation", "serviceLocation",
+			map[string]any{"service": clinicTplKey, "operation": opMeta},
+			&processor.ContextHint{Reads: []string{clinicTplKey, opMeta}})
+	}
 }
 
 // retireLegacyTemplates soft-deletes the two backgroundCheck-classed
@@ -300,19 +366,19 @@ func alive(ctx context.Context, conn *substrate.Conn, key string) bool {
 	return !doc.IsDeleted
 }
 
-// findRequestServiceOpMeta scans Core KV for the RequestService op-meta
-// meta-vertex (no canonicalName aspect, so FindOpMetaByOperationType, not
+// findOpMetaByType scans Core KV for an op-meta meta-vertex by operationType
+// (no canonicalName aspect, so FindOpMetaByOperationType, not
 // FindMetaByCanonical — mirrors seed-edge-demo.go's helper of the same name).
-func findRequestServiceOpMeta(ctx context.Context, conn *substrate.Conn) string {
+func findOpMetaByType(ctx context.Context, conn *substrate.Conn, operationType string) string {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
 	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	must(err, "list core-kv keys")
-	opMetaKey, err := pkgverify.FindOpMetaByOperationType(ctx, coreKV, allKeys, "RequestService")
-	must(err, "find RequestService op-meta")
+	opMetaKey, err := pkgverify.FindOpMetaByOperationType(ctx, coreKV, allKeys, operationType)
+	must(err, "find "+operationType+" op-meta")
 	if opMetaKey == "" {
-		fmt.Fprintln(os.Stderr, "FATAL: RequestService op-meta not found — has `make install-edge-manifest` been run against this stack?")
+		fmt.Fprintln(os.Stderr, "FATAL: "+operationType+" op-meta not found — has the owning package been installed against this stack?")
 		os.Exit(1)
 	}
 	return opMetaKey

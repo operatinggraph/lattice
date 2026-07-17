@@ -740,8 +740,8 @@ func TestRecordServiceOutcome_StatusOutOfEnum_Rejected(t *testing.T) {
 }
 
 // TestCreateServiceTemplate_FamilyOutOfEnum_Rejected: a create op family outside
-// {backgroundCheck, payment, laundry, fitness} (e.g. "inspection") is rejected
-// with InvalidArgument.
+// {backgroundCheck, payment, laundry, fitness, clinic} (e.g. "inspection") is
+// rejected with InvalidArgument.
 func TestCreateServiceTemplate_FamilyOutOfEnum_Rejected(t *testing.T) {
 	ctx, conn := setupServiceEnv(t)
 	cp, cons := newServicePipeline(t, ctx, conn, "family-enum")
@@ -965,12 +965,12 @@ func createLiveInstance(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	return instKey
 }
 
-// TestCreateServiceTemplate_ShowcaseFamilies_Accepted proves the §7.3 enum
-// widening: laundry and fitness (the showcase dataset's own honest families)
-// are accepted exactly like the original two, minting the matching envelope
-// class.
+// TestCreateServiceTemplate_ShowcaseFamilies_Accepted proves the §7.3/§7.4 enum
+// widening: laundry, fitness, and clinic (the showcase dataset's own honest
+// families) are accepted exactly like the original two, minting the matching
+// envelope class.
 func TestCreateServiceTemplate_ShowcaseFamilies_Accepted(t *testing.T) {
-	for _, fam := range []string{"laundry", "fitness"} {
+	for _, fam := range []string{"laundry", "fitness", "clinic"} {
 		t.Run(fam, func(t *testing.T) {
 			ctx, conn := setupServiceEnv(t)
 			cp, cons := newServicePipeline(t, ctx, conn, "showcase-fam-"+fam)

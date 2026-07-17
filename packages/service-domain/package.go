@@ -62,7 +62,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "service-domain",
-	Version:     "0.4.0",
+	Version:     "0.5.0",
 	Description: "Service template + instance vertex type (service DDL + lifecycle ops incl. RequestService, RetireServiceTemplate); the instance records its external-call outcome as aspects (D5). No read-path lens (Phase-3 deferred).",
 	Depends:     []string{"identity-domain", "orchestration-base"},
 	DDLs:        DDLs(),
