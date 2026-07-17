@@ -424,3 +424,30 @@ jobs:
             ./packages/service-location/... ./scripts/... \
             | sort -u > /tmp/sharded.txt
           diff /tmp/all.txt /tmp/sharded.txt && echo "OK: shards cover exactly go list ./..."
+
+  edge-consumer-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # The browser Edge node's NATS transport is the vendored nats.js client
+    # (internal/edge/browser/shell), not nats.go, so its create-consumer wire
+    # form can differ from the Go node's and fail CLOSED in a user's tab while
+    # every Go test passes. This job drives the REAL shell from Node against
+    # internal/natsperm's real per-identity auth-callout and asserts nats.js
+    # emits the ACL-granted $JS.API.CONSUMER.CREATE.SYNC.<durable>.<filter> form
+    # (fail-closed if not), plus the multi-tab leader-election unit vectors.
+    # Needs Node (for the vendored client) + Go (for the callout harness); no
+    # Docker or shared stack. Its own job because it is the only one needing Node.
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run the Edge consumer-create wire-form parity + leader-election gate
+        run: make test-edge-consumer-parity

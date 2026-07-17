@@ -1339,6 +1339,25 @@ test-edge-idb-conformance:
 	PATH="$$PATH:$$(go env GOPATH)/bin" GOOS=js GOARCH=wasm \
 		go test -exec wasmbrowsertest ./internal/edge/store/... ./internal/edge/browser/... -count=1 -timeout 3m
 
+## test-edge-consumer-parity — the browser Edge node's transport-shell gate
+## (edge-browser-node-design.md §2.3/§5). The browser node's NATS transport is
+## the vendored nats.js client (internal/edge/browser/shell), NOT nats.go, so
+## its create-consumer wire form can differ from the Go node's and fail CLOSED
+## in a user's tab while every Go test passes. Two proofs, needing only Node
+## (no Docker, no shared stack):
+##   - the leader-election unit vectors (node --test) — multi-tab handoff logic;
+##   - the consumer-create wire-form parity test (Go, build-tag edgeparity) —
+##     drives the real shell from Node against internal/natsperm's real
+##     per-identity auth-callout, asserting nats.js emits the ACL-granted
+##     $JS.API.CONSUMER.CREATE.SYNC.<durable>.<filter> form (fail-closed if not).
+## The vendored bundle is regenerated per internal/edge/browser/shell/VENDOR.md.
+.PHONY: test-edge-consumer-parity
+test-edge-consumer-parity:
+	@echo "==> Running the Edge shell leader-election unit vectors (node --test)..."
+	node --test internal/edge/browser/shell/leader.test.mjs
+	@echo "==> Running the consumer-create wire-form parity test (nats.js vs the granted ACL)..."
+	go test -tags edgeparity ./internal/natsperm/ -run TestEdgeConsumerCreateWireFormParity -count=1 -v
+
 ## build-edge-wasm — the browser Edge node's wasm artifact
 ## (edge-browser-node-design.md §3.3). Compiles cmd/edge-wasm (the same
 ## semantics engine cmd/facet embeds natively) to js/wasm and copies the
