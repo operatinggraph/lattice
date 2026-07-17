@@ -80,9 +80,16 @@ function toast(msg, ok) {
 const state = {
   rows: new Map(),   // manifest key -> {data, pending}
   outbox: new Map(), // requestId -> outbox entry (server shape, feed.go)
+  // outboxHistory holds entries that fell out of the pinned Outbox section
+  // once confirmed (§3.4's "still logged, collapsed under 'Outbox history'
+  // if the user expands it") — newest first, bounded so a long-running tab
+  // doesn't grow this unboundedly.
+  outboxHistory: [],
   view: "home",
   credentials: null, // null = not yet loaded; array once GET /api/credentials resolves
 };
+
+const maxOutboxHistory = 50;
 
 function me() { const r = state.rows.get("manifest.me"); return r && r.data; }
 
@@ -132,16 +139,19 @@ function connectFeed() {
     showRevocationBanner(reason);
     finishBoot(); // never strand a revoked session on the boot spinner
   });
+  // The reconnect banner keys on the host's own NATS connectivity (this
+  // frame, design §4.4), never on onopen/onerror below — those reflect the
+  // browser↔host SSE transport, a different link that can stay open through
+  // a NATS outage (and vice versa).
+  es.addEventListener("connectivity", (e) => {
+    const fr = JSON.parse(e.data);
+    if (fr.connected) hideReconnectBanner(); else showReconnectBanner();
+  });
   es.onopen = () => {
     if (!hasBootstrapped) {
       setBootLabel("Loading your world…", true);
       armSilenceFallback();
-    } else {
-      hideReconnectBanner();
     }
-  };
-  es.onerror = () => {
-    if (hasBootstrapped) showReconnectBanner();
   };
 }
 
@@ -189,7 +199,12 @@ function applyOutboxFrame(e) {
   if (e.state === "confirmed") {
     setTimeout(() => {
       const cur = state.outbox.get(e.requestId);
-      if (cur && cur.state === "confirmed") { state.outbox.delete(e.requestId); scheduleRender(); }
+      if (cur && cur.state === "confirmed") {
+        state.outbox.delete(e.requestId);
+        state.outboxHistory.unshift(cur);
+        state.outboxHistory.length = Math.min(state.outboxHistory.length, maxOutboxHistory);
+        scheduleRender();
+      }
     }, 2000);
   }
   scheduleRender();
@@ -308,6 +323,7 @@ function taskRow(t) {
   const opRow = opByFullKey(d.forOperationKey);
   const title = (opRow && opRow.data.title) || prettifyOpType(d.operationType);
   return `<div class="card" data-goto="task" data-key="${esc(t.key)}" style="flex-direction:row;align-items:center;gap:12px">
+    ${t.pending ? `<span class="pending-chip">Pending</span>` : ""}
     <div style="flex:1">
       <div class="title">${esc(title)}</div>
       <div class="subtitle">${esc(prettify(d.scopedTo))} &middot; due ${esc(relativeTime(d.expiresAt))}</div>
@@ -394,21 +410,38 @@ function openTaskDetail(key) {
 
 // -------------------------------------------------------------- Activity
 
+// outboxHistoryExpanded toggles the collapsed "Outbox history" section
+// (§3.4's reconciliation note) — collapsed by default so a confirmed order
+// doesn't clutter the feed once its own manifest.inst.* row has taken over.
+let outboxHistoryExpanded = false;
+
 function renderActivity() {
   const pinned = [...state.outbox.values()]
     .filter((e) => e.state === "queued" || e.state === "submitting" || e.state === "rejected")
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   const insts = instances().sort(byCreatedDesc);
-  if (!pinned.length && !insts.length) {
+  const history = state.outboxHistory;
+  if (!pinned.length && !insts.length && !history.length) {
     $("view-activity").innerHTML = `<div class="empty">Nothing yet.</div>`;
     return;
   }
-  $("view-activity").innerHTML = pinned.map(outboxCard).join("") + insts.map(instanceRow).join("");
+  const historyHtml = history.length
+    ? `<button class="ghost-btn" data-toggle-outbox-history style="margin:12px 0">${outboxHistoryExpanded ? "Hide" : "Show"} Outbox history (${history.length})</button>`
+      + (outboxHistoryExpanded ? history.map(outboxHistoryCard).join("") : "")
+    : "";
+  $("view-activity").innerHTML = pinned.map(outboxCard).join("") + insts.map(instanceRow).join("") + historyHtml;
 }
 
 function titleForOutbox(e) {
   const match = ops().find((o) => o.data.operationType === e.operationType);
   return (match && match.data.title) || prettifyOpType(e.operationType);
+}
+
+function outboxHistoryCard(e) {
+  const stateLabel = e.state === "confirmed" ? "Done" : e.state;
+  return `<div class="timeline-item">
+    <div class="row1"><span class="title">${esc(titleForOutbox(e))}</span><span class="badge ${esc(e.state)}">${esc(stateLabel)}</span></div>
+  </div>`;
 }
 
 function outboxCard(e) {
@@ -425,16 +458,6 @@ function outboxCard(e) {
 }
 
 function dismissOutbox(reqId) { state.outbox.delete(reqId); scheduleRender(); }
-
-function retryOutbox(reqId) {
-  const e = state.outbox.get(reqId);
-  if (!e) return;
-  fetch("/api/enqueue", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ operationType: e.operationType, payload: e.payload, reads: e.reads, optionalReads: e.optionalReads, authContext: e.authContext }),
-  }).then(() => { state.outbox.delete(reqId); scheduleRender(); }).catch((err) => toast(String(err), false));
-}
 
 function reviewOutbox(reqId) {
   const e = state.outbox.get(reqId);
@@ -458,7 +481,8 @@ function renderMe() {
   // claimed user would be shown "Claim your identity" — an affordance that
   // then fails with "Not signed in.", in exactly the state it's most likely
   // to appear.
-  const m = me();
+  const row = state.rows.get("manifest.me");
+  const m = row && row.data;
   if (!m) {
     $("view-me").innerHTML = `<div class="subtitle">Loading your identity…</div>`;
     return;
@@ -467,6 +491,7 @@ function renderMe() {
   const anchors = (m.anchors || []).filter((a) => a.key);
   $("view-me").innerHTML = `
     <div class="card" style="cursor:default">
+      ${row.pending ? `<span class="pending-chip">Pending</span>` : ""}
       <div class="title" style="font-size:18px">${esc(m.displayName || "Unnamed")}</div>
       <div class="subtitle">${m.claimed ? "Claimed identity" : "Not yet claimed"}</div>
     </div>
@@ -769,6 +794,19 @@ function targetFieldValue(kind, ctx) {
   return undefined;
 }
 
+// resolveTouchedKey picks the Contract #1 key this write's optimistic
+// effect should overlay (design R3; server.go's enqueueRequest.TouchedKey)
+// — only meaningful for an update to an ALREADY-KNOWN key: a task's own key
+// (it disappears from the Tasks list on confirm, so the chip marks "this is
+// about to complete"), or the signed-in identity for a self-scoped op. A
+// create op (RequestService mints the new instance's key server-side) has
+// no predictable target and gets none, per server.go's own doc comment.
+function resolveTouchedKey(op, ctx) {
+  if (ctx.taskKey) return ctx.taskKey;
+  if (op.dispatchAuthContext === "self") { const m = me(); return (m && m.identityKey) || undefined; }
+  return undefined;
+}
+
 function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextParams) {
   const payload = {};
   for (const name of fieldNames) {
@@ -812,11 +850,12 @@ function submitDescriptorForm(form, op, opKey, ctx, fieldNames, props, contextPa
   const selfKey = me() && me().identityKey;
   if (selfKey && !reads.includes(selfKey)) reads.push(selfKey);
   const authContext = buildAuthContext(op.dispatchAuthContext, ctx);
+  const touchedKey = resolveTouchedKey(op, ctx);
 
   fetch("/api/enqueue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, authContext }),
+    body: JSON.stringify({ operationType: op.operationType, class: op.dispatchClass || "", payload, reads, authContext, touchedKey }),
   })
     .then((r) => r.json())
     .then((body) => {
@@ -891,12 +930,12 @@ function onGlobalClick(e) {
     return;
   }
 
-  const retry = e.target.closest("[data-retry]");
-  if (retry) { retryOutbox(retry.dataset.retry); return; }
   const review = e.target.closest("[data-review]");
   if (review) { reviewOutbox(review.dataset.review); return; }
   const dismiss = e.target.closest("[data-dismiss]");
   if (dismiss) { dismissOutbox(dismiss.dataset.dismiss); return; }
+  const toggleHistory = e.target.closest("[data-toggle-outbox-history]");
+  if (toggleHistory) { outboxHistoryExpanded = !outboxHistoryExpanded; scheduleRender(); return; }
 
   const closeBtn = e.target.closest("[data-close]");
   if (closeBtn) { hideModal(); return; }

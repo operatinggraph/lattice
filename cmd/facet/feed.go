@@ -30,22 +30,29 @@ import (
 //     itself: its writes are async (POST /api/enqueue returns long before
 //     the drain loop ever contacts the Gateway), so the failure surfaces
 //     only here, on the host's drain loop.
+//   - "connectivity" — the engine's host↔NATS connection went up or down
+//     (design §4.4/§3.0's "Reconnecting…" banner). Deliberately NOT the
+//     browser↔host EventSource's own open/error events: those reflect the
+//     SSE transport this same process serves, not whether its NATS
+//     connection is actually alive — a stale EventSource state would keep
+//     the banner showing "Reconnecting…" after NATS came back, or hide it
+//     while NATS is genuinely down but the SSE tab never blinked.
 type frame struct {
-	Kind     string          `json:"-"`
-	Key      string          `json:"key,omitempty"`
-	Deleted  bool            `json:"deleted,omitempty"`
-	Pending  bool            `json:"pending,omitempty"`
-	Data     json.RawMessage `json:"data,omitempty"`
-	Revision uint64          `json:"revision,omitempty"`
-	Outbox   *outboxEntry    `json:"outbox,omitempty"`
-	Reason   string          `json:"reason,omitempty"`
+	Kind      string          `json:"-"`
+	Key       string          `json:"key,omitempty"`
+	Deleted   bool            `json:"deleted,omitempty"`
+	Pending   bool            `json:"pending,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	Revision  uint64          `json:"revision,omitempty"`
+	Outbox    *outboxEntry    `json:"outbox,omitempty"`
+	Reason    string          `json:"reason,omitempty"`
+	Connected bool            `json:"connected"`
 }
 
 // outboxEntry mirrors facet-app-ux.md §3.4a: one enqueued write and its
 // lifecycle. Payload/Reads/OptionalReads/AuthContext are retained so the
-// browser can rebuild the exact envelope for Retry, or reopen the
-// descriptor form pre-filled for Review (§3.4b) without re-deriving
-// anything server-side.
+// browser can rebuild the exact envelope, or reopen the descriptor form
+// pre-filled for Review (§3.4b) without re-deriving anything server-side.
 type outboxEntry struct {
 	RequestID     string                 `json:"requestId"`
 	OperationType string                 `json:"operationType"`
@@ -83,12 +90,19 @@ type feed struct {
 	// builds a fresh one, with a fresh credential and a fresh feed. Without
 	// that eviction this stickiness would be a permanent lockout.
 	revokedReason string
+	// connected is the sticky host↔NATS connectivity state (see the frame
+	// doc comment's "connectivity" kind) — a fresh SSE connection replays it
+	// immediately (writeSSE) instead of leaving the banner in its default
+	// hidden state until the next transition, which would show "connected"
+	// even mid-outage for a tab that opened during one.
+	connected bool
 }
 
 func newFeed() *feed {
 	return &feed{
-		subs:   make(map[chan frame]struct{}),
-		outbox: make(map[string]*outboxEntry),
+		subs:      make(map[chan frame]struct{}),
+		outbox:    make(map[string]*outboxEntry),
+		connected: true, // newEngine only calls newFeed after NATS dial succeeds
 	}
 }
 
@@ -160,6 +174,27 @@ func (f *feed) revoked() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.revokedReason, f.revokedReason != ""
+}
+
+// setConnected records the engine's host↔NATS connectivity and broadcasts
+// the transition — a no-op when the state didn't actually change (nats.go's
+// disconnect/reconnect handlers can each fire more than once per outage).
+func (f *feed) setConnected(connected bool) {
+	f.mu.Lock()
+	changed := f.connected != connected
+	f.connected = connected
+	f.mu.Unlock()
+	if changed {
+		f.publish(frame{Kind: "connectivity", Connected: connected})
+	}
+}
+
+// connectedState returns the current sticky connectivity state (for a fresh
+// SSE connection's initial replay — see writeSSE).
+func (f *feed) connectedState() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connected
 }
 
 // enqueueOutbox records a freshly-queued write and publishes its initial
@@ -238,6 +273,7 @@ func writeSSE(w http.ResponseWriter, r *http.Request, logger *slog.Logger, fd *f
 	ch := fd.subscribe()
 	defer fd.unsubscribe(ch)
 
+	writeFrame(w, frame{Kind: "connectivity", Connected: fd.connectedState()})
 	for _, fr := range snapshot() {
 		writeFrame(w, fr)
 	}

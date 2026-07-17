@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/asolgan/lattice/internal/edge/agent"
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/store"
@@ -82,6 +84,12 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	}
 
 	fd := newFeed()
+	// Connectivity handlers key the offline banner on this connection's own
+	// host↔NATS state (design §4.4), not the browser↔host SSE transport —
+	// nats.go calls these on every disconnect/reconnect cycle regardless of
+	// how many times the underlying TCP connection actually flaps.
+	conn.NATS().SetDisconnectErrHandler(func(_ *nats.Conn, _ error) { fd.setConnected(false) })
+	conn.NATS().SetReconnectHandler(func(_ *nats.Conn) { fd.setConnected(true) })
 	overlayStore := overlay.New(st)
 	mgr, err := edgesync.New(conn, st, edgesync.Config{
 		IdentityID: identityID,
