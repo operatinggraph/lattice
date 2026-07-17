@@ -121,6 +121,19 @@ After W2, `internal/edge`'s semantics packages hold no host-coupled concrete typ
 
 **W3 prerequisite (named, not optional):** extract the DTOs these three packages expose to the Edge into leaf packages (std-lib only), leaving the server machinery behind — then the engine drops to ~0.9 MB gz, the FORK-W tripwire measures the artifact rather than the debt, and the js gate can be upgraded from "compiles" to "cannot reach nats.go", which is the assertion that actually confines the browser build to the Gateway door.
 
+**W3 increment 1 — the DTO extraction — SHIPPED (2026-07-17).** Four wire-leaf packages now hold the DTOs the engine needs, with the server machinery left behind: `internal/processor/opwire` (the operation envelope + reply + `ParseEnvelope`), `internal/refractor/control/controlwire` (the control request/response + subject), `internal/refractor/health/healthwire` (the health `Entry` a control response embeds — the transitive blocker), `internal/vault/vaultwire` (the vault wire types + `OpenWithSessionKey`). Each parent re-exports its leaf as **type aliases**, so no platform call site changed — the W2 `internal/substrate/keys` precedent. Client and server share one definition rather than re-declaring (the §8.1 RR-4 drift hazard).
+
+Measured (`GOOS=js` probe importing the six engine packages, gzip -9):
+
+| wasm probe | raw | gz |
+|---|---|---|
+| full engine, before (W2) | 8.32 MB | 2.28 MB |
+| **full engine, after** | **4.65 MB** | **1.32 MB** |
+
+**The engine reaches zero `github.com/nats-io/*` packages under `GOOS=js`** — not one, which is the claim the js gate now asserts (`go list -deps`, upgraded from "compiles"; verified to fail on a package that genuinely links NATS, so it is not vacuous). Every existing suite is untouched-green (the no-behavior-change proof), and the moved structs' JSON tags were diffed as an exact multiset against their originals — the wire format is provably unchanged.
+
+**Correction to this section's own estimate:** the predicted ~0.9 MB gz was optimistic — it was the W2 `store`+`overlay`+`transport` figure (0.87 MB) assuming `sync`/`agent`/`vault` add nothing. They add ~0.45 MB gz of real semantics (intent queue, reconcile, envelope construction, AEAD). **1.32 MB gz is the honest engine floor**, and it is now artifact rather than debt. Against the ~2.6 MB FORK-W tripwire that leaves ~1.28 MB of headroom for `syscall/js` + the IndexedDB store + the JS shell — the tripwire now measures what W3 actually adds, which was the point.
+
 ### 3.3 Fire W3 — the browser host (wasm engine + JS shell)
 
 **The split (FORK-W A′):**

@@ -87,7 +87,27 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
   ✅ ratified). It is **not** gated on a Gateway WS bridge — no such component exists or is planned.
   WebSocket is a native NATS listener (a `websocket {}` block, shipped by fire W1 below); the only
   genuinely undesigned piece is the **push-waker** (background wake when the tab is dead), deferred to
-  Facet Stage 3. Remaining: W2 (engine seams), W3 (the wasm host + JS shell), W4 (Facet browser-native).
+  Facet Stage 3. Remaining: W3 (the wasm host + JS shell), W4 (Facet browser-native).
+
+**The browser-build boundary.** The engine's semantics packages compile under `GOOS=js GOARCH=wasm` and
+reach **no NATS client** — CI asserts both (a build check, and a `go list -deps` assertion over the same
+package set). That confinement is what keeps the browser node honest: its only sanctioned write door is
+the Gateway (Fetch) and its only read door is the JS shell's WebSocket, so a linked NATS client would be
+both dead weight in the artifact and a trusted transport waiting to be wired around the boundary. Two
+mechanisms hold it:
+
+- **Build tags** keep the trusted, pre-Gateway paths off the browser entirely: `internal/edge/transport/
+  natstransport` (the substrate `DeltaSource`/`ControlClient` adapters) and `agent/submit_nats.go` (the
+  `NATSSubmitter`) are `!js`.
+- **Wire-leaf packages** keep NATS from arriving by accident. The DTOs the engine needs used to sit beside
+  server machinery — an `OperationEnvelope` lived in `internal/processor`, a `ControlRequest` in
+  `internal/refractor/control` — so referencing a struct linked a NATS client. Each now has a leaf package
+  holding the wire format and nothing else: `internal/processor/opwire`, `internal/refractor/control/
+  controlwire`, `internal/refractor/health/healthwire`, `internal/vault/vaultwire`, and
+  `internal/substrate/keys`. The parent packages re-export them as **type aliases**, so platform call sites
+  read as processor/control/vault vocabulary and nothing changed shape; the Edge imports the leaves. Client
+  and server share one definition rather than each declaring their own — a re-declared struct is exactly the
+  drift hazard the round-trip test (edge design §8.1 RR-4) exists to catch.
 
 ### Transports
 
