@@ -258,6 +258,20 @@ A fidelity audit against this design (Andrew-prompted) found §7.1's increments 
 
 ### 7.3 Showcase dataset (Andrew-directed, 2026-07-16) — a curated demo world, not on-the-fly seeding
 
+**✅ SHIPPED (`2696321`, 2026-07-16).** service-domain's family enum widened to
+`{backgroundCheck, payment, laundry, fitness}` + a `RetireServiceTemplate` admin op;
+`scripts/seed-showcase.go` (`make seed-showcase`) is the idempotent loader — fixed
+NanoID handles, a building-anchored short-circuit so a rerun recovers instead of
+re-minting. Live-verified: from-scratch load, idempotent rerun (zero ops on the
+second run), and both live mislabeled `backgroundCheck`-as-"Maple Laundry" templates
+confirmed tombstoned. One deviation from the plan below, decided during the build:
+ops submit directly over NATS as the bootstrap admin actor (mirroring
+`seed-edge-demo.go`'s own precedent), not through the Gateway — a dev/ops loader,
+not a consumer-actor flow, so the Gateway's external-actor door doesn't apply. Tasks
+(named below) were NOT seeded — the two-persona differentiation Inc 2's green bar
+needs is already carried by differing service/instance state; a task seed is a
+clean follow-up, not a blocker.
+
 Andrew caught the graph lying: `seed-edge-demo` brands **`service.backgroundCheck.template`** vertices as "Maple Laundry" via `.presentation` (its own header documents the workaround — service-domain's `SERVICE_FAMILIES` enum is closed to `{backgroundCheck, payment}`, so the seed reused a permitted family). For a discovery showcase this is disqualifying: P7 makes the envelope class the machine truth, and it is *semantically live* — lease-signing's renewals lens matches `service.backgroundCheck.instance`, so a completed "laundry order" reads as a valid background check. The package is not buggy; the seed improvised around a deliberate constraint instead of extending it.
 
 **The fix (one verticals-lane item, feeds Inc 2):**
