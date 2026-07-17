@@ -57,7 +57,7 @@ jobs:
         # this check still earns its place by covering the packages that job
         # does not run, so an import that cannot build for a browser — bbolt
         # above all — can never re-enter the engine unnoticed.
-        run: GOOS=js GOARCH=wasm go build ./internal/edge/...
+        run: GOOS=js GOARCH=wasm go build ./internal/edge/... ./cmd/edge-wasm/...
 
       - name: Assert the browser Edge engine cannot reach a NATS client
         # The browser node's only sanctioned write door is the Gateway (Fetch)
@@ -72,7 +72,7 @@ jobs:
         # vaultwire / substrate keys), so reaching a NATS client now takes a
         # deliberate import rather than a struct reference.
         run: |
-          deps=$(GOOS=js GOARCH=wasm go list -deps ./internal/edge/...)
+          deps=$(GOOS=js GOARCH=wasm go list -deps ./internal/edge/... ./cmd/edge-wasm/...)
           if echo "$deps" | grep -q '^github.com/nats-io/'; then
             echo "::error::the js/wasm Edge engine reaches a NATS client:"
             echo "$deps" | grep '^github.com/nats-io/'
@@ -322,6 +322,7 @@ jobs:
         run: >-
           go test -count=1 -p 4 -timeout 10m
           ./cmd/bootstrap/... ./cmd/bridge/... ./cmd/chronicler/... ./cmd/edge/...
+          ./cmd/edge-wasm/...
           ./cmd/facet/... ./cmd/gateway/... ./cmd/lattice-pkg/... ./cmd/loftspace-app/...
           ./cmd/loom/... ./cmd/loupe/... ./cmd/object-store-manager/...
           ./cmd/processor/... ./cmd/refractor/... ./cmd/weaver/...
@@ -404,6 +405,7 @@ jobs:
             ./packages/privacy-operator-grant/... ./packages/service-domain/... \
             ./packages/wellness-domain/... \
             ./cmd/bootstrap/... ./cmd/bridge/... ./cmd/chronicler/... ./cmd/edge/... \
+            ./cmd/edge-wasm/... \
             ./cmd/facet/... ./cmd/gateway/... ./cmd/lattice-pkg/... ./cmd/loftspace-app/... \
             ./cmd/loom/... ./cmd/loupe/... ./cmd/object-store-manager/... \
             ./cmd/processor/... ./cmd/refractor/... ./cmd/weaver/... \

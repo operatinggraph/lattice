@@ -1316,11 +1316,16 @@ test-lease-convergence:
 test-object-gc:
 	go test -tags objectgc ./internal/objectgc/... -run TestObjectGC -v -p 1 -count=1 -timeout 3m
 
-## test-edge-idb-conformance — the browser Edge store's conformance gate
-## (edge-browser-node-design.md §3.3). Runs the SAME internal/edge/store
-## conformance suite the bbolt store passes, compiled to js/wasm and executed
-## against a real IndexedDB in a real headless Chrome — the check that the
-## browser port preserved the Store semantics rather than merely compiling.
+## test-edge-idb-conformance — the browser Edge node's in-Chrome gate
+## (edge-browser-node-design.md §3.3). Runs, compiled to js/wasm and executed
+## against a real IndexedDB in a real headless Chrome:
+##   - internal/edge/store — the SAME conformance suite the bbolt store passes,
+##     so the IndexedDB port preserved the Store semantics, not merely compiled;
+##   - internal/edge/browser — the wasm host driven over its exported JS API
+##     against that same real IndexedDB: a pushed delta lands under
+##     last-writer-wins, a snapshot reads it back through the overlay, an
+##     enqueue produces a durable intent. This is the only place the browser
+##     host's syscall/js wiring runs at all.
 ##
 ## Self-contained: no Docker, no NATS, no shared stack. It does need a Chrome
 ## (or Chromium) on PATH, which every dev box and the CI runner image already
@@ -1330,9 +1335,26 @@ WASM_BROWSER_TEST_VERSION ?= v0.11.0
 test-edge-idb-conformance:
 	@echo "==> Installing wasmbrowsertest $(WASM_BROWSER_TEST_VERSION)..."
 	go install github.com/agnivade/wasmbrowsertest@$(WASM_BROWSER_TEST_VERSION)
-	@echo "==> Running the Edge IndexedDB store conformance suite in headless Chrome..."
+	@echo "==> Running the Edge store + browser-host suites in headless Chrome..."
 	PATH="$$PATH:$$(go env GOPATH)/bin" GOOS=js GOARCH=wasm \
-		go test -exec wasmbrowsertest ./internal/edge/store/... -count=1 -timeout 3m
+		go test -exec wasmbrowsertest ./internal/edge/store/... ./internal/edge/browser/... -count=1 -timeout 3m
+
+## build-edge-wasm — the browser Edge node's wasm artifact
+## (edge-browser-node-design.md §3.3). Compiles cmd/edge-wasm (the same
+## semantics engine cmd/facet embeds natively) to js/wasm and copies the
+## matching wasm_exec.js from the toolchain beside it — the two must ship as a
+## pair (wasm_exec.js is version-locked to the compiler that built the module).
+## The artifact lands under bin/edge-wasm/ (gitignored); the PWA embeds it at
+## W4. Emitting it also lets the size floor be measured (echoed gzipped, the
+## FORK-W tripwire's unit).
+.PHONY: build-edge-wasm
+build-edge-wasm:
+	@echo "==> Building the Edge browser wasm artifact..."
+	mkdir -p bin/edge-wasm
+	GOOS=js GOARCH=wasm go build -o bin/edge-wasm/edge.wasm ./cmd/edge-wasm
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" bin/edge-wasm/wasm_exec.js
+	@gz=$$(gzip -9 -c bin/edge-wasm/edge.wasm | wc -c); \
+	echo "==> edge.wasm: $$(wc -c < bin/edge-wasm/edge.wasm) bytes ($$((gz / 1024)) KB gzipped, gzip -9) — FORK-W floor ~1.32 MB gz, tripwire ~2.6 MB"
 
 ## test-crypto-shred — Vault crypto-shredding Fire 4a end-to-end gate.
 ## Self-contained: embedded NATS, installs rbac → privacy-base → identity →

@@ -171,12 +171,34 @@ the multi-tab host of §3.3), and the conformance factory deletes the database b
 **Correction to this fire's own scope:** inc 2 was filed as "the browser host" — store **+**
 `make build-edge-wasm` **+** the JS shell. It shipped the **store half only**, deliberately: the wasm
 artifact has nothing to emit until the **host entry point** the JS shell brings exists, so a
-`build-edge-wasm` target landed now would build a `main` that exports nothing. **Inc 3 = the wasm host
-entry + the JS shell** (vendored `nats.js`, leader election, token-refresh reconnect, `InactiveThreshold`)
-**+ `make build-edge-wasm` + the consumer-create wire-form parity test + the nats.js `vendors.md` row.**
-The FORK-W size tripwire is unmoved and still un-tripped: the engine floor stands at **1.32 MB gz** against
-~2.6 MB, and `syscall/js` + this store are inside the ~1.28 MB of headroom inc 1 measured — the shell is
-what spends the rest.
+`build-edge-wasm` target landed now would build a `main` that exports nothing. **Inc 3 splits at the wasm↔JS boundary:**
+
+- **Inc 3a — SHIPPED (2026-07-17): the wasm host entry + `make build-edge-wasm` + the in-Chrome host test.**
+  `internal/edge/browser` (js-tagged) wires the same semantics packages `cmd/facet` embeds (store, overlay,
+  sync, agent) onto the IndexedDB store and a JS transport shell, exposing them to the page as
+  `globalThis.latticeEdge` (the frame kinds are `cmd/facet`'s SSE kinds verbatim, so W4's renderer swap is a
+  transport change, not a rewrite). `cmd/edge-wasm` is the artifact `main`; `make build-edge-wasm` emits it +
+  the version-matched `wasm_exec.js`. The host is driven over its exported JS API against a real IndexedDB in
+  headless Chrome (`test-edge-idb-conformance` now runs `internal/edge/browser` beside the store suite). The
+  js CI gate's build + `go list -deps` nats-free assertion now covers `cmd/edge-wasm` too.
+
+- **Inc 3b — the JS shell** (vendored `nats.js`, leader election, token-refresh reconnect, `InactiveThreshold`)
+  **+ the consumer-create wire-form parity test + the nats.js `vendors.md` row** — the transport half the
+  `jsTransport` seam calls out to (`startConsumer`/`stopConsumer`/`firstSequence`/`request`, plus pushing
+  deltas in via `deliver`).
+
+**The size tripwire, measured honestly (inc 3a).** The 1.32 MB-gz "engine floor" was measured by a
+**blank-import probe** (`_ "internal/edge/…"`), which the linker's dead-code elimination strips down to the
+imported *packages*, not the *reachable* call graph. A real `main` that actually calls the write path retains
+`net/http` **and** `crypto/tls` — and the wasm artifact came out at **3.0 MB gz, past the ~2.6 MB tripwire**.
+The excess is **not** dead weight and FORK-W B would not remove it (B changes the read transport, not the
+write door): `net/http` is reachable in the js engine graph *only* through `agent.GatewaySubmitter`, and in a
+browser it is a wasm reimplementation of `fetch` — which the page has natively, TLS and all. So inc 3a gives
+the browser host a **`syscall/js` fetch submitter** (`submit_fetch.go`, the same POST `/v1/operations` wire
+contract + `ErrCredentialRejected` taxonomy, over `fetch`); the Go host keeps `agent.GatewaySubmitter`. That
+drops `net/http`/`crypto/tls` from the live graph and the artifact to **1.71 MB gz (gzip -9)** — under the
+tripwire, ~0.9 MB of headroom over the 1.32 MB floor for `syscall/js` + the store, with the shell being
+JS-side (it does not grow the wasm). The tripwire stands un-tripped, now on a real-link measurement.
 
 **The split (FORK-W A′):**
 
@@ -252,7 +274,7 @@ The PWA drops the Go host: renderer binds to the engine's JS API, `cmd/facet` sh
 
 1. **W1 `[lattice]` — WS listener + transport-parity vectors.** `RenderConf` websocket block (explicit port, dev `no_tls`, non-empty `allowed_origins`) + regenerated conf + compose port + the seven WS auth-callout vectors + the config-shape pin. *Green:* vectors pass over `ws://`; `TestConfMatchesMatrix` green. *Depends on: nothing.*
 2. **W2 `[lattice]` — engine seams.** `store.Store` interface + `DeltaSource`/`ControlClient` seams; substrate/bbolt adapters; conformance harness extracted; CI `GOOS=js` compile check. *Green:* existing suites untouched-green. *Depends on: nothing (parallel with W1).*
-3. **W3 `[lattice]` — the browser host.** **First: the DTO extraction named in §3.2** — without it the engine carries ~1.4 MB gz of unreachable NATS client and the size tripwire measures the debt, not the artifact. Then: IndexedDB store (syscall/js) + wasm build target + the JS shell (vendored nats.js, leader election, token-refresh reconnect, `InactiveThreshold`) + the wire-form parity test + vendors.md row. *Green:* conformance harness on IndexedDB; parity test; size budget; the js CI gate upgraded from "compiles" to "`go list -deps` cannot reach nats.go". *Depends on: W1 + W2.*
+3. **W3 `[lattice]` — the browser host.** Shipped across three increments: **inc 1** the DTO extraction (§3.2 — without it the engine carried ~1.4 MB gz of unreachable NATS client); **inc 2** the IndexedDB store (syscall/js, conformance-passing in headless Chrome); **inc 3a** the wasm host entry (`internal/edge/browser` + `cmd/edge-wasm`) + `make build-edge-wasm` + the in-Chrome host test + the js CI gate extended to `cmd/edge-wasm`, with the size tripwire honestly re-measured and held under budget by the fetch submitter (§3.3). **Remaining: inc 3b** — the JS shell (vendored nats.js, leader election, token-refresh reconnect, `InactiveThreshold`) + the consumer-create wire-form parity test + the nats.js vendors.md row. *Green:* conformance harness on IndexedDB ✅; host test ✅; size budget ✅; js gate upgraded from "compiles" to "`go list -deps` cannot reach nats.go" ✅ (inc 1); parity test + shell (3b). *Depends on: W1 + W2.*
 4. **W4 `[lattice]` — Facet browser-native (= Facet Fire 4).** Renderer binds the engine JS API; Go host dropped. *Green:* the ratified Fire-4 acceptance (cross-machine, confined, no binary). *Depends on: W3 + Facet Fire 3 (auth turn-on, 🏗️ building — Inc 1 shipped).* Single-lane: built here, not handed to the verticals steward.
 
 **Deferred, named (unchanged dispositions):** the **push-waker** (Facet G13 — file as its own lattice design when Stage 2 lands = when W4 ships); **PL.6 multicast dedup** (bandwidth trigger); **EDGE.6** local authority (Andrew-gated); native iOS host (re-opens the 2.5.2 store-policy item; the PWA route ships first per Facet FORK-4).
