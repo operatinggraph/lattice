@@ -72,7 +72,7 @@ type Config struct {
 // Agent is the Edge node's intent uploader + reconciler.
 type Agent struct {
 	submitter Submitter
-	store     *store.Store
+	store     store.Store
 	overlay   *overlay.Overlay
 	rehydrate Rehydrator
 	cfg       Config
@@ -84,7 +84,7 @@ type Agent struct {
 // harness) — a nil Rehydrator on an actual conflict is a logged no-op, not
 // a panic. submitter may be nil only if the caller never calls Drain (e.g.
 // GC-only tests).
-func New(submitter Submitter, st *store.Store, ov *overlay.Overlay, rehydrate Rehydrator, cfg Config) *Agent {
+func New(submitter Submitter, st store.Store, ov *overlay.Overlay, rehydrate Rehydrator, cfg Config) *Agent {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()

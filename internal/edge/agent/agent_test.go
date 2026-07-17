@@ -31,7 +31,7 @@ func (f *fakeSubmitter) Submit(_ context.Context, env *processor.OperationEnvelo
 	return f.decide(env)
 }
 
-func openTestStack(t *testing.T) (*store.Store, *overlay.Overlay) {
+func openTestStack(t *testing.T) (store.Store, *overlay.Overlay) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "edge.db"))
 	require.NoError(t, err)

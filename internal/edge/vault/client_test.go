@@ -13,6 +13,7 @@ import (
 
 	edgeoverlay "github.com/asolgan/lattice/internal/edge/overlay"
 	edgestore "github.com/asolgan/lattice/internal/edge/store"
+	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
 	edgevault "github.com/asolgan/lattice/internal/edge/vault"
 	"github.com/asolgan/lattice/internal/refractor/control"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -49,7 +50,7 @@ func piiKeyEntry(t *testing.T, envelope corevault.Envelope) *substrate.KVEntry {
 	return &substrate.KVEntry{Value: value}
 }
 
-func openTestStore(t *testing.T) *edgestore.Store {
+func openTestStore(t *testing.T) edgestore.Store {
 	t.Helper()
 	st, err := edgestore.Open(filepath.Join(t.TempDir(), "edge.db"))
 	require.NoError(t, err)
@@ -85,7 +86,7 @@ func TestClient_Decrypt_RoundTrip(t *testing.T) {
 	ct, err := backend.Encrypt(ctx, identityKey, envelope, plaintext)
 	require.NoError(t, err)
 
-	client, err := edgevault.New(conn, edgevault.Config{IdentityID: testIdentityID, TTL: time.Minute})
+	client, err := edgevault.New(natstransport.New(conn), edgevault.Config{IdentityID: testIdentityID, TTL: time.Minute})
 	require.NoError(t, err)
 
 	got, err := client.Decrypt(ctx, ct)
@@ -138,7 +139,7 @@ func TestClient_Decrypt_CachesSessionKeyAcrossCalls(t *testing.T) {
 	ct2, err := backend.Encrypt(ctx, identityKey, envelope, []byte("second"))
 	require.NoError(t, err)
 
-	client, err := edgevault.New(conn, edgevault.Config{IdentityID: testIdentityID, TTL: time.Hour})
+	client, err := edgevault.New(natstransport.New(conn), edgevault.Config{IdentityID: testIdentityID, TTL: time.Hour})
 	require.NoError(t, err)
 
 	got1, err := client.Decrypt(ctx, ct1)
@@ -173,7 +174,7 @@ func TestClient_Decrypt_ShreddedIdentity_Denied(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, backend.ShredKey(ctx, identityKey))
 
-	client, err := edgevault.New(conn, edgevault.Config{IdentityID: testIdentityID})
+	client, err := edgevault.New(natstransport.New(conn), edgevault.Config{IdentityID: testIdentityID})
 	require.NoError(t, err)
 
 	_, err = client.Decrypt(ctx, ct)
@@ -187,7 +188,7 @@ func TestReader_Read_PassesThroughPlaintext(t *testing.T) {
 
 	envelope := corevault.Envelope{} // unused: this test never decrypts.
 	conn, _ := startTestControlServiceWithKEK(t, ctx, envelope, mustRandKEK(t))
-	client, err := edgevault.New(conn, edgevault.Config{IdentityID: testIdentityID})
+	client, err := edgevault.New(natstransport.New(conn), edgevault.Config{IdentityID: testIdentityID})
 	require.NoError(t, err)
 
 	st := openTestStore(t)
@@ -220,7 +221,7 @@ func TestReader_Read_DecryptsSensitiveAspect(t *testing.T) {
 	ctJSON, err := json.Marshal(ct)
 	require.NoError(t, err)
 
-	client, err := edgevault.New(conn, edgevault.Config{IdentityID: testIdentityID})
+	client, err := edgevault.New(natstransport.New(conn), edgevault.Config{IdentityID: testIdentityID})
 	require.NoError(t, err)
 
 	st := openTestStore(t)

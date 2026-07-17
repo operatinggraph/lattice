@@ -50,6 +50,22 @@ jobs:
       - name: Build
         run: make build
 
+      - name: Build Edge engine for the browser target
+        # The Edge engine's semantics are single-sourced in Go and compiled to
+        # wasm for the browser node (edge-browser-node-design.md §3.2). Nothing
+        # runs this target yet; the check exists so an import that cannot build
+        # for a browser — bbolt above all — can never re-enter the engine
+        # unnoticed between here and the browser host landing.
+        #
+        # Scope, precisely: this catches imports that FAIL to compile under
+        # js/wasm. It does NOT prove the engine is free of NATS — nats.go
+        # builds for js/wasm quite happily, so a trusted transport could
+        # re-enter and this step would stay green. Keeping NATS out of the
+        # browser build is enforced by build tags today, not by this gate; the
+        # dependency-level assertion needs the wire-type packages untangled
+        # first (see edge-browser-node-design.md §3.3, W3 prerequisite).
+        run: GOOS=js GOARCH=wasm go build ./internal/edge/...
+
       - name: Vet
         run: make vet
 

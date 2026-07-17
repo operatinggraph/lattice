@@ -22,7 +22,7 @@ import (
 	"fmt"
 
 	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/substrate/keys"
 )
 
 // Value is what the UI should show for a key: the confirmed mirror entry,
@@ -38,11 +38,11 @@ type Value struct {
 
 // Overlay composes optimistic local-apply over a Local VAL Store.
 type Overlay struct {
-	store *store.Store
+	store store.Store
 }
 
 // New builds an Overlay over st.
-func New(st *store.Store) *Overlay {
+func New(st store.Store) *Overlay {
 	return &Overlay{store: st}
 }
 
@@ -125,7 +125,7 @@ func (o *Overlay) PendingKeys() ([]string, error) {
 // Discovery"): reflects the local slice as currently mirrored/queued, never
 // proves cloud state, and is not an authorization decision.
 func (o *Overlay) Links(hub, relation, direction string) ([]string, error) {
-	hubType, hubID, ok := substrate.ParseVertexKey(hub)
+	hubType, hubID, ok := keys.ParseVertexKey(hub)
 	if !ok {
 		return nil, fmt.Errorf("edge/overlay: Links: %q is not a Contract #1 vertex key", hub)
 	}
@@ -136,7 +136,7 @@ func (o *Overlay) Links(hub, relation, direction string) ([]string, error) {
 	candidates := make(map[string]struct{})
 
 	if direction == "out" {
-		prefix := substrate.LinkPrefix + "." + hubType + "." + hubID + "." + relation + "."
+		prefix := keys.LinkPrefix + "." + hubType + "." + hubID + "." + relation + "."
 		entries, err := o.store.ScanPrefix(prefix)
 		if err != nil {
 			return nil, fmt.Errorf("edge/overlay: scan confirmed links: %w", err)
@@ -148,12 +148,12 @@ func (o *Overlay) Links(hub, relation, direction string) ([]string, error) {
 		// "in": hub is the target side (type2/id2), which isn't a scan
 		// prefix — filter the mirror's full link set, bounded by the local
 		// slice's size (the user's own activity, never the whole graph).
-		entries, err := o.store.ScanPrefix(substrate.LinkPrefix + ".")
+		entries, err := o.store.ScanPrefix(keys.LinkPrefix + ".")
 		if err != nil {
 			return nil, fmt.Errorf("edge/overlay: scan confirmed links: %w", err)
 		}
 		for _, e := range entries {
-			_, _, rel, t2, id2, ok := substrate.ParseLinkKey(e.Key)
+			_, _, rel, t2, id2, ok := keys.ParseLinkKey(e.Key)
 			if ok && rel == relation && t2 == hubType && id2 == hubID {
 				candidates[e.Key] = struct{}{}
 			}
@@ -165,7 +165,7 @@ func (o *Overlay) Links(hub, relation, direction string) ([]string, error) {
 		return nil, err
 	}
 	for _, k := range pendingKeys {
-		t1, id1, rel, t2, id2, ok := substrate.ParseLinkKey(k)
+		t1, id1, rel, t2, id2, ok := keys.ParseLinkKey(k)
 		if !ok || rel != relation {
 			continue
 		}

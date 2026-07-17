@@ -41,7 +41,7 @@ func newEdgeGate3Server(t *testing.T, authn *auth.Authenticator, submit submitFu
 	return srv
 }
 
-func newEdgeAgentStack(t *testing.T, gatewayURL, token string) (*agent.Agent, *overlay.Overlay, *store.Store) {
+func newEdgeAgentStack(t *testing.T, gatewayURL, token string) (*agent.Agent, *overlay.Overlay, store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "edge.db"))
 	require.NoError(t, err)

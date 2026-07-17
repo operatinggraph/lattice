@@ -20,12 +20,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
-	"github.com/asolgan/lattice/internal/controlauth"
 	"github.com/asolgan/lattice/internal/edge/overlay"
+	"github.com/asolgan/lattice/internal/edge/transport"
 	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/asolgan/lattice/internal/substrate/keys"
 	corevault "github.com/asolgan/lattice/internal/vault"
 )
 
@@ -57,7 +55,7 @@ type Config struct {
 // Client requests and TTL-caches a transient Vault session key for one
 // identity, and decrypts ciphertext-shaped aspect data with it.
 type Client struct {
-	conn        *substrate.Conn
+	ctrl        transport.ControlClient
 	cfg         Config
 	identityKey string
 	logger      *slog.Logger
@@ -68,8 +66,8 @@ type Client struct {
 
 // New creates a Client. Returns an error if cfg.IdentityID is empty or not a
 // valid Contract #1 NanoID.
-func New(conn *substrate.Conn, cfg Config) (*Client, error) {
-	if !substrate.IsValidNanoID(cfg.IdentityID) {
+func New(ctrl transport.ControlClient, cfg Config) (*Client, error) {
+	if !keys.IsValidNanoID(cfg.IdentityID) {
 		return nil, fmt.Errorf("edge/vault: IdentityID %q is not a valid NanoID", cfg.IdentityID)
 	}
 	logger := cfg.Logger
@@ -77,9 +75,9 @@ func New(conn *substrate.Conn, cfg Config) (*Client, error) {
 		logger = slog.Default()
 	}
 	return &Client{
-		conn:        conn,
+		ctrl:        ctrl,
 		cfg:         cfg,
-		identityKey: substrate.VertexKey("identity", cfg.IdentityID),
+		identityKey: keys.VertexKey("identity", cfg.IdentityID),
 		logger:      logger,
 	}, nil
 }
@@ -117,8 +115,7 @@ func (c *Client) sessionKey(ctx context.Context) ([]byte, error) {
 }
 
 // requestSessionKey issues one "sessionkey" control-plane request, mirroring
-// internal/edge/sync.Manager.controlRequest's subject-building + actor-
-// header pattern.
+// internal/edge/sync.Manager.controlRequest's subject-building + actor pattern.
 func (c *Client) requestSessionKey(ctx context.Context) (corevault.SessionKey, error) {
 	body := control.ControlRequest{
 		IdentityID: c.cfg.IdentityID,
@@ -128,17 +125,12 @@ func (c *Client) requestSessionKey(ctx context.Context) (corevault.SessionKey, e
 	if err != nil {
 		return corevault.SessionKey{}, fmt.Errorf("edge/vault: marshal sessionkey request: %w", err)
 	}
-	msg := &nats.Msg{Subject: control.ControlSubject("personal", "sessionkey"), Data: data}
-	if c.cfg.ActorHeader != "" {
-		msg.Header = nats.Header{}
-		msg.Header.Set(controlauth.HeaderActor, c.cfg.ActorHeader)
-	}
-	reply, err := c.conn.NATS().RequestMsgWithContext(ctx, msg)
+	reply, err := c.ctrl.Request(ctx, control.ControlSubject("personal", "sessionkey"), data, c.cfg.ActorHeader)
 	if err != nil {
 		return corevault.SessionKey{}, fmt.Errorf("edge/vault: sessionkey request: %w", err)
 	}
 	var resp control.ControlResponse
-	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+	if err := json.Unmarshal(reply, &resp); err != nil {
 		return corevault.SessionKey{}, fmt.Errorf("edge/vault: decode sessionkey response: %w", err)
 	}
 	if resp.Error != "" {

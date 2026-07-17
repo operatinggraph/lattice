@@ -1,4 +1,4 @@
-package substrate
+package keys
 
 import (
 	"strings"

@@ -1,3 +1,11 @@
+//go:build !js
+
+// NATSSubmitter is excluded from the js/wasm build: it is the trusted,
+// pre-Gateway submit path, and a browser host is untrusted by construction, so
+// the browser build must not be able to reach it even by mistake. Browser
+// hosts submit through GatewaySubmitter, which carries a bearer credential the
+// Gateway verifies.
+
 package agent
 
 import (

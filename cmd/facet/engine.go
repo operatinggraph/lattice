@@ -13,6 +13,7 @@ import (
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/store"
 	edgesync "github.com/asolgan/lattice/internal/edge/sync"
+	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -37,7 +38,7 @@ type engine struct {
 	identityID string
 	deviceID   string
 	conn       *substrate.Conn
-	store      *store.Store
+	store      store.Store
 	overlay    *overlay.Overlay
 	agent      *agent.Agent
 	feed       *feed
@@ -91,7 +92,7 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	conn.NATS().SetDisconnectErrHandler(func(_ *nats.Conn, _ error) { fd.setConnected(false) })
 	conn.NATS().SetReconnectHandler(func(_ *nats.Conn) { fd.setConnected(true) })
 	overlayStore := overlay.New(st)
-	mgr, err := edgesync.New(conn, st, edgesync.Config{
+	mgr, err := edgesync.New(natstransport.New(conn), st, edgesync.Config{
 		IdentityID: identityID,
 		DeviceID:   deviceID,
 		// See main.go's identical comment: the control plane's

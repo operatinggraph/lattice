@@ -1,10 +1,15 @@
 // Package sync is the Edge node's Sync Manager (edge-lattice-full-design.md
-// §3.2): a durable JetStream consumer on the Personal-Lens SYNC stream that
+// §3.2): it consumes a durable delta feed of the Personal-Lens SYNC stream,
 // applies inbound delta envelopes to the Local VAL Store (internal/edge/store)
 // under last-writer-wins-by-revision, persists the cursor, and — on cold
 // start or a detected retention gap — calls the Personal-Lens
 // "personal.register"/"personal.hydrate" control RPCs (internal/refractor/
 // control) before resuming incremental delivery.
+//
+// The feed and the control RPCs arrive through the host-supplied Transport
+// seam (internal/edge/transport), not a concrete connection: these semantics
+// are identical whether the deltas come over TCP from a trusted Go host or
+// over WebSocket from a browser host.
 package sync
 
 import (
@@ -13,13 +18,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/nats-io/nats.go"
-
-	"github.com/asolgan/lattice/internal/controlauth"
 	"github.com/asolgan/lattice/internal/edge/store"
+	"github.com/asolgan/lattice/internal/edge/transport"
 	"github.com/asolgan/lattice/internal/refractor/control"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
 )
 
 const (
@@ -77,10 +79,19 @@ type Config struct {
 	OnHydrationComplete func(revision uint64)
 }
 
+// Transport is the host-supplied seam a Manager drives: the durable delta
+// feed it applies, and the control request-reply it registers/hydrates over.
+// A trusted Go host satisfies it with transport.NewSubstrate; a browser host
+// satisfies it over a JS NATS client on WebSocket.
+type Transport interface {
+	transport.DeltaSource
+	transport.ControlClient
+}
+
 // Manager is the Edge node's Sync Manager.
 type Manager struct {
-	conn    *substrate.Conn
-	store   *store.Store
+	tr      Transport
+	store   store.Store
 	cfg     Config
 	stream  string
 	prefix  string
@@ -90,7 +101,7 @@ type Manager struct {
 
 // New creates a Manager. Returns an error if cfg.IdentityID or cfg.DeviceID
 // is empty.
-func New(conn *substrate.Conn, st *store.Store, cfg Config) (*Manager, error) {
+func New(tr Transport, st store.Store, cfg Config) (*Manager, error) {
 	if cfg.IdentityID == "" || cfg.DeviceID == "" {
 		return nil, fmt.Errorf("edge/sync: IdentityID and DeviceID are both required")
 	}
@@ -107,7 +118,7 @@ func New(conn *substrate.Conn, st *store.Store, cfg Config) (*Manager, error) {
 		prefix = defaultSubjectPrefix
 	}
 	return &Manager{
-		conn:   conn,
+		tr:     tr,
 		store:  st,
 		cfg:    cfg,
 		stream: stream,
@@ -131,7 +142,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	if err := m.ensureFresh(ctx); err != nil {
 		return fmt.Errorf("edge/sync: ensure fresh: %w", err)
 	}
-	return m.conn.RunDurableConsumer(ctx, substrate.DurableConsumerConfig{
+	return m.tr.RunDurableConsumer(ctx, transport.ConsumerConfig{
 		Stream:        m.stream,
 		FilterSubject: subjects.PersonalSync(m.prefix, m.cfg.IdentityID),
 		Durable:       m.durable,
@@ -198,11 +209,11 @@ func (m *Manager) ensureFresh(ctx context.Context) error {
 // pruned messages between cursor and the earliest still-retained message, so
 // a plain durable resume would silently skip them.
 func (m *Manager) gapped(ctx context.Context, cursor uint64) (bool, error) {
-	s, err := m.conn.JetStream().Stream(ctx, m.stream)
+	first, err := m.tr.FirstSequence(ctx, m.stream)
 	if err != nil {
-		return false, fmt.Errorf("look up stream %q: %w", m.stream, err)
+		return false, err
 	}
-	return cursor < s.CachedInfo().State.FirstSeq, nil
+	return cursor < first, nil
 }
 
 // hydrate registers the device's Interest Set, then runs the cold bulk
@@ -257,51 +268,41 @@ func (m *Manager) callHydrate(ctx context.Context) (revision uint64, err error) 
 	return resp.PersonalHydrate.Revision, nil
 }
 
-// controlRequest issues a plain NATS request (Refractor control planes are
-// NATS-Services micro-services over core NATS, not JetStream) to the
-// "personal" pseudo-lens op, stamping cfg.ActorHeader as Lattice-Actor when
-// set (mirrors cmd/loupe's controlRequest / controlauth.NewActorRequestMsg,
-// extended to carry a JSON body — the register/hydrate ops need one).
+// controlRequest issues one request-reply against the "personal" pseudo-lens
+// op, carrying cfg.ActorHeader as the actor the control plane authorizes.
 func (m *Manager) controlRequest(ctx context.Context, op string, body control.ControlRequest) (control.ControlResponse, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return control.ControlResponse{}, fmt.Errorf("marshal %s request: %w", op, err)
 	}
-	msg := &nats.Msg{Subject: control.ControlSubject("personal", op), Data: data}
-	if m.cfg.ActorHeader != "" {
-		msg.Header = nats.Header{}
-		msg.Header.Set(controlauth.HeaderActor, m.cfg.ActorHeader)
-	}
-	reply, err := m.conn.NATS().RequestMsgWithContext(ctx, msg)
+	reply, err := m.tr.Request(ctx, control.ControlSubject("personal", op), data, m.cfg.ActorHeader)
 	if err != nil {
 		return control.ControlResponse{}, fmt.Errorf("%s request: %w", op, err)
 	}
 	var resp control.ControlResponse
-	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+	if err := json.Unmarshal(reply, &resp); err != nil {
 		return control.ControlResponse{}, fmt.Errorf("decode %s response: %w", op, err)
 	}
 	return resp, nil
 }
 
-// handle applies one delivered SYNC-stream message to the Local VAL Store
-// and advances the persisted cursor. Must be idempotent (substrate.HandlerFunc
-// contract): a redelivered message re-applies harmlessly under
-// last-writer-wins-by-revision.
-func (m *Manager) handle(_ context.Context, msg substrate.Message) substrate.Decision {
+// handle applies one delivered delta to the Local VAL Store and advances the
+// persisted cursor. Must be idempotent (transport.Handler contract): a
+// redelivered delta re-applies harmlessly under last-writer-wins-by-revision.
+func (m *Manager) handle(_ context.Context, d transport.Delta) transport.Decision {
 	var env deltaEnvelope
-	if err := json.Unmarshal(msg.Body, &env); err != nil {
+	if err := json.Unmarshal(d.Body, &env); err != nil {
 		// A malformed envelope will never parse differently on redelivery —
-		// terminate rather than hot-loop (mirrors substrate.Term's documented
-		// use for poison messages).
-		m.logger.Error("edge/sync: malformed delta envelope, dropping", "subject", msg.Subject, "err", err)
-		return substrate.Term
+		// terminate rather than hot-loop.
+		m.logger.Error("edge/sync: malformed delta envelope, dropping", "subject", d.Subject, "err", err)
+		return transport.Term
 	}
 	switch env.Op {
 	case "upsert":
 		applied, err := m.store.ApplyUpsert(env.Key, env.Revision, env.Data)
 		if err != nil {
 			m.logger.Error("edge/sync: apply upsert failed", "key", env.Key, "err", err)
-			return substrate.Nak
+			return transport.Nak
 		}
 		if applied && m.cfg.OnChange != nil {
 			m.cfg.OnChange(env.Key, false)
@@ -310,7 +311,7 @@ func (m *Manager) handle(_ context.Context, msg substrate.Message) substrate.Dec
 		applied, err := m.store.ApplyDelete(env.Key, env.Revision)
 		if err != nil {
 			m.logger.Error("edge/sync: apply delete failed", "key", env.Key, "err", err)
-			return substrate.Nak
+			return transport.Nak
 		}
 		if applied && m.cfg.OnChange != nil {
 			m.cfg.OnChange(env.Key, true)
@@ -323,9 +324,9 @@ func (m *Manager) handle(_ context.Context, msg substrate.Message) substrate.Dec
 	default:
 		m.logger.Warn("edge/sync: unknown delta op, cursor still advanced", "op", env.Op)
 	}
-	if err := m.store.SetCursor(msg.Sequence); err != nil {
+	if err := m.store.SetCursor(d.Sequence); err != nil {
 		m.logger.Error("edge/sync: persist cursor failed", "err", err)
-		return substrate.Nak
+		return transport.Nak
 	}
-	return substrate.Ack
+	return transport.Ack
 }

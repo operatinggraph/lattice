@@ -1,4 +1,4 @@
-package substrate
+package keys
 
 import (
 	"crypto/rand"
@@ -26,7 +26,7 @@ var alphabetIndex [256]byte
 
 func init() {
 	if len(Alphabet) != 58 {
-		panic(fmt.Sprintf("substrate: Alphabet must be 58 chars, got %d", len(Alphabet)))
+		panic(fmt.Sprintf("substrate/keys: Alphabet must be 58 chars, got %d", len(Alphabet)))
 	}
 	for i := range alphabetIndex {
 		alphabetIndex[i] = 0xFF
@@ -37,7 +37,7 @@ func init() {
 	// Sanity: forbidden characters must NOT be in the alphabet.
 	for _, c := range "IlO0" {
 		if alphabetIndex[byte(c)] != 0xFF {
-			panic(fmt.Sprintf("substrate: forbidden char %q present in Alphabet", c))
+			panic(fmt.Sprintf("substrate/keys: forbidden char %q present in Alphabet", c))
 		}
 	}
 }
@@ -68,7 +68,7 @@ func newNanoIDN(n int) (string, error) {
 	i := 0
 	for {
 		if _, err := rand.Read(buf); err != nil {
-			return "", fmt.Errorf("substrate: read entropy: %w", err)
+			return "", fmt.Errorf("substrate/keys: read entropy: %w", err)
 		}
 		for j := 0; j < step && i < n; j++ {
 			v := buf[j] & mask

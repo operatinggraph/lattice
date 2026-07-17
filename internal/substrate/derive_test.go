@@ -32,7 +32,7 @@ func deriveViaDocumentedSeedWiring(s string) string {
 // allFromAlphabet reports whether every byte of s is in the canonical alphabet.
 func allFromAlphabet(s string) bool {
 	for i := 0; i < len(s); i++ {
-		if alphabetIndex[s[i]] == 0xFF {
+		if strings.IndexByte(Alphabet, s[i]) < 0 {
 			return false
 		}
 	}

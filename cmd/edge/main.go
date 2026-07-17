@@ -48,6 +48,7 @@ import (
 	"github.com/asolgan/lattice/internal/edge/overlay"
 	"github.com/asolgan/lattice/internal/edge/store"
 	"github.com/asolgan/lattice/internal/edge/sync"
+	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
 	"github.com/asolgan/lattice/internal/substrate"
 )
 
@@ -116,7 +117,7 @@ func run(logger *slog.Logger) error {
 	defer conn.Close()
 	logger.Info("connected to NATS", "natsURL", natsURL)
 
-	mgr, err := sync.New(conn, st, sync.Config{
+	mgr, err := sync.New(natstransport.New(conn), st, sync.Config{
 		IdentityID:  identityID,
 		DeviceID:    deviceID,
 		ActorHeader: token,

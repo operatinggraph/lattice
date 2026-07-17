@@ -9,7 +9,7 @@ import (
 	"github.com/asolgan/lattice/internal/edge/store"
 )
 
-func openTestOverlay(t *testing.T) (*Overlay, *store.Store) {
+func openTestOverlay(t *testing.T) (*Overlay, store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "edge.db"))
 	require.NoError(t, err)

@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	edgestore "github.com/asolgan/lattice/internal/edge/store"
+	"github.com/asolgan/lattice/internal/edge/transport"
+	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
 	"github.com/asolgan/lattice/internal/refractor/control"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -35,7 +37,7 @@ func newSyncTestConn(t *testing.T, ctx context.Context) *substrate.Conn {
 	return conn
 }
 
-func openTestStore(t *testing.T) *edgestore.Store {
+func openTestStore(t *testing.T) edgestore.Store {
 	t.Helper()
 	st, err := edgestore.Open(filepath.Join(t.TempDir(), "edge.db"))
 	require.NoError(t, err)
@@ -120,7 +122,7 @@ func TestManager_ColdStart_HydratesRegistersAndAppliesBulkDelta(t *testing.T) {
 	startControlService(t, ctx, conn, h, interestKV)
 
 	st := openTestStore(t)
-	mgr, err := New(conn, st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -163,7 +165,7 @@ func TestManager_EnsureFresh_WarmCursorSkipsHydrate(t *testing.T) {
 	st := openTestStore(t)
 	require.NoError(t, st.SetCursor(firstSeq))
 
-	mgr, err := New(conn, st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
 	assert.NoError(t, mgr.ensureFresh(ctx))
@@ -204,7 +206,7 @@ func TestManager_EnsureFresh_GapTriggersHydrate(t *testing.T) {
 	st := openTestStore(t)
 	require.NoError(t, st.SetCursor(1)) // behind FirstSeq once eviction has run
 
-	mgr, err := New(conn, st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
 	require.NoError(t, mgr.ensureFresh(ctx))
@@ -219,7 +221,7 @@ func TestManager_Handle(t *testing.T) {
 	defer cancel()
 	conn := newSyncTestConn(t, ctx)
 	st := openTestStore(t)
-	mgr, err := New(conn, st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
 	body := func(env deltaEnvelope) []byte {
@@ -231,41 +233,41 @@ func TestManager_Handle(t *testing.T) {
 	require.NoError(t, err)
 	key := substrate.VertexKey("lease", leaseID)
 
-	decision := mgr.handle(ctx, substrate.Message{
+	decision := mgr.handle(ctx, transport.Delta{
 		Sequence: 1,
 		Body:     body(deltaEnvelope{Op: "upsert", Key: key, Revision: 1, Data: json.RawMessage(`{"x":1}`)}),
 	})
-	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, transport.Ack, decision)
 	entry, ok, err := st.Get(key)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.False(t, entry.Deleted)
 
-	decision = mgr.handle(ctx, substrate.Message{
+	decision = mgr.handle(ctx, transport.Delta{
 		Sequence: 2,
 		Body:     body(deltaEnvelope{Op: "delete", Key: key, Revision: 2}),
 	})
-	require.Equal(t, substrate.Ack, decision)
+	require.Equal(t, transport.Ack, decision)
 	entry, ok, err = st.Get(key)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.True(t, entry.Deleted)
 
-	decision = mgr.handle(ctx, substrate.Message{Sequence: 3, Body: body(deltaEnvelope{Op: "hydrationComplete", Revision: 100})})
-	assert.Equal(t, substrate.Ack, decision)
+	decision = mgr.handle(ctx, transport.Delta{Sequence: 3, Body: body(deltaEnvelope{Op: "hydrationComplete", Revision: 100})})
+	assert.Equal(t, transport.Ack, decision)
 	cursor, ok, err := st.Cursor()
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, uint64(3), cursor)
 
-	decision = mgr.handle(ctx, substrate.Message{Sequence: 4, Body: body(deltaEnvelope{Op: "somethingFutureVersion"})})
-	assert.Equal(t, substrate.Ack, decision, "unknown op should not block the pipeline")
+	decision = mgr.handle(ctx, transport.Delta{Sequence: 4, Body: body(deltaEnvelope{Op: "somethingFutureVersion"})})
+	assert.Equal(t, transport.Ack, decision, "unknown op should not block the pipeline")
 	cursor, _, err = st.Cursor()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(4), cursor, "cursor advances even for an unrecognized op")
 
-	decision = mgr.handle(ctx, substrate.Message{Sequence: 5, Body: []byte("not json")})
-	assert.Equal(t, substrate.Term, decision, "a malformed envelope is dropped, not redelivered")
+	decision = mgr.handle(ctx, transport.Delta{Sequence: 5, Body: []byte("not json")})
+	assert.Equal(t, transport.Term, decision, "a malformed envelope is dropped, not redelivered")
 }
 
 // TestManager_Handle_OnChangeFiresOnlyOnApplied proves the change-notification
@@ -284,7 +286,7 @@ func TestManager_Handle_OnChangeFiresOnlyOnApplied(t *testing.T) {
 		deleted bool
 	}
 	var changes []change
-	mgr, err := New(conn, st, Config{
+	mgr, err := New(natstransport.New(conn), st, Config{
 		IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger(),
 		OnChange: func(key string, deleted bool) { changes = append(changes, change{key, deleted}) },
 	})
@@ -300,13 +302,13 @@ func TestManager_Handle_OnChangeFiresOnlyOnApplied(t *testing.T) {
 	key := substrate.VertexKey("lease", leaseID)
 
 	// Fresh upsert: fires with deleted=false.
-	mgr.handle(ctx, substrate.Message{Sequence: 1, Body: body(deltaEnvelope{Op: "upsert", Key: key, Revision: 2})})
+	mgr.handle(ctx, transport.Delta{Sequence: 1, Body: body(deltaEnvelope{Op: "upsert", Key: key, Revision: 2})})
 	// Stale redelivery (revision behind current): dropped, must not fire.
-	mgr.handle(ctx, substrate.Message{Sequence: 2, Body: body(deltaEnvelope{Op: "upsert", Key: key, Revision: 1})})
+	mgr.handle(ctx, transport.Delta{Sequence: 2, Body: body(deltaEnvelope{Op: "upsert", Key: key, Revision: 1})})
 	// Delete: fires with deleted=true.
-	mgr.handle(ctx, substrate.Message{Sequence: 3, Body: body(deltaEnvelope{Op: "delete", Key: key, Revision: 3})})
+	mgr.handle(ctx, transport.Delta{Sequence: 3, Body: body(deltaEnvelope{Op: "delete", Key: key, Revision: 3})})
 	// Stale delete redelivery: dropped, must not fire.
-	mgr.handle(ctx, substrate.Message{Sequence: 4, Body: body(deltaEnvelope{Op: "delete", Key: key, Revision: 1})})
+	mgr.handle(ctx, transport.Delta{Sequence: 4, Body: body(deltaEnvelope{Op: "delete", Key: key, Revision: 1})})
 
 	require.Equal(t, []change{{key, false}, {key, true}}, changes)
 }
@@ -326,7 +328,7 @@ func TestManager_UpdateInterest_RegistersWithoutHydrating(t *testing.T) {
 	startControlService(t, ctx, conn, h, interestKV)
 
 	st := openTestStore(t)
-	mgr, err := New(conn, st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: recipient, DeviceID: "deviceX", Logger: testutil.TestLogger()})
 	require.NoError(t, err)
 
 	require.NoError(t, mgr.UpdateInterest(ctx, []string{"lease"}, []string{"unit-1"}))
