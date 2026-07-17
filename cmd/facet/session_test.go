@@ -58,9 +58,10 @@ func TestResolveSessionIdentity_NoSignerNoBootFallsClosed(t *testing.T) {
 func TestResolveSessionIdentity_BootFallbackWhenNoCookie(t *testing.T) {
 	srv := &server{logger: slog.Default(), bootIdentityID: "bootid12345678901234"}
 	r := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
-	id, ok := srv.resolveSessionIdentity(r)
+	si, ok := srv.resolveSessionIdentity(r)
 	require.True(t, ok)
-	require.Equal(t, "bootid12345678901234", id)
+	require.Equal(t, "bootid12345678901234", si.identityID)
+	require.False(t, si.viaCookie, "the boot fallback is not a proven cookie session")
 }
 
 func TestResolveSessionIdentity_VerifiedCookieWinsOverBootFallback(t *testing.T) {
@@ -77,9 +78,10 @@ func TestResolveSessionIdentity_VerifiedCookieWinsOverBootFallback(t *testing.T)
 
 	r := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
-	id, ok := srv.resolveSessionIdentity(r)
+	si, ok := srv.resolveSessionIdentity(r)
 	require.True(t, ok)
-	require.Equal(t, loggedIn, id, "a verified session cookie must win over the boot-env fallback")
+	require.Equal(t, loggedIn, si.identityID, "a verified session cookie must win over the boot-env fallback")
+	require.True(t, si.viaCookie)
 }
 
 func TestHandleDevLogin_DisabledWithoutDevSigner(t *testing.T) {
@@ -139,9 +141,9 @@ func TestHandleDevLogin_SetsSessionCookieAndVerifies(t *testing.T) {
 	// resolve to the same identity through resolveSessionIdentity.
 	r2 := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
 	r2.AddCookie(cookie)
-	id, ok := srv.resolveSessionIdentity(r2)
+	si, ok := srv.resolveSessionIdentity(r2)
 	require.True(t, ok)
-	require.Equal(t, target, id)
+	require.Equal(t, target, si.identityID)
 }
 
 func TestHandleDevLogin_AcceptsVtxIdentityPrefix(t *testing.T) {

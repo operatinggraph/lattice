@@ -4,12 +4,29 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/asolgan/lattice/internal/processor"
 )
+
+// ErrCredentialRejected marks a submit the Gateway refused at the DOOR — the
+// bearer credential itself is dead (401 authentication failed, or 403 token
+// revoked: the kill-switch, gateway.go's authFailureStatus). It is a
+// permanent condition for this credential, unlike an ordinary transport
+// error (offline, Gateway down), which a later Drain legitimately retries:
+// re-submitting the same token can only ever be refused again.
+//
+// It is deliberately NOT a rejected reply. A reply means the envelope
+// reached the Processor and the platform decided its fate; this never got
+// that far, so the intent stays queued — a re-login with a fresh credential
+// drains it. Callers distinguish the two with errors.Is: a UI host owns
+// presenting the sign-out flow (edge-showcase-app-design.md §4.4's
+// "Gateway writes die immediately (403 → sign-out flow)"), which this
+// package does not — same division as Config.Conflict.
+var ErrCredentialRejected = errors.New("edge/agent: gateway rejected the credential")
 
 // gatewayOperationRequest mirrors internal/gateway's operationRequest (the
 // wire shape POST /v1/operations accepts) and cmd/loupe/gatewayrelay.go's
@@ -113,7 +130,13 @@ func (g *GatewaySubmitter) Submit(ctx context.Context, env *processor.OperationE
 
 	var errBody gatewayErrorBody
 	if err := json.Unmarshal(raw, &errBody); err == nil && errBody.Error != "" {
+		if isCredentialRejection(resp.StatusCode) {
+			return nil, fmt.Errorf("%w: %s (HTTP %d)", ErrCredentialRejected, errBody.Error, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("gateway: %s (HTTP %d)", errBody.Error, resp.StatusCode)
+	}
+	if isCredentialRejection(resp.StatusCode) {
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrCredentialRejected, resp.StatusCode)
 	}
 	const snippetCap = 500
 	snippet := raw
@@ -121,4 +144,12 @@ func (g *GatewaySubmitter) Submit(ctx context.Context, env *processor.OperationE
 		snippet = snippet[:snippetCap]
 	}
 	return nil, fmt.Errorf("gateway: unrecognized response (HTTP %d): %s", resp.StatusCode, string(snippet))
+}
+
+// isCredentialRejection reports whether status is the Gateway refusing the
+// credential itself rather than failing the operation — the two codes
+// gateway.go's authFailureStatus returns (401 authentication failed / 403
+// token revoked).
+func isCredentialRejection(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }

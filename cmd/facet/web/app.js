@@ -81,6 +81,7 @@ const state = {
   rows: new Map(),   // manifest key -> {data, pending}
   outbox: new Map(), // requestId -> outbox entry (server shape, feed.go)
   view: "home",
+  credentials: null, // null = not yet loaded; array once GET /api/credentials resolves
 };
 
 function me() { const r = state.rows.get("manifest.me"); return r && r.data; }
@@ -108,9 +109,11 @@ function opByFullKey(fullKey) {
 
 let hasBootstrapped = false;
 let sseSilenceTimer = null;
+let activeFeed = null; // the live EventSource — closed on sign-out (§4.4 purge)
 
 function connectFeed() {
   const es = new EventSource("/api/feed");
+  activeFeed = es;
   es.addEventListener("manifest", (e) => {
     const fr = JSON.parse(e.data);
     if (fr.deleted) state.rows.delete(fr.key);
@@ -123,6 +126,12 @@ function connectFeed() {
     applyOutboxFrame(fr.outbox);
   });
   es.addEventListener("ready", () => finishBoot());
+  es.addEventListener("revoked", (e) => {
+    let reason = "";
+    try { reason = (JSON.parse(e.data) || {}).reason || ""; } catch (err) { /* keep the default copy */ }
+    showRevocationBanner(reason);
+    finishBoot(); // never strand a revoked session on the boot spinner
+  });
   es.onopen = () => {
     if (!hasBootstrapped) {
       setBootLabel("Loading your world…", true);
@@ -158,6 +167,22 @@ function setBootLabel(text, showProgress) {
 function showReconnectBanner() { $("reconnect-banner").hidden = false; }
 function hideReconnectBanner() { $("reconnect-banner").hidden = true; }
 
+// ---------------------------------------------------------- sign-out (§4.4)
+
+// signOut implements the design's "on confirmed revocation/sign-out the
+// local mirror is purged" — clears every in-memory row/outbox entry and
+// closes the live SSE connection before the cookie is cleared, so no stray
+// frame repopulates state after logout starts, then hands off to /login.
+function signOut() {
+  if (activeFeed) { activeFeed.close(); activeFeed = null; }
+  state.rows.clear();
+  state.outbox.clear();
+  state.credentials = null;
+  fetch("/api/logout", { method: "POST" })
+    .catch(() => {})
+    .finally(() => { location.replace("/login"); });
+}
+
 function applyOutboxFrame(e) {
   if (!e) return;
   state.outbox.set(e.requestId, e);
@@ -168,6 +193,12 @@ function applyOutboxFrame(e) {
     }, 2000);
   }
   scheduleRender();
+}
+
+function showRevocationBanner(reason) {
+  const el = $("revocation-banner");
+  if (reason) $("revocation-reason").textContent = reason;
+  el.hidden = false;
 }
 
 let renderScheduled = false;
@@ -207,8 +238,37 @@ function updateBadges() {
   const tb = $("tasks-badge");
   if (openTasks > 0) { tb.textContent = String(openTasks); tb.hidden = false; } else tb.hidden = true;
 
+  // The manifest's displayName is the good label, but it is absent for an
+  // identity with no name aspect yet (a freshly provisioned, not-yet-claimed
+  // one — exactly the case the Me screen's claim card serves), and the whole
+  // manifest is absent until hydration lands. whoami's identityId is always
+  // available the moment the session resolves, so it backstops the header:
+  // the signed-in user can always tell WHO they are signed in as (design
+  // §7.2's whoami-driven header).
   const nm = me();
-  $("identity-name").textContent = (nm && nm.displayName) || "";
+  $("identity-name").textContent = (nm && nm.displayName) || shortIdentityLabel();
+}
+
+// whoami is fetched once at boot; the header reads it until (and unless) a
+// manifest.me row with a real displayName arrives.
+let whoamiIdentityID = "";
+
+function shortIdentityLabel() {
+  return whoamiIdentityID ? whoamiIdentityID.slice(0, 8) + "…" : "";
+}
+
+function loadWhoami() {
+  return fetch("/api/whoami")
+    .then((r) => r.json())
+    .then((body) => {
+      if (body && body.loggedIn) whoamiIdentityID = body.identityId || "";
+      // The boot-env fallback identity is authenticated by no cookie, so
+      // there is nothing for a sign-out to end — offering it would clear a
+      // cookie nobody used and bounce the browser straight back in.
+      $("sign-out-btn").hidden = !(body && body.canSignOut);
+      scheduleRender();
+    })
+    .catch(() => {});
 }
 
 // ----------------------------------------------------------------- Home
@@ -392,7 +452,17 @@ function reviewOutbox(reqId) {
 // -------------------------------------------------------------------- Me
 
 function renderMe() {
-  const m = me() || {};
+  // Guard on the manifest ROW's presence, not on a falsy `claimed`: until
+  // manifest.me hydrates (and it never does for a session whose sync is
+  // dead), `me()` is undefined, so `claimed` reads falsy and a perfectly
+  // claimed user would be shown "Claim your identity" — an affordance that
+  // then fails with "Not signed in.", in exactly the state it's most likely
+  // to appear.
+  const m = me();
+  if (!m) {
+    $("view-me").innerHTML = `<div class="subtitle">Loading your identity…</div>`;
+    return;
+  }
   const roles = (m.roles || []).filter((r) => r.key);
   const anchors = (m.anchors || []).filter((a) => a.key);
   $("view-me").innerHTML = `
@@ -404,12 +474,172 @@ function renderMe() {
     <div class="chip-row">${roles.length ? roles.map((r) => `<span class="chip">${esc(r.name || prettify(r.key))}</span>`).join("") : '<span class="subtitle">None</span>'}</div>
     <h3 class="category-heading">Places</h3>
     <div class="chip-row">${anchors.length ? anchors.map((a) => `<span class="chip">${esc(prettify(a.key))}</span>`).join("") : '<span class="subtitle">None</span>'}</div>
-    <div class="card" style="cursor:default;margin-top:18px;opacity:0.6">
-      <div class="title">Manage sign-in methods</div>
-      <div class="subtitle">Coming in a future release</div>
-    </div>
-    ${!m.claimed ? `<div class="card" style="cursor:default;margin-top:10px;opacity:0.6"><div class="title">Claim your identity</div><div class="subtitle">Coming soon</div></div>` : ""}
+    ${m.claimed ? renderCredentialsSection() : renderClaimCard()}
   `;
+  if (m.claimed && state.credentials === null && !credentialsLoading && !credentialsError) loadCredentials();
+}
+
+// renderClaimCard is the Me screen's claim/link entry for a signed-in but
+// not-yet-claimed identity (design §4.1's claim beat, reached here instead
+// of first-run since Inc 2's dev-login session already got the browser IN —
+// see edge-showcase-app-design.md §7.2's Inc 3 note). Submits the same
+// POST /api/claim the /login page's "new here?" branch uses, targeting the
+// signed-in identity's own key.
+function renderClaimCard() {
+  return `<div class="card" style="cursor:default;margin-top:18px">
+    <div class="title">Claim your identity</div>
+    <div class="subtitle" style="margin-bottom:10px">Enter the claim key you were given to activate this identity.</div>
+    <div class="field" style="margin-bottom:8px">
+      <input type="text" id="claim-key-input" placeholder="Claim key" autocomplete="off">
+    </div>
+    <button class="primary-btn" data-claim-submit>Claim</button>
+  </div>`;
+}
+
+function submitSelfClaim() {
+  const input = $("claim-key-input");
+  const key = input && input.value.trim();
+  if (!key) { toast("Enter your claim key first.", false); return; }
+  const m = me();
+  if (!m || !m.identityKey) { toast("Not signed in.", false); return; }
+  fetch("/api/claim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetIdentityKey: m.identityKey, claimKey: key }),
+  })
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) { toast((body && body.error) || "Claim failed", false); return; }
+      toast("Claimed — your world is loading…", true);
+    })
+    .catch((err) => toast(String(err), false));
+}
+
+// ---- Manage sign-in methods (multi-credential-identity-linking-design.md
+// §3/§8, edge-showcase-app-design.md §7.2 Inc 3) ----
+//
+// Lists the credentials bound to the signed-in identity (GET /api/credentials,
+// the identityCredentialsRead Protected Postgres lens — mirrors
+// cmd/loftspace-app's account-settings page, credentials.go), links a new one
+// and removes one. Unlike loftspace's browser-direct dance, Facet's browser
+// never talks to the Gateway itself, so link/unlink are each ONE backend
+// call (credentials.go runs the Initiate/CompleteCredentialLink pair
+// server-side, mirroring /api/claim's own mint-a-throwaway-device shape).
+
+let credentialsLoading = false;
+
+// credentialsError holds a failed read's message. It exists so a broken read
+// model can never render as the affirmative claim "no sign-in methods" — an
+// unconfigured FACET_PG_DSN, an unreachable Postgres, or an unprojected lens
+// must look like a failure, not like an identity with zero ways to sign in
+// (which would invite linking a credential to "fix" a list that isn't
+// actually empty).
+let credentialsError = "";
+
+function loadCredentials() {
+  if (credentialsLoading) return Promise.resolve();
+  credentialsLoading = true;
+  return fetch("/api/credentials")
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) {
+        credentialsError = (body && body.error) || "Could not load your sign-in methods.";
+        return;
+      }
+      credentialsError = "";
+      state.credentials = body.credentials || [];
+    })
+    .catch((err) => { credentialsError = String(err); })
+    .finally(() => { credentialsLoading = false; scheduleRender(); });
+}
+
+// refreshCredentialsUntilChanged re-reads until the list actually moves.
+// /api/credentials serves the identityCredentialsRead lens, fed by ASYNC CDC
+// projection, so a read fired the instant link/unlink returns still sees the
+// pre-mutation set — the write is accepted but not yet projected. Polling to
+// a bounded ceiling keeps the "Linked."/"Removed." toast honest instead of
+// leaving the card the user just deleted sitting on screen until a reload.
+function refreshCredentialsUntilChanged(prevCount) {
+  let attempts = 0;
+  const poll = () => {
+    loadCredentials().then(() => {
+      attempts++;
+      const changed = credentialsError || (state.credentials || []).length !== prevCount;
+      if (!changed && attempts < 8) setTimeout(poll, 300);
+    });
+  };
+  poll();
+}
+
+function renderCredentialsSection() {
+  const creds = state.credentials;
+  if (credentialsError) {
+    return `<h3 class="category-heading">Sign-in methods</h3>
+      <div class="degraded-card">${esc(credentialsError)}</div>
+      <button class="ghost-btn" style="margin-top:8px" data-reload-credentials>Try again</button>`;
+  }
+  if (creds === null) {
+    return `<h3 class="category-heading">Sign-in methods</h3><div class="subtitle">Loading…</div>`;
+  }
+  return `
+    <h3 class="category-heading">Sign-in methods</h3>
+    ${creds.length ? creds.map((c) => renderCredentialCard(c, creds.length)).join("") : `<div class="empty">No sign-in methods found.</div>`}
+    <button class="ghost-btn" style="margin-top:8px" data-link-credential ${linkInFlight ? "disabled" : ""}>${linkInFlight ? "Linking…" : "+ Link a new sign-in method"}</button>
+  `;
+}
+
+function renderCredentialCard(c, totalCount) {
+  const short = lastSeg(c.actorKey || "").slice(0, 8);
+  const disabled = totalCount <= 1;
+  return `<div class="card" style="cursor:default">
+    <div class="title">Sign-in method ${esc(short)}&hellip;</div>
+    ${c.boundAt ? `<div class="subtitle">Linked ${esc(new Date(c.boundAt).toLocaleString())}</div>` : ""}
+    <div class="card-actions">
+      <button class="ghost-btn" data-unlink-credential="${esc(c.actorKey)}" ${disabled ? "disabled" : ""} title="${disabled ? "Cannot remove your last remaining sign-in method" : ""}">Remove</button>
+    </div>
+  </div>`;
+}
+
+// linkInFlight serializes the link ceremony per browser. Two overlapping
+// links against the same identity corrupt each other: InitiateCredentialLink
+// is create-or-overwrite on U.linkKey (the DDL is explicit that re-initiating
+// overwrites), so B's arm replaces A's, and A's Complete then fails the hash
+// check with the deliberately generic ClaimKeyInvalid — a rejection whose
+// anti-enumeration wording gives the user no hint that their own double-click
+// caused it.
+let linkInFlight = false;
+
+function linkCredential() {
+  if (linkInFlight) return;
+  linkInFlight = true;
+  const prevCount = (state.credentials || []).length;
+  scheduleRender();
+  fetch("/api/credentials/link", { method: "POST" })
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) { toast((body && body.error) || "Could not link a new sign-in method", false); return; }
+      toast("New sign-in method linked.", true);
+      refreshCredentialsUntilChanged(prevCount);
+    })
+    .catch((err) => toast(String(err), false))
+    .finally(() => { linkInFlight = false; scheduleRender(); });
+}
+
+function unlinkCredentialAction(actorKey) {
+  if (!confirm("Remove this sign-in method? It will no longer be able to sign in to this identity.")) return;
+  const prevCount = (state.credentials || []).length;
+  fetch("/api/credentials/unlink", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credentialActorKey: actorKey }),
+  })
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok) { toast((body && body.error) || "Could not remove sign-in method", false); return; }
+      toast("Sign-in method removed.", true);
+      refreshCredentialsUntilChanged(prevCount);
+    })
+    .catch((err) => toast(String(err), false));
 }
 
 // ------------------------------------------------------------------ modal
@@ -608,6 +838,9 @@ function selectSegmented(btn) {
 }
 
 function onGlobalClick(e) {
+  const signOutBtn = e.target.closest("#sign-out-btn, #revocation-signout");
+  if (signOutBtn) { signOut(); return; }
+
   const navBtn = e.target.closest(".bottom-nav button, #outbox-btn");
   if (navBtn) { setView(navBtn.dataset.view); return; }
 
@@ -626,6 +859,18 @@ function onGlobalClick(e) {
     document.querySelector('[data-entity-ref-results="' + name + '"]').innerHTML = "";
     return;
   }
+
+  const claimSubmit = e.target.closest("[data-claim-submit]");
+  if (claimSubmit) { submitSelfClaim(); return; }
+
+  const linkCred = e.target.closest("[data-link-credential]");
+  if (linkCred) { linkCredential(); return; }
+
+  const reloadCreds = e.target.closest("[data-reload-credentials]");
+  if (reloadCreds) { credentialsError = ""; loadCredentials(); return; }
+
+  const unlinkCred = e.target.closest("[data-unlink-credential]");
+  if (unlinkCred) { unlinkCredentialAction(unlinkCred.dataset.unlinkCredential); return; }
 
   const openOp = e.target.closest("[data-open-op]");
   if (openOp) {
@@ -680,5 +925,6 @@ function onGlobalInput(e) {
 document.addEventListener("DOMContentLoaded", () => {
   document.body.addEventListener("click", onGlobalClick);
   document.body.addEventListener("input", onGlobalInput);
+  loadWhoami();
   connectFeed();
 });

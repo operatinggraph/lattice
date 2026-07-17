@@ -119,10 +119,13 @@
       }
 
       // Already signed in (a cookie survived a reload)? Bounce straight to
-      // the app rather than making a returning user sign in again.
+      // the app rather than making a returning user sign in again. Gated on
+      // a real COOKIE session (canSignOut): a boot-env fallback deployment
+      // always reports loggedIn, so bouncing on that alone would trap a user
+      // who just signed out in a /login ↔ / loop with no way out.
       fetch("/api/whoami", { credentials: "same-origin" })
         .then(function (res) { return res.json(); })
-        .then(function (body) { if (body && body.loggedIn) location.replace("/"); })
+        .then(function (body) { if (body && body.loggedIn && body.canSignOut) location.replace("/"); })
         .catch(function () { /* stay on this page */ });
 
       function devLogin(identityId) {

@@ -24,6 +24,12 @@ import (
 //     (queued/submitting/confirmed/rejected, §3.4a/b).
 //   - "ready"    — the cold hydration catch-up finished (§3.0's "Hydrating"
 //     → "Home" transition signal).
+//   - "revoked"  — the Gateway refused this identity's credential outright
+//     (agent.ErrCredentialRejected: revoked via the kill-switch, or
+//     expired). Drives §4.4's sign-out flow. The browser cannot observe this
+//     itself: its writes are async (POST /api/enqueue returns long before
+//     the drain loop ever contacts the Gateway), so the failure surfaces
+//     only here, on the host's drain loop.
 type frame struct {
 	Kind     string          `json:"-"`
 	Key      string          `json:"key,omitempty"`
@@ -32,6 +38,7 @@ type frame struct {
 	Data     json.RawMessage `json:"data,omitempty"`
 	Revision uint64          `json:"revision,omitempty"`
 	Outbox   *outboxEntry    `json:"outbox,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
 }
 
 // outboxEntry mirrors facet-app-ux.md §3.4a: one enqueued write and its
@@ -67,6 +74,15 @@ type feed struct {
 	subs    map[chan frame]struct{}
 	outbox  map[string]*outboxEntry
 	outboxQ []string // insertion order, for trimming
+	// revokedReason is sticky once set: an engine's credential is minted once
+	// (engineManager.Acquire) and never refreshed, so a dead one stays dead
+	// for the engine's whole lifetime — and a browser that connects or
+	// reloads AFTER the drain loop discovered the revocation must still be
+	// told, hence writeSSE replays it. What ENDS the state is sign-out:
+	// engineManager.Purge evicts the engine outright, so the next login
+	// builds a fresh one, with a fresh credential and a fresh feed. Without
+	// that eviction this stickiness would be a permanent lockout.
+	revokedReason string
 }
 
 func newFeed() *feed {
@@ -120,6 +136,30 @@ func (f *feed) publishManifestKey(ov *overlay.Overlay, key string, deleted bool)
 
 func (f *feed) publishReady(revision uint64) {
 	f.publish(frame{Kind: "ready", Revision: revision})
+}
+
+// publishRevoked records + broadcasts that the Gateway refused this
+// identity's credential (§4.4's sign-out flow). Idempotent: the drain loop
+// re-discovers the same rejection on every tick while intents remain queued,
+// and only the first is worth publishing.
+func (f *feed) publishRevoked(reason string) {
+	f.mu.Lock()
+	already := f.revokedReason != ""
+	if !already {
+		f.revokedReason = reason
+	}
+	f.mu.Unlock()
+	if already {
+		return
+	}
+	f.publish(frame{Kind: "revoked", Reason: reason})
+}
+
+// revoked returns the sticky revocation reason, if any.
+func (f *feed) revoked() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revokedReason, f.revokedReason != ""
 }
 
 // enqueueOutbox records a freshly-queued write and publishes its initial
@@ -203,6 +243,9 @@ func writeSSE(w http.ResponseWriter, r *http.Request, logger *slog.Logger, fd *f
 	}
 	for _, e := range fd.snapshotOutbox() {
 		writeFrame(w, frame{Kind: "outbox", Outbox: e})
+	}
+	if reason, ok := fd.revoked(); ok {
+		writeFrame(w, frame{Kind: "revoked", Reason: reason})
 	}
 	fl.Flush()
 

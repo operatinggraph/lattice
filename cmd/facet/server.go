@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/asolgan/lattice/internal/gateway/auth"
 	"github.com/asolgan/lattice/internal/processor"
 	"github.com/asolgan/lattice/internal/substrate"
@@ -42,6 +44,13 @@ type server struct {
 	// loopback gates the session cookie's Secure flag, mirroring
 	// cmd/loupe/readauth.go's setOperatorSessionCookie.
 	loopback bool
+	// pgPool backs GET /api/credentials (credentials.go, Inc 3) — the
+	// identityCredentialsRead Protected Postgres lens, mirroring
+	// cmd/loftspace-app's read boundary. Nil when FACET_PG_DSN is unset;
+	// handleCredentials reports the read model as unconfigured rather than
+	// failing the whole process (same optional-dependency posture as
+	// loftspace-app's own pgPool).
+	pgPool *pgxpool.Pool
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -54,6 +63,9 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/feed", s.handleFeed)
 	inner.HandleFunc("/api/enqueue", s.handleEnqueue)
 	inner.HandleFunc("/api/claim", s.handleClaim)
+	inner.HandleFunc("/api/credentials", s.handleCredentials)
+	inner.HandleFunc("/api/credentials/link", s.handleCredentialsLink)
+	inner.HandleFunc("/api/credentials/unlink", s.handleCredentialsUnlink)
 	inner.HandleFunc(loginPagePath, s.handleLoginPage)
 	inner.HandleFunc(devLoginPath, s.handleDevLogin)
 	inner.HandleFunc(logoutPath, s.handleLogout)

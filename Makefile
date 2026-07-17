@@ -42,6 +42,10 @@ LOUPE_PG_DSN ?= postgres://loupe_pg:loupe_pg_dev@localhost:5432/lattice?sslmode=
 # Fire 3), same NON-superuser SELECT-only posture as LOFTSPACE_APP_PG_DSN /
 # CLINIC_APP_PG_DSN. See provision-gateway-role.
 GATEWAY_PG_DSN ?= postgres://gateway:gateway_dev@localhost:5432/lattice?sslmode=disable
+# Facet's identityCredentialsRead read boundary (Inc 3), same NON-superuser
+# SELECT-only posture as LOFTSPACE_APP_PG_DSN / CLINIC_APP_PG_DSN. See
+# provision-facet-role.
+FACET_PG_DSN ?= postgres://facet_app:facet_app_dev@localhost:5432/lattice?sslmode=disable
 # Directory of <name>.sql read-model files (Fire 3); each becomes a
 # GET /v1/<name> route. See internal/gateway/read.go / cmd/gateway's
 # GATEWAY_READ_MODELS_DIR doc comment.
@@ -94,7 +98,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo seed-showcase up-facet run-facet verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo seed-showcase up-facet run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -993,6 +997,8 @@ seed-showcase:
 up-facet:
 	@$(MAKE) up-full
 	@$(MAKE) install-edge-manifest
+	@$(MAKE) provision-facet-role
+	@$(MAKE) provision-readpath
 	@echo "==> Building facet binary..."
 	go build -o bin/facet ./cmd/facet
 	@echo "==> Loading the showcase dataset (idempotent)..."
@@ -1001,10 +1007,29 @@ up-facet:
 	@pkill -f "bin/facet" 2>/dev/null || true
 	@echo "==> Starting facet in background (FACET_DEV_AUTH=1 — sign in at /login as a showcase tenant)..."
 	@FACET_STORE_DIR=./facet-store NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 \
-		FACET_DEV_AUTH=1 \
+		FACET_DEV_AUTH=1 FACET_PG_DSN="$(FACET_PG_DSN)" \
 		./bin/facet >facet.log 2>&1 </dev/null & \
 	sleep 1; \
 	echo "==> Facet ready: http://127.0.0.1:7810/login (sign in with a showcase tenant NanoID from 'make seed-showcase' output)"
+
+## provision-facet-role — Create facet's Postgres read role for the
+## identityCredentialsRead Protected lens (the Me screen's "manage sign-in
+## methods", Inc 3). Same NON-superuser, SELECT-only posture, and the same
+## reasoning, as provision-loftspace-role: a superuser (or BYPASSRLS) role
+## skips RLS entirely, and this model's whole confinement IS RLS — the row is
+## anchored on the identity's own NanoID, so a bypassing reader would see
+## every identity's bound credentials instead of only its own. Idempotent.
+provision-facet-role:
+	@echo "==> Provisioning facet non-superuser SELECT-only Postgres role..."
+	docker compose exec -T postgres psql -U lattice -d lattice -v ON_ERROR_STOP=1 -c "\
+		DO \$$\$$ BEGIN \
+		  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='facet_app') THEN \
+		    CREATE ROLE facet_app LOGIN PASSWORD 'facet_app_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE; \
+		  END IF; \
+		END \$$\$$;" \
+		-c "GRANT USAGE ON SCHEMA public TO facet_app;" \
+		-c "ALTER DEFAULT PRIVILEGES FOR ROLE lattice IN SCHEMA public GRANT SELECT ON TABLES TO facet_app;" \
+		-c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO facet_app;"
 
 ## run-facet — Build + run the Facet app in the FOREGROUND against an
 ## already-up + already-seeded stack, with FACET_DEV_AUTH=1 (sign in at
@@ -1015,7 +1040,8 @@ run-facet:
 	@echo "==> Building facet binary..."
 	go build -o bin/facet ./cmd/facet
 	@echo "==> Facet app on http://127.0.0.1:7810 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 FACET_DEV_AUTH=$${FACET_DEV_AUTH:-1} ./bin/facet
+	NATS_URL=$(NATS_URL) EDGE_GATEWAY_URL=http://localhost:8080 FACET_DEV_AUTH=$${FACET_DEV_AUTH:-1} \
+		FACET_PG_DSN="$(FACET_PG_DSN)" ./bin/facet
 
 ## install-onebill — Install the Café Inc 3 "one-bill" composition lens (Café
 ## vertical row, ★★★): re-projects loftspace-ledger's + cafe-ledger's posted

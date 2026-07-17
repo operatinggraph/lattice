@@ -35,6 +35,12 @@
 //	                   any caller-named identity; loopback-only, demo posture only
 //	FACET_DEV_PRIVATE_KEY_PATH  overrides the shared dev signing key path (optional)
 //	FACET_DEV_PUBLIC_KEY_PATH   overrides the shared dev trust key path (optional)
+//	FACET_PG_DSN       OPTIONAL Postgres DSN for the identityCredentialsRead
+//	                   Protected read model (credentials.go, Inc 3's "manage
+//	                   sign-in methods" — mirrors cmd/loftspace-app's
+//	                   LOFTSPACE_APP_PG_DSN). Unset: GET /api/credentials
+//	                   reports the read model as unconfigured; nothing else
+//	                   in Facet depends on it.
 //
 // No Health-KV reporting: EDGE.3's per-identity NATS connection is confined
 // by natsauth's issued permission set to exactly `lattice.sync.user.<U>` +
@@ -54,10 +60,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/asolgan/lattice/internal/edge/agent"
 )
@@ -106,6 +115,29 @@ func run(logger *slog.Logger) error {
 	})
 	defer engines.CloseAll()
 
+	// identityCredentialsRead read boundary (Inc 3, mirrors cmd/loftspace-app/
+	// main.go's pgPool wiring): optional at startup, same as there — a
+	// missing/unreachable DSN degrades GET /api/credentials to a clean
+	// error rather than failing the whole process.
+	var pgPool *pgxpool.Pool
+	if dsn := strings.TrimSpace(os.Getenv("FACET_PG_DSN")); dsn != "" {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		pgPool = pool
+		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := pool.Ping(pingCtx); err != nil {
+			logger.Warn("identityCredentialsRead pool configured but unreachable at startup; /api/credentials will 502 until Postgres is reachable", "error", err)
+		} else {
+			logger.Info("identityCredentialsRead pool configured")
+		}
+		cancel()
+	} else {
+		logger.Warn("FACET_PG_DSN unset; /api/credentials will report the protected read model is unconfigured")
+	}
+
 	bootIdentityID := os.Getenv("EDGE_IDENTITY_ID")
 	if bootIdentityID != "" {
 		deviceID := os.Getenv("EDGE_DEVICE_ID")
@@ -127,6 +159,7 @@ func run(logger *slog.Logger) error {
 		engines:        engines,
 		bootIdentityID: bootIdentityID,
 		loopback:       loopback,
+		pgPool:         pgPool,
 	}
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
@@ -167,8 +200,11 @@ func run(logger *slog.Logger) error {
 
 // runAgentLoop periodically drains the intent queue and sweeps the
 // overlay's local GC — identical cadence/shape to cmd/edge's own loop. Used
-// by every engine (engine.go), not just a single boot-time one.
-func runAgentLoop(ctx context.Context, ag *agent.Agent, logger *slog.Logger) {
+// by every engine (engine.go), not just a single boot-time one. fd receives
+// the §4.4 revocation signal: this loop is the ONLY place a dead credential
+// is ever observed, since /api/enqueue returns before the Gateway is
+// contacted.
+func runAgentLoop(ctx context.Context, ag *agent.Agent, fd *feed, logger *slog.Logger) {
 	ticker := time.NewTicker(agentDrainInterval)
 	defer ticker.Stop()
 	for {
@@ -177,7 +213,17 @@ func runAgentLoop(ctx context.Context, ag *agent.Agent, logger *slog.Logger) {
 			return
 		case <-ticker.C:
 			if err := ag.Drain(ctx); err != nil {
-				logger.Warn("facet agent: drain failed, will retry", "err", err)
+				// A refused credential is permanent for this engine — the
+				// intents stay queued (a re-login drains them), but the
+				// browser must stop waiting and be offered the sign-out
+				// flow. Every other drain error is transient: keep retrying
+				// silently, exactly as before.
+				if errors.Is(err, agent.ErrCredentialRejected) {
+					logger.Warn("facet agent: gateway refused this identity's credential; signalling sign-out", "err", err)
+					fd.publishRevoked("Your session is no longer valid. Sign in again to continue.")
+				} else {
+					logger.Warn("facet agent: drain failed, will retry", "err", err)
+				}
 			}
 			if _, err := ag.GC(); err != nil {
 				logger.Warn("facet agent: GC failed", "err", err)

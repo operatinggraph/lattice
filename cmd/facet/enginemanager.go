@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -169,6 +171,59 @@ func (m *engineManager) reapIdle() {
 	for _, eng := range toClose {
 		eng.Close()
 	}
+}
+
+// Purge stops identityID's engine and DELETES its local mirror (the bbolt
+// store file under StoreDir) — design §4.4's "on confirmed revocation/
+// sign-out the local mirror is purged" (documented residual: host-level
+// storage until the media is reused).
+//
+// This is where two ratified sentences that conflict for exactly this case
+// are reconciled. Inc 2's "warm resume" (§7.2) serves a tab close or a
+// reload — the user never said to forget them. An EXPLICIT sign-out, or a
+// credential the platform has revoked, is the opposite instruction. So a
+// reload still resumes warm (the engine merely idles), while sign-out and
+// revocation purge. Inc 2's green bar — "sign out and back in re-enters the
+// same identity" — still holds: re-entry re-hydrates instead of resuming,
+// which is a latency property, not that bar.
+//
+// Purging is also what makes the §4.4 sign-out flow RECOVERABLE rather than
+// a dead end. An engine's credential is minted once, at first Acquire, and
+// Acquire's hot path returns the cached entry verbatim — it never re-mints.
+// So without eviction, a revoked-or-expired engine would be handed straight
+// back to the user who just re-logged in with a fresh cookie, replaying the
+// revocation forever (the new cookie only selects WHICH engine to use; it
+// does not refresh the one already built). Dropping the entry here forces
+// the next Acquire to build a new engine with a freshly minted credential.
+func (m *engineManager) Purge(identityID string) error {
+	// Defense in depth against a path escape: identityID is splice into a
+	// filename below, and filepath.Join CLEANS its result rather than
+	// neutralizing "..", so a non-NanoID id like "../../x" would resolve to
+	// a delete OUTSIDE StoreDir entirely. The login path already refuses a
+	// non-NanoID subject; this is the sink refusing independently, so no
+	// future caller can reintroduce the traversal.
+	if !substrate.IsValidNanoID(identityID) {
+		return fmt.Errorf("purge: refusing a non-NanoID identity %q", identityID)
+	}
+	m.mu.Lock()
+	e, ok := m.entries[identityID]
+	if ok {
+		delete(m.entries, identityID)
+	}
+	m.mu.Unlock()
+
+	if ok {
+		e.eng.Close()
+	}
+	// Delete the mirror even when no engine was live: an already-reaped
+	// engine, or a prior process lifetime, can have left the file behind —
+	// the point of the purge is that nothing of this identity survives
+	// locally, not merely that the running copy stops.
+	storePath := filepath.Join(m.deps.StoreDir, identityID+".db")
+	if err := os.Remove(storePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("purge local mirror %q: %w", storePath, err)
+	}
+	return nil
 }
 
 // CloseAll stops every running engine — process shutdown.

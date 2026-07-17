@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/asolgan/lattice/internal/gateway/auth"
+	"github.com/asolgan/lattice/internal/substrate"
 )
 
 // Inc 2 (edge-showcase-app-design.md §7.2): a login surface so a returning
@@ -76,12 +78,29 @@ func sessionCookieToken(r *http.Request) string {
 }
 
 // sessionIdentityContextKey is the request-context key requireSession stores
-// the resolved identity id (bare NanoID) under.
+// the resolved session under.
 type sessionIdentityContextKey struct{}
 
+// sessionInfo is what requireSession resolved for a request: which identity,
+// and whether a real session COOKIE authenticated it as opposed to the
+// boot-env single-user fallback. The distinction is load-bearing — a
+// fallback session proves nothing about who the caller is, so it must not
+// reach a per-user surface (see handleCredentials).
+type sessionInfo struct {
+	identityID string
+	viaCookie  bool
+}
+
 func sessionIdentity(ctx context.Context) (string, bool) {
-	id, ok := ctx.Value(sessionIdentityContextKey{}).(string)
-	return id, ok && id != ""
+	si, ok := ctx.Value(sessionIdentityContextKey{}).(sessionInfo)
+	return si.identityID, ok && si.identityID != ""
+}
+
+// sessionViaCookie reports whether this request's identity was proven by a
+// verified session cookie rather than inherited from the boot fallback.
+func sessionViaCookie(ctx context.Context) bool {
+	si, ok := ctx.Value(sessionIdentityContextKey{}).(sessionInfo)
+	return ok && si.viaCookie
 }
 
 // resolveSessionIdentity verifies the session cookie's token (when s.authn
@@ -91,20 +110,28 @@ func sessionIdentity(ctx context.Context) (string, bool) {
 // deployment that never enables FACET_DEV_AUTH, or a browser that hasn't
 // logged in yet, keeps working exactly as Fire 2/3 did: one process, one
 // identity.
-func (s *server) resolveSessionIdentity(r *http.Request) (string, bool) {
+func (s *server) resolveSessionIdentity(r *http.Request) (sessionInfo, bool) {
 	if s.authn != nil {
 		if tok := sessionCookieToken(r); tok != "" {
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
 			if actor, err := s.authn.Authenticate(ctx, tok); err == nil && actor.Subject != "" {
-				return actor.Subject, true
+				return sessionInfo{identityID: actor.Subject, viaCookie: true}, true
 			}
+			// A cookie that is PRESENT but does not verify fails CLOSED. It
+			// must never fall through to the boot identity: a session whose
+			// token merely expired (30m TTL) would silently become someone
+			// else, and the UI would keep claiming to be the signed-in user
+			// while acting as the boot identity — an UnlinkCredential then
+			// strips the WRONG identity's sign-in method. Absent cookie is
+			// the only case the fallback answers.
+			return sessionInfo{}, false
 		}
 	}
 	if s.bootIdentityID != "" {
-		return s.bootIdentityID, true
+		return sessionInfo{identityID: s.bootIdentityID}, true
 	}
-	return "", false
+	return sessionInfo{}, false
 }
 
 // requireSession wraps next so every request resolves to a signed-in
@@ -123,16 +150,16 @@ func (s *server) requireSession(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		identityID, ok := s.resolveSessionIdentity(r)
+		si, ok := s.resolveSessionIdentity(r)
 		if !ok {
 			if isBrowserNavigation(r) {
 				http.Redirect(w, r, loginPagePath, http.StatusFound)
 				return
 			}
-			s.writeError(w, http.StatusUnauthorized, "login required (no session cookie and no boot identity configured)")
+			s.writeError(w, http.StatusUnauthorized, "login required (no valid session cookie and no boot identity configured)")
 			return
 		}
-		ctx := context.WithValue(r.Context(), sessionIdentityContextKey{}, identityID)
+		ctx := context.WithValue(r.Context(), sessionIdentityContextKey{}, si)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -195,13 +222,93 @@ func (s *server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "identityId is required")
 		return
 	}
+	// The minter signs ANY subject it is handed, and that subject goes on to
+	// name a file under FACET_STORE_DIR (engine.go) — including one this
+	// process later DELETES on sign-out (engineManager.Purge). An id is a
+	// Contract #1 NanoID or it is not an identity; refusing anything else
+	// here keeps a caller-supplied string from ever reaching a path.
+	if !substrate.IsValidNanoID(bareID) {
+		s.writeError(w, http.StatusBadRequest, "identityId must be a 20-character NanoID")
+		return
+	}
 	token, exp, err := s.devSigner.mint(bareID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint session token: "+err.Error())
 		return
 	}
+
+	// Resolve the credential to the identity it is BOUND to (design §4.1
+	// step 2's whoami beat: GET /v1/actor → {actorId, resolvedActorId}).
+	// Signing in with a second, linked sign-in method — exactly what Inc 3's
+	// own /api/credentials/link mints — must open THAT identity's world, not
+	// the bare credential's empty one: otherwise "manage sign-in methods"
+	// links a credential that cannot sign in, and the Gateway would resolve
+	// the write path to U while this session's engine still synced A2's
+	// slice. Resolution happens once, here at login, rather than per
+	// request: the cookie carries the RESOLVED identity's own token, so the
+	// engine's NATS connection and every Gateway write already authenticate
+	// as U with no further round trip.
+	resolved, rerr := s.resolveActorIdentity(r.Context(), token)
+	if rerr != nil {
+		// Fail OPEN to the raw credential — the documented deny-safe
+		// fallback (mirrors cmd/loftspace-app/readauth.go's resolve and the
+		// Gateway's own resolveActor): an unresolved binding grants nothing
+		// extra, it just signs in as the credential itself.
+		s.logger.Error("facet: credential-binding resolve failed; signing in as the raw credential", "actor", bareID, "error", rerr)
+	} else if resolved != "" && resolved != bareID {
+		token, exp, err = s.devSigner.mint(resolved)
+		if err != nil {
+			s.writeError(w, http.StatusInternalServerError, "mint resolved session token: "+err.Error())
+			return
+		}
+		s.logger.Info("facet: signed in via a bound credential", "credential", bareID, "identityId", resolved)
+		bareID = resolved
+	}
+
 	s.setSessionCookie(w, token, exp)
 	s.writeJSON(w, http.StatusOK, map[string]any{"identityId": bareID, "expiresAt": exp.UTC().Format(time.RFC3339)})
+}
+
+// actorResponse is the Gateway's GET /v1/actor (whoami) body — the shipped
+// multi-credential Fire 2 surface the design names as Facet's hard
+// dependency for credential→identity resolution (§4.1 step 2; gap G10).
+type actorResponse struct {
+	ActorID         string `json:"actorId"`
+	ResolvedActorID string `json:"resolvedActorId"`
+}
+
+// resolveActorIdentity asks the Gateway which identity token's credential is
+// bound to, returning the bare resolved identity id — empty when the Gateway
+// reports no distinct binding (an identity signing in as itself). Facet
+// deliberately does NOT read the credential-bindings KV bucket the way
+// cmd/loftspace-app does: design §4.5 binds this app to "never reads
+// platform buckets"; its only platform surface is the Gateway's own
+// external door.
+func (s *server) resolveActorIdentity(ctx context.Context, token string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayURL+"/v1/actor", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gateway whoami: HTTP %d", resp.StatusCode)
+	}
+	var body actorResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxClaimBodyBytes)).Decode(&body); err != nil {
+		return "", err
+	}
+	if body.ResolvedActorID == "" || body.ResolvedActorID == body.ActorID {
+		return "", nil
+	}
+	return strings.TrimPrefix(body.ResolvedActorID, "vtx.identity."), nil
 }
 
 // handleLogout implements POST /api/logout — clears the session cookie.
@@ -211,6 +318,23 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return
+	}
+	// Purge the signed-in identity's local mirror (§4.4). Resolve from the
+	// COOKIE only, never the boot fallback: a boot-env deployment's identity
+	// is the process's own, not this browser's to erase.
+	if s.authn != nil {
+		if tok := sessionCookieToken(r); tok != "" {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			if actor, err := s.authn.Authenticate(ctx, tok); err == nil && actor.Subject != "" && actor.Subject != s.bootIdentityID {
+				if err := s.engines.Purge(actor.Subject); err != nil {
+					// The cookie still clears — a mirror we failed to delete
+					// must not trap the user in a session they asked to
+					// leave. Loud, because it IS the §4.4 residual.
+					s.logger.Error("facet: purge local mirror on sign-out failed", "identityId", actor.Subject, "error", err)
+				}
+			}
+			cancel()
+		}
 	}
 	s.clearSessionCookie(w)
 	s.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -223,14 +347,21 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // reports loggedIn:false, so the login page can safely probe it before any
 // cookie exists.
 func (s *server) handleWhoami(w http.ResponseWriter, r *http.Request) {
-	identityID, ok := s.resolveSessionIdentity(r)
+	si, ok := s.resolveSessionIdentity(r)
 	if !ok {
 		s.writeJSON(w, http.StatusOK, map[string]bool{"loggedIn": false})
 		return
 	}
+	// canSignOut distinguishes a real cookie session from the boot-env
+	// single-user fallback, which no cookie authenticates and therefore no
+	// logout can end. Without it the two collapse and a boot deployment
+	// traps the browser in a loop: sign-out clears a cookie nobody used,
+	// whoami still answers loggedIn (via the fallback), and the login page
+	// bounces straight back into the app.
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"loggedIn":   true,
-		"identityId": identityID,
+		"identityId": si.identityID,
+		"canSignOut": si.viaCookie,
 	})
 }
 

@@ -104,6 +104,11 @@ button, input, select, textarea { font-family: inherit; }
   text-align: center; font-size: 12px; font-weight: 600;
   padding: 5px;
 }
+.reconnect-banner.revocation { background: var(--red); color: #fff; }
+.link-btn {
+  background: transparent; border: none; text-decoration: underline;
+  color: inherit; font: inherit; font-weight: 700; cursor: pointer; padding: 0;
+}
 
 main.screen { flex: 1; padding: 14px 14px 84px; max-width: 640px; margin: 0 auto; width: 100%; }
 
@@ -257,6 +262,10 @@ h2.section-title { font-size: 14px; text-transform: uppercase; letter-spacing: 0
 .toggle-switch.on .knob { transform: translateX(20px); background: #fff; }
 
 .degraded-card { color: var(--text-dim); font-size: 13px; background: var(--bg-input); border-radius: 10px; padding: 12px; }
+
+/* ---- account / credentials (§4.2 Me screen, Inc 3) ---- */
+
+.card-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 
 /* ---- buttons ---- */
 

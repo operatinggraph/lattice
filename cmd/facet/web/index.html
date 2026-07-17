@@ -19,6 +19,10 @@
 
 <div id="app" class="app" hidden>
   <div id="reconnect-banner" class="reconnect-banner" hidden>Reconnecting…</div>
+  <div id="revocation-banner" class="reconnect-banner revocation" hidden>
+    <span id="revocation-reason">Your session is no longer valid.</span>
+    <button id="revocation-signout" class="link-btn">Sign in again</button>
+  </div>
   <header class="topbar">
     <div class="brand">Facet</div>
     <div class="identity-name" id="identity-name"></div>
@@ -26,6 +30,7 @@
     <button class="outbox-btn" id="outbox-btn" data-view="activity">
       Outbox<span class="count" id="outbox-count" hidden>0</span>
     </button>
+    <button class="ghost-btn" id="sign-out-btn">Sign out</button>
   </header>
 
   <main class="screen">

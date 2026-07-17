@@ -131,7 +131,7 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	e.wg.Add(2)
 	go func() {
 		defer e.wg.Done()
-		runAgentLoop(engCtx, ag, cfg.Logger)
+		runAgentLoop(engCtx, ag, fd, cfg.Logger)
 	}()
 	go func() {
 		defer e.wg.Done()
