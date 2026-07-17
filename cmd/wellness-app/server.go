@@ -24,11 +24,11 @@ type server struct {
 	logger      *slog.Logger
 	natsTimeout time.Duration
 
-	// devSigner mints the staff Bearer token the FE presents to the Gateway;
-	// nil unless WELLNESS_APP_DEV_AUTH is enabled. Every wellness-domain op is
-	// grantsTo:[operator] scope:any, so a single staff token (minted for this
-	// app's own admin actor) covers every write — no per-resident identity
-	// token is needed.
+	// devSigner mints Bearer tokens the FE presents to the Gateway; nil
+	// unless WELLNESS_APP_DEV_AUTH is enabled. It mints the fixed staff token
+	// (this app's own admin actor) for operator-scoped writes, and — via
+	// handleDevToken — a per-resident token for the consumer scope=self
+	// CreateBooking/CancelBooking self-service path.
 	devSigner *devSigner
 
 	// gatewayURL is the Gateway's externally-reachable base URL, served to
@@ -50,6 +50,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/bookings", s.handleBookings)
 	mux.HandleFunc("/api/residents", s.handleResidents)
 	mux.HandleFunc("/api/staff/dev-token", s.handleStaffDevToken)
+	mux.HandleFunc("/api/dev-token", s.handleDevToken)
 	mux.HandleFunc("/api/config", s.handleConfig)
 }
 

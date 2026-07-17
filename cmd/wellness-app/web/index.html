@@ -16,6 +16,13 @@
   </nav>
 </header>
 
+<div id="me-bar" class="me-bar">
+  <span id="me-status" class="me-status">Not signed in</span>
+  <select id="me-resident"></select>
+  <button id="me-signin" class="ghost">Sign in as resident</button>
+  <button id="me-signout" class="ghost" hidden>Sign out</button>
+</div>
+
 <main>
   <section id="view-schedule" role="tabpanel">
     <div class="panel-controls">
@@ -38,7 +45,7 @@
 
   <section id="view-myclasses" role="tabpanel" hidden>
     <div class="panel-controls">
-      <label for="myclasses-resident">Resident</label>
+      <label id="myclasses-resident-label" for="myclasses-resident">Resident</label>
       <select id="myclasses-resident"></select>
       <button id="myclasses-refresh" class="ghost">Refresh</button>
     </div>

@@ -6,12 +6,14 @@
 //
 // It is a vertical product app, distinct from Loupe (the operator tool) and a
 // sibling of loftspace-app/clinic-app/cafe-app. WRITES go browser-direct to
-// the Gateway's POST /v1/operations with a staff Bearer token (every
-// wellness-domain op is grantsTo:[operator] scope:any, so no per-resident
-// identity token is needed). READS are all plain NATS-KV lens projections
-// (P5) plus the shared weaver-targets convergence bucket (the resident
-// picker) — no protected Postgres read model exists for wellness, so this
-// app carries no pgxpool.
+// the Gateway's POST /v1/operations with a staff Bearer token by default
+// (most wellness-domain ops are grantsTo:[operator] scope:any); a resident
+// who signs in as themselves (the Schedule/My Classes "Me" bar) instead
+// books/cancels with a token minted for their own identity, exercising
+// CreateBooking/CancelBooking's consumer scope=self grant. READS are all
+// plain NATS-KV lens projections (P5) plus the shared weaver-targets
+// convergence bucket (the resident picker) — no protected Postgres read
+// model exists for wellness, so this app carries no pgxpool.
 //
 // SAFETY: this app has NO authentication and acts as admin. It binds
 // 127.0.0.1 only by default; a non-loopback WELLNESS_APP_ADDR is an explicit
