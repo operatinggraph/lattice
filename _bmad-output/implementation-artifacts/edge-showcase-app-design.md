@@ -496,6 +496,56 @@ descriptor-form renderer (turns the one-tap empty-payload Enqueue into a real fi
 before the acceptance-demo green bar (§ overview: "wire a brand-new service... watch it appear in both
 renderers with zero app change").
 
+### 7.12 Fire 5 — second-renderer spike Inc 3 (Winston, 2026-07-18) — descriptor-form renderer
+
+Closes §7.11's first residual: `DescriptorForm.swift` (`FacetManifestKit`) resolves a `manifest.op`
+row's `inputSchema`/`dispatch.*` fields into a real submission — the Swift-side mirror of `app.js`'s
+`renderDescriptorForm`/`renderField`/`submitDescriptorForm` (facet-app-ux.md §3.6), narrowed to the
+field kinds every shipped op-meta actually uses (free-text string, string enum) rather than the PWA's
+fuller vocabulary (date/money/entity-ref/boolean), which no op-meta exercises yet. `ContentView`'s
+Catalog rows now open `DescriptorFormSheet` — a real form — instead of Inc 2's blind empty-payload
+Enqueue button; `ManifestStore` grew `submitDescriptorForm` alongside the existing `enqueue`.
+
+**A real platform gap found and closed in the same fire, not papered over.** `cafe-domain`'s `OpenTab`
+op-meta had no `Dispatch.Reads` declared — §7.11's live test only succeeded because the throwaway
+harness hand-corrected the envelope's `reads`, not because the op-meta itself was drivable by a generic
+client. `OpDispatchSpec.Reads` (`internal/pkgmgr/definition.go`) already exists and is tested
+(`capabilitymaterializer_starlark.go`), just never populated by any shipped op-meta — this fire is its
+first real use (mirrors wellness-domain's opmetas.go doc comment on being ContextParams' first real
+use): `OpenTab`'s `Dispatch.Reads` now declares `{payload.leaseAppKey}`, guarded by
+`packages/cafe-domain/opmetas_test.go`. This does not make `OpenTab` fully descriptor-form-drivable on
+its own — the per-lease `cafeOpenTabGuard` dedup read and the self-scope ownership check both need
+`ContextHint.OptionalReads` entries, and `OpDispatchSpec` has no `OptionalReads`-equivalent field —
+named as an open vocabulary gap, not silently worked around.
+
+**Verified in three layers, headless-first (the browser was never opened this fire).**
+1. `go build`/`go test ./packages/cafe-domain/...`, `make vet`, `STRICT=1 lint-conventions`,
+   `golangci-lint` all green.
+2. `swift build` succeeds; `Tests/FacetManifestKitTests/DescriptorFormTests.swift` (real, checked-in
+   XCTest source) asserts `DescriptorForm` against the actual shipped op-meta JSON for `OpenTab`,
+   `RequestService`, `SetAppointmentStatus`, and wellness's `CreateBooking` — but **this machine has
+   only CommandLineTools, no full Xcode, so `swift test` can't run** (`error: no such module 'XCTest'`
+   — the same gap §7.10/§7.11 already named for a literal iOS build). Verified instead via a throwaway
+   `swift run` executable mirroring the same 18 assertions by hand: **all pass.**
+3. **A real, independently-confirmed live write**, driven end-to-end by the actual production
+   `DescriptorForm.buildSubmission` code (not a hand-built envelope): logged in as showcase tenant1
+   (`make seed-showcase`), read the real `RequestService` catalog row over SSE, and submitted it.
+   Uncovered a second real bug in the process: the throwaway harness's first version waited for an SSE
+   `ready` event before submitting — `cmd/facet/engine.go`'s `OnHydrationComplete` fires `publishReady`
+   **once per facet-host process lifetime**, broadcast only to subscribers connected at that instant, so
+   a long-running host (this one's been up since the previous day) never re-sends it to a fresh
+   connection. Fixed to submit as soon as the op row itself is seen (already fully populated on
+   arrival — nothing further to wait for). The corrected run: outbox transitioned
+   `queued → submitting → confirmed`, and the read-side `manifest.inst` projection independently showed
+   a new open instance (`vtx.service.M9eXgFz1KQ8JAjDSQ37w`, template "Maple Laundry") — not just the
+   outbox's own say-so.
+
+Fire 5 residual now: only the literal iOS build (needs full Xcode elsewhere) remains before the
+acceptance-demo green bar. The `OpDispatchSpec.OptionalReads` vocabulary gap (above) is real future
+work, not blocking — it only affects ops whose self-scope/dedup checks need reads beyond
+`payload`/`targetField`/the actor's own key (OpenTab today; none of the currently-catalog-visible ops
+with visible form fields need it).
+
 ## 8. Non-goals (v1)
 
 No local authority (EDGE.6 stays a separate Andrew-gated decision); no admin/cross-identity surfaces (Loupe exists; Facet renders only vocabulary-described personal projections — it is not a graph browser); no payments UX; no vendor push integration before the waker design; no per-vertical bespoke screens — a vertical that wants richer-than-vocabulary UI builds its own FE (the existing pattern) while Facet keeps the universal floor.

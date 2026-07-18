@@ -17,7 +17,7 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | 🏗️ building · [design §7.11](../../implementation-artifacts/edge-showcase-app-design.md) · 2nd-renderer spike Inc 2 shipped (write path, live-verified confirmed write) · next: descriptor-form renderer, then literal iOS build |
+| **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | 🏗️ building · [design §7.12](../../implementation-artifacts/edge-showcase-app-design.md) · 2nd-renderer spike Inc 3 shipped (descriptor-form renderer, live-verified confirmed write) · next: literal iOS build only |
 | **Account settings — manage sign-in methods** | Live-verified: LoftSpace has no account/profile surface at all today (grepped `app.js`/`index.html` — only qualification-profile, no identity page). Page for the applicant to see linked credentials (`whoami`), link another (`InitiateCredentialLink`/`CompleteCredentialLink`), and remove one (`UnlinkCredential`, platform refuses removing the last). | LoftSpace | FE + pkg | ★★ | S | ✅ shipped `25623d9` |
 | **Care→Wellness referral** | Post-visit, the clinic worklist offers a bookable wellness class (the clinic+wellness emergence — shared scheduling shape); a clinic→wellness handoff that opens a booking from the appointment context. | Clinic/Wellness | pkg + FE | ★ | S | ✅ shipped `e86ab45` |
 | **Clinical notes are write-only** | `RecordEncounter` PHI (`ddls.go:333-336`) captured, never projected. The cited `clinicPatientsRead` Secure-Lens precedent does NOT extend — that decrypts identity-anchored Vault ciphertext; this is raw plaintext on a non-identity vertex, and that exact shortcut was already REJECTED pre-Vault (`vault-crypto-shredding-design.md` ratification decision #2). | Clinic | pkg | ★★★ | M | 🚧 blocked-on: Vault extended to non-identity content (architectural fork, Andrew) |
@@ -67,6 +67,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-18 · `a14f67d` · Facet 2nd-renderer spike Inc 3 — descriptor-form renderer, live-verified confirmed write — [design §7.12](../../implementation-artifacts/edge-showcase-app-design.md)
 - 2026-07-18 · `339f0a1` · Facet 2nd-renderer spike Inc 2 — write path (enqueue), live-verified confirmed write — [design §7.11](../../implementation-artifacts/edge-showcase-app-design.md)
 - 2026-07-18 · `f29bb89` · Facet 2nd-renderer spike Inc 1 — SwiftUI client, live-verified — [design §7.10](../../implementation-artifacts/edge-showcase-app-design.md)
 - 2026-07-18 · `16ef550` · Landlord sign-in reload race — `init()` awaits `loadIdentities()` before `applyMode()`; live-verified
