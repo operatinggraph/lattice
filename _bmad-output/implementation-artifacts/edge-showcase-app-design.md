@@ -395,6 +395,10 @@ Closes residual (2) named in §7.6: café-app's Resident view now has a real per
 
 Fire 5 residual now: the second-renderer (iOS/SwiftUI) spike (unstarted) and a live end-to-end proof of café's resident self-service write path once loftspace-app's dev sign-in `RotateClaimKey` bug is fixed.
 
+### 7.9 Fire 5 residual (2) closed (Winston, 2026-07-18) — café resident self-service, live end-to-end
+
+The `RotateClaimKey` bug §7.8 flagged is already fixed (`98a5bcd`, a prior fire). Minted a fresh fixture through the real product paths, not a seed script: loftspace-app's "+ New applicant" ceremony created + claimed `vtx.identity.UvsgF4q1JUhuqZrLzbPZ`, then Apply against the `make seed-classic-demo` listing produced `vtx.leaseapp.Z8ebXzStgUGerUpqeHEF` with its `applicationFor` link to that identity — the exact class-(d) key café's self-scope guard reads (§7.8). Signed the same identity into café-app's Resident view: the lease picker auto-locked to the resident's own lease (no manual selection), Open Tab submitted `asSelf` and minted `vtx.tab.jxVYPwxYQoVn4nbFiqF2` with `createdBy=vtx.identity.UvsgF4q1JUhuqZrLzbPZ`, and Settle My Tab transitioned its `.status` aspect to `value=settled`, `lastModifiedBy` the same resident identity — confirmed by direct Core KV read, not just the FE toast. Zero console errors throughout. Fire 5 residual now: only the second-renderer (iOS/SwiftUI) spike remains, unstarted.
+
 ## 8. Non-goals (v1)
 
 No local authority (EDGE.6 stays a separate Andrew-gated decision); no admin/cross-identity surfaces (Loupe exists; Facet renders only vocabulary-described personal projections — it is not a graph browser); no payments UX; no vendor push integration before the waker design; no per-vertical bespoke screens — a vertical that wants richer-than-vocabulary UI builds its own FE (the existing pattern) while Facet keeps the universal floor.
