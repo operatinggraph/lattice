@@ -3989,10 +3989,10 @@ async function submitAddPhotos() {
 
 // ---- wire up ----
 
-function init() {
+async function init() {
   restoreApplicant();
   restoreMode();
-  loadIdentities();
+  const identitiesLoaded = loadIdentities();
   $("#applicant").addEventListener("change", (e) => setApplicant(e.target.value));
   $("#new-applicant").addEventListener("click", openNewApplicant);
   $("#applicant-cancel").addEventListener("click", closeNewApplicant);
@@ -4075,6 +4075,11 @@ function init() {
   });
 
   loadListings();
+  // applyMode() (landlord path) reaches identityState()/ensureClaimedDevice,
+  // which needs state.identities populated — await the roster fetch kicked
+  // off above so a restored landlord mode never races it into a doomed
+  // RotateClaimKey on an already-claimed identity.
+  await identitiesLoaded;
   applyMode();
 }
 
