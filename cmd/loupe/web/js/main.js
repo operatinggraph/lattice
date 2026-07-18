@@ -18,6 +18,7 @@ import * as pkg from "./views/package.js";
 import * as files from "./views/files.js";
 import * as op from "./views/op.js";
 import * as lens from "./views/lens.js";
+import * as review from "./views/review.js";
 
 // The route table: view name (the first hash segment) → panel + module. The
 // nav anchors carry the same hashes, so a tab click is just a hash change.
@@ -33,6 +34,7 @@ const routes = {
   packages:  { panel: "packages",  view: packages,  crumb: "Packages" },
   package:   { panel: "package",   view: pkg,       crumb: "Packages", nav: "packages", crumbHref: "#/packages" },
   files:     { panel: "files",     view: files,     crumb: "Files" },
+  review:    { panel: "review",    view: review,    crumb: "Review" },
   op:        { panel: "op",        view: op,        crumb: "Submit Op" },
 };
 
@@ -91,6 +93,22 @@ function renderCrumbs(route, entry) {
   bar.appendChild(section);
   bar.appendChild(el("span", "crumb-sep", "›"));
 
+  // Review's arg nests a tab segment ("capability" or "capability/<id>",
+  // "/"-joined, not the "."-joined vertex-key shape every other drill route
+  // uses) — render it as plain tab/id text instead of the dot-segmented
+  // key-link walk below.
+  if (route.view === "review") {
+    const parts = route.arg.split("/");
+    const box = el("span", "crumb-key");
+    box.appendChild(el("span", null, parts[0]));
+    if (parts[1]) {
+      box.appendChild(el("span", "crumb-dot", "›"));
+      box.appendChild(el("span", null, parts[1]));
+    }
+    bar.appendChild(box);
+    return;
+  }
+
   const segs = route.arg.split(".");
   const keyBox = el("span", "crumb-key");
   segs.forEach((s, i) => {
@@ -121,5 +139,6 @@ lens.init();
 packages.init();
 pkg.init();
 files.init();
+review.init();
 op.init();
 startRouter(dispatch);

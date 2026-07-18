@@ -1064,6 +1064,40 @@ a.pulse-derived-text:hover { color: var(--text); }
 .pkg-modal-out { max-height: 320px; overflow: auto; }
 .warn-text { color: var(--yellow); }
 
+/* AI review console (#/review, F16.1: capability queue + detail + reject). */
+.review-badge {
+  display: none;
+  margin-left: 6px;
+  background: var(--yellow);
+  color: #1a1a1a;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+.review-badge.visible { display: inline-block; }
+
+.review-state { font-size: 10px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.3px; }
+.review-state.pending { color: var(--yellow); border-color: var(--yellow); }
+.review-state.approved, .review-state.applied { color: var(--green); border-color: var(--green); }
+.review-state.rejected { color: var(--text-dim); border-color: var(--border); }
+.review-state.invalid { color: var(--red); border-color: var(--red); }
+.review-state.authoring { color: var(--accent); border-color: var(--accent-dim); }
+.review-state.unknown { color: var(--text-dim); border-color: var(--border); }
+
+.confidence-band { font-size: 10px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); }
+.confidence-band.low { color: var(--red); border-color: var(--red); }
+.confidence-band.med { color: var(--yellow); border-color: var(--yellow); }
+.confidence-band.high { color: var(--green); border-color: var(--green); }
+.confidence-band.unknown { color: var(--text-dim); }
+
+.review-card { text-decoration: none; color: inherit; display: block; cursor: pointer; }
+.review-card:hover { border-color: var(--accent-dim); }
+.review-card-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+.review-glyph { font-size: 12px; }
+.review-invalid-reason { color: var(--red); font-size: 12px; margin-top: 4px; }
+.review-valid-ok { color: var(--green); border-color: var(--green); }
+
 /* Submit-Op reply panel, follow-through, and session op log (design §10) */
 .opreply { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg-raised); }
 .opreply-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }

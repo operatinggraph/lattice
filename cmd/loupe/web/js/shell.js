@@ -5,9 +5,28 @@
 
 import { $, el, api } from "./api.js";
 import { shapeAlertLines } from "./logic/status.js";
+import { pendingCount } from "./logic/review.js";
 
 const POLL_MS = 30000;
 const shell = { timer: null, expanded: false, fetchSeq: 0 };
+
+// refreshReviewBadge drives the top-nav "Review" count badge (§2.2 — the
+// number of proposals in review.state=pending, i.e. awaiting a human
+// verdict). Best-effort: a fetch error just hides the badge rather than
+// erroring the whole shell tick. Augur's count joins this in F16.3.
+async function refreshReviewBadge() {
+  const badge = $("#review-badge");
+  if (!badge) return;
+  const body = await api("/api/review/capability");
+  const n = body.error ? 0 : pendingCount(body.proposals || []);
+  if (n > 0) {
+    badge.textContent = String(n);
+    badge.classList.add("visible");
+  } else {
+    badge.textContent = "";
+    badge.classList.remove("visible");
+  }
+}
 
 async function refreshShellHealth() {
   const seq = ++shell.fetchSeq;
@@ -52,8 +71,17 @@ function renderStrip(body) {
 
 function init() {
   refreshShellHealth();
-  shell.timer = setInterval(() => { if (!document.hidden) refreshShellHealth(); }, POLL_MS);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshShellHealth(); });
+  refreshReviewBadge();
+  shell.timer = setInterval(() => {
+    if (document.hidden) return;
+    refreshShellHealth();
+    refreshReviewBadge();
+  }, POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    refreshShellHealth();
+    refreshReviewBadge();
+  });
 
   const logout = $("#topbar-logout");
   if (logout) {

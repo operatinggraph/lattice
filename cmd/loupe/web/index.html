@@ -16,6 +16,7 @@
       <a class="tab" data-tab="flows" href="#/flows">Flows</a>
       <a class="tab" data-tab="packages" href="#/packages">Packages</a>
       <a class="tab" data-tab="files" href="#/files">Files</a>
+      <a class="tab" data-tab="review" href="#/review">Review<span class="review-badge" id="review-badge"></span></a>
       <a class="tab" data-tab="op" href="#/op">Submit Op</a>
     </nav>
     <div class="topbar-status">
@@ -220,6 +221,28 @@
         <span class="muted" id="files-status"></span>
       </div>
       <div class="files-grid" id="files-grid"></div>
+    </section>
+
+    <!-- AI review console (drill-through: #/review/capability/<id>; F16.1 —
+         capability queue + detail + reject. Augur tab is F16.3. -->
+    <section class="panel" id="panel-review">
+      <div id="review-queue-view">
+        <div class="panel-controls">
+          <button id="review-load">Refresh</button>
+          <span class="muted" id="review-status"></span>
+        </div>
+        <p class="muted small">Capability-authoring proposals — an AI reasoned out a new DDL artifact
+          (lens, grant, weaverTarget, loomPattern, vertexTypeDDL, or opMeta) and parked it for a human
+          verdict. Nothing installs until you approve it here.</p>
+        <div class="cards" id="review-cards"></div>
+      </div>
+      <div id="review-detail-view" style="display:none">
+        <div class="panel-controls">
+          <a class="detail-action-link" href="#/review/capability">← back to the queue</a>
+          <span class="muted" id="review-detail-status"></span>
+        </div>
+        <div class="lens-panels" id="review-detail-body"></div>
+      </div>
     </section>
 
     <!-- Submit Op -->
