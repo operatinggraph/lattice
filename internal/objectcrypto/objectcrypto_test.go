@@ -134,6 +134,39 @@ func TestDecodeWrappedCEK_Malformed_Rejected(t *testing.T) {
 	}
 }
 
+// TestSeal_BadKeyLength_Fails pins the newAESGCM error branch reached through
+// Seal: AES-256-GCM requires a 32-byte key, so a mis-sized CEK must surface an
+// error rather than seal under a silently-truncated/invalid key.
+func TestSeal_BadKeyLength_Fails(t *testing.T) {
+	badKey := bytes.Repeat([]byte{0x42}, 10) // not 16/24/32
+	if _, _, err := Seal(badKey, []byte("secret"), []byte("oid")); err == nil {
+		t.Error("Seal with an invalid key length must fail")
+	}
+}
+
+// TestOpen_BadKeyLength_Fails is Open's counterpart to the newAESGCM branch.
+func TestOpen_BadKeyLength_Fails(t *testing.T) {
+	badKey := bytes.Repeat([]byte{0x42}, 10)
+	if _, err := Open(badKey, bytes.Repeat([]byte{0}, 12), []byte("ct"), []byte("oid")); err == nil {
+		t.Error("Open with an invalid key length must fail")
+	}
+}
+
+// TestOpen_BadNonceLength_Fails pins the explicit nonce-length guard: a nonce
+// whose length does not match the GCM nonce size is rejected with a clear
+// error (not passed into gcm.Open, which would panic).
+func TestOpen_BadNonceLength_Fails(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, CEKSize)
+	nonce, ciphertext, err := Seal(key, []byte("secret"), []byte("oid"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	shortNonce := nonce[:len(nonce)-1]
+	if _, err := Open(key, shortNonce, ciphertext, []byte("oid")); err == nil {
+		t.Error("Open with a wrong-length nonce must fail the length guard")
+	}
+}
+
 func TestGenerateCEK_Size(t *testing.T) {
 	cek, err := GenerateCEK()
 	if err != nil {
