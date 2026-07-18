@@ -168,6 +168,8 @@ type declaredApp struct {
 var declaredApps = []declaredApp{
 	{id: "clinic-app", label: "Clinic"},
 	{id: "loftspace-app", label: "LoftSpace"},
+	{id: "cafe-app", label: "Café"},
+	{id: "wellness-app", label: "Wellness"},
 }
 
 // skeletonEdges is the canonical data flow (architecture-overview.md §"data
