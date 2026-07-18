@@ -1,16 +1,21 @@
 // cmd/cafe-app — the Café app: a local web front-end for opening, charging,
 // and settling resident house tabs over a running Lattice deployment. Three
 // thin views: POS (pick a lease, open/charge/settle its tab), Front Desk (the
-// clinic-wide list of open tabs), and Resident (a lease's posted café ledger
-// history + any open tab).
+// clinic-wide list of open tabs), and Resident (a signed-in resident's own
+// open tab + posted café ledger history, or — signed out — any lease's, for
+// staff lookups).
 //
 // It is a vertical product app, distinct from Loupe (the operator tool) and a
-// sibling of loftspace-app/clinic-app. WRITES go browser-direct to the
-// Gateway's POST /v1/operations with a staff Bearer token (mirrors
-// loftspace-app/clinic-app's own "staff" actor-kind — every café op is
-// grantsTo:[operator] scope:any, so no per-resident identity token is
-// needed). READS are all plain NATS-KV lens projections (P5) — no protected
-// Postgres read model exists for café, so this app carries no pgxpool.
+// sibling of loftspace-app/clinic-app/wellness-app. WRITES go browser-direct
+// to the Gateway's POST /v1/operations, by default with a staff Bearer token
+// (mirrors loftspace-app/clinic-app's own "staff" actor-kind — Charge is
+// grantsTo:[operator] scope:any). The Resident view's Me bar additionally
+// lets a resident sign in as themselves: OpenTab/Settle also grant
+// `consumer` scope=self (packages/cafe-domain/permissions.go), so a
+// resident can open or settle THEIR OWN tab with a token minted for their
+// own identity (mirrors wellness-app's Me bar). READS are all plain NATS-KV
+// lens projections (P5) — no protected Postgres read model exists for café,
+// so this app carries no pgxpool.
 //
 // SAFETY: this app has NO authentication and acts as admin. It binds
 // 127.0.0.1 only by default; a non-loopback CAFE_APP_ADDR is an explicit
@@ -21,7 +26,7 @@
 //	CAFE_APP_ADDR      HTTP listen address (default: 127.0.0.1:7801)
 //	NATS_URL           NATS server URL (default: nats://localhost:4222)
 //	BOOTSTRAP_JSON_PATH  path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
-//	CAFE_APP_DEV_AUTH  "1" enables the demo staff dev-token minter (loopback bind only).
+//	CAFE_APP_DEV_AUTH  "1" enables the demo staff + resident dev-token minter (loopback bind only).
 //	CAFE_APP_INSTANCE  Health-KV instance id (default: auto-generated cafe-<NanoID>).
 //	CAFE_APP_HEARTBEAT_EVERY  Health-KV heartbeat cadence (default: 10s).
 //	CAFE_APP_GATEWAY_URL  the Gateway's base URL the FE submits writes to, browser-direct

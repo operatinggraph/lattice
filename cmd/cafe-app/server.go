@@ -24,11 +24,11 @@ type server struct {
 	logger      *slog.Logger
 	natsTimeout time.Duration
 
-	// devSigner mints the staff Bearer token the FE presents to the Gateway;
-	// nil unless CAFE_APP_DEV_AUTH is enabled. Every café op is
-	// grantsTo:[operator] scope:any, so a single staff token (minted for
-	// this app's own admin actor) covers every write — no per-resident
-	// identity token is needed.
+	// devSigner mints the Bearer tokens the FE presents to the Gateway; nil
+	// unless CAFE_APP_DEV_AUTH is enabled. It mints the fixed staff token
+	// (handleStaffDevToken, covers Charge + the operator-scope OpenTab/
+	// Settle path) and, per-resident, a token for a signed-in resident's own
+	// identity (handleDevToken, OpenTab/Settle's consumer scope=self path).
 	devSigner *devSigner
 
 	// gatewayURL is the Gateway's externally-reachable base URL, served to
@@ -51,7 +51,9 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/frontdesk-lease-details", s.handleFrontDeskLeaseDetails)
 	mux.HandleFunc("/api/frontdesk-visits", s.handleFrontDeskVisits)
 	mux.HandleFunc("/api/ledger", s.handleLedger)
+	mux.HandleFunc("/api/residents", s.handleResidents)
 	mux.HandleFunc("/api/staff/dev-token", s.handleStaffDevToken)
+	mux.HandleFunc("/api/dev-token", s.handleDevToken)
 	mux.HandleFunc("/api/config", s.handleConfig)
 }
 

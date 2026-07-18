@@ -16,6 +16,13 @@
   </nav>
 </header>
 
+<div id="me-bar" class="me-bar">
+  <span id="me-status" class="me-status">Not signed in</span>
+  <select id="me-resident"></select>
+  <button id="me-signin" class="ghost">Sign in as resident</button>
+  <button id="me-signout" class="ghost" hidden>Sign out</button>
+</div>
+
 <main>
   <section id="view-pos" role="tabpanel">
     <div class="panel-controls">
@@ -37,7 +44,7 @@
 
   <section id="view-resident" role="tabpanel" hidden>
     <div class="panel-controls">
-      <label for="resident-lease">Lease</label>
+      <label id="resident-lease-label" for="resident-lease">Lease</label>
       <select id="resident-lease"></select>
       <button id="resident-refresh" class="ghost">Refresh</button>
     </div>

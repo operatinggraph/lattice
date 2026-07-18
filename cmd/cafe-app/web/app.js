@@ -32,26 +32,84 @@ async function staffReadToken() {
   return body.token;
 }
 
-// submitOp posts one operation to the Gateway, browser-direct, with the
-// staff Bearer token — every café op (OpenTab/Charge/Settle) is
-// grantsTo:[operator] scope:any, so the fixed staff identity covers every
-// write (no per-resident login exists in this thin FE).
-async function submitOp(body) {
-  const [base, token] = await Promise.all([gatewayURL(), staffReadToken()]);
+// ---- self-service session -------------------------------------------
+
+// selfBookerKey is the signed-in resident's own identity key (the "Me" bar),
+// persisted across reloads. OpenTab/Settle's consumer scope=self grant
+// requires authContext.target to name that identity (packages/cafe-domain/
+// permissions.go), so signing in is just picking which resident you are —
+// mirrors cmd/wellness-app's own Me bar.
+const SELF_BOOKER_STORAGE_KEY = "cafe.selfBookerKey";
+let selfBookerKey = localStorage.getItem(SELF_BOOKER_STORAGE_KEY) || null;
+
+function signInAsSelf(bookerKey) {
+  selfBookerKey = bookerKey;
+  selfTokenCache = null;
+  localStorage.setItem(SELF_BOOKER_STORAGE_KEY, bookerKey);
+}
+
+function signOutSelf() {
+  selfBookerKey = null;
+  selfTokenCache = null;
+  localStorage.removeItem(SELF_BOOKER_STORAGE_KEY);
+}
+
+let selfTokenCache = null;
+async function selfWriteToken() {
+  if (!selfBookerKey) throw new Error("not signed in");
+  if (selfTokenCache && selfTokenCache.subject === selfBookerKey &&
+      Date.parse(selfTokenCache.expiresAt) - Date.now() > 5000) {
+    return selfTokenCache.token;
+  }
+  const body = await api("/api/dev-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject: idOf(selfBookerKey) }),
+  });
+  selfTokenCache = { subject: selfBookerKey, token: body.token, expiresAt: body.expiresAt };
+  return body.token;
+}
+
+// submitOp posts one operation to the Gateway, browser-direct. By default it
+// uses the staff Bearer token (Charge's operator scope:any covers it, and
+// so does the operator half of OpenTab/Settle); passing opts.asSelf instead
+// submits with a token minted for the signed-in resident's own identity,
+// and stamps authContext.target so the platform's scope=self check
+// (op.actor == authContext.target) and cafe-domain's own applicationFor
+// indirection check both resolve to that resident.
+async function submitOp(body, opts) {
+  const asSelf = !!(opts && opts.asSelf);
+  const [base, token] = await Promise.all([gatewayURL(), asSelf ? selfWriteToken() : staffReadToken()]);
+  const withAuth = asSelf ? Object.assign({}, body, { authContext: { target: selfBookerKey } }) : body;
   return api(base + "/v1/operations", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify(body),
+    body: JSON.stringify(withAuth),
   });
 }
 
-async function opOrThrow(body, what) {
-  const reply = await submitOp(body);
+async function opOrThrow(body, what, opts) {
+  const reply = await submitOp(body, opts);
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
     throw new Error(`Could not ${what} — ${msg}`);
   }
   return reply || {};
+}
+
+// idOf returns a key's raw trailing NanoID segment (unlike shortKey, which
+// truncates for display) — used to compose a link key from two vertex keys.
+function idOf(key) {
+  const parts = (key || "").split(".");
+  return parts[parts.length - 1];
+}
+
+// applicationForOptionalRead returns the OpenTab/Settle self-scope guard's
+// declared read (packages/cafe-domain/ddls.go): a resident submitting
+// asSelf must declare the lease's applicationFor→identity link so the
+// Starlark script can confirm the lease is theirs without a live GET.
+function applicationForOptionalRead(leaseAppKey, bookerKey) {
+  return "lnk.leaseapp." + idOf(leaseAppKey) + ".applicationFor.identity." + idOf(bookerKey);
 }
 
 // ---- formatting --------------------------------------------------------
@@ -137,6 +195,45 @@ function fillLeaseSelect(select, leases) {
     select.appendChild(opt);
   }
   if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
+}
+
+// ---- residents (Me bar picker data) ---------------------------------
+
+let residentsCache = null;
+async function loadResidents() {
+  if (residentsCache) return residentsCache;
+  const body = await api("/api/residents");
+  residentsCache = body.residents || [];
+  return residentsCache;
+}
+
+function fillResidentSelect(select, residents) {
+  select.innerHTML = "";
+  if (!residents.length) {
+    const opt = document.createElement("option");
+    opt.textContent = "(no residents)";
+    opt.value = "";
+    select.appendChild(opt);
+    return;
+  }
+  const opt0 = document.createElement("option");
+  opt0.value = "";
+  opt0.textContent = "(choose a resident)";
+  select.appendChild(opt0);
+  for (const r of residents) {
+    const opt = document.createElement("option");
+    opt.value = r.bookerKey;
+    opt.textContent = shortKey(r.bookerKey) + (r.approved ? " (resident)" : " (applicant)");
+    select.appendChild(opt);
+  }
+}
+
+// leaseAppKeyForBooker looks up a signed-in resident's own lease from the
+// resident roster, so the Resident view can resolve which lease is
+// "theirs" without a protected read model.
+function leaseAppKeyForBooker(bookerKey, residents) {
+  const r = residents.find((x) => x.bookerKey === bookerKey);
+  return r ? r.leaseAppKey : "";
 }
 
 // ---- POS view --------------------------------------------------------
@@ -361,19 +458,38 @@ function frontDeskCard(t, booking, lease, visit) {
 
 // ---- Resident view ------------------------------------------------
 
+// residentOwnLeaseAppKey caches the signed-in resident's own lease across a
+// loadResident/renderResident pass — resolved once per load from the
+// residents roster (leaseAppKeyForBooker), since the lease-picker select is
+// hidden (not the value source) in self mode.
+let residentOwnLeaseAppKey = "";
+
 async function loadResident() {
   const select = document.getElementById("resident-lease");
-  const leases = await loadLeases();
-  fillLeaseSelect(select, leases);
+  const label = document.getElementById("resident-lease-label");
+  if (selfBookerKey) {
+    label.hidden = true;
+    select.hidden = true;
+    const residents = await loadResidents();
+    residentOwnLeaseAppKey = leaseAppKeyForBooker(selfBookerKey, residents);
+  } else {
+    label.hidden = false;
+    select.hidden = false;
+    const leases = await loadLeases();
+    fillLeaseSelect(select, leases);
+  }
   await renderResident();
 }
 
 async function renderResident() {
   const body = document.getElementById("resident-body");
-  const leaseAppKey = document.getElementById("resident-lease").value;
+  const selfMode = !!selfBookerKey;
+  const leaseAppKey = selfMode ? residentOwnLeaseAppKey : document.getElementById("resident-lease").value;
   body.innerHTML = "";
   if (!leaseAppKey) {
-    body.innerHTML = '<div class="empty">Pick a lease to view its house-tab history.</div>';
+    body.innerHTML = selfMode
+      ? '<div class="empty">No lease found for your identity yet.</div>'
+      : '<div class="empty">Pick a lease to view its house-tab history.</div>';
     return;
   }
   let ledger, tabs;
@@ -392,7 +508,16 @@ async function renderResident() {
   if (open) {
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(open.totalCents) +
-      '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p></div>"
+      '</p><p class="meta">Opened ' + (open.openedAt || "?") + " — not yet settled</p></div>" +
+      (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
+    );
+  } else if (selfMode) {
+    parts.push(
+      '<div class="panel">' +
+      "<h2>No open tab</h2>" +
+      '<p class="lead">Start a house tab for your own lease.</p>' +
+      '<div class="panel-actions"><button id="resident-open-tab-btn">Open Tab</button></div>' +
+      "</div>"
     );
   }
   if (pendingSettled) {
@@ -428,6 +553,56 @@ async function renderResident() {
     "</div>"
   );
   body.innerHTML = parts.join("");
+  if (selfMode) {
+    const openBtn = document.getElementById("resident-open-tab-btn");
+    if (openBtn) {
+      openBtn.addEventListener("click", async () => {
+        openBtn.disabled = true;
+        try {
+          await opOrThrow(
+            {
+              operationType: "OpenTab",
+              class: "tab",
+              reads: [leaseAppKey],
+              optionalReads: [leaseAppKey + ".cafeOpenTab", applicationForOptionalRead(leaseAppKey, selfBookerKey)],
+              payload: { leaseAppKey },
+            },
+            "open the tab",
+            { asSelf: true }
+          );
+          toast("Tab opened.", true);
+          setTimeout(renderResident, 700);
+        } catch (e) {
+          toast(e.message, false);
+          openBtn.disabled = false;
+        }
+      });
+    }
+    const settleBtn = document.getElementById("resident-settle-btn");
+    if (settleBtn) {
+      settleBtn.addEventListener("click", async () => {
+        settleBtn.disabled = true;
+        try {
+          await opOrThrow(
+            {
+              operationType: "Settle",
+              class: "tab",
+              reads: [open.tabKey, open.tabKey + ".status"],
+              optionalReads: [applicationForOptionalRead(leaseAppKey, selfBookerKey)],
+              payload: { tabKey: open.tabKey },
+            },
+            "settle the tab",
+            { asSelf: true }
+          );
+          toast("Tab settled — posting to the café ledger shortly.", true);
+          setTimeout(renderResident, 700);
+        } catch (e) {
+          toast(e.message, false);
+          settleBtn.disabled = false;
+        }
+      });
+    }
+  }
   const paymentForm = document.getElementById("payment-form");
   if (paymentForm) {
     paymentForm.addEventListener("submit", async (ev) => {
@@ -462,6 +637,53 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+// ---- Me bar ---------------------------------------------------------
+
+// refreshCurrentView re-renders whichever tab is active — called after
+// signing in/out so the Resident view picks up the new self-service mode
+// without a full page reload.
+function refreshCurrentView() {
+  const active = document.querySelector(".tab.active");
+  if (active) showView(active.dataset.view);
+}
+
+async function initMeBar() {
+  const status = document.getElementById("me-status");
+  const select = document.getElementById("me-resident");
+  const signinBtn = document.getElementById("me-signin");
+  const signoutBtn = document.getElementById("me-signout");
+
+  function refreshMeUI() {
+    if (selfBookerKey) {
+      status.textContent = "Signed in as " + shortKey(selfBookerKey);
+      select.hidden = true;
+      signinBtn.hidden = true;
+      signoutBtn.hidden = false;
+    } else {
+      status.textContent = "Not signed in";
+      select.hidden = false;
+      signinBtn.hidden = false;
+      signoutBtn.hidden = true;
+    }
+  }
+
+  const residents = await loadResidents();
+  fillResidentSelect(select, residents);
+  refreshMeUI();
+
+  signinBtn.addEventListener("click", () => {
+    if (!select.value) { toast("Pick a resident first.", false); return; }
+    signInAsSelf(select.value);
+    refreshMeUI();
+    refreshCurrentView();
+  });
+  signoutBtn.addEventListener("click", () => {
+    signOutSelf();
+    refreshMeUI();
+    refreshCurrentView();
+  });
+}
+
 // ---- init --------------------------------------------------------
 
 function init() {
@@ -473,6 +695,7 @@ function init() {
   document.getElementById("frontdesk-refresh").addEventListener("click", loadFrontDesk);
   document.getElementById("resident-lease").addEventListener("change", renderResident);
   document.getElementById("resident-refresh").addEventListener("click", () => { leasesCache = null; loadResident(); });
+  initMeBar();
   loadPos();
 }
 
