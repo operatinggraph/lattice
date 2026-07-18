@@ -27,8 +27,8 @@ public final class ManifestStore: ObservableObject {
     public init() {}
 
     /// Wires the write path: called once `FacetSwiftUISpikeApp.connect()`
-    /// has a logged-in `FeedClient`, so `enqueue(operationType:payload:)`
-    /// below has somewhere to send a write. The store owns the outbox
+    /// has a logged-in `FeedClient`, so `enqueue`/`submitDescriptorForm`
+    /// below have somewhere to send a write. The store owns the outbox
     /// lifecycle already (`apply`'s `.outbox` case), so it is the natural
     /// owner of the trigger too, not `ContentView` reaching into a client
     /// reference of its own.
@@ -42,15 +42,29 @@ public final class ManifestStore: ObservableObject {
     /// an `outbox` frame, not as this call's return value. A synchronous
     /// failure (no session, network) surfaces as a status message since
     /// there is no `requestId` yet to hang an outbox row off.
-    public func enqueue(operationType: String, payload: JSONValue, authContext: JSONValue? = nil, optionalReads: [String] = []) async {
+    public func enqueue(
+        operationType: String, payload: JSONValue, reads: [String] = [],
+        optionalReads: [String] = [], authContext: JSONValue? = nil, touchedKey: String? = nil
+    ) async {
         guard let feedClient else { return }
         do {
             _ = try await feedClient.enqueue(
-                operationType: operationType, payload: payload,
-                optionalReads: optionalReads, authContext: authContext)
+                operationType: operationType, payload: payload, reads: reads,
+                optionalReads: optionalReads, authContext: authContext, touchedKey: touchedKey ?? "")
         } catch {
             statusMessage = "Enqueue failed: \(error)"
         }
+    }
+
+    /// Submits one write assembled by `DescriptorForm.buildSubmission` — the
+    /// real descriptor-form path (`ContentView`'s tapped catalog row), as
+    /// opposed to `enqueue` above's bare empty-payload trigger.
+    public func submitDescriptorForm(op: JSONValue, fieldValues: [String: String], ctx: DescriptorContext) async {
+        guard let operationType = op["operationType"]?.stringValue else { return }
+        let submission = DescriptorForm.buildSubmission(op: op, fieldValues: fieldValues, ctx: ctx)
+        await enqueue(
+            operationType: operationType, payload: submission.payload, reads: submission.reads,
+            authContext: submission.authContext, touchedKey: submission.touchedKey)
     }
 
     public func apply(_ frame: ManifestFrame) {

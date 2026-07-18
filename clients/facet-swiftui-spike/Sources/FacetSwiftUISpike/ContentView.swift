@@ -8,6 +8,12 @@ import FacetManifestKit
 /// appears here with zero app change, same claim as the PWA renderer.
 struct ContentView: View {
     @EnvironmentObject var store: ManifestStore
+    @State private var selectedOp: SelectedOp?
+
+    private struct SelectedOp: Identifiable {
+        let id: String
+        let op: JSONValue
+    }
 
     var body: some View {
         NavigationStack {
@@ -45,6 +51,9 @@ struct ContentView: View {
                     }
                 }
             }
+            .sheet(item: $selectedOp) { selected in
+                DescriptorFormSheet(op: selected.op).environmentObject(store)
+            }
         }
     }
 
@@ -64,36 +73,27 @@ struct ContentView: View {
         }
     }
 
-    /// The write-path trigger: unlike `app.js`'s descriptor-form renderer
-    /// (`facet-app-ux.md` §3.6), which resolves a `manifest.op` row's
-    /// `inputSchema`/`dispatch` fields into a real form before submitting,
-    /// this spike proves only that a SwiftUI view CAN drive
-    /// `ManifestStore.enqueue` end-to-end — an empty-object payload, no
-    /// field resolution. An op requiring payload fields will come back
-    /// `rejected` over the Outbox section below rather than `confirmed`;
-    /// that is still a real round trip through the same envelope path a
-    /// filled-in form would use. Building the actual form renderer is
-    /// named, not done, in the design's residual (§7 Fire 5).
+    /// The write-path trigger: tapping a catalog row opens `DescriptorFormSheet`,
+    /// which resolves the row's `inputSchema`/`dispatch` fields (`DescriptorForm`)
+    /// into a real form before submitting — the Fire 5 Inc 3 successor to
+    /// Inc 2's blind empty-payload "Enqueue" button.
     @ViewBuilder
     private func catalogSection() -> some View {
         if !store.ops.isEmpty {
             Section("Catalog (\(store.ops.count))") {
                 ForEach(Array(store.ops.enumerated()), id: \.offset) { _, row in
-                    HStack {
+                    Button {
+                        let id = row["opMetaKey"]?.stringValue ?? row["operationType"]?.stringValue ?? UUID().uuidString
+                        selectedOp = SelectedOp(id: id, op: row)
+                    } label: {
                         VStack(alignment: .leading) {
                             Text(row["title"]?.stringValue ?? "(untitled)")
                             if let subtitle = row["description"]?.stringValue {
                                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
                             }
                         }
-                        Spacer()
-                        if let operationType = row["operationType"]?.stringValue {
-                            Button("Enqueue") {
-                                Task { await store.enqueue(operationType: operationType, payload: .object([:])) }
-                            }
-                            .buttonStyle(.bordered)
-                        }
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }

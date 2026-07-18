@@ -21,6 +21,22 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // (tabVertexTypeDDL), the Contract #2 §2.1 envelope `class` DDL-hint (never
 // the vertical name "cafe" — see clinic-domain's opmetas.go doc comment for
 // the regression that mistake caused).
+//
+// OpenTab's Dispatch.Reads ({payload.leaseAppKey}) is this package's first
+// real use of the Reads template vocabulary (OpDispatchSpec.Reads;
+// definition.go — mirrors wellness-domain's opmetas.go doc comment on being
+// the first real use of ContextParams): a client-driven descriptor-form
+// submission must declare the lease vertex itself in ContextHint.Reads
+// (required, not optional) for tabDDLScript's `state[lease_key]` liveness
+// check (ddls.go) — discovered live during the Facet second-renderer spike
+// (edge-showcase-app-design.md §7.11) when a hand-built envelope that
+// declared only the applicationFor link in OptionalReads came back
+// UnknownLeaseApplication. This does not by itself make OpenTab fully
+// descriptor-form-drivable: the per-lease cafeOpenTabGuard dedup read and
+// the self-scope ownership check both need the guard aspect key and the
+// applicationFor link in ContextHint.OptionalReads, and OpDispatchSpec has
+// no OptionalReads-equivalent field yet — a genuine, still-open vocabulary
+// gap (§7.11's residual), not something this comment papers over.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -41,6 +57,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "tab",
 				AuthContext: "self",
+				Reads:       []string{"{payload.leaseAppKey}"},
 			},
 		},
 		{
