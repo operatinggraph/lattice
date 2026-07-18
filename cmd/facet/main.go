@@ -33,6 +33,10 @@
 //	FACET_DEV_AUTH     set to enable POST /api/claim + the /login session flow
 //	                   (session.go, claim.go) — mints demo JWTs in-process for
 //	                   any caller-named identity; loopback-only, demo posture only
+//	FACET_DEMO_PERSONAS  OPTIONAL JSON array [{"id","label","sub"}] of curated
+//	                   sign-in personas (deploy/demo): the login page offers
+//	                   exactly these as one-tap cards, /api/dev-login refuses
+//	                   every other subject, and /api/claim is disabled
 //	FACET_DEV_PRIVATE_KEY_PATH  overrides the shared dev signing key path (optional)
 //	FACET_DEV_PUBLIC_KEY_PATH   overrides the shared dev trust key path (optional)
 //	FACET_PG_DSN       OPTIONAL Postgres DSN for the identityCredentialsRead
@@ -112,6 +116,13 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	personas, err := parseDemoPersonas(os.Getenv("FACET_DEMO_PERSONAS"))
+	if err != nil {
+		return err
+	}
+	if len(personas) > 0 {
+		logger.Info("demo-persona posture enabled: login is fenced to the listed personas and /api/claim is disabled", "personas", len(personas))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -180,6 +191,7 @@ func run(logger *slog.Logger) error {
 		pgPool:         pgPool,
 		browserEngine:  browserEngine,
 		bootToken:      os.Getenv("EDGE_TOKEN"),
+		personas:       personas,
 	}
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)

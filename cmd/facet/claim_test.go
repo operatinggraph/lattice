@@ -54,6 +54,18 @@ func TestHandleClaim_MethodNotAllowed(t *testing.T) {
 	require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 }
 
+func TestHandleClaim_DisabledInDemoPersonaPosture(t *testing.T) {
+	srv := &server{
+		logger:    slog.Default(),
+		devSigner: testDevSigner(t),
+		personas:  []demoPersona{{ID: "aaaaaaaaaaaaaaaaaaaa", Label: "Riley"}},
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(`{"targetIdentityKey":"vtx.identity.abc","claimKey":"secret"}`))
+	srv.handleClaim(w, r)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
 func TestHandleClaim_SubmitsExpectedEnvelopeAndReturnsCredential(t *testing.T) {
 	var gotAuth string
 	var gotEnv struct {

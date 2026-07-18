@@ -30,6 +30,7 @@ const loginPagePath = "/login"
 const devLoginPath = "/api/dev-login"
 const logoutPath = "/api/logout"
 const whoamiPath = "/api/whoami"
+const loginOptionsPath = "/api/login-options"
 
 // isSessionAuthExempt reports whether path is reachable with no session
 // cookie at all — the login page, the endpoints that establish/clear one,
@@ -38,11 +39,87 @@ const whoamiPath = "/api/whoami"
 // place). Mirrors cmd/loupe/readauth.go's isOperatorAuthExempt.
 func isSessionAuthExempt(path string) bool {
 	switch path {
-	case loginPagePath, devLoginPath, logoutPath, whoamiPath, "/api/claim":
+	case loginPagePath, devLoginPath, logoutPath, whoamiPath, loginOptionsPath, "/api/claim":
 		return true
 	default:
 		return false
 	}
+}
+
+// demoPersona is one entry of FACET_DEMO_PERSONAS — the hosted-demo login
+// posture (deploy/demo): a curated, seed-derived identity the login page
+// offers as a one-tap sign-in card. While the list is non-empty these are
+// also the ONLY subjects handleDevLogin will mint for, and /api/claim is
+// disabled: the demo world's residents are fixed, so the open any-subject
+// minter and the claim ceremony's write surface both stay unreachable from
+// the proxied public listener.
+type demoPersona struct {
+	// ID is the persona's bare identity NanoID (a "vtx.identity." prefix is
+	// tolerated and stripped at parse).
+	ID string `json:"id"`
+	// Label is the card's headline (e.g. the seeded resident's name).
+	Label string `json:"label"`
+	// Sub is an optional second line (e.g. "Resident · Unit 1").
+	Sub string `json:"sub,omitempty"`
+}
+
+// parseDemoPersonas parses the FACET_DEMO_PERSONAS env value. Empty input is
+// the non-demo posture (nil list). Every entry must carry a valid bare
+// NanoID and a label — a malformed list fails startup rather than silently
+// widening the fence to nothing.
+func parseDemoPersonas(raw string) ([]demoPersona, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var personas []demoPersona
+	if err := json.Unmarshal([]byte(raw), &personas); err != nil {
+		return nil, fmt.Errorf("FACET_DEMO_PERSONAS: %w", err)
+	}
+	if len(personas) == 0 {
+		return nil, fmt.Errorf("FACET_DEMO_PERSONAS: set but names no personas")
+	}
+	for i := range personas {
+		personas[i].ID = strings.TrimPrefix(strings.TrimSpace(personas[i].ID), "vtx.identity.")
+		if !substrate.IsValidNanoID(personas[i].ID) {
+			return nil, fmt.Errorf("FACET_DEMO_PERSONAS[%d]: id must be a 20-character NanoID", i)
+		}
+		if strings.TrimSpace(personas[i].Label) == "" {
+			return nil, fmt.Errorf("FACET_DEMO_PERSONAS[%d]: label is required", i)
+		}
+	}
+	return personas, nil
+}
+
+// personaAllowed reports whether bareID may sign in under the current
+// posture: an empty persona list allows any identity (the dev default), a
+// non-empty one allows exactly its members.
+func (s *server) personaAllowed(bareID string) bool {
+	if len(s.personas) == 0 {
+		return true
+	}
+	for _, p := range s.personas {
+		if p.ID == bareID {
+			return true
+		}
+	}
+	return false
+}
+
+// handleLoginOptions implements GET /api/login-options — the login page's
+// probe for the demo-persona posture. Always answers (an empty list means
+// "no personas configured; show the free-form dev sign-in"), so the page
+// needs no other configuration channel.
+func (s *server) handleLoginOptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "GET required")
+		return
+	}
+	personas := s.personas
+	if personas == nil {
+		personas = []demoPersona{}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"personas": personas})
 }
 
 func (s *server) setSessionCookie(w http.ResponseWriter, token string, exp time.Time) {
@@ -231,6 +308,10 @@ func (s *server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "identityId must be a 20-character NanoID")
 		return
 	}
+	if !s.personaAllowed(bareID) {
+		s.writeError(w, http.StatusForbidden, "this deployment only signs in the listed demo personas")
+		return
+	}
 	token, exp, err := s.devSigner.mint(bareID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint session token: "+err.Error())
@@ -256,6 +337,13 @@ func (s *server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		// extra, it just signs in as the credential itself.
 		s.logger.Error("facet: credential-binding resolve failed; signing in as the raw credential", "actor", bareID, "error", rerr)
 	} else if resolved != "" && resolved != bareID {
+		// The persona fence applies to the identity the session actually
+		// opens, not just the credential typed in — a linked credential that
+		// resolves outside the persona list must not become a side door.
+		if !s.personaAllowed(resolved) {
+			s.writeError(w, http.StatusForbidden, "this deployment only signs in the listed demo personas")
+			return
+		}
 		token, exp, err = s.devSigner.mint(resolved)
 		if err != nil {
 			s.writeError(w, http.StatusInternalServerError, "mint resolved session token: "+err.Error())

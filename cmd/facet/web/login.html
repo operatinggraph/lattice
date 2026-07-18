@@ -74,12 +74,29 @@
     .hint { font-size: 12px; color: var(--text-dim); margin: 6px 0 0; }
     .status { margin-top: 14px; font-size: 12px; color: var(--text-dim); min-height: 1.5em; }
     .status.error { color: var(--red); }
+    .persona {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      cursor: pointer;
+    }
+    .persona:hover { background: var(--accent-dim); border-color: var(--accent); }
+    .persona .p-label { display: block; font-weight: 600; font-size: 14px; }
+    .persona .p-sub { display: block; color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+    #personas { display: none; }
   </style>
 </head>
 <body>
   <div class="card">
     <p class="brand">Facet <span class="brand-sub">· Lattice Edge</span></p>
     <p class="lede">Sign in as an identity to open its own view — same app, different data per identity.</p>
+
+    <div id="personas"></div>
 
     <form id="login-form" novalidate>
       <label for="identity-id">Identity id</label>
@@ -105,6 +122,7 @@
   <script>
     (function () {
       var statusEl = document.getElementById("status");
+      var personasEl = document.getElementById("personas");
       var loginForm = document.getElementById("login-form");
       var identityInput = document.getElementById("identity-id");
       var loginSubmit = document.getElementById("login-submit");
@@ -127,6 +145,45 @@
         .then(function (res) { return res.json(); })
         .then(function (body) { if (body && body.loggedIn && body.canSignOut) location.replace("/"); })
         .catch(function () { /* stay on this page */ });
+
+      // Demo-persona posture: when the host names personas, render them as
+      // one-tap sign-in cards and hide the free-form dev sign-in + claim
+      // forms (the host refuses non-persona subjects anyway — this keeps the
+      // page honest about what it offers).
+      fetch("/api/login-options", { credentials: "same-origin" })
+        .then(function (res) { return res.json(); })
+        .then(function (body) {
+          var personas = (body && body.personas) || [];
+          if (!personas.length) { return; }
+          document.querySelectorAll("#login-form, #claim-form, .divider, .hint").forEach(function (el) {
+            el.style.display = "none";
+          });
+          personas.forEach(function (p) {
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "persona";
+            var label = document.createElement("span");
+            label.className = "p-label";
+            label.textContent = "Sign in as " + p.label;
+            btn.appendChild(label);
+            if (p.sub) {
+              var sub = document.createElement("span");
+              sub.className = "p-sub";
+              sub.textContent = p.sub;
+              btn.appendChild(sub);
+            }
+            btn.addEventListener("click", function () {
+              btn.disabled = true;
+              setStatus("Signing in…");
+              devLogin(p.id)
+                .catch(function (e) { setStatus("Request failed: " + e.message, true); })
+                .finally(function () { btn.disabled = false; });
+            });
+            personasEl.appendChild(btn);
+          });
+          personasEl.style.display = "block";
+        })
+        .catch(function () { /* no personas — the dev forms stay */ });
 
       function devLogin(identityId) {
         return fetch("/api/dev-login", {

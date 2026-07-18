@@ -62,6 +62,10 @@ type server struct {
 	// is the token injected for that identity (there is no cookie to read it
 	// from). Empty in a login-only deployment.
 	bootToken string
+	// personas, when non-empty, puts the process in the demo-persona posture
+	// (FACET_DEMO_PERSONAS, session.go): the login page offers exactly these
+	// identities, dev-login refuses all others, and /api/claim is disabled.
+	personas []demoPersona
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -87,6 +91,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/credentials/link", s.handleCredentialsLink)
 	inner.HandleFunc("/api/credentials/unlink", s.handleCredentialsUnlink)
 	inner.HandleFunc(loginPagePath, s.handleLoginPage)
+	inner.HandleFunc(loginOptionsPath, s.handleLoginOptions)
 	inner.HandleFunc(devLoginPath, s.handleDevLogin)
 	inner.HandleFunc(logoutPath, s.handleLogout)
 	inner.HandleFunc(whoamiPath, s.handleWhoami)

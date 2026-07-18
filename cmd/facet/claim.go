@@ -159,6 +159,13 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, "claim is disabled (FACET_DEV_AUTH not set)")
 		return
 	}
+	// Demo-persona posture (FACET_DEMO_PERSONAS, session.go): the world's
+	// residents are fixed and pre-claimed, so the ceremony's write surface
+	// stays closed — same fail-closed shape as the nil-signer gate above.
+	if len(s.personas) > 0 {
+		s.writeError(w, http.StatusNotFound, "claim is disabled (demo-persona deployment)")
+		return
+	}
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return

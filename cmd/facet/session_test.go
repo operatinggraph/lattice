@@ -239,3 +239,80 @@ func TestSetupSessionAuthn_NilSignerYieldsNilAuthenticator(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, authn)
 }
+
+func TestParseDemoPersonas(t *testing.T) {
+	id1, id2 := testNanoID(t), testNanoID(t)
+
+	t.Run("unset means no posture", func(t *testing.T) {
+		personas, err := parseDemoPersonas("")
+		require.NoError(t, err)
+		require.Nil(t, personas)
+	})
+	t.Run("valid list, vtx prefix stripped", func(t *testing.T) {
+		personas, err := parseDemoPersonas(
+			`[{"id":"vtx.identity.` + id1 + `","label":"Riley","sub":"Unit 1"},{"id":"` + id2 + `","label":"Sam"}]`)
+		require.NoError(t, err)
+		require.Len(t, personas, 2)
+		require.Equal(t, id1, personas[0].ID)
+		require.Equal(t, id2, personas[1].ID)
+	})
+	t.Run("set but empty is an error", func(t *testing.T) {
+		_, err := parseDemoPersonas(`[]`)
+		require.Error(t, err)
+	})
+	t.Run("non-NanoID id is an error", func(t *testing.T) {
+		_, err := parseDemoPersonas(`[{"id":"../../etc/passwd","label":"x"}]`)
+		require.Error(t, err)
+	})
+	t.Run("missing label is an error", func(t *testing.T) {
+		_, err := parseDemoPersonas(`[{"id":"` + id1 + `"}]`)
+		require.Error(t, err)
+	})
+}
+
+func TestHandleDevLogin_PersonaFence(t *testing.T) {
+	allowed, outsider := testNanoID(t), testNanoID(t)
+	srv := &server{
+		logger:    slog.Default(),
+		devSigner: testDevSigner(t),
+		personas:  []demoPersona{{ID: allowed, Label: "Riley"}},
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, devLoginPath, strings.NewReader(`{"identityId":"`+outsider+`"}`))
+	srv.handleDevLogin(w, r)
+	require.Equal(t, http.StatusForbidden, w.Code, "a valid NanoID outside the persona list must be refused")
+
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodPost, devLoginPath, strings.NewReader(`{"identityId":"`+allowed+`"}`))
+	srv.handleDevLogin(w, r)
+	require.Equal(t, http.StatusOK, w.Code, "a listed persona must sign in")
+	var cookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			cookie = c
+		}
+	}
+	require.NotNil(t, cookie, "persona sign-in must still set the session cookie")
+}
+
+func TestHandleLoginOptions(t *testing.T) {
+	require.True(t, isSessionAuthExempt(loginOptionsPath),
+		"the login page must be able to probe options before any session exists")
+
+	t.Run("no personas yields an empty list", func(t *testing.T) {
+		srv := &server{logger: slog.Default()}
+		w := httptest.NewRecorder()
+		srv.handleLoginOptions(w, httptest.NewRequest(http.MethodGet, loginOptionsPath, nil))
+		require.Equal(t, http.StatusOK, w.Code)
+		require.JSONEq(t, `{"personas":[]}`, w.Body.String())
+	})
+	t.Run("personas are returned verbatim", func(t *testing.T) {
+		id := testNanoID(t)
+		srv := &server{logger: slog.Default(), personas: []demoPersona{{ID: id, Label: "Riley", Sub: "Unit 1"}}}
+		w := httptest.NewRecorder()
+		srv.handleLoginOptions(w, httptest.NewRequest(http.MethodGet, loginOptionsPath, nil))
+		require.Equal(t, http.StatusOK, w.Code)
+		require.JSONEq(t, `{"personas":[{"id":"`+id+`","label":"Riley","sub":"Unit 1"}]}`, w.Body.String())
+	})
+}
