@@ -1,7 +1,12 @@
 # Edge gap detection without STREAM.INFO — the `personal.syncgap` control RPC
 
-**Status: 📐 awaiting-Andrew (ratification).**
-Author: Winston (Designer fire, 2026-07-17).
+**Status: ✅ Andrew-ratified (2026-07-17) — boolean result chosen (the §5 `firstSeq`
+alternative declined, on ownership-of-semantics + minimal-wire grounds); no frozen-contract edit
+(builds to Contract #6 §230's reserved `ctrl.<comp>.<verb>` namespace); the §7 availability trade-off
+(warm boot now depends on the control plane being up) accepted with the bounded-retry + `cmd/facet`
+sync-restart mitigation in scope for Inc 2. Build: ONE fire, two increments (§9), owned by the Lattice
+Steward.**
+Author: Winston (Designer fire, 2026-07-17). Ratified by Andrew in a /ratify session, 2026-07-17.
 Backlog row: `planning-artifacts/backlog/lattice.md` → *Security & trust boundary → Edge gap-detection
 needs STREAM.INFO, which the grant denies*.
 Demand source: filed 2026-07-17 by the EDGE.5 W3-inc-3b parity fire
@@ -25,8 +30,8 @@ SYNC stream's owner) answers one more identity-bound question. No frozen-contrac
 `ctrl.refractor.syncgap` verb builds **to** Contract #6 §230's reserved `ctrl.<comp>.<verb>` namespace
 (exact-match operationType), exactly as register/hydrate/sessionkey did.
 
-**The one real design call — answer with a boolean, not the first-sequence number (my recommendation,
-trade-off in §5, stated honestly).** The adversarial pass (§10) established that the boolean is **not**
+**The one real design call — DECIDED (Andrew, 2026-07-17): the boolean, not the first-sequence number
+(trade-off in §5, stated honestly).** The adversarial pass (§10) established that the boolean is **not**
 a side-channel closure: a client that controls `cursor` can binary-search `FirstSeq` in ≤64 calls, so
 under adaptive probing the two shapes disclose the same watermark. The boolean still wins on three
 grounds — the gap *semantic* (`cursor < FirstSeq`, and any future safety margin) stays with the
