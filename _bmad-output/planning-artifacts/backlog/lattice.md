@@ -164,8 +164,13 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > `cmd/facet` gains `FACET_BROWSER_ENGINE`, serving the wasm + shell assets and rewriting only the index to
 > inject `window.__EDGE_BOOT__` (token in-page under `no-store`, device id browser-local via
 > `boot.mjs` resolveDeviceId); nil = the shipped Go host, byte-identical. Go handler + node tested.
-> **Next named build-ready pick: EDGE.5 W4 inc 4b** — the Fire-4 cross-machine no-binary Gate-3 e2e (live
-> stack + `make build-edge-wasm` + headless Chrome; wire `make up-facet` for the native mode)
+> **EDGE.5 W4 inc 4b serving-wiring SHIPPED** (2026-07-17, `1573d11`) — `make up-facet-edge` stands
+> `cmd/facet` up in browser-native mode (builds the wasm, `FACET_BROWSER_ENGINE=1`, in-page engine over the
+> :9222 WS); serving surface live-verified (assets + `__EDGE_BOOT__` injection, `no-store`). **W4 remaining
+> tail = the live cross-machine Gate-3 e2e** (hydrate→order→confirm→task→offline→reconnect + read-bypass
+> twins): needs a FRESH stack mapping :9222 (the shared long-running container predates W1's compose change →
+> 9222 unmapped; recreating it wipes ephemeral JS, unsafe unattended), so it runs attended / on a dedicated
+> stack — not CI-inline (no Puppeteer; twins already covered by W1 vectors + PL.3 e2e + vector 4)
 > ([§3.4](../../implementation-artifacts/edge-browser-node-design.md)). The §8 full multi-persona
 > adversarial re-review of the EDGE.3 security boundary is ✅ COMPLETE (2026-07-16, Designer, 5 lenses) —
 > boundary holds, no CRITICAL/HIGH; 5 hardening follow-ons filed (RR-1…RR-5 below), none an EDGE.5 gate.
@@ -224,7 +229,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 WS half subsumed by the ratified [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md); multicast dedup stays deferred (bandwidth trigger) |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) W1–W3 ✅ · W4 inc 1–4a ✅ (through the browser-native serving surface) · next: W4 inc 4b Gate-3 cross-machine e2e |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) W1–W3 ✅ · W4 1–4a+4b-wiring ✅ (`up-facet-edge`) · next: inc 4b live Gate-3 e2e (fresh :9222 stack) |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ CLOSED (Fires 0–1; +6th read-grant lens at Fire 2) · [design §3.2 amendment](../../implementation-artifacts/edge-showcase-app-design.md) · app half continues as Facet Fire 3 (verticals.md) |
 | **RR-1 — Edge `Revision==0` delta ordering hazard** | Personal-lens adjacency-watch reprojection publishes sentinel seq-0 deltas to the Edge; the Edge LWW gate applies-on-equal so a reordered rev-0 upsert/tombstone transiently resurrects/drops a key. Guarded server adapters already skip seq-0; the Edge SYNC adapter doesn't. | ★★ | S–M | 📋 ready · [design §8.1 RR-1](../../implementation-artifacts/edge-lattice-full-design.md) · fix: skip seq-0 adj-watch write for the natssubject adapter |
 | **RR-4 — Edge producer→consumer envelope round-trip test** | The re-declared `deltaEnvelope` (sync.go) has no test decoding a real `NatsSubjectAdapter` envelope through the consumer struct + `edge/store`; a producer-side field rename passes CI. | ★ | S | 📋 ready · [design §8.1 RR-4](../../implementation-artifacts/edge-lattice-full-design.md) |
@@ -267,6 +272,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-17 · `1573d11` · [facet,edge] EDGE.5 W4 inc 4b serving-wiring — `make up-facet-edge` browser-native stack target (build-edge-wasm + `FACET_BROWSER_ENGINE=1`); serving surface live-verified; live Gate-3 e2e = the tail (fresh :9222 stack)
 - 2026-07-17 · `37617be` · [facet,edge] EDGE.5 W4 inc 4a — browser-native serving surface: `FACET_BROWSER_ENGINE` serves wasm+shell + injects `__EDGE_BOOT__` (token in-page/no-store, device id browser-local); nil = shipped Go host unchanged
 - 2026-07-17 · `5bbff9d` · [edge] RR-2 sync/agent reconcile hardening — poison-key Term (store.ErrUnstorableKey), unrecognized-status keeps intent queued, overlay Discard matches RequestID; CI green
 - 2026-07-17 · `b962871` · [CI] natsperm auth-callout PONG/PING flake fixed — connectEdge retries the pre-PONG RTT-PING race (nats-server 2s gate exceeded under CPU contention); deny vectors + prod conf untouched; stress 2/8→0/8
@@ -298,7 +304,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-13 · `8ccdfff` · [refractor,cmd/lattice] lens-registry-restart-integrity Fire B CLOSED — lensesRegistered metric + RegistryProbe reconciliation + health-summary lens staleness; live-stack verified; CI green
 - 2026-07-13 · `6503f22` · [refractor,substrate,loom] lens-registry-restart-integrity Fire A — CoreKVSource per-boot durable (fixes the live P0 cold-registry incident) + age-guarded PruneStaleDurables (all 4 meta-sources inherit it); CI green
 - 2026-07-13 · `ca9affe` · [controlauth,natsauth,control-authz] per-identity-nats-subscribe-acl Fire 2 tail — opened personal.hydrate/register/deregister (op table + consumer grant + transport); EDGE.4 unblocked; CI green
-- 2026-07-13 · `a6c3802` · [Core/bootstrap] test-coverage sweep — Persist, PrivacyActorKey (incl. pre-v15 absent case), seedPrimordialPerKey concurrent-bootstrap fallback; 65.7%→69.3%; CI green
-- 2026-07-12 · `4b8e815` · [Weaver] registry-cleanup-edge-branches-uncovered SHIPPED — CDC malformed-input paths covered, 84.8%→86.2%; CI green
-- 2026-07-12 · `d24446e` · [docs] doc sweep — README/architecture-overview/loupe.md corrected to reflect shipped D1 + Personal Lens + Edge Lattice EDGE.1-3 (were still marked designed/deferred)
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

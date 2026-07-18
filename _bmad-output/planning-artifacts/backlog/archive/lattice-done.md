@@ -2,7 +2,10 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-13 · `a6c3802` · [Core/bootstrap] test-coverage sweep — Persist, PrivacyActorKey (incl. pre-v15 absent case), seedPrimordialPerKey concurrent-bootstrap fallback; 65.7%→69.3%; CI green
 - 2026-07-13 · `9a86a01` · [Refractor] projection-package coverage sweep — Install{ActorAggregate,PersonalLens} wiring + personalEnvelopeFn D1/Interest-Set branches; 59.2%→93.0%; CI green
+- 2026-07-12 · `4b8e815` · [Weaver] registry-cleanup-edge-branches-uncovered SHIPPED — CDC malformed-input paths covered, 84.8%→86.2%; CI green
+- 2026-07-12 · `d24446e` · [docs] doc sweep — README/architecture-overview/loupe.md corrected to reflect shipped D1 + Personal Lens + Edge Lattice EDGE.1-3 (were still marked designed/deferred)
 - 2026-07-12 · `1b778f9` · [pkgmgr,edge,edge-manifest] edge-manifest Fire 1 inc 2 — 5-lens `packages/edge-manifest` (first nats-subject Personal Lens package), edge/store.go manifest.* key exemption, verify-package-edge-manifest; CI green
 - 2026-07-12 · `f6be3b0` · [edge-manifest,refractor] edge-manifest Fire 1 CLOSED — install-edge-manifest chain, seed-edge-demo, live e2e; fixed a lens anchor bug blocking all 5 lenses from ever publishing; CI green
 - 2026-07-12 · `17d6fbe` · [CI] unit job split into weight-balanced unit-1/unit-2 shards + a coverage-guard job; overall wall-clock 237s→145s (~39% faster), CI green

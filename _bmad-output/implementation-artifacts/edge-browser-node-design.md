@@ -298,12 +298,29 @@ session (fields present, ordered before `boot.mjs`, `no-store`, no `deviceId`); 
 path; script-breakout escaping; mode-off = un-injected shipped page + no wasm route; `resolveDeviceId`
 generate/persist/resume/regenerate-malformed/degrade-on-throw; a config valid with no `deviceId`.
 
-**W4 remaining increment:** **inc 4b** — the ratified Fire-4 cross-machine, no-binary e2e (the W4 green
-bar, Gate-3 class): the Fire-2 e2e completed by the PWA on a second machine under confined WS permissions
-with no local binary, plus the WS twins of the read-bypass posture (A's browser never receives B's deltas;
-a revoked token cannot reconnect). Needs a live stack + `make build-edge-wasm` + headless Chrome, so it is
-its own fire (not deterministically runnable inline). Wire `make up-facet` for `FACET_BROWSER_ENGINE`
-alongside it.
+**W4 inc 4b — `up-facet-edge` browser-native stack wiring — SHIPPED (2026-07-17, `1573d11`).** The
+deterministic half of inc 4b: `make up-facet-edge` stands `cmd/facet` up in browser-native mode — the same
+showcase prep + `FACET_DEV_AUTH=1` login as `up-facet`, plus a `build-edge-wasm` prerequisite and the
+`FACET_BROWSER_ENGINE=1` / `FACET_EDGE_WASM_DIR` / `FACET_EDGE_SHELL_DIR` / `EDGE_WS_URL=ws://127.0.0.1:9222`
+launch env, so the browser runs the wasm engine in-page over the :9222 WS listener with **no local per-user
+binary** (the "no binary" half of the Fire-4 green bar). The shipped Go-host `up-facet` is untouched.
+Verified live against the running stack, driving the exact target env: `/edge.wasm` → 200 `application/wasm`
+(6178400 B, matching the artifact), `/shell/shell.mjs` → 200 `text/javascript`, and the injected index →
+`Cache-Control: no-store` carrying `window.__EDGE_BOOT__` (identityId + `wsUrl=ws://127.0.0.1:9222` +
+gatewayUrl + the session JWT) spliced immediately in front of the `boot.mjs` module tag.
+
+**W4 remaining tail:** the ratified Fire-4 cross-machine, no-binary **live e2e** (the W4 green bar, Gate-3
+class): the Fire-2 flow completed by the PWA on a second machine under confined WS permissions with no local
+binary — hydrate → order → pending→confirmed → task auto-complete → offline queue → reconnect drain — plus
+the WS twins of the read-bypass posture (A's browser never receives B's deltas; a revoked token cannot
+reconnect). This leg needs a **fresh stack whose compose maps :9222** — the WS listener the in-page shell
+dials, added to `docker-compose.yml` only at W1, which a long-running shared dev container predates
+(`docker ps` shows `lattice-nats` without a 9222 port). Recreating that container to map the port wipes the
+ephemeral dev JetStream (no named volume), so this leg runs **attended or on a dedicated stack**, not
+unattended against a shared long-running one. It is not deterministically CI-runnable inline (the repo's
+browser toolchain is `wasmbrowsertest` + `node --test`, no Puppeteer/Playwright); the read-bypass twins are
+already covered by the shipped W1 auth-callout vectors (transport half) and PL.3's e2e (projection half),
+and the revoked-token-reconnect path by vector 4.
 
 ### 3.5 Read/write/state summary (unchanged invariants)
 
