@@ -322,6 +322,29 @@ browser toolchain is `wasmbrowsertest` + `node --test`, no Puppeteer/Playwright)
 already covered by the shipped W1 auth-callout vectors (transport half) and PL.3's e2e (projection half),
 and the revoked-token-reconnect path by vector 4.
 
+**W4 Gate-3 e2e — first attended live run (2026-07-17).** On a freshly-recreated `:9222`-mapped stack,
+signed in as showcase tenant Riley Chen. **Proven green — the inc-4b headline (engine in-page, no local
+binary, write round-trip over the confined transport):** cold-start **hydrate** over the `:9222` WS (the
+engine's own `edge/sync` logs surface in the *browser* console — `hydration complete revision=2066`);
+**order laundry → `RequestService` committed** on the backend over the browser-native `GatewaySubmitter`
+Fetch door (processor `actor=<Riley>`, 3 mutations); the confirmation **delta flowed back over the WS** →
+the UI instance flipped "No orders yet" → "🧺 Maple Laundry — open" and the Outbox drained. **Not green
+this run:** the request rests at `open` — no orchestration op fired to advance pending→confirmed→task (a
+showcase orchestration-trigger question, orthogonal to the transport proof); and **offline queue → reconnect
+drain is blocked by the syncgap gap** ([`edge-syncgap-control-rpc-design.md`](edge-syncgap-control-rpc-design.md)):
+a reconnect is a warm resume, whose `gapped()` → `$JS.API.STREAM.INFO.SYNC` is denied → `edge/browser: sync
+manager exited`, sync dead for the session. This live run proves the §7 "latent → likely" host bug is in
+fact **certain on any browser reload**, and that it gates the reconnect leg of this very green bar.
+
+The run also surfaced **three `up-facet-edge` dev-stack bring-up gaps — fixed in the Makefile, none a
+Fire-4 defect:** (1) it never ran `provision-gateway-identity-provisioner`, so the Gateway's first-touch
+`ProvisionConsumerIdentity` was `AuthDenied` (gateway identity lacked `identityProvisioner`); (2)
+`GATEWAY_CORS_ORIGINS` omitted Facet's `127.0.0.1:7810` origin, so the browser write door was CORS-blocked
+before the Fetch left the page; (3) it ran `seed-showcase` before the vertical domains were installed, so
+the cross-vertical seed FATAL'd on `CreateAppointment`. All three are now wired into `up-facet` /
+`up-facet-edge` (+ a shared `install-showcase-domains`), so a clean `make down && make up-facet-edge`
+reaches the write-proven state above; only the reconnect leg still awaits the syncgap fire.
+
 ### 3.5 Read/write/state summary (unchanged invariants)
 
 | Concern | Mechanism | Invariant |

@@ -53,7 +53,7 @@ GATEWAY_READ_MODELS_DIR ?= $(abspath ./deploy/gateway-read-models)
 # Origins allowed to call POST /v1/operations cross-origin — the vertical apps'
 # own dev ports, since the browser-direct write path (real-actor-write-auth-e2e-
 # design.md §3.1) has the FE call the Gateway directly from its own origin.
-GATEWAY_CORS_ORIGINS ?= http://localhost:7788,http://localhost:7799,http://localhost:7801
+GATEWAY_CORS_ORIGINS ?= http://localhost:7788,http://localhost:7799,http://localhost:7801,http://localhost:7802,http://localhost:7810,http://127.0.0.1:7810
 
 # Per-component dev NKey seeds (NATS account-level write restriction, Path A —
 # deploy/nats-server.conf's permission matrix). Each binary's NATS_NKEY points at
@@ -98,7 +98,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo seed-showcase up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest seed-edge-demo seed-showcase install-showcase-domains up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-conformance build vet lint-conventions lint-board install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -213,6 +213,8 @@ down: assert-main-checkout
 	-pkill -f "bin/loupe" 2>/dev/null || true
 	-pkill -f "bin/loftspace-app" 2>/dev/null || true
 	-pkill -f "bin/clinic-app" 2>/dev/null || true
+	-pkill -f "bin/cafe-app" 2>/dev/null || true
+	-pkill -f "bin/wellness-app" 2>/dev/null || true
 	-pkill -f "bin/facet" 2>/dev/null || true
 	@echo "==> Down complete."
 
@@ -909,6 +911,17 @@ install-wellness:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/wellness-domain
 	@echo "==> Wellness vertical installed (lease-signing + wellness-domain). Drive it via the wellness-app, the lattice CLI, or Loupe."
 
+## install-showcase-domains — the four vertical domain packages the cross-vertical
+## showcase seed (seed-showcase) writes data across. up-full installs only the
+## core/service/edge packages, so a clean up-facet(-edge) must install the vertical
+## domains before seed-showcase or the seed FATALs on the first vertical op (e.g.
+## CreateAppointment, owned by clinic-domain). Idempotent; safe to re-run.
+install-showcase-domains:
+	@$(MAKE) install-loftspace
+	@$(MAKE) install-clinic
+	@$(MAKE) install-cafe
+	@$(MAKE) install-wellness
+
 ## up-wellness — One-command Wellness vertical: up-full → install-wellness →
 ## build + start wellness-app (:7802) in the background alongside Loupe
 ## (:7777). No protected Postgres read model exists for wellness (every lens
@@ -996,6 +1009,8 @@ seed-showcase:
 ## facet-app-ux.md §7.
 up-facet:
 	@$(MAKE) up-full
+	@$(MAKE) provision-gateway-identity-provisioner
+	@$(MAKE) install-showcase-domains
 	@$(MAKE) install-edge-manifest
 	@$(MAKE) provision-facet-role
 	@$(MAKE) provision-readpath
@@ -1029,6 +1044,8 @@ up-facet:
 ## seed-showcase step) so the recreate maps the port.
 up-facet-edge: build-edge-wasm
 	@$(MAKE) up-full
+	@$(MAKE) provision-gateway-identity-provisioner
+	@$(MAKE) install-showcase-domains
 	@$(MAKE) install-edge-manifest
 	@$(MAKE) provision-facet-role
 	@$(MAKE) provision-readpath

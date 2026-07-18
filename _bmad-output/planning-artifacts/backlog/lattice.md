@@ -166,12 +166,12 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > `boot.mjs` resolveDeviceId); nil = the shipped Go host, byte-identical. Go handler + node tested.
 > **EDGE.5 W4 inc 4b serving-wiring SHIPPED** (2026-07-17, `1573d11`) — `make up-facet-edge` stands
 > `cmd/facet` up in browser-native mode (builds the wasm, `FACET_BROWSER_ENGINE=1`, in-page engine over the
-> :9222 WS); serving surface live-verified (assets + `__EDGE_BOOT__` injection, `no-store`). **W4 remaining
-> tail = the live cross-machine Gate-3 e2e** (hydrate→order→confirm→task→offline→reconnect + read-bypass
-> twins): needs a FRESH stack mapping :9222 (the shared long-running container predates W1's compose change →
-> 9222 unmapped; recreating it wipes ephemeral JS, unsafe unattended), so it runs attended / on a dedicated
-> stack — not CI-inline (no Puppeteer; twins already covered by W1 vectors + PL.3 e2e + vector 4)
-> ([§3.4](../../implementation-artifacts/edge-browser-node-design.md)). The §8 full multi-persona
+> :9222 WS); serving surface live-verified (assets + `__EDGE_BOOT__` injection, `no-store`). **W4 Gate-3
+> e2e — first attended live run 2026-07-17: hydrate + order→`RequestService`-committed + WS confirmation
+> read-back all proven live; reconnect leg ⛔ blocked on the syncgap gap (row below), confirm/task
+> progression + read-bypass twins remain** ([Gate-3 checkpoint + the 3 `up-facet-edge` bring-up fixes it
+> drove](../../implementation-artifacts/edge-browser-node-design.md); a re-run needs a FRESH :9222 stack,
+> attended — recreating the shared container wipes ephemeral JS). The §8 full multi-persona
 > adversarial re-review of the EDGE.3 security boundary is ✅ COMPLETE (2026-07-16, Designer, 5 lenses) —
 > boundary holds, no CRITICAL/HIGH; the 5 hardening follow-ons **RR-1…RR-5 are all CLOSED** (RR-2 `5bbff9d`;
 > RR-1/RR-3/RR-4/RR-5 `ebb02ab`, 2026-07-17), none was an EDGE.5 gate.
@@ -206,7 +206,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | **Processor-MAC'd sensitive-refs (ref provenance)** | `$sensitiveRef` values are trusted at the package-DDL boundary; a fabricated ref names another identity's aspect and the bridge unwraps it. Processor MACs the refs it authors; a new ref-verified decrypt RPC + bridge grant swap — the ratified trigger gating AI-caps Fire 4. | ★★★ | M | ✅ CLOSED (2026-07-16) · [design](../../implementation-artifacts/sensitive-ref-mac-provenance-design.md) · Fires 1–2 shipped, CI green |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
-| **Edge gap-detection needs STREAM.INFO, which the grant denies** | `sync.Manager.gapped()` → `FirstSequence` → `$JS.API.STREAM.INFO.SYNC`, omitted from the per-identity Edge grant; warm resume w/ a stored cursor fails closed (Go + browser nodes; latent — cold start hydrates). Fix: identity-bound `personal.syncgap` control RPC, seam sheds `FirstSequence`. | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/edge-syncgap-control-rpc-design.md) |
+| **Edge gap-detection needs STREAM.INFO, which the grant denies** | `sync.Manager.gapped()` → `FirstSequence` → `$JS.API.STREAM.INFO.SYNC`, omitted from the per-identity Edge grant; warm resume w/ a stored cursor fails closed → sync dies (Go + browser; every browser reload hits it, cold start hydrates). Fix: identity-bound `personal.syncgap` control RPC, seam sheds `FirstSequence`. | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/edge-syncgap-control-rpc-design.md) · Gate-3 reconnect blocker (live e2e 2026-07-17) |
 
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
@@ -228,7 +228,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 WS half subsumed by the ratified [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md); multicast dedup stays deferred (bandwidth trigger) |
-| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) W1–W3 ✅ · W4 1–4a+4b-wiring ✅ (`up-facet-edge`) · next: inc 4b live Gate-3 e2e (fresh :9222 stack) |
+| Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | 🏗️ building · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 done · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) W1–W3 ✅ · W4 1–4a+4b-wiring ✅ (`up-facet-edge`) · inc 4b Gate-3 e2e (2026-07-17): hydrate+write ✅ · reconnect ⛔ syncgap |
 | Edge-manifest + personal-lens consumer (Facet platform half) | Five per-identity `nats_subject` manifest lenses (me/services/catalog/tasks/instances) + descriptor vocabulary (presentation/per-op schema/dispatch); `pkgmgr.LensSpec` `nats_subject` adapter; `RequestService` service-path op; seeded topology. Un-defers PL.6/EDGE.5. | ★★★ | L | ✅ CLOSED (Fires 0–1; +6th read-grant lens at Fire 2) · [design §3.2 amendment](../../implementation-artifacts/edge-showcase-app-design.md) · app half continues as Facet Fire 3 (verticals.md) |
 
 ### AI-native
