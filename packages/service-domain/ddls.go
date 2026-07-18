@@ -119,7 +119,7 @@ func serviceDDL() pkgmgr.DDLSpec {
 			"(minimal, D5). A service vertex is a TEMPLATE (an offering) or an INSTANCE (a run of an " +
 			"offering), discriminated by the vertex ENVELOPE class (service.<x>.template / " +
 			"service.<x>.instance — P7, no .class shadow aspect); the service family <x> is one of " +
-			"{backgroundCheck, payment, laundry, fitness, clinic, wellness} (edge-showcase-app-design.md §7.3 — widened honestly " +
+			"{backgroundCheck, payment, laundry, fitness, clinic, wellness, cafe} (edge-showcase-app-design.md §7.3 — widened honestly " +
 			"for the showcase dataset rather than branding a closed-enum member via presentation). Relationships are LINKS: providedBy (template→provider: who " +
 			"provides it), instanceOf (template→the service DDL meta, and instance→template: the " +
 			"write-gate type-authority chain + the offering this run is of), providedTo (instance→identity: " +
@@ -152,7 +152,7 @@ func serviceDDL() pkgmgr.DDLSpec {
 			"non-existent or already-retired template and a target that is an instance, not a template.",
 		Script: serviceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"family":{"type":"string","enum":["backgroundCheck","payment","laundry","fitness","clinic","wellness"],"description":"The service family <x> (backgroundCheck|payment|laundry|fitness|clinic|wellness). Sets the vertex envelope class service.<x>.template|instance."},` +
+			`{"family":{"type":"string","enum":["backgroundCheck","payment","laundry","fitness","clinic","wellness","cafe"],"description":"The service family <x> (backgroundCheck|payment|laundry|fitness|clinic|wellness|cafe). Sets the vertex envelope class service.<x>.template|instance."},` +
 			`"templateId":{"type":"string","description":"Optional bare NanoID for the template vertex (CreateServiceTemplate); absent → minted."},` +
 			`"providedBy":{"type":"string","description":"Optional vtx.<provType>.<NanoID> that provides the template; the providedBy link is written only when supplied (CreateServiceTemplate)."},` +
 			`"presentation":{"type":"object","description":"Optional client-facing display metadata (CreateServiceTemplate): {name, description?, icon, category?}. Written as the template's .presentation aspect.",` +
@@ -169,7 +169,7 @@ func serviceDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.service.<NanoID> of the created/updated service vertex (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"family":           "The service family <x>, one of {backgroundCheck, payment, laundry, fitness, clinic, wellness}. Determines the vertex envelope class (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
+			"family":           "The service family <x>, one of {backgroundCheck, payment, laundry, fitness, clinic, wellness, cafe}. Determines the vertex envelope class (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
 			"templateId":       "Optional bare NanoID (no dots / key segments) for the template vertex (vtx.service.<templateId>) created by CreateServiceTemplate. Absent → minted with nanoid.new().",
 			"providedBy":       "Optional full vtx.<provType>.<NanoID> key of the provider of the template offering. CreateServiceTemplate validates it is alive and writes the providedBy link only when supplied.",
 			"presentation":     "Optional client-facing display metadata {name, description?, icon, category?} (CreateServiceTemplate). Written verbatim as the template's .presentation aspect; absent → no aspect written (a template stays undescribed, per edge-showcase-app-design.md §3.3's degrade-gracefully rule).",
@@ -319,15 +319,15 @@ def optional_presentation(p):
 # The service families this package admits (<x> in the class string
 # service.<x>.template | service.<x>.instance). One service DDL handles all
 # families; the family is carried by the vertex envelope class + an op payload field, not
-# a DDL per family. laundry/fitness/clinic/wellness (edge-showcase-app-design.md §7.3, §7.4) are
+# a DDL per family. laundry/fitness/clinic/wellness/cafe (edge-showcase-app-design.md §7.3, §7.4, §7.6) are
 # the showcase dataset's own honest families, widened rather than branding a
 # closed-enum member (backgroundCheck) via .presentation as something it isn't.
-SERVICE_FAMILIES = ["backgroundCheck", "payment", "laundry", "fitness", "clinic", "wellness"]
+SERVICE_FAMILIES = ["backgroundCheck", "payment", "laundry", "fitness", "clinic", "wellness", "cafe"]
 
 def required_family(p):
     fam = required_string(p, "family")
     if fam not in SERVICE_FAMILIES:
-        fail("InvalidArgument: family: must be one of backgroundCheck, payment, laundry, fitness, clinic, wellness; got " + fam)
+        fail("InvalidArgument: family: must be one of backgroundCheck, payment, laundry, fitness, clinic, wellness, cafe; got " + fam)
     return fam
 
 # The terminal outcome values RecordServiceOutcome admits. completed = the

@@ -57,15 +57,17 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.1.0",
+	Version: "0.2.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/Settle, OCC-conditioned " +
 		"running total) + the tabStatus aspect type + the cafeTabSettlement actorAggregate convergence lens " +
 		"(missing_account/missing_charge) + the §10.8 playbook dispatching directOp(CreateAccount)/" +
-		"directOp(DebitAccount) (cafe-ledger) to post a settled tab onto the resident's house-tab account. " +
-		"Depends lease-signing + cafe-ledger.",
+		"directOp(DebitAccount) (cafe-ledger) to post a settled tab onto the resident's house-tab account + " +
+		"edge-manifest descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) so the two self-scope ops are " +
+		"Facet-renderable. Depends lease-signing + cafe-ledger.",
 	Depends:       []string{"lease-signing", "cafe-ledger"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),
 	WeaverTargets: WeaverTargets(),
+	OpMetas:       OpMetas(),
 }

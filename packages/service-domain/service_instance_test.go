@@ -965,12 +965,12 @@ func createLiveInstance(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	return instKey
 }
 
-// TestCreateServiceTemplate_ShowcaseFamilies_Accepted proves the §7.3/§7.4 enum
-// widening: laundry, fitness, clinic, and wellness (the showcase dataset's own
-// honest families) are accepted exactly like the original two, minting the
-// matching envelope class.
+// TestCreateServiceTemplate_ShowcaseFamilies_Accepted proves the §7.3/§7.4/§7.6
+// enum widening: laundry, fitness, clinic, wellness, and cafe (the showcase
+// dataset's own honest families) are accepted exactly like the original two,
+// minting the matching envelope class.
 func TestCreateServiceTemplate_ShowcaseFamilies_Accepted(t *testing.T) {
-	for _, fam := range []string{"laundry", "fitness", "clinic", "wellness"} {
+	for _, fam := range []string{"laundry", "fitness", "clinic", "wellness", "cafe"} {
 		t.Run(fam, func(t *testing.T) {
 			ctx, conn := setupServiceEnv(t)
 			cp, cons := newServicePipeline(t, ctx, conn, "showcase-fam-"+fam)

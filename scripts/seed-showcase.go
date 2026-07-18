@@ -1,9 +1,9 @@
 //go:build ignore
 
 // seed-showcase.go — dev-seed for `make seed-showcase` (edge-showcase-app-
-// design.md §7.3, §7.4): loads a curated two-persona demo world using
-// service-domain's real families ({laundry, fitness, clinic, wellness} among
-// the enum) — P7 makes the envelope class the machine truth, so a template's
+// design.md §7.3, §7.4, §7.6): loads a curated two-persona demo world using
+// service-domain's real families ({laundry, fitness, clinic, wellness, cafe}
+// among the enum) — P7 makes the envelope class the machine truth, so a template's
 // family must match what it's presented as, or a completed run of it reads
 // as a different real thing to any family-matching consumer (e.g.
 // lease-signing's renewals lens).
@@ -69,6 +69,7 @@ const (
 	fitnessTplID  = "xeY6h9HU3MYWUuiUZhcA"
 	clinicTplID   = "hqYJYTcdwtPPfD2pPG8c"
 	wellnessTplID = "nh8YmMryPJbSzhCyTLxR"
+	cafeTplID     = "7HRxY1Ymcjv2kuWoR1uC"
 	instance1ID   = "w3wX6tCr9EQMDo7zKu6P"
 
 	// CreateLocation mints vtx.<locationType>.<id> — the type-specific prefix,
@@ -80,6 +81,7 @@ const (
 	fitnessTplKey  = "vtx.service." + fitnessTplID
 	clinicTplKey   = "vtx.service." + clinicTplID
 	wellnessTplKey = "vtx.service." + wellnessTplID
+	cafeTplKey     = "vtx.service." + cafeTplID
 
 	tenant1Name  = "Riley Chen"
 	tenant1Email = "riley.chen@showcase.dev.lattice.local"
@@ -126,6 +128,8 @@ func main() {
 		fmt.Println("==> template clinic: " + clinicTplKey + " availableAt building, permits CreateAppointment/RescheduleAppointment/SetAppointmentStatus")
 		seedWellnessTemplate(ctx, conn, adminKey)
 		fmt.Println("==> template wellness: " + wellnessTplKey + " availableAt building, permits CreateBooking/CancelBooking")
+		seedCafeTemplate(ctx, conn, adminKey)
+		fmt.Println("==> template cafe: " + cafeTplKey + " availableAt building, permits OpenTab/Settle")
 		return
 	}
 	consumerRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
@@ -187,6 +191,14 @@ func main() {
 
 	seedWellnessTemplate(ctx, conn, adminKey)
 	fmt.Println("==> template wellness: " + wellnessTplKey + " availableAt building, permits CreateBooking/CancelBooking")
+
+	// --- café "house tab" template, same mixed-use building precedent as
+	// clinic/wellness above — permits OpenTab/Settle directly (they also
+	// carry their own scope=self auth, not RequestService's
+	// authContext.service path) --
+
+	seedCafeTemplate(ctx, conn, adminKey)
+	fmt.Println("==> template cafe: " + cafeTplKey + " availableAt building, permits OpenTab/Settle")
 
 	// --- one completed instance for tenant1 (the Activity timeline seed) --
 
@@ -337,6 +349,45 @@ func seedWellnessTemplate(ctx context.Context, conn *substrate.Conn, adminKey st
 		submitOp(ctx, conn, adminKey, "WirePermitsOperation", "serviceLocation",
 			map[string]any{"service": wellnessTplKey, "operation": opMeta},
 			&processor.ContextHint{Reads: []string{wellnessTplKey, opMeta}})
+	}
+}
+
+// seedCafeTemplate mints the café "house tab" service template, wires it
+// availableAt the showcase building, and permitsOperation-links it directly
+// to cafe-domain's two self-scope consumer ops (OpenTab, Settle) — the
+// catalog-path wiring named in edge-showcase-app-design.md §7.6's residual
+// note, mirroring seedClinicTemplate/seedWellnessTemplate exactly (same
+// building, same permitsOperation pattern; a resident opening a tab needs no
+// prior "browsing" entity the way a clinic provider or wellness session is,
+// so there is nothing else for this template to link besides the two ops
+// themselves).
+func seedCafeTemplate(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	if !alive(ctx, conn, cafeTplKey) {
+		submitOp(ctx, conn, adminKey, "CreateServiceTemplate", "service",
+			map[string]any{"family": "cafe", "templateId": cafeTplID, "presentation": map[string]any{
+				"name":        "Riverside Café",
+				"description": "Open, or settle, a house tab",
+				"icon":        "cafe",
+				"category":    "home",
+			}}, nil)
+	}
+
+	availableAtLnk := "lnk.service." + cafeTplID + ".availableAt." + strings.TrimPrefix(buildingKey, "vtx.")
+	if !alive(ctx, conn, availableAtLnk) {
+		submitOp(ctx, conn, adminKey, "WireAvailableAt", "serviceLocation",
+			map[string]any{"service": cafeTplKey, "location": buildingKey},
+			&processor.ContextHint{Reads: []string{cafeTplKey, buildingKey}})
+	}
+
+	for _, opType := range []string{"OpenTab", "Settle"} {
+		opMeta := findOpMetaByType(ctx, conn, opType)
+		permitsLnk := "lnk.service." + cafeTplID + ".permitsOperation." + strings.TrimPrefix(opMeta, "vtx.")
+		if alive(ctx, conn, permitsLnk) {
+			continue
+		}
+		submitOp(ctx, conn, adminKey, "WirePermitsOperation", "serviceLocation",
+			map[string]any{"service": cafeTplKey, "operation": opMeta},
+			&processor.ContextHint{Reads: []string{cafeTplKey, opMeta}})
 	}
 }
 

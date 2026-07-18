@@ -1,5 +1,5 @@
 name: service-domain
-version: 0.6.0
+version: 0.7.0
 description: |
   Service template + instance vertex type (the service DDL + lifecycle ops
   CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome,
@@ -7,8 +7,8 @@ description: |
   vertex (instanceOf a template, providedTo an applicant identity) whose
   external-call outcome (status + completedAt) is recorded as aspects per D5
   — vertex root data minimal. The family enum is {backgroundCheck, payment,
-  laundry, fitness, clinic, wellness} (edge-showcase-app-design.md §7.3, §7.4
-  — widened honestly for the showcase dataset). RequestService (edge-manifest Fire 1) is the
+  laundry, fitness, clinic, wellness, cafe} (edge-showcase-app-design.md
+  §7.3, §7.4, §7.6 — widened honestly for the showcase dataset). RequestService (edge-manifest Fire 1) is the
   consumer-invocable service-path counterpart to CreateServiceInstance:
   authorized structurally via authContext.service against the cap.svc
   availability grant, not a standing PermissionSpec — it carries no
