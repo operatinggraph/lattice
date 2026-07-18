@@ -49,6 +49,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Weaver] Doc drift — stale op-vertex-pruner deferred bullet** | `docs/components/weaver.md` "Deferred (Phase 3+)" still lists "Full temporal scheduler / op-vertex pruner (#47/#49)" but the same doc's "Temporal lane" section (above it) already states #47 is realized by the two scheduling legs and #49 is retired — self-contradicting; drop the stale bullet. | ★ | XS | 📋 ready |
+| **[Loom] Starlark guard sandbox Value-interface branches uncovered** | `guard_starlark.go`'s `starlarkDataDict`/`starlarkSubject` `starlarklib.Value` methods (`String`/`Truth`/`Hash`/`AttrNames`/`Iterate`) sit at 0% — no test calls `str(subject)`, `bool(subject.data)`, `hash(subject)`, or iterates `subject.data`, though a guard script legally can. | ★ | XS–S | 📋 ready · `internal/loom/guard_starlark.go:65-159` |
 
 ### Survey log (round-robin rotation)
 
@@ -70,7 +71,8 @@ feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the 
 - 2026-07-06 Arch-review — Refractor deferred re-review filed ([report](../../../docs/reviews/arch-review-2026-07-06.md)): verdict drifted; 9 rows filed (chronicler-host ★★★, publish-acl ★★★, protected-by-default ★★★); doc/marker truth-up done.
 - 2026-07-13 Core (processor healthy, clean lint/vet, no TODOs; step 6.5 sensitive-encrypt path was 0% covered, filled 80.1%→82.0%).
 - 2026-07-18 Weaver (healthy, 86.8%/78.6%/91.3% cov, clean lint, no TODOs; filed error-branch-coverage + a doc-drift fix).
-- **Next:** Loom.
+- 2026-07-18 Loom (healthy, 82.3%/80.2% cov, clean lint, no TODOs; prior deadline/redelivery gaps already shipped `495476b`; filed starlark-guard-sandbox-value-iface-uncovered).
+- **Next:** Refractor.
 
 ## Arch-review intake — platform hardening & doc/contract truth
 
