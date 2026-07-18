@@ -599,10 +599,13 @@ func TestLoomE2E_MidRunRestartExactlyOnce(t *testing.T) {
 	instanceID := submitStartLoomPattern(t, ctx, conn, patternID, subjectKey)
 
 	// Wait until step A is persisted as the pending token (write-ahead) + its
-	// durable token pointer exists.
+	// durable token pointer exists, THEN until the systemOp has actually reached
+	// the processor. The write-ahead pointer is durably persisted BEFORE the op
+	// submission round-trips, so `submitted` still trails `waitPending` by the
+	// async submit — poll it to a floor of 1 rather than reading it once (the
+	// gated committed event is held behind `gate`, so step A stays pending).
 	waitPending(t, ctx, conn, instanceID)
-	committedAfterGen1 := atomic.LoadInt64(&fp.submitted)
-	require.GreaterOrEqual(t, committedAfterGen1, int64(1), "step A must have committed")
+	waitSubmitted(t, fp, 1)
 
 	// Crash generation 1, THEN release step A's committed event. Join the Start
 	// goroutine (deterministic: supervisor.Stop has synchronously drained every
@@ -759,6 +762,22 @@ func waitInstanceStatus(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	}
 	t.Fatalf("instance %q never reached status %q", instanceID, status)
 	return nil
+}
+
+// waitSubmitted blocks until the fake processor has accepted at least n
+// non-duplicate systemOp commits, or fails the test on timeout. Deterministic
+// sync for the async submit round-trip (the counter trails the durable
+// write-ahead pointer that waitPending observes).
+func waitSubmitted(t *testing.T, fp *fakeProcessor, n int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt64(&fp.submitted) >= n {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("fake processor never reached %d submitted systemOp(s) (have %d)", n, atomic.LoadInt64(&fp.submitted))
 }
 
 func waitPending(t *testing.T, ctx context.Context, conn *substrate.Conn, instanceID string) {
