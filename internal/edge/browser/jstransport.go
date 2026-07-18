@@ -26,7 +26,6 @@ import (
 //
 //	startConsumer({stream, durable, filterSubject}) -> Promise<void>
 //	stopConsumer()                                  -> Promise<void> (optional)
-//	firstSequence(stream)                           -> Promise<number>
 //	request(subject, Uint8Array, actor)             -> Promise<Uint8Array>
 //
 // Everything the shell needs to know beyond that — the durable's
@@ -44,7 +43,7 @@ var _ transport.DeltaSource = (*jsTransport)(nil)
 var _ transport.ControlClient = (*jsTransport)(nil)
 
 func newJSTransport(shell js.Value) (*jsTransport, error) {
-	for _, m := range []string{"startConsumer", "firstSequence", "request"} {
+	for _, m := range []string{"startConsumer", "request"} {
 		if shell.Get(m).Type() != js.TypeFunction {
 			return nil, fmt.Errorf("edge/browser: shell is missing the %q function", m)
 		}
@@ -90,25 +89,6 @@ func (t *jsTransport) RunDurableConsumer(ctx context.Context, cfg transport.Cons
 		}
 	}
 	return ctx.Err()
-}
-
-// FirstSequence reports the stream's earliest still-retained sequence, which
-// the Sync Manager compares against its cursor to detect a retention gap. A
-// wrong answer here silently skips deltas, so a non-numeric or negative reply
-// is an error rather than a coerced zero (zero would read as "no gap").
-func (t *jsTransport) FirstSequence(ctx context.Context, stream string) (uint64, error) {
-	v, err := await(ctx, t.shell.Call("firstSequence", stream))
-	if err != nil {
-		return 0, fmt.Errorf("edge/browser: first sequence of %q: %w", stream, err)
-	}
-	if v.Type() != js.TypeNumber {
-		return 0, fmt.Errorf("edge/browser: first sequence of %q: expected a number, got %s", stream, v.Type())
-	}
-	f := v.Float()
-	if f < 0 || f != f {
-		return 0, fmt.Errorf("edge/browser: first sequence of %q: not a valid sequence: %v", stream, f)
-	}
-	return uint64(f), nil
 }
 
 // Request issues one control-plane request-reply through the shell, carrying

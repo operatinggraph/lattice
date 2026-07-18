@@ -22,14 +22,14 @@ import (
 // the Go API.
 
 // fakeShell is a minimal transport shell: it captures startConsumer's config,
-// answers firstSequence and the personal.register/hydrate control RPCs, and
-// otherwise stays out of the way. Everything it does is synchronous, and await
-// tolerates a non-thenable return, so the tests do not need a JS Promise.
+// answers the personal.register/hydrate/syncgap control RPCs, and otherwise
+// stays out of the way. Everything it does is synchronous, and await tolerates
+// a non-thenable return, so the tests do not need a JS Promise.
 type fakeShell struct {
 	started      chan map[string]any
-	firstSeq     float64
 	registerResp controlwire.ControlResponse
 	hydrateResp  controlwire.ControlResponse
+	syncGapResp  controlwire.ControlResponse
 	funcs        []js.Func
 
 	// signalled captures each key the leader posts to peers via signalChange,
@@ -47,9 +47,9 @@ type peerSignal struct {
 func newFakeShell() *fakeShell {
 	return &fakeShell{
 		started:      make(chan map[string]any, 1),
-		firstSeq:     0,
 		registerResp: controlwire.ControlResponse{PersonalRegister: &controlwire.PersonalRegisterResult{Registered: true}},
 		hydrateResp:  controlwire.ControlResponse{PersonalHydrate: &controlwire.PersonalHydrateResult{Hydrated: true, Revision: 1}},
+		syncGapResp:  controlwire.ControlResponse{PersonalSyncGap: &controlwire.PersonalSyncGapResult{Gapped: false}},
 		signalled:    make(chan peerSignal, 8),
 	}
 }
@@ -73,9 +73,6 @@ func (s *fakeShell) value() js.Value {
 		}
 		return js.Undefined() // resolves await immediately; the test pushes deltas itself
 	}))
-	obj.Set("firstSequence", fn(func(_ js.Value, _ []js.Value) any {
-		return s.firstSeq
-	}))
 	obj.Set("request", fn(func(_ js.Value, args []js.Value) any {
 		subject := args[0].String()
 		var resp controlwire.ControlResponse
@@ -84,6 +81,8 @@ func (s *fakeShell) value() js.Value {
 			resp = s.registerResp
 		case controlwire.ControlSubject("personal", "hydrate"):
 			resp = s.hydrateResp
+		case controlwire.ControlSubject("personal", "syncgap"):
+			resp = s.syncGapResp
 		default:
 			resp = controlwire.ControlResponse{Error: "unexpected control subject " + subject}
 		}

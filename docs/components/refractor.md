@@ -66,7 +66,7 @@ Key sub-packages:
 | **Health KV signals** (Contract #5) | Health KV `health.refractor.<instance>.lens.<canonicalName>` | Per-lens latency snapshots (p95, p99, mean, count from `LatencyRingBuffer`); consumer lag; per-instance heartbeat every 10s. |
 | **Audit subjects** | `lattice.refractor.audit.<lensId>` | One `AuditEntry` per projection. |
 | **Metrics subjects** | `lattice.refractor.metrics.<lensId>` | Consumer lag on `LagPoller` interval. |
-| **Control plane** | `micro.Service` endpoints at `lattice.ctrl.refractor.<lensId>.<op>` | Handles JSON control requests (`validate`, `rebuild`, `pause`, `resume`, `delete`, `register`, `deregister`, health) via the NATS Services framework; capability-gated (FR30). |
+| **Control plane** | `micro.Service` endpoints at `lattice.ctrl.refractor.<lensId>.<op>` | Handles JSON control requests (`health`, `validate`, `rebuild`, `pause`, `resume`, `delete`, `register`, `deregister`, `hydrate`, `sessionkey`, `syncgap`) via the NATS Services framework; capability-gated (FR30). The five identity-bound Personal-Lens ops (`register`/`deregister`/`hydrate`/`sessionkey`/`syncgap`) additionally bind `identityId` to the verified actor server-side. |
 | **Personal Lens delta envelopes** | Per-recipient NATS subject `<targetConfig.subjectPrefix>.<actor>` (e.g. `lattice.sync.user.<identityId>`) on the backing JetStream stream `targetConfig.stream` | Produced by a `targetType: "nats_subject"` lens (`adapter/natssubject.go`). See below. |
 
 ### Personal Lens transport (`nats_subject` target)

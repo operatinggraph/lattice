@@ -24,7 +24,7 @@
 //              "create-denied" (expect the create to be denied) |
 //              "roundtrip" (create, then receive+ack one published delta)
 //
-// The shell's other transport methods (firstSequence, request) are at parity
+// The shell's other transport method (request) is at parity
 // with the trusted Go node's natstransport by construction — this driver pins
 // the one method whose wire form the browser client (nats.js) could shape
 // differently from nats.go: consumer create.

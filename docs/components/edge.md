@@ -58,13 +58,17 @@ package, built incrementally per the design's §7 Steward decomposition (EDGE.1 
   `SYNC` stream, filtered to the actor's own `lattice.sync.user.<id>` subject. Each delivered delta drives
   `store.ApplyUpsert`/`ApplyDelete` and advances `store.SetCursor` to the message's stream sequence — a
   malformed envelope is `Term`inated (poison, never redelivered), an apply failure is `Nak`ed for retry. On
-  cold start (no local cursor) or a detected **gap** (the local cursor has fallen behind the SYNC stream's
-  current `FirstSeq` — retention pruned messages the node never saw), it calls the Personal-Lens
+  cold start (no local cursor) or a detected **gap**, it calls the Personal-Lens
   `personal.register`/`personal.hydrate` control RPCs (`internal/refractor/control`) before subscribing; a
   warm cursor still within retention skips both and resumes incrementally from the durable's own ack floor.
+  Gap detection is a control-plane RPC, not a JetStream admin call: the node holds no `$JS.API.STREAM.*`
+  grant, so `gapped()` asks `personal.syncgap` (request `{identityId, deviceId, cursor}`, response
+  `{personalSyncGap: {gapped}}`) — the Refractor compares the cursor to the SYNC stream's earliest retained
+  sequence on its own full-grant read and returns one boolean; a transient control-plane unavailability at
+  warm boot is retried with bounded backoff, then fails closed (never resume unverified).
   Control-plane requests carry a `Lattice-Actor` header stamped with the device's bearer JWT
   (`EDGE_TOKEN`) — when the Refractor's `ActorVerifier` is configured, `personal.register`/`deregister`/
-  `hydrate` bind to the verified actor server-side, overriding any `identityId` the request body asserts
+  `hydrate`/`sessionkey`/`syncgap` bind to the verified actor server-side, overriding any `identityId` the request body asserts
   (per-identity-nats-subscribe-acl-design.md §3.4); no verifier configured preserves the self-asserted
   body (dev/e2e fixtures).
 - **`internal/edge/overlay`** (design §3.4, the Edge "Processor" — pure-A this increment, no local

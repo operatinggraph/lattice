@@ -12,7 +12,6 @@
 //
 //	startConsumer({stream, durable, filterSubject}) -> Promise<void>
 //	stopConsumer()                                  -> Promise<void>
-//	firstSequence(stream)                           -> Promise<number>
 //	request(subject, Uint8Array, actor)             -> Promise<Uint8Array>
 //
 // `createShell` wraps a core with the browser-only coordination the seam
@@ -88,7 +87,7 @@ export function createSyncCore(config) {
     nc: null,
     jsm: null,
     js: null,
-    // Memoises the in-flight connect so two callers (e.g. firstSequence and
+    // Memoises the in-flight connect so two callers (e.g. request and
     // startConsumer) racing before the first resolves share one dial rather
     // than opening two connections.
     connecting: null,
@@ -205,12 +204,6 @@ export function createSyncCore(config) {
     }
   }
 
-  async function firstSequence(stream) {
-    await connect();
-    const info = await state.jsm.streams.info(stream);
-    return info.state.first_seq;
-  }
-
   async function request(subject, data, actor) {
     await connect();
     const opts = { timeout: controlTimeoutMs };
@@ -236,7 +229,6 @@ export function createSyncCore(config) {
     connect,
     startConsumer,
     stopConsumer,
-    firstSequence,
     request,
     close,
     // deliver is a settable slot (see the doc above); expose it as a property.
@@ -373,7 +365,6 @@ export function createShell(config) {
       return core.startConsumer(cfg);
     },
     stopConsumer: () => core.stopConsumer(),
-    firstSequence: (stream) => core.firstSequence(stream),
     request: (subject, data, actor) => core.request(subject, data, actor),
     // signalChange is the leader's call after a delta lands, so followers learn
     // the shared store moved. A no-op when there is no channel (single-context

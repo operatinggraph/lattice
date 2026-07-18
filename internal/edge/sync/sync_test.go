@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,10 +17,131 @@ import (
 	"github.com/asolgan/lattice/internal/edge/transport"
 	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
 	"github.com/asolgan/lattice/internal/refractor/control"
+	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
 	"github.com/asolgan/lattice/internal/refractor/subjects"
 	"github.com/asolgan/lattice/internal/substrate"
 	"github.com/asolgan/lattice/internal/testutil"
 )
+
+// fakeControlTransport is a Manager Transport whose Request answers control
+// RPCs from a programmable func, so ensureFresh/gapped can be unit-tested
+// without a live NATS server — the paths where a real service cannot easily
+// produce the shape under test (an absent syncgap result, a persistent RPC
+// failure). RunDurableConsumer is never reached by ensureFresh, so it panics.
+type fakeControlTransport struct {
+	requests []string // op suffixes requested, in order
+	reply    func(op string, body controlwire.ControlRequest) (controlwire.ControlResponse, error)
+}
+
+func (f *fakeControlTransport) RunDurableConsumer(context.Context, transport.ConsumerConfig, transport.Handler) error {
+	panic("fakeControlTransport: RunDurableConsumer not used by these tests")
+}
+
+func (f *fakeControlTransport) Request(_ context.Context, subject string, data []byte, _ string) ([]byte, error) {
+	op := subject[strings.LastIndex(subject, ".")+1:]
+	f.requests = append(f.requests, op)
+	var body controlwire.ControlRequest
+	if err := json.Unmarshal(data, &body); err != nil {
+		return nil, err
+	}
+	resp, err := f.reply(op, body)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(resp)
+}
+
+// happyControlReply answers register/hydrate with success and syncgap with the
+// given gapped value — the baseline a test overrides for the path it probes.
+func happyControlReply(gapped bool) func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+	return func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		switch op {
+		case "register":
+			return controlwire.ControlResponse{PersonalRegister: &controlwire.PersonalRegisterResult{Registered: true}}, nil
+		case "hydrate":
+			return controlwire.ControlResponse{PersonalHydrate: &controlwire.PersonalHydrateResult{Hydrated: true, Revision: 1}}, nil
+		case "syncgap":
+			return controlwire.ControlResponse{PersonalSyncGap: &controlwire.PersonalSyncGapResult{Gapped: gapped}}, nil
+		default:
+			return controlwire.ControlResponse{Error: "unexpected op " + op}, nil
+		}
+	}
+}
+
+func newFakeManager(t *testing.T, tr *fakeControlTransport, cursor uint64, haveCursor bool) *Manager {
+	t.Helper()
+	st := openTestStore(t)
+	if haveCursor {
+		require.NoError(t, st.SetCursor(cursor))
+	}
+	mgr, err := New(tr, st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	require.NoError(t, err)
+	return mgr
+}
+
+// TestManager_EnsureFresh_ColdStartMakesNoSyncGapCall proves a never-hydrated
+// node (no stored cursor) takes the cold path — register + hydrate — and never
+// asks the syncgap RPC.
+func TestManager_EnsureFresh_ColdStartMakesNoSyncGapCall(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: happyControlReply(false)}
+	mgr := newFakeManager(t, tr, 0, false)
+
+	require.NoError(t, mgr.ensureFresh(ctx))
+	assert.NotContains(t, tr.requests, "syncgap", "cold start must not call syncgap")
+	assert.Contains(t, tr.requests, "hydrate", "cold start must hydrate")
+}
+
+// TestManager_EnsureFresh_WarmGappedTrueHydrates proves gapped=true over the
+// RPC triggers a re-hydrate.
+func TestManager_EnsureFresh_WarmGappedTrueHydrates(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: happyControlReply(true)}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	require.NoError(t, mgr.ensureFresh(ctx))
+	assert.Equal(t, "syncgap", tr.requests[0], "warm resume asks syncgap first")
+	assert.Contains(t, tr.requests, "hydrate", "gapped=true must re-hydrate")
+}
+
+// TestManager_EnsureFresh_AbsentSyncGapResultErrors is the silent-data-loss
+// guard (edge-syncgap-control-rpc-design.md §3.3): a decodable response whose
+// personalSyncGap is absent must be an ERROR, never defaulted to
+// gapped=false — a warm node that should re-hydrate would otherwise resume its
+// durable and skip the pruned deltas forever.
+func TestManager_EnsureFresh_AbsentSyncGapResultErrors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		// A well-formed response with neither Error nor a result struct.
+		return controlwire.ControlResponse{}, nil
+	}}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	err := mgr.ensureFresh(ctx)
+	require.Error(t, err, "an absent syncgap result must never be treated as gapped=false")
+	assert.NotContains(t, tr.requests, "hydrate", "an unverifiable gap answer must not resume, and must not blindly hydrate either")
+}
+
+// TestManager_EnsureFresh_SyncGapRetryIsBounded proves a persistent
+// control-plane failure fails closed after a BOUNDED number of syncgap
+// attempts — never an unbounded boot hang (edge-syncgap-control-rpc-design.md
+// §7). The RPC errors every time; ensureFresh must error after exactly
+// syncGapMaxAttempts tries.
+func TestManager_EnsureFresh_SyncGapRetryIsBounded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tr := &fakeControlTransport{reply: func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		return controlwire.ControlResponse{}, errors.New("control plane down")
+	}}
+	mgr := newFakeManager(t, tr, 5, true)
+
+	err := mgr.ensureFresh(ctx)
+	require.Error(t, err, "a persistent syncgap failure must fail closed, never resume unverified")
+	assert.Len(t, tr.requests, syncGapMaxAttempts, "the retry must be bounded to syncGapMaxAttempts")
+}
 
 // newSyncTestConn spins up an embedded JetStream-enabled NATS server and
 // ensures the SYNC stream exists (unbounded retention — callers that need to
@@ -89,6 +211,16 @@ func startControlService(t *testing.T, ctx context.Context, conn *substrate.Conn
 	svc.SetCapabilityChecker(control.NewStubCapabilityChecker(nil))
 	svc.SetPersonalHydrator(h)
 	svc.SetPersonalInterestKV(interestKV)
+	// The syncgap seam reads the live SYNC stream's earliest retained sequence
+	// on the control host's own connection, mirroring cmd/refractor's
+	// IsPersonalLens wiring — so gapped() gets a real gap answer over the RPC.
+	svc.SetSyncFirstSeq(func(ctx context.Context) (uint64, error) {
+		s, err := conn.JetStream().Stream(ctx, defaultStream)
+		if err != nil {
+			return 0, err
+		}
+		return s.CachedInfo().State.FirstSeq, nil
+	})
 	require.NoError(t, svc.StartNATSListener(ctx, conn.NATS()))
 }
 
@@ -161,17 +293,21 @@ func TestManager_ColdStart_HydratesRegistersAndAppliesBulkDelta(t *testing.T) {
 }
 
 // TestManager_EnsureFresh_WarmCursorSkipsHydrate proves a cursor still within
-// the stream's retention window does NOT trigger hydration — no control
-// service is started at all, so a wrongly-triggered hydrate call would fail
-// with "no responders" and this test would catch it.
+// the stream's retention window answers gapped=false over the personal.syncgap
+// RPC and does NOT trigger hydration: the fakeHydrator records no call. (Cursor
+// == FirstSeq is the fresh boundary — gapped is strictly cursor < FirstSeq.)
 func TestManager_EnsureFresh_WarmCursorSkipsHydrate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	conn := newSyncTestConn(t, ctx)
+	interestKV := openInterestKV(t, ctx, conn)
 
 	s, err := conn.JetStream().Stream(ctx, defaultStream)
 	require.NoError(t, err)
 	firstSeq := s.CachedInfo().State.FirstSeq
+
+	h := &fakeHydrator{conn: conn}
+	startControlService(t, ctx, conn, h, interestKV)
 
 	st := openTestStore(t)
 	require.NoError(t, st.SetCursor(firstSeq))
@@ -180,6 +316,7 @@ func TestManager_EnsureFresh_WarmCursorSkipsHydrate(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NoError(t, mgr.ensureFresh(ctx))
+	assert.Empty(t, h.calledWith, "a warm cursor (gapped=false) must not trigger hydrate")
 }
 
 // TestManager_EnsureFresh_GapTriggersHydrate proves a cursor that has fallen

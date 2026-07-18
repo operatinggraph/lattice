@@ -53,15 +53,15 @@ type ConsumerConfig struct {
 }
 
 // DeltaSource is the inbound half of the seam: a durable, resumable feed of
-// projection deltas, plus the stream's earliest retained sequence so a
-// resuming consumer can tell whether retention pruned messages it never saw.
+// projection deltas. Retention-gap detection is NOT here — an Edge connection
+// speaks no $JS.API.STREAM.* verb (its per-identity grant denies it), so the
+// earliest-retained sequence is compared to the cursor server-side by the
+// personal.syncgap control RPC over the ControlClient half instead
+// (edge-syncgap-control-rpc-design.md §3.3).
 type DeltaSource interface {
 	// RunDurableConsumer delivers cfg's stream/filter to h until ctx is
 	// cancelled, resuming from the durable's own ack floor across restarts.
 	RunDurableConsumer(ctx context.Context, cfg ConsumerConfig, h Handler) error
-	// FirstSequence returns stream's earliest still-retained sequence. A
-	// cursor below it means retention pruned deltas this node never applied.
-	FirstSequence(ctx context.Context, stream string) (uint64, error)
 }
 
 // ControlClient is the outbound half of the seam: request-reply against a

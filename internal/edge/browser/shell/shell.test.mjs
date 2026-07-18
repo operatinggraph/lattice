@@ -45,7 +45,7 @@ class FakeLockManager {
 // makeFakeCore records the transport calls the shell delegates so a vector can
 // assert whether/when a durable was opened, with no WebSocket.
 function makeFakeCore() {
-  const calls = { connect: 0, startConsumer: 0, stopConsumer: 0, firstSequence: 0, request: 0, close: 0 };
+  const calls = { connect: 0, startConsumer: 0, stopConsumer: 0, request: 0, close: 0 };
   let deliverFn = null;
   return {
     calls,
@@ -55,10 +55,6 @@ function makeFakeCore() {
       calls.lastConsumerCfg = cfg;
     },
     stopConsumer: async () => void calls.stopConsumer++,
-    firstSequence: async () => {
-      calls.firstSequence++;
-      return 0;
-    },
     request: async () => {
       calls.request++;
       return new Uint8Array();

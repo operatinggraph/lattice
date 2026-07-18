@@ -144,11 +144,46 @@ func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, toke
 	}()
 	go func() {
 		defer e.wg.Done()
-		if err := mgr.Run(engCtx); err != nil && engCtx.Err() == nil {
-			cfg.Logger.Warn("facet engine: sync manager exited", "identityId", identityID, "err", err)
-		}
+		runSyncLoop(engCtx, mgr, identityID, cfg.Logger)
 	}()
 	return e, nil
+}
+
+// runSyncLoop runs the Edge Sync Manager, restarting it with capped
+// exponential backoff whenever Run returns while the engine context is still
+// live. Run can now fail on a transient control-plane unavailability at warm
+// boot — the personal.syncgap gap check fails closed if Refractor (or its
+// personal lens rule) is briefly unavailable at boot
+// (edge-syncgap-control-rpc-design.md §7) — so a single exit must not leave
+// sync dead for the whole session, the pre-existing log-and-abandon behaviour
+// this design turns from latent to likely. A cancelled engine context ends the
+// loop cleanly; local store reads keep serving throughout (offline-first).
+func runSyncLoop(ctx context.Context, mgr *edgesync.Manager, identityID string, logger *slog.Logger) {
+	const (
+		baseBackoff = 500 * time.Millisecond
+		maxBackoff  = 30 * time.Second
+	)
+	backoff := baseBackoff
+	for {
+		err := mgr.Run(ctx)
+		if ctx.Err() != nil {
+			return // engine shutting down — a clean exit, not a failure
+		}
+		if err == nil {
+			return // Run returned without error and without cancellation — nothing to restart
+		}
+		logger.Warn("facet engine: sync manager exited, restarting", "identityId", identityID, "backoff", backoff, "err", err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff *= 2; backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 }
 
 // Close stops the engine's background goroutines and releases its store and

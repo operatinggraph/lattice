@@ -16,7 +16,6 @@ package natstransport
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/nats-io/nats.go"
 
@@ -62,15 +61,6 @@ func (s *Conn) RunDurableConsumer(ctx context.Context, cfg transport.ConsumerCon
 			return substrate.Nak
 		}
 	})
-}
-
-// FirstSequence returns stream's earliest still-retained sequence.
-func (s *Conn) FirstSequence(ctx context.Context, stream string) (uint64, error) {
-	st, err := s.conn.JetStream().Stream(ctx, stream)
-	if err != nil {
-		return 0, fmt.Errorf("edge/natstransport: look up stream %q: %w", stream, err)
-	}
-	return st.CachedInfo().State.FirstSeq, nil
 }
 
 // Request issues one core-NATS request-reply (Refractor control planes are

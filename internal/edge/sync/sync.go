@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/asolgan/lattice/internal/edge/store"
 	"github.com/asolgan/lattice/internal/edge/transport"
@@ -28,6 +29,20 @@ import (
 const (
 	defaultStream        = "SYNC"
 	defaultSubjectPrefix = "lattice.sync.user"
+
+	// syncGapMaxAttempts bounds the warm-resume gap check's retry of the
+	// personal.syncgap control RPC (edge-syncgap-control-rpc-design.md §7).
+	// The control plane may briefly be unavailable at boot (Refractor still
+	// starting, or the personal lens rule not yet loaded → the syncgap seam
+	// nil, fail-closed), a transient window the JetStream stream-info admin
+	// call this replaces did not have — the NATS server answered that directly
+	// and needed no tolerance. A persistent failure still fails closed after the bound:
+	// freshness is unverifiable, so the node must never resume unverified.
+	syncGapMaxAttempts = 3
+	// syncGapRetryBaseBackoff is the initial delay between syncgap attempts,
+	// doubled each retry. Short enough not to stall a healthy boot, present so
+	// a transient control-plane blip does not fail the whole session.
+	syncGapRetryBaseBackoff = 100 * time.Millisecond
 )
 
 // deltaEnvelope mirrors the wire shape a Personal Lens delta publishes to
@@ -206,15 +221,63 @@ func (m *Manager) ensureFresh(ctx context.Context) error {
 }
 
 // gapped reports whether cursor (the last stream sequence this node applied)
-// has fallen behind the SYNC stream's current FirstSeq — i.e. retention has
-// pruned messages between cursor and the earliest still-retained message, so
-// a plain durable resume would silently skip them.
+// has fallen behind the SYNC stream's current retention window — i.e.
+// retention pruned messages between cursor and the earliest still-retained
+// message, so a plain durable resume would silently skip them. Answered by
+// the identity-bound personal.syncgap control RPC
+// (edge-syncgap-control-rpc-design.md): the Edge grant no longer speaks any
+// $JS.API.STREAM.* verb, so the earliest-retained sequence is compared to the
+// cursor server-side by the control host on its own full-grant read. A
+// transient control-plane unavailability (boot-order window, §7) is retried
+// with bounded backoff; a persistent failure fails closed (never resume
+// unverified).
 func (m *Manager) gapped(ctx context.Context, cursor uint64) (bool, error) {
-	first, err := m.tr.FirstSequence(ctx, m.stream)
+	var lastErr error
+	backoff := syncGapRetryBaseBackoff
+	for attempt := 1; attempt <= syncGapMaxAttempts; attempt++ {
+		gapped, err := m.syncGapOnce(ctx, cursor)
+		if err == nil {
+			return gapped, nil
+		}
+		lastErr = err
+		if attempt == syncGapMaxAttempts {
+			break
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+	}
+	return false, fmt.Errorf("after %d attempts: %w", syncGapMaxAttempts, lastErr)
+}
+
+// syncGapOnce issues one personal.syncgap control RPC and decodes its answer.
+// The response handling is deliberately stricter than the sibling ops'
+// nil-checks: gapped=false is this op's COMMON, legitimate answer, so an
+// absent PersonalSyncGap result must be an error, never defaulted to false —
+// nil→false is the silent-data-loss direction (a warm node that should
+// re-hydrate would instead resume its durable and skip the pruned deltas
+// forever, edge-syncgap-control-rpc-design.md §3.3).
+func (m *Manager) syncGapOnce(ctx context.Context, cursor uint64) (bool, error) {
+	resp, err := m.controlRequest(ctx, "syncgap", controlwire.ControlRequest{
+		IdentityID: m.cfg.IdentityID,
+		DeviceID:   m.cfg.DeviceID,
+		Cursor:     cursor,
+	})
 	if err != nil {
 		return false, err
 	}
-	return cursor < first, nil
+	if resp.Error != "" {
+		return false, fmt.Errorf("%s", resp.Error)
+	}
+	if resp.PersonalSyncGap == nil {
+		return false, fmt.Errorf("control plane returned no syncgap result")
+	}
+	return resp.PersonalSyncGap.Gapped, nil
 }
 
 // hydrate registers the device's Interest Set, then runs the cold bulk
