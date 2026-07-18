@@ -141,7 +141,7 @@ func TestInstallPersonalLens_NotFullEngine_Refuses(t *testing.T) {
 	r.CompiledRule = fakeCompiledRule{}
 	p := newPersonalPipeline(t)
 
-	ok := InstallPersonalLens(p, r, nil, nil, nil, nil, discardTestLogger())
+	ok := InstallPersonalLens(p, r, nil, nil, nil, nil, false, discardTestLogger())
 	if ok {
 		t.Fatalf("a non-full-engine compiled rule must refuse installation")
 	}
@@ -151,7 +151,7 @@ func TestInstallPersonalLens_KeyColumnNotAReturnAlias_Refuses(t *testing.T) {
 	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor", "bogusColumn"})
 	p := newPersonalPipeline(t)
 
-	ok := InstallPersonalLens(p, r, nil, nil, nil, nil, discardTestLogger())
+	ok := InstallPersonalLens(p, r, nil, nil, nil, nil, false, discardTestLogger())
 	if ok {
 		t.Fatalf("a business key column absent from the RETURN aliases must refuse installation")
 	}
@@ -161,9 +161,22 @@ func TestInstallPersonalLens_WellFormed_Installs(t *testing.T) {
 	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor"})
 	p := newPersonalPipeline(t)
 
-	ok := InstallPersonalLens(p, r, nil, nil, nil, nil, discardTestLogger())
+	ok := InstallPersonalLens(p, r, nil, nil, nil, nil, false, discardTestLogger())
 	if !ok {
 		t.Fatalf("a well-formed personal lens must install")
+	}
+}
+
+// RR-3 (edge-lattice-full-design.md §8.1): with requireReadGate=true (the
+// production posture), a nil capKV must REFUSE registration rather than
+// install the read-grant gate open.
+func TestInstallPersonalLens_RequireReadGate_NoCapKV_Refuses(t *testing.T) {
+	r := personalTestRule(t, personalMatch, lens.KeyField{adapter.PersonalActorKeyField, "anchor"})
+	p := newPersonalPipeline(t)
+
+	ok := InstallPersonalLens(p, r, nil, nil, nil, nil /*capKV*/, true /*requireReadGate*/, discardTestLogger())
+	if ok {
+		t.Fatalf("requireReadGate=true with a nil capKV must refuse installation (a personal lens must never run open in production)")
 	}
 }
 

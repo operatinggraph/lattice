@@ -1278,6 +1278,19 @@ func (p *Pipeline) handleAdjNode(ctx context.Context, nodeKey string, data []byt
 		}
 		return
 	}
+	// The Edge SYNC adapter (natssubject) feeds an untrusted device that orders
+	// deltas by revision; a sentinel-seq (0) adjacency-watch write reaches it
+	// unordered and can transiently resurrect a tombstone / drop an upsert
+	// (edge-lattice-full-design.md §8.1 RR-1). It is redundant with the
+	// real-seq stream-consumer fan-out that reprojects the same actors, so skip
+	// it here — the Edge must never receive an unordered rev-0 delta.
+	if s, ok := adpt.(interface{ SkipsAdjWatchWrite() bool }); ok && s.SkipsAdjWatchWrite() {
+		if len(results) > 0 {
+			slog.Info("pipeline: adj watch: skipping edge-sync write (real-seq fan-out owns delivery)",
+				"ruleId", p.ruleID, "key", nodeKey, "results", len(results))
+		}
+		return
+	}
 	for _, result := range results {
 		var writeErr error
 		if result.Delete {

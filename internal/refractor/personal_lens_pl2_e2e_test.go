@@ -152,7 +152,7 @@ func activatePersonalLens(t *testing.T, h *pl2Harness, lensID, cypher string, bu
 	require.True(t, projection.IsPersonalLens(r), "lens must be recognized as a Fire-2 personal lens")
 	require.True(t, ruleUsesFullEngine(t, r))
 	p.UseFullEngine(fullEngineSingleton, r.CompiledRule)
-	require.True(t, projection.InstallPersonalLens(p, r, h.adjKV, h.coreKV, h.interestKV, capKV, h.logger))
+	require.True(t, projection.InstallPersonalLens(p, r, h.adjKV, h.coreKV, h.interestKV, capKV, false, h.logger))
 
 	p.RunOn(h.conn, e2eSpec(lensID, "core-kv"))
 	pipelineCtx, pipelineCancel := context.WithCancel(h.ctx)

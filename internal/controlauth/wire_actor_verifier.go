@@ -32,10 +32,18 @@ const wireActorVerifierTimeout = 10 * time.Second
 // the token-revocation bucket won't open) is a startup error — once an
 // operator opts into JWT mode it must come up correctly or not at all,
 // mirroring the Gateway's own fail-closed bring-up.
+//
+// RR-5 (edge-lattice-full-design.md §8.1): an Edge-facing control plane serves
+// an untrusted device, where a nil verifier degrades body.IdentityID to
+// self-asserted. That is correct for dev but MUST NOT hold in an untrusted-Edge
+// deployment. LATTICE_CONTROL_REQUIRE_ACTOR_VERIFIER=true turns the (nil, nil)
+// "not configured" return into a hard startup error, so an operator running the
+// untrusted-Edge posture cannot silently come up with self-asserted identity.
 func WireActorVerifierFromEnv(ctx context.Context, conn *substrate.Conn, logger *slog.Logger) (*ActorVerifier, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	requireVerifier := os.Getenv("LATTICE_CONTROL_REQUIRE_ACTOR_VERIFIER") == "true"
 	keysDir := os.Getenv("LATTICE_CONTROL_JWT_KEYS_DIR")
 	devMode := os.Getenv("LATTICE_CONTROL_JWT_DEV_MODE") == "true"
 
@@ -49,6 +57,10 @@ func WireActorVerifierFromEnv(ctx context.Context, conn *substrate.Conn, logger 
 		return nil, fmt.Errorf("controlauth: load trusted JWT keys: %w", err)
 	}
 	if len(keys) == 0 {
+		if requireVerifier {
+			// Untrusted-Edge posture: refuse to start self-asserted.
+			return nil, fmt.Errorf("controlauth: LATTICE_CONTROL_REQUIRE_ACTOR_VERIFIER=true but no JWT trust root resolved — an untrusted-Edge control plane must not start with self-asserted identity (set LATTICE_CONTROL_JWT_KEYS_DIR or LATTICE_CONTROL_JWT_DEV_MODE)")
+		}
 		// Not configured — Fire 1 self-asserted-header behavior stands.
 		return nil, nil
 	}

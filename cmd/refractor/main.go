@@ -596,7 +596,10 @@ func main() {
 			// Fires PL.2-PL.3): installs the ActorEnumerator + the
 			// "__actor"-injecting envelope, gated by D1's read-grant check
 			// (capabilityKV) and filtered through the Interest Set registry.
-			if !projection.InstallPersonalLens(p, r, adjKV, coreKV, personalInterestKV, capabilityKV, logger) {
+			// requireReadGate=true: the production refractor fails closed if
+			// capabilityKV is nil rather than installing a personal lens open
+			// (edge-lattice-full-design.md §8.1 RR-3).
+			if !projection.InstallPersonalLens(p, r, adjKV, coreKV, personalInterestKV, capabilityKV, true, logger) {
 				return
 			}
 			// The Hydration Hook (personal-secure-lens-design.md §3.5, Fire

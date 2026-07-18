@@ -220,7 +220,7 @@ func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 		p, err := pipeline.New(r.ID, "nats_subject", "core-kv", h.adjKV, h.coreKV, adpt, nil)
 		require.NoError(t, err)
 		p.UseFullEngine(fullEngineSingleton, r.CompiledRule)
-		require.True(t, projection.InstallPersonalLens(p, r, h.adjKV, h.coreKV, h.interestKV, h.capKV, h.logger),
+		require.True(t, projection.InstallPersonalLens(p, r, h.adjKV, h.coreKV, h.interestKV, h.capKV, false, h.logger),
 			"%s must install through projection.InstallPersonalLens", ls.CanonicalName)
 
 		p.RunOn(h.conn, e2eSpec(r.ID, "core-kv"))

@@ -290,6 +290,22 @@ func (a *NatsSubjectAdapter) Delete(ctx context.Context, keys map[string]any, pr
 	return a.publish(ctx, actor, env)
 }
 
+// SkipsAdjWatchWrite reports that the adjacency-watch reprojection path must
+// NOT publish its sentinel-seq (0) deltas to this adapter. Keyed on the
+// transport, not on personal-ness: every "nats_subject" lens (both the Fire 2
+// personal fan-out and the PL.1 direct shape) feeds the Edge SYNC consumer,
+// an untrusted device whose LWW gate orders by revision and applies-on-equal,
+// so a Revision==0 delta arrives ordered-by-arrival and a redelivered/
+// reordered rev-0 upsert can transiently resurrect a rev-0 tombstone or
+// vice-versa (edge-lattice-full-design.md §8.1 RR-1). The write is redundant
+// regardless: the adjacency reprojection carries no stream sequence, and the
+// same link/aspect CDC event flows through the stream consumer's
+// evalLinkFanOut/evalAspectFanOut, reprojecting the same keys with the
+// triggering message's real sequence (the same pipeline-general property the
+// guarded-adapter seq-0 skip relies on, pipeline.handleAdjNode) — so this is
+// dropped, not downgraded. The Edge must never receive an unordered delta.
+func (a *NatsSubjectAdapter) SkipsAdjWatchWrite() bool { return true }
+
 func (a *NatsSubjectAdapter) publish(ctx context.Context, actor string, env deltaEnvelope) error {
 	data, err := json.Marshal(env)
 	if err != nil {

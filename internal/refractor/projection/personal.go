@@ -41,13 +41,27 @@ func IsPersonalLens(r *lens.Rule) bool {
 // exercising only fan-out/relevance may still pass nil, but a production
 // caller MUST thread a real handle (personal-secure-lens-design.md §3.4, Fire
 // PL.3: "the security door is the only thing that needs D1; it is the
-// explicit gate, not a silent default"). Returns false when the lens must not
-// be registered (a fail-closed descriptor/engine error).
-func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, interestKV, capKV *substrate.KV, logger *slog.Logger) bool {
+// explicit gate, not a silent default"). requireReadGate makes that
+// requirement fail-closed: when true, a nil capKV REFUSES registration rather
+// than installing the lens open (edge-lattice-full-design.md §8.1 RR-3) — the
+// production wiring (cmd/refractor) passes true, the trusted/test posture
+// passes false. Returns false when the lens must not be registered (a
+// fail-closed descriptor/engine/posture error).
+func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, interestKV, capKV *substrate.KV, requireReadGate bool, logger *slog.Logger) bool {
 	cr, ok := r.CompiledRule.(*full.CompiledRule)
 	if !ok {
 		logger.Error("personal lens requires the full engine", "lensId", r.ID)
 		return false
+	}
+
+	if capKV == nil {
+		if requireReadGate {
+			logger.Error("personal lens registration REFUSED: the D1 read-grant security gate (capKV) is required in this posture but was not threaded — a personal lens must never run open in production",
+				"lensId", r.ID)
+			return false
+		}
+		logger.Warn("personal lens installed WITHOUT the D1 read-grant security gate — trusted/test-only posture, never production",
+			"lensId", r.ID)
 	}
 
 	businessKeys := make([]string, 0, len(r.Into.Key))
@@ -66,10 +80,6 @@ func InstallPersonalLens(p *pipeline.Pipeline, r *lens.Rule, adjKV, coreKV, inte
 	p.SetEnvelopeFn(personalEnvelopeFn(interestKV, capKV, logger))
 	p.SetActorEnumerator(pipeline.NewActorEnumerator(adjKV, coreKV, PersonalActorType))
 
-	if capKV == nil {
-		logger.Warn("personal lens installed WITHOUT the D1 read-grant security gate — trusted/test-only posture, never production",
-			"lensId", r.ID)
-	}
 	logger.Info("personal lens fan-out + envelope installed",
 		"lensId", r.ID, "businessKeys", businessKeys, "interestSetFilter", interestKV != nil, "readGrantGate", capKV != nil)
 	return true
