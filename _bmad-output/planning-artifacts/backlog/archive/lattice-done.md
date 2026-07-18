@@ -2,6 +2,15 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-14 · `ea2b48b` · [CI] internal/substrate's 63 tests now `t.Parallel()` (20.4s→9s local); CI shard flat — ceiling confirmed 2x
+- 2026-07-14 · `c22b3a6` · [CI] processor+outbox `t.Parallel()` (29s→9s, 17s→10s); found real `internal/bootstrap.populate()` global-state race blocking the same fix elsewhere
+- 2026-07-13 · `e0c64df` · [loom,starlarksandbox] Starlark guards Fire 2 CLOSED — `{reads, starlark}` guard eval lit up, budget-bounded parse-time compile-check, deterministic dict key ordering fix; CI green
+- 2026-07-13 · `b56f155` · [CI] internal/natsperm's 32 per-test embedded-NATS conformance tests now `t.Parallel()` (69s→53s in CI, zero races); shard wall-clock unchanged, real bottleneck named
+- 2026-07-13 · `0b72492` · [rbac-domain] service-location cap.roles gap CLOSED — ground-truthed healthy live; added a regression test for recurrence
+- 2026-07-13 · `f1ce5bb` · [Weaver] inflight_<g>-as-external-gap-marker SHIPPED — staleMark cross-checks ga.Action vs directOp/proposedOp, InflightActionMismatch Health issue on mismatch; CI green
+- 2026-07-13 · `3c61feb` · [vault,edge] EDGE.4 increment 2 — `internal/edge/vault` client: session-key request+TTL-cache + local AEAD decrypt via new `vault.OpenWithSessionKey`; `Reader` composes over `overlay.Read`; CI green
+- 2026-07-13 · `fb557cb` · [refractor,gateway,control-authz] EDGE.4 increment 1 — identity-bound `sessionkey` control RPC (Vault Proxy trust boundary), grants in lockstep across 3 places; CI green
+- 2026-07-13 · `182d751` · [weaver] fixed CI-caught TestTargetSource_StableInstanceGetsFreshDurableEachBoot flake from the age-guarded prune (Loom's sibling test was fixed in Fire A, Weaver's copy was missed); CI green
 - 2026-07-13 · `8ccdfff` · [refractor,cmd/lattice] lens-registry-restart-integrity Fire B CLOSED — lensesRegistered metric + RegistryProbe reconciliation + health-summary lens staleness; live-stack verified; CI green
 - 2026-07-13 · `6503f22` · [refractor,substrate,loom] lens-registry-restart-integrity Fire A — CoreKVSource per-boot durable (fixes the live P0 cold-registry incident) + age-guarded PruneStaleDurables (all 4 meta-sources inherit it); CI green
 - 2026-07-13 · `ca9affe` · [controlauth,natsauth,control-authz] per-identity-nats-subscribe-acl Fire 2 tail — opened personal.hydrate/register/deregister (op table + consumer grant + transport); EDGE.4 unblocked; CI green
