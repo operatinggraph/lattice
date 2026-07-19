@@ -112,14 +112,33 @@ never a primary label. Fallback ladder: `displayName` → composed relational la
   anchor `name`/`containerName` — the anchors project as bare
   `{key, container}`, and `displayName` stays null. So the projection genuinely
   omits both N3 fields with the correct rule installed and a reprojection
-  demonstrably running. Two candidates remain, and they were not separated:
+  demonstrably running. Two candidates remained:
   **(a)** Refractor is executing a compiled rule older than the spec it holds, or
   **(b)** the engine does not resolve these two expression forms — a neighbour's
   aspect hop *inside* a `collect()` map, and an aspect's whole `.data` object as a
-  scalar-position alias — and yields null for each. Note the shipped proof covers
-  the alias *resolving*, not the envelope arriving. Separating (a) from (b) is one
-  targeted engine test on the two expression shapes; do that before touching either
-  the lens or the renderer.
+  scalar-position alias — and yields null for each.
+
+  **Both are now falsified (2026-07-19, `2a0af7e3`) — the loss is downstream of
+  the engine.**
+
+  - **(b) is false.** `aspect_expression_shapes_test.go` exercises the two shapes
+    against the real engine: `identity.name.data` in scalar alias position yields
+    the `{ct, nonce, keyId}` envelope, and `loc.presentation.data.name` resolves
+    inside a `collect()` map across two OPTIONAL MATCH hops. Both pass. They share
+    one `resolveProperty` call site, so there is no second evaluator to diverge.
+  - **(a) is false.** The installed spec (`vtx.meta.ua4dCK62adbHJDCxua4d.spec`)
+    was written at 02:04:30 and carries the N3 cypher verbatim; the running
+    Refractor logged `lens loaded edgeIdentity` at 06:04:52 — *after* that write —
+    with no refusal in its log. The compiled rule is current.
+
+  So the engine produces both fields and the rule that produces them is live. The
+  remaining search space is **downstream of projection**: this lens's target is
+  not a KV row but `nats_subject` / `personal: true` / stream `SYNC`
+  (`subjectPrefix: lattice.sync.user`), so the next step is the personal-envelope
+  emit path and the edge `manifestFrame` seam — capture the actual SYNC delta for
+  a signed-in actor and compare it field-by-field against the projection result,
+  rather than inferring from the rendered row. Do that before touching the lens or
+  the renderer.
 
   Two real gaps *were* found and fixed while grounding this (`93c6064d`): the
   showcase seed never named an already-seeded world (it passes location names only
