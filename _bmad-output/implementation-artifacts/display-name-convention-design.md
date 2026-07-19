@@ -156,26 +156,37 @@ never a primary label. Fallback ladder: `displayName` → composed relational la
   the newer delta never overwrote — which is exactly why the earlier
   rebuild-and-rehydrate "came back identical".
 
-  **Leading candidate for why the mirror never reconciles, and it is an
-  environment artifact rather than a product defect:** the running stack denies
-  the gap-detection RPC —
+  **RESOLVED — N3 works end to end; the tail was a stale device mirror
+  (2026-07-19).** Purging `facet-store/<identityID>.db` and re-hydrating returns
+  the row complete, and `/api/feed` now serves:
 
   ```
-  Permissions Violation for Publish to "lattice.ctrl.refractor.personal.syncgap"
+  "displayName": "Riley Chen",
+  "anchors": [ { "key": "vtx.unit.J11X…", "name": "Unit 1",
+                 "container": "vtx.building.A9jn…", "containerName": "Riverside Building" } ]
   ```
 
-  `bin/gateway` on this stack was built 2026-07-17 20:33; the grant for that
-  subject landed in `internal/gateway/natsauth` at 2026-07-17 22:52 (`0acd68c3`),
-  so the running auth-callout responder predates its own permission. The syncgap
-  RPC is precisely the mechanism that would pull a missed delta, so a device that
-  cannot call it keeps whatever its mirror already holds.
+  `displayName` is the decrypted plaintext, so `internal/edge/vault.SelfName` is
+  confirmed working in-engine against the real Vault control plane on a live
+  stack — the beat the N3 commit could never observe. **No code was wrong.** Both
+  the design's candidates and the syncgap theory below were all false; the mirror
+  simply held a pre-N3 row that nothing forced it to re-fetch, and a local purge
+  is what re-fetches it.
 
-  **Next step (cheap, decisive, not yet run):** rebuild + restart `bin/gateway`,
-  purge `facet-store/<identityID>.db`, re-login, and re-read `/api/feed`. If the
-  row returns with `sealedName` and named anchors, N3 is already complete and this
-  tail was a stale-dev-stack artifact throughout; if it does not, the defect is in
-  the mirror's apply/hydrate path and is real. The purge was deliberately left
-  un-run here — it deletes a device mirror on the stack Andrew may be demoing.
+  Two environment findings fell out, worth keeping because both cost real
+  debugging time here:
+
+  - **A stale `bin/gateway` denied the gap RPC.** The running auth-callout
+    responder (built 2026-07-17 20:33) predated the grant for
+    `lattice.ctrl.refractor.personal.syncgap` (`0acd68c3`, 2026-07-17 22:52), so
+    every gap check was refused. Rebuilding + restarting the gateway cleared it —
+    but it was NOT the cause of the stale row, which survived the fix and only
+    cleared on purge. Two fires in a row were misdirected by a stale dev binary;
+    check binary build times against the commits under investigation *first*.
+  - **A hydrate needs a moment.** Reading `/api/feed` ~8s after login still
+    returned the pre-N3 row; the corrected row landed once replay finished.
+    Sample the feed until the row settles rather than treating the first frame
+    as the answer.
 
   Two real gaps *were* found and fixed while grounding this (`93c6064d`): the
   showcase seed never named an already-seeded world (it passes location names only
