@@ -35,17 +35,14 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **F16 — AI review console** | Operator control point for the AI-native loop, zero surface today (CLI-only): (a) capability-proposal queue — DDL/lens diff, approve→apply; (b) Augur L3 escalation queue — proposed ops, approve/reject→auto-dispatch. Both human-gated; one console, two tabs, one shared card. Fires F16.1 (see+reject) → F16.3 (Augur) → F16.2 (cap approve+apply). | ★★★ | M | ✅ CLOSED — F16.1+F16.3+F16.2 shipped; full human-in-the-loop surface (both loops) live · [UX design](../../implementation-artifacts/loupe-f16-ai-review-console-ux.md) |
-| **F17 — Orchestration queue observability** | Loupe's task inbox (`tasks.go`) shows only status/assignee/scopedTo/operation — blind to the FR28 queue plane shipped since: `queuedFor` + `ClaimTask`, `unroutedTasks` (Weaver-surfaced via Health-KV), availability-gated routing + `SetAvailability`. Add queued/unrouted/available columns + a "stuck/unrouted work" view. High value (live orchestration visibility), small. | ★★★ | S–M | ✅ CLOSED — F17.1 shipped: queue-plane-aware inbox · [UX](../../implementation-artifacts/loupe-f17-queue-observability-ux.md) |
-| **F18 — Weaver planner-mandate diagnostics** | The planner mandate publishes rich heartbeat diagnostics (contraction, oscillation, shadow agree/diverge, admission pacing, `LensEffectMismatch`), but only the generic health rollup rendered them. Add a planner solver/remediation view. | ★★ | M | ✅ CLOSED — F18.1: Planner panel on the Weaver page (oscillation · mismatch · contraction · admission · shadow) · [UX](../../implementation-artifacts/loupe-f18-planner-diagnostics-ux.md) |
-| **F19 — Edge / Personal-Lens fleet** | A whole plane was invisible: Personal Lens (PL.1–5) + Edge Lattice (EDGE.1–5) — per-identity subscribe ACL, `personal.*` control RPCs, Interest Sets. Adds a subscriber roster + per-device sync-gap health. | ★★ | M–L | ✅ CLOSED — F19.1 shipped: `#/edge` device roster + gap triage, no cross-lane ask · [UX](../../implementation-artifacts/loupe-f19-edge-fleet-ux.md) |
 | **F20 — Hosted-demo read-only operator** | Loupe in the public demo as the behind-the-scenes view: a `demoOperator` role stripped to inspect-only grants, so every write is capability-denied at the platform — proving "even the console is capability-scoped" live; one-tap demo login; own subdomain + visitor disclaimer. Exposed only at public-launch. | ★★ | M | 🏗️ F20.1 SHIPPED · F20.5+F20.2 📋 build-ready (design §6–§7) · exposure Andrew-gated · [design + exposure checklist](../../implementation-artifacts/loupe-f20-demo-operator-ux.md) |
 
 ## Component maintenance
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **designAhead trio flip** | `systemmap.go` hardcoded gateway/vault/chronicler as `designAhead:true`; all three heartbeat live now, so the "not yet deployed" framing was stale. | ★★ | XS–S | ✅ SHIPPED — flag `designAhead`→`optional`; never-seen→"offline" (up-full only, zero rollup), seen-then-gone→absent-red (everLive crash-detection preserved); live→normal. Verified live: all three render live status (Gateway stale, Vault/Chronicler green), no design-ahead chips. |
+
+*(nothing open.)*
 
 ## Parked
 
