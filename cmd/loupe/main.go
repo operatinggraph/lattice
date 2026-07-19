@@ -27,6 +27,19 @@
 //	                           LOUPE_JWT_ISSUER / LOUPE_JWT_AUDIENCE / LOUPE_JWT_KID refine it
 //	LOUPE_GATEWAY_URL          the Gateway's base URL op-submissions relay the operator's
 //	                           own Bearer token to (default: http://localhost:8080)
+//	LOUPE_DEMO_MODE            the hosted-demo read-only posture (demo.go); requires
+//	                           LOUPE_OPERATOR_ACTOR_KEY to name a scoped demo identity
+//	LOUPE_PUBLIC_ORIGIN        the exact external https origin the console is served at
+//	                           through a TLS-terminating reverse proxy, e.g.
+//	                           https://loupe.demo.example (publicorigin.go). Unset (the
+//	                           default) leaves the same-origin gate and the session
+//	                           cookie's Secure flag deriving from the bind, as before
+//	LOUPE_EVENT_STREAM_MAX     concurrent SSE tail bound (default: 4, or 32 in demo mode)
+//
+// LOUPE_DEMO_MODE, LOUPE_PUBLIC_ORIGIN, and LOUPE_EVENT_STREAM_MAX all parse
+// fail-closed: a value that is set but malformed refuses to boot rather than
+// reading as unset, because silently disabling any of them is the dangerous
+// direction on the one deployment where they matter.
 //
 // Logs to stderr in slog text format. The server starts even when NATS is
 // unreachable or the bootstrap file is missing: the UI is served and each
@@ -149,6 +162,21 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// The public-origin posture (publicorigin.go): the origin gate, the session
+	// cookie's Secure flag, and the limiter's peer keying all key off this one
+	// declaration, and unset leaves each exactly as it was.
+	pubOrigin, err := parsePublicOrigin(os.Getenv("LOUPE_PUBLIC_ORIGIN"))
+	if err != nil {
+		return err
+	}
+	if err := publicOriginAuthGuard(pubOrigin != nil, isTruthy(os.Getenv("LOUPE_DEV_AUTH")), demoMode); err != nil {
+		return err
+	}
+	streamMax, err := eventStreamMax(os.Getenv("LOUPE_EVENT_STREAM_MAX"), demoMode)
+	if err != nil {
+		return err
+	}
+
 	// operatorActorKey is stamped as the Lattice-Actor header on every outbound
 	// control-plane request (control-plane-capability-authz-design.md §3.6 —
 	// "Loupe is the trusted single-identity console; its identity is now
@@ -180,20 +208,28 @@ func run(logger *slog.Logger) error {
 	}
 
 	srv := &server{
-		conn:               conn,
-		adminActor:         adminActor,
-		operatorActorKey:   operatorActorKey,
-		operatorActorToken: operatorActorToken,
-		logger:             logger,
-		natsTimeout:        natsRequestLimit,
-		uploadCap:          uploadCap,
-		pg:                 pgPool,
-		pgDSNInvalid:       pgDSNInvalid,
-		bindHost:           bindHost,
-		authn:              authn,
-		devSigner:          signer,
-		gatewayURL:         envOrDefault("LOUPE_GATEWAY_URL", defaultGatewayURL),
-		demoMode:           demoMode,
+		conn:                  conn,
+		adminActor:            adminActor,
+		operatorActorKey:      operatorActorKey,
+		operatorActorToken:    operatorActorToken,
+		logger:                logger,
+		natsTimeout:           natsRequestLimit,
+		uploadCap:             uploadCap,
+		pg:                    pgPool,
+		pgDSNInvalid:          pgDSNInvalid,
+		bindHost:              bindHost,
+		publicOrigin:          pubOrigin,
+		cookieSecure:          sessionCookieSecure(pubOrigin, bindHost),
+		credLimiter:           newCredentialLimiter(time.Now),
+		maxEventStreamClients: streamMax,
+		authn:                 authn,
+		devSigner:             signer,
+		gatewayURL:            envOrDefault("LOUPE_GATEWAY_URL", defaultGatewayURL),
+		demoMode:              demoMode,
+	}
+	if pubOrigin != nil {
+		logger.Info("public origin declared; the same-origin gate accepts it and the session cookie is Secure",
+			"origin", pubOrigin.String())
 	}
 	if demoMode {
 		logger.Warn("DEMO MODE: console is read-only; every non-GET request is refused. "+

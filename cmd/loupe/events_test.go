@@ -67,13 +67,13 @@ func TestFormatSSE(t *testing.T) {
 	}
 }
 
-// TestEventStream_ClientLimit pins the concurrent-tail bound: the slot past
-// maxEventStreamClients is refused and a released slot is reusable. The
-// limiter is driven directly — the handler path around it needs a live NATS
-// connection (covered by TestEventStream_TailsCoreEvents).
+// TestEventStream_ClientLimit pins the concurrent-tail bound: the slot past the
+// configured cap is refused and a released slot is reusable. The limiter is
+// driven directly — the handler path around it needs a live NATS connection
+// (covered by TestEventStream_TailsCoreEvents).
 func TestEventStream_ClientLimit(t *testing.T) {
-	s := &server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	for i := 0; i < maxEventStreamClients; i++ {
+	s := &server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), maxEventStreamClients: 3}
+	for i := 0; i < s.maxEventStreamClients; i++ {
 		if !s.acquireEventClient() {
 			t.Fatalf("client %d rejected under the limit", i)
 		}

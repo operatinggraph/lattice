@@ -233,7 +233,7 @@ func (s *server) setOperatorSessionCookie(w http.ResponseWriter, token string, e
 		Path:     "/",
 		Expires:  exp,
 		HttpOnly: true,
-		Secure:   !isLoopbackHost(s.bindHost),
+		Secure:   s.cookieSecure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -247,7 +247,7 @@ func (s *server) clearOperatorSessionCookie(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   !isLoopbackHost(s.bindHost),
+		Secure:   s.cookieSecure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }

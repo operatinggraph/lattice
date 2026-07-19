@@ -67,6 +67,23 @@ type server struct {
 	// bindHost is the host part of the listen address; the same-origin gate
 	// accepts it alongside loopback hosts (the non-loopback opt-in).
 	bindHost string
+	// publicOrigin is the declared external origin the console is served at
+	// through a TLS-terminating reverse proxy (LOUPE_PUBLIC_ORIGIN,
+	// publicorigin.go). nil — the default — means undeclared, and every path
+	// that consults it behaves exactly as it did before the declaration
+	// existed.
+	publicOrigin *publicOrigin
+	// cookieSecure is the session cookie's Secure flag, computed once at boot:
+	// set when a public origin is declared (always https) or the bind is
+	// non-loopback. Derived from the bind alone it would fail OPEN behind a
+	// TLS-terminating proxy on a loopback bind.
+	cookieSecure bool
+	// credLimiter throttles the three unauthenticated credential-exchange
+	// endpoints (credlimit.go). nil disables throttling.
+	credLimiter *credentialLimiter
+	// maxEventStreamClients bounds concurrent SSE tails, resolved at boot from
+	// the posture (eventStreamMax). Read through eventStreamCap.
+	maxEventStreamClients int
 	// everLive remembers which components this process has seen heartbeating
 	// (snapshotEverLive / noteEverLive) so an optional component that was
 	// running and then crashed reads absent-red, not "offline".
@@ -134,9 +151,13 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	// the bare and trailing-segment patterns route to the same handler.
 	mux.HandleFunc("/api/objects", s.handleObjects)
 	mux.HandleFunc("/api/objects/", s.handleObjects)
-	mux.HandleFunc(operatorDevTokenPath, s.handleOperatorDevToken)
-	mux.HandleFunc(operatorSessionPath, s.handleOperatorSession)
-	mux.HandleFunc(operatorLogoutPath, s.handleOperatorLogout)
+	// The three credential-exchange endpoints are the console's only handlers
+	// reachable with no credential at all, so they carry the rate limiter
+	// (credlimit.go) — wrapped here so a throttled caller costs no body read
+	// and no signing work.
+	mux.HandleFunc(operatorDevTokenPath, s.limitCredentialExchange(s.handleOperatorDevToken))
+	mux.HandleFunc(operatorSessionPath, s.limitCredentialExchange(s.handleOperatorSession))
+	mux.HandleFunc(operatorLogoutPath, s.limitCredentialExchange(s.handleOperatorLogout))
 	mux.HandleFunc(loginPagePath, s.handleLoginPage)
 }
 
@@ -171,9 +192,18 @@ func (s *server) writeError(w http.ResponseWriter, status int, msg string) {
 // loopback host, or the explicitly-configured bind host (the warned-about
 // non-loopback opt-in). Origin "null" (sandboxed iframe, some redirects) has
 // no host and fails closed.
+//
+// Behind a TLS-terminating reverse proxy neither of those holds — the browser's
+// Origin names the public site while the bind is loopback — so a declared
+// public origin (LOUPE_PUBLIC_ORIGIN, publicorigin.go) is accepted as its own
+// branch. That branch does not consult r.Host at all; see publicOrigin.matches
+// for why equality against a boot-time constant keeps the rebinding hardening.
 func (s *server) crossOriginBlocked(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
+		return false
+	}
+	if s.publicOrigin.matches(origin) {
 		return false
 	}
 	if origin == "http://"+r.Host || origin == "https://"+r.Host {

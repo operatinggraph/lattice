@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -13,9 +14,6 @@ import (
 )
 
 const (
-	// maxEventStreamClients bounds concurrent SSE tails. Loupe is a loopback
-	// single-operator tool; a handful of tabs is the ceiling, not a fleet.
-	maxEventStreamClients = 4
 	// eventStreamBuffer is the per-client channel depth between the JetStream
 	// consumer callback and the HTTP writer. A full buffer drops (the FE ring
 	// buffer makes loss non-fatal); a dropped counter rides the next message.
@@ -70,11 +68,33 @@ func formatSSE(event string, data []byte) []byte {
 	return b.Bytes()
 }
 
+// eventStreamCap is the concurrent-tail bound this server runs with, resolved
+// at boot (eventStreamMax, publicorigin.go). An unset field means a server
+// value that never went through boot — only a test fixture — so it falls back
+// to the ordinary default rather than denying every tail.
+func (s *server) eventStreamCap() int32 {
+	if s.maxEventStreamClients <= 0 {
+		return defaultEventStreamClients
+	}
+	return int32(s.maxEventStreamClients)
+}
+
+// atCapacityMessage is the terminal streamError text for a refused tail. An
+// operator is told what to do about it; a demo visitor, who has no other tab to
+// close and no control over how many strangers are watching, is told to wait.
+func (s *server) atCapacityMessage() string {
+	if s.demoMode {
+		return "the live feed is at capacity — try again in a moment"
+	}
+	return fmt.Sprintf("too many event stream clients (max %d) — close another Loupe tab", s.eventStreamCap())
+}
+
 // acquireEventClient reserves an SSE client slot, false when at capacity.
 func (s *server) acquireEventClient() bool {
+	limit := s.eventStreamCap()
 	for {
 		cur := s.eventClients.Load()
-		if cur >= maxEventStreamClients {
+		if cur >= limit {
 			return false
 		}
 		if s.eventClients.CompareAndSwap(cur, cur+1) {
@@ -129,7 +149,7 @@ func (s *server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 
 	sseHeaders(w)
 	if !s.acquireEventClient() {
-		streamError("too many event stream clients (max 4) — close another Loupe tab")
+		streamError(s.atCapacityMessage())
 		return
 	}
 	defer s.eventClients.Add(-1)

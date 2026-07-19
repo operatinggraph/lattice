@@ -475,7 +475,11 @@ func TestRequireOperator_NonNavigationRequest_Still401(t *testing.T) {
 // addition to the existing JSON token response.
 func TestHandleOperatorDevToken_Mint_SetsSessionCookie(t *testing.T) {
 	s := devAuthServer(t)
-	s.bindHost = "127.0.0.1" // mirrors main.go's real loopback default
+	s.bindHost = "127.0.0.1"
+	// The cookie's Secure flag is a field resolved once at boot, so the loopback
+	// posture has to be set the way main.go computes it — asserting !Secure off
+	// the struct zero value would pass no matter what the derivation did.
+	s.cookieSecure = sessionCookieSecure(nil, s.bindHost)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, operatorDevTokenPath, nil)
 	s.handleOperatorDevToken(rec, r)
