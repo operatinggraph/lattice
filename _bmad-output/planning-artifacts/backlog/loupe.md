@@ -44,7 +44,7 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **designAhead trio flip** | `systemmap.go` still hardcodes gateway/vault/chronicler as `designAhead:true`, but all three now heartbeat live (Gateway in `up-full`; Vault `health.vault.*`; Chronicler `health.chronicler.*`) — the flag is moot when live and only mis-renders the DOWN state as "design-ahead" not a real absent/offline signal. Decide the down-state posture (core-expected red vs vertical-style offline; kernel-only `make up` skips them) and flip. Also verify the F11 revoke loop live now Gateway runs in up-full. | ★★ | XS–S | 📋 ready |
+| **designAhead trio flip** | `systemmap.go` hardcoded gateway/vault/chronicler as `designAhead:true`; all three heartbeat live now, so the "not yet deployed" framing was stale. | ★★ | XS–S | ✅ SHIPPED — flag `designAhead`→`optional`; never-seen→"offline" (up-full only, zero rollup), seen-then-gone→absent-red (everLive crash-detection preserved); live→normal. Verified live: all three render live status (Gateway stale, Vault/Chronicler green), no design-ahead chips. |
 
 ## Parked
 
@@ -54,7 +54,6 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 ## PO notes (rotation memory — capped, dated one-liners)
 
-- 2026-07-01 PO review (Andrew session) — filed the program; found+fixed the control-plane lockout.
 - 2026-07-02 UX design adjudicated (2 premises corrected against live stack — see design §15).
 - 2026-07-02 PO review (Andrew session) — **extended 2.0** with platform-edges fires F10–F13 (Gateway/Vault/Chronicler onto the curated map + the Time Machine); map stays curated, agent-console stays shelved, design-ahead all three.
 - 2026-07-02 — F10–F13 UX **adjudicated** (Winston): [platform-edges-ux](../../implementation-artifacts/loupe-platform-edges-ux.md); Andrew grants `ShredIdentityKey`+`RevokeActor`, map shows design-ahead, revoke = op→event→Gateway-internal-KV (refined lattice revocation row → Designer). Cross-lane asks filed to lattice (Gateway up-full+jwks, Vault→Loupe enablers).
@@ -73,12 +72,14 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 - 2026-07-18 — F16 UX design drafted (Sally) + **adjudicated (Winston, Andrew-delegated)**, grounded live against the shipped read-models/op DDLs. Key finding: **both** loops are human-gated (Augur `augurDispatchPending` fires on `review.state="approved"`, not `pending`) — Augur is an action tab, not observe-only; its approve is *lighter* than capability's (server-side re-validation, no apply step). §8 forks resolved: approve=Loupe-in-process (Option A), apply=apply-in-Loupe (CLI fallback), reject=simple-confirm, Augur pending sorts by confidence. F16 → 📋 ready.
 - 2026-07-18 — **F16.1 SHIPPED**: capability queue+detail+reject, verified live (routing/nav/error rendering; the shared stack has no `capability-author` package installed, so functional correctness rode an embedded-NATS Go test instead). **Next:** F16.3 (Augur tab, zero dep, first prod `ReviewProposal` use), then F16.2 (approve+apply, two contingent spikes). `designAhead`-trio maintenance row is 📋 ready.
 - 2026-07-18 — **F16.3 SHIPPED**: Augur escalation tab — queue+detail+approve+reject, shares F16.1's card renderer, pending-by-confidence sort (§8.4), badge now sums both loops. Augur's approve re-validates entirely server-side (no client validation payload, no apply step) so both verdicts shipped in one fire — this is `ReviewProposal`'s first production submitter; verified live (routing/auth/error rendering — the shared stack has no `packages/augur` installed either, so the approve→dispatch write path rode the embedded-NATS Go test, same posture as F16.1). Lead self-review. **Next:** F16.2 (capability approve+apply, two contingent spikes).
+- 2026-07-18 — **designAhead trio flip SHIPPED** (`569f06af`): Winston-adjudicated posture — Gateway/Vault/Chronicler are optional (up-full only), not design-ahead; everLive-gated down-state (never-seen→offline keeps kernel-only green; crash→absent-red). `mapEdge.DesignAhead` (app→gateway route) untouched. F11-revoke live-click NOT exercised (destructive submit, declined unattended per the risky-action guardrail); the revoke surface is unaffected + Gateway confirmed heartbeating.
 - 2026-07-18 — **F16.2 SHIPPED → F16 CLOSED**: capability approve+apply (`#/review/capability/<id>/{approve,apply}`). Both spikes landed in-Loupe, no cross-lane ask: approve re-validates the artifact server-side against the live catalog (Option A — the CLI's three `ValidateCapabilityArtifact` deps all constructible in `cmd/loupe`; a fresh-invalid verdict blocks client-side, no op sent), apply drives the two-commit F-004 install (`CapabilityApplyPlanForProposal`→`Installer.Apply`→`MarkCapabilityProposalApplied`) reusing `pkg.go`'s Installer wiring. FE: approve button live, approved-state "Apply now". Known tail: a partial failure (install committed, mark op failed) isn't retryable via the button for a newPackage — recovery is the CLI mark step (error names it). Verified headless (routing/auth/method-gating/handler-reach; rebuilt asset served) + embedded-NATS Go tests for the guards + `freshCapabilityVerdict` (shared stack has no `capability-author` installed, same posture as F16.1/F16.3). Lead self-review.
 
 ## Done log — loupe (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-18 · `569f06af` · [Loupe/maint] designAhead trio flip — Gateway/Vault/Chronicler `designAhead`→`optional`; down-state "offline", everLive crash→absent-red preserved. Tests, live-verified, CI green
 - 2026-07-18 · `0f292d43` · [Loupe/F16.2] Capability approve+apply — server-side re-validation (Option A) + two-commit F-004 install, closing F16. Embedded-NATS tests; headless-verified. Lead self-review, CI green
 - 2026-07-18 · `d010fe60` · [Loupe/F16.3] AI review console — Augur escalation tab, queue + detail + approve + reject (`#/review/augur`), shares F16.1's card renderer. Goja + embedded-NATS test coverage; live-verified. Lead self-review, CI green
 - 2026-07-18 · `d37e86b` · [Loupe/F16.1] AI review console — capability queue + detail + reject (`#/review`). Goja + embedded-NATS test coverage; live-verified. Lead self-review, CI green
