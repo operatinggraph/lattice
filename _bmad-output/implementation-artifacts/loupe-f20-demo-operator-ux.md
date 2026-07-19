@@ -1,6 +1,7 @@
 # Loupe F20 — Hosted-demo read-only operator
 
 **Status:** ✅ adjudicated (Winston, 2026-07-19 — Andrew-delegated for the Loupe program).
+§6–§7 (the F20.5 / F20.2 build designs) added + adjudicated same day, second pass (§4.1).
 Lane: [backlog/loupe.md](../planning-artifacts/backlog/loupe.md). Companion:
 [deploy/demo/README.md](../../deploy/demo/README.md) (the hosted-demo deployment as it stands today).
 
@@ -97,8 +98,8 @@ Related, same deployment: `setOperatorSessionCookie` sets `Secure` from `!isLoop
 `Secure`** on a public HTTPS site.
 
 Both need a configured public-origin/trusted-proxy posture. Not built here — changing a
-rebinding-hardened gate belongs in its own fire, not bundled with the demo posture. Filed as **F20.5**
-and added to the exposure checklist.
+rebinding-hardened gate belongs in its own fire, not bundled with the demo posture. Filed as **F20.5**,
+added to the exposure checklist, and **designed in §6**.
 
 ## 3. Design
 
@@ -185,17 +186,48 @@ Forks resolved:
 
 Deliberately **not** done: "fixing" the loopback/reverse-proxy gap in `setupOperatorAuth`. It is
 correct for the dev posture it guards, and under F20 the minting-for-everyone behavior is intended.
-Narrowing it would break the one-tap login this design depends on.
+Narrowing it would break the one-tap login this design depends on. (§6.4 adds the complementary
+boot coupling: a *declared* public origin with dev-auth enabled refuses to run outside demo mode.)
+
+### 4.1 Adjudication, second pass (Winston, 2026-07-19) — the §6/§7 build designs
+
+F20.5 was filed as a problem statement (§2.3), not a design; F20.2 carried an open fail-open
+classification question. Both are resolved below; forks adjudicated:
+
+1. **Where the rate limiter lives** → **Loupe-side** (§6.5). The apt-installed Caddy has no HTTP
+   rate-limit handler (third-party xcaddy module — verified upstream, see the Caddy row in
+   [docs/vendors.md](../../docs/vendors.md)), so an edge limiter means a custom Caddy build in the
+   bootstrap; and a Loupe-side limiter is in-lane, unit-testable, and holds under any future proxy.
+   F20.4 may *add* an edge limiter later; it would be complementary, not a replacement.
+2. **Detect the proxy vs. declare it** → **declare** (§6.1). A process behind a reverse proxy cannot
+   distinguish the proxy's requests from a direct local caller's; `LOUPE_PUBLIC_ORIGIN` is the
+   explicit declaration, every §6 behavior keys off it, and unset means byte-for-byte today's
+   behavior.
+3. **Dev-auth on a declared public origin** → **demo mode required, refuse boot otherwise** (§6.4).
+   The same exposure `setupOperatorAuth` already refuses on a non-loopback *bind*, arriving through
+   the proxy door instead — it gets the same refusal, keyed on the declaration.
+4. **SSE cap on a public URL** → **raise in demo (32), env-tunable, visitor-legible message** (§6.6)
+   rather than keep-at-4 or per-peer accounting. The live pulse is the demo's most compelling
+   surface; a global bound is the resource protection, and per-peer bookkeeping buys little at this
+   scale.
+5. **`/login` disclaimer transport** → **server-side injection** (§7.3), not an unauthenticated
+   `/api/demo` exemption. A static string does not justify widening the pre-auth API surface.
+
+Vendor grounding for §6: Caddy's default forwarded-header semantics were verified against
+<https://caddyserver.com/docs/caddyfile/directives/reverse_proxy> (incoming `X-Forwarded-*` from an
+untrusted client is **ignored** — anti-spoofing — and `X-Forwarded-For` is set from the immediate
+peer; `Host` passes through), and the rate-limit module status against its own repo. Caddy now has a
+row in `docs/vendors.md`.
 
 ## 5. Fires
 
 | Fire | Scope | Lane | State |
 |---|---|---|---|
 | **F20.1** | §3.2 — `LOUPE_DEMO_MODE`: method default-deny middleware, fail-closed flag + boot guard, reveal denial (§2.2), `/api/demo` + visitor banner | Loupe | ✅ SHIPPED 2026-07-19 |
-| **F20.2** | §3.2c polish — suppress write affordances per view; restore the three read-only control POSTs; a disclaimer on `/login` (the visitor's first screen has none, and `/api/demo` is auth-gated so that page cannot read the posture without a redirect loop) | Loupe | 📋 ready (not a safety item) |
-| **F20.3** | §3.1 — the `demoOperator` grant package | Lattice (cross-lane) | filed |
+| **F20.2** | §7 — demo polish: suppress write affordances per view, restore the three read-only control POSTs, `/login` disclaimer | Loupe | 📋 build-ready (§7; not a safety item; after F20.5) |
+| **F20.3** | §3.1 — the `demoOperator` grant package | Lattice (cross-lane) | filed (lattice.md row, 📋 ready) |
 | **F20.4** | §3.3 — Caddy subdomain + README | deploy (cross-lane) | 🚧 Andrew-gated on public launch |
-| **F20.5** | §2.3 — public-origin/trusted-proxy posture: `crossOriginBlocked` must accept the demo hostname, and the session cookie must be `Secure` behind a TLS proxy. **Blocks F20.4** — without it no visitor can log in | Loupe | 📋 ready |
+| **F20.5** | §6 — the public-origin posture: `LOUPE_PUBLIC_ORIGIN` (origin gate + `Secure` cookie), the dev-auth⇒demo boot coupling, the credential-exchange rate limiter, the SSE cap posture. **Blocks F20.4** — without it no visitor can log in | Loupe | 📋 build-ready (§6; build first) |
 
 **Exposure checklist** — every line must hold before Loupe is reachable publicly:
 
@@ -203,10 +235,172 @@ Narrowing it would break the one-tap login this design depends on.
    observed against the deployed stack, not inferred).
 2. F20.5 shipped — otherwise login 403s and the session cookie is not `Secure`.
 3. `LOUPE_DEMO_MODE=1` with `LOUPE_OPERATOR_ACTOR_KEY` naming the demo identity — the boot guard
-   proves both, and a malformed flag now refuses to boot rather than failing open.
-4. A rate limit in front of `/api/operator/dev-token`: minting is unauthenticated by construction and
-   hands out a replayable actor JWT.
-5. A decision on `/api/events/stream`: it is a GET, so demo-allowed, and the global cap is **4**
-   concurrent tails (`events.go:131`) — sized for one operator. On a public URL the live feed dies
-   for visitor #5 onward with a message written for an operator with too many tabs.
+   proves both, and a malformed flag now refuses to boot rather than failing open — and
+   `LOUPE_PUBLIC_ORIGIN` set to the exact public origin (§6.1; the origin gate, the `Secure`
+   cookie, and the limiter's peer keying all key off it).
+4. The credential-exchange rate limiter observed live: repeated mints from one client answer `429`
+   (§6.5 ships it in-lane with F20.5; this line is the deployed proof, not a decision).
+5. The live feed observed with more than four concurrent visitors (§6.6 resolves the cap: demo
+   default 32, `LOUPE_EVENT_STREAM_MAX` override, visitor-legible at-cap message).
 6. Andrew's explicit go-ahead. Exposure is his call, not a fire's.
+
+## 6. F20.5 — the public-origin posture (build design)
+
+Everything the console's browser-facing machinery derives from the **bind host** must instead honor
+a **declared public origin** when one is configured — without changing anything when it is not. All
+of §6 is gated on the new env being set; unset, every code path below is byte-for-byte today's.
+
+Grounding (all at `232a6bf1`): the three bind-host derivations are `setupOperatorAuth`'s loopback
+gate (`main.go:174` — stays as is, §4/§6.4), `crossOriginBlocked` (`server.go:174` — fails CLOSED
+behind a proxy, logins 403), and the session cookie's `Secure` (`readauth.go:236,250` — fails OPEN,
+cookie ships without `Secure` on a public HTTPS site). `r.Host` has exactly one consumer
+(`crossOriginBlocked`); nothing else in `cmd/loupe` builds URLs from the bind address. Facet has no
+same-origin gate at all, so there is no precedent to mirror — the pattern source is Loupe's own
+shipped gate (loupe-operator-auth-lift + the F9 same-origin gate), extended.
+
+### 6.1 The declaration: `LOUPE_PUBLIC_ORIGIN`
+
+The exact external origin the console is served at through a TLS-terminating reverse proxy, e.g.
+`https://loupe.demo.example`. Parsed at boot, **fail-closed**: the scheme must be `https`, the host
+non-empty, and nothing else present (no path, query, fragment, or userinfo; an explicit port is
+allowed). Anything malformed — including an `http://` origin — **refuses to boot**, same philosophy
+as `demoModeEnabled`: a typo must stop the process, not silently disable the posture. A plain-HTTP
+public deployment is not a supported shape (Caddy terminates TLS for free; `Secure` cookies would
+not survive it anyway).
+
+### 6.2 The origin gate
+
+`crossOriginBlocked` gains one acceptance branch: the request's `Origin`, parsed, **componentwise
+equals the configured public origin** — scheme `https`, hostname (case-insensitive), and port with
+443-defaulting on both sides (browsers omit `:443`). The existing loopback/bind-host branch is
+untouched, and the new branch does not consult `r.Host` at all: equality against a configured
+constant is strictly stronger than the Origin↔Host agreement the local branch needs, and it keeps
+the gate's rebinding hardening intact — under DNS rebinding the attacker's Origin carries the
+attacker's hostname, which equals neither loopback, the bind host, nor the configured public host.
+`Origin: null` still fails closed. Empty-Origin requests still pass (curl semantics unchanged — the
+§2.1 minting-for-everyone behavior is the demo's intent, bounded by §6.5).
+
+### 6.3 The `Secure` cookie
+
+`Secure` becomes a server field computed once at construction: set when a public origin is
+configured **or** the bind is non-loopback (today's term). Both `setOperatorSessionCookie` and
+`clearOperatorSessionCookie` use it. §6.1's https-only rule is what makes this unconditional-when-
+declared correct. `HttpOnly` and `SameSite=Strict` are unchanged — the login page and the one-tap
+button are same-origin under the proxy, and Strict survives a top-level same-site navigation.
+
+### 6.4 The dangerous-combo boot guard
+
+`LOUPE_PUBLIC_ORIGIN` set **and** `LOUPE_DEV_AUTH` enabled **⇒ `LOUPE_DEMO_MODE` must be on, else
+refuse to boot.** A proxied dev-auth console hands the fully-configured operator credential to every
+internet visitor (§2.1); that is only a sane posture when the credential is the demo identity whose
+grants permit nothing (`demoOperatorGuard` + F20.3) — i.e. demo mode. A *writable* proxied console
+must use a real IdP (`LOUPE_JWT_PUBLIC_KEY`), exactly as `setupOperatorAuth` already demands for a
+non-loopback bind: same exposure, different door, same refusal. Demo mode behind a public origin
+with a real IdP (no one-tap login) remains a valid, unconstrained combination.
+
+Honest limit, stated: Loupe cannot *detect* an undeclared proxy — the declaration is configuration,
+and the F20.4 deploy material is what sets it (checklist item 3 ties them). What this guard closes
+is the misconfiguration where the declaration exists but the operator forgot what dev-auth means on
+a public URL.
+
+### 6.5 The credential-exchange rate limiter (checklist #4, resolved)
+
+A token-bucket limiter applied to **exactly the three `requireOperator`-exempt POST endpoints**
+(`dev-token`, `session`, `logout`) — the console's only unauthenticated handlers — running **before
+any body read or crypto work**. Two tiers:
+
+- **Per-peer**: 10 requests/min, burst 10. Peer identity: when a public origin is declared, the
+  **last** `X-Forwarded-For` entry — Caddy ignores incoming `X-Forwarded-*` from untrusted clients
+  (anti-spoofing default, verified upstream — vendors.md) and appends the immediate peer, so under
+  the single-hop demo topology the last entry is the real client and is not client-forgeable.
+  Undeclared: `RemoteAddr`'s host, today's direct-peer truth.
+- **Global ceiling**: 300 requests/min across all peers — the actual abuse bound (RSA signing and
+  log churn are the cost being bounded); per-peer is fairness so one noisy client cannot starve the
+  login for everyone else.
+
+Denial is `429` with a visitor-legible message. The peer map is bounded (idle-evicted; at capacity a
+new peer is admitted under the global ceiling only, never tracked unboundedly). Sizing honesty: the
+mint is **fixed-subject** (`readauth.go:402`) — N tokens are the *same one credential*, so the
+limiter does not bound credential proliferation (one mint is already full demo capability); it
+bounds unauthenticated compute and noise. 10/min/peer is ~30× a real visitor's need (one mint per
+30-minute TTL); 300/min global is trivial CPU (~ms per RS256 sign) while capping a flood at
+five signs/second.
+
+The authenticated read surface is deliberately **not** limited here — a public read-only console
+serves the public; the expensive endpoint (`/api/events/stream`) has its own bound (§6.6), the rest
+are cheap KV/lens reads bounded by `natsTimeout`, and an edge-level connection limit is F20.4's
+option if real traffic ever demands one.
+
+### 6.6 The event-stream cap posture (checklist #5, resolved)
+
+`maxEventStreamClients` becomes a boot-computed value: `LOUPE_EVENT_STREAM_MAX` when set (integer
+> 0; anything else **refuses to boot**, same fail-closed parse rule as every §6 knob), else **32 in
+demo mode, 4 otherwise**. The at-cap `streamError` message becomes posture-aware: the operator
+message stays "close another Loupe tab"; a demo visitor sees "the live feed is at capacity — try
+again in a moment". Bounds: each tail is one ephemeral ordered consumer on `core-events` plus one
+SSE goroutine — 32 of them is negligible beside the full stack already on the demo box, and the
+live pulse is the single most persuasive behind-the-scenes surface, so starving it at 4 would gut
+the demo. Visitor #33 gets a graceful message, not a broken page.
+
+### 6.7 Test strategy + increment
+
+All unit/httptest, no stack: origin parse (rejects http/path/garbage; accepts host and host:port);
+gate matrix (public origin allowed; attacker/rebound hostname denied; `null` denied; loopback and
+bind-host branches unchanged); cookie `Secure` matrix (declared/undeclared × loopback/non-loopback);
+the §6.4 combo refusal; limiter (per-peer 429 at 11th, global ceiling, XFF-last keying only when
+declared, RemoteAddr otherwise, eviction bound); SSE knob (default 4, demo 32, override, malformed
+refusal). Plus the checklist's live proofs post-deploy. One fire — the pieces share the declaration
+plumbing and none is independently shippable to the demo without the others.
+
+## 7. F20.2 — demo polish (build design)
+
+Three mechanisms, none safety-bearing (the §3.2 middleware and the platform grants stay the
+enforcement); ships after F20.5.
+
+### 7.1 Restore the three read-only control POSTs
+
+The concern that deferred this (§3.2a) was a classification that fails open on drift. Resolved by
+making omission deny: `controlComponent` gains a `readOnlyOps` set **co-located with `mutateOps` in
+`control.go`** — loom `{inspect}`, weaver `{}` (all three of its ops mutate), refractor
+`{health, validate}` (`rebuild`/`pause`/`resume`/`delete` stay denied). The demo rule gains one
+carve-out: a POST matching `/api/control/<comp>/<name>/<op>` — parsed with `splitNonEmpty`, the
+**same helper `handleControl` routes with** (`server.go:446`), so gate and handler cannot disagree
+about which op executes — is allowed iff the shape is exactly three segments and
+`op ∈ readOnlyOps[comp]`. Everything else stays method-denied.
+
+Drift analysis, both directions: a future op added to `mutateOps` alone is **denied** in demo
+(omission = deny — the fail-open worry is structurally gone); misclassifying a mutate as read-only
+requires an affirmative wrong entry in the same table a reviewer reads, and two tests pin it — an
+invariant test (`readOnlyOps ⊆ mutateOps`) and an exact-expected-set test, so widening the set is a
+conscious, test-visible act. The handler still runs `mutateSubject`'s full validation; the gate only
+ever *narrows*.
+
+### 7.2 Suppress write affordances
+
+The shell already fetches `/api/demo` for the banner; expose that posture once in client state (no
+per-view refetch). Contract: any element that initiates a platform write or a reveal carries a
+shared marker (a `data-demo-hide` attribute or helper), and one shell-level CSS rule hides marked
+elements when the posture is on. Views to sweep (the Steward enumerates precisely): op submit
+(`#/op` + vertex-page prefills), package install/upgrade/uninstall, lens delete, component-page
+control mutates (pause/resume/rebuild/delete/disable/enable/revoke — **not** the three §7.1 restored
+reads, which now work and stay visible), review approve/reject/apply, the Graph explorer's reveal
+and shred confirms, object upload/detach. Drift direction is cosmetic-only and already adjudicated
+acceptable (§4 fork 3): an untagged new affordance stays visible and its click 403s honestly —
+never a security regression, since enforcement never moved into the UI. The §2.2 reveal denial is
+**untouched** by this fire.
+
+### 7.3 The `/login` disclaimer
+
+`handleLoginPage` injects a demo block server-side when the posture is on: `login.html` gains a
+marker comment the handler string-replaces with static copy (what this demo is, writes are denied
+by the platform's grants) and demo-appropriate button labeling ("Enter the read-only demo"). No new
+unauthenticated endpoint, no client fetch, works with JS disabled, and the page stays self-contained
+(no new `requireOperator` exemptions — the §4.1 fork-5 rationale).
+
+### 7.4 Test strategy
+
+Unit: the §7.1 gate matrix (each restored op allowed in demo, every weaver op + refractor `rebuild`
+et al. still denied, malformed/short/long paths denied) + the two classification-pin tests; goja
+logic tests for the affordance helper's posture gating; an httptest asserting `/login` contains the
+disclaimer exactly when demo mode is on. Live: the restored loom `inspect` / refractor `health`
+exercised as a demo visitor against the dev stack.
