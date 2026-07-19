@@ -191,6 +191,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-19 · `28e2be3` · [refractor] rebuild completion watched `NumPending`, so an unacked in-flight message read as drained and persisted health `active` on a paused mid-rebuild lens — new `OutstandingForConsumer` (+`NumAckPending`)
+- 2026-07-19 · `28e2be3` · [CI] `edge-browser-store` `websocket url timeout reached` flake — two wasm packages cold-started their own Chrome concurrently, both missing chromedp's hardcoded 20s banner budget; serialized with `-p 1`
 - 2026-07-18 · `c26a7d6` · [objectcrypto] cover the Vault wrap/unwrap RPC seam (0%) + AEAD error guards — fake-Vault responder pins marshaling, round-trip, resp.Error propagation, transport + malformed-reply failure; 46.6%→91.4%
 - 2026-07-18 · `029256d` · [loom] fix `TestLoomE2E_MidRunRestartExactlyOnce` flake — submit counter trails the write-ahead pending token, so poll `fp.submitted`≥1 (new `waitSubmitted`) instead of reading once; -race -count=8 clean
 - 2026-07-17 · `9c830a4` · [weaver] test-cover the effect-mismatch loud surface (flagEffectMismatches set→recover→clear + metric, 53%→100%) + formatISODuration hours/clamp (50%→100%)
