@@ -35,12 +35,18 @@ public struct DescriptorContext {
     public let serviceKey: String?
     public let scopedTo: String?
     public let taskKey: String?
+    /// The me-row's declared `selfAnchors`, keyed by Contract #1 vertex type
+    /// — what `{me.<type>}` resolves against. A type appears only when the
+    /// identity holds exactly one vertex of it; the caller drops an ambiguous
+    /// type rather than passing a guess (`app.js`'s `selfAnchorKey`).
+    public let selfAnchors: [String: String]
 
-    public init(actorIdentityKey: String?, serviceKey: String? = nil, scopedTo: String? = nil, taskKey: String? = nil) {
+    public init(actorIdentityKey: String?, serviceKey: String? = nil, scopedTo: String? = nil, taskKey: String? = nil, selfAnchors: [String: String] = [:]) {
         self.actorIdentityKey = actorIdentityKey
         self.serviceKey = serviceKey
         self.scopedTo = scopedTo
         self.taskKey = taskKey
+        self.selfAnchors = selfAnchors
     }
 }
 
@@ -169,7 +175,7 @@ public enum DescriptorForm {
     }
 
     /// Mirrors `app.js`'s `substituteTemplate`: replaces each `{expr}` token
-    /// with `{actor}`/`{service}`/`{scopedTo}`/`{payload.<field>}`,
+    /// with `{actor}`/`{service}`/`{scopedTo}`/`{me.<type>}`/`{payload.<field>}`,
     /// left-to-right, single pass — an unrecognized token is left verbatim.
     private static func substituteTemplate(_ str: String, ctx: DescriptorContext, payload: [String: JSONValue]) -> String {
         var result = ""
@@ -195,6 +201,13 @@ public enum DescriptorForm {
         if expr == "actor" { return ctx.actorIdentityKey ?? "" }
         if expr == "service" { return ctx.serviceKey ?? "" }
         if expr == "scopedTo" { return ctx.scopedTo ?? "" }
+        // `{me.<type>}` — the submitting identity's own vertex of that type.
+        // Resolving to "" rather than leaving the token verbatim is the point:
+        // a literal "{me.leaseapp}" reaching the Processor as a vertex key is
+        // strictly worse than an empty one that fails the op outright.
+        if expr.hasPrefix("me.") {
+            return ctx.selfAnchors[String(expr.dropFirst("me.".count))] ?? ""
+        }
         if expr.hasPrefix("payload.") {
             let field = String(expr.dropFirst("payload.".count))
             return payload[field]?.stringValue ?? ""

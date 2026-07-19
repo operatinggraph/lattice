@@ -16,7 +16,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "edge-manifest",
-	Version:     "0.3.0",
+	Version:     "0.4.0",
 	Description: "The Facet edge app's world manifest: five Personal Lenses (edgeIdentity/edgeServices/edgeCatalog/edgeTasks/edgeInstances) projecting identity, reachable services, the op descriptor vocabulary, open tasks, and service instances into the manifest.* namespace over the per-actor SYNC transport. Plus edgeManifestReadGrants, the cap-read.edgeManifest read-grant producer the non-self-anchored lenses need to actually publish (Fire 2).",
 	Depends:     []string{"identity-domain", "orchestration-base", "service-domain", "service-location"},
 	Lenses:      Lenses(),

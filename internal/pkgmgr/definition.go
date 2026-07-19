@@ -467,7 +467,17 @@ type OpPresentationSpec struct {
 // populates (`self` -> {target: actorId}; `service` -> {service: serviceKey};
 // `task` -> {task, target: scopedTo}) — NOT itself a processor.AuthContext
 // value. ContextParams/Reads entries are templates substituted from
-// `{actor}`, `{scopedTo}`, `{service}`, `{payload.<field>}`.
+// `{actor}`, `{scopedTo}`, `{service}`, `{payload.<field>}`, and — in
+// ContextParams only — `{me.<type>}`, the submitting identity's own vertex
+// of that Contract #1 type, taken from the `selfAnchors` set the client's
+// identity projection carries (edge-manifest's edgeIdentity lens projects
+// each as {type, key}). `{me.<type>}` is how a self-scope entity-key param
+// is declared rather than asked of the visitor as a raw vertex key: the
+// client fills it and never renders the field. It resolves only when the
+// identity holds exactly one vertex of that type — zero or several is not a
+// value to guess at, and a client that cannot resolve a declared
+// `{me.<type>}` has no business offering the op (the same rule TargetType
+// states below).
 type OpDispatchSpec struct {
 	Class       string
 	AuthContext string // "self" | "service" | "task"

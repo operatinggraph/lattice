@@ -9,13 +9,15 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // op-meta: it stays operator-only (permissions.go), so it is never
 // Facet-reachable.
 //
-// leaseAppKey (OpenTab) is not auto-fillable via dispatch.targetField or
-// dispatch.contextParams the way clinic's provider/wellness's session are —
-// a tab is a fresh vertex the op mints, there is no pre-existing "tab being
-// viewed" to derive it from — so it is described in prose, the same
-// treatment clinic-domain gives its own non-auto-fillable "patient" field.
-// tabKey (Settle) auto-fills the ordinary way, from the tab OpenTab's own
-// response returned (the client's own local record of what it just opened).
+// leaseAppKey (OpenTab) is declared `{me.leaseapp}` in
+// dispatch.contextParams — the submitter's own lease, which is the only
+// lease the self-scope grant would accept anyway. dispatch.targetField
+// cannot express it (a tab is a fresh vertex the op mints, so there is no
+// "tab being viewed" to derive it from), but the value was never the
+// visitor's to choose: the client resolves it from the me-row's declared
+// selfAnchors and renders no field for it. tabKey (Settle) auto-fills the
+// ordinary way, from the tab OpenTab's own response returned (the client's
+// own local record of what it just opened).
 //
 // Dispatch.Class on each entry is "tab" — the tab DDL's own CanonicalName
 // (tabVertexTypeDDL), the Contract #2 §2.1 envelope `class` DDL-hint (never
@@ -55,9 +57,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"leaseAppKey": "Your own lease application — must be identified-by your identity, via the lease's applicationFor link (self-scope grant requirement).",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
-				Class:       "tab",
-				AuthContext: "self",
-				Reads:       []string{"{payload.leaseAppKey}"},
+				Class:         "tab",
+				AuthContext:   "self",
+				ContextParams: map[string]string{"leaseAppKey": "{me.leaseapp}"},
+				Reads:         []string{"{payload.leaseAppKey}"},
 			},
 		},
 		{

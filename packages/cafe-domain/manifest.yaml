@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.4.0
+version: 0.5.0
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   Settle, OCC-conditioned running total) + the tabStatus aspect type + the

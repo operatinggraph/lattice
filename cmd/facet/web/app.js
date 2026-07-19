@@ -540,6 +540,13 @@ function opButton(o, ctx) {
   if (d.dispatchTargetField && !resolveTargetKey(d, ctx)) {
     return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — Open a ${esc(typeLabel(d.dispatchTargetType))} to do this; it can't be started from here.</div>`;
   }
+  // A {me.<type>} contextParam is filled from the identity's own declared
+  // anchors and never rendered, so an unresolvable one has no field the
+  // visitor could correct — the op simply isn't theirs to submit yet.
+  const missing = unresolvableSelfAnchor(d);
+  if (missing) {
+    return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This needs your own ${esc(typeLabel(missing))}; you don't have one yet.</div>`;
+  }
   const label = d.submitLabel || d.title || prettifyOpType(d.operationType);
   const attrs = [`data-open-op="${esc(o.key)}"`];
   if (ctx.serviceKey) attrs.push(`data-service-key="${esc(ctx.serviceKey)}"`);
@@ -850,36 +857,47 @@ function openDescriptorForm(opKey, ctx) {
 
 // --------------------------------------------- the descriptor form (§3.6)
 
-// vtxTypeForField maps a descriptor field named "<type>Key" to its Contract #1
-// vertex type — the convention every self-scope entity-key field follows
-// ("leaseAppKey" -> "leaseapp", "tabKey" -> "tab", "sessionKey" -> "session").
-// Returns undefined for a field that isn't a "<type>Key", so only entity-key
-// fields are candidates for manifest auto-fill.
-function vtxTypeForField(name) {
-  const m = /^(.+)Key$/.exec(name || "");
-  return m ? m[1].toLowerCase() : undefined;
-}
-
 // selfAnchoredKeys indexes, by Contract #1 vertex type, the entity keys the
-// signed-in identity already owns per the manifest — today a task's scopedTo
-// target (the Sign-lease task names the resident's own vtx.leaseapp.<id>). A
-// descriptor form can then answer a "<type>Key" field from the manifest
-// instead of asking the visitor to paste a vertex key. Returns a Map of vtx
-// type -> Set of keys; a field only auto-fills when its type has exactly one,
-// so an ambiguous type (two leases) falls back to the editable input rather
-// than guessing. Absent the task (e.g. an already-signed lease whose task has
-// closed) the type is simply absent and the field stays editable.
-function selfAnchoredKeys(taskList) {
+// signed-in identity owns — the `selfAnchors` set the me-row declares
+// ({type, key} per entry, the type stamped by the walk that found it in
+// edge-manifest's edgeIdentity lens), not anything inferred from a key or a
+// field name. Returns a Map of vtx type -> Set of keys. Degenerate
+// {key: null} entries (the identity holds no vertex of that type) are the
+// expected OPTIONAL MATCH shape and drop here.
+function selfAnchoredKeys() {
   const byType = new Map();
-  for (const t of (taskList || [])) {
-    const k = t && t.data && t.data.scopedTo;
-    if (typeof k !== "string" || !k.startsWith("vtx.")) continue;
-    const type = k.split(".")[1];
-    if (!type) continue;
-    if (!byType.has(type)) byType.set(type, new Set());
-    byType.get(type).add(k);
+  const m = me();
+  for (const a of ((m && m.selfAnchors) || [])) {
+    if (!a || !a.type || typeof a.key !== "string" || !a.key.startsWith("vtx.")) continue;
+    if (!byType.has(a.type)) byType.set(a.type, new Set());
+    byType.get(a.type).add(a.key);
   }
   return byType;
+}
+
+// selfAnchorKey answers "the signed-in identity's own <type>" — and only when
+// that is unambiguous. Zero (no such vertex) or several (two leases) is not a
+// value to guess at: the caller degrades the op instead, which is the point
+// of the anchor being declared rather than inferred.
+function selfAnchorKey(type) {
+  const keys = type && selfAnchoredKeys().get(type);
+  return keys && keys.size === 1 ? [...keys][0] : undefined;
+}
+
+// unresolvableSelfAnchor returns the first {me.<type>} an op's
+// dispatch.contextParams declares that this identity cannot answer, or
+// undefined when every one resolves. A contextParam is filled and never
+// rendered, so an unresolvable one would otherwise reach the Processor as an
+// empty string — the same failure dispatchTargetType's gate exists to prevent.
+function unresolvableSelfAnchor(op) {
+  const params = maybeParseJSON(op.dispatchContextParams) || {};
+  for (const template of Object.values(params)) {
+    if (typeof template !== "string") continue;
+    for (const m of template.matchAll(/\{me\.([^}]+)\}/g)) {
+      if (!selfAnchorKey(m[1])) return m[1];
+    }
+  }
+  return undefined;
 }
 
 function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
@@ -891,25 +909,7 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   const targetField = op.dispatchTargetField;
   const fieldNames = Object.keys(props).filter((f) => !(f in contextParams) && f !== targetField);
 
-  // A descriptor field naming a self-anchored entity key the manifest already
-  // carries (café OpenTab's leaseAppKey — the signed-in identity's own lease,
-  // named by its Sign-lease task) is auto-filled read-only rather than asked
-  // of the visitor as a raw vertex key. Only an unambiguous single match fills
-  // (see selfAnchoredKeys); a prefill the caller already supplied wins, and a
-  // field with no match falls back to its ordinary editable input.
-  const anchored = selfAnchoredKeys(tasks());
-  const merged = {};
-  const autoAnchored = new Set();
-  for (const name of fieldNames) {
-    const supplied = prefill[name];
-    if (supplied !== undefined && supplied !== null && supplied !== "") { merged[name] = supplied; continue; }
-    const t = vtxTypeForField(name);
-    const keys = t && anchored.get(t);
-    if (keys && keys.size === 1) { merged[name] = [...keys][0]; autoAnchored.add(name); }
-    else merged[name] = supplied;
-  }
-
-  const fieldsHtml = fieldNames.map((name) => renderField(name, props[name], fieldDescs[name], required.has(name), merged[name], op.sensitive, autoAnchored.has(name))).join("");
+  const fieldsHtml = fieldNames.map((name) => renderField(name, props[name], fieldDescs[name], required.has(name), prefill[name], op.sensitive)).join("");
 
   showModal(`
     <button class="close-x" data-close>&times;</button>
@@ -929,25 +929,13 @@ function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   });
 }
 
-function renderField(name, schema, help, isRequired, prefillVal, opSensitive, anchored) {
+function renderField(name, schema, help, isRequired, prefillVal, opSensitive) {
   schema = schema || {};
   const label = schema.title || name;
   const helpHtml = help ? `<div class="help">${esc(help)}</div>` : "";
   const reqAttr = isRequired ? "required" : "";
   const val = prefillVal !== undefined && prefillVal !== null ? prefillVal : "";
   let inputHtml;
-
-  // A self-anchored key the manifest supplied (renderDescriptorForm's
-  // autoAnchored) shows as a read-only summary of the visitor's own entity,
-  // carrying the actual key in a hidden input the submit path still collects.
-  if (anchored && val) {
-    return `<div class="field">
-      <label>${esc(label)}</label>
-      <div class="static-field">${esc(prettify(val))}</div>
-      <input type="hidden" name="${esc(name)}" value="${esc(val)}">
-      ${helpHtml}
-    </div>`;
-  }
 
   if (schema.type === "boolean") {
     inputHtml = `<div class="toggle-switch ${val === true ? "on" : ""}" data-toggle-field="${esc(name)}"><div class="knob"></div></div>`;
@@ -997,6 +985,12 @@ function substituteTemplate(str, ctx, payload) {
     if (expr === "actor") return (me() && me().identityKey) || "";
     if (expr === "service") return ctx.serviceKey || "";
     if (expr === "scopedTo") return ctx.scopedTo || "";
+    // {me.<type>} — the submitting identity's own vertex of that type, from
+    // the me-row's declared selfAnchors. opButton has already refused to
+    // offer an op whose {me.<type>} doesn't resolve, so reaching "" here
+    // means the anchor set changed mid-form; the empty value fails at the
+    // Processor rather than substituting some other identity's key.
+    if (expr.startsWith("me.")) return selfAnchorKey(expr.slice(3)) || "";
     if (expr.startsWith("payload.")) { const v = payload[expr.slice(8)]; return v === undefined ? "" : v; }
     return m;
   });
@@ -1056,8 +1050,7 @@ function resolveTargetKey(op, ctx) {
     const m = me();
     return (m && m.identityKey) || undefined;
   }
-  const keys = selfAnchoredKeys(tasks()).get(want);
-  return keys && keys.size === 1 ? [...keys][0] : undefined;
+  return selfAnchorKey(want);
 }
 
 // resolveTouchedKey picks the Contract #1 key this write's optimistic

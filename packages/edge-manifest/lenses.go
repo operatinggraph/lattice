@@ -182,11 +182,25 @@ const (
 // SelfName). `displayName` still resolves directly on a stack whose
 // sensitive aspects were never sealed (an in-process harness with no Vault),
 // so both paths land on the same field the renderer reads.
+//
+// `selfAnchors` is the typed self-anchor set an op meta's
+// dispatch.contextParams addresses as `{me.<type>}` (OpDispatchSpec's
+// ContextParams vocabulary): each entry is {type, key}, where `type` is a
+// literal stamped per walk rather than parsed out of the key — the engine
+// has no vertex-type-from-key function, and the type is a declaration of
+// what the walk means, not a derivation from what it returned. One
+// OPTIONAL MATCH per anchor type; adding a type is one more walk plus one
+// more collect entry. Contract #1 direction: the leaseapp is the
+// later-arriving source of `applicationFor`, so the walk into the
+// pre-existing identity runs backwards. A degenerate {key:null} entry when
+// the identity has no lease is the same expected shape roles/anchors carry
+// and is dropped client-side.
 const edgeIdentitySpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
 OPTIONAL MATCH (identity)-[:residesIn]->(loc)
 OPTIONAL MATCH (loc)-[:containedIn]->(container)
+OPTIONAL MATCH (identity)<-[:applicationFor]-(leaseapp:leaseapp)
 RETURN
   identity.key AS anchor,
   "manifest.me" AS ns,
@@ -195,7 +209,8 @@ RETURN
   identity.name.data AS sealedName,
   (identity.state.data.value = "claimed") AS claimed,
   collect(DISTINCT {key: role.key, name: role.canonicalName.data.value}) AS roles,
-  collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name}) AS anchors
+  collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name}) AS anchors,
+  collect(DISTINCT {type: 'leaseapp', key: leaseapp.key}) AS selfAnchors
 `
 
 // edgeServicesSpec projects one `manifest.svc.<tplId>` row per service
