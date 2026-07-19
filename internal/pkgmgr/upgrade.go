@@ -143,8 +143,9 @@ func (i *Installer) computeDeltaAgainst(ctx context.Context, existing *installed
 }
 
 // submitUpgradeOp submits one UpgradePackage op carrying the upgrade delta.
-// Deterministic requestId from name+from+to so a re-submit dedup-short-circuits
-// while distinct (from,to) pairs stay independent (Contract #8 §8.2 pattern).
+// Deterministic requestId from name+from+to+content so a re-submit of the same
+// delta dedup-short-circuits while distinct (from,to) pairs — and distinct
+// same-version edits — stay independent (Contract #8 §8.2 pattern).
 func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVersion string, mutations []installMutation) error {
 	payload := map[string]any{
 		"name":        def.Name,
@@ -152,7 +153,10 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 		"toVersion":   def.Version,
 		"mutations":   mutations,
 	}
-	requestID := deterministicNanoID(def.Name, fromVersion+"->"+def.Version, "upgrade-op")
+	requestID, err := contentRequestID(def.Name, fromVersion+"->"+def.Version, "upgrade-op", mutations)
+	if err != nil {
+		return err
+	}
 	reply, err := i.submitOp(ctx, "UpgradePackage", "UpgradePackage", requestID, payload)
 	if err != nil {
 		return fmt.Errorf("pkgmgr: submit UpgradePackage: %w", err)

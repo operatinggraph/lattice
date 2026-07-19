@@ -3,6 +3,7 @@ package pkgmgr
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,9 +168,13 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 		"version":   def.Version,
 		"mutations": ops,
 	}
-	// Deterministic requestId from name+version so a re-submit dedup-
-	// short-circuits at step 2 (idempotent install).
-	requestID := deterministicNanoID(def.Name, def.Version, "install-op")
+	// Deterministic requestId from name+version+content so a re-submit of the
+	// SAME manifest dedup-short-circuits at step 2 (idempotent install) while
+	// a same-version edit still reaches the Processor.
+	requestID, err := contentRequestID(def.Name, def.Version, "install-op", ops)
+	if err != nil {
+		return nil, err
+	}
 	reply, err := i.submitOp(ctx, "InstallPackage", "InstallPackage", requestID, payload)
 	if err != nil {
 		return nil, fmt.Errorf("pkgmgr: submit InstallPackage: %w", err)
@@ -269,6 +274,40 @@ func (i *Installer) buildManifestBatch(def Definition) ([]installMutation, []str
 // entity keys use entityNanoID, which omits the version (Contract #8 §8.1).
 func deterministicNanoID(name, version, tag string) string {
 	return nanoIDFromSalt("lattice-pkg:" + name + ":" + version + ":" + tag)
+}
+
+// contentRequestID derives an op requestId from the package identity AND the
+// exact mutation set the op carries.
+//
+// The requestId must be deterministic so that genuinely re-submitting the same
+// work dedup-short-circuits at the Processor's step 2. Deriving it from
+// name+version alone assumes the version identifies the content — true for a
+// real version bump, false for the same-version edit that `make
+// reinstall-package` exists to serve. On that path fromVersion == toVersion, so
+// every run produced an identical requestId and the Processor discarded all but
+// the first as a duplicate: the second and later edits to a package's DDL or
+// lens spec were silently dropped while the CLI still reported "committed"
+// (ReplyStatusDuplicate is treated as success). Folding the mutation digest in
+// keeps the idempotency — identical content still yields an identical id — and
+// makes a changed same-version edit a distinct op.
+func contentRequestID(name, versionScope, tag string, mutations []installMutation) (string, error) {
+	digest, err := mutationsDigest(mutations)
+	if err != nil {
+		return "", err
+	}
+	return nanoIDFromSalt("lattice-pkg:" + name + ":" + versionScope + ":" + tag + ":" + digest), nil
+}
+
+// mutationsDigest is a stable content hash of a mutation batch. encoding/json
+// sorts map keys and preserves struct field order, so the same batch always
+// marshals to the same bytes.
+func mutationsDigest(mutations []installMutation) (string, error) {
+	raw, err := json.Marshal(mutations)
+	if err != nil {
+		return "", fmt.Errorf("pkgmgr: digest mutations: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // entityNanoID derives a stable, version-independent Contract #1 NanoID for
