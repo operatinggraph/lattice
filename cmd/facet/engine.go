@@ -63,7 +63,7 @@ type engine struct {
 // 401-doomed token forever (agent.ErrCredentialRejected, sticky sign-out).
 // nil is the boot-env fallback's posture (enginemanager.go's Seed): that
 // credential was minted OUTSIDE this process, so there is nothing to
-// re-mint — token stays static, exactly as before this fix.
+// re-mint — token stays static.
 func newEngine(ctx context.Context, cfg engineConfig, identityID, deviceID, token string, tokenSource func() (string, error)) (*engine, error) {
 	storePath := filepath.Join(cfg.StoreDir, identityID+".db")
 	st, err := store.Open(storePath)

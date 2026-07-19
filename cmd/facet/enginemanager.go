@@ -92,9 +92,8 @@ func (m *engineManager) Seed(identityID, deviceID, token string) error {
 // keeps that connection recovering across the credential's TTL on its own,
 // so reaching this branch means reconnection genuinely failed for good
 // (nats.go exhausted MaxReconnects, or aborted after repeated identical auth
-// errors) — the same dead-end Purge's doc comment already named for the
-// pre-fix world, now closed as a backstop rather than relied on as the only
-// recovery path.
+// errors) — a last-resort backstop. Purge remains the explicit eviction
+// path for revocation (see its doc).
 func (m *engineManager) Acquire(identityID string) (*engine, error) {
 	m.mu.Lock()
 	if e, ok := m.entries[identityID]; ok {

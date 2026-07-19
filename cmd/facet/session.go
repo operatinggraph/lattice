@@ -35,8 +35,7 @@ const sessionRefreshPath = "/api/session/refresh"
 
 // sessionRefreshGrace is how far past a session token's stated exp POST
 // /api/session/refresh still honors it — the sliding-session renewal window
-// (edge-browser-node-design.md's deferred "Fire 3's refresh endpoint",
-// closing the gap boot.mjs's getToken comment named). The proactive refresh
+// (edge-browser-node-design.md's token-refresh-on-reconnect). The proactive refresh
 // loop the browser-native shell runs (boot.mjs) renews well before expiry in
 // the ordinary case, so this grace exists for the case that loop itself was
 // delayed — a backgrounded tab whose timers the browser throttled, a laptop
@@ -480,8 +479,8 @@ type sessionRefreshResponse struct {
 }
 
 // handleSessionRefresh implements POST /api/session/refresh — the
-// sliding-session renewal edge-browser-node-design.md's boot.mjs comment
-// named as Fire 3's still-missing endpoint. It verifies the current session
+// sliding-session renewal endpoint (edge-browser-node-design.md's
+// token-refresh-on-reconnect). It verifies the current session
 // cookie with s.refreshAuthn's sessionRefreshGrace tolerance (wider than
 // every other session-gated request's strict default), then mints a fresh
 // token for the SAME identity and re-sets the cookie. It deliberately does
