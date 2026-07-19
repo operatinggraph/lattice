@@ -4,23 +4,21 @@
 // to visuals. No DOM, no fetch.
 
 // componentStatusClass maps a component/client status to the CSS class that
-// drives its color. Unknown statuses fall back to a neutral dot. design-ahead
-// (surface built, backend not yet deployed) uses the accent (informational)
-// family — the component analog of a pending-readpath lens, never red.
-// offline (a F14 declared app with no heartbeat) is the plain dim family —
-// verticals are optional workloads, never absent-red.
+// drives its color. Unknown statuses fall back to a neutral dot. offline is the
+// plain dim family — both a F14 declared app with no heartbeat and an optional
+// platform component (up-full only) not running in this stack, never absent-red.
 var componentStatusClass = {
   green: "green", stale: "stale", absent: "absent", unknown: "unknown",
-  degraded: "yellow", unhealthy: "red", "design-ahead": "designahead", offline: "dim",
+  degraded: "yellow", unhealthy: "red", offline: "dim",
 };
 
-// The operator copy for a design-ahead node's hover tip, plus the per-component
-// pointer that tells the roadmap instead of alarming about it.
-var designAheadCopy = "design-ahead — surface built, backend not yet deployed";
-var designAheadPointer = {
-  gateway: "Gateway: the external write-path door — behind the up-full deploy (lattice lane)",
-  vault: "Vault: crypto-shred key custody — behind the Lattice-lane Vault build",
-  chronicler: "Chronicler: append-only history — behind the Lattice-lane Chronicler build",
+// The operator copy for an offline optional-component node's hover tip, plus the
+// per-component pointer that names where it runs instead of alarming about it.
+var offlineComponentCopy = "offline — backend deployed, runs under `make up-full` (not started in this stack)";
+var offlineComponentPointer = {
+  gateway: "Gateway: the external write-path door — starts under `make up-full`",
+  vault: "Vault: crypto-shred key custody — starts under `make up-full`",
+  chronicler: "Chronicler: append-only history — starts under `make up-full`",
 };
 
 // appPointerCopy is the curated hover copy for a F14 declared-app door-band
@@ -76,18 +74,18 @@ function shapeAlertLines(health) {
 
 // sysmapSummary counts the map banner's plain-English rollup. healthy covers
 // every green-family status; a pending-readpath lens is counted separately
-// and NEVER as degraded (the "7 degraded" fix); a design-ahead component
-// likewise gets its own informational bucket; absent/unhealthy also count
-// into degraded so the yellow line's total matches what the eye finds.
+// and NEVER as degraded (the "7 degraded" fix); absent/unhealthy also count
+// into degraded so the yellow line's total matches what the eye finds. offline
+// (a F14 declared app or an optional up-full-only component not running here)
+// contributes nothing — expected absence, not degradation.
 function sysmapSummary(nodes) {
   var healthy = { green: 1, present: 1, projecting: 1 };
-  var out = { absent: 0, unhealthy: 0, degraded: 0, pending: 0, designAhead: 0 };
+  var out = { absent: 0, unhealthy: 0, degraded: 0, pending: 0 };
   var list = nodes || [];
   for (var i = 0; i < list.length; i++) {
     var st = list[i].status || "";
     if (st === "pending-readpath") { out.pending++; continue; }
-    if (st === "design-ahead") { out.designAhead++; continue; }
-    if (st === "offline") continue; // F14 declared app, no heartbeat — zero rollup contribution
+    if (st === "offline") continue; // declared app or optional component, no heartbeat — zero rollup contribution
     if (st === "absent") out.absent++;
     if (st === "unhealthy") out.unhealthy++;
     if (!healthy[st]) out.degraded++;
@@ -158,4 +156,4 @@ function groupLenses(nodes) {
   return out;
 }
 
-export { appPointerCopy, componentStatusClass, designAheadCopy, designAheadPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier, groupLenses };
+export { appPointerCopy, componentStatusClass, offlineComponentCopy, offlineComponentPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier, groupLenses };

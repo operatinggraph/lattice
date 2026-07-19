@@ -87,15 +87,15 @@ func TestSysmapSummaryJS(t *testing.T) {
 		map[string]any{"status": "lagging"},
 		map[string]any{"status": "absent"},
 		map[string]any{"status": "unhealthy"},
-		map[string]any{"status": "design-ahead"},
+		map[string]any{"status": "offline"},
 	}
 	got, ok := call(t, vm, "sysmapSummary", nodes).(map[string]any)
 	if !ok {
 		t.Fatal("sysmapSummary did not return an object")
 	}
-	// goja exports JS numbers as int64 when integral. A design-ahead component
-	// gets its own informational bucket — never degraded (§1.4).
-	want := map[string]int64{"pending": 2, "degraded": 3, "absent": 1, "unhealthy": 1, "designAhead": 1}
+	// goja exports JS numbers as int64 when integral. An offline node (declared
+	// app or optional up-full-only component) contributes to no bucket.
+	want := map[string]int64{"pending": 2, "degraded": 3, "absent": 1, "unhealthy": 1}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("summary[%q] = %v, want %d", k, got[k], v)
@@ -147,8 +147,8 @@ func TestComponentStatusClassOfflineJS(t *testing.T) {
 	}
 }
 
-// F14: an offline declared app never counts toward the yellow "degraded"
-// line — verticals are optional workloads, symmetric with design-ahead.
+// An offline node (declared app or optional up-full-only component) never
+// counts toward the yellow "degraded" line — both are expected-absent.
 func TestSysmapSummaryOfflineJS(t *testing.T) {
 	vm := logicVM(t, "status.js")
 	nodes := []any{
@@ -205,27 +205,27 @@ func TestGroupLensesJS(t *testing.T) {
 	}
 }
 
-// design-ahead maps to the accent-family class, and the hover copy + pointers
-// exist for every designAhead component the server declares.
-func TestDesignAheadRenderTablesJS(t *testing.T) {
+// offline maps to the dim-family class, and the hover copy + pointers exist for
+// every optional component the server declares (up-full only).
+func TestOptionalComponentRenderTablesJS(t *testing.T) {
 	vm := logicVM(t, "status.js")
 	cls, ok := vm.Get("componentStatusClass").Export().(map[string]any)
 	if !ok {
 		t.Fatal("componentStatusClass is not an object")
 	}
-	if cls["design-ahead"] != "designahead" {
-		t.Errorf(`componentStatusClass["design-ahead"] = %v, want "designahead"`, cls["design-ahead"])
+	if cls["offline"] != "dim" {
+		t.Errorf(`componentStatusClass["offline"] = %v, want "dim"`, cls["offline"])
 	}
-	ptr, ok := vm.Get("designAheadPointer").Export().(map[string]any)
+	ptr, ok := vm.Get("offlineComponentPointer").Export().(map[string]any)
 	if !ok {
-		t.Fatal("designAheadPointer is not an object")
+		t.Fatal("offlineComponentPointer is not an object")
 	}
 	for _, dc := range declaredComponents {
-		if !dc.designAhead {
+		if !dc.optional {
 			continue
 		}
 		if s, _ := ptr[dc.id].(string); s == "" {
-			t.Errorf("designAheadPointer[%q] missing — every design-ahead node teaches its roadmap", dc.id)
+			t.Errorf("offlineComponentPointer[%q] missing — every optional node names where it runs", dc.id)
 		}
 	}
 }

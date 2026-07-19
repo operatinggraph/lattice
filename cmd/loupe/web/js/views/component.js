@@ -7,7 +7,7 @@
 
 import { $, el, api, setStatus, toast } from "../api.js";
 import { replaceRoute } from "../router.js";
-import { designAheadCopy, designAheadPointer, issueClass, lensStateDot, lensStateGlyph, pendingReadpathCopy } from "../logic/status.js";
+import { offlineComponentCopy, offlineComponentPointer, issueClass, lensStateDot, lensStateGlyph, pendingReadpathCopy } from "../logic/status.js";
 import { metricsLine, eventSummary, controlSurface } from "../logic/component.js";
 import { authFailureRate, pctLabel, jwksRows, revocationStatus, revokeActorValid, revokeConfirmReady } from "../logic/gateway.js";
 import { shredFleetSummary, shredFinalizationLine, shredInFlight } from "../logic/shred.js";
@@ -93,12 +93,13 @@ function renderHead(head, page) {
 function renderState(col, page) {
   col.appendChild(el("h3", "comp-section", "Instances"));
   if (!page.instances.length) {
-    // A design-ahead component is EXPECTED to be heartbeatless — teach the
-    // roadmap instead of alarming (the same §1.4 rule as its map node).
-    if (page.status === "design-ahead") {
-      col.appendChild(el("div", "muted", designAheadCopy + "."));
-      if (designAheadPointer[page.component]) {
-        col.appendChild(el("div", "muted", designAheadPointer[page.component]));
+    // An offline optional component (up-full only) is EXPECTED to be
+    // heartbeatless here — name where it runs instead of alarming (the same
+    // rule as its map node).
+    if (page.status === "offline") {
+      col.appendChild(el("div", "muted", offlineComponentCopy + "."));
+      if (offlineComponentPointer[page.component]) {
+        col.appendChild(el("div", "muted", offlineComponentPointer[page.component]));
       }
     } else {
       col.appendChild(el("div", "muted",

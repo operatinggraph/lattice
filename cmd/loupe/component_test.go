@@ -77,13 +77,13 @@ func TestComputeComponentAbsentAndUndeclared(t *testing.T) {
 	}
 }
 
-// A designAhead declared component's page agrees with its map node: with no
-// heartbeat the header pill reads "design-ahead" (informational), and a live
-// instance overwrites it with the normal worst-of status.
-func TestComputeComponentDesignAhead(t *testing.T) {
+// An optional declared component's page agrees with its map node: with no
+// heartbeat and never-seen-alive the header pill reads "offline" (informational,
+// up-full only), and a live instance overwrites it with the normal worst-of.
+func TestComputeComponentOptionalOffline(t *testing.T) {
 	page := computeComponent("vault", nil, func(string) (map[string]any, bool) { return nil, false }, time.Minute, nil)
-	if !page.Declared || page.Status != "design-ahead" {
-		t.Errorf("vault page = declared=%v status=%q, want declared/design-ahead", page.Declared, page.Status)
+	if !page.Declared || page.Status != "offline" {
+		t.Errorf("vault page = declared=%v status=%q, want declared/offline", page.Declared, page.Status)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -95,13 +95,13 @@ func TestComputeComponentDesignAhead(t *testing.T) {
 	}
 	page = computeComponent("vault", []string{"health.vault.v1"}, read, time.Minute, nil)
 	if page.Status != "green" {
-		t.Errorf("heartbeating vault page status = %q, want green (designAhead moot once live)", page.Status)
+		t.Errorf("heartbeating vault page status = %q, want green (optional flag moot once live)", page.Status)
 	}
 }
 
-// The component page applies the same ever-live gate as the map: a designAhead
-// component seen alive earlier this process reports absent, not design-ahead.
-func TestComputeComponentDesignAheadEverLive(t *testing.T) {
+// The component page applies the same ever-live gate as the map: an optional
+// component seen alive earlier this process reports absent, not offline.
+func TestComputeComponentOptionalEverLive(t *testing.T) {
 	page := computeComponent("vault", nil, func(string) (map[string]any, bool) { return nil, false },
 		time.Minute, map[string]bool{"vault": true})
 	if page.Status != "absent" {

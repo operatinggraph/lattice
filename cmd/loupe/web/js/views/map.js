@@ -6,7 +6,7 @@
 // data change, not new rendering logic.
 
 import { el, api, setStatus } from "../api.js";
-import { appPointerCopy, componentStatusClass, designAheadCopy, designAheadPointer, groupLenses, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
+import { appPointerCopy, componentStatusClass, offlineComponentCopy, offlineComponentPointer, groupLenses, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
 import { deriveTransitions, ledClass } from "../logic/feed.js";
 import { keyTarget } from "../logic/keys.js";
 import { clockLabel, framesFromFlows, timelineWindow } from "../logic/scrubber.js";
@@ -286,11 +286,6 @@ function setSysmapRollup(data) {
   const counts = sysmapSummary(data.nodes || []);
   let pendingSuffix = counts.pending
     ? " · " + counts.pending + " pending read path" : "";
-  // design-ahead components are the roadmap, not degradation — their count
-  // rides the informational suffix beside pending-readpath.
-  if (counts.designAhead) {
-    pendingSuffix += " · " + counts.designAhead + " design-ahead (not yet deployed)";
-  }
   if (overall === "red") {
     const parts = [];
     if (counts.absent) parts.push(counts.absent + " absent");
@@ -443,11 +438,11 @@ function renderSystemMap(data) {
     stage.appendChild(cshelf);
   }
 
-  // Empty / no-health hint: every component absent (or design-ahead — also
+  // Empty / no-health hint: every component absent (or offline — also
   // heartbeatless) and zero lenses.
   const components = nodes.filter((n) => n.kind === "component");
   const hasLenses = nodes.some((n) => n.kind === "lens");
-  if (components.length && components.every((n) => n.status === "absent" || n.status === "design-ahead") && !hasLenses) {
+  if (components.length && components.every((n) => n.status === "absent" || n.status === "offline") && !hasLenses) {
     const hint = el("div", "muted sysmap-hint",
       "No live components reporting — is the stack running? (make up-full)");
     stage.appendChild(hint);
@@ -597,7 +592,6 @@ function buildSysmapNode(n) {
     const cls = componentStatusClass[n.status] || "unknown";
     if (cls === "absent") node.classList.add("absent");
     if (cls === "stale") node.classList.add("stale");
-    if (cls === "designahead") node.classList.add("designahead");
     if (n.status === "degraded") node.classList.add("degraded");
     if (n.status === "unhealthy") node.classList.add("unhealthy");
     if (n.status === "offline") node.classList.add("offline");
@@ -611,9 +605,6 @@ function buildSysmapNode(n) {
     if (n.instances && n.instances.length > 1) head.appendChild(el("span", "sysmap-tag", "×" + n.instances.length));
     if (n.issues && n.issues.length) head.appendChild(el("span", "sysmap-tag warn", "⚠ " + n.issues.length));
     node.appendChild(head);
-    // The ◇ tag rides its own line (a span between the head/detail divs) so
-    // it never steals head-row width from the node label.
-    if (n.status === "design-ahead") node.appendChild(el("span", "sysmap-tag ahead", "◇ design-ahead"));
     if (n.detail) {
       const d = el("div", "sysmap-detail", n.detail);
       node.appendChild(d);
@@ -684,10 +675,10 @@ function showSysmapTip(n, evt) {
   if (n.status === "pending-readpath") {
     tip.appendChild(el("div", "sysmap-issue", pendingReadpathCopy));
   }
-  if (n.status === "design-ahead") {
-    tip.appendChild(el("div", "sysmap-tip-ahead", designAheadCopy));
-    if (designAheadPointer[n.id]) {
-      tip.appendChild(el("div", "sysmap-tip-ahead", designAheadPointer[n.id]));
+  if (n.kind === "component" && n.status === "offline") {
+    tip.appendChild(el("div", "sysmap-tip-ahead", offlineComponentCopy));
+    if (offlineComponentPointer[n.id]) {
+      tip.appendChild(el("div", "sysmap-tip-ahead", offlineComponentPointer[n.id]));
     }
   }
   if (n.kind === "app") {
@@ -954,12 +945,12 @@ function pulseFlow() {
   if (!svg) return;
   flashPath(svg.querySelector('path[data-from="core-operations"][data-to="processor"]'), 0);
   flashPath(svg.querySelector('path[data-from="processor"][data-to="core-events"]'), 180);
-  // A design-ahead consumer isn't consuming — animating live flow into it
-  // would claim data movement its own node says can't be happening yet.
-  const ahead = new Set(((sysmap.data && sysmap.data.nodes) || [])
-    .filter((n) => n.status === "design-ahead").map((n) => n.id));
+  // An offline consumer isn't consuming — animating live flow into it
+  // would claim data movement its own node says can't be happening.
+  const offline = new Set(((sysmap.data && sysmap.data.nodes) || [])
+    .filter((n) => n.status === "offline").map((n) => n.id));
   svg.querySelectorAll('path[data-from="core-events"]').forEach((p) => {
-    if (!ahead.has(p.dataset.to)) flashPath(p, 360);
+    if (!offline.has(p.dataset.to)) flashPath(p, 360);
   });
 }
 

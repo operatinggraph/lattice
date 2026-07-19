@@ -82,13 +82,12 @@ func computeComponent(
 		if dc.id == id {
 			page.Label = dc.label
 			page.Declared = true
-			// A designAhead component with no heartbeat is "design-ahead"
-			// (surface built, backend not yet deployed), matching its map
-			// node; any live instance overwrites this with the worst-of, and
-			// one seen alive earlier this process (everLive) reports an
-			// honest "absent" once its heartbeats TTL away.
-			if dc.designAhead && !everLive[id] {
-				page.Status = "design-ahead"
+			// An optional component (up-full only) with no heartbeat is
+			// "offline", matching its map node; any live instance overwrites
+			// this with the worst-of, and one seen alive earlier this process
+			// (everLive) reports an honest "absent" once its heartbeats TTL away.
+			if dc.optional && !everLive[id] {
+				page.Status = "offline"
 			}
 		}
 	}

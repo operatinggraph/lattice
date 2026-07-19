@@ -301,17 +301,17 @@ func TestComputeSystemMapDeclaredAppsDoorBand(t *testing.T) {
 	}
 }
 
-// A designAhead declared component with no heartbeat renders the informational
-// "design-ahead" state (loupe-platform-edges-ux.md §1.4) — never absent-red,
-// never a rollup contribution; the instant it heartbeats it goes live like any
+// An optional declared component with no heartbeat and never-seen-alive renders
+// the informational "offline" state (up-full only) — never absent-red, never a
+// rollup contribution; the instant it heartbeats it goes live like any
 // component. The F10 topology nodes (ingress marker, object-store plane,
 // Vault's lateral flag) and edges ride the same map.
-func TestComputeSystemMapDesignAhead(t *testing.T) {
+func TestComputeSystemMapOptionalOffline(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	docs := map[string]map[string]any{"health.bootstrap.complete": {}}
 	for _, dc := range declaredComponents {
-		if dc.designAhead {
-			continue // gateway / vault / chronicler: no heartbeat yet
+		if dc.optional {
+			continue // gateway / vault / chronicler: up-full only, not running here
 		}
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
 	}
@@ -325,12 +325,12 @@ func TestComputeSystemMapDesignAhead(t *testing.T) {
 	byID := nodesByID(m)
 
 	if m.Overall != "green" {
-		t.Errorf("overall = %q, want green (design-ahead never degrades the rollup)", m.Overall)
+		t.Errorf("overall = %q, want green (offline never degrades the rollup)", m.Overall)
 	}
 	for _, id := range []string{"gateway", "vault", "chronicler"} {
 		n := byID[id]
-		if n.Kind != nodeComponent || n.Status != "design-ahead" || n.Detail != "not yet deployed" {
-			t.Errorf("%s = %+v, want component/design-ahead/not yet deployed", id, n)
+		if n.Kind != nodeComponent || n.Status != "offline" || n.Detail != "up-full only" {
+			t.Errorf("%s = %+v, want component/offline/up-full only", id, n)
 		}
 	}
 	if !byID["vault"].Lateral {
@@ -371,18 +371,18 @@ func TestComputeSystemMapDesignAhead(t *testing.T) {
 	keys = append(keys, "health.gateway.gw-1")
 	m = computeSystemMap(keys, read, nil, nil, time.Minute, nil, nil)
 	if gw := nodesByID(m)["gateway"]; gw.Status != "green" || gw.Detail != "gw-1" {
-		t.Errorf("heartbeating gateway = %+v, want green/gw-1 (designAhead moot once live)", gw)
+		t.Errorf("heartbeating gateway = %+v, want green/gw-1 (optional flag moot once live)", gw)
 	}
 }
 
-// A design-ahead component this process HAS seen alive must not revert to
-// "not yet deployed" once its heartbeats TTL out of Health KV — that is a
-// deployed-then-crashed component, and it reads honest absent-red.
-func TestComputeSystemMapDesignAheadEverLive(t *testing.T) {
+// An optional component this process HAS seen alive must not revert to
+// "offline" once its heartbeats TTL out of Health KV — that is a
+// started-then-crashed component, and it reads honest absent-red.
+func TestComputeSystemMapOptionalEverLive(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	docs := map[string]map[string]any{"health.bootstrap.complete": {}}
 	for _, dc := range declaredComponents {
-		if dc.designAhead {
+		if dc.optional {
 			continue
 		}
 		docs["health."+dc.id+".inst"] = map[string]any{"component": dc.id, "instance": "inst", "heartbeatAt": now}
@@ -400,8 +400,8 @@ func TestComputeSystemMapDesignAheadEverLive(t *testing.T) {
 	if m.Overall != "red" {
 		t.Errorf("overall = %q, want red (a crashed ever-live component degrades the rollup)", m.Overall)
 	}
-	// Vault was never seen alive — it stays design-ahead.
-	if v := nodesByID(m)["vault"]; v.Status != "design-ahead" {
-		t.Errorf("never-live vault = %q, want design-ahead", v.Status)
+	// Vault was never seen alive — it stays offline.
+	if v := nodesByID(m)["vault"]; v.Status != "offline" {
+		t.Errorf("never-live vault = %q, want offline", v.Status)
 	}
 }

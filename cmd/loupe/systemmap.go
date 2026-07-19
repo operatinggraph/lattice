@@ -13,10 +13,10 @@ import (
 // KV store — the spine the components hang off), or "ingress" (the
 // external-actors marker above the door band — a plain non-interactive chip,
 // no heartbeat). Status carries the live overlay: a component/client/app is
-// "green" / "stale" / "absent" — or "design-ahead" for a declared-but-not-
-// yet-deployed component, or "offline" for a declared app with no heartbeat
-// (surface built, backend/workload not running; both informational, never
-// degrade the rollup); a lens carries its §4.2 renderedState ("projecting" /
+// "green" / "stale" / "absent" — or "offline" for a declared app with no
+// heartbeat or an optional up-full-only component not running in this stack
+// (workload not started; informational, never degrades the rollup); a lens
+// carries its §4.2 renderedState ("projecting" /
 // "lagging" / "paused" / "pending-readpath" / "rebuilding" / "fault" /
 // "unknown"); infra/ingress is "present" (it exists if Loupe could read
 // Health KV). Protected marks a read-path-authorized lens (spec-side truth —
@@ -110,21 +110,23 @@ const (
 
 // declaredComponent is an engine the deployment is expected to run. Its id is
 // the Health KV group name (classifyHealthKey) so the overlay matches by id.
-// designAhead suppresses the absent-red for a component whose Loupe surface is
-// built but whose backend is not yet deployed: with no heartbeat it renders the
-// informational "design-ahead" state and contributes nothing to the rollup
-// (the pending-readpath precedent). The instant it heartbeats it takes its
-// normal live status, so the flag is moot for a running component.
+// optional marks a component the deployment runs only under `make up-full`
+// (Gateway/Vault/Chronicler), not kernel-only `make up`: with no heartbeat and
+// never-seen-alive it renders the informational "offline" state (dim, no rollup
+// contribution — the pending-readpath precedent). Once it has heartbeated this
+// process, a later disappearance is an honest absent-red (deployed-then-crashed,
+// via everLive), so the flag is moot for a component that is currently live.
 type declaredComponent struct {
-	id          string
-	label       string
-	designAhead bool
+	id       string
+	label    string
+	optional bool
 }
 
 // declaredComponents is the engine set that heartbeats to Health KV
 // (architecture-overview.md, "heartbeat" edges). Order is the render order.
-// Gateway is designAhead until `make up-full` starts it; Vault and Chronicler
-// until their builds deploy (loupe-platform-edges-ux.md §1.4).
+// Gateway/Vault/Chronicler are optional: deployed and heartbeating under
+// `make up-full`, skipped by kernel-only `make up`, so their absence in a
+// kernel-only stack is honest "offline", not degradation.
 var declaredComponents = []declaredComponent{
 	{id: "processor", label: "Processor"},
 	{id: refractorID, label: "Refractor"},
@@ -132,9 +134,9 @@ var declaredComponents = []declaredComponent{
 	{id: "loom", label: "Loom"},
 	{id: "bridge", label: "Bridge"},
 	{id: "object-store-manager", label: "Object Store Mgr"},
-	{id: "gateway", label: "Gateway", designAhead: true},
-	{id: "vault", label: "Vault", designAhead: true},
-	{id: "chronicler", label: "Chronicler", designAhead: true},
+	{id: "gateway", label: "Gateway", optional: true},
+	{id: "vault", label: "Vault", optional: true},
+	{id: "chronicler", label: "Chronicler", optional: true},
 }
 
 // infraNodes is the core stream / store spine the components flow through.
@@ -213,11 +215,11 @@ var skeletonEdges = []mapEdge{
 // topology. readEntry / resolveLens / resolveSpec / staleThreshold mirror
 // computeHealth so the assembler is unit-testable without NATS. A declared
 // component with no Health KV heartbeat renders "absent" (red) — or
-// "design-ahead" (informational, no rollup contribution) when it is declared
-// designAhead AND has never been seen alive by this process (everLive):
+// "offline" (informational, no rollup contribution) when it is declared
+// optional AND has never been seen alive by this process (everLive):
 // heartbeat keys TTL out of Health KV, so without that memory a
-// deployed-then-crashed design-ahead component would silently revert to a
-// false "not yet deployed" instead of an honest absent-red. A stale heartbeat
+// deployed-then-crashed optional component would silently revert to a
+// false "offline" instead of an honest absent-red. A stale heartbeat
 // renders "stale" (yellow); each live lens becomes a node parented to
 // Refractor carrying its renderedState — a pending-readpath lens contributes
 // nothing to the rollup (it is expected fail-closed state, not degradation).
@@ -336,9 +338,9 @@ func computeSystemMap(
 		node := mapNode{ID: dc.id, Label: dc.label, Kind: nodeComponent, Lateral: dc.id == "vault"}
 		if bs, ok := beats[dc.id]; ok {
 			worse(applyBeats(&node, bs))
-		} else if dc.designAhead && !everLive[dc.id] {
-			node.Status = "design-ahead"
-			node.Detail = "not yet deployed"
+		} else if dc.optional && !everLive[dc.id] {
+			node.Status = "offline"
+			node.Detail = "up-full only"
 			node.Freshness = "-"
 		} else {
 			node.Status = "absent"

@@ -254,7 +254,7 @@ pre {
 .comp-pill.green { color: var(--green); border-color: var(--green); }
 .comp-pill.stale, .comp-pill.degraded, .comp-pill.unknown { color: var(--yellow); border-color: var(--yellow); }
 .comp-pill.unhealthy, .comp-pill.absent { color: var(--red); border-color: var(--red); }
-.comp-pill.design-ahead { color: var(--accent-dim); border-color: var(--accent-dim); }
+.comp-pill.offline { color: var(--text-dim); border-color: var(--border); }
 .comp-onmap { color: var(--accent); text-decoration: none; font-size: 12px; }
 .comp-onmap:hover { text-decoration: underline; }
 .comp-body { display: grid; grid-template-columns: 1fr 380px; gap: 14px; align-items: start; }
@@ -474,22 +474,15 @@ table.grid td { font-family: var(--mono); }
 }
 .sysmap-node.component[data-status="unknown"] { border-left-color: var(--yellow); }
 .sysmap-node.component.absent .sysmap-label { text-decoration: line-through; color: var(--text-dim); }
-/* design-ahead: surface built, backend not yet deployed — the informational
-   accent family (dashed accent border, dimmed label), never absent-red. */
-.sysmap-node.component.designahead {
-  border: 1px dashed var(--accent-dim);
-  border-left-width: 3px;
-  opacity: 0.75;
-}
-.sysmap-node.component.designahead .sysmap-label { color: var(--text-dim); }
-/* offline (F14): a declared vertical app with no heartbeat — the plain dim
-   family, distinct from absent-red (verticals are optional workloads). */
-.sysmap-node.app.offline {
+/* offline: a declared vertical app with no heartbeat, or an optional platform
+   component (up-full only) not running in this stack — the plain dim family,
+   distinct from absent-red (both are expected-absent, not degradation). */
+.sysmap-node.offline {
   border: 1px dashed var(--border);
   border-left-width: 3px;
   opacity: 0.6;
 }
-.sysmap-node.app.offline .sysmap-label { color: var(--text-dim); }
+.sysmap-node.offline .sysmap-label { color: var(--text-dim); }
 
 /* The ingress marker (external actors · Bearer JWT): a deliberately-plain
    non-interactive chip above the Gateway. */
@@ -536,8 +529,6 @@ table.grid td { font-family: var(--mono); }
 .sysmap-tag { font-size: 10px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-dim); flex-shrink: 0; }
 .sysmap-tag.warn { color: var(--yellow); border-color: var(--yellow); }
 .sysmap-tag.bad { color: var(--red); border-color: var(--red); }
-.sysmap-tag.ahead { color: var(--accent-dim); border-color: var(--accent-dim); }
-.sysmap-dot.designahead { background: transparent; border: 1px solid var(--accent-dim); }
 
 .sysmap-shelf {
   position: absolute;

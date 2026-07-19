@@ -68,8 +68,8 @@ type server struct {
 	// accepts it alongside loopback hosts (the non-loopback opt-in).
 	bindHost string
 	// everLive remembers which components this process has seen heartbeating
-	// (snapshotEverLive / noteEverLive) so a design-ahead component that was
-	// deployed and then crashed reads absent-red, not "not yet deployed".
+	// (snapshotEverLive / noteEverLive) so an optional component that was
+	// running and then crashed reads absent-red, not "offline".
 	everLiveMu sync.Mutex
 	everLive   map[string]bool
 	// authn verifies the operator's Bearer JWT for the console's front door
@@ -403,9 +403,9 @@ func (s *server) handleSystemMap(w http.ResponseWriter, r *http.Request) {
 }
 
 // snapshotEverLive copies the set of components this process has observed
-// with live heartbeats. It gates the design-ahead rendering: heartbeats TTL
-// out of Health KV, so "no heartbeat key" alone cannot distinguish
-// never-deployed from deployed-then-crashed.
+// with live heartbeats. It gates the optional-component rendering: heartbeats
+// TTL out of Health KV, so "no heartbeat key" alone cannot distinguish
+// never-started from started-then-crashed.
 func (s *server) snapshotEverLive() map[string]bool {
 	s.everLiveMu.Lock()
 	defer s.everLiveMu.Unlock()
