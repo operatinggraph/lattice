@@ -82,6 +82,59 @@ func TestUpgrade_VersionBumpOnlyUpdatesPackageEntities(t *testing.T) {
 	}
 }
 
+// TestUpgrade_ReAddsRemovedEntity proves a package can get an entity back after
+// dropping it. Entity keys are deterministic in (package, kind, canonicalName),
+// so the re-add lands on the exact key the removal tombstoned — and a create
+// asserts revision 0, which that key's history defeats. Before the revive
+// branch this failed with a RevisionConflict, permanently: re-running produced
+// the identical batch, so the package could never regain the entity. Found live
+// on 2026-07-19 re-adding service-location's staffReadGrants lens, which a
+// previous fire had installed and removed.
+func TestUpgrade_ReAddsRemovedEntity(t *testing.T) {
+	ctx, conn, inst := newInstallerHarness(t)
+
+	v1 := sampleDef("0.1.0")
+	if _, err := inst.Install(ctx, v1); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	permKey := "vtx.permission." + entityNanoID(v1.Name, permTag("SampleOp", "any"))
+
+	// v2 drops the permission — tombstoning its key.
+	v2 := sampleDef("0.2.0")
+	v2.Permissions = nil
+	if _, err := inst.Upgrade(ctx, v2); err != nil {
+		t.Fatalf("Upgrade (drop): %v", err)
+	}
+	if del, _ := kvDoc(t, ctx, conn, permKey)["isDeleted"].(bool); !del {
+		t.Fatalf("%s should be tombstoned after the drop", permKey)
+	}
+
+	// v3 adds it back, identically — the same deterministic key.
+	v3 := sampleDef("0.3.0")
+	res, err := inst.Upgrade(ctx, v3)
+	if err != nil {
+		t.Fatalf("Upgrade (re-add) must revive the tombstoned key, not fail: %v", err)
+	}
+	if res.Created == 0 {
+		t.Fatalf("the re-added permission should report as created, got %+v", res)
+	}
+
+	revived := kvDoc(t, ctx, conn, permKey)
+	if del, _ := revived["isDeleted"].(bool); del {
+		t.Fatalf("%s should be live again after the re-add", permKey)
+	}
+	// The entity must come back whole. A tombstone is written stripped, so a
+	// revive that only flipped isDeleted would leave a bodyless permission that
+	// every consumer reads as malformed.
+	data, ok := revived["data"].(map[string]any)
+	if !ok || data["operationType"] != "SampleOp" {
+		t.Fatalf("revived permission lost its body: %+v", revived)
+	}
+	if revived["class"] == nil {
+		t.Fatalf("revived permission lost its class: %+v", revived)
+	}
+}
+
 // TestUpgrade_DiffCreateUpdateTombstone exercises all three partitions in one
 // upgrade: add a lens (create), change the DDL description (update, with
 // createdAt carried forward), drop the permission (tombstone). It asserts the

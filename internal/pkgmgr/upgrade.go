@@ -93,7 +93,7 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		PackageName: def.Name,
 		FromVersion: existing.Version,
 		ToVersion:   def.Version,
-		Created:     sum.created,
+		Created:     sum.created + sum.revived,
 		Updated:     sum.updated,
 		Tombstoned:  sum.tombstoned,
 	}
@@ -175,18 +175,34 @@ func (i *Installer) submitUpgradeOp(ctx context.Context, def Definition, fromVer
 
 // diffSummary counts the three partitions an upgrade produces.
 type diffSummary struct {
-	created    int
+	created int
+	// revived counts entities the package re-adds onto a key a prior removal
+	// tombstoned. They commit as updates (a create cannot land on a subject with
+	// history) but are new entities from the package's point of view, so they
+	// report as Created; the separate counter keeps the path assertable.
+	revived    int
 	updated    int
 	tombstoned int
 }
 
 // diffManifest partitions the new create-batch against the old key set into the
-// upgrade delta: a key only in the new set → create; a surviving key whose
+// upgrade delta: a key only in the new set → create, unless KV already holds it
+// as a tombstone, in which case it is REVIVED by update; a surviving key whose
 // committed body differs from the rebuilt one → update (with createdAt/createdBy
 // carried forward); a key only in the old set → tombstone. Surviving keys with
 // a byte-equal logical body are omitted (the body-equality skip). Output order
 // is deterministic: the new-batch order for create/update, sorted keys for
 // tombstones.
+//
+// The revive case is what makes re-adding a removed entity possible at all.
+// Package entity keys are deterministic in (package, kind, canonicalName), so a
+// lens/role/permission that is dropped from a package and later added back
+// lands on the EXACT key its removal tombstoned. A create asserts revision 0
+// and the tombstone's subject history defeats that assertion, so the whole
+// upgrade batch is rejected — permanently, since re-running is just as
+// deterministic. The old manifest cannot see this: the key is absent from it
+// precisely because the entity was removed, which is why the check has to be a
+// KV read rather than a set difference.
 //
 // Every update/tombstone mutation carries the revision this diff's own read
 // just observed as ExpectedRevision (per-key OCC, F-011/Contract #8 §8.6): a
@@ -208,14 +224,25 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 	var sum diffSummary
 
 	for _, op := range newOps {
-		if _, survives := oldSet[op.Key]; !survives {
-			out = append(out, installMutation{Op: "create", Key: op.Key, Document: op.Document})
-			sum.created++
-			continue
-		}
+		_, survives := oldSet[op.Key]
 		committed, rev, err := i.getCommitted(ctx, op.Key)
 		if err != nil {
 			return nil, diffSummary{}, err
+		}
+		if !survives {
+			if committed == nil {
+				out = append(out, installMutation{Op: "create", Key: op.Key, Document: op.Document})
+				sum.created++
+				continue
+			}
+			// Re-adding an entity whose key a prior removal tombstoned. Revive it
+			// under the same per-key OCC every other update carries. No provenance
+			// is grafted: a tombstone is written stripped (isDeleted + the
+			// lastModified triplet, no createdAt), so the revived entity honestly
+			// carries this install's creation stamp rather than a resurrected one.
+			out = append(out, installMutation{Op: "update", Key: op.Key, Document: op.Document, ExpectedRevision: &rev})
+			sum.revived++
+			continue
 		}
 		if committed == nil {
 			// Recorded in the old manifest but absent from KV (a prior partial
