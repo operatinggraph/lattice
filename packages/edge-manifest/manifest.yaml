@@ -1,14 +1,15 @@
 name: edge-manifest
-version: 0.6.0
+version: 0.7.0
 description: |
-  The Facet edge app's world manifest: seven Personal Lenses (edgeIdentity/
-  edgeServices/edgeCatalog/edgeTasks/edgeInstances/edgeEntitySessions/
-  edgeEntityProviders) projecting identity, reachable services, the op
-  descriptor vocabulary, open tasks, service instances, and browsable
-  dispatch-target entities (wellness sessions via studio locatedAt, clinic
-  providers via practicesAt — manifest.ent rows a declared
-  dispatch.targetType resolves against) into the manifest.* namespace over
-  the per-actor SYNC transport.
+  The Facet edge app's world manifest: ten Personal Lenses (edgeIdentity/
+  edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
+  edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings)
+  projecting identity, reachable services, the op descriptor vocabulary,
+  open and queued tasks, service instances, and browsable dispatch-target
+  entities (wellness sessions via studio locatedAt, clinic providers via
+  practicesAt, the actor's own bookings via bookedBy — manifest.ent rows a
+  declared dispatch.targetType resolves against) into the manifest.*
+  namespace over the per-actor SYNC transport.
   Plus edgeManifestReadGrants, a cap-read.edgeManifest.<actor> read-grant
   producer lens (Fire 2): every non-self-anchored manifest row is otherwise
   dropped by Refractor's D1 readableAnchors fail-closed gate, which is
@@ -43,6 +44,9 @@ declares:
       adapter: nats-subject
       engine: full
     - canonicalName: edgeEntityProviders
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeEntityBookings
       adapter: nats-subject
       engine: full
     - canonicalName: edgeCatalogRoles

@@ -23,6 +23,14 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // through — so the caller never needs to name it, the client can just fill
 // it silently from context (widget vocabulary: "dispatch.contextParams
 // fields are auto-filled and hidden").
+//
+// CancelBooking's `session` field is the same auto-fill argument one step
+// out: its value must be the booking's ACTUAL forSession target, so it is a
+// value the client reads off the booking row it is displaying rather than one
+// the visitor types. That is the first use of `{entity.<column>}` — the
+// viewed manifest.ent row as a substitution source (edge-showcase-app-design.md
+// §3.3) — filled from the `sessionKey` column edge-manifest's
+// edgeEntityBookings lens projects alongside the booking.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -72,6 +80,28 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "bookingKey",
 				TargetType:  "booking",
+				// The booking's session is not the visitor's to type: it must
+				// be the booking's ACTUAL forSession target (the script
+				// rebuilds the seat-cell key from it and validates it against
+				// the link), so the client fills it from the booking row it is
+				// already displaying — the manifest.ent `sessionKey` column
+				// edge-manifest's edgeEntityBookings lens projects.
+				ContextParams: map[string]string{"session": "{entity.sessionKey}"},
+				// The booking's own .status aspect is REQUIRED, not optional:
+				// the script reads the seat index it carries to rebuild the
+				// seat cell it releases, so its absence is a correctness
+				// error. The targetField fallback declares the booking vertex
+				// but never its aspects.
+				Reads: []string{"{payload.bookingKey}", "{payload.bookingKey}.status"},
+				// The session-match and self-scope ownership probes. Absence
+				// of either is a meaningful rejection the script renders
+				// (WrongSession / AuthDenied), not a correctness error — the
+				// same shape cafe-domain's Settle uses for its applicationFor
+				// ownership probe.
+				OptionalReads: []string{
+					"lnk.booking.{payload.bookingKey:id}.forSession.session.{payload.session:id}",
+					"lnk.booking.{payload.bookingKey:id}.bookedBy.identity.{actor:id}",
+				},
 			},
 		},
 	}

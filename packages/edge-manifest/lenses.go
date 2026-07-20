@@ -155,6 +155,17 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:          edgeEntityProvidersSpec,
 		},
 		{
+			CanonicalName: "edgeEntityBookings",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Spec:          edgeEntityBookingsSpec,
+		},
+		{
 			CanonicalName: "edgeCatalogRoles",
 			Class:         "meta.lens",
 			Adapter:       "nats-subject",
@@ -476,6 +487,42 @@ RETURN
   prov.profile.data.specialty AS subtitle
 `
 
+// edgeEntityBookingsSpec projects one `manifest.ent.<bookingId>` row per
+// booking the actor themself made — the browse rows for
+// `dispatch.targetType: "booking"` (CancelBooking).
+//
+// Reachability here is the actor's OWN `bookedBy` link, NOT the residence
+// chain the session/provider lenses walk. Locality is the wrong predicate for
+// a booking in both directions: it would surface co-residents' bookings (a
+// booking is nobody's business but the booker's) and it would drop the
+// actor's own booking at a studio outside their building. That makes this the
+// first manifest.ent lens whose row set is inherently private rather than
+// merely locality-scoped.
+//
+// `sessionKey` rides along because CancelBooking needs the booking's session
+// in its payload (the seat-cell key it tombstones is rebuilt from it) and the
+// renderer fills that from the viewed row via `{entity.<column>}`. A
+// cancelled booking tombstones its own vertex, so the row self-clears with no
+// status filter.
+const edgeEntityBookingsSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:bookedBy]-(bk:booking)
+OPTIONAL MATCH (bk)-[:forSession]->(sess:session)
+OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
+WITH bk, sess, studio
+WHERE bk.key <> null
+RETURN
+  bk.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(bk.key) AS entityId,
+  bk.key AS entityKey,
+  "booking" AS entityType,
+  sess.schedule.data.name AS title,
+  studio.profile.data.name AS subtitle,
+  sess.schedule.data.startsAt AS startsAt,
+  sess.key AS sessionKey
+`
+
 // edgeCatalogRolesSpec projects one `manifest.op.<opMetaId>` row per op meta
 // the actor can reach through a ROLE they hold, rather than through a service
 // template — the role-standing-grant path the package doc names as deferred,
@@ -588,9 +635,9 @@ RETURN
 `
 
 // edgeManifestReadGrantsSpec is edge-manifest's single combined read-grant
-// producer for all six non-self-anchored manifest lenses (edgeServices,
+// producer for all seven non-self-anchored manifest lenses (edgeServices,
 // edgeCatalog, edgeTasks, edgeInstances, edgeEntitySessions,
-// edgeEntityProviders) — an actorAggregate lens mirroring
+// edgeEntityProviders, edgeEntityBookings) — an actorAggregate lens mirroring
 // internal/bootstrap/lenses.go's CapabilityReadLensDefinition shape exactly
 // (one row per actor, a readableAnchors[] array), just walking THIS
 // package's reachability chains instead of the trivial self-anchor.
@@ -618,6 +665,7 @@ OPTIONAL MATCH (identity)<-[:providedTo]-(inst:service)
 OPTIONAL MATCH (container)<-[:locatedAt]-(studio:studio)
 OPTIONAL MATCH (studio)<-[:atStudio]-(sess:session)
 OPTIONAL MATCH (container)<-[:practicesAt]-(prov:provider)
+OPTIONAL MATCH (identity)<-[:bookedBy]-(bk:booking)
 RETURN
   identity.key AS actorKey,
   collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(tpl.key), via: ['availableAt']}) +
@@ -625,6 +673,7 @@ RETURN
   collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(task.key), via: ['assignedTo']}) +
   collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(inst.key), via: ['providedTo']}) +
   collect(DISTINCT {anchorType: 'session', anchorId: nanoIdFromKey(sess.key), via: ['locatedAt', 'atStudio']}) +
-  collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['practicesAt']})
+  collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['practicesAt']}) +
+  collect(DISTINCT {anchorType: 'booking', anchorId: nanoIdFromKey(bk.key), via: ['bookedBy']})
   AS readableAnchors
 `

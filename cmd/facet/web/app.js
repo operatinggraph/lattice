@@ -648,6 +648,14 @@ function opButton(o, ctx) {
   if (missing) {
     return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This needs your own ${esc(typeLabel(missing))}; you don't have one yet.</div>`;
   }
+  // Same gate for a {entity.<column>} contextParam: it is filled from the
+  // viewed row and never rendered, so a column this row doesn't carry has no
+  // field the visitor could correct — submitting "" is strictly worse than
+  // saying so.
+  const missingColumn = unresolvableEntityColumn(d, ctx);
+  if (missingColumn) {
+    return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This record is missing its ${esc(missingColumn)}; it can't be completed here.</div>`;
+  }
   const label = d.submitLabel || d.title || prettifyOpType(d.operationType);
   const attrs = [`data-open-op="${esc(o.key)}"`];
   if (ctx.serviceKey) attrs.push(`data-service-key="${esc(ctx.serviceKey)}"`);
@@ -1058,6 +1066,36 @@ function unresolvableSelfAnchor(op) {
   return undefined;
 }
 
+// entityColumn answers "a column of the manifest.ent row this op is being
+// submitted from" — the seam that lets an op declare a payload field whose
+// value is a projected property of the entity being viewed, rather than one
+// the visitor types. ctx.entityKey is the row's identity; a column that is
+// absent, null or empty is no value at all and returns undefined so the
+// caller can degrade rather than substitute "".
+function entityColumn(ctx, column) {
+  if (!ctx || !ctx.entityKey || !column) return undefined;
+  const row = entities().find((e) => e.data && e.data.entityKey === ctx.entityKey);
+  const v = row && row.data ? row.data[column] : undefined;
+  return v === undefined || v === null || v === "" ? undefined : v;
+}
+
+// unresolvableEntityColumn returns the first {entity.<column>} an op's
+// dispatch.contextParams declares that the viewed row cannot answer, or
+// undefined when every one resolves. Same fail-closed rationale as
+// unresolvableSelfAnchor: a contextParam is filled and never rendered, so an
+// unresolvable one would reach the Processor as an empty string.
+function unresolvableEntityColumn(op, ctx) {
+  const params = maybeParseJSON(op.dispatchContextParams) || {};
+  for (const template of Object.values(params)) {
+    if (typeof template !== "string") continue;
+    for (const m of template.matchAll(/\{entity\.([^}]+)\}/g)) {
+      const column = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
+      if (!entityColumn(ctx, column)) return column;
+    }
+  }
+  return undefined;
+}
+
 function renderDescriptorForm(op, opKey, ctx, prefill, reviewBanner) {
   const schema = maybeParseJSON(op.inputSchema) || { type: "object", properties: {} };
   const props = schema.properties || {};
@@ -1155,6 +1193,10 @@ function substituteTemplate(str, ctx, payload) {
     // means the anchor set changed mid-form; the empty value fails at the
     // Processor rather than substituting some other identity's key.
     if (expr.startsWith("me.")) return out(selfAnchorKey(expr.slice(3)) || "");
+    // {entity.<column>} — a projected column of the manifest.ent row being
+    // viewed. opButton has already refused to offer an op whose column
+    // doesn't resolve, so reaching "" here means the row changed mid-form.
+    if (expr.startsWith("entity.")) return out(entityColumn(ctx, expr.slice(7)) || "");
     if (expr.startsWith("payload.")) { const v = payload[expr.slice(8)]; return v === undefined ? "" : out(v); }
     return m;
   });

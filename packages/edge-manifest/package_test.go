@@ -33,8 +33,8 @@ func TestPackage_NoDDLsOrPermissions(t *testing.T) {
 	}
 }
 
-// manifestLensNames are the nine Personal Lenses (edge-showcase-app-
-// design.md §3.2; the two manifest.ent entity lenses per
+// manifestLensNames are the ten Personal Lenses (edge-showcase-app-
+// design.md §3.2; the three manifest.ent entity lenses per
 // facet-entity-browse-design.md; the two staff siblings per
 // facet-staff-worlds-design.md §3.3). readGrantLensNames are their read-grant
 // producers (nats-kv, actorAggregate) — a structurally different class (never
@@ -45,6 +45,7 @@ var manifestLensNames = map[string]bool{
 	"edgeIdentity": true, "edgeServices": true, "edgeCatalog": true,
 	"edgeTasks": true, "edgeInstances": true,
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
+	"edgeEntityBookings": true,
 	"edgeCatalogRoles": true, "edgeTasksQueued": true,
 }
 
@@ -60,9 +61,9 @@ var readGrantLensNames = map[string]bool{
 	"edgeManifestStaffReadGrants": true,
 }
 
-func TestPackage_ElevenLenses(t *testing.T) {
-	if got := len(Package.Lenses); got != 11 {
-		t.Fatalf("expected 11 lenses (9 manifest + 2 read-grant producers), got %d", got)
+func TestPackage_TwelveLenses(t *testing.T) {
+	if got := len(Package.Lenses); got != 12 {
+		t.Fatalf("expected 12 lenses (10 manifest + 2 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range Package.Lenses {
@@ -172,6 +173,7 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeInstances":       `"manifest.inst" AS ns`,
 		"edgeEntitySessions":  `"manifest.ent" AS ns`,
 		"edgeEntityProviders": `"manifest.ent" AS ns`,
+		"edgeEntityBookings":  `"manifest.ent" AS ns`,
 		// The staff siblings share their non-staff counterpart's namespace on
 		// purpose: same ns + same entityId means an op or task reachable by
 		// both paths projects the identical row under the identical key, and

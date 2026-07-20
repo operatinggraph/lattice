@@ -181,3 +181,86 @@ test("an optionalRead that failed to substitute is dropped, never declared", () 
   const kept = [built].filter((k) => k && !k.includes("{") && !k.includes(".."));
   assert.deepEqual(kept, []);
 });
+
+// ---- {entity.<column>} — the viewed manifest.ent row as a fill source ----
+// Wellness CancelBooking's `session` must be the booking's ACTUAL forSession
+// target, so it is read off the booking row the visitor opened (the
+// `sessionKey` column edgeEntityBookings projects), never typed.
+
+const BOOKING = "vtx.booking.FFFFFFFFFFFFFFFFFFFF";
+const SESSION = "vtx.session.GGGGGGGGGGGGGGGGGGGG";
+
+// loadAppWithEntities points both `me()` and `entities()` at fixtures — same
+// global-object override trick the harness note above describes.
+function loadAppWithEntities(meRow, ents) {
+  const app = loadApp(meRow);
+  app.entities = () => ents;
+  return app;
+}
+
+const bookingRow = {
+  key: "manifest.ent." + BOOKING,
+  data: { entityKey: BOOKING, entityType: "booking", title: "Vinyasa Flow", sessionKey: SESSION },
+};
+
+test("{entity.<column>} resolves a projected column of the viewed row", () => {
+  const app = loadAppWithEntities({ identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD" }, [bookingRow]);
+  const ctx = { entityKey: BOOKING };
+  assert.equal(app.entityColumn(ctx, "sessionKey"), SESSION);
+  assert.equal(app.substituteTemplate("{entity.sessionKey}", ctx, {}), SESSION);
+  // And it composes into the ownership probe the op declares.
+  const payload = { bookingKey: BOOKING, session: app.substituteTemplate("{entity.sessionKey}", ctx, {}) };
+  assert.equal(
+    app.substituteTemplate("lnk.booking.{payload.bookingKey:id}.forSession.session.{payload.session:id}", ctx, payload),
+    "lnk.booking.FFFFFFFFFFFFFFFFFFFF.forSession.session.GGGGGGGGGGGGGGGGGGGG",
+  );
+});
+
+test("{entity.<column>:id} substitutes the bare Contract #1 id", () => {
+  const app = loadAppWithEntities({ identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD" }, [bookingRow]);
+  assert.equal(app.substituteTemplate("{entity.sessionKey:id}", { entityKey: BOOKING }, {}),
+    "GGGGGGGGGGGGGGGGGGGG");
+});
+
+test("a column the viewed row doesn't carry is unresolvable, never empty", () => {
+  const app = loadAppWithEntities({ identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD" }, [
+    { key: "manifest.ent." + BOOKING, data: { entityKey: BOOKING, entityType: "booking", sessionKey: null } },
+  ]);
+  const ctx = { entityKey: BOOKING };
+  assert.equal(app.entityColumn(ctx, "sessionKey"), undefined);   // null projects as absent
+  assert.equal(app.entityColumn(ctx, "nosuch"), undefined);
+  assert.equal(app.entityColumn({}, "sessionKey"), undefined);    // no entity context at all
+
+  const op = { dispatchContextParams: JSON.stringify({ session: "{entity.sessionKey}" }) };
+  assert.equal(app.unresolvableEntityColumn(op, ctx), "sessionKey");
+  assert.equal(app.unresolvableEntityColumn(op, { entityKey: "vtx.booking.HHHHHHHHHHHHHHHHHHHH" }), "sessionKey");
+  // The `:id` modifier is stripped before the column lookup.
+  const idOp = { dispatchContextParams: JSON.stringify({ session: "{entity.sessionKey:id}" }) };
+  assert.equal(app.unresolvableEntityColumn(idOp, ctx), "sessionKey");
+});
+
+test("opButton degrades an op whose {entity.<column>} the row can't answer", () => {
+  const op = {
+    key: "vtx.meta.EEEEEEEEEEEEEEEEEEEE",
+    data: {
+      operationType: "CancelBooking", title: "Cancel booking", dispatchClass: "booking",
+      dispatchTargetField: "bookingKey", dispatchTargetType: "booking",
+      dispatchContextParams: JSON.stringify({ session: "{entity.sessionKey}" }),
+    },
+  };
+  const meRow = { identityKey: "vtx.identity.DDDDDDDDDDDDDDDDDDDD" };
+
+  const ok = loadAppWithEntities(meRow, [bookingRow]);
+  const okHtml = ok.opButton(op, { entityKey: BOOKING });
+  assert.match(okHtml, /data-open-op="vtx\.meta\.EEEEEEEEEEEEEEEEEEEE"/);
+  assert.match(okHtml, /data-entity-key="vtx\.booking\.FFFFFFFFFFFFFFFFFFFF"/);
+  assert.doesNotMatch(okHtml, /degraded-card/);
+
+  const bad = loadAppWithEntities(meRow, [
+    { key: "manifest.ent." + BOOKING, data: { entityKey: BOOKING, entityType: "booking" } },
+  ]);
+  const badHtml = bad.opButton(op, { entityKey: BOOKING });
+  assert.match(badHtml, /degraded-card/);
+  assert.match(badHtml, /sessionKey/);
+  assert.doesNotMatch(badHtml, /data-open-op=/);
+});
