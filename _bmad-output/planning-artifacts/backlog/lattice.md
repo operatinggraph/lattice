@@ -56,7 +56,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Bootstrap] Stale `lattice.bootstrap.json` vs. recreated Core KV — no freshness probe** | `LoadOrGenerate` skips `SeedPrimordial` whenever the local JSON says `status="committed"` — it never probes Core KV for the bootstrap op tracker, so a recreated/empty Core KV behind a surviving file comes up "ready" with silently-empty reads; recurred 3× (`docs/components/bootstrap.md` §Known gap). | ★★ | S–M | 📋 ready · `cmd/bootstrap/main.go:68-126`, `internal/bootstrap/nanoid.go:331` |
 | **[CI] `edge-browser-store` reds the gate on a slow headless-Chrome cold start** | `wasmbrowsertest` waits a chromedp-hardcoded 20s for Chrome's DevTools banner and exposes no knob for it (`test-edge-idb-conformance`). `-p 1` already removed self-contention, yet one cold start still overran on a loaded runner — observed on main, green on re-run, whole gate red meanwhile. Nothing retries the suite. Retry once on the `websocket url timeout reached` signature alone, so real failures stay unmasked. | ★★ | XS–S | 📋 ready |
-| **[Gateway] Heartbeat key never expires — dead instances accumulate** | `internal/gateway/health.go` writes its heartbeat with `KVPut`; every other emitter (`internal/healthkv/reporter.go`, `internal/weaver/health.go`) uses `KVPutWithTTL`. Each restart therefore leaks a permanent `health.gateway.<instance>` key — the live stack carries 11, ten of them stale, the oldest by ~50h. The rollup counts each as a stale component, so overall health can never read green. | ★★ | XS | 📋 ready |
+| **[Ops] Drain the already-leaked `health.gateway.*` keys** | The TTL fix stops the leak but cannot drain it: keys written untimed carry no TTL, and only the live instance rewrites its own, so the ~10 already-orphaned dead-instance keys persist and keep the rollup from reading green. Needs a one-off operator sweep (delete `health.gateway.<instance>` for every instance not currently heartbeating), and the same question for any other emitter that predates its TTL. | ★★ | XS | 📋 ready |
 
 ### Survey log (round-robin rotation)
 
@@ -119,8 +119,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > 🎯 **Build-ready now.** Every ✅ ratified row in the feature tables below is Andrew-gated or
 > driver-blocked, so the live picks are the **📋 ready rows in Component maintenance** above. Top of that
 > stack now: **[Bootstrap] stale `lattice.bootstrap.json` freshness probe** (★★, the documented Known gap,
-> recurred 3×), then **[Gateway] heartbeat TTL leak** (★★ XS) and **[CI] `edge-browser-store` retry**
-> (★★ XS–S). A stale callout starves the lane — whoever ships the top pick renames this to the next.
+> recurred 3×), then **[CI] `edge-browser-store` retry** (★★ XS–S) and **[Ops] drain the leaked
+> `health.gateway.*` keys** (★★ XS). A stale callout starves the lane — whoever ships the top pick
+> renames this to the next.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -185,6 +186,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-20 · `dcfe4af` · [gateway] heartbeat armed with the §5.6 interval-derived TTL — the last bare-`KVPut` emitter no longer leaks a `health.gateway.<instance>` key per restart; fixture bucket mirrors bootstrap
 - 2026-07-20 · `5b58f66` · [weaver] `__effect` window counts attempts, not dispatches — a collapse-only reclaim books no unanswerable episode, and a sweep-won close is credited; both LensEffectMismatch false-alarm biases
 - 2026-07-19 · `3a5cd35` · [health] classifyKey classifies component heartbeats structurally — gateway/bridge/objmgr/chronicler/vault/4 vertical apps no longer read "unknown" forever, and their error issues can reach red
 - 2026-07-19 · `7e5f1e6` · [processor] step 8 preserves the stored document across update/tombstone — creation triplet carries over (unforgeable), a tombstone keeps its whole body; sensitive aspects gain the soft-delete decrypt guard
