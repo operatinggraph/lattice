@@ -1,6 +1,6 @@
 # Facet entity browse — giving `dispatch.targetType` something to resolve against
 
-**Status:** ✅ Andrew-ratified 2026-07-19 (interactive) — v1 scope widened at ratification: clinic **providers included** alongside sessions (F2). The demand trigger F2 waited on arrived with the design itself — Andrew's live report of clinic "Open a Provider" degraded cards.
+**Status:** ✅ SHIPPED 2026-07-19 · `7341ad73` — built per §4 and live-verified end-to-end: the showcase tenant browsed the Nearby view, opened Vinyasa Flow, and the booking committed through the real Processor (booking vertex + forSession link + seat claim in Core KV). One naming deviation: the row's schedule instant is `startsAt`, not `when` — WHEN is a CASE keyword in the engine's lexer. (Ratified 2026-07-19, interactive; v1 scope widened at ratification: clinic **providers included** alongside sessions (F2) — the demand trigger F2 waited on arrived with the design itself.)
 **Board row:** [verticals.md](../planning-artifacts/backlog/verticals.md) — "Facet has no browse surface for bookable entities" (★★ / M)
 **Extends:** [edge-showcase-app-design.md](edge-showcase-app-design.md) §3.2, §3.3, §4.2 — and reconciles its §8 non-goal (below).
 
