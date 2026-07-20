@@ -95,6 +95,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/credentials", s.handleCredentials)
 	inner.HandleFunc("/api/credentials/link", s.handleCredentialsLink)
 	inner.HandleFunc("/api/credentials/unlink", s.handleCredentialsUnlink)
+	inner.HandleFunc("/api/staff/worklist", s.handleStaffWorklist)
 	inner.HandleFunc(loginPagePath, s.handleLoginPage)
 	inner.HandleFunc(loginOptionsPath, s.handleLoginOptions)
 	inner.HandleFunc(devLoginPath, s.handleDevLogin)

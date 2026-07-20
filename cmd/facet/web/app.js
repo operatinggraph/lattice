@@ -173,6 +173,11 @@ const state = {
   outboxHistory: [],
   view: "home",
   credentials: null, // null = not yet loaded; array once GET /api/credentials resolves
+  // worklist is the STAFF SERVER-PANE (facet-staff-worlds-design.md §3.4) —
+  // deliberately NOT in `rows`, because those mirror onto the device and this
+  // must not: it is cross-identity Protected data, session-scoped, and
+  // unavailable offline while the manifest half keeps working.
+  worklist: { status: "idle", applications: [], schedule: [], day: "" },
 };
 
 const maxOutboxHistory = 50;
@@ -424,6 +429,11 @@ function scheduleRender() {
 // ------------------------------------------------------------------- nav
 
 function setView(view) {
+  // Entering the Worklist is an explicit nav action, so it re-reads: the pane
+  // is live server data, and tapping the tab is how a staff actor both
+  // refreshes it and retries one that failed while offline. (Refreshing from
+  // renderView instead would re-fetch on every render.)
+  if (view === "worklist" && state.worklist.status !== "loading") loadWorklist();
   state.view = view;
   document.querySelectorAll("main.screen > section").forEach((el) => { el.hidden = el.dataset.view !== view; });
   document.querySelectorAll(".bottom-nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
@@ -436,6 +446,7 @@ function renderView(view) {
   else if (view === "services") renderServices();
   else if (view === "browse") renderBrowse();
   else if (view === "tasks") renderTasks();
+  else if (view === "worklist") renderWorklist();
   else if (view === "activity") renderActivity();
   else if (view === "me") renderMe();
 }
@@ -458,6 +469,14 @@ function updateBadges() {
   // §7.2's whoami-driven header).
   const nm = me();
   $("identity-name").textContent = nm ? identityLabel(nm) : shortIdentityLabel();
+
+  // The Work tab appears exactly when the manifest says this actor has a
+  // workplace — the same `worksAt` link staffReadGrants keys the Protected
+  // grant on. Unwire it and both the tab and the rows it fed go away together,
+  // which is the honesty invariant working, not two mechanisms agreeing.
+  const staff = isStaff();
+  $("worklist-nav").hidden = !staff;
+  if (staff && state.worklist.status === "idle") loadWorklist();
 }
 
 // whoami is fetched once at boot; the header reads it until (and unless) a
@@ -734,6 +753,120 @@ function openEntityDetail(key) {
 function renderTasks() {
   const tsks = tasks().sort((a, b) => new Date(a.data.expiresAt || 0) - new Date(b.data.expiresAt || 0));
   $("view-tasks").innerHTML = tsks.length ? tsks.map(taskRow).join("") : `<div class="empty">Nothing needs your attention.</div>`;
+}
+
+// --------------------------------------------------------- Worklist (staff)
+
+// The Worklist screen archetype (facet-staff-worlds-design.md §3.4). Two
+// distinctions this screen has to keep visible, because they are real:
+//
+//   1. It is SERVER-PANE, not mirror. Every other screen renders from the
+//      local manifest and works offline; this one is a live Protected read and
+//      says so when it can't reach the host, instead of rendering stale or
+//      empty rows that would read as "no work today."
+//   2. It exists only for an actor with a workplace. Visibility derives from
+//      the grant topology (a `worksAt` anchor in the manifest), never from
+//      curation — §3.3's honesty invariant. A resident never sees the tab.
+// isStaffMe is the tab-visibility rule as a pure function of the me-row, so it
+// states the derivation in one place and can be checked without a live state.
+function isStaffMe(m) {
+  return splitAnchors(m || {}).workplaces.length > 0;
+}
+
+function staffWorkplaces() {
+  return splitAnchors(me() || {}).workplaces;
+}
+
+function isStaff() {
+  return isStaffMe(me());
+}
+
+function loadWorklist() {
+  if (!isStaff()) return Promise.resolve();
+  state.worklist.status = "loading";
+  return fetch("/api/staff/worklist")
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((body) => {
+      state.worklist = {
+        status: "ready",
+        applications: body.applications || [],
+        schedule: body.schedule || [],
+        day: body.day || "",
+      };
+      scheduleRender();
+    })
+    .catch(() => {
+      // Offline, or the Protected model isn't reachable. Either way the pane
+      // is UNAVAILABLE, which is a different statement from "empty" — an empty
+      // worklist is a real answer about the workplace, and showing one here
+      // when we simply couldn't read would be a lie a front-desk actor acts on.
+      state.worklist = { ...state.worklist, status: "unavailable" };
+      scheduleRender();
+    });
+}
+
+function renderWorklist() {
+  const places = staffWorkplaces();
+  const where = places.length ? places.map((p) => anchorLabel(p)).join(", ") : "";
+  $("view-worklist").innerHTML = worklistHTML(state.worklist, where);
+}
+
+// worklistHTML is the pane's markup as a pure function of its loaded state.
+function worklistHTML(w, where) {
+  if (w.status === "unavailable") {
+    return `<div class="degraded-card">Worklist unavailable — it needs a live connection. Everything else keeps working offline.</div>`;
+  }
+  if (w.status === "idle" || w.status === "loading") {
+    return `<div class="empty">Loading…</div>`;
+  }
+  return `
+    ${where ? `<div class="section-title">${esc(where)}</div>` : ""}
+    <div class="category-heading">Applications to review${w.applications.length ? ` (${w.applications.length})` : ""}</div>
+    ${w.applications.length
+      ? w.applications.map(worklistApplicationRow).join("")
+      : `<div class="empty">No applications waiting.</div>`}
+    <div class="category-heading">Today's schedule${w.day ? ` · ${esc(w.day)}` : ""}</div>
+    ${w.schedule.length
+      ? w.schedule.map(worklistAppointmentRow).join("")
+      : `<div class="empty">Nothing scheduled today.</div>`}`;
+}
+
+// Both row renderers follow the display-label floor rule (display-names N2):
+// a nameless row gets a typed label, never a bare NanoID and never "Unnamed".
+function worklistApplicationRow(a) {
+  const place = [a.unitAddress, a.unitCity].filter(Boolean).join(", ");
+  const badge = a.qualified === true
+    ? `<span class="badge confirmed">qualified</span>`
+    : a.qualified === false ? `<span class="badge queued">incomplete</span>` : "";
+  return `
+    <div class="timeline-item">
+      <div class="row1">
+        <span class="title">${esc(a.applicantName || "Applicant")}</span>
+        ${badge}
+      </div>
+      <div class="meta">${esc(place || "Unit")}</div>
+      ${a.moveInDate ? `<div class="meta">Move-in ${esc(a.moveInDate)}</div>` : ""}
+    </div>`;
+}
+
+function worklistAppointmentRow(s) {
+  const who = [s.providerName, s.providerSpecialty].filter(Boolean).join(" · ");
+  return `
+    <div class="timeline-item">
+      <div class="row1">
+        <span class="title">${esc(timeOfDay(s.startsAt))}${esc(s.patientName || "Patient")}</span>
+        ${s.status ? `<span class="badge queued">${esc(s.status)}</span>` : ""}
+      </div>
+      <div class="meta">${esc(who || "Provider")}</div>
+    </div>`;
+}
+
+// timeOfDay renders an ISO instant as a "HH:MM — " prefix, or "" if the column
+// was null or unparseable (a null costs the prefix, never the row).
+function timeOfDay(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : d.toISOString().slice(11, 16) + " — ";
 }
 
 function openTaskDetail(key) {
