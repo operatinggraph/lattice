@@ -84,6 +84,33 @@ func TestGrantKeyFields(t *testing.T) {
 	}
 }
 
+// TestDiffRetractionAdapters_ImplementKeyLister pins the invariant the pipeline
+// depends on by type assertion, and which a wrapper silently breaks: every
+// adapter a DiffRetraction lens can be pointed at must be able to enumerate its
+// keys. pkgmgr's validateLensReadPath admits DiffRetraction on the postgres and
+// nats-kv targets, which is exactly this set.
+//
+// The failure this prevents is silent by construction — the lens activates,
+// upserts fine, and simply never retracts — so it surfaces as stale
+// authorization rather than as an error. ProtectedAdapter shipped in exactly
+// that state (found live 2026-07-19).
+func TestDiffRetractionAdapters_ImplementKeyLister(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    Adapter
+	}{
+		{"postgres", &PostgresAdapter{}},
+		{"protected (wraps postgres)", &ProtectedAdapter{}},
+		{"grant writer", &GrantWriterAdapter{}},
+		{"nats-kv", &NatsKVAdapter{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ok := tc.a.(KeyLister)
+			assert.True(t, ok, "%T must implement KeyLister or a DiffRetraction lens on it retracts nothing, silently", tc.a)
+		})
+	}
+}
+
 // ── ProtectedAdapter array-encoding unit (no database) ───────────────────────
 
 func TestNewProtectedAdapter_NilInner(t *testing.T) {
@@ -145,7 +172,10 @@ func TestReadPathSeam_Integration(t *testing.T) {
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	// Closed after the cleanup below, not before it (t.Cleanup is LIFO): a
+	// `defer` here would close the pool first and make the cleanup's deletes
+	// silent no-ops, leaving this test's grants in the shared table.
+	t.Cleanup(pool.Close)
 
 	const role = "rls_test_reader"
 	suffix := sanitize(t.Name())
@@ -162,7 +192,8 @@ func TestReadPathSeam_Integration(t *testing.T) {
 	clean := func() {
 		bg := context.Background()
 		_, _ = pool.Exec(bg, `DROP TABLE IF EXISTS "`+tbl+`"`)
-		_, _ = pool.Exec(bg, `DELETE FROM "actor_read_grants" WHERE actor_id = ANY($1)`, []string{actor, other})
+		_, err := pool.Exec(bg, `DELETE FROM "actor_read_grants" WHERE actor_id = ANY($1)`, []string{actor, other})
+		require.NoError(t, err)
 	}
 	clean()
 	t.Cleanup(clean)
@@ -248,7 +279,11 @@ func TestGrantWriterAdapter_ListKeys_ScopedToOwnSource_Integration(t *testing.T)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
-	defer pool.Close()
+	// Registered before the cleanup below so it runs AFTER it (t.Cleanup is
+	// LIFO). A `defer pool.Close()` would instead close the pool first and make
+	// the delete a silent no-op, leaving rows behind in a table shared with
+	// every other producer — and with whatever stack this DSN points at.
+	t.Cleanup(pool.Close)
 
 	suffix := sanitize(t.Name())
 	mine := "cap-read.mine." + suffix
@@ -257,8 +292,9 @@ func TestGrantWriterAdapter_ListKeys_ScopedToOwnSource_Integration(t *testing.T)
 	actorB := "actor_b_" + suffix
 
 	clean := func() {
-		_, _ = pool.Exec(context.Background(),
+		_, err := pool.Exec(context.Background(),
 			`DELETE FROM "actor_read_grants" WHERE grant_source = ANY($1)`, []string{mine, theirs})
+		require.NoError(t, err)
 	}
 
 	gw, err := NewPostgresGrantWriter(pool, 10*time.Second)

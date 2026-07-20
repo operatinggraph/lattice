@@ -161,6 +161,7 @@ type ProtectedAdapter struct {
 var (
 	_ Adapter   = (*ProtectedAdapter)(nil)
 	_ Truncater = (*ProtectedAdapter)(nil)
+	_ KeyLister = (*ProtectedAdapter)(nil)
 )
 
 // NewProtectedAdapter wraps a non-nil PostgresAdapter. arrayCols names the row
@@ -266,3 +267,20 @@ func (p *ProtectedAdapter) Guarded() bool { return p.inner.Guarded() }
 // Truncate delegates to the base adapter so a protected read model still
 // supports truncate-before-rebuild (FR29).
 func (p *ProtectedAdapter) Truncate(ctx context.Context) error { return p.inner.Truncate(ctx) }
+
+// ListKeys delegates to the base adapter, which already lists this table's own
+// key columns and excludes the guarded Delete's soft tombstones — a protected
+// table is always guarded, so its tombstoned rows are correctly absent from the
+// "currently live" set the diff compares against.
+//
+// Wrapping is why this has to be spelled out: the pipeline reaches DiffRetraction
+// through an adapter.KeyLister type assertion, and a wrapper only satisfies an
+// optional interface it re-declares. Without this method every protected lens
+// declaring DiffRetraction — the very shape the mechanism was built for, a
+// composite key with a column bound to a neighbor rather than the row's own
+// anchor — silently retracted nothing, so a row kept its authz_anchors after the
+// link that justified them was gone. Found live 2026-07-19 on
+// landlordUnitsRead and landlordLeaseApplicationsRead.
+func (p *ProtectedAdapter) ListKeys(ctx context.Context) ([]map[string]any, error) {
+	return p.inner.ListKeys(ctx)
+}
