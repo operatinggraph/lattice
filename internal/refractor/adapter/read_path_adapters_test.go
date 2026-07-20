@@ -189,6 +189,13 @@ func TestReadPathSeam_Integration(t *testing.T) {
 	END $$;`)
 	require.NoError(t, err)
 
+	// The grant table must exist before clean() can delete from it — on a fresh
+	// database (CI) it does not, and a strict cleanup would fail on the missing
+	// relation rather than on anything this test did.
+	gw, err := NewPostgresGrantWriter(pool, 10*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, gw.Provision(ctx))
+
 	clean := func() {
 		bg := context.Background()
 		_, _ = pool.Exec(bg, `DROP TABLE IF EXISTS "`+tbl+`"`)
@@ -198,10 +205,7 @@ func TestReadPathSeam_Integration(t *testing.T) {
 	clean()
 	t.Cleanup(clean)
 
-	// Provision the grant table + the protected business table from the spec.
-	gw, err := NewPostgresGrantWriter(pool, 10*time.Second)
-	require.NoError(t, err)
-	require.NoError(t, gw.Provision(ctx))
+	// Provision the protected business table from the spec.
 	require.NoError(t, ProvisionProtectedTable(ctx, pool, tbl,
 		[]string{"id"}, []ColumnDef{{Name: "status", Type: "text"}}, 10*time.Second))
 
