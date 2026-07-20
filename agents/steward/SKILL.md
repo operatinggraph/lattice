@@ -245,12 +245,15 @@ pinned `lattice-nats` container and wipes all Core KV (the 2026-07-13 data loss)
 guard + a PreToolUse session hook now refuse it. **Reuse the running stack from your worktree; if none is up,
 `cd` to the main repo root to bring it up** (`refresh-<vertical>` for a live package edit needs no teardown).
 
-**Shared core stack vs. your own app binary** (the rule that bit a prior fire): **"never `make down` a stack
-you didn't start" means the CORE STACK** — NATS + processor / refractor / weaver / loom / bridge / objmgr /
-Loupe — shared by every fire + Andrew; tearing it down kills their work. **But the single binary you just
-rebuilt — the per-vertical app (`bin/<vertical>-app` on :7788 / :7799), or `bin/loupe` for a Loupe FE change —
-is YOURS to cycle** against the still-running core stack; that is *not* `make down`, and you MUST cycle it to
-serve + verify your new assets. Unattended: reuse the running core stack → `pkill -f "bin/<that-binary>"` →
+**Shared core stack vs. the binary you changed** (the rule that bit a prior fire): **"never `make down` a stack
+you didn't start" means the CORE STACK as a whole** — NATS + processor / refractor / weaver / loom / bridge /
+objmgr / Loupe — shared by every fire + Andrew; tearing it down kills their work. **But ANY single binary whose
+code this fire changed is YOURS to cycle** against the still-running stack — a per-vertical app
+(`bin/<vertical>-app` on :7788 / :7799), `bin/loupe`, **or a core engine like `bin/weaver` / `bin/gateway` /
+`bin/processor`**. Cycling one binary is *not* `make down`, and you MUST cycle it — **not only to serve new FE
+assets, but for any behavior change at all**, backend included. (The old wording named only the FE binaries and
+talked about `go:embed`'d assets, which read as "this is an FE concern" and let backend engine fixes ship
+un-cycled — see the MERGED ≠ RUNNING gate in §4.) Unattended: reuse the running core stack → `pkill -f "bin/<that-binary>"` →
 rebuild (`go build -o bin/<x> ./cmd/<x>`) → **relaunch it in the BACKGROUND** (with `NATS_URL` /
 `BOOTSTRAP_JSON_PATH`; assets are `go:embed`'d, so the rebuilt binary serves the new ones — `make
 run-<vertical>-app` is *foreground / human-only*, don't use it unattended) → verify → **leave the new
@@ -295,6 +298,30 @@ running; the **browser tab** you do not.
   aspect**; a key-list/ref index aspect (`.bookings` / `.leaseApplications` style) is a Contract #1 violation
   *and* a paper-over (the clean form files the missing reverse-link primitive + blocks — §2 no-paper-over);
   readers filter `isDeleted`. A change that violates these is **not** L2-eligible until fixed — don't merge it.
+- **MERGED ≠ RUNNING — rebuild every affected binary from `main` before you call the fire done.** The stack
+  runs the `bin/*` binaries built from the **main checkout**; your worktree merge does not touch them, so the
+  fix is committed, CI-green, and **still not live**. This has now bitten repeatedly, and "verify the stack is
+  up" does **not** catch it — a stale binary is a perfectly healthy *running process*. Liveness is not
+  freshness. **Derive the affected binaries mechanically — never from memory**, because a change reaches
+  binaries you won't think of (an `internal/weaver` fix also ships in `bin/lattice`, the all-in-one):
+
+  ```sh
+  # for each internal/ package this fire touched:
+  for c in $(ls cmd); do go list -deps ./cmd/$c 2>/dev/null \
+    | grep -q "lattice/internal/<pkg>$" && echo "bin/$c"; done
+  ```
+
+  Then for each one: `go build -o bin/<x> ./cmd/<x>` → `pkill -f "bin/<x>"` → relaunch in the **BACKGROUND**
+  with its captured env (read it off the running process first: `ps eww -p $(pgrep -f "bin/<x>")`) → confirm it
+  re-reports healthy in Health KV. **Verify freshness, don't assume it** — the running binary's mtime must
+  postdate the merge commit (`stat -f %Sm bin/<x>` vs `git log -1 --format=%cd`).
+  **This applies to the CORE ENGINES too** (`weaver`, `processor`, `refractor`, `loom`, `gateway`, `bridge`,
+  `objmgr`) — not just FE binaries. Cycling ONE engine binary against the still-running stack is **not**
+  `make down` and is explicitly allowed; the "don't tear down a stack you didn't start" rule protects NATS +
+  the *set* of engines, not any individual binary you just rebuilt.
+  *A fix you cannot observe running is not shipped — and cycling the component is often what surfaces the
+  residual (pre-existing polluted state the fix stops adding to but does not drain). Look at what the
+  restarted component reports, and file the drain if it's still dirty.*
 - **Commit hygiene — the working tree is SHARED.** A scheduled fire shares `main`'s working tree with Andrew's
   interactive session and other fires. **Stage only the files your work changed — explicit `git add <paths>`;
   NEVER `git add -A` / `git add .` / `git commit -a`.** A broad add sweeps in unrelated, possibly *not-ready*

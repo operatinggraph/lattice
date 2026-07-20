@@ -56,7 +56,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Bootstrap] Stale `lattice.bootstrap.json` vs. recreated Core KV — no freshness probe** | `LoadOrGenerate` skips `SeedPrimordial` whenever the local JSON says `status="committed"` — it never probes Core KV for the bootstrap op tracker, so a recreated/empty Core KV behind a surviving file comes up "ready" with silently-empty reads; recurred 3× (`docs/components/bootstrap.md` §Known gap). | ★★ | S–M | 📋 ready · `cmd/bootstrap/main.go:68-126`, `internal/bootstrap/nanoid.go:331` |
 | **[CI] `edge-browser-store` reds the gate on a slow headless-Chrome cold start** | `wasmbrowsertest` waits a chromedp-hardcoded 20s for Chrome's DevTools banner and exposes no knob for it (`test-edge-idb-conformance`). `-p 1` already removed self-contention, yet one cold start still overran on a loaded runner — observed on main, green on re-run, whole gate red meanwhile. Nothing retries the suite. Retry once on the `websocket url timeout reached` signature alone, so real failures stay unmasked. | ★★ | XS–S | 📋 ready |
-| **[Ops] Drain the already-leaked `health.gateway.*` keys** | The TTL fix stops the leak but cannot drain it: keys written untimed carry no TTL, and only the live instance rewrites its own, so the ~10 already-orphaned dead-instance keys persist and keep the rollup from reading green. Needs a one-off operator sweep (delete `health.gateway.<instance>` for every instance not currently heartbeating), and the same question for any other emitter that predates its TTL. | ★★ | XS | 📋 ready |
+| **[Weaver] Drain the `__effect` windows polluted before the attempt-booking fix** | Gating collapse-only reclaims stops new unanswerable episodes but cannot drain windows already filled. The live stack raises standing `LensEffectMismatch` on `leaseApplicationComplete` for `missing_onboarding`/`triggerLoom` and `missing_signature`/`assignTask`, each 20 pending slots deep, and they cannot self-clear (one close flips one slot). Needs a reset of the affected `__effect` keys, or a window-age bound so a stale window ages out. | ★★ | XS–S | 📋 ready |
 
 ### Survey log (round-robin rotation)
 
@@ -119,8 +119,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > 🎯 **Build-ready now.** Every ✅ ratified row in the feature tables below is Andrew-gated or
 > driver-blocked, so the live picks are the **📋 ready rows in Component maintenance** above. Top of that
 > stack now: **[Bootstrap] stale `lattice.bootstrap.json` freshness probe** (★★, the documented Known gap,
-> recurred 3×), then **[CI] `edge-browser-store` retry** (★★ XS–S) and **[Ops] drain the leaked
-> `health.gateway.*` keys** (★★ XS). A stale callout starves the lane — whoever ships the top pick
+> recurred 3×), then **[CI] `edge-browser-store` retry** (★★ XS–S) and **[Weaver] drain the polluted
+> `__effect` windows** (★★ XS–S). A stale callout starves the lane — whoever ships the top pick
 > renames this to the next.
 
 ### Security & trust boundary
