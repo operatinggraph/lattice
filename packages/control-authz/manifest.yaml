@@ -1,5 +1,5 @@
 name: control-authz
-version: 0.1.0
+version: 0.2.0
 description: |
   Grants ctrl.<component>.<verb> control-plane permissions (Weaver/Loom/Refractor)
   to a new control-operator role, declared in the package definition and created
