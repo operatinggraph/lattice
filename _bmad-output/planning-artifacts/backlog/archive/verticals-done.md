@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-18 · `—` · Facet Fire 5 residual (2) closed — café resident self-service (OpenTab/Settle asSelf) proven live end-to-end via Core KV, not just the FE toast — [design §7.9](../../implementation-artifacts/edge-showcase-app-design.md)
+- 2026-07-18 · `934c487` · `make seed-classic-demo` — one leaseapp/listing/appointment/tab, live-verified via loftspace-app/clinic-app/cafe-app read APIs
+- 2026-07-17 · `c8962ff` · Facet Fire 5 Inc 5 — café-app real per-resident self-service auth (Me bar), exercises OpenTab/Settle scope=self in-browser — [design §7.8](../../implementation-artifacts/edge-showcase-app-design.md)
 - 2026-07-17 · `8ec52ff` · Facet Fire 5 Inc 4 — café descriptor metadata + catalog-path wiring: `cafe-domain.OpMetas()` + `service-domain` `cafe` family + "Riverside Café" showcase template, live-verified on the SSE manifest feed
 - 2026-07-17 · `a5828c5` · Facet Fire 5 — café self-scope adoption Inc 1: `OpenTab`/`Settle` consumer scope=self grant via the lease's applicationFor link; package layer only, FE checkpointed
 - 2026-07-17 · `97db230` · Facet Fire 5 — wellness catalog-path wiring: `wellness` family + Riverside Wellness Studio template availableAt/permitsOperation-wired to CreateBooking/CancelBooking, live-verified on the SYNC manifest feed
