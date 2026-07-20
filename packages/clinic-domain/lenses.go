@@ -489,6 +489,19 @@ RETURN
 // withProvider stays OPTIONAL: it is a display-only neighbour, not the anchor.
 // Same column surface as clinicAppointmentsSpec (the unprotected lens) so the
 // migrated "My Appointments" view keeps full display parity.
+//
+// authz_anchors carries the patient's own NanoID plus the WORKPLACE token — the
+// building the appointment's provider practises at — so front-desk staff working
+// that building read the row through service-location's staffReadGrants
+// (facet-staff-worlds-design.md §3.5). Declaring a building token IS the
+// declaration that these rows are workplace-readable.
+//
+// The workplace half is a pattern COMPREHENSION, not a second array element, and
+// the difference is load-bearing: a walk that finds no building yields a NULL
+// element, which ProtectedAdapter.toStringSlice rejects — failing the whole row's
+// upsert, so an appointment whose provider practises nowhere would vanish for its
+// own patient too. The comprehension yields [] instead. A missing building must
+// cost a row its staff visibility, never its existence.
 const clinicAppointmentsReadSpec = `MATCH (a:appointment)
 MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
@@ -510,7 +523,9 @@ RETURN
   a.encounter.data.documentedAt      AS documented_at,
   a.encounter.data.followUpRequested AS follow_up_requested,
   a.encounter.data.followUpDate      AS follow_up_date,
-  [nanoIdFromKey(p.key)]             AS authz_anchors
+  [nanoIdFromKey(p.key)] +
+    [(a)-[:withProvider]->(pr2:provider)-[:practicesAt]->(b:building) | nanoIdFromKey(b.key)]
+                                     AS authz_anchors
 `
 
 // providerAppointmentsReadSpec is the PROVIDER-anchored protected Postgres read

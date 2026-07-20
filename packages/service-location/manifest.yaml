@@ -1,5 +1,5 @@
 name: service-location
-version: 0.4.0
+version: 0.5.0
 description: |
   Residence-based service-access scheme — the cap.svc grant source. Composes
   location-domain (the place graph) and service-domain (the service catalog).
@@ -9,7 +9,11 @@ description: |
   validation at the op) plus the capabilityServiceAccess actorAggregate lens
   projecting cap.svc.<actor> into the shared capability-kv bucket. The core
   service auth path reads cap.svc.<actor> via the re-pointed serviceKeyFromActor
-  derivation. Depends on location-domain and service-domain.
+  derivation. Also ships staffReadGrants, the cap-read.staff GrantTable producer
+  granting a front-desk actor the NanoID of each building they worksAt — the
+  workplace read token behind RLS on the Protected worklist tables, retracted by
+  target-diff when either the role or the worksAt link goes away.
+  Depends on location-domain and service-domain.
 depends:
   - location-domain
   - service-domain
@@ -21,6 +25,9 @@ declares:
     - canonicalName: capabilityServiceAccess
       adapter: nats-kv
       bucket: capability-kv
+      engine: full
+    - canonicalName: staffReadGrants
+      adapter: postgres
       engine: full
   permissions:
     - operationType: WireResidesIn

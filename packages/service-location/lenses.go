@@ -19,6 +19,13 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 //     space (Contract #6 §6.1) keeps the location grant off the core
 //     cap.<actor> / cap.roles.<actor> keys; the service path reads it via the
 //     re-pointed serviceKeyFromActor derivation (one key per path).
+//
+//   - staffReadGrants (GrantTable, Path A): for every front-desk staff actor,
+//     one actor_read_grants row per building they work at — the workplace READ
+//     grant behind RLS on the Protected worklist tables. The location spine's
+//     read-path sibling to capabilityServiceAccess's write-path grant, and it
+//     lives here because it derives from worksAt, the link this package owns and
+//     whose removal must revoke it.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -36,6 +43,35 @@ func Lenses() []pkgmgr.LensSpec {
 				EmptyBehavior:    "delete",
 				Freshness:        "auto",
 			},
+		},
+		{
+			// staffReadGrants — the cap-read.staff Path A producer
+			// (facet-staff-worlds-design.md §3.5), mirroring the
+			// clinicPatientReadGrants package-producer shape but anchoring on the
+			// WORKPLACE rather than on the actor itself.
+			//
+			// The anchor is the BUILDING's NanoID, and that is the whole security
+			// argument: anchors are global tokens, so granting a front-desk actor
+			// each resident's NanoID would open those residents' rows in every
+			// Protected table, credentials included. A building token instead
+			// opens exactly the rows a lens chose to declare workplace-readable.
+			//
+			// The grant exists only while BOTH links do — holdsRole frontOfHouse
+			// and worksAt. Retraction therefore cannot ride an anchor tombstone
+			// the way the clinic producers' does: an unwire tombstones the LINK,
+			// not the staff identity or the building, so no vertex tombstone ever
+			// names this row. The row-set simply shrinks, which is exactly the
+			// shape DiffRetraction exists for — here the diff IS the revocation
+			// transport, scoped to this lens's own grant_source (GrantSource,
+			// below) so it cannot touch another producer's grants.
+			CanonicalName:  "staffReadGrants",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			GrantTable:     true,
+			GrantSource:    "cap-read.staff",
+			DiffRetraction: true,
+			Engine:         "full",
+			Spec:           staffReadGrantsSpec,
 		},
 	}
 }
@@ -106,4 +142,31 @@ RETURN
     resolvedVia: [loc.key],
     allowedOperations: [(svc)-[:permitsOperation]->(op) WHERE op.data.operationType <> null | {operationType: op.data.operationType}]
   }) AS serviceAccess
+`
+
+// staffReadGrantsSpec projects one grant row per (front-desk staff, workplace
+// building) pair. Both MATCHes are REQUIRED, so the row exists only while the
+// actor both holds frontOfHouse and works somewhere: drop either link and the
+// pair stops being derived, and the target-diff revokes the grant.
+//
+// Deliberately UNANCHORED — no {key: $actorKey} anywhere, unlike this package's
+// capabilityServiceAccess above. DiffRetraction compares the target's full live
+// key set against this query's full result set, which is exact only when the
+// result set is already the complete current truth; an $actorKey-scoped variant
+// would retract every OTHER staff actor's grants on its first event. Refractor
+// enforces this at activation (ValidateUnanchoredForDiffRetraction), so the
+// property cannot be lost by a later edit.
+//
+// The `building` label matches the vtx.building.* KEY TYPE, not the class (every
+// location vertex is class=location — location-domain/ddls.go): a worksAt wired
+// to a unit or a property therefore grants nothing, which is the intended
+// granularity. The role is matched by canonicalName, the same way
+// rbac-domain's capabilityRoleIndex reads a role's name.
+const staffReadGrantsSpec = `MATCH (staff:identity)-[:holdsRole]->(r:role)
+MATCH (staff)-[:worksAt]->(b:building)
+WHERE r.canonicalName.data.value = 'frontOfHouse'
+RETURN
+  nanoIdFromKey(staff.key)    AS actor_id,
+  nanoIdFromKey(b.key)        AS anchor_id,
+  'cap-read.staff'            AS grant_source
 `

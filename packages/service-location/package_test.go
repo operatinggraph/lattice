@@ -124,8 +124,8 @@ func TestPackage_DDLAndOps(t *testing.T) {
 // into the shared capability-kv bucket, keyed cap.svc.{actorSuffix}, body
 // column serviceAccess, emptyBehavior delete (absence = denial).
 func TestPackage_Lens(t *testing.T) {
-	if got := len(Package.Lenses); got != 1 {
-		t.Fatalf("expected 1 lens, got %d", got)
+	if got := len(Package.Lenses); got != 2 {
+		t.Fatalf("expected 2 lenses, got %d", got)
 	}
 	l := Package.Lenses[0]
 	if l.CanonicalName != "capabilityServiceAccess" {
@@ -154,6 +154,51 @@ func TestPackage_Lens(t *testing.T) {
 	}
 	if len(l.Output.BodyColumns) != 1 || l.Output.BodyColumns[0] != "serviceAccess" {
 		t.Fatalf("Output.BodyColumns = %v, want [serviceAccess]", l.Output.BodyColumns)
+	}
+}
+
+// TestPackage_StaffReadGrantsLens pins the cap-read.staff producer's posture.
+// Every assertion here is load-bearing for the grant's confinement, so a silent
+// edit to any of them is a security regression, not a refactor.
+func TestPackage_StaffReadGrantsLens(t *testing.T) {
+	var l pkgmgr.LensSpec
+	for _, cand := range Package.Lenses {
+		if cand.CanonicalName == "staffReadGrants" {
+			l = cand
+		}
+	}
+	if l.CanonicalName == "" {
+		t.Fatal("staffReadGrants lens not declared")
+	}
+	if l.Adapter != "postgres" || !l.GrantTable {
+		t.Fatalf("staffReadGrants must be a postgres GrantTable lens, got adapter=%q grantTable=%v", l.Adapter, l.GrantTable)
+	}
+	// The grant is derived from links, not from a vertex whose tombstone could
+	// carry the retraction — the target-diff IS the revocation transport, and it
+	// only confines to this producer's rows via the declared source.
+	if !l.DiffRetraction {
+		t.Error("staffReadGrants must declare DiffRetraction: an unwire tombstones the LINK, so no anchor tombstone ever retracts the grant")
+	}
+	if l.GrantSource != "cap-read.staff" {
+		t.Errorf("GrantSource = %q, want cap-read.staff — it scopes retraction to this producer's own rows in the shared actor_read_grants", l.GrantSource)
+	}
+	if !strings.Contains(l.Spec, "'cap-read.staff'") {
+		t.Error("the cypher's projected grant_source must match the declared GrantSource, or the adapter rejects every row")
+	}
+	// DiffRetraction compares the target's FULL live key set against this query's
+	// FULL result set; an $actorKey seed would make the result set a per-actor
+	// slice and retract every other staff actor's grants on the first event.
+	if strings.Contains(l.Spec, "$actorKey") {
+		t.Error("staffReadGrants must be unanchored — a $actorKey seed makes the target-diff retract other actors' grants")
+	}
+	// Both links required: the grant must not outlive either half.
+	for _, want := range []string{"holdsRole", "worksAt", "frontOfHouse", "(b:building)"} {
+		if !strings.Contains(l.Spec, want) {
+			t.Errorf("staffReadGrants cypher missing %q", want)
+		}
+	}
+	if strings.Contains(l.Spec, "OPTIONAL MATCH") {
+		t.Error("neither the role nor the worksAt walk may be OPTIONAL — an optional half would grant on one link alone")
 	}
 }
 
