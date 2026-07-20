@@ -276,6 +276,96 @@ func TestHealthSummary_Rollup_WeaverLoom(t *testing.T) {
 }
 
 // rollupOf computes the overall rollup level for a doc set (test helper).
+// sharedReporterComponents are components that emit through the shared healthkv
+// reporter and carry no bespoke case in classifyKey — the set the structural
+// default has to cover.
+var sharedReporterComponents = []string{
+	"gateway", "bridge", "object-store-manager", "chronicler", "vault",
+	"cafe-app", "clinic-app", "loftspace-app", "wellness-app",
+}
+
+// TestClassifyKey_UnenumeratedComponent pins the structural classification: a
+// component with no bespoke case is still read as a heartbeat, and its deeper
+// keys as its event stream. Without this a heartbeat lands in the "lens" bucket,
+// whose status vocabulary ({active,paused,rebuilding} + lastUpdated) shares no
+// field with a real heartbeat doc — so it reads "unknown" forever, healthy or
+// dead, and a frozen instance is indistinguishable from a live one.
+func TestClassifyKey_UnenumeratedComponent(t *testing.T) {
+	for _, c := range sharedReporterComponents {
+		key := "health." + c + ".inst-abc"
+		if got := classifyKey(key); got != "component-heartbeat" {
+			t.Errorf("classifyKey(%q) = %q, want %q", key, got, "component-heartbeat")
+		}
+		evt := key + ".detail"
+		if got := classifyKey(evt); got != "component-event" {
+			t.Errorf("classifyKey(%q) = %q, want %q", evt, got, "component-event")
+		}
+	}
+}
+
+// TestClassifyKey_StructuralBoundaries pins what the structural default rests
+// on: a bare NanoID (no health. prefix) is a per-lens reporter entry, and the
+// key families with bespoke handling still win over the generic rule — each of
+// these would otherwise be swept up as a component heartbeat or event.
+func TestClassifyKey_StructuralBoundaries(t *testing.T) {
+	cases := []struct{ key, want string }{
+		{"someBareLensNanoID", "lens"},
+		{"health.bootstrap.complete", "bootstrap"},
+		{"health.gates.phase1.gate2", "gate"},
+		{"health.alerts.refractor-lag", "alert"},
+		{"health.weaver.wvr-01", "weaver-heartbeat"},
+	}
+	for _, c := range cases {
+		if got := classifyKey(c.key); got != c.want {
+			t.Errorf("classifyKey(%q) = %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+
+// TestHealthSummary_Rollup_UnenumeratedComponent verifies the structural
+// classification reaches the rollup: an unenumerated component's heartbeat is
+// staleness-checked and issue-checked exactly like Weaver's, rather than
+// contributing a permanent "unknown". The stale case is the one that matters
+// operationally — it is the difference between seeing a dead gateway and not.
+func TestHealthSummary_Rollup_UnenumeratedComponent(t *testing.T) {
+	now := time.Now().UTC()
+	fresh := now.Add(-5 * time.Second).Format(time.RFC3339)
+	stale := now.Add(-120 * time.Second).Format(time.RFC3339)
+
+	t.Run("FreshIsGreen", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.gateway.gw-01":      {"heartbeatAt": fresh, "status": "healthy", "issues": []any{}},
+			"health.vault.vlt-01":       {"heartbeatAt": fresh, "status": "healthy", "issues": []any{}},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupGreen {
+			t.Errorf("overall = %v, want GREEN (fresh unenumerated heartbeats)", level)
+		}
+	})
+
+	t.Run("StaleIsYellow", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.gateway.gw-02":      {"heartbeatAt": stale, "status": "healthy"},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupYellow {
+			t.Errorf("overall = %v, want YELLOW (stale gateway heartbeat)", level)
+		}
+	})
+
+	t.Run("ErrorIssueIsRed", func(t *testing.T) {
+		level := rollupOf(t, map[string]map[string]any{
+			"health.bridge.br-01": {"heartbeatAt": fresh, "status": "healthy", "issues": []any{
+				map[string]any{"severity": "error", "code": "X", "message": "boom"},
+			}},
+			"health.bootstrap.complete": {"status": "complete"},
+		})
+		if level != rollupRed {
+			t.Errorf("overall = %v, want RED (bridge error issue)", level)
+		}
+	})
+}
+
 func rollupOf(t *testing.T, docs map[string]map[string]any) rollupLevel {
 	t.Helper()
 	allKeys := make([]string, 0, len(docs))

@@ -111,7 +111,25 @@ func classifyKey(key string) string {
 	case strings.HasPrefix(key, "health.alerts."):
 		return "alert"
 	default:
-		return "lens"
+		// Components that need bespoke rollup handling are named above; every
+		// other one reports through the shared healthkv reporter, which writes
+		// health.<component>.<instance> with a uniform {status, heartbeatAt,
+		// issues[]} body. Those are classified STRUCTURALLY rather than by
+		// name: an enumeration silently mis-buckets each newly-added component
+		// until someone remembers to extend it, and a mis-bucketed heartbeat
+		// reads "unknown" whether the component is healthy or dead. Contract #5
+		// forces an instance to a single dot-free token, so "exactly one dot
+		// after the health. prefix" is an exact heartbeat test; anything deeper
+		// is that component's event stream. A key with no health. prefix at all
+		// is a per-lens reporter entry (bare NanoID).
+		rest, ok := strings.CutPrefix(key, "health.")
+		if !ok {
+			return "lens"
+		}
+		if strings.Count(rest, ".") == 1 {
+			return "component-heartbeat"
+		}
+		return "component-event"
 	}
 }
 
@@ -251,7 +269,7 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 			overall = worstOf(overall, row.level)
 			rows = append(rows, row)
 
-		case "weaver-heartbeat", "loom-heartbeat":
+		case "weaver-heartbeat", "loom-heartbeat", "component-heartbeat":
 			row := componentRow{Component: k}
 			if ts, ok := parseTimestamp(doc, "heartbeatAt"); ok {
 				age := time.Since(ts).Round(time.Second)
@@ -269,8 +287,9 @@ func computeSummaryRollup(allKeys []string, readEntry func(string) (map[string]a
 				row.level = rollupYellow
 			}
 			// Inline issues[] (Contract #5 §5.2): error → red, warning → yellow.
-			// Weaver/Loom embed issues in the heartbeat doc rather than as
-			// separate health.alerts.* keys, so they are evaluated here.
+			// Shared-reporter components embed issues in the heartbeat doc
+			// rather than as separate health.alerts.* keys, so they are
+			// evaluated here.
 			for _, it := range issueSeverities(doc) {
 				switch it {
 				case "error":
