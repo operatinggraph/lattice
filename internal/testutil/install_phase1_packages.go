@@ -49,6 +49,26 @@ import (
 //
 // Each install is idempotent; calling this helper twice with the same
 // connection is safe.
+// StandardRoleIDs is the role-name → NanoID map a test installer needs to
+// resolve `GrantsTo` entries, matching what cmd/lattice-pkg builds in
+// production (roleIDsFromBootstrap): the primordial `operator` plus every role
+// identity-domain declares.
+//
+// Use this instead of a hand-written `{"operator": ...}` literal in any fixture
+// that installs a package granting a package-declared role. The installer hard
+// -fails an unresolvable canonical name ("GrantsTo entry X is not a valid
+// NanoID"), so a fixture missing a role does not degrade — it fails the whole
+// install, and every test in that package with it. That failure mode is why
+// this is centralized: adding one role to one package's GrantsTo otherwise
+// breaks every downstream fixture that never mentioned the role at all.
+func StandardRoleIDs() map[string]string {
+	ids := map[string]string{"operator": bootstrap.RoleOperatorID}
+	for _, r := range identitydomain.Package.Roles {
+		ids[r.CanonicalName] = pkgmgr.RoleID(identitydomain.Package.Name, r.CanonicalName)
+	}
+	return ids
+}
+
 func InstallPhase1Packages(t *testing.T, ctx context.Context, conn *substrate.Conn) {
 	t.Helper()
 
@@ -56,9 +76,7 @@ func InstallPhase1Packages(t *testing.T, ctx context.Context, conn *substrate.Co
 	defer stop()
 
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{
-		"operator": bootstrap.RoleOperatorID,
-	}
+	inst.RoleIDs = StandardRoleIDs()
 
 	for _, def := range []pkgmgr.Definition{
 		rbacdomain.Package,

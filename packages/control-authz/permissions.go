@@ -40,19 +40,27 @@ func componentPermissions(component string, verbs []string) []pkgmgr.PermissionS
 	return perms
 }
 
-// personalLensPermissions grants the given refractor verbs to both
-// control-operator and consumer — the identity-bound Personal Lens ops
-// (§3.4 confines each to the caller's own identity server-side, so a broad
-// scope=any grant to consumer never lets one identity act on another's
-// interest set).
+// personalLensPermissions grants the given refractor verbs to control-operator
+// and to every role whose holders run a syncing client — the identity-bound
+// Personal Lens ops (§3.4 confines each to the caller's own identity
+// server-side, so a broad scope=any grant never lets one identity act on
+// another's interest set).
+//
+// `frontOfHouse` is here for the same reason `consumer` is, and it is not
+// optional: registering Personal Lens interest is the FIRST thing a client
+// does, so without this grant a staff device cannot sync at all — the sync
+// manager fails "personal.register: actor lacks the control grant" and retries
+// forever, leaving the whole staff world empty rather than partially degraded.
+// Any future role whose holders sign into a mirroring client needs adding here
+// too.
 func personalLensPermissions(verbs ...string) []pkgmgr.PermissionSpec {
 	perms := make([]pkgmgr.PermissionSpec, 0, len(verbs))
 	for _, verb := range verbs {
 		perms = append(perms, pkgmgr.PermissionSpec{
 			OperationType: "ctrl.refractor." + verb,
 			Scope:         "any",
-			Note:          "Authorizes control-operator, or any consumer identity acting on its own Personal Lens interest set (bound server-side, §3.4), to invoke the refractor control plane's " + verb + " op.",
-			GrantsTo:      []string{"control-operator", "consumer"},
+			Note:          "Authorizes control-operator, or any consumer / frontOfHouse identity acting on its own Personal Lens interest set (bound server-side, §3.4), to invoke the refractor control plane's " + verb + " op.",
+			GrantsTo:      []string{"control-operator", "consumer", "frontOfHouse"},
 		})
 	}
 	return perms

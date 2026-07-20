@@ -77,7 +77,28 @@ function anchorLabel(a) {
   return prettify(a.key);
 }
 
-// scopedLabel names a task's scoped target (class-4 relational label,
+// splitAnchors separates the two identity spines edgeIdentity projects. Both
+// arrive in one `anchors` array carrying a `relation` stamp ("residesIn" /
+// "worksAt") because the cypher engine has no UNION to give them separate
+// columns. They mean different things to a person — where you live vs. where
+// you work — so the UI never merges them into one undifferentiated "Places".
+//
+// An anchor with no relation is treated as a residence: rows projected before
+// the stamp existed carry none, and residence is what they were.
+function splitAnchors(m) {
+  const all = ((m && m.anchors) || []).filter((a) => a && a.key);
+  return {
+    homes: all.filter((a) => a.relation !== "worksAt"),
+    workplaces: all.filter((a) => a.relation === "worksAt"),
+  };
+}
+
+// chipRow renders a list of anchors as chips, or a caller-supplied empty note.
+function chipRow(anchors, emptyHTML) {
+  if (!anchors.length) return emptyHTML;
+  return `<div class="chip-row">${anchors.map((a) => `<span class="chip">${esc(anchorLabel(a))}</span>`).join("")}</div>`;
+}
+
 // design §2). The lens projects the target's subject name (scopedName) — a
 // SignLease task scopedTo a leaseapp carries its applied-for unit's name — so
 // compose "Unit 1 lease" from the subject + the target's type. Absent subject
@@ -460,14 +481,18 @@ function loadWhoami() {
 
 function renderHome() {
   const m = me() || {};
-  const anchors = (m.anchors || []).filter((a) => a.key);
+  const { homes, workplaces } = splitAnchors(m);
   const svcs = services();
   const tsks = tasks();
   $("view-home").innerHTML = `
-    <section>
+    ${homes.length || !workplaces.length ? `<section>
       <h2 class="section-title">My places</h2>
-      ${anchors.length ? `<div class="chip-row">${anchors.map((a) => `<span class="chip">${esc(anchorLabel(a))}</span>`).join("")}</div>` : `<div class="empty">No residence linked yet.</div>`}
-    </section>
+      ${chipRow(homes, `<div class="empty">No residence linked yet.</div>`)}
+    </section>` : ""}
+    ${workplaces.length ? `<section>
+      <h2 class="section-title">Where I work</h2>
+      ${chipRow(workplaces, "")}
+    </section>` : ""}
     <section>
       <h2 class="section-title">Services ${svcs.length > 4 ? `<a class="see-all" data-goto="services">See all &rarr;</a>` : ""}</h2>
       ${svcs.length ? `<div class="strip">${svcs.slice(0, 4).map(serviceCard).join("")}</div>` : `<div class="empty">No services available yet.</div>`}
@@ -492,14 +517,70 @@ function taskRow(t) {
   const d = t.data;
   const opRow = opByFullKey(d.forOperationKey);
   const title = (opRow && opRow.data.title) || prettifyOpType(d.operationType);
+  const due = d.expiresAt ? " &middot; due " + esc(relativeTime(d.expiresAt)) : "";
+
+  // A queued row (edgeTasksQueued) is work offered to a ROLE the signed-in
+  // person holds — nobody owns it yet, so opening its detail view to act on it
+  // would be wrong. It gets a claim affordance instead; claiming swaps
+  // queuedFor→assignedTo at the Processor, after which the row re-projects
+  // through edgeTasks and renders as ordinary owned work below.
+  if (d.queuedRole) {
+    const role = d.queuedRoleName || prettify(d.queuedRole);
+    return `<div class="card" style="flex-direction:row;align-items:center;gap:12px;cursor:default">
+      ${t.pending ? `<span class="pending-chip">Pending</span>` : ""}
+      <div style="flex:1">
+        <div class="title">${esc(title)}</div>
+        <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedName))}${due}</div>
+        <div class="subtitle">Queued to ${esc(role)}</div>
+      </div>
+      <button class="btn" data-claim-task data-key="${esc(t.key)}">Claim</button>
+    </div>`;
+  }
+
   return `<div class="card" data-goto="task" data-key="${esc(t.key)}" style="flex-direction:row;align-items:center;gap:12px">
     ${t.pending ? `<span class="pending-chip">Pending</span>` : ""}
     <div style="flex:1">
       <div class="title">${esc(title)}</div>
-      <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedName))} &middot; due ${esc(relativeTime(d.expiresAt))}</div>
+      <div class="subtitle">${esc(scopedLabel(d.scopedTo, d.scopedName))}${due}</div>
     </div>
   </div>`;
 }
+
+// claimTask submits the shipped ClaimTask op for a role-queued task.
+//
+// This is ClaimTask's FIRST production dispatcher (the DDL script's own
+// read-posture notes say so), which means it owes the read declarations the
+// script relies on: the task itself is a required read, and the claimant's own
+// assignedTo link is an OPTIONAL read — the script probes it to tell an
+// idempotent re-claim by the same actor from a TaskAlreadyClaimed race, and on
+// a first claim it is legitimately absent.
+//
+// No authContext: authority here is the standing role grant, and the script
+// takes the claimant from the trusted envelope actor rather than any payload
+// field, so there is nothing for the client to assert.
+function claimTask(taskKey) {
+  const m = me() || {};
+  const actorId = bareKeyId(m.identityKey);
+  const taskId = bareKeyId(taskKey);
+  if (!actorId || !taskId) { toast("Cannot claim: unresolved identity", false); return; }
+
+  activeSource.enqueue({
+    operationType: "ClaimTask",
+    class: "task",
+    payload: { taskKey },
+    reads: [taskKey],
+    optionalReads: ["lnk.task." + taskId + ".assignedTo.identity." + actorId],
+    authContext: undefined,
+    touchedKey: taskKey,
+  })
+    .then((body) => {
+      if (body && body.error) { toast(body.error, false); return; }
+      toast("Claimed", true);
+    })
+    .catch((err) => toast(String(err), false));
+}
+
+// scopedLabel names a task's scoped target (class-4 relational label,
 
 // ------------------------------------------------------------- Services
 
@@ -734,7 +815,7 @@ function renderMe() {
     return;
   }
   const roles = (m.roles || []).filter((r) => r.key);
-  const anchors = (m.anchors || []).filter((a) => a.key);
+  const { homes, workplaces } = splitAnchors(m);
   $("view-me").innerHTML = `
     <div class="card" style="cursor:default">
       ${row.pending ? `<span class="pending-chip">Pending</span>` : ""}
@@ -744,7 +825,8 @@ function renderMe() {
     <h3 class="category-heading">Roles</h3>
     <div class="chip-row">${roles.length ? roles.map((r) => `<span class="chip">${esc(r.name || prettify(r.key))}</span>`).join("") : '<span class="subtitle">None</span>'}</div>
     <h3 class="category-heading">Places</h3>
-    <div class="chip-row">${anchors.length ? anchors.map((a) => `<span class="chip">${esc(anchorLabel(a))}</span>`).join("") : '<span class="subtitle">None</span>'}</div>
+    ${chipRow(homes, '<div class="chip-row"><span class="subtitle">None</span></div>')}
+    ${workplaces.length ? `<h3 class="category-heading">Workplaces</h3>${chipRow(workplaces, "")}` : ""}
     ${m.claimed ? renderCredentialsSection() : renderClaimCard()}
   `;
   if (m.claimed && state.credentials === null && !credentialsLoading && !credentialsError) loadCredentials();
@@ -1088,6 +1170,11 @@ function buildAuthContext(kind, ctx) {
   if (kind === "self") return { target: m && m.identityKey };
   if (kind === "service") return { service: ctx.serviceKey };
   if (kind === "task") return { task: ctx.taskKey, target: ctx.scopedTo };
+  // "standing": authority is a standing role grant (cap.roles), so the envelope
+  // carries no authContext at all. Spelled out rather than left to the
+  // undefined fallthrough, because for a staff op sending nothing is the
+  // CORRECT submission — not an unrecognized descriptor value being degraded.
+  if (kind === "standing") return undefined;
   return undefined;
 }
 
@@ -1253,6 +1340,9 @@ function onGlobalClick(e) {
 
   const claimSubmit = e.target.closest("[data-claim-submit]");
   if (claimSubmit) { submitSelfClaim(); return; }
+
+  const claimTaskBtn = e.target.closest("[data-claim-task]");
+  if (claimTaskBtn) { claimTask(claimTaskBtn.dataset.key); return; }
 
   const linkCred = e.target.closest("[data-link-credential]");
   if (linkCred) { linkCredential(); return; }

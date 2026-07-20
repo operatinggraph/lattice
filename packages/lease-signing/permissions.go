@@ -150,6 +150,62 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     needs no op-meta.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
+		// DecideLeaseApplication is the front-desk demo beat ("Applications to
+		// review"), and the first op meta here to carry the full descriptor
+		// vocabulary: a staff client builds the entire submission — form, labels,
+		// declared reads — from this vertex alone.
+		//
+		// authContext "standing" is the fourth and oldest authorization case: the
+		// caller sends no authContext object at all, because their authority is a
+		// standing role grant rather than a self / service / task relationship.
+		// Every operator FE has always submitted this way; naming it lets a
+		// data-driven client do the same instead of special-casing the absence.
+		{
+			OperationType: "DecideLeaseApplication",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Decide a lease application",
+				ShortLabel:  "Decide",
+				Description: "Approve or decline an application. The decision is final once recorded.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Record decision",
+				Group:       "Front desk",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application being decided."},` +
+				`"decision":{"type":"string","enum":["approved","declined"],"description":"The decision. Terminal once recorded."},` +
+				`"reason":{"type":"string","description":"Why the application was declined. Ignored on an approve."},` +
+				`"unit":{"type":"string","description":"vtx.unit.<NanoID> this application is for. Required on the FIRST approve."}},` +
+				`"required":["leaseAppKey","decision"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The application being decided — filled from the application in view, not typed.",
+				"decision":    "Approve or decline. TERMINAL: the same value re-submits harmlessly, but a different value is rejected, so a decision can never silently flip.",
+				"reason":      "Optional rationale shown to the applicant on a decline, and kept as a fair-housing record. Ignored on an approve.",
+				"unit":        "The unit this application is for. Required on the first approve, which stamps the tenancy dates read off the unit's listing; not needed on a decline or a re-approve.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "standing",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				Reads:       []string{"{payload.leaseAppKey}"},
+				// Each of these is genuinely absence-tolerant, which is why none is
+				// a required Read: .decision and .tenancy are absent on a first
+				// decision (they ARE the read-before-write terminal and create-only
+				// guards), .signature is absent on an unsigned application (the
+				// NotReadyToApprove check), and the unit pair is consulted only on
+				// the first approve. A decline that declared them required would
+				// fail on keys that are correctly missing.
+				OptionalReads: []string{
+					"{payload.leaseAppKey}.decision",
+					"{payload.leaseAppKey}.tenancy",
+					"{payload.leaseAppKey}.signature",
+					"lnk.leaseapp.{payload.leaseAppKey:id}.appliesToUnit.unit.{payload.unit:id}",
+					"{payload.unit}",
+					"{payload.unit}.listing",
+				},
+			},
+		},
 		{OperationType: "SignLease"},
 		{OperationType: "RecordIdentityPII"},
 		{OperationType: "CreateLeaseServiceInstance"},

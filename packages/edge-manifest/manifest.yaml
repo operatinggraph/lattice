@@ -1,5 +1,5 @@
 name: edge-manifest
-version: 0.5.0
+version: 0.6.0
 description: |
   The Facet edge app's world manifest: seven Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeTasks/edgeInstances/edgeEntitySessions/
@@ -44,6 +44,15 @@ declares:
       engine: full
     - canonicalName: edgeEntityProviders
       adapter: nats-subject
+      engine: full
+    - canonicalName: edgeCatalogRoles
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeTasksQueued
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeManifestStaffReadGrants
+      adapter: nats-kv
       engine: full
     - canonicalName: edgeManifestReadGrants
       adapter: nats-kv

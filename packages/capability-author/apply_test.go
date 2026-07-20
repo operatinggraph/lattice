@@ -276,7 +276,7 @@ func applyRealPackage(t *testing.T, ctx context.Context, conn *substrate.Conn, p
 	defer stop()
 
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	inst.RoleIDs = testutil.StandardRoleIDs()
 	res, err := inst.Apply(ctx, plan.Definition, pkgmgr.ApplyOptions{})
 	if err != nil {
 		t.Fatalf("Installer.Apply(%s): %v", plan.PackageName, err)

@@ -33,24 +33,36 @@ func TestPackage_NoDDLsOrPermissions(t *testing.T) {
 	}
 }
 
-// manifestLensNames are the seven Personal Lenses (edge-showcase-app-
+// manifestLensNames are the nine Personal Lenses (edge-showcase-app-
 // design.md §3.2; the two manifest.ent entity lenses per
-// facet-entity-browse-design.md). readGrantLensName is their Fire 2
-// read-grant producer (nats-kv, actorAggregate) — a structurally different
-// class (never Personal, never nats-subject) that
+// facet-entity-browse-design.md; the two staff siblings per
+// facet-staff-worlds-design.md §3.3). readGrantLensNames are their read-grant
+// producers (nats-kv, actorAggregate) — a structurally different class (never
+// Personal, never nats-subject) that
 // TestPackage_LensesAreNatsSubjectPersonal/
 // TestPackage_LensRowKeysAreManifestNamespaced correctly exclude.
 var manifestLensNames = map[string]bool{
 	"edgeIdentity": true, "edgeServices": true, "edgeCatalog": true,
 	"edgeTasks": true, "edgeInstances": true,
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
+	"edgeCatalogRoles": true, "edgeTasksQueued": true,
 }
 
 const readGrantLensName = "edgeManifestReadGrants"
 
-func TestPackage_EightLenses(t *testing.T) {
-	if got := len(Package.Lenses); got != 8 {
-		t.Fatalf("expected 8 lenses (7 manifest + 1 read-grant producer), got %d", got)
+// readGrantLensNames is every Path B cap-read producer this package ships. The
+// staff slice is separate from the base one on purpose (§3.3): §6.14 unions
+// slices, so a second slice costs nothing, while folding its two branches into
+// the base producer would multiply that lens's existing cross-product fan-out
+// for every actor.
+var readGrantLensNames = map[string]bool{
+	readGrantLensName:             true,
+	"edgeManifestStaffReadGrants": true,
+}
+
+func TestPackage_ElevenLenses(t *testing.T) {
+	if got := len(Package.Lenses); got != 11 {
+		t.Fatalf("expected 11 lenses (9 manifest + 2 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range Package.Lenses {
@@ -61,8 +73,10 @@ func TestPackage_EightLenses(t *testing.T) {
 			t.Fatalf("missing lens %q (have %v)", want, names)
 		}
 	}
-	if !names[readGrantLensName] {
-		t.Fatalf("missing lens %q (have %v)", readGrantLensName, names)
+	for want := range readGrantLensNames {
+		if !names[want] {
+			t.Fatalf("missing read-grant lens %q (have %v)", want, names)
+		}
 	}
 }
 
@@ -158,9 +172,15 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeInstances":       `"manifest.inst" AS ns`,
 		"edgeEntitySessions":  `"manifest.ent" AS ns`,
 		"edgeEntityProviders": `"manifest.ent" AS ns`,
+		// The staff siblings share their non-staff counterpart's namespace on
+		// purpose: same ns + same entityId means an op or task reachable by
+		// both paths projects the identical row under the identical key, and
+		// the renderer never learns which path a row arrived by.
+		"edgeCatalogRoles": `"manifest.op" AS ns`,
+		"edgeTasksQueued":  `"manifest.task" AS ns`,
 	}
 	for _, l := range Package.Lenses {
-		if l.CanonicalName == readGrantLensName {
+		if readGrantLensNames[l.CanonicalName] {
 			continue
 		}
 		lit, ok := want[l.CanonicalName]

@@ -2,12 +2,14 @@ package edgemanifest
 
 import "github.com/asolgan/lattice/internal/pkgmgr"
 
-// Lenses returns the package's seven Personal-Lens declarations
+// Lenses returns the package's nine Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the two manifest.ent entity lenses per
-// facet-entity-browse-design.md) — the first real `nats-subject` /
-// Personal Lens package in the repo (the adapter plumbing shipped latent in
-// Fire 0; this is its first production consumer) — plus ONE read-grant
-// PRODUCER lens, edgeManifestReadGrants (Fire 2 fix, added building
+// facet-entity-browse-design.md; the two staff siblings edgeCatalogRoles +
+// edgeTasksQueued per facet-staff-worlds-design.md §3.3) — the first real
+// `nats-subject` / Personal Lens package in the repo (the adapter plumbing
+// shipped latent in Fire 0; this is its first production consumer) — plus TWO
+// read-grant PRODUCER lenses, edgeManifestReadGrants (Fire 2 fix, added
+// building
 // cmd/facet): every non-self-anchored Personal Lens row (edgeServices/
 // edgeCatalog/edgeTasks/edgeInstances each anchor on a vertex OTHER than the
 // recipient identity — a service template, op meta, task, or instance) is
@@ -36,7 +38,11 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // (service/op/task/instance/session/provider) — no need for separate
 // lenses, since the actor's effective readable
 // set is already a union over every slice class, and one slice may itself
-// list many anchors.
+// list many anchors. edgeManifestStaffReadGrants is the SECOND slice, covering
+// the two anchor kinds the staff lenses add (role-granted op metas, role-queued
+// tasks) — kept separate precisely because §6.14 unions slices, so the base
+// producer's cross-product fan-out need not grow for every actor to serve a
+// staff-only reachability path.
 //
 // Every Personal-Lens cypher below is Personal:true (Refractor's
 // cross-vertex fan-out re-executes the cypher once per reachable identity,
@@ -61,14 +67,14 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // human label instead of a bare NanoID; the location TYPE segment is still
 // not synthesized into the row (the engine has no vertex-type-from-key
 // function outside nanoIdFromKey, and no string concatenation to build one),
-// so the renderer derives type from the key client-side; edgeCatalog covers only the
-// service-permitsOperation reachability path (role-standing-grant and
-// open-task-forOperation paths are deferred — a task's own bound op
-// already rides inline on its edgeTasks row, so the gap is "browse all my
-// ops," not "complete my task"); edgeTasks covers only direct `assignedTo`
-// tasks (FR28 role-queued tasks are deferred, mirroring the same
-// multi-path-dedup engine limits as edgeCatalog — no UNION, no list
-// comprehension to filter degenerate branches apart).
+// so the renderer derives type from the key client-side; edgeCatalog covers the
+// service-permitsOperation reachability path and edgeTasks the direct
+// `assignedTo` one, with their role-derived counterparts split into the sibling
+// lenses edgeCatalogRoles + edgeTasksQueued rather than folded in (this engine
+// has no UNION, so a second independent path in one cypher cross-products it).
+// Still deferred: the open-task-forOperation catalog path — a task's own bound
+// op already rides inline on its edgeTasks row, so that gap is "browse all my
+// ops," never "complete my task."
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -149,6 +155,45 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:          edgeEntityProvidersSpec,
 		},
 		{
+			CanonicalName: "edgeCatalogRoles",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Spec:          edgeCatalogRolesSpec,
+		},
+		{
+			CanonicalName: "edgeTasksQueued",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Spec:          edgeTasksQueuedSpec,
+		},
+		{
+			CanonicalName:  "edgeManifestStaffReadGrants",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "capability-kv",
+			Engine:         "full",
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "identity",
+				OutputKeyPattern: "cap-read.edgeManifestStaff.{actorSuffix}",
+				BodyColumns:      []string{"readableAnchors"},
+				EmptyBehavior:    "delete",
+				Freshness:        "auto",
+				Lanes:            []string{"default"},
+			},
+			Spec: edgeManifestStaffReadGrantsSpec,
+		},
+		{
 			CanonicalName:  "edgeManifestReadGrants",
 			Class:          "meta.lens",
 			Adapter:        "nats-kv",
@@ -224,6 +269,8 @@ MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
 OPTIONAL MATCH (identity)-[:residesIn]->(loc)
 OPTIONAL MATCH (loc)-[:containedIn]->(container)
+OPTIONAL MATCH (identity)-[:worksAt]->(work)
+OPTIONAL MATCH (work)-[:containedIn]->(workContainer)
 OPTIONAL MATCH (identity)<-[:applicationFor]-(leaseapp:leaseapp)
 RETURN
   identity.key AS anchor,
@@ -233,7 +280,8 @@ RETURN
   identity.name.data AS sealedName,
   (identity.state.data.value = "claimed") AS claimed,
   collect(DISTINCT {key: role.key, name: role.canonicalName.data.value}) AS roles,
-  collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name}) AS anchors,
+  collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name, relation: 'residesIn'}) +
+  collect(DISTINCT {key: work.key, name: work.presentation.data.name, container: workContainer.key, containerName: workContainer.presentation.data.name, relation: 'worksAt'}) AS anchors,
   collect(DISTINCT {type: 'leaseapp', key: leaseapp.key}) AS selfAnchors
 `
 
@@ -426,6 +474,117 @@ RETURN
   "provider" AS entityType,
   prov.profile.data.fullName AS title,
   prov.profile.data.specialty AS subtitle
+`
+
+// edgeCatalogRolesSpec projects one `manifest.op.<opMetaId>` row per op meta
+// the actor can reach through a ROLE they hold, rather than through a service
+// template — the role-standing-grant path the package doc names as deferred,
+// now built (staff-worlds F2). The walk is
+// (identity)-[:holdsRole]->(role)<-[:grantedBy]-(perm)-[:forOperation]->(op),
+// where the last hop is the install-time edge pkgmgr mints beside `grantedBy`
+// (internal/pkgmgr/build.go): without it the walk dead-ends at
+// perm.data.operationType, a STRING this engine cannot join to a vertex.
+//
+// A sibling lens rather than more branches on edgeCatalog, for the same reason
+// the entity lenses are siblings: this engine has no UNION, so folding a second
+// independent reachability path into one cypher cross-products it. Same `ns`
+// and same RETURN shape as edgeCatalog means the renderer needs to know nothing
+// about which path a row arrived by, and an op reachable BOTH ways projects the
+// identical row under the identical key — an LWW-idempotent overlap, noted
+// rather than feared.
+//
+// This is the lens that makes the staff catalog honest: it derives visibility
+// from the grant topology the Processor actually authorizes against, so the
+// catalog cannot drift into offering ops step 3 will deny. It also closes the
+// named "browse all my ops" gap for ordinary residents, whose consumer-role
+// grants project through exactly the same walk.
+const edgeCatalogRolesSpec = `
+MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
+OPTIONAL MATCH (role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)
+WITH op, role
+WHERE op.key <> null
+RETURN
+  op.key AS anchor,
+  "manifest.op" AS ns,
+  nanoIdFromKey(op.key) AS entityId,
+  op.key AS opMetaKey,
+  op.data.operationType AS operationType,
+  op.presentation.data.title AS title,
+  op.presentation.data.shortLabel AS shortLabel,
+  op.presentation.data.description AS description,
+  op.presentation.data.icon AS icon,
+  op.presentation.data.tone AS tone,
+  op.presentation.data.submitLabel AS submitLabel,
+  op.presentation.data.group AS group,
+  op.inputSchema.data.schema AS inputSchema,
+  op.fieldDescriptions.data.fieldDescriptions AS fieldDescriptions,
+  op.dispatch.data.class AS dispatchClass,
+  op.dispatch.data.authContext AS dispatchAuthContext,
+  op.dispatch.data.targetField AS dispatchTargetField,
+  op.dispatch.data.targetType AS dispatchTargetType,
+  op.dispatch.data.contextParams AS dispatchContextParams,
+  op.dispatch.data.reads AS dispatchReads,
+  op.dispatch.data.optionalReads AS dispatchOptionalReads,
+  op.sensitive.data.value AS sensitive,
+  role.key AS viaRole,
+  role.canonicalName.data.value AS viaRoleName
+`
+
+// edgeTasksQueuedSpec projects one `manifest.task.<taskId>` row per OPEN task
+// queued to a role the actor holds (FR28) — the role-queue path edgeTasks names
+// as deferred, now built. The walk
+// (identity)-[:holdsRole]->(role)<-[:queuedFor]-(task) is the one
+// orchestration-base's my-tasks aggregate already runs verbatim; this re-emits
+// it per-row over the personal SYNC transport a Facet device mirrors.
+//
+// queuedRole names the governing role, which is what distinguishes these rows
+// from edgeTasks' directly-assigned ones: a queued task is CLAIMABLE, not yet
+// owned. The renderer's claim affordance submits the shipped ClaimTask, whose
+// atomic queuedFor→assignedTo swap then stops this branch matching for every
+// non-claimant and materializes the edgeTasks row for the winner — so the whole
+// claim beat is existing machinery, reached over a new projection.
+const edgeTasksQueuedSpec = `
+MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)<-[:queuedFor]-(task:task)
+WHERE task.data.status = "open"
+OPTIONAL MATCH (task)-[:forOperation]->(op)
+OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
+OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
+RETURN
+  task.key AS anchor,
+  "manifest.task" AS ns,
+  nanoIdFromKey(task.key) AS entityId,
+  task.key AS taskKey,
+  op.key AS forOperationKey,
+  op.data.operationType AS operationType,
+  tgt.key AS scopedTo,
+  scopedUnit.presentation.data.name AS scopedName,
+  task.data.expiresAt AS expiresAt,
+  role.key AS queuedRole,
+  role.canonicalName.data.value AS queuedRoleName
+`
+
+// edgeManifestStaffReadGrantsSpec is the Path B read-grant slice covering the
+// two anchor kinds the staff lenses introduce: role-granted op metas and
+// role-queued tasks. Without it Refractor's D1 readableAnchors gate silently
+// drops every row those two lenses project — the same fail-closed trap that
+// left Fire 1's manifest lenses invisible, which is why this slice lands in the
+// SAME change as its lenses.
+//
+// A SEPARATE slice rather than more branches on edgeManifestReadGrants:
+// Contract #6 §6.14 unions every cap-read.*.<actor> slice into one effective
+// readable set, and that producer's own doc comment already flags its
+// multi-branch cross-product fan-out — adding two more independent branches
+// there would multiply it for every actor, staff or not. A resident who holds
+// no role-queued tasks simply gets an empty slice, deleted by EmptyBehavior.
+const edgeManifestStaffReadGrantsSpec = `
+MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
+OPTIONAL MATCH (role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)
+OPTIONAL MATCH (role)<-[:queuedFor]-(task:task)
+RETURN
+  identity.key AS actorKey,
+  collect(DISTINCT {anchorType: 'meta', anchorId: nanoIdFromKey(op.key), via: ['holdsRole', 'grantedBy', 'forOperation']}) +
+  collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(task.key), via: ['holdsRole', 'queuedFor']})
+  AS readableAnchors
 `
 
 // edgeManifestReadGrantsSpec is edge-manifest's single combined read-grant

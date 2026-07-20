@@ -490,8 +490,18 @@ type OpPresentationSpec struct {
 // which is exactly why the AI-authored validator's stricter anchored
 // vocabulary rejects that shape — see sensitiveReadAspect.
 type OpDispatchSpec struct {
-	Class       string
-	AuthContext string // "self" | "service" | "task"
+	Class string
+
+	// AuthContext is "self" | "service" | "task" | "standing".
+	//
+	// The first three name which of the wire envelope's authContext fields the
+	// client populates. "standing" names the fourth case: populate NONE of them
+	// and send no authContext object at all, because the caller's authority is a
+	// standing role grant (cap.roles) rather than a relationship to the target.
+	// That is how every operator / staff FE has always submitted; naming it lets
+	// a data-driven client render and dispatch such an op from the descriptor
+	// alone, instead of having to special-case the absence of an authContext.
+	AuthContext string
 	TargetField string
 
 	// TargetType is the Contract #1 vertex type TargetField's value must

@@ -1,5 +1,5 @@
 name: orchestration-base
-version: 0.5.0
+version: 0.6.0
 description: |
   Generic task substrate (task DDL + CreateTask/ClaimTask/SetAvailability,
   FR28 role-queue + fallback: assignee-or-queue routing gated on the
@@ -51,7 +51,7 @@ declares:
       grantsTo: [operator]
     - operationType: ClaimTask
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
     - operationType: ReAssignTask
       scope: any
       grantsTo: [operator]

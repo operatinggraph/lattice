@@ -1,5 +1,5 @@
 name: control-authz
-version: 0.2.0
+version: 0.3.0
 description: |
   Grants ctrl.<component>.<verb> control-plane permissions (Weaver/Loom/Refractor)
   to a new control-operator role, declared in the package definition and created
@@ -70,16 +70,16 @@ declares:
       grantsTo: [control-operator]
     - operationType: ctrl.refractor.register
       scope: any
-      grantsTo: [control-operator, consumer]
+      grantsTo: [control-operator, consumer, frontOfHouse]
     - operationType: ctrl.refractor.deregister
       scope: any
-      grantsTo: [control-operator, consumer]
+      grantsTo: [control-operator, consumer, frontOfHouse]
     - operationType: ctrl.refractor.hydrate
       scope: any
-      grantsTo: [control-operator, consumer]
+      grantsTo: [control-operator, consumer, frontOfHouse]
     - operationType: ctrl.refractor.sessionkey
       scope: any
-      grantsTo: [control-operator, consumer]
+      grantsTo: [control-operator, consumer, frontOfHouse]
     - operationType: ctrl.refractor.syncgap
       scope: any
-      grantsTo: [control-operator, consumer]
+      grantsTo: [control-operator, consumer, frontOfHouse]

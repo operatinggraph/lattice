@@ -72,7 +72,7 @@ func installServiceDeps(t *testing.T, ctx context.Context, conn *substrate.Conn)
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	inst.RoleIDs = testutil.StandardRoleIDs()
 	if _, err := inst.Install(ctx, orchestrationbase.Package); err != nil {
 		t.Fatalf("install orchestration-base: %v", err)
 	}

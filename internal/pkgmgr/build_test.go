@@ -2,6 +2,7 @@ package pkgmgr
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -587,5 +588,63 @@ func TestBuildInstallBatch_EffectsAspectEmittedOnlyWhenDeclared(t *testing.T) {
 
 	if _, ok := findOp(ops, createKey+".effects"); ok {
 		t.Errorf("CreateLeaseApplication declares no Effects; want no %s aspect", createKey+".effects")
+	}
+}
+
+// TestBuildInstallBatch_PermissionForOperationLink pins the
+// `permission forOperation meta` edge (staff-worlds F2): a permission whose
+// operationType matches an op meta declared in the same package links to it, so
+// a role-standing grant can be walked from the role all the way to the op meta
+// it gates. Without this edge the walk dead-ends at the permission's
+// operationType STRING, which the cypher engine cannot join to a vertex.
+//
+// The negative half matters as much as the positive: a permission with no
+// matching op meta must emit NO link rather than a dangling reference, so the
+// op stays catalog-invisible until an op meta exists — fail-closed, additive.
+func TestBuildInstallBatch_PermissionForOperationLink(t *testing.T) {
+	def := Definition{
+		Name:    "forop-test-pkg",
+		Version: "0.0.1",
+		OpMetas: []OpMetaSpec{{OperationType: "SignLease"}},
+		Permissions: []PermissionSpec{
+			// Has an op meta → gets a forOperation link.
+			{OperationType: "SignLease", Scope: "any", GrantsTo: []string{"operator"}},
+			// Same op, different scope: an independent permission vertex, and it
+			// links too — scope narrows WHO may submit, not which op is gated.
+			{OperationType: "SignLease", Scope: "self", GrantsTo: []string{"consumer"}},
+			// No op meta declared → no link at all.
+			{OperationType: "ArchiveLease", Scope: "any", GrantsTo: []string{"operator"}},
+		},
+	}
+
+	opMetaID := EntityNanoIDForTest(def.Name, "opMeta:SignLease")
+	ops, _, err := BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+
+	opMetaKey := metaVertexPrefix + opMetaID
+	linked := 0
+	for _, op := range ops {
+		if !strings.Contains(op.Key, ".forOperation.") {
+			continue
+		}
+		linked++
+		if !strings.HasPrefix(op.Key, "lnk.permission.") {
+			t.Errorf("forOperation link %q must be sourced on a permission (Contract #1 §1.1: the later-arriving vertex is the source)", op.Key)
+		}
+		if !strings.HasSuffix(op.Key, ".forOperation.meta."+opMetaID) {
+			t.Errorf("forOperation link %q must target the SignLease op meta", op.Key)
+		}
+		if got := op.Document["class"]; got != "forOperation" {
+			t.Errorf("forOperation link class = %v, want \"forOperation\"", got)
+		}
+		if got, _ := op.Document["targetVertex"].(string); got != opMetaKey {
+			t.Errorf("forOperation targetVertex = %q, want %q", got, opMetaKey)
+		}
+	}
+	// Exactly the two SignLease permissions link; ArchiveLease must not.
+	if linked != 2 {
+		t.Fatalf("forOperation links = %d, want 2 (both SignLease permissions; ArchiveLease has no op meta)", linked)
 	}
 }

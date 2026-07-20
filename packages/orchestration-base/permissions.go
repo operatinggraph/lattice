@@ -16,12 +16,19 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // (the §10.6 auto-complete path needs no permission — it is
 // platform-injected on the commit path, not a submitted op).
 //
-// ClaimTask is granted to `operator` here as the platform-wide baseline
-// (operators may always claim any queued task); a vertical package that
-// establishes its OWN role-queue (e.g. a "leasing-team" role) must ALSO
-// grant that role ClaimTask, mirroring how the Epic-12 cap.roles
-// decomposition lets each package contribute its own role grants —
-// orchestration-base cannot know a downstream package's role names.
+// ClaimTask is granted to `operator` as the platform-wide baseline (operators
+// may always claim any queued task) and to `frontOfHouse`, the shipped
+// front-of-house staff role whose queued work is the whole point of the FR28
+// role-queue. Any package establishing a FURTHER role-queue (e.g. a
+// "leasing-team" role) must likewise grant that role ClaimTask — the Epic-12
+// cap.roles decomposition lets each package contribute its own role grants,
+// since orchestration-base cannot know a downstream package's role names.
+//
+// A platform-wide ClaimTask grant is not a platform-wide claim capability: the
+// DDL script resolves the task's own queuedFor link and rejects
+// NotAuthorizedToClaim unless the submitting actor holds THAT role. The
+// permission is the outer gate; holding the queued role is the real
+// confinement. So frontOfHouse can claim front-desk work and nothing else.
 func Permissions() []pkgmgr.PermissionSpec {
 	perms := []pkgmgr.PermissionSpec{
 		{
@@ -33,8 +40,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "ClaimTask",
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit ClaimTask operations (FR28 platform-wide baseline; a vertical package's own role-queue role must be granted separately).",
-			GrantsTo:      []string{"operator"},
+			Note:          "Grants the operator and front-of-house staff the right to submit ClaimTask operations (FR28 platform-wide baseline; the script further requires the claimant to hold the task's own queued role, so this grant claims nothing on its own).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
 			OperationType: "ReAssignTask",

@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.19.0
+version: 0.20.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -140,6 +140,7 @@ declares:
     - patternId: leaseDocument
       subjectType: leaseapp
   opMetas:
+    - operationType: DecideLeaseApplication
     - operationType: SignLease
     - operationType: RecordIdentityPII
     - operationType: CreateLeaseServiceInstance

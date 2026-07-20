@@ -262,6 +262,14 @@ func (i *Installer) buildInstallBatch(
 		}
 	}
 
+	// Op-meta lookup for the permission `forOperation` links below. Both the
+	// permission and the op meta are minted in THIS batch with deterministic,
+	// version-independent ids, so the join is a local map, not a KV read.
+	opMetaIDByOpType := make(map[string]string, len(def.OpMetas))
+	for idx, o := range def.OpMetas {
+		opMetaIDByOpType[o.OperationType] = opMetaIDs[idx]
+	}
+
 	// Permissions + grant links.
 	for idx, p := range def.Permissions {
 		permID := permIDs[idx]
@@ -287,6 +295,23 @@ func (i *Installer) buildInstallBatch(
 			linkKey := "lnk.permission." + permID + ".grantedBy.role." + roleID
 			addCreate(linkKey, docLink("vtx.permission."+permID, "vtx.role."+roleID,
 				"grantedBy", "grantedBy", nil))
+		}
+		// `permission forOperation meta` — the edge that lets a role-standing
+		// grant reach the op meta it gates. The grant walk otherwise dead-ends
+		// at permission.data.operationType, a STRING the cypher engine cannot
+		// join to a vertex, so a client could not derive "which ops does my
+		// role grant me" from the graph at all.
+		//
+		// This is what keeps the staff catalog honest: visibility derives from
+		// the grant topology itself rather than from a curated list that can
+		// drift into offering ops the Processor will deny (or hiding ones it
+		// allows). A permission whose op meta is not declared in the same
+		// package simply gets no link and stays catalog-invisible until one is
+		// — fail-closed and additive, never a broken reference.
+		if opMetaID, ok := opMetaIDByOpType[p.OperationType]; ok {
+			linkKey := "lnk.permission." + permID + ".forOperation.meta." + opMetaID
+			addCreate(linkKey, docLink(permKey, metaVertexPrefix+opMetaID,
+				"forOperation", "forOperation", nil))
 		}
 		_ = idx
 	}

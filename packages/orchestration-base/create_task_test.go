@@ -70,7 +70,7 @@ func installOrchestrationBase(t *testing.T, ctx context.Context, conn *substrate
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	inst.RoleIDs = testutil.StandardRoleIDs()
 	if _, err := inst.Install(ctx, orchestrationbase.Package); err != nil {
 		t.Fatalf("install orchestration-base: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestInstall_Idempotent(t *testing.T) {
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	inst.RoleIDs = testutil.StandardRoleIDs()
 
 	res1, err := inst.Install(ctx, orchestrationbase.Package)
 	if err != nil {

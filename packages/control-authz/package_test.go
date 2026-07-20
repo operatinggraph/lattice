@@ -64,8 +64,11 @@ func TestPackage_DeclaresControlOperatorRoleDistinctFromPrimordialOperator(t *te
 // internal/controlauth's WeaverOps/LoomOps/RefractorOps): every op grants
 // scope=any, and every op grants to control-operator ALONE except the five
 // identity-bound Personal Lens ops
-// (register/deregister/hydrate/sessionkey/syncgap), which additionally grant
-// to consumer (§3.4-confined — see personalLensPermissions).
+// (register/deregister/hydrate/sessionkey/syncgap), which additionally grant to
+// every role whose holders run a syncing client — consumer and frontOfHouse
+// (§3.4-confined — see personalLensPermissions). A role missing from that set
+// cannot register Personal Lens interest at all, so its holders' clients sync
+// nothing; this test is where that omission surfaces.
 func TestPackage_EveryControlOpHasExpectedGrantees(t *testing.T) {
 	wantSoleControlOperator := []string{
 		"ctrl.weaver.read", "ctrl.weaver.disable", "ctrl.weaver.enable", "ctrl.weaver.revoke",
@@ -73,6 +76,7 @@ func TestPackage_EveryControlOpHasExpectedGrantees(t *testing.T) {
 		"ctrl.refractor.read", "ctrl.refractor.rebuild", "ctrl.refractor.pause", "ctrl.refractor.resume",
 		"ctrl.refractor.delete",
 	}
+	wantPersonalLensGrantees := []string{"control-operator", "consumer", "frontOfHouse"}
 	wantControlOperatorAndConsumer := []string{
 		"ctrl.refractor.register", "ctrl.refractor.deregister", "ctrl.refractor.hydrate", "ctrl.refractor.sessionkey",
 		"ctrl.refractor.syncgap",
@@ -110,8 +114,13 @@ func TestPackage_EveryControlOpHasExpectedGrantees(t *testing.T) {
 		for _, g := range p.GrantsTo {
 			grants[g] = true
 		}
-		if len(p.GrantsTo) != 2 || !grants["control-operator"] || !grants["consumer"] {
-			t.Errorf("%s: GrantsTo = %v, want [control-operator consumer]", op, p.GrantsTo)
+		if len(p.GrantsTo) != len(wantPersonalLensGrantees) {
+			t.Errorf("%s: GrantsTo = %v, want exactly %v", op, p.GrantsTo, wantPersonalLensGrantees)
+		}
+		for _, want := range wantPersonalLensGrantees {
+			if !grants[want] {
+				t.Errorf("%s: GrantsTo = %v, missing %q — its holders' clients cannot register Personal Lens interest and will sync nothing", op, p.GrantsTo, want)
+			}
 		}
 	}
 }
