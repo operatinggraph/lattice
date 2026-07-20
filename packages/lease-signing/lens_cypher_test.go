@@ -1247,6 +1247,125 @@ func TestLeaseApplicationComplete_InflightBgcheck_OutcomePresent(t *testing.T) {
 	require.Equal(t, true, v["missing_bgcheck"], "a failed outcome does not close the gap")
 }
 
+// humanGapFixture seeds a bare application whose two HUMAN-paced gaps are both
+// open: no ssn aspect on the applicant (missing_onboarding) and no signature
+// aspect on the application (missing_signature). Nothing else is seeded, so the
+// only thing that can move inflight_onboarding / inflight_signature is the task
+// the caller adds. Returns the leaseapp logical name.
+func humanGapFixture(t *testing.T, f *lensFixture) string {
+	t.Helper()
+	f.vtx(t, "app", "leaseapp")
+	f.vtx(t, "alice", "identity")
+	f.edge(t, "applicationFor", "app", "alice")
+	return "app"
+}
+
+// seedTask seeds one user task bound to an operation and scoped to a target:
+// root {status, expiresAt} scalars (Contract #10 §10.1 — the task DDL's root is
+// scalars-only, no aspects), a forOperation edge to a meta-vertex whose root
+// data.operationType names the bound op, and a scopedTo edge to the target the
+// task hangs off.
+func (f *lensFixture) seedTask(t *testing.T, taskName, opName, operationType, scopedTo, status string) {
+	t.Helper()
+	f.vtx(t, taskName, "task")
+	f.setRootData(t, taskName, map[string]any{"status": status, "expiresAt": "2026-08-18T00:00:00Z"})
+	f.vtx(t, opName, "meta")
+	f.setRootData(t, opName, map[string]any{"operationType": operationType})
+	f.edge(t, "forOperation", taskName, opName)
+	f.edge(t, "scopedTo", taskName, scopedTo)
+}
+
+// TestLeaseApplicationComplete_InflightSignature pins the signature gap's
+// suppression companion: an OPEN SignLease task scoped to the application projects
+// inflight_signature=true while the gap itself stays open. Only a person signing
+// closes missing_signature, so without this companion Weaver re-dispatches the
+// assignTask every time the mark lease expires, against a task already sitting
+// open.
+func TestLeaseApplicationComplete_InflightSignature(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	app := humanGapFixture(t, f)
+	f.seedTask(t, "sigtask", "signlease", "SignLease", "app", "open")
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1, "the task fan must not multiply the anchor row")
+	v := rows[0].Values
+	require.Equal(t, true, v["inflight_signature"], "an open SignLease task scoped to the app → in flight")
+	require.Equal(t, true, v["missing_signature"], "an assigned task is NOT a signature → the gap stays open")
+	require.Equal(t, true, v["violating"], "the gap stays violating while the task is outstanding")
+}
+
+// TestLeaseApplicationComplete_InflightOnboarding pins the onboarding companion.
+// The onboarding remediation is triggerLoom(onboarding), whose single userTask
+// step binds RecordIdentityPII against the APPLICANT — so the task hangs off the
+// identity, not the application, and that is where the companion looks.
+func TestLeaseApplicationComplete_InflightOnboarding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	app := humanGapFixture(t, f)
+	f.seedTask(t, "onbtask", "recordpii", "RecordIdentityPII", "alice", "open")
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["inflight_onboarding"], "an open RecordIdentityPII task on the applicant → in flight")
+	require.Equal(t, true, v["missing_onboarding"], "an assigned task is NOT a recorded ssn → the gap stays open")
+	require.Equal(t, false, v["inflight_signature"], "the onboarding task must not suppress the signature gap")
+}
+
+// TestLeaseApplicationComplete_InflightHumanGaps_WrongOperationDoesNotSuppress is
+// the over-suppression guard, and the reason both companions discriminate on
+// op.data.operationType rather than merely counting open tasks. Several gaps hang
+// tasks off the same applicant and the same application; an open task bound to an
+// unrelated operation must NOT park a gap it cannot close.
+func TestLeaseApplicationComplete_InflightHumanGaps_WrongOperationDoesNotSuppress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	app := humanGapFixture(t, f)
+	// Both tasks are OPEN and correctly placed — on the application and on the
+	// applicant — but neither is bound to the operation that closes its gap.
+	f.seedTask(t, "othertask", "otherop", "AttachObject", "app", "open")
+	f.seedTask(t, "othertask2", "otherop2", "RecordLeaseServiceOutcome", "alice", "open")
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["inflight_signature"], "an open task for another op must not suppress the signature gap")
+	require.Equal(t, false, v["inflight_onboarding"], "an open task for another op must not suppress the onboarding gap")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseApplicationComplete_InflightHumanGaps_ClosedTaskResumesDispatch: a task
+// that is no longer open stops suppressing, so a cancelled or expired-and-closed
+// remediation is re-dispatched rather than leaving the gap parked forever. The
+// status filter lives in the OPTIONAL MATCH's WHERE, so a closed task contributes
+// no row at all.
+func TestLeaseApplicationComplete_InflightHumanGaps_ClosedTaskResumesDispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	app := humanGapFixture(t, f)
+	f.seedTask(t, "sigtask", "signlease", "SignLease", "app", "completed")
+	f.seedTask(t, "onbtask", "recordpii", "RecordIdentityPII", "alice", "cancelled")
+
+	rows := f.projectAt(t, app, now)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["inflight_signature"], "a closed task no longer suppresses → re-dispatch resumes")
+	require.Equal(t, false, v["inflight_onboarding"], "a cancelled task no longer suppresses → re-dispatch resumes")
+}
+
 // TestLeaseApplicationComplete_InflightBgcheck_NoDispatch: a bgcheck instance with
 // NO .dispatch marker (and no .outcome) is not in flight — vendorRef <> null is
 // false when the .dispatch aspect is absent, so inflight_bgcheck=false and the gap

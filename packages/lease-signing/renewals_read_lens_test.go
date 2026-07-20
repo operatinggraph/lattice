@@ -26,10 +26,10 @@ import (
 	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
 )
 
-// setRootData overwrites a fixture vertex's root `data` (design D5: the
-// renewal vertex's status/cycleEnd are ROOT scalars, not aspects — the one
-// case in this package's lens tests that needs it; every other fact lives on
-// an aspect via f.aspect).
+// setRootData overwrites a fixture vertex's root `data` (design D5). Used by the
+// vertices whose facts are ROOT scalars rather than aspects: the renewal's
+// status/cycleEnd, a task's status/expiresAt, and an operation meta-vertex's
+// operationType. Every other fact lives on an aspect via f.aspect.
 func (f *lensFixture) setRootData(t *testing.T, name string, data map[string]any) {
 	t.Helper()
 	key := "vtx." + f.types[f.ids[name]] + "." + f.ids[name]

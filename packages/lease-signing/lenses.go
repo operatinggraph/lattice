@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "freshUntil", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -450,9 +450,11 @@ func Lenses() []pkgmgr.LensSpec {
 //	inflight_<g> is a §10.2 BodyColumn Weaver reads as a dispatch-suppression
 //	companion of the gap missing_<g> (the prefix-swap convention, like freshUntil):
 //	while it is true Weaver does NOT (re-)dispatch the externalTask, but the gap
-//	stays missing_<g>=true / violating — only re-dispatch is suppressed. It is
-//	counted on the SAME single no-WHERE providedTo fan as the missing_* counts, so
-//	it adds no filtered optional that could drop the anchor.
+//	stays missing_<g>=true / violating — only re-dispatch is suppressed. The
+//	service-backed ones are counted on the SAME single no-WHERE providedTo fan as
+//	the missing_* counts, so they add no filtered optional that could drop the
+//	anchor; the two human-paced ones fan off their own OPTIONAL task walks, which
+//	cannot drop it either (the anchor is the required `app` match).
 //
 //	- inflight_<g> — a call of that family is legitimately in flight: a service
 //	  instance with a .dispatch marker present (inst.dispatch.data.vendorRef <>
@@ -467,6 +469,22 @@ func Lenses() []pkgmgr.LensSpec {
 //	  Re-dispatch resumes only when the call resolves: a failed outcome lands
 //	  (status != null) → inflight_<g> false → Weaver dispatches a fresh call
 //	  (a new claim vertex / vendorRef — never a silent resubmit of the same one).
+//	- inflight_onboarding / inflight_signature — the same contract for the two
+//	  HUMAN-paced gaps, whose remediation is a user task rather than a vendor call:
+//	  an open task (task.data.status = 'open') bound to that gap's own operation
+//	  through forOperation — RecordIdentityPII for onboarding, SignLease for
+//	  signature. Discriminating on op.data.operationType is what keeps them from
+//	  over-suppressing: several gaps hang tasks off the same applicant, and an
+//	  unrelated open task must not park a gap it cannot close. Without the
+//	  companion these two never stop re-dispatching, because only a person can
+//	  close them: the mark lease expires, the sweep reclaims, and Weaver re-fires a
+//	  remediation whose task is already sitting open. The duplicate op collapses on
+//	  the tracker, so nothing is written twice — but every reclaim still books an
+//	  `__effect` dispatch into a window that cannot record a close until the person
+//	  acts, which surfaces downstream as a false LensEffectMismatch.
+//	  The onboarding companion anchors on the applicant identity, not the
+//	  application: ssn is a property of the person, so one RecordIdentityPII closes
+//	  the gap for every application they hold.
 //	- maxretries_<g> — the per-gap retry cap, a CONSTANT integer column baked from
 //	  retry_budget.go (maxBgcheckRetries / maxPaymentRetries) onto every row. The
 //	  budget itself is NOT a lens predicate (a lifetime failed-count never resets on
@@ -603,6 +621,12 @@ OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
 OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
 OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
+OPTIONAL MATCH (app)<-[:scopedTo]-(sigTask:task)
+  WHERE sigTask.data.status = 'open'
+OPTIONAL MATCH (sigTask)-[:forOperation]->(sigOp)
+OPTIONAL MATCH (id)<-[:scopedTo]-(onbTask:task)
+  WHERE onbTask.data.status = 'open'
+OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp)
 %s
 WITH
   app.key AS entityKey,
@@ -644,6 +668,8 @@ WITH
   max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.contentType ELSE null END) AS docContentType,
   max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.digest ELSE null END) AS docDigest,
   max(CASE WHEN docInst.class = 'service.docGen.instance' AND docInst.outcome.data.status = 'completed' THEN docInst.outcome.data.size ELSE null END) AS docSize,
+  count(DISTINCT CASE WHEN sigOp.data.operationType = 'SignLease' THEN sigTask.key ELSE null END) AS sigTaskOpen,
+  count(DISTINCT CASE WHEN onbOp.data.operationType = 'RecordIdentityPII' THEN onbTask.key ELSE null END) AS onbTaskOpen,
   count(DISTINCT CASE WHEN leaseDocObj.key <> null THEN leaseDocObj.key ELSE null END) AS leaseDocAttachedCount,
   max(CASE WHEN inst.class = 'service.backgroundCheck.instance' AND inst.outcome.data.status = 'completed' AND inst.outcome.data.validUntil > $now THEN inst.outcome.data.validUntil ELSE null END) AS freshUntil
 RETURN
@@ -682,6 +708,8 @@ RETURN
   (bgInflight > 0)       AS inflight_bgcheck,
   (payInflight > 0)      AS inflight_payment,
   (docGenInflight > 0)   AS inflight_docGen,
+  (onbTaskOpen > 0)      AS inflight_onboarding,
+  (sigTaskOpen > 0)      AS inflight_signature,
   ((bgFailed > 0) AND (freshBgComplete = 0))  AS declined_bgcheck,
   ((payFailed > 0) AND (payComplete = 0))     AS declined_payment,
   ((docGenFailed > 0) AND (docGenComplete = 0)) AS declined_docGen,
