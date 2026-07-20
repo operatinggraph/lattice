@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	lsActorID  = "BBlsActorrHJKMNPQRST"
+	lsActorID  = "BBLsActorrHJKMNPQRST"
 	lsActorKey = "vtx.identity." + lsActorID
 	lsCapKey   = "cap.identity." + lsActorID
 
@@ -91,6 +91,9 @@ func setupLeaseEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // rbac + identity + hygiene
 	installLeaseDeps(t, ctx, conn)
 	testutil.SeedCapDoc(t, ctx, conn, lsCapDoc())
+	// The operator grant is only half the claim — the workplace-confinement
+	// guard reads the holdsRole LINK to decide whether its caller is root.
+	testutil.SeedHoldsRole(t, ctx, conn, lsActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 

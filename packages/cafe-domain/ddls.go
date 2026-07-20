@@ -61,8 +61,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"DebitAccount{tabRef}) through Weaver, never a direct cross-package write from this script. Both Charge " +
 			"and Settle reject a tab that is not currently open (TabNotOpen) — a settled tab cannot be charged again " +
 			"or double-settled. OpenTab, Charge, and Settle all grant scope=self to consumer: a resident may open, " +
-				"self-order on, or settle a tab for their OWN lease only, verified via the lease's " +
-				"applicationFor→identity link (AuthDenied otherwise).",
+			"self-order on, or settle a tab for their OWN lease only, verified via the lease's " +
+			"applicationFor→identity link (AuthDenied otherwise).",
 		Script: tabDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> the tab is opened for (OpenTab; required, validated alive)."},` +
@@ -369,6 +369,132 @@ def vertex_alive(state, key):
         return False
     return True
 
+# --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
+#
+# A staff actor may write only inside the location it worksAt. Three properties
+# make this sound; each is a trap a simpler form falls into.
+#
+# 1. The exemption is ROLE-derived, never worksAt-derived. Exempting "an actor
+#    with no worksAt link" would be perverse: UnwireWorksAt would WIDEN a staff
+#    member's write surface from one building to everywhere. The exemption is
+#    holding the primordial 'operator' role -- the same walk the kernel projects
+#    its own root grant from (internal/bootstrap/lenses.go: MATCH (identity)
+#    -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator'), so
+#    an actor that is genuinely root necessarily has it. Everyone else is
+#    confined, and an actor holding no roles at all is confined to nothing.
+#
+# 2. A tombstoned link is ABSENT. kv.Read returns the tombstone DOCUMENT rather
+#    than None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), and
+#    UnwireWorksAt tombstones rather than deletes, so the '== None' form the
+#    cafe/clinic self-guards use would let a moved-on staff member keep writing.
+#
+# 3. The location is resolved from the TARGET's own topology, never from a
+#    payload field -- a caller cannot forge which building it is writing at.
+WORKPLACE_ROLE_PAGE_LIMIT = 50
+WORKPLACE_PARENT_PAGE_LIMIT = 20
+WORKPLACE_MAX_DEPTH = 8
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, WORKPLACE_ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def worksAt_covers(actor_id, location_key):
+    # Walks the location's containedIn chain upward, testing the actor's
+    # deterministic worksAt link at each level. The location itself is tested
+    # first, so a staff member wired to an exact unit matches too; one wired to
+    # the building matches everything containedIn it.
+    cur = location_key
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if cur == None:
+            return False
+        parts = cur.split(".")
+        if len(parts) != 3:
+            return False
+        # read-posture: (e) per-candidate follow-up read off the containedIn
+        # enumeration below (data-derived key -- the ancestor chain is not
+        # knowable client-side, so it cannot be pre-declared).
+        lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+        if lnk != None and not lnk.isDeleted:
+            return True
+        # read-posture: (e) relation=containedIn epoch=none -- a location has at
+        # most a few parents; containment is provisioned topology, not written
+        # concurrently with this op.
+        page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
+        nxt = None
+        for lk in page:
+            if not lk.isDeleted:
+                nxt = lk.targetVertex
+        cur = nxt
+    return False
+
+def workplace_exempt():
+    # The cheap half of require_workplace, callable BEFORE a domain resolver
+    # runs. Starlark evaluates arguments eagerly, so
+    # require_workplace(resolve(x), ...) would walk the target's topology even
+    # for root -- wasted reads, and worse, a malformed key anywhere in that walk
+    # raises where the op previously succeeded. Call sites therefore gate on
+    # this; require_workplace re-checks it anyway, so a site that forgets the
+    # gate is still CORRECT, only slower.
+    return op.authContextTarget != "" or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    # Binds the STANDING path only -- operator and staff role grants, which
+    # submit with no authContext (scope=any never sets one). A scope=self caller
+    # is bound instead by its own op's ownership probe (the applicationFor /
+    # identifiedBy indirection): a resident legitimately holds no worksAt link,
+    # and confining them by a rule written for staff would deny every
+    # self-service write. The two guards are complementary, not alternatives --
+    # each binds the path the other cannot see.
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write: a target can legitimately sit at several places
+    # at once (a provider practises at two buildings), and staff at either one
+    # are equally entitled to it. An empty list -- a target whose location
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
+    if op.authContextTarget != "":
+        return
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
+def leaseapp_unit(lease_key):
+    # A tab's location is its lease's unit -- lease-signing's appliesToUnit link,
+    # the same indirection landlordLeaseApplicationsRead anchors its building on.
+    # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp carries
+    # exactly one appliesToUnit link (required at CreateLeaseApplication), so
+    # this is never a keyspace scan.
+    page, _ = kv.Links(lease_key, "appliesToUnit", "out")
+    unit = None
+    for lk in page:
+        if not lk.isDeleted:
+            unit = lk.targetVertex
+    return unit
+
 def class_of(state, key):
     if key not in state:
         return None
@@ -423,6 +549,12 @@ def execute(state, op):
         _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, lease_key):
             fail("UnknownLeaseApplication: " + lease_key)
+
+        # Staff-standing confinement: a non-operator staff actor may only open a
+        # tab against a lease whose unit sits inside its workplace. No-op on the
+        # resident-self path, which the applicationFor probe below binds instead.
+        if not workplace_exempt():
+            require_workplace([leaseapp_unit(lease_key)], "cannot open a tab for lease " + lease_key)
 
         # Resident-self (consumer's scope=self grant only): step 3 authorizes
         # scope=self by checking authContext.target == actor (Contract #6),
@@ -510,6 +642,13 @@ def execute(state, op):
 
         existing = require_open_status(state, tab_key)
 
+        # Staff-standing confinement: the lease comes from the tab's OWN .status
+        # aspect (never the payload), so the workplace it resolves to cannot be
+        # forged. Earliest point the location is derivable.
+        if not workplace_exempt():
+            require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
+                              "cannot charge tab " + tab_key)
+
         # Resident-self ownership: same closure as Settle above — the lease
         # is recovered from the tab's OWN .status aspect, never from caller-
         # supplied payload.
@@ -545,6 +684,11 @@ def execute(state, op):
         settled_at = time.rfc3339_utc(op.submittedAt)
         total_cents = existing.data.get("totalCents")
         lease_key = existing.data.get("leaseAppKey")
+
+        # Staff-standing confinement: same derivation as Charge — the lease comes
+        # from the tab's own .status aspect, so the workplace cannot be forged.
+        if not workplace_exempt():
+            require_workplace([leaseapp_unit(lease_key)], "cannot settle tab " + tab_key)
 
         # Resident-self (consumer's scope=self grant only): same closure as
         # OpenTab above, but the lease is recovered from the tab's OWN

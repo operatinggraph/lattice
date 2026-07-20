@@ -119,6 +119,9 @@ func setupClinicEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	}
 	stop()
 	testutil.SeedCapDoc(t, ctx, conn, clStaffCapDoc())
+	// The operator grant is only half the claim — the workplace-confinement
+	// guard reads the holdsRole LINK to decide whether its caller is root.
+	testutil.SeedHoldsRole(t, ctx, conn, clStaffActorKey, bootstrap.RoleOperatorKey)
 	testutil.SeedCapDoc(t, ctx, conn, clConsumerCapDoc())
 	return ctx, conn
 }

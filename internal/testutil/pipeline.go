@@ -115,6 +115,49 @@ func SeedCapDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, doc *pr
 	}
 }
 
+// SeedHoldsRole writes the `identity holdsRole role` link a package test's
+// ad-hoc actor needs in the GRAPH, not just in its cap doc.
+//
+// The two are different claims, and package tests had only ever made the
+// second. A cap doc says "step 3 will authorize this actor"; the link says
+// "this actor holds this role" — what the primordial seed writes for the admin
+// and the five service actors (internal/bootstrap/primordial.go), and what the
+// kernel's own root-grant lens matches on (MATCH (identity)-[:holdsRole]->
+// (role) WHERE role.canonicalName.data.value = 'operator'). An op script that
+// asks whether its caller is root — the workplace-confinement guards in
+// lease-signing / cafe-domain / clinic-domain / wellness-domain do — reads the
+// link, so an actor carrying only a cap doc looks like an unprivileged caller
+// no matter what its cap doc grants.
+//
+// Tests submitting under an operator grant call this so their actor models a
+// real operator.
+func SeedHoldsRole(t *testing.T, ctx context.Context, conn *substrate.Conn, actorKey, roleKey string) {
+	t.Helper()
+	linkKey := "lnk.identity." + actorKey[len("vtx.identity."):] +
+		".holdsRole.role." + roleKey[len("vtx.role."):]
+	SeedLink(t, ctx, conn, linkKey, "holdsRole", actorKey, roleKey)
+}
+
+// SeedLink writes an alive link document straight to Core KV, for tests that
+// need graph topology an op script walks (containment chains, worksAt /
+// appliesToUnit / practicesAt / locatedAt edges) without paying for the ops
+// that would normally write it.
+func SeedLink(t *testing.T, ctx context.Context, conn *substrate.Conn, linkKey, class, source, target string) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": false,
+		"sourceVertex": source, "targetVertex": target,
+		"localName": class, "data": map[string]any{},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal link %s: %v", linkKey, err)
+	}
+	if _, err := conn.KVPut(ctx, HarnessCoreBucket, linkKey, b); err != nil {
+		t.Fatalf("seed link %s: %v", linkKey, err)
+	}
+}
+
 // testVaultKEK is a fixed, non-secret 32-byte master KEK shared by every
 // TestVault instance. Using one constant (rather than a random KEK per call)
 // lets independently-constructed LocalBackend instances — one per

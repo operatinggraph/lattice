@@ -109,6 +109,9 @@ func setupDomainEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install wellness-domain: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	// The operator grant is only half the claim — the workplace-confinement
+	// guard reads the holdsRole LINK to decide whether its caller is root.
+	testutil.SeedHoldsRole(t, ctx, conn, domainActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 
