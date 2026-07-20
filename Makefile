@@ -1280,11 +1280,17 @@ refresh-loftspace:
 ## (loupe-operator-auth-lift-design.md §3.2) — `make run-gateway` (:8080,
 ## LOUPE_GATEWAY_URL's default) must also be running, which `make up` alone
 ## does not start; `up-full`/`up-full-capability` do.
+## Runs under the scoped consoleOperator identity from LOUPE_OPERATOR_JSON, the
+## same key up-full passes (mechanism B: never root). The key carries the ctrl.*
+## grants the control plane checks, so without it every control-plane request —
+## the component pages' Control panels and their disable/enable/revoke buttons —
+## is denied. `make dev-seed-console-operator` provisions it.
 run-loupe:
 	@echo "==> Building loupe binary..."
 	go build -o bin/loupe ./cmd/loupe
 	@echo "==> Loupe on http://127.0.0.1:7777 (Ctrl-C to stop)..."
-	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) LOUPE_DEV_AUTH=1 ./bin/loupe
+	@LOUPE_OP_KEY=$$(jq -r '.operatorActorKey // empty' $(LOUPE_OPERATOR_JSON) 2>/dev/null); \
+	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) LOUPE_OPERATOR_ACTOR_KEY="$$LOUPE_OP_KEY" LOUPE_DEV_AUTH=1 ./bin/loupe
 
 ## run-gateway — Build + run the Gateway (external write-path translator) in the
 ## FOREGROUND, DEV MODE (trusts the checked-in dev JWT key — never for prod).

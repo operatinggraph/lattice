@@ -187,6 +187,15 @@ func run(logger *slog.Logger) error {
 	operatorActorKey := configuredOperatorKey
 	if operatorActorKey == "" {
 		operatorActorKey = adminActor
+		if operatorActorKey != "" {
+			// The primordial admin holds the bootstrap `operator` role, which is
+			// deliberately disjoint from the control-operator/consoleOperator
+			// roles carrying the ctrl.* grants (packages/control-authz). Falling
+			// back to it therefore denies every control-plane request rather
+			// than degrading gracefully, so say so at the seam that causes it.
+			logger.Warn("LOUPE_OPERATOR_ACTOR_KEY unset: falling back to the bootstrap admin actor, which by design holds no ctrl.* grants; every control-plane request will be denied with \"controlauth: actor lacks the control grant\" — provision a console operator (make dev-seed-console-operator) and pass its key",
+				"actor", operatorActorKey)
+		}
 	}
 	if operatorActorKey == "" {
 		logger.Warn("no operator actor configured (LOUPE_OPERATOR_ACTOR_KEY unset and no bootstrap admin actor loaded); control-plane requests will carry no Lattice-Actor header")
