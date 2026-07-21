@@ -1,0 +1,40 @@
+name: demo-operator
+version: 0.1.0
+description: |
+  Declares a scoped demoOperator role holding INSPECT-ONLY grants: the
+  non-mutating control-plane reads (ctrl.weaver.read, ctrl.loom.read,
+  ctrl.refractor.read) plus this role's read-side wildcard grant
+  (demoOperatorReadGrants), and NOTHING that writes. It is the
+  console-operator package minus every write — no ShredIdentityKey,
+  RevokeActor, UnrevokeActor, AttachObject, DetachObject, no pkg-lifecycle
+  trio, no mutating ctrl.<component>.<verb> op, no vault decrypt, no generic
+  op-submit. This is the platform-side security boundary for exposing Loupe
+  as a public read-only demo: every write surface a visitor could reach is
+  capability-denied at the Processor because this role simply holds no write
+  grant — Loupe's own LOUPE_DEMO_MODE is defense in depth, not the boundary.
+  Like console-operator, demoOperator is an ordinary (non-system) rbac actor,
+  distinct from the kernel-primordial `operator` role (no anchor, no
+  boot-snapshot dependency), and this package ships only the grant data —
+  provisioning the demo identity + re-scoping it onto this role is a separate
+  Loupe-lane wiring step gated on the demo's public-launch phase.
+  loupe-f20-demo-operator-ux.md §3.1.
+depends:
+  - rbac-domain
+  - identity-domain
+  - privacy-base
+  - objects-base
+declares:
+  lenses:
+    - canonicalName: demoOperatorReadGrants
+      adapter: postgres
+      engine: full
+  permissions:
+    - operationType: ctrl.weaver.read
+      scope: any
+      grantsTo: [demoOperator]
+    - operationType: ctrl.loom.read
+      scope: any
+      grantsTo: [demoOperator]
+    - operationType: ctrl.refractor.read
+      scope: any
+      grantsTo: [demoOperator]
