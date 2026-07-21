@@ -1595,15 +1595,17 @@ lint-package-version:
 	@echo "==> Linting packages/ version bumps..."
 	go run ./scripts/lint-package-version.go
 
-## install-skills — Install the canonical agentic-ops role-skills from agents/
-## into the (gitignored) .claude/skills/ where the harness discovers them.
+## install-skills — Symlink the canonical agentic-ops role-skills from agents/
+## into the (gitignored) .claude/skills/ where the harness discovers them. A
+## symlink (not a copy) so edits to agents/<role>/SKILL.md take effect live —
+## Claude Code follows the symlink and watches the target for changes.
 install-skills:
 	@mkdir -p .claude/skills
 	@for d in agents/*/; do \
 		name=$$(basename $$d); \
 		rm -rf ".claude/skills/$$name"; \
-		cp -R "$$d" ".claude/skills/$$name"; \
-		echo "installed skill: $$name"; \
+		ln -s "../../$$d" ".claude/skills/$$name"; \
+		echo "linked skill: $$name -> $$d"; \
 	done
 
 ## clean — Remove compiled binaries.
