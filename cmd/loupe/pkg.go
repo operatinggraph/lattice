@@ -36,6 +36,7 @@ import (
 	clinicreminders "github.com/asolgan/lattice/packages/clinic-reminders"
 	consoleoperator "github.com/asolgan/lattice/packages/console-operator"
 	controlauthz "github.com/asolgan/lattice/packages/control-authz"
+	demooperator "github.com/asolgan/lattice/packages/demo-operator"
 	edgemanifest "github.com/asolgan/lattice/packages/edge-manifest"
 	frontdesk "github.com/asolgan/lattice/packages/front-desk"
 	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
@@ -86,6 +87,7 @@ var packageRegistry = map[string]pkgmgr.Definition{
 	"semantic-contracts":     semanticcontracts.Package,
 	"control-authz":          controlauthz.Package,
 	"console-operator":       consoleoperator.Package,
+	"demo-operator":          demooperator.Package,
 	"wellness-domain":        wellnessdomain.Package,
 }
 
