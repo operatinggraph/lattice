@@ -3,6 +3,8 @@ package weaver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -790,6 +792,83 @@ func TestHandleRow_EffectDispatchAndClose(t *testing.T) {
 	}
 	if len(stats.Window) != 1 || !stats.Window[0] {
 		t.Fatalf("window after close = %v, want [true]", stats.Window)
+	}
+}
+
+// TestClearClosedMarks_ConcurrentCloseCreditsEffectOnce is the regression for
+// the lane-1/sweep `__effect` double-credit: two paths clearing the SAME closed
+// gap each used to record a close, because the credit was gated on the mark
+// being FOUND at read time, not on winning its delete. Both reading found=true
+// before either deleted, both credited — inflating the confidence window's
+// close count and masking a real LensEffectMismatch. Revision-conditioning the
+// delete makes exactly one concurrent path win, so exactly one close is
+// credited. The window is made two-deep (a fresh dispatch plus one reclaim
+// re-fire) so a double-credit is observable: one close must flip exactly one
+// pending slot, never both.
+func TestClearClosedMarks_ConcurrentCloseCreditsEffectOnce(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	// A fresh targetID per iteration keeps each (target, gap, action) `__effect`
+	// window independent — the window key carries no entityID, so reusing a
+	// target would let iterations accumulate into one window.
+	for i := 0; i < 20; i++ {
+		targetID := fmt.Sprintf("fixtureRace%d", i)
+		target := &Target{
+			TargetID: targetID,
+			Gaps:     map[string]GapAction{"missing_x": {Action: actionDirectOp, Operation: "FixX"}},
+		}
+		h.seedTarget(target)
+		entityID := testNanoID(t)
+		open := map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": true, "missing_x": true,
+		}
+		if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, open, 1, 1)); dec != substrate.Ack {
+			t.Fatalf("iter %d: fresh dispatch must Ack, got %v", i, dec)
+		}
+		h.nextOp(t) // drain the dispatch op
+
+		// A second dispatch of the still-open gap (as the sweep's reclaim re-fires
+		// an expired mark, the mark surviving) makes the window two-deep.
+		if err := h.engine.marks.recordEffectDispatch(ctx, targetID, "missing_x", actionDirectOp); err != nil {
+			t.Fatalf("iter %d: second dispatch record: %v", i, err)
+		}
+
+		closed := map[string]any{
+			"entityKey": "vtx.leaseApp." + entityID, "violating": false, "missing_x": false,
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for g := 0; g < 2; g++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				h.engine.clearClosedMarks(ctx, target, targetID, entityID, closed)
+			}()
+		}
+		close(start) // release both at once to maximise overlap
+		wg.Wait()
+
+		stats, _, ok, err := readEffectStats(ctx, h.engine.marks, targetID, "missing_x", actionDirectOp)
+		if err != nil || !ok {
+			t.Fatalf("iter %d: read effect stats: err=%v ok=%v", i, err, ok)
+		}
+		closedCount := 0
+		for _, w := range stats.Window {
+			if w {
+				closedCount++
+			}
+		}
+		if closedCount != 1 {
+			t.Fatalf("iter %d: window %v credited %d closes, want exactly 1 (double-credit regression)",
+				i, stats.Window, closedCount)
+		}
 	}
 }
 

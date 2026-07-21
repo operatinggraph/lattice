@@ -648,12 +648,18 @@ func (e *Engine) fire(ctx context.Context, targetID, entityID, col string, markR
 // gap's not-currently-true condition with the mark delete, so it runs in exactly
 // the same cases (gap closed, column dropped, or entity deleted).
 //
-// A gap actually being cleared here (a mark existed) is also a CLOSE event for
-// the §10.3 `__effect` confidence window (design §3.2): the mark's Action names
-// which actionRef to record the close against. Read BEFORE delete (the delete
-// itself carries no value to recover the action from); a read failure logs and
-// skips the effect record — the window is a future ranking input, never a gate,
-// so it must never block the mark/count clear it rides alongside.
+// A gap actually being cleared here is also a CLOSE event for the §10.3
+// `__effect` confidence window (design §3.2): the mark's Action names which
+// actionRef to record the close against, read BEFORE the delete (the delete
+// carries no value to recover the action from). The delete is revision-
+// conditioned on that read and the close credited only when THIS path wins it,
+// so lane-1 racing the sweep on the same close credits it once, not twice
+// (mirroring releaseCompletedLeg and every other sweep-path mark mutation); a
+// lost race is a normal outcome, never an error, and must not Nak. A read
+// failure has no revision to condition on, so it logs, falls back to a blind
+// best-effort clear, and records no close — the window is a future ranking
+// input, never a gate, so it must never block the mark/count clear it rides
+// alongside.
 func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID, entityID string, row map[string]any) bool {
 	ok := true
 	for _, col := range markCandidateColumns(target, row) {
@@ -668,12 +674,22 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 			e.issues.clear(issueKeyGap(targetID, col))
 			continue
 		}
-		rec, _, found, gErr := e.marks.get(ctx, targetID, entityID, col)
+		rec, markRev, found, gErr := e.marks.get(ctx, targetID, entityID, col)
 		if gErr != nil {
 			e.logger.Warn("weaver: mark read before clear failed; effect close not recorded",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", gErr)
 		}
-		if err := e.marks.delete(ctx, targetID, entityID, col); err != nil {
+		markCleared := false
+		if gErr == nil && found {
+			conflict, err := e.marks.deleteRevision(ctx, targetID, entityID, col, markRev)
+			if err != nil {
+				e.logger.Error("weaver: mark clear failed",
+					"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
+				ok = false
+			} else {
+				markCleared = !conflict
+			}
+		} else if err := e.marks.delete(ctx, targetID, entityID, col); err != nil {
 			e.logger.Error("weaver: mark clear failed",
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 			ok = false
@@ -683,7 +699,7 @@ func (e *Engine) clearClosedMarks(ctx context.Context, target *Target, targetID,
 				"targetId", targetID, "entityId", entityID, "gap", col, "err", err)
 			ok = false
 		}
-		if gErr == nil && found {
+		if markCleared {
 			if cErr := e.marks.recordEffectClose(ctx, targetID, col, rec.Action); cErr != nil {
 				e.logger.Warn("weaver: effect close record failed",
 					"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
