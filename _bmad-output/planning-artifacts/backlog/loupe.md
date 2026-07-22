@@ -27,7 +27,7 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 |---|---|---|---|---|
 | **F13 — Chronicler Time Machine** | Flow-history browser + map scrubber + ledger browser (platform-edges brief §4 L1–L3); overrides the Chronicler design's "rides F6" display note (Loupe scope). | ★★★ | L | 🚧 L1 reconciled (shipped Flows tab satisfies it, no rebuild) + L2 v1 SHIPPED (flow-liveness scrubber); L2-full/L3 blocked-on: Chronicler archive mode (lattice, unscheduled) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
 | **F21 — demo-operator cold re-mint survives a world reset** | Hosted Loupe died on every world rotation: a reset rescans ~13k events, so the re-minted operator's grant sat behind the backlog and the 4m poll expired, degrading `demo-up.sh` to no-Loupe. Root cause = the auth-plane class in [the reconciliation design](../../implementation-artifacts/capability-projection-reconciliation-design.md). | ★★★ | M | ✅ provisioning now waits on convergence; `lens reproject` repairs a lost doc |
-| **F22 — lens Contents panel handles `nats_subject` targets** | `lensRowsTarget` (cmd/loupe/lens.go:393) knows only `nats_kv` and `postgres`, so a valid `nats_subject` lens falls to `default` and renders as a red "unknown targetType" malformed-spec error — visible in the public demo. The platform accepts three types; a `nats_subject` target is a per-actor delta stream with no stored rows by design. Add a third rows-target kind, keeping `default` for real malformations. | ★★ | S | 📋 ready — seen live on edgeCatalogRoles |
+| **F22 — lens Contents panel handles `nats_subject` targets** | `lensRowsTarget` (cmd/loupe/lens.go:393) knows only `nats_kv` and `postgres`, so a valid `nats_subject` lens falls to `default` and renders as a red "unknown targetType" malformed-spec error — visible in the public demo. The platform accepts three types; a `nats_subject` target is a per-actor delta stream with no stored rows by design. Add a third rows-target kind, keeping `default` for real malformations. | ★★ | S | ✅ SHIPPED |
 
 ## New capability surfaces — 2026-07-18 PO survey
 
@@ -78,6 +78,7 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · `d48541a3` · [Loupe/F22] F22 CLOSED — Contents panel handles `nats_subject` targets honestly, points Personal targets to Edge Fleet. Lead self-review, live-verified, CI green
 - 2026-07-22 · `0690381e` · [Loupe/F20.4] F20 CLOSED — hosted read-only Loupe exposed on its own subdomain; per-reset operator provisioning; exposure checklist #1–#7 discharged live (Andrew's go)
 - 2026-07-19 · `c645c772` · [Loupe/F20.2] Demo polish — inspect-only control reads (omission-denies classification), write-affordance suppression, `/login` disclaimer. 3-layer review fixed forward, live-verified, CI green
 - 2026-07-19 · `ca941e58` · [Loupe/F20.5] Public-origin posture — `LOUPE_PUBLIC_ORIGIN` (origin gate + Secure cookie), dev-auth⇒demo boot coupling, credential-exchange limiter, SSE cap knob. 3-layer review fixed forward, live-verified, CI green
