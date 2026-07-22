@@ -10,3 +10,7 @@ Type=oneshot
 WorkingDirectory=__REPO__
 ExecStart=__REPO__/deploy/demo/demo-reset.sh
 TimeoutStartSec=1800
+# demo-up.sh leaves the stack's host processes (processor … facet) running in
+# the background, lifecycle-managed by the scripts' own pkills; the default
+# control-group cleanup would reap them all the moment the oneshot deactivates.
+KillMode=process
