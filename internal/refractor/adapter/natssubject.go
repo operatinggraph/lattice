@@ -38,7 +38,7 @@ const (
 // deltaEnvelope is the wire shape a Personal Lens delta publishes to
 // lattice.sync.user.<actor> (docs/components/refractor.md).
 type deltaEnvelope struct {
-	Op            string         `json:"op"` // "upsert" | "delete"
+	Op            string         `json:"op"` // "upsert" | "delete" | "keyset" | "hydrationComplete"
 	Key           string         `json:"key"`
 	Anchor        string         `json:"anchor,omitempty"`
 	Kind          string         `json:"kind,omitempty"`
@@ -47,6 +47,18 @@ type deltaEnvelope struct {
 	ProjectionSeq uint64         `json:"projectionSeq"`
 	Encrypted     bool           `json:"encrypted"`
 	Data          map[string]any `json:"data,omitempty"`
+	// Lens is the producing lens's rule ID (personal-lens-retraction-
+	// design.md §3.1, R1) — set on "upsert" and "keyset" envelopes so the
+	// Edge client can attribute a key to the lens that asserts it. A same
+	// key can be projected by more than one lens (e.g. edgeTasksQueued and
+	// edgeTasks both project manifest.task.<id>); attribution is what lets
+	// the client refcount survive one lens retracting while another still
+	// asserts.
+	Lens string `json:"lens,omitempty"`
+	// Keys carries the complete, authoritative business-key set a "keyset"
+	// envelope asserts for its actor+lens as of Revision — nil/empty is a
+	// valid, meaningful value (the last-row-retraction case).
+	Keys []string `json:"keys,omitempty"`
 }
 
 // NatsSubjectAdapter publishes materialized rows as per-recipient delta
@@ -60,6 +72,7 @@ type deltaEnvelope struct {
 // the recipient (the Edge Sync Manager) dedups/reorders by envelope revision.
 type NatsSubjectAdapter struct {
 	conn          *substrate.Conn
+	ruleID        string
 	subjectPrefix string
 	stream        string
 	keyOrder      []string // full Into.Key order, including PersonalActorKeyField
@@ -67,11 +80,17 @@ type NatsSubjectAdapter struct {
 
 // NewNatsSubjectAdapter creates a NatsSubjectAdapter and ensures the backing
 // JetStream stream exists (idempotent — safe on every process startup,
-// mirrors the nats_kv case's JIT bucket creation in cmd/refractor).
+// mirrors the nats_kv case's JIT bucket creation in cmd/refractor). ruleID
+// is the owning lens's rule ID, stamped onto every "upsert"/"keyset"
+// envelope's Lens field (personal-lens-retraction-design.md §3.1) so the
+// Edge client can attribute a key to the lens asserting it.
 // keyOrder must include PersonalActorKeyField exactly once; the platform's
 // NanoID alphabet carries no dots, so the reserved field's value is a safe
 // single subject token (subjects.PersonalSync validates it defensively).
-func NewNatsSubjectAdapter(ctx context.Context, conn *substrate.Conn, subjectPrefix, stream string, keyOrder []string) (*NatsSubjectAdapter, error) {
+func NewNatsSubjectAdapter(ctx context.Context, conn *substrate.Conn, ruleID, subjectPrefix, stream string, keyOrder []string) (*NatsSubjectAdapter, error) {
+	if ruleID == "" {
+		return nil, errors.New("natssubject: ruleID must not be empty")
+	}
 	if subjectPrefix == "" {
 		return nil, errors.New("natssubject: subjectPrefix must not be empty")
 	}
@@ -84,7 +103,7 @@ func NewNatsSubjectAdapter(ctx context.Context, conn *substrate.Conn, subjectPre
 	if err := ensureSyncStream(ctx, conn, stream, subjectPrefix); err != nil {
 		return nil, fmt.Errorf("natssubject: ensure stream %q: %w", stream, err)
 	}
-	return &NatsSubjectAdapter{conn: conn, subjectPrefix: subjectPrefix, stream: stream, keyOrder: keyOrder}, nil
+	return &NatsSubjectAdapter{conn: conn, ruleID: ruleID, subjectPrefix: subjectPrefix, stream: stream, keyOrder: keyOrder}, nil
 }
 
 // syncStreamMaxAge bounds the SYNC stream's retention (personal-secure-lens-
@@ -235,8 +254,37 @@ func (a *NatsSubjectAdapter) Upsert(ctx context.Context, keys map[string]any, ro
 		ProjectionSeq: projectionSeq,
 		Encrypted:     rowHasCiphertext(data),
 		Data:          data,
+		Lens:          a.ruleID,
 	}
 	return a.publish(ctx, actor, env)
+}
+
+// PublishKeySet publishes a "keyset" frame to actorID's subject: the
+// complete, authoritative set of keys this adapter's lens currently
+// projects for that actor, as of revision (personal-lens-retraction-
+// design.md §3.1-3.2, R1). Each entry in keys is rendered through the same
+// buildKey derivation Upsert/Delete use, so the client diffs directly
+// against the key strings it already stores. A nil/empty keys is a valid,
+// meaningful frame — the last-row-retraction / missing-actor case — and is
+// published exactly like a non-empty one; only Op=="keyset" gates the
+// client's interpretation, not the field's presence.
+func (a *NatsSubjectAdapter) PublishKeySet(ctx context.Context, actorID string, keys []map[string]any, revision uint64) error {
+	keyStrs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		ks, err := a.buildKey(k)
+		if err != nil {
+			return fmt.Errorf("natssubject keyset: %w", err)
+		}
+		keyStrs = append(keyStrs, ks)
+	}
+	env := deltaEnvelope{
+		Op:            "keyset",
+		Lens:          a.ruleID,
+		Keys:          keyStrs,
+		Revision:      revision,
+		ProjectionSeq: revision,
+	}
+	return a.publish(ctx, actorID, env)
 }
 
 // rowHasCiphertext reports whether any of data's values is shaped like a

@@ -56,15 +56,29 @@ func (p *Pipeline) Hydrate(ctx context.Context, identityID string) (uint64, erro
 	}
 
 	adpt := p.currentAdapter()
+	var frameKeys []map[string]any
 	for _, result := range results {
 		var writeErr error
 		if result.Delete {
 			writeErr = adpt.Delete(ctx, result.Keys, highWater)
 		} else {
 			writeErr = adpt.Upsert(ctx, result.Keys, result.Row, highWater)
+			frameKeys = append(frameKeys, result.Keys)
 		}
 		if writeErr != nil {
 			return 0, fmt.Errorf("pipeline: hydrate %q: write: %w", identityID, writeErr)
+		}
+	}
+
+	// A keyset frame at highWater — the complete authoritative set this cold
+	// bulk projection just published — lets the cold reconnect prune
+	// whatever dropped out since the device's last mirror, exactly like a
+	// live retraction (personal-lens-retraction-design.md §3.4). Published
+	// before the terminal marker so a client observing the marker has
+	// already seen the frame.
+	if publisher, ok := adpt.(adapter.KeySetPublisher); ok {
+		if err := publisher.PublishKeySet(ctx, identityID, frameKeys, highWater); err != nil {
+			return 0, fmt.Errorf("pipeline: hydrate %q: keyset: %w", identityID, err)
 		}
 	}
 

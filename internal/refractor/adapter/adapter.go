@@ -64,3 +64,18 @@ type RowReader interface {
 type HydrationMarkerPublisher interface {
 	PublishHydrationComplete(ctx context.Context, actorID string, revision uint64) error
 }
+
+// KeySetPublisher is an optional interface for adapters that support
+// publishing a "keyset" frame — the complete, authoritative set of keys a
+// lens currently projects for one actor, as of one revision
+// (personal-lens-retraction-design.md §3.1, R1). Implemented by
+// NatsSubjectAdapter. keys carries the same field-name-to-value key maps
+// Upsert accepts, one per row this lens currently projects for actorID
+// (empty/nil when the actor's evaluation surfaced no surviving row — the
+// last-row-retraction case a keyset frame exists to signal). The Edge
+// client diffs its per-lens mirror against the frame and prunes whatever
+// dropped out; the adapter derives each key's on-wire string itself, the
+// same derivation Upsert/Delete use.
+type KeySetPublisher interface {
+	PublishKeySet(ctx context.Context, actorID string, keys []map[string]any, revision uint64) error
+}

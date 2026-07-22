@@ -65,7 +65,7 @@ func TestEvaluateForEntry_CompositeKeyProducer_DeliversAllKeyColumns(t *testing.
 	}
 
 	// Threaded composite key columns → all three delivered.
-	results, err := newPipeline([]string{"actor_id", "anchor_id", "grant_source"}).
+	results, _, err := newPipeline([]string{"actor_id", "anchor_id", "grant_source"}).
 		evaluateForEntry(ctx, liveEntry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
@@ -77,7 +77,7 @@ func TestEvaluateForEntry_CompositeKeyProducer_DeliversAllKeyColumns(t *testing.
 	require.Len(t, results[0].Keys, 3, "the composite key is complete")
 
 	// Legacy control: un-threaded → only the first RETURN item (the bug).
-	legacy, err := newPipeline(nil).evaluateForEntry(ctx, liveEntry)
+	legacy, _, err := newPipeline(nil).evaluateForEntry(ctx, liveEntry)
 	require.NoError(t, err)
 	require.Len(t, legacy, 1)
 	require.Len(t, legacy[0].Keys, 1, "the un-threaded fallback keys on the first item only")
@@ -118,7 +118,7 @@ func TestEvaluateForEntry_CompositeKeyGrant_RetractsOnTombstone(t *testing.T) {
 		IsDeleted:  true,
 		Properties: map[string]any{"isDeleted": true},
 	}
-	results, err := p.evaluateForEntry(ctx, tombstone)
+	results, _, err := p.evaluateForEntry(ctx, tombstone)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.True(t, results[0].Delete, "a tombstoned identity must retract its self-grant")

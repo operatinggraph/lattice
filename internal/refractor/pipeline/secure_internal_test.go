@@ -450,7 +450,7 @@ func TestSecureLens_FullEngineRoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(vertexBody, &vertexProps))
 	entry := ruleengine.NodeEntry{CoreKVKey: identityKey, NodeLabel: "identity", Properties: vertexProps}
 
-	results, err := p.evaluateForEntry(ctx, entry)
+	results, _, err := p.evaluateForEntry(ctx, entry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "Alice Applicant", results[0].Row["name"], "the projected row carries decrypted plaintext")
@@ -464,7 +464,7 @@ func TestSecureLens_FullEngineRoundTrip(t *testing.T) {
 
 	// Shred, then re-evaluate: the same row now projects null PII.
 	require.NoError(t, v.ShredKey(ctx, identityKey))
-	results, err = p.evaluateForEntry(ctx, entry)
+	results, _, err = p.evaluateForEntry(ctx, entry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Nil(t, results[0].Row["name"], "post-shred reprojection self-nullifies the PII column")

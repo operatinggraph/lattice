@@ -104,7 +104,7 @@ func activatePersonalLens(t *testing.T, h *pl2Harness, lensID, cypher string, bu
 	const subjectPrefix = "lattice.sync.user"
 	const syncStream = "SYNC"
 
-	adpt, err := adapter.NewNatsSubjectAdapter(h.ctx, h.conn, subjectPrefix, syncStream,
+	adpt, err := adapter.NewNatsSubjectAdapter(h.ctx, h.conn, lensID, subjectPrefix, syncStream,
 		append([]string{adapter.PersonalActorKeyField}, businessKeys...))
 	require.NoError(t, err)
 
@@ -342,8 +342,16 @@ func TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = cons.Next(jetstream.FetchMaxWait(3 * time.Second))
-	require.Error(t, err, "a mismatched Interest Set filter must suppress the lease delta")
+	// A mismatched Interest Set filter must suppress the lease delta — the
+	// link event still enumerates the recipient and, per the retraction
+	// design, publishes an empty keyset frame (the "no surviving rows"
+	// signal) rather than an upsert.
+	msg, err := cons.Next(jetstream.FetchMaxWait(3 * time.Second))
+	require.NoError(t, err, "an Interest-Set-suppressed actor still receives an empty keyset frame")
+	var suppressedEnv map[string]any
+	require.NoError(t, json.Unmarshal(msg.Data(), &suppressedEnv))
+	require.Equal(t, "keyset", suppressedEnv["op"], "suppression must retract by an empty frame, never publish the row")
+	require.Empty(t, suppressedEnv["keys"], "no surviving keys for the Interest-Set-filtered actor")
 
 	// Sanity: IsRelevant itself agrees (isolates the filter from any fan-out
 	// timing flake in the assertion above).
@@ -364,7 +372,7 @@ func TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits(t *testing.T) {
 
 	writePL2Vertex(t, h, leaseKey, "lease", map[string]any{"id": "lease-pl2-2", "monthlyRent": 3100})
 
-	msg, err := cons.Next(jetstream.FetchMaxWait(15 * time.Second))
+	msg, err = cons.Next(jetstream.FetchMaxWait(15 * time.Second))
 	require.NoError(t, err, "after deregistering, the identity must receive the next delta")
 	var env map[string]any
 	require.NoError(t, json.Unmarshal(msg.Data(), &env))

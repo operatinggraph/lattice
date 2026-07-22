@@ -68,15 +68,21 @@ func projectedAtFromProvenance(nodeProps map[string]any) (string, error) {
 // point both the stream consumer (handle) and the adjacency watch
 // (handleAdjUpdate) flow through, so no plain-lens evaluation path can bypass
 // it.
-func (p *Pipeline) evaluateForEntry(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
-	results, err := p.evaluateForEntryRaw(ctx, entry)
+// The second return value is the enumerated-actor list (full vertex keys) —
+// non-nil only for an actor-aware pipeline (personal-lens-retraction-
+// design.md §3.2, R1: the frame-emission caller needs the complete
+// enumerated set, not just the actors results happened to name, because an
+// actor whose evaluation surfaced zero surviving rows must still get an
+// empty retraction frame). Nil for a plain lens.
+func (p *Pipeline) evaluateForEntry(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
+	results, enumeratedActors, err := p.evaluateForEntryRaw(ctx, entry)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := p.applySecureDecrypt(ctx, results); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return results, nil
+	return results, enumeratedActors, nil
 }
 
 // applySecureDecrypt runs the installed SecureDecryptor over results; a no-op
@@ -93,9 +99,9 @@ func (p *Pipeline) applySecureDecrypt(ctx context.Context, results []ruleengine.
 }
 
 // evaluateForEntryRaw is evaluateForEntry's core, pre-decrypt.
-func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
 	if p.fullEngine == nil || p.fullCR == nil {
-		return nil, fmt.Errorf("pipeline: full engine/compiled rule unset for rule %q", p.ruleID)
+		return nil, nil, fmt.Errorf("pipeline: full engine/compiled rule unset for rule %q", p.ruleID)
 	}
 
 	// Cross-vertex fan-out: on a non-actor event with an ActorEnumerator
@@ -109,17 +115,25 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 		}
 	}
 
-	// Actor tombstone shortcut: emit a Delete against the Capability KV
-	// target key so the cap entry is removed when an identity vertex is
-	// soft-deleted. Only the actor-aware pipeline (ActorEnumerator installed)
-	// takes this path — other lenses let the cypher re-execute normally.
+	// Actor tombstone: the actor itself (the vertex event's own key) is the
+	// sole enumerated actor. A personal (KeySetPublisher) target has no
+	// cap-shaped delete key that fits its wire shape (natssubject.Delete
+	// requires __actor in Keys, which a bare "key" map lacks) — publishing
+	// one is the identity-tombstone defect this design closes structurally
+	// (§3.4): return no result, just the enumerated actor, so
+	// emitPersonalFrames's empty frame retracts every key for this identity
+	// instead. A capability (or other actor-aware) target keeps the
+	// existing Delete-against-cap-key shortcut.
 	if entry.IsDeleted && p.actorEnumerator != nil {
+		if _, isPersonal := p.currentAdapter().(adapter.KeySetPublisher); isPersonal {
+			return nil, []string{entry.CoreKVKey}, nil
+		}
 		delKey := p.actorDeleteKeyFor(entry.CoreKVKey)
 		return []ruleengine.EvalResult{{
 			Delete: true,
 			Keys:   map[string]any{"key": delKey},
 			Row:    nil,
-		}}, nil
+		}}, nil, nil
 	}
 
 	// Plain-projection anchor tombstone: retract the row the deleted anchor
@@ -134,13 +148,13 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 		eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 		if keys, ok := p.fullEngine.AnchorDeleteResult(
 			p.fullCR, entry.CoreKVKey, eventType, entry.Properties); ok {
-			return []ruleengine.EvalResult{{Delete: true, Keys: keys, Row: nil}}, nil
+			return []ruleengine.EvalResult{{Delete: true, Keys: keys, Row: nil}}, nil, nil
 		}
 	}
 
 	results, err := p.executeFullForActor(ctx, entry.CoreKVKey, entry.Properties)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Filter-retraction presence check (plain projection lenses): when a
 	// live event anchor no longer appears in the re-derived row set — a
@@ -168,11 +182,18 @@ func (p *Pipeline) evaluateForEntryRaw(ctx context.Context, entry ruleengine.Nod
 			var derr error
 			results, derr = p.applyDiffRetraction(ctx, results)
 			if derr != nil {
-				return nil, derr
+				return nil, nil, derr
 			}
 		}
 	}
-	return results, nil
+	// No frame here even when actorEnumerator != nil: frame emission is
+	// scoped to the reprojectActors code path (fan-out + Hydrate,
+	// personal-lens-retraction-design.md's "For Andrew" summary) — this
+	// branch is the actor's OWN vertex re-evaluating itself outside that
+	// path (e.g. an identity property edit), which fires on every such
+	// mutation and would make frames far chattier than the design costs
+	// for. A later fan-out event or hydrate still converges any drift.
+	return results, nil, nil
 }
 
 // executeFullForActor runs the full-engine cypher against a single
@@ -317,19 +338,20 @@ func detectOutputKeyCollision(results []ruleengine.EvalResult) (collidingKey str
 // on a non-actor vertex; enumerate affected actors and re-execute the cypher
 // per actor. Each actor's result set is appended to the returned []EvalResult
 // — the pipeline write loop handles each result row independently.
-func (p *Pipeline) evaluateFanOut(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluateFanOut(ctx context.Context, entry ruleengine.NodeEntry) ([]ruleengine.EvalResult, []string, error) {
 	eventType, _, _ := substrate.ParseVertexKey(entry.CoreKVKey)
 	actorKeys, err := p.actorEnumerator.Enumerate(ctx, entry.CoreKVKey, eventType)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
+		return nil, nil, fmt.Errorf("pipeline: fan-out enumerate: %w", err)
 	}
 	// No affected actors → no projection to write. This is a valid
 	// outcome (e.g. a role with no assignments yet, or a service in a
 	// location no actor sits inside).
 	if len(actorKeys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return p.reprojectActors(ctx, actorKeys)
+	results, err := p.reprojectActors(ctx, actorKeys)
+	return results, actorKeys, err
 }
 
 // evaluateLinkFanOut handles a link CDC event (create or tombstone) on the
@@ -346,11 +368,11 @@ func (p *Pipeline) evaluateFanOut(ctx context.Context, entry ruleengine.NodeEntr
 // (create) / removes (tombstone) by EdgeID, so the dedicated consumer's later
 // Build for the same edge is a no-op. This guarantees the reprojection never
 // races ahead of the edge that triggered it.
-func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDeleted bool) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDeleted bool) ([]ruleengine.EvalResult, []string, error) {
 	srcType, srcID, linkName, dstType, dstID, ok := substrate.ParseLinkKey(linkKey)
 	if !ok {
 		// ClassifyKey already gated KindLink; unreachable in practice.
-		return nil, fmt.Errorf("pipeline: link fan-out: not a Contract #1 link key: %q", linkKey)
+		return nil, nil, fmt.Errorf("pipeline: link fan-out: not a Contract #1 link key: %q", linkKey)
 	}
 
 	// Idempotently reflect this link in adjKV before enumerating. The link key
@@ -367,7 +389,7 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDel
 	}
 	for _, evt := range []adjacency.CoreKVEvent{outbound, inbound} {
 		if err := adjacency.Build(ctx, p.adjKV, evt); err != nil {
-			return nil, fmt.Errorf("pipeline: link fan-out: adjacency build for %q: %w", linkKey, err)
+			return nil, nil, fmt.Errorf("pipeline: link fan-out: adjacency build for %q: %w", linkKey, err)
 		}
 	}
 
@@ -380,7 +402,7 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDel
 	for _, ep := range []struct{ key, typ string }{{srcVtx, srcType}, {dstVtx, dstType}} {
 		actors, err := p.actorEnumerator.Enumerate(ctx, ep.key, ep.typ)
 		if err != nil {
-			return nil, fmt.Errorf("pipeline: link fan-out enumerate from %q: %w", ep.key, err)
+			return nil, nil, fmt.Errorf("pipeline: link fan-out enumerate from %q: %w", ep.key, err)
 		}
 		for _, a := range actors {
 			actorSet[a] = struct{}{}
@@ -389,13 +411,14 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDel
 	if len(actorSet) == 0 {
 		// A link whose endpoints reach no actors (e.g. a book→author link)
 		// is a correct no-op.
-		return nil, nil
+		return nil, nil, nil
 	}
 	actorKeys := make([]string, 0, len(actorSet))
 	for a := range actorSet {
 		actorKeys = append(actorKeys, a)
 	}
-	return p.reprojectActors(ctx, actorKeys)
+	results, err := p.reprojectActors(ctx, actorKeys)
+	return results, actorKeys, err
 }
 
 // evaluateAspectFanOut handles an aspect CDC event (mutation or tombstone) on
@@ -409,23 +432,24 @@ func (p *Pipeline) evaluateLinkFanOut(ctx context.Context, linkKey string, isDel
 // walks adjacency to the actors that reach it. Adjacency is untouched — an
 // aspect change never alters graph topology — so, unlike the link fan-out, no
 // adjacency.Build is performed here.
-func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, aspectKey string) ([]ruleengine.EvalResult, error) {
+func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, aspectKey string) ([]ruleengine.EvalResult, []string, error) {
 	parentVtx, parentType, _, _, ok := substrate.ParseAspectKey(aspectKey)
 	if !ok {
 		// ClassifyKey already gated KindAspect; unreachable in practice.
-		return nil, fmt.Errorf("pipeline: aspect fan-out: not a Contract #1 aspect key: %q", aspectKey)
+		return nil, nil, fmt.Errorf("pipeline: aspect fan-out: not a Contract #1 aspect key: %q", aspectKey)
 	}
 
 	actorKeys, err := p.actorEnumerator.Enumerate(ctx, parentVtx, parentType)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
+		return nil, nil, fmt.Errorf("pipeline: aspect fan-out enumerate from %q: %w", parentVtx, err)
 	}
 	// No affected actors → no projection to write (e.g. a meta-vertex aspect,
 	// or a vertex no actor reaches). A correct no-op.
 	if len(actorKeys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return p.reprojectActors(ctx, actorKeys)
+	results, err := p.reprojectActors(ctx, actorKeys)
+	return results, actorKeys, err
 }
 
 // reprojectActors re-executes the capability cypher for each actor key and
@@ -433,6 +457,14 @@ func (p *Pipeline) evaluateAspectFanOut(ctx context.Context, aspectKey string) (
 // Delete against its Capability KV key. Shared by the vertex fan-out
 // (evaluateFanOut) and the link fan-out (evaluateLinkFanOut).
 func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]ruleengine.EvalResult, error) {
+	// This currentAdapter() call is independent of the one writeResults/
+	// Hydrate later capture for the actual write — safe because a
+	// HotReloadInto only ever swaps between two adapters of the SAME
+	// target type for a given lens (INTO-only config fields like
+	// subjectPrefix/stream change; Into.Target does not), so the
+	// KeySetPublisher classification cannot flip mid-event even if the
+	// concrete instance does.
+	_, isPersonal := p.currentAdapter().(adapter.KeySetPublisher)
 	var all []ruleengine.EvalResult
 	for _, actorKey := range actorKeys {
 		// Fetch the actor's properties via Core KV so the engine can
@@ -444,6 +476,13 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 			return nil, fmt.Errorf("pipeline: fan-out fetch %q: %w", actorKey, err)
 		}
 		if entryProps == nil {
+			if isPersonal {
+				// A personal target has no cap-shaped delete key that fits
+				// its wire shape (personal-lens-retraction-design.md §3.4) —
+				// the caller's empty keyset frame for this enumerated actor
+				// is what retracts every key, so emit no result here.
+				continue
+			}
 			// Actor missing → emit a Delete (cap key) so the Capability
 			// KV reflects the disappearance. This case can occur if the
 			// actor was tombstoned but its adjacency hasn't been
@@ -463,6 +502,60 @@ func (p *Pipeline) reprojectActors(ctx context.Context, actorKeys []string) ([]r
 		all = append(all, res...)
 	}
 	return all, nil
+}
+
+// emitPersonalFrames publishes one keyset frame per enumerated actor
+// through adpt, when it is KeySetPublisher-capable (personal-lens-
+// retraction-design.md §3.1-3.2, R1). adpt must be the SAME adapter
+// instance the caller already wrote results through (writeResults captures
+// it once via currentAdapter() and passes it here) — re-resolving
+// currentAdapter() independently at this later point would let a
+// concurrent HotReloadInto swap the adapter between the write and the
+// frame, so the frame could describe rows written through a different
+// adapter instance than the one it's attributed to (or a capability-typed
+// pre-reload adapter could see a post-reload personal instance and
+// no-op incorrectly, or vice versa). enumeratedActors is nil for a plain
+// lens or a non-personal actor-aware pipeline — skip entirely (a cheap
+// check before any type assertion). Grouping frame keys from results —
+// rather than treating an actor absent from results as having nothing to
+// say — still yields an empty frame for such an actor, because the loop
+// below ranges over enumeratedActors, not over results: an actor whose
+// evaluation produced zero surviving rows (D1 deny, Interest Set miss, a
+// missing actor, a genuinely empty match) gets a frame with no keys, which
+// is exactly the last-row-retraction signal (§3.2 rule 1). A publish error
+// is logged, not surfaced: the write this frame describes already
+// succeeded, so losing the frame only risks staleness the next live event
+// or hydrate heals (§3.5) — never a wrong delete, since the client only
+// prunes on a frame it actually receives.
+func (p *Pipeline) emitPersonalFrames(ctx context.Context, adpt adapter.Adapter, enumeratedActors []string, results []ruleengine.EvalResult, revision uint64) {
+	if len(enumeratedActors) == 0 {
+		return
+	}
+	publisher, ok := adpt.(adapter.KeySetPublisher)
+	if !ok {
+		return
+	}
+	byActor := make(map[string][]map[string]any, len(enumeratedActors))
+	for i := range results {
+		if results[i].Delete {
+			continue
+		}
+		actorID, _ := results[i].Keys[adapter.PersonalActorKeyField].(string)
+		if actorID == "" {
+			continue
+		}
+		byActor[actorID] = append(byActor[actorID], results[i].Keys)
+	}
+	for _, actorVtxKey := range enumeratedActors {
+		_, actorID, ok := substrate.ParseVertexKey(actorVtxKey)
+		if !ok {
+			continue
+		}
+		if err := publisher.PublishKeySet(ctx, actorID, byActor[actorID], revision); err != nil {
+			slog.Error("pipeline: publish keyset frame",
+				"ruleId", p.ruleID, "actorId", actorID, "err", err)
+		}
+	}
 }
 
 // resultsContainKeys reports whether any non-delete result carries the given

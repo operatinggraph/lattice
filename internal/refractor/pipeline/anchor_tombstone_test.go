@@ -55,7 +55,7 @@ func TestEvaluateForEntry_PlainAnchorTombstone_Retracts(t *testing.T) {
 		IsDeleted:  false,
 		Properties: map[string]any{"lastModifiedAt": "2026-05-15T10:00:00Z"},
 	}
-	results, err := p.evaluateForEntry(ctx, liveEntry)
+	results, _, err := p.evaluateForEntry(ctx, liveEntry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.False(t, results[0].Delete, "a live anchor must upsert, not delete")
@@ -70,7 +70,7 @@ func TestEvaluateForEntry_PlainAnchorTombstone_Retracts(t *testing.T) {
 		IsDeleted:  true,
 		Properties: map[string]any{"isDeleted": true, "lastModifiedAt": "2026-05-15T10:05:00Z"},
 	}
-	results, err = p.evaluateForEntry(ctx, tombstoneEntry)
+	results, _, err = p.evaluateForEntry(ctx, tombstoneEntry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.True(t, results[0].Delete, "a tombstoned anchor must retract its projected row")
@@ -87,7 +87,7 @@ func TestEvaluateForEntry_PlainAnchorTombstone_Retracts(t *testing.T) {
 		IsDeleted:  true,
 		Properties: map[string]any{"isDeleted": true, "lastModifiedAt": "2026-05-15T10:06:00Z"},
 	}
-	results, err = p.evaluateForEntry(ctx, secondaryEntry)
+	results, _, err = p.evaluateForEntry(ctx, secondaryEntry)
 	require.NoError(t, err)
 	for _, r := range results {
 		require.False(t, r.Delete, "a non-anchor tombstone must never emit a Delete against the anchor lens")

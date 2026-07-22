@@ -85,6 +85,18 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 	if p.envelopeFn == nil {
 		return Reprojection{}, ErrNotActorAggregate
 	}
+	if _, isPersonal := p.currentAdapter().(adapter.KeySetPublisher); isPersonal {
+		// A Personal Lens also installs an envelopeFn (the actor-fan-out
+		// injection), so the check above alone doesn't exclude it — but
+		// Reproject's RowReader-diff reconciliation model was never built
+		// for an append-only personal target (no GetRow, no cap-shaped
+		// missing-actor Delete since personal-lens-retraction-design.md
+		// §3.4 — reprojectActors now silently skips that branch for a
+		// KeySetPublisher adapter, which would otherwise turn a real
+		// reconciliation gap into a quiet no-op here). Personal Lens has
+		// its own reconciliation path: Hydrate.
+		return Reprojection{}, ErrNotActorAggregate
+	}
 	if actorKey == "" {
 		return Reprojection{}, fmt.Errorf("pipeline: reproject: actorKey is required")
 	}

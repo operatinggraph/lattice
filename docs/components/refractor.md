@@ -96,12 +96,37 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
   `<subjectPrefix>.<actor>`); the remaining key fields build the envelope's `key` (mirrors
   `NatsKVAdapter.buildKey`). A non-string or subject-unsafe `__actor` value fails the write with an
   error rather than reaching a panic — the value is untrusted, cypher-projected business data.
-- **Delta envelope** (`{op, key, anchor, kind, class, revision, projectionSeq, encrypted, data}`):
-  `op` is `"upsert"` or `"delete"` (plus the Fire PL.4 terminal `"hydrationComplete"` marker, key/data
-  omitted — below); `anchor`/`kind`/`class` are optional envelope metadata a lens's
-  RETURN clause supplies as reserved row-column names (promoted out of `data`, so they never appear
-  twice); `data` is the remaining projected row (nil/omitted for a delete or an all-metadata row).
-  `encrypted` is always `false` through PL.2 — Vault ciphertext passthrough is Fire 5.
+- **Delta envelope** (`{op, key, anchor, kind, class, revision, projectionSeq, encrypted, data, lens}`):
+  `op` is `"upsert"`, `"delete"`, `"keyset"` (Retraction Fire R1, below), or the Fire PL.4 terminal
+  `"hydrationComplete"` marker (key/data omitted); `anchor`/`kind`/`class` are optional envelope
+  metadata a lens's RETURN clause supplies as reserved row-column names (promoted out of `data`, so
+  they never appear twice); `data` is the remaining projected row (nil/omitted for a delete or an
+  all-metadata row). `encrypted` is always `false` through PL.2 — Vault ciphertext passthrough is
+  Fire 5. `lens` (an `"upsert"`/`"keyset"` field) is the producing lens's rule ID, stamped from the
+  adapter's construction-time `ruleID` — the attribution a same-key multi-lens overlap needs (below).
+- **Keyset frame (Retraction Fire R1, `personal-lens-retraction-design.md`).** Personal Lens rows
+  never retracted before this fire, live or on cold hydrate — a row that stopped matching a lens's
+  cypher just lingered on the device forever. R1 closes the gap from the server side: after every
+  successful evaluate+write, the pipeline publishes one **additional** `{op: "keyset", lens,
+  keys: [...], revision, projectionSeq}` frame per enumerated actor, naming that lens's **complete,
+  authoritative** business-key set for the actor as of `revision` — an actor whose evaluation
+  surfaced zero surviving rows (D1 deny, Interest Set miss, a missing/tombstoned actor) gets an
+  **empty** frame, which is the last-row-retraction signal. Frames are emitted only when the whole
+  batch cleanly applied (no retry-enqueue, no terminal DLQ) and are additive on the wire — a client
+  that doesn't understand `"keyset"` acks and ignores it (the existing unknown-`op` fallback), so R1
+  ships with zero risk to a client that hasn't adopted the Edge-side diff (a later, separate fire).
+  The identity-tombstone shortcut and `reprojectActors`' missing-actor branch (previously a
+  cap-shaped `Delete` this adapter rejects — `"__actor" absent from keys"`, redelivered indefinitely
+  since a personal pipeline configures no retry queue) now emit **no** result for a personal target;
+  the caller's empty frame is what retracts instead, closing that redelivery-loop defect
+  structurally. `Hydrate` (below) publishes its own keyset frame — at `highWater`, after its bulk
+  upserts and before the terminal marker — so a cold reconnect prunes exactly like a live retraction.
+  Emission is scoped to the `reprojectActors` code path (fan-out + Hydrate); a personal actor's own
+  vertex mutating itself outside a fan-out (e.g. an identity property edit) re-evaluates directly and
+  never emits a frame — it also never produces a `Delete` for a personal pipeline (filter/diff
+  retraction is gated off for actor-aware lenses), so there is nothing that branch would need to
+  retract. See the design doc for the Edge-side consumption half (client-side `Sources` attribution +
+  `frameHW` guard + dead-lens prune), not yet built.
 - **Stream provisioning.** The adapter JIT-provisions the backing stream via `substrate.EnsureStream`
   (mirrors the `nats_kv` case's JIT bucket creation) rather than a bootstrap pre-provision, and
   **unions** the lens's `subjectPrefix` wildcard into the stream's existing `Subjects` rather than
@@ -135,12 +160,17 @@ shape**) or injected by the fan-out envelope (the **PL.2 shape**) — never both
 - **Hydration Hook (Fire PL.4, `internal/refractor/pipeline.Pipeline.Hydrate`).** The cold-start
   catch-up path for a device that missed the SYNC stream's retention window (or is starting for the
   first time): the control-plane RPC `lattice.ctrl.refractor.personal.hydrate` — request body
-  `{identityId, deviceId?}`, response `{personalHydrate: {hydrated: true, revision}}` — re-executes
-  the personal cypher for that one identity via the same `reprojectActors` machinery the live
-  cross-vertex fan-out uses (§ above), publishes every resulting row as a normal upsert/delete
-  through the active adapter, then (via the adapter's optional `HydrationMarkerPublisher`
-  interface) publishes a terminal `{op: "hydrationComplete", revision, projectionSeq}` marker to the
-  identity's subject. `revision` is the pipeline's own CDC forward-progress
+  `{identityId, deviceId?}`, response `{personalHydrate: {hydrated: true, revision, lenses}}` —
+  re-executes the personal cypher for that one identity via the same `reprojectActors` machinery the
+  live cross-vertex fan-out uses (§ above), publishes every resulting row as a normal upsert/delete
+  through the active adapter, then (via the adapter's optional `KeySetPublisher` interface) its own
+  keyset frame at the same revision (Retraction Fire R1, above), then (via the optional
+  `HydrationMarkerPublisher` interface) a terminal `{op: "hydrationComplete", revision,
+  projectionSeq}` marker to the identity's subject. `lenses` is the set of registered personal
+  hydrators that ran — the Edge client drops any stored attribution for a lens **not** in this set
+  after a completed hydrate, healing a decommissioned/re-minted lens's otherwise permanently-stranded
+  keys (no live emitter would ever retract them any other way). `revision` is the pipeline's own CDC
+  forward-progress
   (`Progress().LastAppliedSeq`) captured *before* reprojection runs, so any live incremental delta
   applied concurrently with or after the hydrate call necessarily carries a revision at or above
   this snapshot's — the Edge's last-writer-wins-by-revision resolution can never let a bulk
@@ -646,7 +676,7 @@ band — so a one-cycle spike does not flap the heartbeat.)
 
 | Feature | Phase | Notes |
 |---------|-------|-------|
-| Personal Lens / Secure Lens | Fires 1–4 (PL.1 transport, PL.2 fan-out + Interest Set, PL.3 D1 security gate, PL.4 Hydration Hook) shipped; PL.5 pending | Per-identity security-filtered projection. PL.1's `nats_subject` target adapter + PL.2's `ActorEnumerator` fan-out/Interest Set + PL.3's `capabilityread`-backed D1 gate + PL.4's `personal.hydrate` cold-bulk-projection RPC (above) ship dark; the NATS `SUB` boundary (Fork 3, subscribe-ACL) and the `personal.{register,deregister,hydrate}` request-body identity binding are now closed (per-identity-nats-subscribe-acl-design.md Fires 1–2) — full untrusted-multi-identity exposure still waits on that design's Fire 3 (Edge design EDGE.3 handoff); Vault ciphertext + transient-key composition (PL.5) remains |
+| Personal Lens / Secure Lens | Fires 1–4 (PL.1 transport, PL.2 fan-out + Interest Set, PL.3 D1 security gate, PL.4 Hydration Hook) shipped; Retraction R1 (server-side keyset frames) shipped, R2 (Edge-side consumption) pending; PL.5 pending | Per-identity security-filtered projection. PL.1's `nats_subject` target adapter + PL.2's `ActorEnumerator` fan-out/Interest Set + PL.3's `capabilityread`-backed D1 gate + PL.4's `personal.hydrate` cold-bulk-projection RPC + Retraction R1's per-actor keyset frame (above) ship dark; the NATS `SUB` boundary (Fork 3, subscribe-ACL) and the `personal.{register,deregister,hydrate}` request-body identity binding are now closed (per-identity-nats-subscribe-acl-design.md Fires 1–2) — full untrusted-multi-identity exposure still waits on that design's Fire 3 (Edge design EDGE.3 handoff); Vault ciphertext + transient-key composition (PL.5) remains |
 | Multi-cell lens routing | Phase 3 | Current pipeline is single-cell |
 | Cross-instance latency aggregation | Phase 3 | Current `LatencyRingBuffer` is per-instance; no cluster-level rollup |
 | Link-envelope tombstone re-projection | Phase 3 | Currently adjacency entries are left in place on tombstone; re-projection on tombstone is not triggered |

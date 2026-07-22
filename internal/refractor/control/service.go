@@ -994,7 +994,7 @@ func (s *Service) personalHydrate(ctx context.Context, body ControlRequest) Cont
 				"deviceId", body.DeviceID, "err", cerr)
 		}
 	}
-	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater}}
+	return ControlResponse{PersonalHydrate: &PersonalHydrateResult{Hydrated: true, Revision: highWater, Lenses: ruleIDs}}
 }
 
 // personalSessionKey mints a transient Vault session key for the requesting

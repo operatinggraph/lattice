@@ -209,7 +209,7 @@ func TestHandleAdjNode_GuardedSkip_NonVacuous(t *testing.T) {
 	// same evaluate path handleAdjNode drives must actually produce a row.
 	entry := ruleengine.NodeEntry{CoreKVKey: nodeKey, NodeLabel: "widget",
 		Properties: map[string]any{"lastModifiedAt": "2026-07-02T10:00:00Z", "data": map[string]any{"name": "gadget"}}}
-	results, err := p.evaluateForEntry(ctx, entry)
+	results, _, err := p.evaluateForEntry(ctx, entry)
 	require.NoError(t, err)
 	require.NotEmpty(t, results, "the guarded-skip assertion is meaningless unless the lens actually matches")
 
@@ -258,7 +258,7 @@ func TestHandleAdjNode_WriteError_RecordsAndContinues(t *testing.T) {
 
 	entry := ruleengine.NodeEntry{CoreKVKey: nodeKey, NodeLabel: "widget",
 		Properties: map[string]any{"lastModifiedAt": "2026-07-02T10:00:00Z"}}
-	preResults, err := p.evaluateForEntry(ctx, entry)
+	preResults, _, err := p.evaluateForEntry(ctx, entry)
 	require.NoError(t, err)
 	require.Len(t, preResults, 2, "the write-error+continue assertion needs two independent results")
 

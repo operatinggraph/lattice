@@ -80,6 +80,8 @@ func TestPersonalLens_PL4_E2E_HydrateBulkProjectsThenCompletes(t *testing.T) {
 	require.Empty(t, hydrateResp.Error)
 	require.NotNil(t, hydrateResp.PersonalHydrate)
 	require.True(t, hydrateResp.PersonalHydrate.Hydrated)
+	require.Equal(t, []string{lensID}, hydrateResp.PersonalHydrate.Lenses,
+		"the response must name every registered personal hydrator that ran (§3.4's dead-lens prune set)")
 	revision := hydrateResp.PersonalHydrate.Revision
 
 	// The bulk upsert for the identity's one lease.
@@ -91,6 +93,19 @@ func TestPersonalLens_PL4_E2E_HydrateBulkProjectsThenCompletes(t *testing.T) {
 	data, ok := env["data"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, float64(2200), data["monthlyRent"])
+
+	// The keyset frame at the same revision — the authoritative set this
+	// bulk projection just published (personal-lens-retraction-design.md
+	// §3.4), published before the terminal marker.
+	msg, err = drainCons.Next(jetstream.FetchMaxWait(10 * time.Second))
+	require.NoError(t, err, "hydrate must publish a keyset frame")
+	var frameEnv map[string]any
+	require.NoError(t, json.Unmarshal(msg.Data(), &frameEnv))
+	require.Equal(t, "keyset", frameEnv["op"])
+	require.Equal(t, float64(revision), frameEnv["revision"])
+	frameKeys, ok := frameEnv["keys"].([]any)
+	require.True(t, ok)
+	require.Len(t, frameKeys, 1, "the frame names the identity's one surviving lease row")
 
 	// The terminal hydrationComplete marker, carrying the same revision the
 	// control response returned.
@@ -112,10 +127,12 @@ func TestPersonalLens_PL4_E2E_HydrateBulkProjectsThenCompletes(t *testing.T) {
 	require.Equal(t, float64(revision), doc["revisionCursor"])
 }
 
-// TestPersonalLens_PL4_E2E_HydrateNoLease_PublishesOnlyMarker proves the
-// zero-anchor case is a clean no-op-then-complete: an identity with no
-// leases gets no upsert row, only the terminal marker.
-func TestPersonalLens_PL4_E2E_HydrateNoLease_PublishesOnlyMarker(t *testing.T) {
+// TestPersonalLens_PL4_E2E_HydrateNoLease_PublishesEmptyFrameThenMarker
+// proves the zero-anchor case is a clean no-op-then-complete: an identity
+// with no leases gets no upsert row — only an empty keyset frame (the
+// last-row-retraction signal, personal-lens-retraction-design.md §3.4) and
+// the terminal marker.
+func TestPersonalLens_PL4_E2E_HydrateNoLease_PublishesEmptyFrameThenMarker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping e2e test in -short mode")
 	}
@@ -157,6 +174,13 @@ func TestPersonalLens_PL4_E2E_HydrateNoLease_PublishesOnlyMarker(t *testing.T) {
 	require.True(t, hydrateResp.PersonalHydrate.Hydrated)
 
 	msg, err := drainCons.Next(jetstream.FetchMaxWait(10 * time.Second))
+	require.NoError(t, err, "an identity with no leases must still get an empty keyset frame")
+	var frameEnv map[string]any
+	require.NoError(t, json.Unmarshal(msg.Data(), &frameEnv))
+	require.Equal(t, "keyset", frameEnv["op"])
+	require.Empty(t, frameEnv["keys"], "no lease anchor means no surviving key")
+
+	msg, err = drainCons.Next(jetstream.FetchMaxWait(10 * time.Second))
 	require.NoError(t, err, "an identity with no leases must still get the terminal marker")
 	var env map[string]any
 	require.NoError(t, json.Unmarshal(msg.Data(), &env))
@@ -165,5 +189,5 @@ func TestPersonalLens_PL4_E2E_HydrateNoLease_PublishesOnlyMarker(t *testing.T) {
 	require.Never(t, func() bool {
 		_, err := drainCons.Next(jetstream.FetchMaxWait(500 * time.Millisecond))
 		return err == nil
-	}, 3*time.Second, 500*time.Millisecond, "no lease anchor means no upsert row, only the marker")
+	}, 3*time.Second, 500*time.Millisecond, "no lease anchor means no upsert row, only the empty frame and the marker")
 }

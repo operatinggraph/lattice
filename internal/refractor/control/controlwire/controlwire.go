@@ -158,6 +158,13 @@ type PersonalDeregisterResult struct {
 type PersonalHydrateResult struct {
 	Hydrated bool   `json:"hydrated"`
 	Revision uint64 `json:"revision"`
+	// Lenses is the set of registered personal-hydrator rule IDs that ran
+	// (personal-lens-retraction-design.md §3.4): the client drops any
+	// stored key attribution whose lens is not in this set after a
+	// completed hydrate, healing a decommissioned/re-minted lens's
+	// otherwise-permanently-stranded keys (no emitter is left to retract
+	// them any other way).
+	Lenses []string `json:"lenses,omitempty"`
 }
 
 // PersonalSessionKeyResult is the synchronous acknowledgement returned by the

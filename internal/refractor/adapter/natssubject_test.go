@@ -71,7 +71,7 @@ func readSyncMsg(t *testing.T, js jetstream.JetStream, stream, subject string) m
 
 func TestNewNatsSubjectAdapter_EnsuresStream(t *testing.T) {
 	conn, js := startSyncServer(t)
-	_, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	_, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	s, err := js.Stream(context.Background(), "SYNC")
@@ -81,19 +81,22 @@ func TestNewNatsSubjectAdapter_EnsuresStream(t *testing.T) {
 
 func TestNewNatsSubjectAdapter_RejectsMissingConfig(t *testing.T) {
 	conn, _ := startSyncServer(t)
-	_, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "", "SYNC", []string{adapter.PersonalActorKeyField})
+	_, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField})
+	assert.Error(t, err, "empty ruleID must be rejected")
+
+	_, err = adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "", "SYNC", []string{adapter.PersonalActorKeyField})
 	assert.Error(t, err)
 
-	_, err = adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "", []string{adapter.PersonalActorKeyField})
+	_, err = adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "", []string{adapter.PersonalActorKeyField})
 	assert.Error(t, err)
 
-	_, err = adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{"entityId"})
+	_, err = adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{"entityId"})
 	assert.Error(t, err, "keyOrder without PersonalActorKeyField must be rejected")
 }
 
 func TestNatsSubjectAdapter_Upsert_PublishesEnvelopeToActorSubject(t *testing.T) {
 	conn, js := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	keys := map[string]any{adapter.PersonalActorKeyField: "identityA", "entityId": "lease.abc123"}
@@ -125,7 +128,7 @@ func TestNatsSubjectAdapter_Upsert_PublishesEnvelopeToActorSubject(t *testing.T)
 
 func TestNatsSubjectAdapter_Upsert_DisjointActorsGetDisjointSubjects(t *testing.T) {
 	conn, js := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	require.NoError(t, a.Upsert(context.Background(), map[string]any{adapter.PersonalActorKeyField: "identityA", "entityId": "e1"}, map[string]any{"v": 1.0}, 1))
@@ -143,7 +146,7 @@ func TestNatsSubjectAdapter_Upsert_DisjointActorsGetDisjointSubjects(t *testing.
 // the field itself is forwarded byte-for-byte (never decoded/decrypted).
 func TestNatsSubjectAdapter_Upsert_CiphertextFieldSetsEncrypted(t *testing.T) {
 	conn, js := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	keys := map[string]any{adapter.PersonalActorKeyField: "identityA", "entityId": "identity.ssn"}
@@ -169,7 +172,7 @@ func TestNatsSubjectAdapter_Upsert_CiphertextFieldSetsEncrypted(t *testing.T) {
 // column named "ct" with no nonce/keyId must not false-positive as ciphertext.
 func TestNatsSubjectAdapter_Upsert_FieldNamedCtAloneNotFlaggedEncrypted(t *testing.T) {
 	conn, js := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	keys := map[string]any{adapter.PersonalActorKeyField: "identityA", "entityId": "e1"}
@@ -182,7 +185,7 @@ func TestNatsSubjectAdapter_Upsert_FieldNamedCtAloneNotFlaggedEncrypted(t *testi
 
 func TestNatsSubjectAdapter_Delete_PublishesTombstoneEnvelope(t *testing.T) {
 	conn, js := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	keys := map[string]any{adapter.PersonalActorKeyField: "identityA", "entityId": "lease.abc123"}
@@ -197,7 +200,7 @@ func TestNatsSubjectAdapter_Delete_PublishesTombstoneEnvelope(t *testing.T) {
 
 func TestNatsSubjectAdapter_Upsert_MissingActorKeyErrors(t *testing.T) {
 	conn, _ := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	err = a.Upsert(context.Background(), map[string]any{"entityId": "lease.abc123"}, map[string]any{}, 1)
@@ -206,7 +209,7 @@ func TestNatsSubjectAdapter_Upsert_MissingActorKeyErrors(t *testing.T) {
 
 func TestNatsSubjectAdapter_Upsert_MalformedActorFailsClosedNotPanic(t *testing.T) {
 	conn, _ := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	// A non-string __actor (e.g. a malformed cypher projection) must return an
@@ -227,7 +230,7 @@ func TestNatsSubjectAdapter_Upsert_MalformedActorFailsClosedNotPanic(t *testing.
 
 func TestNatsSubjectAdapter_PublishHydrationComplete_PublishesMarker(t *testing.T) {
 	conn, js := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	require.NoError(t, a.PublishHydrationComplete(context.Background(), "identityA", 10500))
@@ -246,14 +249,14 @@ func TestNatsSubjectAdapter_SatisfiesHydrationMarkerPublisher(t *testing.T) {
 
 func TestNatsSubjectAdapter_Probe(t *testing.T) {
 	conn, _ := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField})
 	require.NoError(t, err)
 	assert.NoError(t, a.Probe(context.Background()))
 }
 
 func TestNatsSubjectAdapter_Close(t *testing.T) {
 	conn, _ := startSyncServer(t)
-	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField})
+	a, err := adapter.NewNatsSubjectAdapter(context.Background(), conn, "rule-1", "lattice.sync.user", "SYNC", []string{adapter.PersonalActorKeyField})
 	require.NoError(t, err)
 	assert.NoError(t, a.Close())
 }

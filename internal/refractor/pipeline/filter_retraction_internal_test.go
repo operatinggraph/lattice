@@ -272,7 +272,7 @@ func TestPlainLens_NeighborKeyedComposite_FallsThroughToLinger(t *testing.T) {
 		CoreKVKey: appKey, NodeLabel: "leaseapp",
 		Properties: map[string]any{"lastModifiedAt": "2026-07-02T10:00:00Z"},
 	}
-	results, err := p.evaluateForEntry(ctx, appEntry)
+	results, _, err := p.evaluateForEntry(ctx, appEntry)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.False(t, results[0].Delete)
@@ -292,7 +292,7 @@ func TestPlainLens_NeighborKeyedComposite_FallsThroughToLinger(t *testing.T) {
 			OtherNodeID: d.otherID, OtherType: d.otherType, IsDeleted: true,
 		}))
 	}
-	results, err = p.evaluateForEntry(ctx, appEntry)
+	results, _, err = p.evaluateForEntry(ctx, appEntry)
 	require.NoError(t, err)
 	for _, r := range results {
 		require.False(t, r.Delete,

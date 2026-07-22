@@ -214,7 +214,7 @@ func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 		require.True(t, projection.IsPersonalLens(r), "%s must be recognized as a personal lens", ls.CanonicalName)
 		require.True(t, ruleUsesFullEngine(t, r), "%s must compile under the full engine", ls.CanonicalName)
 
-		adpt, err := adapter.NewNatsSubjectAdapter(h.ctx, h.conn, subjectPrefix, syncStream,
+		adpt, err := adapter.NewNatsSubjectAdapter(h.ctx, h.conn, r.ID, subjectPrefix, syncStream,
 			append([]string{adapter.PersonalActorKeyField}, ls.IntoKey[1:]...))
 		require.NoError(t, err)
 		p, err := pipeline.New(r.ID, "nats_subject", "core-kv", h.adjKV, h.coreKV, adpt, nil)

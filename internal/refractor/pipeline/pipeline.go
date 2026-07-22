@@ -713,7 +713,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// Evaluate against the full engine ([]ProjectionResult{Key,Values,Delete}).
 	// evaluateForEntry normalises and applies the envelope so the downstream
 	// write path sees a single []ruleengine.EvalResult shape.
-	results, err := p.evaluateForEntry(ctx, entry)
+	results, enumeratedActors, err := p.evaluateForEntry(ctx, entry)
 	if err != nil {
 		slog.Error("pipeline: evaluate",
 			"ruleId", p.ruleID, "entityId", key,
@@ -725,7 +725,7 @@ func (p *Pipeline) handle(ctx context.Context, msg substrate.Message) (substrate
 	// terminal DLQ, retry enqueue, ack discipline). The adapter is captured
 	// once inside writeResults so all results in this message use a consistent
 	// instance even if HotReloadInto swaps it between messages.
-	return p.writeResults(ctx, msg, key, results)
+	return p.writeResults(ctx, msg, key, results, enumeratedActors)
 }
 
 // evalLinkFanOut handles a KindLink CDC event on the actor-aware pipeline.
@@ -748,7 +748,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, ke
 		isDeleted, _ = props["isDeleted"].(bool)
 	}
 
-	results, err := p.evaluateLinkFanOut(ctx, key, isDeleted)
+	results, enumeratedActors, err := p.evaluateLinkFanOut(ctx, key, isDeleted)
 	if err != nil {
 		slog.Error("pipeline: link fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -758,7 +758,7 @@ func (p *Pipeline) evalLinkFanOut(ctx context.Context, msg substrate.Message, ke
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
 	}
 
-	return p.writeResults(ctx, msg, key, results)
+	return p.writeResults(ctx, msg, key, results, enumeratedActors)
 }
 
 // evalPlainAspectReprojection handles a KindAspect CDC event on a plain
@@ -789,7 +789,7 @@ func (p *Pipeline) evalPlainAspectReprojection(ctx context.Context, msg substrat
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
 	}
-	return p.writeResults(ctx, msg, key, results)
+	return p.writeResults(ctx, msg, key, results, nil)
 }
 
 // evalPlainLinkReprojection handles a KindLink CDC event on a plain
@@ -877,7 +877,7 @@ func (p *Pipeline) evalPlainLinkReprojection(ctx context.Context, msg substrate.
 			combined = append(combined, r)
 		}
 	}
-	return p.writeResults(ctx, msg, key, combined)
+	return p.writeResults(ctx, msg, key, combined, nil)
 }
 
 // evaluatePlainFromVertex point-reads a vertex and runs the plain evaluate
@@ -897,7 +897,8 @@ func (p *Pipeline) evaluatePlainFromVertex(ctx context.Context, vtxKey, vtxType 
 		NodeLabel:  vtxType,
 		Properties: props,
 	}
-	return p.evaluateForEntry(ctx, entry)
+	results, _, err := p.evaluateForEntry(ctx, entry)
+	return results, err
 }
 
 // dedupeKeyFor returns a canonical identity for an EvalResult's target key
@@ -925,7 +926,7 @@ func dedupeKeyFor(r ruleengine.EvalResult) string {
 // (the reprojection cypher re-reads current Core KV state), so a tombstone
 // (empty body) and a value change take the same path.
 func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, key string) (substrate.Decision, error) {
-	results, err := p.evaluateAspectFanOut(ctx, key)
+	results, enumeratedActors, err := p.evaluateAspectFanOut(ctx, key)
 	if err != nil {
 		slog.Error("pipeline: aspect fan-out: evaluate",
 			"ruleId", p.ruleID, "entityId", key, "stage", "traversal", "err", err)
@@ -935,7 +936,7 @@ func (p *Pipeline) evalAspectFanOut(ctx context.Context, msg substrate.Message, 
 		return p.dispositionEvalErr(ctx, msg, key, "traversal", err)
 	}
 
-	return p.writeResults(ctx, msg, key, results)
+	return p.writeResults(ctx, msg, key, results, enumeratedActors)
 }
 
 // dispositionEvalErr maps an evaluate-stage error to a Decision (+ error for the
@@ -967,7 +968,14 @@ func (p *Pipeline) dispositionEvalErr(ctx context.Context, msg substrate.Message
 // leaves the message pending (Nak) makes redelivery re-run every result, so
 // flushing eagerly would enqueue/publish a duplicate for the already-disposed
 // results on every redelivery (e.g. each pause/resume cycle).
-func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key string, results []ruleengine.EvalResult) (substrate.Decision, error) {
+//
+// enumeratedActors (personal-lens-retraction-design.md §3.2, R1) is nil for
+// a plain lens or a non-personal actor-aware pipeline; otherwise a keyset
+// frame is published per enumerated actor once every result has cleanly
+// applied (no retry-enqueue, no terminal DLQ) — a partially-disposed batch
+// emits no frame, so a would-be-retracting frame can never race ahead of
+// the write it is supposed to describe.
+func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key string, results []ruleengine.EvalResult, enumeratedActors []string) (substrate.Decision, error) {
 	adpt := p.currentAdapter()
 	var retryResults []ruleengine.EvalResult
 	var terminalErrs []error
@@ -1026,8 +1034,13 @@ func (p *Pipeline) writeResults(ctx context.Context, msg substrate.Message, key 
 	if len(retryResults) > 0 || len(terminalErrs) > 0 {
 		// Transient enqueue / terminal DLQ: the message is fully disposed —
 		// ack to prevent redelivery (the retry queue owns the eventual write).
+		// No frame here — a retry-enqueued or DLQ'd result did not (yet, or
+		// ever) apply, so a frame built from `results` would describe state
+		// that isn't true; the next live event or hydrate heals (§3.5).
 		return substrate.Ack, nil
 	}
+
+	p.emitPersonalFrames(ctx, adpt, enumeratedActors, results, msg.Sequence)
 
 	slog.Info("pipeline: processed",
 		"ruleId", p.ruleID, "entityId", key,
@@ -1315,7 +1328,7 @@ func (p *Pipeline) handleAdjNode(ctx context.Context, nodeKey string, data []byt
 		Properties: props,
 	}
 
-	results, err := p.evaluateForEntry(ctx, entry)
+	results, _, err := p.evaluateForEntry(ctx, entry)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

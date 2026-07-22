@@ -95,7 +95,7 @@ func TestPersonalLens_PL1_E2E_MutationFansToActorSubject(t *testing.T) {
 	fullCR.KeyColumns = []string{adapter.PersonalActorKeyField, "entityId"}
 	require.NoError(t, fullCR.ValidateKeyColumns())
 
-	adpt, err := adapter.NewNatsSubjectAdapter(ctx, conn, subjectPrefix, syncStream, []string{adapter.PersonalActorKeyField, "entityId"})
+	adpt, err := adapter.NewNatsSubjectAdapter(ctx, conn, "rule-1", subjectPrefix, syncStream, []string{adapter.PersonalActorKeyField, "entityId"})
 	require.NoError(t, err)
 
 	p, err := pipeline.New(lensID, "nats_subject", coreBucket, adjKV, coreKV, adpt, nil)

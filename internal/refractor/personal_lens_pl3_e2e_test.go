@@ -91,8 +91,12 @@ func TestPersonalLens_PL3_E2E_NoCapReadEntry_DeniesFailClosed(t *testing.T) {
 	writePL2Link(t, h, "identity", recipient, "holds", "lease", leaseID)
 
 	cons := pl3Consumer(t, h, recipient)
-	_, err := cons.Next(jetstream.FetchMaxWait(3 * time.Second))
-	require.Error(t, err, "an actor with no cap-read entry at all must receive nothing")
+	msg, err := cons.Next(jetstream.FetchMaxWait(3 * time.Second))
+	require.NoError(t, err, "an actor with no cap-read entry at all still receives an empty keyset frame")
+	var env map[string]any
+	require.NoError(t, json.Unmarshal(msg.Data(), &env))
+	require.Equal(t, "keyset", env["op"], "denial retracts by an empty frame, never publishes the row")
+	require.Empty(t, env["keys"], "no cap-read entry means no readable anchor")
 }
 
 // TestPersonalLens_PL3_E2E_SecurityWinsOverRelevance is Gate-3 vector (1): a
@@ -147,8 +151,12 @@ func TestPersonalLens_PL3_E2E_SecurityWinsOverRelevance(t *testing.T) {
 	writePL2Link(t, h, "identity", recipient, "holds", "lease", leaseID)
 
 	cons := pl3Consumer(t, h, recipient)
-	_, err = cons.Next(jetstream.FetchMaxWait(3 * time.Second))
-	require.Error(t, err, "a delta outside the actor's readableAnchors must be denied even when the Interest Set explicitly declares it relevant")
+	msg, err := cons.Next(jetstream.FetchMaxWait(3 * time.Second))
+	require.NoError(t, err, "a delta outside the actor's readableAnchors must be denied — even when the Interest Set explicitly declares it relevant — via an empty keyset frame")
+	var env map[string]any
+	require.NoError(t, json.Unmarshal(msg.Data(), &env))
+	require.Equal(t, "keyset", env["op"], "denial retracts by an empty frame, never publishes the row")
+	require.Empty(t, env["keys"], "the ungranted anchor must not appear in the frame")
 }
 
 // TestPersonalLens_PL3_E2E_GrantedAnchor_StreamsThenRevokeStops is Gate-3

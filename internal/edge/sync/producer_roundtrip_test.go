@@ -33,7 +33,7 @@ func TestProducerConsumerEnvelope_RoundTrip(t *testing.T) {
 	// The real producer: a NatsSubjectAdapter over the SYNC stream, keyed by
 	// the reserved actor field + a business "anchor" column.
 	keyOrder := []string{refadapter.PersonalActorKeyField, "anchor"}
-	adpt, err := refadapter.NewNatsSubjectAdapter(ctx, conn, defaultSubjectPrefix, defaultStream, keyOrder)
+	adpt, err := refadapter.NewNatsSubjectAdapter(ctx, conn, "rule-1", defaultSubjectPrefix, defaultStream, keyOrder)
 	require.NoError(t, err)
 
 	actor, err := substrate.NewNanoID()
