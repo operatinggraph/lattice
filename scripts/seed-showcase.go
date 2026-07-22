@@ -333,6 +333,26 @@ func ensureStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, b
 	must(err, "list core-kv keys")
 	existing, live := findLinkedIdentity(ctx, coreKV, allKeys, "worksAt", buildingKey)
 	if existing == "" {
+		// No worksAt link at all — but the persona may still exist: a seed
+		// that dies between AssignRole and WireWorksAt leaves the staff
+		// identity role-linked yet unwired, and its fixed email forbids
+		// minting a replacement (identity index). Adopt it by its holdsRole
+		// link and finish the remaining wiring; both pending ops are
+		// deterministic here (a wired persona is caught by the worksAt scan
+		// above, so this one is pre-WireWorksAt and pre-state-flip). A death
+		// between CreateUnclaimedIdentity and AssignRole is the residual
+		// wedge this cannot see — a fresh world (`make down` + reseed) is
+		// the remedy there.
+		if orphan, orphanLive := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey); orphan != "" && orphanLive {
+			submitOp(ctx, conn, adminKey, "WireWorksAt", "serviceLocation",
+				map[string]any{"identity": orphan, "location": buildingKey},
+				wireHint(orphan, "worksAt", buildingKey))
+			submitOp(ctx, conn, adminKey, "UpdateIdentityState", "identity",
+				map[string]any{"identityKey": orphan, "newState": "claimed"},
+				&processor.ContextHint{Reads: []string{orphan, orphan + ".state"}})
+			fmt.Printf("==> healed:          adopted %s (held frontOfHouse, was never wired worksAt) — wired + claimed\n", orphan)
+			return orphan
+		}
 		return seedStaff(ctx, conn, adminKey, roleKey, buildingKey, name, email)
 	}
 	if !live {
