@@ -35,7 +35,6 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **F20 — Hosted-demo read-only operator** | Loupe in the public demo as the behind-the-scenes view: a `demoOperator` role stripped to inspect-only grants, so every write is capability-denied at the platform — proving "even the console is capability-scoped" live; one-tap demo login; own subdomain + visitor disclaimer. Exposed only at public-launch. | ★★ | M | 🚧 exposure blocked-on [Refractor] cap first-projection loss + Andrew-gated · Loupe-side CLOSED (F20.1/2/3/5) · [design + exposure checklist](../../implementation-artifacts/loupe-f20-demo-operator-ux.md) |
 
 ## Component maintenance
 
@@ -77,6 +76,7 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · `0690381e` · [Loupe/F20.4] F20 CLOSED — hosted read-only Loupe exposed on its own subdomain; per-reset operator provisioning; exposure checklist #1–#7 discharged live (Andrew's go)
 - 2026-07-19 · `c645c772` · [Loupe/F20.2] Demo polish — inspect-only control reads (omission-denies classification), write-affordance suppression, `/login` disclaimer. 3-layer review fixed forward, live-verified, CI green
 - 2026-07-19 · `ca941e58` · [Loupe/F20.5] Public-origin posture — `LOUPE_PUBLIC_ORIGIN` (origin gate + Secure cookie), dev-auth⇒demo boot coupling, credential-exchange limiter, SSE cap knob. 3-layer review fixed forward, live-verified, CI green
 - 2026-07-19 · `018dd913` · [Loupe/F20.1] Hosted-demo read-only posture — `LOUPE_DEMO_MODE` (default off): method default-deny, boot guard, reveal denial, visitor banner. 3-layer review fixed forward, live-verified, CI green
