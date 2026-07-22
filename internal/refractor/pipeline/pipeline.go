@@ -127,6 +127,12 @@ type Pipeline struct {
 	rebuildPollInterval time.Duration
 	rebuildInFlight     atomic.Bool
 
+	// sweeper is the auth-plane convergence sweep, installed via SetSweepPlan
+	// for an auth-plane actor-aggregate lens only and driven by RunSweep. Nil
+	// for every other lens, which is what excludes the personal, plain,
+	// convergence, and operation-aggregate lenses structurally.
+	sweeper *Sweeper
+
 	// Supervised runtime. The supervisor hosts the pump skeleton (restore →
 	// pump → classify → pause/probe/resume); the pipeline supplies the handler
 	// + Classify + Probe + HealthSink policy. Configured via RunOn before Run.

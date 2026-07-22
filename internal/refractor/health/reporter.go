@@ -110,6 +110,11 @@ func (r *Reporter) SetActive(ctx context.Context) error {
 		LastError:      nil,                 // JSON null
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
 		RuleEngine:     eng,
+		// The convergence sweep's round-robin position and heal count are
+		// lens-lifetime state, not status-transition state: a pause/resume must
+		// not silently restart the walk or zero the counter the operator reads.
+		SweepCursor:     existing.SweepCursor,
+		SweepReconciled: existing.SweepReconciled,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -152,6 +157,10 @@ func (r *Reporter) SetPaused(ctx context.Context, reason, lastError string) erro
 		LastError:      lastErrPtr,          // null when no error message; non-nil otherwise
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
 		RuleEngine:     r.RuleEngine(),
+		// Preserved for the same reason as in SetActive: sweep progress is
+		// lens-lifetime state, not status-transition state.
+		SweepCursor:     existing.SweepCursor,
+		SweepReconciled: existing.SweepReconciled,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -190,6 +199,10 @@ func (r *Reporter) SetRebuilding(ctx context.Context) error {
 		LastError:      nil,                 // JSON null
 		LastUpdated:    time.Now().UTC().Format(time.RFC3339),
 		RuleEngine:     r.RuleEngine(),
+		// Preserved for the same reason as in SetActive: sweep progress is
+		// lens-lifetime state, not status-transition state.
+		SweepCursor:     existing.SweepCursor,
+		SweepReconciled: existing.SweepReconciled,
 	}
 	if err := r.put(ctx, entry); err != nil {
 		return err
@@ -284,6 +297,27 @@ func (r *Reporter) SetProjectionProgress(ctx context.Context, lag uint64, lastPr
 		existing.LastProjectedAt = lastProjectedAt.UTC().Format(time.RFC3339)
 	}
 	existing.ActiveSequence = seq
+	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	existing.RuleID = r.ruleID
+	return r.put(ctx, existing)
+}
+
+// SetSweepProgress persists the auth-plane convergence sweep's round-robin
+// cursor and cumulative heal count onto the lens's existing health entry
+// (capability-projection-reconciliation-design.md §3.2). Read-modify-write under
+// the same writeMu as every other setter, so it cannot lose an update to a
+// concurrent RecordError. Called once per sweep tick — the sweep's only health
+// write.
+func (r *Reporter) SetSweepProgress(ctx context.Context, cursor string, reconciled uint64) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	existing, err := r.readExisting(ctx)
+	if err != nil {
+		return fmt.Errorf("health: SetSweepProgress read: %w", err)
+	}
+	existing.SweepCursor = cursor
+	existing.SweepReconciled = reconciled
 	existing.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 	existing.RuleID = r.ruleID
 	return r.put(ctx, existing)

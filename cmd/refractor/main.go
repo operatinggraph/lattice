@@ -314,12 +314,25 @@ func main() {
 			if st.PauseReason != nil {
 				pauseReason = *st.PauseReason
 			}
+			// The sweep's coverage verdict, read from the in-process sweeper
+			// rather than the persisted entry: the streak is what escalates the
+			// issue, and it is per-run state the health entry deliberately does
+			// not carry (a restart starts a fresh escalation window).
+			var reconciled uint64
+			var divergentStreak int
+			if sw := entry.pipeline.Sweeper(); sw != nil {
+				status := sw.Status()
+				reconciled = status.Reconciled
+				divergentStreak = status.DivergentStreak
+			}
 			out = append(out, health.CapabilityLensStatus{
-				CanonicalName: entry.canonicalName,
-				RuleID:        st.RuleID,
-				Status:        st.Status,
-				PauseReason:   pauseReason,
-				ConsumerLag:   pending,
+				CanonicalName:        entry.canonicalName,
+				RuleID:               st.RuleID,
+				Status:               st.Status,
+				PauseReason:          pauseReason,
+				ConsumerLag:          pending,
+				SweepReconciled:      reconciled,
+				SweepDivergentStreak: divergentStreak,
 			})
 		}
 		return out
@@ -731,6 +744,16 @@ func main() {
 		if projection.IsActorAggregate(r) {
 			controlSvc.RegisterReprojector(r.ID, reprojectorFor(p))
 		}
+
+		// The auth-plane convergence sweep (§3.2) runs beside the pump on the
+		// same lens context, so it stops with the lens. RunSweep returns
+		// immediately unless the driver installed a sweep plan, which it does
+		// only for an auth-plane actor-aggregate lens.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.RunSweep(lensCtx)
+		}()
 
 		logger.Info("lens pipeline started", "lensId", r.ID, "target", r.Into.Target, "table", r.Into.Table, "bucket", r.Into.Bucket)
 	}

@@ -38,7 +38,19 @@ const defaultCapabilityLensLagRaiseCycles = 3
 const (
 	issueCapabilityLensPaused  = "CapabilityLensPaused"
 	issueCapabilityLensLagging = "CapabilityLensLagging"
+	// issueCapabilityCoverageDivergence is raised when the auth-plane
+	// convergence sweep heals a graph ↔ Capability-KV divergence
+	// (capability-projection-reconciliation-design.md §3.2). The two lag codes
+	// above watch the consumer; this one watches the truth — a caught-up
+	// consumer that MISSED events reads as fine on every other signal.
+	issueCapabilityCoverageDivergence = "CapabilityCoverageDivergence"
 )
+
+// capabilityDivergenceErrorStreak is the number of CONSECUTIVE sweep passes
+// that must each heal a divergence before the issue escalates from warning to
+// error. One divergent pass is a repaired incident; a second in a row means the
+// sweep is papering over an ongoing delivery gap rather than a past one.
+const capabilityDivergenceErrorStreak = 2
 
 // defaultLensLagThreshold / defaultLensLagRaiseCycles mirror the capability-lens
 // defaults (lens-projection-liveness-design.md §5.7 — the cap path's
@@ -69,6 +81,12 @@ type CapabilityLensStatus struct {
 	Status        string // "active" | "paused" | "rebuilding"
 	PauseReason   string // "" when not paused
 	ConsumerLag   uint64
+	// SweepReconciled is the lens's cumulative count of divergent projections
+	// the convergence sweep has healed; SweepDivergentStreak is how many
+	// consecutive sweep passes have each healed at least one. Zero for a lens
+	// with no sweeper installed (every non-auth-plane target).
+	SweepReconciled      uint64
+	SweepDivergentStreak int
 }
 
 // LensLivenessStatus is one non-auth-plane (business) lens's liveness snapshot,
@@ -465,7 +483,8 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 
 	snaps := h.CapabilityLensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging []string
+	var paused, lagging, diverging []string
+	divergenceSeverity := ""
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := capLensName(s)
@@ -492,10 +511,23 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			// any pending streak.
 			h.resetLagState(name)
 		}
+		// The sweep's coverage verdict is independent of the consumer's own
+		// state: a lens can be active and caught-up while its projection has a
+		// hole, which is exactly the class the sweep exists to detect.
+		if s.SweepDivergentStreak > 0 {
+			diverging = append(diverging, fmt.Sprintf("%s (%d consecutive sweeps, %d healed)",
+				name, s.SweepDivergentStreak, s.SweepReconciled))
+			if s.SweepDivergentStreak >= capabilityDivergenceErrorStreak {
+				divergenceSeverity = "error"
+			} else if divergenceSeverity == "" {
+				divergenceSeverity = "warning"
+			}
+		}
 		metric[name] = map[string]any{
 			"status":      s.Status,
 			"consumerLag": s.ConsumerLag,
 			"alert":       alert,
+			"reconciled":  s.SweepReconciled,
 		}
 	}
 	h.pruneLagState(seen)
@@ -513,6 +545,13 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			severity: "warning",
 			message: fmt.Sprintf("capability lens consumer lag exceeds threshold %d; authorization reads may be stale: %s",
 				threshold, strings.Join(lagging, ", ")),
+		}
+	}
+	if len(diverging) > 0 {
+		active[issueCapabilityCoverageDivergence] = capIssue{
+			severity: divergenceSeverity,
+			message: "capability projection diverged from the graph and was healed by the convergence sweep; " +
+				"a nonzero rate means events are being lost, not just repaired: " + strings.Join(diverging, ", "),
 		}
 	}
 	return metric, h.reconcileCapIssues(active, now)

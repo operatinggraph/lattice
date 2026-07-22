@@ -201,6 +201,50 @@ func (d OutputDescriptor) BuildKey(actorKey string) string {
 	return strings.ReplaceAll(d.OutputKeyPattern, ActorSuffixPlaceholder, suffix)
 }
 
+// AnchorFromKey is the inverse of BuildKey: it recovers the anchor vertex key a
+// target key was built for, reporting false for any key this descriptor's
+// pattern did not produce. The convergence sweep
+// (capability-projection-reconciliation-design.md §3.2) needs it for the orphan
+// direction — a target key whose anchor no longer exists — and one NATS-KV
+// bucket is shared by every lens targeting it, so the ownership test has to be
+// exact rather than a prefix guess.
+//
+// Exactness comes from three checks: the pattern's literal prefix and suffix
+// must both match, and the recovered key must parse as a Contract #1 vertex key
+// OF THIS DESCRIPTOR'S AnchorType. A sibling lens's key sharing a literal
+// prefix (cap.{actorSuffix} against cap.roles.identity.<id>) recovers a
+// four-segment key ParseVertexKey rejects, so neither lens claims the other's
+// rows.
+func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
+	idx := strings.Index(d.OutputKeyPattern, ActorSuffixPlaceholder)
+	if idx < 0 {
+		return "", false
+	}
+	prefix := d.OutputKeyPattern[:idx]
+	suffix := d.OutputKeyPattern[idx+len(ActorSuffixPlaceholder):]
+
+	rest, ok := strings.CutPrefix(targetKey, prefix)
+	if !ok {
+		return "", false
+	}
+	rest, ok = strings.CutSuffix(rest, suffix)
+	if !ok {
+		return "", false
+	}
+
+	actorKey := substrate.VertexPrefix + "." + rest
+	if d.KeyColumn != "" {
+		// §10.2 Option (b): the suffix is the anchor's bare NanoID, so the type
+		// segment comes back from the descriptor.
+		actorKey = substrate.VertexPrefix + "." + d.AnchorType + "." + rest
+	}
+	vtxType, _, parsed := substrate.ParseVertexKey(actorKey)
+	if !parsed || vtxType != d.AnchorType {
+		return "", false
+	}
+	return actorKey, true
+}
+
 // RealnessFiltered returns the subset of a collect array whose entries carry a
 // real (present and non-empty) value at the realnessFilter field. It drops the
 // degenerate null-key collect artifacts an OPTIONAL-match cypher produces for an

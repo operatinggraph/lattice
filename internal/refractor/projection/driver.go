@@ -172,6 +172,19 @@ func InstallActorAggregate(
 	p.SetActorDeleteKey(desc.BuildKey)
 	p.SetLatencyBuffer(pipeline.NewLatencyRingBuffer(pipeline.DefaultLatencyBufferSize))
 
+	// The auth-plane convergence sweep (capability-projection-reconciliation-
+	// design.md §3.2). Installing a plan is what opts a lens in, and only an
+	// auth-plane actor-aggregate lens receives one — a plain lens retracts
+	// through filter/diff retraction and the Personal Lens has its own Hydrate,
+	// so neither is excluded by a name list; it simply never gets a plan.
+	if authPlane {
+		p.SetSweepPlan(pipeline.SweepPlan{
+			AnchorType:    desc.AnchorType,
+			BuildKey:      desc.BuildKey,
+			AnchorFromKey: desc.AnchorFromKey,
+		})
+	}
+
 	guarded := authPlane || desc.RequiresGuardedTombstone()
 	if guarded {
 		if gErr := EnableProjectionGuard(adpt, r.ID); gErr != nil {

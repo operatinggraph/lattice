@@ -46,4 +46,14 @@ type Entry struct {
 	// ProjectionLag is the operator-facing alias of ConsumerLag (same NumPending
 	// value, named for what it means to an operator: events behind).
 	ProjectionLag uint64 `json:"projectionLag"`
+	// SweepCursor is the auth-plane convergence sweep's round-robin position —
+	// the last anchor vertex key its deep pass verified
+	// (capability-projection-reconciliation-design.md §3.2). It lives on the
+	// existing health entry rather than in new state, so a restart resumes the
+	// walk instead of restarting it. "" for every lens that does not sweep.
+	SweepCursor string `json:"sweepCursor,omitempty"`
+	// SweepReconciled is the cumulative number of divergent projections the
+	// sweep has healed for this lens. Healing is deliberately loud: a nonzero
+	// rate is itself the signal to go find the delivery gap it is papering over.
+	SweepReconciled uint64 `json:"sweepReconciled,omitempty"`
 }
