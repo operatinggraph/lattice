@@ -342,16 +342,28 @@ func TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// A mismatched Interest Set filter must suppress the lease delta — the
-	// link event still enumerates the recipient and, per the retraction
-	// design, publishes an empty keyset frame (the "no surviving rows"
-	// signal) rather than an upsert.
-	msg, err := cons.Next(jetstream.FetchMaxWait(3 * time.Second))
-	require.NoError(t, err, "an Interest-Set-suppressed actor still receives an empty keyset frame")
-	var suppressedEnv map[string]any
-	require.NoError(t, json.Unmarshal(msg.Data(), &suppressedEnv))
-	require.Equal(t, "keyset", suppressedEnv["op"], "suppression must retract by an empty frame, never publish the row")
-	require.Empty(t, suppressedEnv["keys"], "no surviving keys for the Interest-Set-filtered actor")
+	// A mismatched Interest Set filter must suppress the lease delta. The
+	// identity's own self-event, the lease's fan-out, and the link's
+	// fan-out each independently re-evaluate the (by-now fully seeded)
+	// graph and can each redundantly re-trigger — every re-evaluation
+	// reads CURRENT state, not a point-in-time snapshot (the same
+	// pre-existing property the retraction R1 tombstone vector documents).
+	// Every one of those redundant triggers is Interest-denied identically,
+	// so what may arrive is zero or more EMPTY keyset frames — never the
+	// suppressed row itself. Drain to quiescence and assert on the
+	// aggregate rather than a fixed message count/position.
+	seedMsgs := drainUntilQuiet(t, cons)
+	for _, env := range seedMsgs {
+		require.NotEqual(t, "upsert", env["op"], "an Interest-Set-suppressed row must never publish as an upsert")
+	}
+	var sawSuppressedFrame bool
+	for _, env := range seedMsgs {
+		keys, _ := env["keys"].([]any)
+		if env["op"] == "keyset" && len(keys) == 0 {
+			sawSuppressedFrame = true
+		}
+	}
+	require.True(t, sawSuppressedFrame, "a fan-out event over a suppressed row must still publish an empty retraction frame")
 
 	// Sanity: IsRelevant itself agrees (isolates the filter from any fan-out
 	// timing flake in the assertion above).
@@ -372,11 +384,21 @@ func TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits(t *testing.T) {
 
 	writePL2Vertex(t, h, leaseKey, "lease", map[string]any{"id": "lease-pl2-2", "monthlyRent": 3100})
 
-	msg, err = cons.Next(jetstream.FetchMaxWait(15 * time.Second))
-	require.NoError(t, err, "after deregistering, the identity must receive the next delta")
-	var env map[string]any
-	require.NoError(t, json.Unmarshal(msg.Data(), &env))
-	data, ok := env["data"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, float64(3100), data["monthlyRent"])
+	// Poll for the specific fresh value rather than reading one deterministic
+	// next message — a redundant re-trigger from before deregister could
+	// still be queued ahead of it (mirrors the sibling VertexFanOut test's
+	// same-shaped second assertion).
+	require.Eventually(t, func() bool {
+		msg, err := cons.Next(jetstream.FetchMaxWait(2 * time.Second))
+		if err != nil {
+			return false
+		}
+		var env map[string]any
+		if json.Unmarshal(msg.Data(), &env) != nil {
+			return false
+		}
+		data, ok := env["data"].(map[string]any)
+		return ok && data["monthlyRent"] == float64(3100)
+	}, 20*time.Second, 200*time.Millisecond,
+		"after deregistering, the identity must receive the fresh delta")
 }
