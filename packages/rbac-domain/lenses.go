@@ -41,7 +41,13 @@ func Lenses() []pkgmgr.LensSpec {
 				OutputKeyPattern: "cap.roles.{actorSuffix}",
 				BodyColumns:      []string{"platformPermissions", "roles"},
 				EmptyBehavior:    "delete",
-				Freshness:        "auto",
+				// operationType is the platformPermissions entry field: real for a
+				// granted permission, null on the degenerate all-null collect entry
+				// an actor with no role produces. Without this the delete behavior
+				// never fires and a revoked actor's last role leaves cap.roles.<id>
+				// stranded (§6.8 absence = denial).
+				RealnessFilter: "operationType",
+				Freshness:      "auto",
 				// Per-lane submission grant (Contract #2 §2.3): every ordinary
 				// role-holder gets the `default` lane only ("most actors hold
 				// `default` only"). A static baseline on the descriptor — not a

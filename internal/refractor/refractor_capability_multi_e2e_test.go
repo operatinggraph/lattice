@@ -486,10 +486,10 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		"capabilityRoleIndex must include admin or user role canonicalName; got %v", allRoles)
 
 	// --- Sub-test: tombstone the role-link for identity B → cap.roles.<B>
-	// re-projects with the holdsRole removed → empty platformPermissions. The
-	// capabilityRoles emptyBehavior:delete drives the key away once no real
-	// grant remains. ---
-	t.Run("tombstone role link shrinks platformPermissions", func(t *testing.T) {
+	// re-projects with the holdsRole removed → no real grant remains, and the
+	// capabilityRoles emptyBehavior:delete hard-deletes the key (identity B
+	// held only this one role). ---
+	t.Run("tombstone role link deletes cap.roles entry", func(t *testing.T) {
 		// Overwrite the link envelope with isDeleted=true. The adjacency
 		// bootstrapper observes it, removes the edges, then the role
 		// vertex CDC isn't needed — but the link tombstone *itself* is
@@ -518,29 +518,13 @@ func TestRefractor_CapabilityLens_MultiIdentity_E2E(t *testing.T) {
 		// only. This is a documented residual — see closing summary.)
 		writeVertex(identityBKey, "identity", map[string]any{"name": "bob", "rev": "2"})
 
-		// platformPermissions must now be empty (the holdsRole edge is gone).
+		// cap.roles.<B> must be hard-deleted (no real grant remains, and the
+		// capability plane uses the default hard delete).
 		require.Eventually(t, func() bool {
-			entry, gErr := capabilityKV.Get(ctx, "cap.roles.identity."+identityBID)
-			if gErr != nil || entry == nil {
-				return false
-			}
-			var env map[string]any
-			if jerr := json.Unmarshal(entry.Value, &env); jerr != nil {
-				return false
-			}
-			pp, _ := env["platformPermissions"].([]any)
-			// platformPermissions may contain a "ghost" object with all-nil
-			// fields (cypher collect over zero matches); count only entries
-			// with a non-nil operationType.
-			real := 0
-			for _, e := range pp {
-				if m, ok := e.(map[string]any); ok && m["operationType"] != nil {
-					real++
-				}
-			}
-			return real == 0
+			_, gErr := capabilityKV.Get(ctx, "cap.roles.identity."+identityBID)
+			return errors.Is(gErr, substrate.ErrKeyNotFound)
 		}, 15*time.Second, 100*time.Millisecond,
-			"identity B platformPermissions must empty after holdsRole tombstone")
+			"cap.roles.<B> must be hard-deleted (key gone) after its last holdsRole tombstone")
 	})
 
 	// --- Sub-test: tombstone identity C itself → cap.roles.<C> entry deleted ---

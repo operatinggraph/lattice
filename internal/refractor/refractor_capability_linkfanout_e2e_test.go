@@ -15,6 +15,7 @@ package refractor_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -185,9 +186,8 @@ func TestRefractor_CapabilityLens_LinkFanOut_E2E(t *testing.T) {
 		return linkKey
 	}
 
-	// Seed role + permission vertices, then the identity LAST so it projects
-	// with an EMPTY capability set (no role yet) — mirroring an agent created
-	// before any AssignRole/GrantPermission.
+	// Seed role + permission vertices, then the identity LAST so it holds no
+	// role yet — mirroring an agent created before any AssignRole/GrantPermission.
 	writeVertex(roleKey, "role", map[string]any{"canonicalName": "author"})
 	writeVertex(permKey, "permission", map[string]any{
 		"operationType": "create",
@@ -220,13 +220,15 @@ func TestRefractor_CapabilityLens_LinkFanOut_E2E(t *testing.T) {
 		}
 		return env, true
 	}
+	capDocAbsent := func() bool {
+		_, gErr := capabilityKV.Get(ctx, capKey)
+		return errors.Is(gErr, substrate.ErrKeyNotFound)
+	}
 
-	// The identity cap doc must project (empty permission set).
-	require.Eventually(t, func() bool {
-		env, ok := getEnv()
-		return ok && !hasCreateBook(env)
-	}, 20*time.Second, 100*time.Millisecond,
-		"identity cap doc must project with no create/book permission before any role grant")
+	// No role held yet → no real grant → the capabilityRoles emptyBehavior:
+	// delete hard-deletes the (never-yet-created) key. Absence = denial.
+	require.Eventually(t, capDocAbsent, 20*time.Second, 100*time.Millisecond,
+		"identity cap doc must stay absent before any role grant")
 
 	// (b) grantedBy create: permission → role. No actor holds the role yet,
 	// so this fans out to zero actors — a correct no-op. The cap doc must
@@ -259,18 +261,12 @@ func TestRefractor_CapabilityLens_LinkFanOut_E2E(t *testing.T) {
 
 	// (c) holdsRole tombstone (revocation): re-write the link with
 	// isDeleted=true. The link fan-out must reproject the identity with the
-	// holdsRole edge removed → permission lost.
+	// holdsRole edge removed — no role held, no real grant, key deleted.
 	writeLink("identity", identityID, "holdsRole", "role", roleID, true)
 	_ = holdsKey
 
-	require.Eventually(t, func() bool {
-		env, ok := getEnv()
-		if !ok {
-			return false
-		}
-		return !hasCreateBook(env)
-	}, 20*time.Second, 100*time.Millisecond,
-		"identity cap doc must lose create/book permission after holdsRole tombstone fan-out")
+	require.Eventually(t, capDocAbsent, 20*time.Second, 100*time.Millisecond,
+		"identity cap doc must be deleted after its last holdsRole tombstone fan-out")
 
 	// (c') grantedBy tombstone via NATS DEL (empty body). Re-grant the role
 	// first so the actor reaches the permission again, then physically delete
@@ -286,12 +282,8 @@ func TestRefractor_CapabilityLens_LinkFanOut_E2E(t *testing.T) {
 	grantedByKey := substrate.LinkKey("permission", permID, "grantedBy", "role", roleID)
 	require.NoError(t, coreKV.Delete(ctx, grantedByKey))
 
-	require.Eventually(t, func() bool {
-		env, ok := getEnv()
-		if !ok {
-			return false
-		}
-		return !hasCreateBook(env)
-	}, 20*time.Second, 100*time.Millisecond,
-		"identity cap doc must lose create/book after grantedBy DEL tombstone fan-out")
+	// The role now grants nothing, so the 3-hop holdsRole/grantedBy pattern
+	// has no match for it either — no real grant remains, key deleted.
+	require.Eventually(t, capDocAbsent, 20*time.Second, 100*time.Millisecond,
+		"identity cap doc must be deleted after grantedBy DEL tombstone fan-out")
 }

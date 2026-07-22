@@ -245,18 +245,25 @@ func (d OutputDescriptor) AnchorFromKey(targetKey string) (string, bool) {
 	return actorKey, true
 }
 
-// RealnessFiltered returns the subset of a collect array whose entries carry a
-// real (present and non-empty) value at the realnessFilter field. It drops the
-// degenerate null-key collect artifacts an OPTIONAL-match cypher produces for an
-// actor with no real rows. When no realnessFilter is configured the input is
-// returned unchanged.
+// RealnessFiltered returns the subset of a collect array whose entries are
+// real. It drops the degenerate null-key collect artifacts an OPTIONAL-match
+// cypher produces for an actor with no real rows. When no realnessFilter is
+// configured the input is returned unchanged.
+//
+// A single OutputDescriptor's RealnessFilter names one field, but its
+// BodyColumns can collect two different entry shapes from the same query — a
+// roster column collects maps (e.g. platformPermissions: {operationType,
+// scope, lanes}), while a plain relationship column collects bare keys (e.g.
+// roles: role.key). A map entry is checked at the named field; a non-map
+// (scalar) entry is checked directly, since there is no field to project into
+// — a bare degenerate null is unreal, a bare real key is real.
 //
 // "Real" is defined by isRealField: a non-empty string keeps the entry; a
 // missing field or an empty/whitespace string drops it (the degenerate
-// null-taskKey collect artifact). A non-string value at the realness field is
-// NOT silently dropped — that would over-revoke (zero an actor's whole
-// projection on a type the cypher never intends). A present non-string value is
-// treated as real and kept.
+// null-taskKey collect artifact). A non-string value is NOT silently dropped
+// — that would over-revoke (zero an actor's whole projection on a type the
+// cypher never intends). A present non-string value is treated as real and
+// kept.
 func (d OutputDescriptor) RealnessFiltered(collect any) []any {
 	list, ok := collect.([]any)
 	if !ok {
@@ -267,11 +274,13 @@ func (d OutputDescriptor) RealnessFiltered(collect any) []any {
 	}
 	out := make([]any, 0, len(list))
 	for _, e := range list {
-		m, ok := e.(map[string]any)
-		if !ok {
+		if m, isMap := e.(map[string]any); isMap {
+			if isRealField(m[d.RealnessFilter]) {
+				out = append(out, e)
+			}
 			continue
 		}
-		if isRealField(m[d.RealnessFilter]) {
+		if isRealField(e) {
 			out = append(out, e)
 		}
 	}

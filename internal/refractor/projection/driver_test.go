@@ -408,3 +408,76 @@ func TestDriver_ScalarRealnessColumn_Absent_Deletes(t *testing.T) {
 		t.Fatalf("delete must key on the bare-NanoID convergence key, got %v", keys["key"])
 	}
 }
+
+// --- capabilityRoles regression: emptyBehavior must fire without a map-only
+// realness column (packages/rbac-domain/lenses.go). ---
+
+// capabilityRolesDesc mirrors the shipped rbac-domain capabilityRoles
+// descriptor exactly: two list body columns of DIFFERENT entry shapes —
+// platformPermissions collects maps, roles collects bare role-key strings —
+// sharing one RealnessFilter field name ("operationType", which only exists on
+// the map entries).
+func capabilityRolesDesc(t *testing.T) projection.OutputDescriptor {
+	t.Helper()
+	d, err := projection.ParseOutputDescriptor(&lens.OutputDescriptorSpec{
+		AnchorType:       "identity",
+		OutputKeyPattern: "cap.roles.{actorSuffix}",
+		BodyColumns:      []string{"platformPermissions", "roles"},
+		EmptyBehavior:    "delete",
+		RealnessFilter:   "operationType",
+		Freshness:        "auto",
+		Lanes:            []string{"default"},
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	return d
+}
+
+// TestDriver_CapabilityRoles_LastRoleRevoked_Deletes is the proven-live
+// regression: an actor whose last role was just revoked yields the OPTIONAL
+// MATCH's degenerate all-null platformPermissions entry and an empty roles
+// collect. This pins the combined fix: the degenerate map entry is filtered
+// out of platformPermissions so anyReal goes false, and EmptyAction fires —
+// before the fix cap.roles.<id> survived a last-role revocation indefinitely.
+func TestDriver_CapabilityRoles_LastRoleRevoked_Deletes(t *testing.T) {
+	fn := capabilityRolesDesc(t).EnvelopeFn("vtx.meta.capRoles", func(string) uint64 { return 0 })
+	row := map[string]any{
+		"actorKey":            actor,
+		"platformPermissions": []any{map[string]any{"operationType": nil, "scope": nil, "lanes": nil}},
+		"roles":               []any{},
+	}
+	_, keys, err := fn(row, nil, map[string]any{"projectedAt": "t"})
+	if !errors.Is(err, pipeline.ErrDeleteProjection) {
+		t.Fatalf("expected ErrDeleteProjection on a revoked actor's last role, got %v", err)
+	}
+	if keys["key"] != "cap.roles.identity.Hj4kPmRtw9nbCxz5vQ2y" {
+		t.Fatalf("delete key: %v", keys["key"])
+	}
+}
+
+// TestDriver_CapabilityRoles_RealGrant_KeepsBothColumns asserts a real grant
+// projects platformPermissions AND roles intact — the fix must not
+// over-filter the bare-string roles column via the map-only realness field.
+func TestDriver_CapabilityRoles_RealGrant_KeepsBothColumns(t *testing.T) {
+	fn := capabilityRolesDesc(t).EnvelopeFn("vtx.meta.capRoles", func(string) uint64 { return 0 })
+	row := map[string]any{
+		"actorKey": actor,
+		"platformPermissions": []any{
+			map[string]any{"operationType": "Approve", "scope": "any", "lanes": []any{"default"}},
+		},
+		"roles": []any{"vtx.role.r1"},
+	}
+	env, _, err := fn(row, nil, map[string]any{"projectedAt": "t"})
+	if err != nil {
+		t.Fatalf("a real grant must project, got err %v", err)
+	}
+	pp, ok := env["platformPermissions"].([]any)
+	if !ok || len(pp) != 1 {
+		t.Fatalf("platformPermissions must keep the 1 real grant, got %v", env["platformPermissions"])
+	}
+	roles, ok := env["roles"].([]any)
+	if !ok || len(roles) != 1 || roles[0] != "vtx.role.r1" {
+		t.Fatalf("roles must keep the bare role-key string untouched, got %v", env["roles"])
+	}
+}
