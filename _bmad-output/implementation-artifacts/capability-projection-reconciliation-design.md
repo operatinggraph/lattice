@@ -352,3 +352,25 @@ Fire 1 is platform code (Lattice lane, `internal/refractor` + `cmd/refractor`;
 `internal/substrate` untouched); Fire 2 is `scripts/` + `deploy/demo/` only. Fire 1's verb half
 alone already turns the demo box's reset-window wedge into a one-command targeted heal; the sweep
 half removes the class.
+
+## 10. Incident — 2026-07-22 nightly reset outran Fire 2's wait budget
+
+Hosted Loupe was down (`502`) for ~7h after the 09:10 UTC reset — Facet unaffected. Not a
+regression in Fire 1 or Fire 2: the sweep/verb were never invoked because nothing was lost: the
+mechanism correctly classified this as still-catching-up (`core-kv pending=51502` at the deadline,
+Fire 1's own "< 20 ⇒ lost" test rightly did not fire) and `provision-demo-operator.sh`'s wait
+behaved exactly as designed — it just gave up at its `PROVISION_TIMEOUT_SECONDS=2700` (45m) outer
+deadline before the drain finished. `refractor.log` volume (10-min buckets) shows the real rescan
+ran hot 09:10→10:00 and didn't fully quiet until ~12:20 — **~3h10m**, not 45m, roughly 4x the
+budget. Recovered by re-running `provision-demo-operator.sh` by hand once pending hit 0 (16:27) —
+the intended recovery path for the not-lost case, just missing an automatic trigger.
+
+**Don't fix this by raising the constant again.** We have no tight bound on real drain time (only
+"somewhere between 45m and 3h10m" today, and the seeded dataset only grows), so any fixed number is
+next reset's outage waiting to happen — the exact shape this incident already is, one level up.
+**Fire 3 candidate:** decouple the demo Loupe's provisioning-and-start from `demo-up.sh`'s
+synchronous path — a background retry (systemd timer or equivalent, every few minutes,
+`provision-demo-operator.sh` is already idempotent/safe to re-invoke) that keeps trying until it
+succeeds, so the demo self-heals within minutes of the real drain point instead of waiting for an
+operator to notice a stuck 502 and re-run it by hand. Also removes the pressure on the reset unit's
+own `TimeoutStartSec` (bumped once already, 5345fd76, to "outlast" this same wait).
