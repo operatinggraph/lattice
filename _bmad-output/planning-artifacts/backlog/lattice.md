@@ -52,7 +52,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Bootstrap] `cmd/bootstrap` has no test files — the seed decision is inspection-only** | The probe, re-seed, and two-phase reopen are covered in `internal/bootstrap`, but the branch that *decides* to re-seed lives in `package main` and is untested. Consumer: the freshness probe's own decision path. Either extract the decision into `internal/bootstrap` or add a `cmd/bootstrap` test binary. | ★ | XS–S | 📋 ready · `cmd/bootstrap/main.go:110-140` |
 | **[Refractor] `emptyBehavior` is inert without a `realnessFilter`** | The envelope reaches `EmptyAction()` only inside `if !anyReal && d.RealnessFilter != ""` (`projection/driver.go:99`), so a lens declaring `emptyBehavior:"delete"` with no realness field never deletes. Only myTasks sets one; `capabilityRoles`/`capability`/`capabilityRead` don't. Proven live: after `RevokeRole` takes an actor's last role, `cap.roles.<id>` survives with `lanes:["default"]` — not deleted as §6.8 absence=denial declares. | ★★ | S | 📋 ready |
 | **[Refractor] `lastAppliedSeq` restarts at 0, so reconciliation stays inert on a quiet stream** | The projection ordering token is in-process state: a restarted pipeline holds none until its consumer acks something, so a stale-row heal is refused (`ErrNoOrderingToken`) until traffic arrives. Fix: seed it from the durable's persisted ack floor at startup. Consumer: the auth-plane convergence sweep. | ★★ | S | 📋 ready · [design §3.4](../../implementation-artifacts/capability-projection-reconciliation-design.md) |
-| **[Refractor] A role-queued task's Personal-Lens row never reaches the mirror** | A 2nd `CreateTask` queuedFor a staff role yields a correct `cap.ephemeral` grant and a correct `cap-read` slice carrying the task anchor, yet no `manifest.task` row reaches the device across a host restart + re-hydrate; a stale row for a `complete` task stays un-retracted. Lens and read gate both exonerated live (see the design's F5 Inc 2 note). | ★★★ | M | 📋 ready · consumer: [F5 claim](../../implementation-artifacts/facet-staff-worlds-design.md) |
+| **[Refractor] Personal Lens rows never retract** | No stored key-state to diff against (`NatsSubjectAdapter`), so a stale multi-row anchor (e.g. a completed task) never gets a `Delete`, live or via cold `Hydrate`. Needs a design call on where reconciliation state lives. | ★★ | M | 📋 needs-design · [F5 residual](../../implementation-artifacts/facet-staff-worlds-design.md) |
 
 ### Survey log (round-robin rotation)
 
@@ -112,12 +112,12 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top of the stack: **[Refractor] role-queued task's Personal-Lens row**
-> (★★★ M — F5 claim is its consumer) and **[Refractor] inert `emptyBehavior`** (★★ S — proven
+> 🎯 **Build-ready now.** Top of the stack: **[Refractor] inert `emptyBehavior`** (★★ S — proven
 > live, auth-plane; the last-role-revocation half of the reconciliation work, which the shipped
 > sweep now inherits the empty semantics of). Then the **📋 ready rows in Component maintenance**:
-> **[Weaver] fresh-episode/reclaim error-branch coverage** (★ S–M) and **[Bootstrap]
-> `cmd/bootstrap` tests** (★ XS–S). Every ✅ ratified row in the feature tables below stays
+> **[Weaver] fresh-episode/reclaim error-branch coverage** (★ S–M), **[Bootstrap]
+> `cmd/bootstrap` tests** (★ XS–S), and **[Refractor] Personal Lens rows never retract** (★★ M —
+> needs-design, not build-ready yet). Every ✅ ratified row in the feature tables below stays
 > Andrew-gated or driver-blocked. A stale callout starves the lane — whoever ships the top pick
 > renames this to the next.
 
@@ -185,6 +185,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · `5c5cb236` · [refractor] `personal.hydrate` fans out to every registered Personal Lens, not just the last-registered one — fixes a role-queued task never reaching a rehydrating device
 - 2026-07-22 · `77a9dea8` · [facet] host health emission — `health.facet.<instance>` via a second host-level NKey connection (natsperm `facet` row, publish health-kv-only + `_INBOX.>` subscribe); Lamplighter now sees a crash-looping sync engine
 - 2026-07-22 · `ac4d46b8` · [refractor] auth-plane convergence sweep heals graph↔Capability-KV divergence via the reproject path — `CapabilityCoverageDivergence` + `reconciled` counter; closes the projection-reconciliation item
 - 2026-07-22 · `222f66a5` · [CI] `edge-browser-store` retries once on the `websocket url timeout reached` signature alone — a cold-start miss no longer reds the gate, every other failure still fails unretried
