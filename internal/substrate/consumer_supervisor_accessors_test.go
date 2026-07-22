@@ -207,6 +207,73 @@ func TestSupervisor_OutstandingForConsumer_CountsUnackedInFlight(t *testing.T) {
 	}, "OutstandingForConsumer did not drain to 0 after all messages acked")
 }
 
+// TestSupervisor_AckFloorForConsumer proves the accessor reports the
+// durable's persisted ack floor — zero before anything is acked, and the
+// stream sequence of the last acked message once the consumer has processed
+// some. This is the primitive a caller uses to seed in-process
+// forward-progress state at startup instead of starting cold at zero.
+func TestSupervisor_AckFloorForConsumer(t *testing.T) {
+	t.Parallel()
+	c, ctx := newTestConn(t)
+	stream := provisionAccessorStream(ctx, t, c)
+
+	acked := make(chan uint64, 8)
+	spec := ConsumerSpec{
+		Name:          "acc-ackfloor",
+		Stream:        stream,
+		FilterSubject: "acc.ackfloor",
+		Handler: func(_ context.Context, m Message) (Decision, error) {
+			acked <- m.Sequence
+			return Ack, nil
+		},
+	}
+	sup := NewConsumerSupervisor(c)
+	t.Cleanup(sup.Stop)
+	if err := sup.Add(ctx, spec); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Before anything is published/acked, the floor is zero.
+	floor, err := sup.AckFloorForConsumer(ctx, "acc-ackfloor")
+	if err != nil {
+		t.Fatalf("AckFloorForConsumer (fresh durable): %v", err)
+	}
+	if floor != 0 {
+		t.Fatalf("AckFloorForConsumer (fresh durable) = %d, want 0", floor)
+	}
+
+	const published = 3
+	var lastSeq uint64
+	for i := 0; i < published; i++ {
+		if _, err := c.js.Publish(ctx, "acc.ackfloor", []byte(fmt.Sprintf(`{"n":%d}`, i))); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	for i := 0; i < published; i++ {
+		select {
+		case lastSeq = <-acked:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d/%d messages acked", i, published)
+		}
+	}
+
+	// Once every published message is acked, the floor converges to the last
+	// acked stream sequence.
+	waitFor(t, 5*time.Second, func() bool {
+		floor, err := sup.AckFloorForConsumer(ctx, "acc-ackfloor")
+		return err == nil && floor == lastSeq
+	}, "AckFloorForConsumer did not converge to the last acked stream sequence")
+
+	// Unknown name: (0, error), and the error names the "ack floor" read.
+	n, err := sup.AckFloorForConsumer(ctx, "acc-unknown")
+	if err == nil || n != 0 {
+		t.Fatalf("AckFloorForConsumer(unknown) = (%d, %v), want (0, not-managed error)", n, err)
+	}
+	if !strings.Contains(err.Error(), "not managed") || !strings.Contains(err.Error(), "ack floor") {
+		t.Fatalf("AckFloorForConsumer(unknown) error = %q, want it to say not-managed and name the ack floor read", err)
+	}
+}
+
 // TestSupervisor_Accessors_DeletedDurable_FailLoud proves both accessors ERROR
 // when a managed consumer's durable is gone from the server, surfacing the
 // underlying not-found — they must never report 0 for a name they cannot read,

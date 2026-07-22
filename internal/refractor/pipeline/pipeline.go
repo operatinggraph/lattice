@@ -180,6 +180,34 @@ func (p *Pipeline) recordAppliedSeq(seq uint64) {
 	p.progressMu.Unlock()
 }
 
+// seedAppliedSeqFromAckFloor seeds lastAppliedSeq from the durable consumer's
+// persisted ack floor right after the supervisor registers it (Run). The
+// token is per-process state that otherwise starts at zero on every restart
+// (capability-projection-reconciliation-design.md §3.4): on a quiet stream —
+// nothing to ack since the previous process exited — the pipeline would hold
+// no usable ordering token until new traffic arrives, so a reconciliation
+// write over an existing row keeps hitting ErrNoOrderingToken indefinitely.
+// The durable's ack floor already reflects every message this rule has ever
+// applied, restart or not, so seeding from it makes the token usable
+// immediately. A read failure (e.g. a transient info-fetch error) is logged
+// and otherwise ignored — the pipeline falls back to the pre-existing
+// cold-start-at-zero behavior, which is safe, just inert until traffic
+// arrives. The write only raises lastAppliedSeq, never lowers it, so it
+// cannot regress a value the pump has already advanced to concurrently.
+func (p *Pipeline) seedAppliedSeqFromAckFloor(ctx context.Context) {
+	floor, err := p.supervisor.AckFloorForConsumer(ctx, p.consumerCfg.Name)
+	if err != nil {
+		slog.Warn("pipeline: could not read ack floor to seed lastAppliedSeq, starting cold",
+			"ruleId", p.ruleID, "err", err)
+		return
+	}
+	p.progressMu.Lock()
+	if floor > p.lastAppliedSeq {
+		p.lastAppliedSeq = floor
+	}
+	p.progressMu.Unlock()
+}
+
 // recordProjected stamps the read-model's last-touch clock. Called only after
 // a successful adapter write (Create/Update/Delete actually reaching the
 // target) — never on ack-and-skip or a write error.
@@ -455,6 +483,7 @@ func (p *Pipeline) Run(ctx context.Context) {
 		slog.Error("pipeline: supervisor add", "ruleId", p.ruleID, "err", err)
 		return
 	}
+	p.seedAppliedSeqFromAckFloor(ctx)
 	// Signal that the supervised consumer is registered so Pause/Resume issued
 	// immediately after Run starts (in a goroutine) act on a live consumer.
 	close(p.started)

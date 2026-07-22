@@ -110,11 +110,11 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top of the stack: **[Refractor] `lastAppliedSeq` restarts at 0** (★★ S —
-> the other half of the auth-plane reconciliation work; [design §3.4](../../implementation-artifacts/capability-projection-reconciliation-design.md)).
+> 🎯 **Build-ready now.** Top of the stack: **[Refractor] Personal Lens rows never retract**
+> (★★ M, ✅ Andrew-ratified · [design](../../implementation-artifacts/personal-lens-retraction-design.md)).
 > Then the **📋 ready rows in Component maintenance**: **[Weaver] fresh-episode/reclaim
 > error-branch coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S).
-> **[Refractor] Personal Lens rows never retract** (★★ M) stays 📐 awaiting-Andrew, not
+> **[Processor] tombstone-body posture call** is 🏗️ designing (Designer fire 2026-07-22), not
 > build-ready yet. Every ✅ ratified row in the feature tables below stays Andrew-gated or
 > driver-blocked. A stale callout starves the lane — whoever ships the top pick renames this
 > to the next.
@@ -183,6 +183,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · pending · [refractor] `Pipeline.Run` seeds `lastAppliedSeq` from the durable's persisted ack floor at startup — closes the reconciliation-token residual, quiet-stream restarts no longer stay inert
 - 2026-07-22 · `baf3cb30` · [refractor,rbac-domain] `capabilityRoles` emptyBehavior:delete now fires on last-role revocation — RealnessFiltered generalized for mixed map/scalar list columns; rbac-domain 0.3.0→0.3.1
 - 2026-07-22 · `5c5cb236` · [refractor] `personal.hydrate` fans out to every registered Personal Lens, not just the last-registered one — fixes a role-queued task never reaching a rehydrating device
 - 2026-07-22 · `77a9dea8` · [facet] host health emission — `health.facet.<instance>` via a second host-level NKey connection (natsperm `facet` row, publish health-kv-only + `_INBOX.>` subscribe); Lamplighter now sees a crash-looping sync engine

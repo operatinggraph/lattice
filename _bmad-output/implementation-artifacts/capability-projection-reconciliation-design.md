@@ -230,9 +230,16 @@ token is the pipeline's **last-applied stream sequence, captured before re-evalu
   per-pipeline and clears as soon as the consumer acks anything (it acks every Core KV event,
   ack-and-skip included). Creating an **absent** row at token 0 stays allowed — the guard's
   absent-key branch takes Create, and that is the lost-first-projection case, which must keep
-  healing from a cold pipeline. The residual — a *quiet* stream leaves a restarted pipeline
-  tokenless, so stale-row reconciliation stays inert until traffic arrives — is filed as its own
-  row (seed `lastAppliedSeq` from the durable's persisted ack floor at startup).
+  healing from a cold pipeline. **The residual is fixed:** `Pipeline.Run` seeds `lastAppliedSeq`
+  from the durable consumer's persisted ack floor (`ConsumerSupervisor.AckFloorForConsumer`,
+  `jetstream.ConsumerInfo.AckFloor.Stream`) immediately after the supervised consumer registers,
+  before any new event arrives — a restarted pipeline on a durable with prior ack history holds a
+  usable token from the start instead of staying tokenless until traffic happens to arrive. The
+  seed only ever raises the in-memory value (never lowers it), so it cannot regress a value the
+  pump already advanced concurrently; a read failure logs and falls back to the pre-existing
+  cold-start-at-zero behavior. AckFloor is a safe lower bound (everything up to it is genuinely
+  acked, even under out-of-order acking with `MaxAckPending`), matching the token's own
+  always-loses-to-later-truth contract.
 
 **Staged edit (UNCOMMITTED, the proposal):** `docs/contracts/06-capability-kv.md` §6.2 amendment
 gains one bullet defining the reconciliation write class, its token, its always-loses guarantee,

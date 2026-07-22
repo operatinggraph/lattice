@@ -371,6 +371,19 @@ func (s *ConsumerSupervisor) OutstandingForConsumer(ctx context.Context, name st
 	return info.NumPending + uint64(ackPending), nil
 }
 
+// AckFloorForConsumer returns the named durable's persisted ack floor — the
+// JetStream stream sequence up to which every message is acked. It survives a
+// process restart (the durable, not the process, owns it), so a caller can
+// seed in-process forward-progress state from it at startup instead of
+// starting cold at zero. Returns an error if the consumer info cannot be read.
+func (s *ConsumerSupervisor) AckFloorForConsumer(ctx context.Context, name string) (uint64, error) {
+	info, err := s.consumerInfo(ctx, name, "ack floor")
+	if err != nil {
+		return 0, err
+	}
+	return info.AckFloor.Stream, nil
+}
+
 // consumerInfo reads the live ConsumerInfo for a managed durable. op names the
 // calling accessor so the error identifies which read failed.
 func (s *ConsumerSupervisor) consumerInfo(ctx context.Context, name, op string) (*jetstream.ConsumerInfo, error) {
