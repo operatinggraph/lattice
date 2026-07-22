@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.8.0
+version: 0.8.1
 description: |
   Wellness bookable domain: studio / session / booking vertex types + their
   aspects and links, written by Create*/Tombstone*/Cancel* ops. CreateSession

@@ -207,6 +207,23 @@ func seedLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key, sour
 	}
 }
 
+// tombstoneLink soft-deletes a link the way an unwiring op does — the document
+// stays in Core KV with isDeleted:true. This is the case a `kv.Read(k) == None`
+// ownership guard silently passes, because a tombstone hydrates as a DOCUMENT,
+// not None; the self-guard must read it as absent.
+func tombstoneLink(t *testing.T, ctx context.Context, conn *substrate.Conn, key, source, target, class, localName string) {
+	t.Helper()
+	doc := map[string]any{
+		"class": class, "isDeleted": true,
+		"sourceVertex": source, "targetVertex": target,
+		"localName": localName, "data": map[string]any{},
+	}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("tombstone link %s: %v", key, err)
+	}
+}
+
 // seedLeaseWithApplicant seeds a leaseapp vertex + its applicationFor link
 // to applicantID — the residency check OpenTab/Settle's self-scope guard
 // reads (mirrors wellness-domain's seedLease(..., applicantID, ...)).
@@ -610,6 +627,46 @@ func TestOpenTab_ConsumerSelfScope_RejectedForOthersLease(t *testing.T) {
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("self-service OpenTab for another's lease outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// TestOpenTab_ConsumerSelfScope_TombstonedApplicationForDenied pins the
+// tombstone-blind self-guard: the applicationFor link that once bound this
+// resident to the lease is soft-deleted (isDeleted:true), so kv.Read returns
+// the tombstone DOCUMENT rather than None. A `== None`-only probe reads a
+// moved-out resident's stale link as present and lets them open a tab; the
+// guard must treat a tombstone as absent and deny — the same distinction F4's
+// worksAt guard draws.
+func TestOpenTab_ConsumerSelfScope_TombstonedApplicationForDenied(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "opentabselftomb")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNSLFQTMLEASE", domainConsumerID)
+	applicationForLnk := "lnk.leaseapp.BBCAFEDMNSLFQTMLEASE.applicationFor.identity." + domainConsumerID
+	// The bond existed and was unwired: soft-delete it in place.
+	tombstoneLink(t, ctx, conn, applicationForLnk, leaseKey, domainConsumerKey, "applicationFor", "applicationFor")
+
+	reqID := testutil.GenReqID("cdselfopentab0000003")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "OpenTab",
+		Actor:         domainConsumerKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{leaseKey},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk},
+		},
+		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-service OpenTab with a tombstoned applicationFor outcome = %v, want Rejected (AuthDenied)", outcome)
 	}
 }
 

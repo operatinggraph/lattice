@@ -1108,7 +1108,8 @@ def execute(state, op):
             # caller — it already knows payload.bookingKey and its own
             # authContext.target before submitting, so it computes this key
             # client-side and declares it.
-            if kv.Read(booked_by_lnk) == None:
+            booked_by = kv.Read(booked_by_lnk)
+            if booked_by == None or booked_by.isDeleted:
                 fail("AuthDenied: a consumer may only cancel their own booking")
 
         # read-posture: (a) declared reads at CancelBooking dispatch.

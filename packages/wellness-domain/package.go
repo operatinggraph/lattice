@@ -78,7 +78,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "wellness-domain",
-	Version:     "0.8.0",
+	Version:     "0.8.1",
 	Description: "Wellness bookable domain: studio / session / booking vertex types + their aspects and links, written by Create*/Tombstone*/Cancel* ops. CreateSession claims a deterministic studioSlotClaim per covered 15-minute cell (double-session lock, mirrors clinic-domain's providerSlotClaim). CreateBooking claims the first free sessionSeatClaim within the session's capacity (SessionFull once exhausted — the same CreateOnly idiom extended over a seat-index dimension) and, given an optional leaseAppKey, verifies residency via lease-signing's applicationFor link before granting the resident rate (a mismatch falls through to standard, never a hard failure). Three projection lenses (wellnessStudios, wellnessSessions, wellnessBookings) are the P5 read models a wellness FE reads. No PHI/PII, no protected Postgres layer. Depends lease-signing (documentation only — CreateBooking reads its leaseapp by known key, no install-order requirement enforced at the Starlark level). CreateBooking and CancelBooking each carry an op-meta with the edge-manifest descriptor vocabulary (presentation/inputSchema/dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata only; a client still needs a service-catalog path (permitsOperation) to discover these ops.",
 	DDLs:        DDLs(),
 	Lenses:      Lenses(),

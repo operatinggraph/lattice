@@ -68,7 +68,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.7.0",
+	Version: "0.7.1",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/Settle, OCC-conditioned " +
 		"running total) + the tabStatus aspect type + the cafeTabSettlement actorAggregate convergence lens " +
 		"(missing_account/missing_charge) + the §10.8 playbook dispatching directOp(CreateAccount)/" +

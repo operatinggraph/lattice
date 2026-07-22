@@ -573,7 +573,8 @@ def execute(state, op):
             # self-service caller — it already knows both its own leaseAppKey
             # and its own authContext.target before submitting, so it
             # computes this key client-side and declares it.
-            if kv.Read(application_for_lnk) == None:
+            application_for = kv.Read(application_for_lnk)
+            if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only open a tab for their own lease")
 
         # One open tab per lease, guarded by a deterministic aspect on the
@@ -660,7 +661,8 @@ def execute(state, op):
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller (it knows its own tabKey + leaseAppKey +
             # authContext.target before submitting).
-            if kv.Read(application_for_lnk) == None:
+            application_for = kv.Read(application_for_lnk)
+            if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only charge their own tab")
 
         new_total = existing.data.get("totalCents") + amount_cents
@@ -703,7 +705,8 @@ def execute(state, op):
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller (it knows its own tabKey + leaseAppKey +
             # authContext.target before submitting).
-            if kv.Read(application_for_lnk) == None:
+            application_for = kv.Read(application_for_lnk)
+            if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only settle their own tab")
 
         status_data = {"value": "settled", "totalCents": total_cents,

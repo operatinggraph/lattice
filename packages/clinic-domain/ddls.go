@@ -1746,7 +1746,8 @@ def execute(state, op):
             # engine-dispatcher availability gate.
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller
-            if kv.Read(identified_by_lnk) == None:
+            identified_by = kv.Read(identified_by_lnk)
+            if identified_by == None or identified_by.isDeleted:
                 fail("AuthDenied: a patient may only book an appointment for themselves")
 
         # Normalize startsAt / endsAt to canonical whole-second UTC (time.rfc3339_utc
@@ -1932,7 +1933,8 @@ def execute(state, op):
             identified_by_lnk = "lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller
-            if kv.Read(identified_by_lnk) == None:
+            identified_by = kv.Read(identified_by_lnk)
+            if identified_by == None or identified_by.isDeleted:
                 fail("AuthDenied: a patient may only reschedule their own appointment")
 
         # New times: normalize to canonical whole-second UTC (parse-validates the
@@ -2051,7 +2053,8 @@ def execute(state, op):
             identified_by_lnk = "lnk.patient." + self_patient_id + ".identifiedBy.identity." + target_identity_id
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller
-            if kv.Read(identified_by_lnk) == None:
+            identified_by = kv.Read(identified_by_lnk)
+            if identified_by == None or identified_by.isDeleted:
                 fail("AuthDenied: a patient may only cancel their own appointment")
 
         # Terminal-status lifecycle guard: cancelled / completed / noShow are FINAL.
