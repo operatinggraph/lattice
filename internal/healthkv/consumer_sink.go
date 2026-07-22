@@ -6,7 +6,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // consumerHealthEntry is an engine's minimal per-consumer pause-state

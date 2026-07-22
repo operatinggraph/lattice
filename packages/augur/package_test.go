@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/packages/augur"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/packages/augur"
 )
 
 // TestPackage_ManifestMatchesDefinition catches drift between manifest.yaml and

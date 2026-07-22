@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
 // fullCypherParser adapts ruleengine/full.Engine to CypherParser. Living in a

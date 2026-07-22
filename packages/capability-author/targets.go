@@ -1,6 +1,6 @@
 package capabilityauthor
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
 // #10 §10.8) — the escalation dispatch (design §3.4). One gap,

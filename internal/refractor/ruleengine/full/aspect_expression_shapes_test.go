@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // putAspect writes an aspect body at the Contract #1 aspect key

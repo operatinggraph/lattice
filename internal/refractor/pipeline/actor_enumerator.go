@@ -16,8 +16,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/asolgan/lattice/internal/refractor/adjacency"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // ActorEnumerator finds the set of actor (identity) vertex keys

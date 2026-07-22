@@ -12,9 +12,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // hostHarness wires a real (embedded) NATS/JetStream server with core-kv +

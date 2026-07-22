@@ -1,6 +1,6 @@
 package clinicdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Canonical names. Three vertexType DDLs own the op scripts (each op is admitted
 // by EXACTLY ONE vertexType DDL — the operationType→script index drops an op

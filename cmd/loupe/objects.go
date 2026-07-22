@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/objectcrypto"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/objectcrypto"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 const (

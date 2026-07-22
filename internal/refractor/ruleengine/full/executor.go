@@ -18,9 +18,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/refractor/adjacency"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // maxVarLengthHops is the sanity cap for variable-length traversals when the

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/health/healthwire"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/health/healthwire"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The health KV value schema is defined in internal/refractor/health/healthwire,

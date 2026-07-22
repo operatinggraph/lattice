@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/adjacency"
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 const (

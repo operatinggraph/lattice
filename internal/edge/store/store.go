@@ -27,7 +27,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate/keys"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // ErrUnstorableKey is returned by ApplyUpsert/ApplyDelete when key is neither a

@@ -1,6 +1,6 @@
 package leasesigning
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // RenewalLenses returns the package's renewal lenses (design
 // loftspace-lease-renewal-goal-authored-target-design.md §4.2/§4.3/§4.5):

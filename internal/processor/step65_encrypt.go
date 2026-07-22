@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // encryptSensitiveMutations implements commit-path step 6.5 (Contract #3

@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // startTestServer starts an in-memory JetStream-enabled NATS server and

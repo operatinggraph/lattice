@@ -22,14 +22,14 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
-	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
-	clinicreminders "github.com/asolgan/lattice/packages/clinic-reminders"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
+	clinicreminders "github.com/operatinggraph/lattice/packages/clinic-reminders"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // engineIdleTimeout is how long an identity's engine is kept warm after its

@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // fakeSubmitter is a Submitter test double: decide answers every Submit

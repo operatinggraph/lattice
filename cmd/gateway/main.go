@@ -117,15 +117,15 @@ import (
 
 	"github.com/nats-io/nkeys"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/gateway"
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/gateway/credentialbinding"
-	"github.com/asolgan/lattice/internal/gateway/identityindexhint"
-	"github.com/asolgan/lattice/internal/gateway/natsauth"
-	"github.com/asolgan/lattice/internal/gateway/revocation"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/gateway"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/credentialbinding"
+	"github.com/operatinggraph/lattice/internal/gateway/identityindexhint"
+	"github.com/operatinggraph/lattice/internal/gateway/natsauth"
+	"github.com/operatinggraph/lattice/internal/gateway/revocation"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 const (

@@ -11,9 +11,9 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // controlHarness is an Engine wired to an embedded NATS server with the

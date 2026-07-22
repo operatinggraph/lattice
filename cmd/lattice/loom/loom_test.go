@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	internalloom "github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/loom/control"
-	"github.com/asolgan/lattice/internal/testutil"
+	internalloom "github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/loom/control"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // fakeEngine satisfies the control package's unexported engineControl interface

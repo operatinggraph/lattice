@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 func discardLogger() *slog.Logger {

@@ -1,6 +1,6 @@
 package controlauthz
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the 18 ctrl.<component>.<verb> platform permissions,
 // each granting `scope: any` (v1 — the only working platform scope,

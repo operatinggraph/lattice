@@ -1,6 +1,6 @@
 package clinicreminders
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // The follow-up-reminder sibling of the appointment reminder. A documented visit
 // (clinic-domain RecordEncounter) can request a follow-up with a followUpDate; this

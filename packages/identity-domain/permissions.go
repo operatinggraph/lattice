@@ -1,6 +1,6 @@
 package identitydomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the identity-domain permission vertices.
 //

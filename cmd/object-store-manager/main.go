@@ -36,9 +36,9 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/objectmanager"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/objectmanager"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func main() {

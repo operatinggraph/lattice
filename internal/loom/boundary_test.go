@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/loom"
 )
 
 // TestStart_EmptyActorKeyFails asserts Loom fails LOUD at Start when ActorKey is
@@ -30,14 +30,14 @@ func TestStart_EmptyActorKeyFails(t *testing.T) {
 // its dependency tree. The check uses `go list -deps` (transitive).
 func TestModuleBoundary_OnlySubstrate(t *testing.T) {
 	t.Parallel()
-	out, err := exec.Command("go", "list", "-deps", "github.com/asolgan/lattice/internal/loom").Output()
+	out, err := exec.Command("go", "list", "-deps", "github.com/operatinggraph/lattice/internal/loom").Output()
 	if err != nil {
 		t.Fatalf("go list -deps: %v", err)
 	}
 	forbidden := []string{
-		"github.com/asolgan/lattice/internal/processor",
-		"github.com/asolgan/lattice/internal/weaver",
-		"github.com/asolgan/lattice/internal/refractor",
+		"github.com/operatinggraph/lattice/internal/processor",
+		"github.com/operatinggraph/lattice/internal/weaver",
+		"github.com/operatinggraph/lattice/internal/refractor",
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		dep := strings.TrimSpace(line)
@@ -58,7 +58,7 @@ func TestModuleBoundary_OnlySubstrate(t *testing.T) {
 func TestModuleBoundary_NoRawNATS(t *testing.T) {
 	t.Parallel()
 	out, err := exec.Command("go", "list", "-f", "{{ join .Imports \"\\n\" }}",
-		"github.com/asolgan/lattice/internal/loom").Output()
+		"github.com/operatinggraph/lattice/internal/loom").Output()
 	if err != nil {
 		t.Fatalf("go list imports: %v", err)
 	}

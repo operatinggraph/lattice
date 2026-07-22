@@ -6,7 +6,7 @@
 package capabilityenv
 
 import (
-	"github.com/asolgan/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 )
 
 // NewRoleIndexWrapper returns the EnvelopeFn for the role-by-operation index

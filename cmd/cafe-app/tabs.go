@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	cafedomain "github.com/asolgan/lattice/packages/cafe-domain"
+	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
 
 // weaverTargetsBucket is the shared cross-package Weaver convergence bucket

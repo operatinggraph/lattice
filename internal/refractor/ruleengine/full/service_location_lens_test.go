@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	"github.com/asolgan/lattice/internal/substrate"
-	servicelocation "github.com/asolgan/lattice/packages/service-location"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	servicelocation "github.com/operatinggraph/lattice/packages/service-location"
 )
 
 // service_location_lens_test.go — the §6.10 executor proof for the

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // readBootstrapFile parses lattice.bootstrap.json for assertions on the

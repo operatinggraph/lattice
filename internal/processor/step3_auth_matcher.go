@@ -17,7 +17,7 @@ package processor
 import (
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/capabilitykv"
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
 )
 
 // pathKind classifies the authContext slice an authEntry handles. The three

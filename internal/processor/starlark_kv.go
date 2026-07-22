@@ -7,9 +7,9 @@ import (
 	starlarklib "go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // kvModule returns the Starlark `kv` global exposing a single builtin,

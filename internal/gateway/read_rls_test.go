@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
 // The Fire 3 headline proof: the generic GET /v1/<name> handler enforces RLS

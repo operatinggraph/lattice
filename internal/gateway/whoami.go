@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // whoamiResponse is the GET /v1/actor body

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
 // The D1.5 headline proof: the authenticated read boundary enforces RLS on the

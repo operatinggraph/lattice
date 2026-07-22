@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	cafedomain "github.com/asolgan/lattice/packages/cafe-domain"
-	frontdesk "github.com/asolgan/lattice/packages/front-desk"
+	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
+	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
 )
 
 // Portfolio-pulse (mixed-use-composition-design.md Inc 2 + Inc 3): the

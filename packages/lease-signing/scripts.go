@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 // leaseAppDDLScript handles the leaseapp lifecycle ops CreateLeaseApplication

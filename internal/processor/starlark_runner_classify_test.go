@@ -3,7 +3,7 @@ package processor
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 )
 
 // classifyScriptError only reclassifies a generic ScriptError as

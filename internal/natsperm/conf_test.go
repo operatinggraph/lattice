@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"

@@ -38,12 +38,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/cmd/lattice/output"
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/scripts/pkgverify"
+	"github.com/operatinggraph/lattice/cmd/lattice/output"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/scripts/pkgverify"
 )
 
 func main() {

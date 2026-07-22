@@ -1,6 +1,6 @@
 package loftspacedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Canonical names. The vertexType DDL owns the op scripts; the two aspectType
 // DDLs are step-6 write gates (the Processor keys permittedCommands on the

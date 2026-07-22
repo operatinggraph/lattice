@@ -23,11 +23,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/refractor/lens"
-	"github.com/asolgan/lattice/internal/refractor/projection"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
 // capabilityReadDescriptor builds the compiled §6.13 Output descriptor for the

@@ -11,9 +11,9 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 var _ Adapter = (*NatsSubjectAdapter)(nil)

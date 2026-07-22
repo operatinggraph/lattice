@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Event is one item in an EventList per Contract #3 §3.4: each event has

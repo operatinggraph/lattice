@@ -14,8 +14,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // ConsumerName is the durable consumer name on the Core KV stream.

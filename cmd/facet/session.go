@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Inc 2 (edge-showcase-app-design.md §7.2): a login surface so a returning

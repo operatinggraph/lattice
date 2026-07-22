@@ -15,8 +15,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/processor/opwire"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // replyInboxHeader carries the reply inbox subject through JetStream

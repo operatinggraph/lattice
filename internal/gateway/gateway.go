@@ -24,11 +24,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/cmd/lattice/output"
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/opstatus"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/cmd/lattice/output"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/opstatus"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // maxBodyBytes bounds the request body the Gateway will read — an

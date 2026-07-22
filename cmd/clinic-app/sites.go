@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // siteRow is one row of the clinic-domain `clinicSites` lens read model (P5: an

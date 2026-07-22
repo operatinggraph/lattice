@@ -13,8 +13,8 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/test"
 
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // bypassLogger returns a minimal logger for tests.

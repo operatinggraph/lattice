@@ -49,9 +49,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/refractor/failure"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/refractor/failure"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 const (

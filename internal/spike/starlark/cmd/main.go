@@ -20,7 +20,7 @@ import (
 	"runtime"
 	"time"
 
-	spike "github.com/asolgan/lattice/internal/spike/starlark"
+	spike "github.com/operatinggraph/lattice/internal/spike/starlark"
 )
 
 func main() {

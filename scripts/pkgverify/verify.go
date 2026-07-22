@@ -5,7 +5,7 @@
 //
 // Usage: imported by scripts/verify-package-*.go via:
 //
-//	import "github.com/asolgan/lattice/scripts/pkgverify"
+//	import "github.com/operatinggraph/lattice/scripts/pkgverify"
 //
 // The library requires a live jetstream.KeyValue handle and a pre-populated
 // allKeys map (snapshot of all keys). Callers construct those in main() and

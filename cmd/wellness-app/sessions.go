@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	wellnessdomain "github.com/asolgan/lattice/packages/wellness-domain"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
 // sessionProjection is one row of the wellness-domain `wellnessSessions` lens.

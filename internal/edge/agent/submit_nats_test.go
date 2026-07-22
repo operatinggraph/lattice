@@ -10,9 +10,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 func newNATSSubmitterTestConn(t *testing.T, ctx context.Context) *substrate.Conn {

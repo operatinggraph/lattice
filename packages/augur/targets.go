@@ -1,6 +1,6 @@
 package augur
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's single meta.weaverTarget: augurDispatch —
 // the Fire 2b pickup that closes the Augur loop's last hop. Its one gap column,

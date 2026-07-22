@@ -49,7 +49,7 @@
 // Depends lease-signing (the leaseapp vertex type an account is heldFor).
 package loftspaceledger
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{

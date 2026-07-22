@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/spf13/cobra"
 
-	"github.com/asolgan/lattice/cmd/lattice/output"
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/cmd/lattice/output"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // dmlKeywords are the SQL statement prefixes that are considered DML

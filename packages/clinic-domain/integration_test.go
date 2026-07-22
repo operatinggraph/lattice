@@ -26,13 +26,13 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
-	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
-	locationdomain "github.com/asolgan/lattice/packages/location-domain"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
+	locationdomain "github.com/operatinggraph/lattice/packages/location-domain"
 )
 
 const (

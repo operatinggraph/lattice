@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // personalActorKeyField mirrors internal/refractor/adapter.PersonalActorKeyField

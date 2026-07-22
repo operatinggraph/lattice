@@ -3,7 +3,7 @@ package identitydomain
 import (
 	"strings"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // consumerRoleKey is this package's own "consumer" role key, computed

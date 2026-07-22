@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
 func TestPackage_ManifestMatchesDefinition(t *testing.T) {

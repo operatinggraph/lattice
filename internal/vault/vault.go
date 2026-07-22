@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/asolgan/lattice/internal/vault/vaultwire"
+	"github.com/operatinggraph/lattice/internal/vault/vaultwire"
 )
 
 // The wire types, the sentinel errors, and the session-key open are defined in

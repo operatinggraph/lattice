@@ -44,12 +44,12 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/edge/sync"
-	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/edge/sync"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // defaultGatewayURL matches cmd/gateway's own default listen address and

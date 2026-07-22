@@ -15,8 +15,8 @@ import (
 
 	"github.com/nats-io/nats.go/micro"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // ErrNoToken is returned by ResolveActor when an ActorVerifier is configured

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestTokenBucket_NoContentionAdmitsImmediately proves an uncontended bucket

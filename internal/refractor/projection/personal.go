@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/refractor/capabilityread"
-	"github.com/asolgan/lattice/internal/refractor/lens"
-	"github.com/asolgan/lattice/internal/refractor/personalinterest"
-	"github.com/asolgan/lattice/internal/refractor/pipeline"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/capabilityread"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // PersonalActorType is the recipient vertex type the Personal Lens fan-out

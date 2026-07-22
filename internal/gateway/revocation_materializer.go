@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/gateway/revocation"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/gateway/revocation"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // revocationConsumerName is the durable name of the Gateway's own

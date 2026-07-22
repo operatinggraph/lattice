@@ -8,12 +8,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
-	refadapter "github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	refadapter "github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // TestProducerConsumerEnvelope_RoundTrip is the RR-4 guard

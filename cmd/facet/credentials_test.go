@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // withSession returns r carrying identityID as its resolved session — what

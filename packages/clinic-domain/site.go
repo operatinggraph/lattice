@@ -1,6 +1,6 @@
 package clinicdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Canonical names for the multi-site DDLs. clinicSite (vertexType) owns
 // SetSiteProfile, which writes the .site aspect (class clinicSiteProfile)

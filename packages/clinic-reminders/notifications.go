@@ -1,6 +1,6 @@
 package clinicreminders
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // The bridge-facing half of the reminder mechanism. recordReminderScript /
 // recordFollowUpReminderScript (ddls.go / followups.go) already emit

@@ -20,11 +20,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
-	"github.com/asolgan/lattice/internal/substrate/keys"
-	corevault "github.com/asolgan/lattice/internal/vault/vaultwire"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
+	corevault "github.com/operatinggraph/lattice/internal/vault/vaultwire"
 )
 
 // sessionKeyMargin is subtracted from a cached session key's ExpiresAt when

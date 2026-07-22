@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func TestPackage_ManifestMatchesDefinition(t *testing.T) {

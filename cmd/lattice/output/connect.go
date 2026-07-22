@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // DefaultTimeout is the per-operation NATS timeout used by CLI subcommands.

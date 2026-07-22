@@ -3,7 +3,7 @@ package lens
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

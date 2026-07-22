@@ -1,6 +1,6 @@
 package leasesigning
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // LoomPatterns returns the package's meta.loomPattern declarations (Contract
 // #10 §10.5). Three run over the applicant `identity` subject (the triggerLoom

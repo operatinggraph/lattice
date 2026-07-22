@@ -7,7 +7,7 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 func TestActorFromRequest_HeaderPresent(t *testing.T) {

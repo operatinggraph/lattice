@@ -15,9 +15,9 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/refractor/personalinterest"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestPersonalLens_PL4_E2E_HydrateBulkProjectsThenCompletes proves the cold

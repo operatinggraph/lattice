@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/refractor/personalinterest"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/refractor/personalinterest"
 )
 
 func TestControl_PersonalRegister_NoKVConfigured_FailsClosed(t *testing.T) {

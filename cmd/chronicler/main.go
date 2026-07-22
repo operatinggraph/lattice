@@ -27,10 +27,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/chronicler"
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/chronicler"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // BuildAcceptedReply constructs an `accepted` reply for a successful

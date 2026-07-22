@@ -48,14 +48,14 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/opstatus"
-	"github.com/asolgan/lattice/internal/privacyworker"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/processor/outbox"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/opstatus"
+	"github.com/operatinggraph/lattice/internal/privacyworker"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor/outbox"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 func main() {

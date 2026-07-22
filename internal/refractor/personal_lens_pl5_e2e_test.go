@@ -20,8 +20,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // TestPersonalLens_PL5_E2E_CiphertextFieldForwardedEncrypted proves the

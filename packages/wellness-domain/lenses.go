@@ -1,6 +1,6 @@
 package wellnessdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WellnessStudiosBucket is the NATS-KV read model the wellnessStudios lens
 // projects into — the **P5 query surface** for "which studios exist": the

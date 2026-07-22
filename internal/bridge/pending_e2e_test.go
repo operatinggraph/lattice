@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/bridge"
 )
 
 // TestBridge_PendingOutcome_PostsDispatchOpNotReply drives the async path: the

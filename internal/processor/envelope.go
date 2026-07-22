@@ -1,6 +1,6 @@
 package processor
 
-import "github.com/asolgan/lattice/internal/processor/opwire"
+import "github.com/operatinggraph/lattice/internal/processor/opwire"
 
 // The operation wire format (Contract #2 §2.1–§2.6) is defined in
 // internal/processor/opwire, a leaf package that depends on nothing but the

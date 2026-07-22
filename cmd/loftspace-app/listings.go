@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	loftspacedomain "github.com/asolgan/lattice/packages/loftspace-domain"
+	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
 )
 
 // kvGetter reads a read-model entry's raw bytes for a key, reporting false when

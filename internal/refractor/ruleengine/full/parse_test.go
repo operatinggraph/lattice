@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	identityhygiene "github.com/asolgan/lattice/packages/identity-hygiene"
-	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	identityhygiene "github.com/operatinggraph/lattice/packages/identity-hygiene"
+	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
 
 // parse compiles a body via the public Engine API and returns the wrapped

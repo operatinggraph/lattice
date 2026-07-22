@@ -27,10 +27,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/aiagent"
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/aiagent"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // northStarSeederActorID is the test seeder identity — acts as the operator

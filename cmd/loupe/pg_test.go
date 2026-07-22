@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
 func TestPGResolveTarget(t *testing.T) {

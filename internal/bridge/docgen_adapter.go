@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // leaseDocStoreNamespace seeds the deterministic object store name for an

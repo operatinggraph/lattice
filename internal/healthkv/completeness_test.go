@@ -45,8 +45,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestHealthKV_Phase1Completeness polls Health KV until all non-event-driven

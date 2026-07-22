@@ -1,6 +1,6 @@
 package orchestrationbase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Lenses returns the package's Lens declarations. The single
 // `capabilityEphemeral` lens projects FR56 ephemeral task grants to the

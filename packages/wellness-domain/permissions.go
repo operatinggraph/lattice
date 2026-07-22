@@ -1,6 +1,6 @@
 package wellnessdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants every wellness-domain op to the `operator` role (scope
 // any) — the trusted-tool operator already holds standing permission, no new

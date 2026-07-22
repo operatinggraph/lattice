@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // registrationDoc is the per-device Interest Set document stored at

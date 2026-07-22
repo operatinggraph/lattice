@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Lane-3 subject constants (Contract #10 §10.4). The schedule subject is keyed

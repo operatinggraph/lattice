@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // readableAnchor mirrors one entry of §6.14's readableAnchors[]. anchorType is

@@ -1,6 +1,6 @@
 package maintenancedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Canonical names. One vertexType DDL owns both op scripts (an op is admitted
 // by EXACTLY ONE vertexType DDL — the operationType→script index drops an op

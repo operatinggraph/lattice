@@ -16,9 +16,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // TestSelfDescription_KernelDDLsHaveAllFiveAspects verifies the primordial

@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // --- test plumbing ---------------------------------------------------------

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 // ErrNoPlan is the first-class "no plan derivable" outcome (design §3.1): the

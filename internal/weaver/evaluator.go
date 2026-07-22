@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/weaver/planner"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/weaver/planner"
 )
 
 // handleRow is the lane-1 handler: one KV-CDC message = the current state of

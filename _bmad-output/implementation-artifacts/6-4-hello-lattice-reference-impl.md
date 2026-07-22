@@ -363,9 +363,9 @@ Any assertion that waits for a Lens projection to complete uses a bounded poll l
         "log"
         "os"
         "time"
-        "github.com/asolgan/lattice/internal/aiagent"
-        "github.com/asolgan/lattice/internal/processor"
-        "github.com/asolgan/lattice/internal/substrate"
+        "github.com/operatinggraph/lattice/internal/aiagent"
+        "github.com/operatinggraph/lattice/internal/processor"
+        "github.com/operatinggraph/lattice/internal/substrate"
     )
 
     func main() {

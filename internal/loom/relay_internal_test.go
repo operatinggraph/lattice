@@ -15,8 +15,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestRelay_NakWithDelayDoesNotHotLoop proves AC #3/#5: when the relay's publish

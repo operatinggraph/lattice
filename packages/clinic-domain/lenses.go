@@ -1,6 +1,6 @@
 package clinicdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // ClinicAppointmentsBucket is the NATS-KV read model the clinicAppointments lens
 // projects into. It is the **P5 query surface** for "what appointments exist" — a

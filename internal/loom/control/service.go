@@ -20,8 +20,8 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 
-	"github.com/asolgan/lattice/internal/controlauth"
-	"github.com/asolgan/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/loom"
 )
 
 // engineControl is the minimal interface this package needs from *loom.Engine —

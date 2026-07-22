@@ -1,6 +1,6 @@
 package orchestrationbase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants.
 //

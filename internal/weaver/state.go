@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // gapColumnPrefix is the §10.2 gap-column naming convention: every gap column

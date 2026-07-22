@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // MetricsInterval is the default polling interval for new LagPoller instances.

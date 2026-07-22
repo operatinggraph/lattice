@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	cafeledger "github.com/asolgan/lattice/packages/cafe-ledger"
+	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
 )
 
 // leaseAccountProjection is one row of the cafe-ledger `cafeLeaseAccounts`

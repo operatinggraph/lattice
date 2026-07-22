@@ -3,7 +3,7 @@ package bridge_test
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/bridge"
 )
 
 // TestAugurProposal_CodecRoundTrip: a proposal encoded to the Result.Detail JSON

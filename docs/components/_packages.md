@@ -110,7 +110,7 @@ single `Package` variable that the installer reads:
 // packages/identity-hygiene/package.go
 package identityhygiene
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 var Package = pkgmgr.Definition{
     Name:        "identity-hygiene",

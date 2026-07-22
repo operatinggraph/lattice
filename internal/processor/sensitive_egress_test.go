@@ -8,8 +8,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // seedSensitiveAspectClassDDL seeds an aspectType DDL meta-vertex for class,

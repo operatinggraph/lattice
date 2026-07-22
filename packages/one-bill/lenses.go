@@ -1,6 +1,6 @@
 package onebill
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // HistoryBucket is the NATS-KV read model both lenses below project into — the
 // **P5 query surface** for "every charge/payment across every ledger this

@@ -1,6 +1,6 @@
 package cafedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants. Every op
 // keeps its orchestrator-submitted grant (the trusted-tool app — POS /

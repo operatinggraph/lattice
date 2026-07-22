@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	loftspaceledger "github.com/asolgan/lattice/packages/loftspace-ledger"
+	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
 )
 
 // ledgerEntryProjection is one row of the loftspace-ledger `ledgerHistory` lens,

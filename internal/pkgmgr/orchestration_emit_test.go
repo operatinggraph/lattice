@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/weaver"
+	"github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/weaver"
 )
 
 // findDoc returns the document the install batch emits under key, or nil.

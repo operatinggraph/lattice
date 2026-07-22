@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Envelope classes for the orchestration meta-vertices this installer emits.

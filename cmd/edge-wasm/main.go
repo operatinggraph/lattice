@@ -16,7 +16,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/asolgan/lattice/internal/edge/browser"
+	"github.com/operatinggraph/lattice/internal/edge/browser"
 )
 
 func main() {

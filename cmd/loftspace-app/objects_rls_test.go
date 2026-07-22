@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
 // TestObjectsD1_5_LeaseappEntitlement_RLS proves entitledToObjectOwner's

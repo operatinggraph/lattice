@@ -3,7 +3,7 @@ package pkgmgr
 import (
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 // validateEffects runs the Contract #10 §10.8 Planner-extension install-time

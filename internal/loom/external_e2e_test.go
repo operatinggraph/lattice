@@ -10,8 +10,8 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The external e2e proves the externalTask seam end-to-end: an

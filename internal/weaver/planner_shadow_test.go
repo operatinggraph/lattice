@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 // shadowTestEngine builds a minimal Engine sufficient to exercise

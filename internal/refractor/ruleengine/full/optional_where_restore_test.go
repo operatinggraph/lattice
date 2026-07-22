@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
 // These tests pin the OPTIONAL MATCH ... WHERE null-restore semantics: when a

@@ -1,6 +1,6 @@
 package orchestrationbase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // loomLifecycleDDL is the canonical name of the DDL handling the three
 // event-only Loom lifecycle ops (Contract #10 §10.9).

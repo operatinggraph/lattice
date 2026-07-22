@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // TestSetAvailability_Success writes the identity's availability aspect.

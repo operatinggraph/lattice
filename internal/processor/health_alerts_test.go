@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // alertSeverity maps known alert codes to their Contract #5 severity; unknown

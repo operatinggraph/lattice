@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // TestPackage_ManifestMatchesDefinition is a pure unit smoke test: parse the

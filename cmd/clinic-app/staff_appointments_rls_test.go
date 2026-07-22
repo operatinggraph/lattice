@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
 // The D1.5 staff-wildcard headline proof: a WildcardAnchor grant

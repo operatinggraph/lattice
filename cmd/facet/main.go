@@ -72,7 +72,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // maxInstanceOfHops bounds the instanceOf-chain walk in the step-6 write-gate's

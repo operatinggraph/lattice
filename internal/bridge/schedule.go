@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Poll/timeout lane subjects (Contract #10 §10.4). A pending external call arms

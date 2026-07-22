@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // seedEnginePattern registers a pattern ref → meta.loomPattern vertex key

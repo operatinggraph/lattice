@@ -1,6 +1,6 @@
 package loftspacedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // LoftspaceListingsBucket is the NATS-KV read model the availableListings lens
 // projects into. It is the **P5 query surface** for "what units can I lease":

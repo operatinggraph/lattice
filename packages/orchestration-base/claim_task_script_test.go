@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 const (

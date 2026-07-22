@@ -35,8 +35,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // rebuildPrimaryKey is the PRIMARY per-actor capability doc key the rebuild

@@ -1,6 +1,6 @@
 package loftspacedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants every op to the `operator` role (scope any). The role
 // canonical name `operator` is resolved by cmd/lattice-pkg to the seeded NanoID

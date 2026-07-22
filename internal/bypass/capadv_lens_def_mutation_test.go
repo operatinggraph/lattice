@@ -42,7 +42,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // The canonical Capability Lens vertex key (same constant as in step3_auth_trace.go).

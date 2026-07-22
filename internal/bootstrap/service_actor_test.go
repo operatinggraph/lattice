@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // populateForTest generates a fresh primordial ID set into the package vars.

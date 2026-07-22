@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // The Lens page backend (loupe-2-ux-design.md §6): GET /api/lens/<id>

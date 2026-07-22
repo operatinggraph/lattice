@@ -9,7 +9,7 @@
 // See docs/components/_packages.md for the install contract.
 package identityhygiene
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle. cmd/lattice-pkg imports
 // this variable when dispatching `install identity-hygiene`.

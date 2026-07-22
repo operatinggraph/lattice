@@ -65,7 +65,7 @@ The spike's four behavioral questions all map to specific architectural assumpti
 ## Library / Environment
 
 - **Go version:** 1.26.1 (confirmed via `go version` at scaffolding time)
-- **Go module:** `github.com/asolgan/lattice` (root `go.mod` exists; this spike is `internal/spike/nats-batch/` within it)
+- **Go module:** `github.com/operatinggraph/lattice` (root `go.mod` exists; this spike is `internal/spike/nats-batch/` within it)
 - **NATS server:** embedded — import `github.com/nats-io/nats-server/v2/server` and start an in-process server with JetStream enabled. Do NOT require Docker.
 - **NATS client:** `github.com/nats-io/nats.go` — the official client; check it exposes the `PublishBatch` API (atomic batch is NATS 2.12+; per-key TTL is 2.11+).
 - **NATS server version:** **minimum 2.12, recommended 2.14.** 2.12 introduces atomic batch (`PublishBatch`); 2.14 is the preferred target for stability and feature margin. Pin the embedded-server dependency to a 2.12.x or 2.14.x release accordingly.

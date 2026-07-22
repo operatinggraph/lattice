@@ -9,8 +9,8 @@ import (
 
 	starlarklib "go.starlark.net/starlark"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // evalGuard evaluates a parsed §10.5 guard against the subject's CURRENT Core KV

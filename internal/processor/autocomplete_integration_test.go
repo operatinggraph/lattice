@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // recordingCommitter captures every ScriptResult handed to Commit and lets a

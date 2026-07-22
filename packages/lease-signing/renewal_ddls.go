@@ -3,7 +3,7 @@ package leasesigning
 import (
 	"encoding/json"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // RenewalDDLs returns the package's renewal-vertex DDL declaration: the

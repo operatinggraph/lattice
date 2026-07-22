@@ -1,6 +1,6 @@
 package capabilityauthor
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // CapabilityProposalsBucket is the NATS-KV read model capabilityProposals
 // projects into — the P5 query surface for "what capability-authoring

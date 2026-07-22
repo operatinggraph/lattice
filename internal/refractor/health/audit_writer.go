@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // auditStreamMaxAge is the default retention period for audit stream messages.

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The reconciler sweep cadence is a durable NATS `@every` schedule rather than an

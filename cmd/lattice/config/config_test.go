@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/asolgan/lattice/cmd/lattice/creds"
+	"github.com/operatinggraph/lattice/cmd/lattice/creds"
 )
 
 func TestSetCredential_CreatesFile(t *testing.T) {

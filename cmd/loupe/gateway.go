@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/asolgan/lattice/internal/gateway/revocation"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/gateway/revocation"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // revocationRow is one revoked actor in the GET /api/gateway/revocations

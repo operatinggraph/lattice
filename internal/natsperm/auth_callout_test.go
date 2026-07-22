@@ -16,10 +16,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	gwauth "github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/gateway/natsauth"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	gwauth "github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/natsauth"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // calloutIssuerSeedPath is deploy/nkeys/auth-callout-issuer.nk — the same

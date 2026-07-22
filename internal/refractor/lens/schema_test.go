@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
 )
 
 // validRuleYAML returns a minimal valid rule YAML for use in tests.

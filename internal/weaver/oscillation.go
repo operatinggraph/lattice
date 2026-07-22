@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 // oscillationWindowSize bounds how many recent dispatches against one aspect

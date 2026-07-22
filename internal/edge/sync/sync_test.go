@@ -13,14 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	edgestore "github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
-	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
+	edgestore "github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // fakeControlTransport is a Manager Transport whose Request answers control

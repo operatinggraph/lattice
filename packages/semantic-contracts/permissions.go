@@ -1,6 +1,6 @@
 package semanticcontracts
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares the op-meta vertices that make ops forOperation-resolvable.
 //

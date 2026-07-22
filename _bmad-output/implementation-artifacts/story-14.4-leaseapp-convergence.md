@@ -157,7 +157,7 @@ Author the package mirroring `service-domain` + `orchestration-base` at every la
 ```go
 package leasesigning
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 var Package = pkgmgr.Definition{
     Name:          "lease-signing",

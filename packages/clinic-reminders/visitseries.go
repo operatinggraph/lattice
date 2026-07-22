@@ -1,6 +1,6 @@
 package clinicreminders
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // The clinic vertical's recurring forcing function: a patient on a standing cadence
 // (chronic-care monthly check-ins, weekly PT) gets a self-rolling "next visit due"

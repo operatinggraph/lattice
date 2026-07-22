@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func discardLogger() *slog.Logger {

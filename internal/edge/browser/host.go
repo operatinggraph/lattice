@@ -43,14 +43,14 @@ import (
 	"syscall/js"
 	"time"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
-	edgesync "github.com/asolgan/lattice/internal/edge/sync"
-	"github.com/asolgan/lattice/internal/edge/transport"
-	edgevault "github.com/asolgan/lattice/internal/edge/vault"
-	"github.com/asolgan/lattice/internal/processor/opwire"
-	"github.com/asolgan/lattice/internal/substrate/keys"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // drainInterval is how often the agent retries queued intents. It matches the

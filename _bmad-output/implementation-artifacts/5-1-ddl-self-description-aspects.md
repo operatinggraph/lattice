@@ -586,9 +586,9 @@ import (
     "testing"
     "time"
 
-    "github.com/asolgan/lattice/internal/bootstrap"
-    "github.com/asolgan/lattice/internal/processor"
-    "github.com/asolgan/lattice/internal/testutil"
+    "github.com/operatinggraph/lattice/internal/bootstrap"
+    "github.com/operatinggraph/lattice/internal/processor"
+    "github.com/operatinggraph/lattice/internal/testutil"
 )
 // Note: no substrate import needed — testutil.GenReqID handles request IDs.
 

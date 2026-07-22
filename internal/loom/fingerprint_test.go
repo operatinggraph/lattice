@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestFingerprintOf_DiffersOnRecreateRelevantFields proves the reconcile diff

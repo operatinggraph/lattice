@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/testutil"
-	internalweaver "github.com/asolgan/lattice/internal/weaver"
-	"github.com/asolgan/lattice/internal/weaver/control"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	internalweaver "github.com/operatinggraph/lattice/internal/weaver"
+	"github.com/operatinggraph/lattice/internal/weaver/control"
 )
 
 // fakeEngine satisfies the control package's unexported engineControl

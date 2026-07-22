@@ -3,7 +3,7 @@ package weaver
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestDeriveEpisodeRequestID_Deterministic proves the OCC/idempotency seam of

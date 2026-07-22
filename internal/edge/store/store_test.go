@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/edge/store/storetest"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/edge/store/storetest"
 )
 
 // boltFactory builds bbolt-backed stores for the conformance suite. Each store

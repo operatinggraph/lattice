@@ -13,7 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestBypass2_OffNamespacePublish_NotConsumed publishes a message to a subject

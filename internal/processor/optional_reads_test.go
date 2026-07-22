@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Tests for Contract #2 §2.5 `contextHint.optionalReads` — the absence-tolerant

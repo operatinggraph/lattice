@@ -1,7 +1,7 @@
 package bridge
 
 import (
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // replyRequestNamespace prefixes the hash input so a bridge result-op requestId

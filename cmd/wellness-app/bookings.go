@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	wellnessdomain "github.com/asolgan/lattice/packages/wellness-domain"
+	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
 // bookingProjection is one row of the wellness-domain `wellnessBookings` lens.

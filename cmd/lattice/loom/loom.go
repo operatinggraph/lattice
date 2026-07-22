@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/asolgan/lattice/cmd/lattice/output"
-	"github.com/asolgan/lattice/internal/controlauth"
-	"github.com/asolgan/lattice/internal/loom/control"
+	"github.com/operatinggraph/lattice/cmd/lattice/output"
+	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/loom/control"
 )
 
 // validateName rejects a name that is empty or contains a "." before the request

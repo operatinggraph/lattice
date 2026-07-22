@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/bridge"
 )
 
 // The poll/timeout lane proof. A bridge engine on embedded NATS consumes a Pending

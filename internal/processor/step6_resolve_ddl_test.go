@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Valid 20-char NanoIDs for the instanceOf-resolver fixtures. The link/aspect

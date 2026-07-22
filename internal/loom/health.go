@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // healthVersion is the Loom build version reported in the Contract #5 heartbeat.

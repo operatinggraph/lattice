@@ -183,8 +183,8 @@ Flake-retry per Deviation 14 is allowed (re-run once); a flake *claim* without a
 - `make vet` — passed (no errors).
 - `golangci-lint run ./...` — `0 issues.`
 - `make up && make verify-kernel` (verify-bootstrap was renamed verify-kernel) — `verify-kernel: ALL ASSERTIONS PASSED`. Bootstrap ran clean; readiness gate satisfied. (Primordial seeding reported "already done on prior run" — idempotent path; the new ctx-only signature builds and bootstrap completed.)
-- `go test ./internal/substrate/... -count=1` — `ok  github.com/asolgan/lattice/internal/substrate  1.451s` (includes the empirical KV-readback assertion).
-- `go test ./internal/processor/... -p 1 -count=1` — `ok  github.com/asolgan/lattice/internal/processor  20.111s`.
+- `go test ./internal/substrate/... -count=1` — `ok  github.com/operatinggraph/lattice/internal/substrate  1.451s` (includes the empirical KV-readback assertion).
+- `go test ./internal/processor/... -p 1 -count=1` — `ok  github.com/operatinggraph/lattice/internal/processor  20.111s`.
 - `go test ./... -p 1 -count=1` — all packages `ok` (no FAIL).
 - `make test-bypass` — `PHASE 1 GATE 2: PASSED (4/4 BLOCKED)`.
 - `make test-capability-adversarial` — `PHASE 1 GATE 3: PASSED (4/4 DEFENDED)`.

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // DLQMessage is the diagnostic payload written to a rule's DLQ stream.

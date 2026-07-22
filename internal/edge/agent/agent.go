@@ -32,9 +32,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/processor/opwire"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
 )
 
 // Submitter delivers one operation envelope to the platform and waits for

@@ -1,6 +1,6 @@
 package maintenancedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants the two work-order ops.
 //

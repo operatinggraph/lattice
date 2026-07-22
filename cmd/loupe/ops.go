@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // opGroup is one service/domain in the Submit Op catalog: a meta-vertex (DDL)

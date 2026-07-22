@@ -41,11 +41,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/controlauth"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/weaver"
-	"github.com/asolgan/lattice/internal/weaver/control"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/weaver"
+	"github.com/operatinggraph/lattice/internal/weaver/control"
 )
 
 // engineControl is satisfied structurally by *weaver.Engine; declared here

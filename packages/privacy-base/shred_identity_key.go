@@ -1,6 +1,6 @@
 package privacybase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // shredIdentityKeyDDL is the canonical name of the vertexType DDL owning the
 // ShredIdentityKey op (design §2.2/§9 Fire 3, Contract #3 §3.10/§3.11).

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	frontdesk "github.com/asolgan/lattice/packages/front-desk"
+	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
 )
 
 // bookingRow is one row of the front-desk `frontDeskBookings` lens

@@ -9,8 +9,8 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full/cypher"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full/cypher"
 )
 
 // Engine is the v2 engine. Satisfies ruleengine.RuleEngine.

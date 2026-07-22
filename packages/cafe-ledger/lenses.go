@@ -1,6 +1,6 @@
 package cafeledger
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // LedgerHistoryBucket is the NATS-KV read model the cafeLedgerHistory lens
 // projects into. It is the **P5 query surface** for "what café charges/

@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
-	privacybase "github.com/asolgan/lattice/packages/privacy-base"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
+	privacybase "github.com/operatinggraph/lattice/packages/privacy-base"
 )
 
 // shredRow is one shredded identity's row in the GET /api/vault/shreds reply

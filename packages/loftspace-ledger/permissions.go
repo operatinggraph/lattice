@@ -1,6 +1,6 @@
 package loftspaceledger
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the package's permission vertices + grants. All three
 // ops are orchestrator-submitted (the same operator-grant idiom lease-signing

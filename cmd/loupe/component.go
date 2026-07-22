@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // componentInstance is one live heartbeat of a component — one card on the

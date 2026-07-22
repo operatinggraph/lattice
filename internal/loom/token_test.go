@@ -3,7 +3,7 @@ package loom
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestDeriveRequestID_DeterministicAndValid proves the write-ahead token is a

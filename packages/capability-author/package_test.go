@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	capabilityauthor "github.com/asolgan/lattice/packages/capability-author"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	capabilityauthor "github.com/operatinggraph/lattice/packages/capability-author"
 )
 
 // TestPackage_ManifestMatchesDefinition catches drift between manifest.yaml

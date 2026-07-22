@@ -12,7 +12,7 @@ import (
 	starlarklib "go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 )
 
 // SensitiveAspectResolver lets the §5 validator resolve whether a declared

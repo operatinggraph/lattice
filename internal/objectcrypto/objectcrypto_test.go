@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // TestDigest_MatchesNATSFormat pins the "SHA-256=<base64url>" wire format (a

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // PublicationError is the typed failure surfaced when the batch publish to

@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
 )
 
 // syncgapReq marshals a syncgap ControlRequest carrying only the cursor the

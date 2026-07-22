@@ -15,10 +15,10 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // maxClaimBodyBytes bounds POST /api/claim's request body, mirroring

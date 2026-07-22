@@ -1,6 +1,6 @@
 package identitydomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // IdentityIndexHintBucket is the package-owned NATS-KV read model the
 // identityIndexHint lens projects into — the P5-clean query surface the

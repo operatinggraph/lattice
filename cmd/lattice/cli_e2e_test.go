@@ -65,7 +65,7 @@ func TestCLI_VersionExits0(t *testing.T) {
 func buildLatticeBin(t *testing.T) string {
 	t.Helper()
 	binPath := filepath.Join(t.TempDir(), "lattice-test-bin")
-	cmd := exec.Command("go", "build", "-o", binPath, "github.com/asolgan/lattice/cmd/lattice")
+	cmd := exec.Command("go", "build", "-o", binPath, "github.com/operatinggraph/lattice/cmd/lattice")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	// Ensure go can find the module root regardless of working directory.
 	cmd.Dir = repoRoot(t)

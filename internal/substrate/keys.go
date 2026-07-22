@@ -1,6 +1,6 @@
 package substrate
 
-import "github.com/asolgan/lattice/internal/substrate/keys"
+import "github.com/operatinggraph/lattice/internal/substrate/keys"
 
 // Contract #1 key shapes and NanoIDs are defined in internal/substrate/keys,
 // a leaf package that depends on nothing but the standard library. They are

@@ -1,7 +1,7 @@
 package processor
 
 import (
-	"github.com/asolgan/lattice/internal/capabilitykv"
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
 )
 
 // CapabilityDoc, PlatformPermission, ServiceAccessEntry, AllowedOperation,

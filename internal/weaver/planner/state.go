@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 // ErrUnsupportedEffect is returned when a declared effect guard is not a

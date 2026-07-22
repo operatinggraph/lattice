@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 const defaultRedeliveryDelay = 5 * time.Second

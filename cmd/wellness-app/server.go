@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 //go:embed web

@@ -29,7 +29,7 @@
 // Install via the InstallPackage kernel op. See docs/components/_packages.md.
 package frontdesk
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{

@@ -98,7 +98,7 @@ These cypher rule bodies are TEXT in the Lens definition's `cypherRule` aspect â
 
 ## Library / Environment
 
-- **Go:** 1.26.1 (root `go.mod` already exists; module `github.com/asolgan/lattice`)
+- **Go:** 1.26.1 (root `go.mod` already exists; module `github.com/operatinggraph/lattice`)
 - **NATS client:** `github.com/nats-io/nats.go v1.52.0` (already in go.mod from Story 1.1)
 - **NATS server:** Docker image `nats:2.14-alpine` (or latest 2.14.x). Configure with `-js` flag for JetStream.
 - **Postgres:** Docker image `postgres:16-alpine` or `postgres:16`. Set up with default `lattice` database, `lattice` user, password from `.env` file (which is `.gitignore`d).

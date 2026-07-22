@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
 // BootstrapLensEnvVar gates the hardcoded bootstrap lens. When set to a

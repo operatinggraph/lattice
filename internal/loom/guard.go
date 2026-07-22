@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 )
 
 // Guard grammar (Contract #10 §10.5). A guard is a pure predicate over the

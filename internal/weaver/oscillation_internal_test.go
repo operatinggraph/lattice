@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 func TestTrailingAlternation(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // externalDurable is the bridge's single fixed durable consumer name on the

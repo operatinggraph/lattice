@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"syscall/js"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/processor/opwire"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
 )
 
 // fetchSubmitter is the browser host's write door: the same Gateway POST

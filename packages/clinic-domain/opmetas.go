@@ -1,6 +1,6 @@
 package clinicdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for clinic-domain's three consumer-invocable

@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/weaver/planner"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/weaver/planner"
 )
 
 // targetSourceDurablePrefix is the JetStream durable-consumer name prefix for

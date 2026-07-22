@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
-	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 // TargetSummary is the operator-facing snapshot of one registered target

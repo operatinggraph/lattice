@@ -1,6 +1,6 @@
 package identitydomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // actorRevocationDDL is the canonical name of the DDL handling the two
 // event-only Gateway kill-switch ops (gateway-token-revocation-activation-

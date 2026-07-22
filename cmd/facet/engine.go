@@ -9,13 +9,13 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	"github.com/asolgan/lattice/internal/edge/store"
-	edgesync "github.com/asolgan/lattice/internal/edge/sync"
-	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
-	edgevault "github.com/asolgan/lattice/internal/edge/vault"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // engineConfig is the process-wide wiring every engine shares, resolved once

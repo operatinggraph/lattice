@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // *substrate.KV must satisfy the read surface Lookup needs — the real

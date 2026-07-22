@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/opstatus"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/opstatus"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // eventBody is the minimal view of a core-events message the bridge reads: the

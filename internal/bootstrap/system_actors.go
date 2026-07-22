@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // SystemActorKeys scans core-kv and returns the actor keys of the kernel-seeded

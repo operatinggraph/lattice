@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	clinicledger "github.com/asolgan/lattice/packages/clinic-ledger"
+	clinicledger "github.com/operatinggraph/lattice/packages/clinic-ledger"
 )
 
 // ledgerEntryProjection is one row of the clinic-ledger `ledgerHistory` lens,

@@ -30,14 +30,14 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
-	capabilityauthor "github.com/asolgan/lattice/packages/capability-author"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	capabilityauthor "github.com/operatinggraph/lattice/packages/capability-author"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 const (

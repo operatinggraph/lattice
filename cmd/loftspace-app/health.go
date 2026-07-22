@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 // healthProbe re-checks loftspace-app's own dependencies each tick — the

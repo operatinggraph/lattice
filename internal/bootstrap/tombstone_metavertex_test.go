@@ -18,8 +18,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // makeTombstoneCtx builds a ScriptContext for a TombstoneMetaVertex op with

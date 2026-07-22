@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/asolgan/lattice/internal/processor/opwire"
+	"github.com/operatinggraph/lattice/internal/processor/opwire"
 )
 
 // ErrCredentialRejected marks a submit the Gateway refused at the DOOR — the

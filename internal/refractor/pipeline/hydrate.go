@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Hydrate performs a cold bulk projection of one identity's full authorized +

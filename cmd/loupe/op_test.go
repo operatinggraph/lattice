@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func TestBuildEnvelope(t *testing.T) {

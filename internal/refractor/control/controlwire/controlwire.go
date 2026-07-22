@@ -21,7 +21,7 @@ package controlwire
 import (
 	"time"
 
-	"github.com/asolgan/lattice/internal/refractor/health/healthwire"
+	"github.com/operatinggraph/lattice/internal/refractor/health/healthwire"
 )
 
 // SubjectPrefix is the root of every Refractor control subject.

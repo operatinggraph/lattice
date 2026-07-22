@@ -1,6 +1,6 @@
 package cafedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `tab` (OpenTab,
 // Charge, Settle), the `tabStatus` aspect-type declaration (the step-6 write

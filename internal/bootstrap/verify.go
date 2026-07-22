@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // CoreKVEmpty reports whether Core KV holds no entries at all — the state a

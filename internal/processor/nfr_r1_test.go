@@ -11,7 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // nfrFaultLabel mirrors nfrFaultLabel for the in-package NFR-R1

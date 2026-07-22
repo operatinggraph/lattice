@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
 // PgPool is the subset of *pgxpool.Pool a read-model query needs — a single

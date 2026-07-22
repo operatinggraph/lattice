@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // fakeReader is a scripted capabilitykv.KVGetter: bucket+key -> raw doc

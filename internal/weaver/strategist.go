@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/weaver/planner"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/weaver/planner"
 )
 
 // Action names of the Contract #10 §10.8 action table.

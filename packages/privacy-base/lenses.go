@@ -1,6 +1,6 @@
 package privacybase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // ShredStatusBucket is the package-owned NATS-KV read model the shredStatus
 // lens projects into — the P5 query surface for "which identities are

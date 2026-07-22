@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // TestEngineManager_AcquireWithNoSignerFailsClean proves Acquire refuses to

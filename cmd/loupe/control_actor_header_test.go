@@ -9,9 +9,9 @@ import (
 	"github.com/nats-io/nats.go/micro"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/controlauth"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // TestControlRequest_StampsOperatorActorKey verifies controlRequest carries

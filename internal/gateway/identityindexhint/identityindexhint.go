@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // BucketName is the canonical identity-index-hint bucket

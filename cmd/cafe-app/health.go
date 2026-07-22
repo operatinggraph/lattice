@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 // healthProbe re-checks cafe-app's own dependencies each tick — the admin

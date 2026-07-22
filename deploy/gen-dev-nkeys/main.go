@@ -42,7 +42,7 @@ import (
 
 	"github.com/nats-io/nkeys"
 
-	"github.com/asolgan/lattice/internal/natsperm"
+	"github.com/operatinggraph/lattice/internal/natsperm"
 )
 
 func main() {

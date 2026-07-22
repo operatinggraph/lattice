@@ -37,7 +37,7 @@
 | F-010 | `internal/pkgmgr/installer.go:143-153` | Added post-`resolveGrants` validation: any `GrantsTo` entry that is not a valid NanoID (via `substrate.IsValidNanoID`) returns an error before batch submission |
 | F-011 (doc) | `internal/pkgmgr/build.go:272-277` | Added doc caveat: "concurrent Processor writes to these keys between the read phase and batch submission will be silently overwritten; per-key sequence numbers are a future improvement" |
 
-**F-009 approach chosen:** `scripts/pkgverify/` as an importable normal Go package under the module. The three per-package scripts remain `//go:build ignore` + `package main` and are still invoked via `go run ./scripts/verify-package-*.go`. The shared library is importable at `github.com/asolgan/lattice/scripts/pkgverify`. This is the most direct approach and avoids a combined single-script workaround.
+**F-009 approach chosen:** `scripts/pkgverify/` as an importable normal Go package under the module. The three per-package scripts remain `//go:build ignore` + `package main` and are still invoked via `go run ./scripts/verify-package-*.go`. The shared library is importable at `github.com/operatinggraph/lattice/scripts/pkgverify`. This is the most direct approach and avoids a combined single-script workaround.
 
 ### Nits
 

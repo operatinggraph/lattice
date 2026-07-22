@@ -20,8 +20,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/healthkv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // ClaimAttemptEmitter surfaces ClaimIdentity outcomes to Health KV at

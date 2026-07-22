@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/adjacency"
+	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 )
 
 func TestNeighbors_NodeWithNoEntry(t *testing.T) {

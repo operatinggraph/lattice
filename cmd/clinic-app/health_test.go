@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 func hasIssue(issues []healthkv.Issue, code string) bool {

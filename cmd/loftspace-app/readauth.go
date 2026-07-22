@@ -16,8 +16,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // credentialBindingResolver is the credential→identity resolution surface

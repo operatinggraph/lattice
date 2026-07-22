@@ -15,7 +15,7 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // ErrFaultInjected is the typed sentinel every fault-injection wrapper

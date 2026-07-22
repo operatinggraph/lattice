@@ -3,9 +3,9 @@ package pipeline
 import (
 	"context"
 
-	"github.com/asolgan/lattice/internal/refractor/failure"
-	"github.com/asolgan/lattice/internal/refractor/health"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/failure"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // healthReporter is the slice of *health.Reporter the sink writes through.

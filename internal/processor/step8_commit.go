@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // ConflictError is the typed step-8 failure surfaced when the atomic

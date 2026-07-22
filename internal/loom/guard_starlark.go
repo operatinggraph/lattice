@@ -8,7 +8,7 @@ import (
 	starlarklib "go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 )
 
 // This file builds the frozen Starlark values a §10.5 `{reads, starlark}`

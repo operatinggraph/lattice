@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // pkgStore builds a getter over a literal envelope map.

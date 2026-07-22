@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/capabilitykv"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Clock is the injectable wall clock the CapabilityAuthorizer uses for

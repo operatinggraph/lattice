@@ -25,7 +25,7 @@
 // logs a warning but doesn't enforce install order.
 package identitydomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{

@@ -13,7 +13,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/asolgan/lattice/internal/capabilitykv"
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
 )
 
 // AuthMode selects a control service's CapabilityChecker. Mirrors

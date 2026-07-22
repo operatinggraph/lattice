@@ -119,7 +119,7 @@ These are binding. If any of them is unworkable, halt and escalate — do NOT im
    ```
    The morph plan's recommended layout in §6 is the reference; deviations get logged.
 
-2. **Module + import path:** all morphed files live under `github.com/asolgan/lattice/internal/refractor/...`. No `github.com/asolgan/materializer` references survive.
+2. **Module + import path:** all morphed files live under `github.com/operatinggraph/lattice/internal/refractor/...`. No `github.com/asolgan/materializer` references survive.
 
 3. **Adjacency KV bucket:** provision a NEW dedicated KV bucket `refractor-adjacency` in `internal/bootstrap/primordial.go::provisionBuckets`. Do NOT reuse `core-kv` — the adjacency store is Refractor-internal per AC #7, and mixing it with Core KV pollutes the externally-visible namespace. Add the bucket to `verify-bootstrap` assertions.
 

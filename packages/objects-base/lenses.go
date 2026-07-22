@@ -1,6 +1,6 @@
 package objectsbase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Lenses returns the package's Lens declarations: the single `objectLiveness`
 // actorAggregate convergence lens (Contract #10 §10.2) — the v1b GC's orphan

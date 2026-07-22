@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
-	edgevault "github.com/asolgan/lattice/internal/edge/vault"
-	corevault "github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
+	corevault "github.com/operatinggraph/lattice/internal/vault"
 )
 
 // meRow builds the shape packages/edge-manifest's edgeIdentitySpec projects

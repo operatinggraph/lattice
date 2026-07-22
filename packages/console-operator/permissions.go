@@ -1,6 +1,6 @@
 package consoleoperator
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants the consoleOperator role the default-lane console ops
 // (shred/revoke/object) plus the ctrl.<component>.<verb> control-plane ops —

@@ -162,7 +162,7 @@ Lattice ready — primordial bootstrap complete
 verify-kernel: ALL ASSERTIONS PASSED
 
 $ go test ./internal/processor/... -p 1 -count=1
-ok  	github.com/asolgan/lattice/internal/processor	19.979s
+ok  	github.com/operatinggraph/lattice/internal/processor	19.979s
 
 $ go test ./... -p 1 -count=1
 ok  internal/bootstrap 0.389s · ok internal/aiagent 2.681s · ok internal/processor 19.849s
@@ -171,11 +171,11 @@ ok internal/bypass · ok internal/substrate · ok packages/* · ok cmd/lattice/*
 
 $ make test-bypass
 PHASE 1 GATE 3: PASSED (4/4 DEFENDED)
-ok  	github.com/asolgan/lattice/internal/bypass	3.305s
+ok  	github.com/operatinggraph/lattice/internal/bypass	3.305s
 
 $ make test-capability-adversarial
 PHASE 1 GATE 3: PASSED (4/4 DEFENDED)
-ok  	github.com/asolgan/lattice/internal/bypass	0.342s
+ok  	github.com/operatinggraph/lattice/internal/bypass	0.342s
 ```
 
 No flake re-runs were needed (all gates passed first attempt).

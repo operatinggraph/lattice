@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
-	"github.com/asolgan/lattice/internal/weaver/planner"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/weaver/planner"
 )
 
 // TestValidateTarget_GoalColumns proves the Fire-6 Increment-2 install-time

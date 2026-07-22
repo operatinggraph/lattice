@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	cafedomain "github.com/asolgan/lattice/packages/cafe-domain"
+	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
 
 // menuItemProjection is one row of the cafe-domain `menuCatalog` lens, read

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Compile-time check that NatsKVAdapter satisfies Adapter, Truncater and KeyLister.

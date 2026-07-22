@@ -3,7 +3,7 @@ package leasesigning
 import (
 	"encoding/json"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // LeaseDocDDLs returns the executed-lease document generation DDLs — the docGen

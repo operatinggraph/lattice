@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 // myTasksRow is one projected `my-tasks` lens entry: a single identity's OPEN

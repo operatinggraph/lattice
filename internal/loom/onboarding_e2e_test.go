@@ -9,8 +9,8 @@ import (
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The onboarding e2e proves the userTask seam end-to-end (Story 8.2 AC#1-9):

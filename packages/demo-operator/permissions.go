@@ -1,6 +1,6 @@
 package demooperator
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants the demoOperator role ONLY the non-mutating
 // control-plane reads — ctrl.weaver.read, ctrl.loom.read, ctrl.refractor.read

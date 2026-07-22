@@ -15,7 +15,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
 const testTimeout = 5 * time.Second

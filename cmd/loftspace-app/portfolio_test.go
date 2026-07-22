@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	cafedomain "github.com/asolgan/lattice/packages/cafe-domain"
+	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
 )
 
 // No-Postgres unit coverage for the portfolio-pulse reader: the fail-closed

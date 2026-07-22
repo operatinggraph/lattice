@@ -1,6 +1,6 @@
 package clinicreminders
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants RecordAppointmentReminder to the `operator` role (scope any)
 // — Weaver's service actor dispatches the directOp under operator authority, the

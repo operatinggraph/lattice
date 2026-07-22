@@ -41,7 +41,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // AuthTraceRecord is the three-plane trace document written to Health KV on

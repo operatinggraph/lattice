@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // EdgeEntry is one graph edge stored in the adjacency list for a node.

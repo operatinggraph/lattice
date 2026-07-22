@@ -1,6 +1,6 @@
 package identityhygiene
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Lenses returns the package's Lens declarations. The single
 // `duplicateCandidates` lens is a minimal, PII-free projection over the

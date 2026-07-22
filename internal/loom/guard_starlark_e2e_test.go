@@ -9,8 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestGuardEval_Starlark_EvalTable exercises evalGuard's {reads, starlark}

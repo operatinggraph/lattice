@@ -70,7 +70,7 @@ so that I can manage convergence without a console (Phase 2 has no UI).
 5. **Given** the `nats-io/nats.go/micro` dependency (currently used only by
    `internal/refractor/control`) and `internal/weaver`'s `boundary_test.go` (`TestModuleBoundary_OnlySubstrate`,
    `TestModuleBoundary_NoRawNATS`, both scoped to `go list -deps`/`go list -f .Imports` on
-   `github.com/asolgan/lattice/internal/weaver` specifically)
+   `github.com/operatinggraph/lattice/internal/weaver` specifically)
    **When** the control service is implemented
    **Then** it lives in a **new sibling package `internal/weaver/control`** (NOT inside
    `internal/weaver` itself) that may import `nats-io/nats.go/micro` directly — `internal/weaver`
@@ -352,8 +352,8 @@ so that I can manage convergence without a console (Phase 2 has no UI).
   `boundary_test.go` forbids `internal/weaver` (the package, by `go list -deps`/`go list -f
   .Imports`) from importing `nats-io/*` or `internal/{processor,loom,refractor}`. **A new
   sibling package `internal/weaver/control` is OUTSIDE that scope** — `go list -deps
-  github.com/asolgan/lattice/internal/weaver` does not include
-  `github.com/asolgan/lattice/internal/weaver/control` unless `internal/weaver` itself imports
+  github.com/operatinggraph/lattice/internal/weaver` does not include
+  `github.com/operatinggraph/lattice/internal/weaver/control` unless `internal/weaver` itself imports
   it, which it must NOT (the dependency runs the other way: `internal/weaver/control` imports
   `internal/weaver` for the four new `*Engine` methods + `TargetSummary`). This keeps
   `boundary_test.go` untouched and green. Do not be tempted to add a `substrate`-level micro
@@ -448,7 +448,7 @@ so that I can manage convergence without a console (Phase 2 has no UI).
 ### Project Structure Notes
 
 - `internal/weaver` stays the engine; `internal/weaver/control` is a NEW sibling package (Go
-  import path `github.com/asolgan/lattice/internal/weaver/control`) — same directory tree,
+  import path `github.com/operatinggraph/lattice/internal/weaver/control`) — same directory tree,
   different package, one-directional dependency (`control` → `weaver`, never the reverse).
   This mirrors `internal/refractor/control` being a sibling of `internal/refractor/{pipeline,
   lens,...}`.
@@ -698,7 +698,7 @@ Gates after the batch: `go build ./...`, `make vet`, `golangci-lint run ./...` (
 ## Questions for Winston (non-blocking — drafted around contract-compliant defaults)
 
 1. **`internal/weaver/control` package split (AC #5, Dev Notes).** Confirmed via
-   `boundary_test.go` reading: `go list -deps github.com/asolgan/lattice/internal/weaver` and
+   `boundary_test.go` reading: `go list -deps github.com/operatinggraph/lattice/internal/weaver` and
    `go list -f .Imports` on that SAME package do not cover a new sibling package
    `internal/weaver/control` unless `internal/weaver` imports it (which it must not — dependency
    runs `control` → `weaver`). This mirrors `internal/refractor/control` being a sibling of

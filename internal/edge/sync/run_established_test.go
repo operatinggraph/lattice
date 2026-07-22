@@ -7,9 +7,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // establishedTransport extends fakeControlTransport with a RunDurableConsumer

@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/asolgan/lattice/cmd/lattice/creds"
-	"github.com/asolgan/lattice/cmd/lattice/output"
+	"github.com/operatinggraph/lattice/cmd/lattice/creds"
+	"github.com/operatinggraph/lattice/cmd/lattice/output"
 )
 
 // NewCommand returns the cobra.Command for the config group.

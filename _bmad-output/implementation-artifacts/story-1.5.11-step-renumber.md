@@ -74,7 +74,7 @@ Symbols that **stay** in `package processor` (core script-result / envelope type
 - `EventList.EventClasses()` (`step7_events.go:75`; used by `step8_commit.go:122`)
 - `EventSpec`, `ScriptResult`, `OperationEnvelope`, `BuildEventList`, `OutboxAspectKey`, `ParseOutboxAspect`, `NewOutboxAspect`, `TrackerKey`
 
-After the move, in `publisher.go` (now `package outbox`) those stay-types are referenced **qualified**: `processor.OperationEnvelope`, `processor.EventList`, `processor.Event` (in `Publish`'s signature and body). The publisher keeps importing `internal/substrate` (already imports it). It must add an import of `github.com/asolgan/lattice/internal/processor`.
+After the move, in `publisher.go` (now `package outbox`) those stay-types are referenced **qualified**: `processor.OperationEnvelope`, `processor.EventList`, `processor.Event` (in `Publish`'s signature and body). The publisher keeps importing `internal/substrate` (already imports it). It must add an import of `github.com/operatinggraph/lattice/internal/processor`.
 
 In `internal/processor/outbox/consumer.go`, the publisher is now a **same-package** symbol — drop the `processor.` qualifier:
 - `internal/processor/outbox/consumer.go:40` — `publisher *processor.EventPublisherImpl` → `publisher *EventPublisherImpl`
@@ -139,7 +139,7 @@ These are substrate-/bootstrap-layer explanatory comments that reference "the Pr
 
 | Old path | New path | Edits after move |
 |---|---|---|
-| `internal/processor/step9_publish.go` | `internal/processor/outbox/publisher.go` | `package processor` → `package outbox`; add import `github.com/asolgan/lattice/internal/processor`; qualify stay-types: `*OperationEnvelope`→`*processor.OperationEnvelope`, `EventList`→`processor.EventList` (signature of `Publish`), `events.EventClasses()` stays (method on `processor.EventList`), `ev.EventType`/`ev.EventID` stay (fields of `processor.Event`); renumber comments (§3-ii rows for this file). |
+| `internal/processor/step9_publish.go` | `internal/processor/outbox/publisher.go` | `package processor` → `package outbox`; add import `github.com/operatinggraph/lattice/internal/processor`; qualify stay-types: `*OperationEnvelope`→`*processor.OperationEnvelope`, `EventList`→`processor.EventList` (signature of `Publish`), `events.EventClasses()` stays (method on `processor.EventList`), `ev.EventType`/`ev.EventID` stay (fields of `processor.Event`); renumber comments (§3-ii rows for this file). |
 | `internal/processor/step9_publish_test.go` | `internal/processor/outbox/publisher_test.go` | `package processor` → `package outbox`; rewrite helper scaffolding to `outbox` test helpers (`setup`, literal NanoIDs, local logger); qualify `processor.ScriptResult`/`EventSpec`/`EventList`/`BuildEventList`/`MutationOp`; drop redundant `provisionEvents` (use `setup`); keep all assertions. (Decision A-tests.) |
 | `internal/processor/step10_ack.go` | `internal/processor/step9_ack.go` | renumber comments/strings (§3-ii). Symbols `AckerImpl`/`NewAcker` are NOT numbered — unchanged. |
 | `internal/processor/step10_ack_test.go` | `internal/processor/step9_ack_test.go` | grep for "step 10"/"step10" inside and renumber (baseline shows no numbered ref in the file beyond the filename; `:38` `js.Publish` is unrelated — leave). |

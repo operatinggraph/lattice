@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
 )
 
 // These run the browser host against a fake JS shell in the same real headless

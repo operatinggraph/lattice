@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // taskOperation is the human-facing rendering of a task's forOperation target.

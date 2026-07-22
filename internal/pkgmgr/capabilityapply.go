@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // CapabilityApplyPlan is what an operator needs to apply an APPROVED

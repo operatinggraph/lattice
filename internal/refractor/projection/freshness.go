@@ -1,6 +1,6 @@
 package projection
 
-import "github.com/asolgan/lattice/internal/substrate"
+import "github.com/operatinggraph/lattice/internal/substrate"
 
 // ContributingSources derives the contributing-binding source set for an
 // actor's projection (Contract #6 §6.3, freshness: auto). It is the set of Core

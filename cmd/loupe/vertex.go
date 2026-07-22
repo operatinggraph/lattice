@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // vertexRow is one entry in the Core KV vertex list. Type is the Contract #1

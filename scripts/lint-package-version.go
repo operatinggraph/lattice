@@ -20,10 +20,12 @@
 //     with a notice rather than failing the build on git plumbing.
 //
 // A package's "content" is every file under packages/<name>/ except *_test.go
-// and *.md — the files that shape what install writes. The version check reads
-// manifest.yaml's `version:` value; package.go's Definition.Version is pinned
-// to it by every package's TestPackage_ManifestMatchesDefinition, so one
-// bumped value implies both.
+// and *.md — the files that shape what install writes. A file whose diff only
+// rewrites Go import specifiers naming the module itself is not content: the
+// Definition it compiles to is byte-identical, so install has nothing new to
+// write. The version check reads manifest.yaml's `version:` value; package.go's
+// Definition.Version is pinned to it by every package's
+// TestPackage_ManifestMatchesDefinition, so one bumped value implies both.
 package main
 
 import (
@@ -36,6 +38,12 @@ import (
 )
 
 var versionRe = regexp.MustCompile(`(?m)^version:\s*"?([^"\s#]+)`)
+
+// importSpecRe matches a Go import specifier alone on a unified-diff line —
+// optional `import` keyword, optional alias or blank identifier, quoted path.
+var importSpecRe = regexp.MustCompile(`^[+-]\s*(?:import\s+)?(?:_\s+|[A-Za-z0-9_.]+\s+)?"([^"]+)"\s*$`)
+
+var modulePathRe = regexp.MustCompile(`(?m)^module\s+(\S+)`)
 
 func main() {
 	base := strings.TrimSpace(os.Getenv("DIFF_BASE"))
@@ -57,10 +65,15 @@ func main() {
 		changed = append(changed, gitLines("ls-files", "--others", "--exclude-standard", "packages/")...)
 	}
 
+	modulePaths := modulePathsIn(rangeMode, base, head)
+
 	contentChanged := map[string]int{}
 	for _, path := range changed {
 		pkg, ok := packageOf(path)
 		if !ok || strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".md") {
+			continue
+		}
+		if importOnly(rangeMode, base, head, path, modulePaths) {
 			continue
 		}
 		contentChanged[pkg]++
@@ -132,6 +145,84 @@ func packageOf(path string) (string, bool) {
 
 func isZeroSHA(s string) bool {
 	return strings.Trim(s, "0") == ""
+}
+
+// modulePathsIn returns the module paths declared in go.mod at both ends of the
+// comparison, so an import rewritten across a module rename is recognised at
+// either name.
+func modulePathsIn(rangeMode bool, base, head string) []string {
+	var srcs []string
+	if rangeMode {
+		if out, err := exec.Command("git", "show", base+":go.mod").Output(); err == nil {
+			srcs = append(srcs, string(out))
+		}
+		if out, err := exec.Command("git", "show", head+":go.mod").Output(); err == nil {
+			srcs = append(srcs, string(out))
+		}
+	} else {
+		if out, err := exec.Command("git", "show", "HEAD:go.mod").Output(); err == nil {
+			srcs = append(srcs, string(out))
+		}
+	}
+	if out, err := os.ReadFile("go.mod"); err == nil {
+		srcs = append(srcs, string(out))
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, src := range srcs {
+		if m := modulePathRe.FindStringSubmatch(src); m != nil && !seen[m[1]] {
+			seen[m[1]] = true
+			paths = append(paths, m[1])
+		}
+	}
+	return paths
+}
+
+// importOnly reports whether every line the diff changes in path is a Go import
+// specifier naming one of modulePaths. False when nothing changed — an
+// untracked file has no diff and must still count as content.
+func importOnly(rangeMode bool, base, head, path string, modulePaths []string) bool {
+	if len(modulePaths) == 0 {
+		return false
+	}
+	args := []string{"diff", "-U0"}
+	if rangeMode {
+		args = append(args, base, head)
+	} else {
+		args = append(args, "HEAD")
+	}
+	args = append(args, "--", path)
+
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return false
+	}
+	changedLines := 0
+	for _, ln := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(ln, "+") && !strings.HasPrefix(ln, "-") {
+			continue
+		}
+		if strings.HasPrefix(ln, "+++") || strings.HasPrefix(ln, "---") {
+			continue
+		}
+		changedLines++
+		m := importSpecRe.FindStringSubmatch(ln)
+		if m == nil || !underAnyModule(m[1], modulePaths) {
+			return false
+		}
+	}
+	return changedLines > 0
+}
+
+// underAnyModule reports whether an import path is the module itself or one of
+// its subpackages.
+func underAnyModule(importPath string, modulePaths []string) bool {
+	for _, mod := range modulePaths {
+		if importPath == mod || strings.HasPrefix(importPath, mod+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureCommit makes sure the base SHA is resolvable, fetching it by SHA into

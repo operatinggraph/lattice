@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // availabilityRow is the UNAUTHENTICATED provider-availability view (D1.5): the

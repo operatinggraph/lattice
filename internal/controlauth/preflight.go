@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/capabilitykv"
+	"github.com/operatinggraph/lattice/internal/capabilitykv"
 )
 
 var (

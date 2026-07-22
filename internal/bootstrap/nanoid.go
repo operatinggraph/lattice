@@ -36,7 +36,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Alphabet re-exports substrate.Alphabet as the canonical Lattice NanoID

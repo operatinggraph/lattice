@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/jsstore"
-	"github.com/asolgan/lattice/internal/weaver"
-	"github.com/asolgan/lattice/internal/weaver/control"
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/weaver"
+	"github.com/operatinggraph/lattice/internal/weaver/control"
 )
 
 // fakeEngine satisfies the unexported engineControl interface structurally —

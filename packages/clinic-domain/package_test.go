@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 func TestPackage_ManifestMatchesDefinition(t *testing.T) {

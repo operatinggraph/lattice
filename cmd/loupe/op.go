@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // opRequest is the POST /api/op body. operationType is required; lane defaults

@@ -3,7 +3,7 @@ package leasesigning
 import (
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // Lenses returns the package's Lens declarations: the single

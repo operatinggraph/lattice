@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
 // LensSpec mirrors the JSON aspect body stored at `vtx.meta.<NanoID>.spec`

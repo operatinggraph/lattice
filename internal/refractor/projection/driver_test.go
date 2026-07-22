@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/lens"
-	"github.com/asolgan/lattice/internal/refractor/pipeline"
-	"github.com/asolgan/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 )
 
 func ephemeralDesc(t *testing.T) projection.OutputDescriptor {

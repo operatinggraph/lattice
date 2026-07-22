@@ -1,6 +1,6 @@
 package loftspacedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Canonical name of the ownership DDL. It owns the landlord→unit ownership link
 // (the residence/management relationship the cap-read.residence grant lens

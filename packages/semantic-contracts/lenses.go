@@ -1,6 +1,6 @@
 package semanticcontracts
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // ClauseSatisfactionTarget is the §10.8 TargetID == the clauseSatisfaction
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.

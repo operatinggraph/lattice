@@ -8,7 +8,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // The owner-tombstone-cascade (v1b GC §22). A SECOND durable consumer — over

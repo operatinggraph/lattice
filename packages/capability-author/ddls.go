@@ -1,8 +1,8 @@
 package capabilityauthor
 
 import (
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 // DDLs returns the package's DDL meta-vertex declarations.

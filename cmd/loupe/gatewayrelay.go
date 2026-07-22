@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // The op-submission half of the operator-auth lift

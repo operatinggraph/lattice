@@ -19,7 +19,7 @@
 // key-shape), not by an install-order coupling with identity-domain.
 package privacybase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{

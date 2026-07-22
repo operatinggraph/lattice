@@ -23,8 +23,8 @@ package identityhygiene_test
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/testutil"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
 // --- 1. TestMergeCredentialRepoint_SingularBinding ---

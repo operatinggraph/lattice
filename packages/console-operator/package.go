@@ -56,7 +56,7 @@
 // rbac-domain, identity-domain, privacy-base, objects-base).
 package consoleoperator
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // consoleOperatorReadGrantsSpec mirrors internal/bootstrap/lenses.go's
 // CapabilityReadWildcardGrantsLensDefinition cypher exactly, substituting the

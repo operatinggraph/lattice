@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // MetaVertexRef is the cached projection of a DDL meta-vertex. Built by

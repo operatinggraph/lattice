@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TrackerKey returns the Core KV key for an operation's idempotency

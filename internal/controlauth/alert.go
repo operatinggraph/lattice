@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // AuthAlertEmitter is the minimal Health KV alert surface. Implementations

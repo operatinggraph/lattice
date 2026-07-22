@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/vault"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/vault"
 )
 
 // envelopeLensBucket is the privacy-base piiKeyEnvelope lens's read model

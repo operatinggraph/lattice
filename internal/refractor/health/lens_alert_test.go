@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func lensSnap(name, status, reason string, lag uint64) LensLivenessStatus {

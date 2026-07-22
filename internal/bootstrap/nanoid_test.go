@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // TestLoad_AbsentFile verifies the strict loader errors when the bootstrap

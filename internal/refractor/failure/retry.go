@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // RetryEntry holds all data needed to retry a write or escalate to the DLQ on exhaustion.

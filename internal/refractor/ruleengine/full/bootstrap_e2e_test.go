@@ -8,9 +8,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
-	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
+	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
 
 // ephemeralLensSpec returns the orchestration-base capabilityEphemeral lens

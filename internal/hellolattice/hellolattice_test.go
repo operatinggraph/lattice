@@ -43,10 +43,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/aiagent"
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/aiagent"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // replyInboxHeader is the NATS header used by the Processor reply path.

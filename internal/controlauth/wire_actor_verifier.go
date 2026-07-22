@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/asolgan/lattice/internal/gateway/auth"
-	"github.com/asolgan/lattice/internal/gateway/revocation"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/revocation"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // preflightTimeout bounds the revocation-bucket open at control-plane startup.

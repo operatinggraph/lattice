@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func TestEvalRegistryReconciliation_NilProvider(t *testing.T) {

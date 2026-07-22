@@ -28,9 +28,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/processor"
 
-	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
+	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
 
 // rbacScript returns the single rbac DDL Starlark source.

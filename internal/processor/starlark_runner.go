@@ -10,7 +10,7 @@ import (
 	starlarkjson "go.starlark.net/lib/json"
 	"go.starlark.net/starlarkstruct"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 )
 
 // DefaultScriptWallBudget is the default wall-clock execution budget for a

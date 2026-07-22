@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 var (

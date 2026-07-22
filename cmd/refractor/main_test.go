@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/lens"
-	"github.com/asolgan/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 )
 
 // TestIsOperationRoleIndexLens asserts the role-index routing predicate fires

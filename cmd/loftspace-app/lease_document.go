@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // handleLeaseDocument routes /api/lease-document — the executed-lease artifact

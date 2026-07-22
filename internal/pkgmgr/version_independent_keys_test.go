@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Contract #8 §8.1 — entity NanoIDs are derived from package name + entity tag

@@ -34,7 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // RoleByOperationDoc is the shape of cap.role-by-operation.<operationType>

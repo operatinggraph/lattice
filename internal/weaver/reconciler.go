@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // defaultMarkLease is the production §10.3 mark lease: sized ≫ expected

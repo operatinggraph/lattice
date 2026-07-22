@@ -25,7 +25,7 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full/cypher"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full/cypher"
 )
 
 // astVisitor is the ANTLR listener that drives the recursive descent.

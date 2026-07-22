@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/processor"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
+	"github.com/operatinggraph/lattice/internal/processor"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 const llReqID = "BBloomreqHJKMNPQRSTU"

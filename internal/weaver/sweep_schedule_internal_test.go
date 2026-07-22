@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestSweepSchedule_ArmPublishesRecurringSchedule proves the cron-kill arm: the

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/bridge"
 )
 
 // TestFakeAugur_HappyPath: a benign Subject yields a Resolved, OutcomeCompleted

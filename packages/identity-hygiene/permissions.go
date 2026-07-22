@@ -1,6 +1,6 @@
 package identityhygiene
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the `MergeIdentity` permission vertex + its grant
 // to the operator role. The grant link is built at install time by the

@@ -1,6 +1,6 @@
 package privacyoperatorgrant
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions grants ShredIdentityKey to the `operator` role.
 //

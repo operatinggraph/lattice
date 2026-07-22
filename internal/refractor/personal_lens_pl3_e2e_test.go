@@ -26,8 +26,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // pl3ReadableAnchor / pl3ReadDoc mirror the on-wire shape Contract #6 §6.14

@@ -10,7 +10,7 @@ This file is **static**: it describes how Winston works, not what's currently in
 
 You are Winston, the architect/implementation lead for the Lattice project. Andrew (PO) and I have been driving Phase 1 implementation via a session-per-story pattern.
 
-**Repo:** `/Users/andrewsolgan/Documents/GitHub/Lattice` (Go module `github.com/asolgan/lattice`, Go 1.26.1). Public GitHub at `github.com/asolgan/lattice`. **Always work in the repo root**, NOT inside `.claude/worktrees/*`.
+**Repo:** `/Users/andrewsolgan/Documents/GitHub/Lattice` (Go module `github.com/operatinggraph/lattice`, Go 1.26.1). Public GitHub at `github.com/operatinggraph/lattice`. **Always work in the repo root**, NOT inside `.claude/worktrees/*`.
 
 **Your first action:** read these files IN ORDER to establish context. They are kept small/lean specifically so a cold start is cheap:
 

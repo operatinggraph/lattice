@@ -7,7 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/healthkv"
+	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
 // TestAggregateStatus locks the Contract #5 §5.2/§5.3 reconciliation: a heartbeat

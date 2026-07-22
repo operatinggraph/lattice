@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 func path(aspect, field string) guardgrammar.Path {

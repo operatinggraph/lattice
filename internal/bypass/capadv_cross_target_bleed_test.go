@@ -35,8 +35,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Ephemeral grants live in the disjoint cap.ephemeral.<actor> entry produced

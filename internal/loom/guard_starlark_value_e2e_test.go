@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // seedValueInterfaceSubject writes the fixture the starlark Value-interface

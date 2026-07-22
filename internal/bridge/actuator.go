@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // opEnvelope is the wire format published to ops.<lane> (Contract #2 §2.1) — the

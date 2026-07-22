@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 )
 
 // TestRoleIndexWrapper_Projects asserts the role-by-operation index row is

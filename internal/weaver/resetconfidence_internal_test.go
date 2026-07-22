@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // seedFullWindow fills a (target, gap, action) confidence window to capacity

@@ -1,6 +1,6 @@
 package rbacdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the 10 permission vertices + their grants. Every
 // operation is granted to the `operator` role. The role canonical name

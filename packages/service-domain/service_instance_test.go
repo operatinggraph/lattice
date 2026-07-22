@@ -17,14 +17,14 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
-	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
-	servicedomain "github.com/asolgan/lattice/packages/service-domain"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
+	servicedomain "github.com/operatinggraph/lattice/packages/service-domain"
 )
 
 const (

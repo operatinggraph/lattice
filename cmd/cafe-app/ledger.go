@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	cafeledger "github.com/asolgan/lattice/packages/cafe-ledger"
+	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
 )
 
 // ledgerEntryProjection is one row of the cafe-ledger `cafeLedgerHistory` lens.

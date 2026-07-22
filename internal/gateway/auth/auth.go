@@ -36,7 +36,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // IdentityKeyPrefix is the canonical prefix of an identity vertex key

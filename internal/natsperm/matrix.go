@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // bootstrapComponentName is the sanctioned provisioning-time user (Contract

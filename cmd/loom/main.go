@@ -37,11 +37,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/controlauth"
-	"github.com/asolgan/lattice/internal/loom"
-	"github.com/asolgan/lattice/internal/loom/control"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/controlauth"
+	"github.com/operatinggraph/lattice/internal/loom"
+	"github.com/operatinggraph/lattice/internal/loom/control"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // engineControl is satisfied structurally by *loom.Engine; declared here only as

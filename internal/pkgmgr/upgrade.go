@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // ErrNotInstalled is returned by Upgrade when no base install of the package

@@ -1,8 +1,8 @@
 package capability
 
 import (
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 )
 
 // fullCypherParser adapts ruleengine/full.Engine to pkgmgr.CypherParser.

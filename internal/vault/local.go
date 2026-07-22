@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/asolgan/lattice/internal/vault/vaultwire"
+	"github.com/operatinggraph/lattice/internal/vault/vaultwire"
 )
 
 // LocalAlg identifies the AEAD this backend uses for both DEK-wrapping and

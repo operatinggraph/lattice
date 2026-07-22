@@ -15,14 +15,14 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	"github.com/asolgan/lattice/internal/pkgmgr"
-	"github.com/asolgan/lattice/internal/processor"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
-	identitydomain "github.com/asolgan/lattice/packages/identity-domain"
-	orchestrationbase "github.com/asolgan/lattice/packages/orchestration-base"
-	rbacdomain "github.com/asolgan/lattice/packages/rbac-domain"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
+	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 )
 
 const (

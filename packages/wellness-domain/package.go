@@ -73,7 +73,7 @@
 // comment). See _bmad-output/implementation-artifacts/wellness-vertical-design.md.
 package wellnessdomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{

@@ -63,7 +63,7 @@
 // domain + Weaver wiring only (Café row, verticals.md).
 package cafedomain
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{

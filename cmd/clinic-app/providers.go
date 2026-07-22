@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sort"
 
-	clinicdomain "github.com/asolgan/lattice/packages/clinic-domain"
+	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 )
 
 // kvGetter reads a read-model entry's raw bytes for a key, reporting false when

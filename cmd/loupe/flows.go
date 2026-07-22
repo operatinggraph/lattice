@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 // flowRow is one row of the Chronicler's `loomFlowHistory` read model

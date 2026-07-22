@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Status mirrors Contract #5 §5.3.

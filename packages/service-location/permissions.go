@@ -1,6 +1,6 @@
 package servicelocation
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Permissions returns the ten permission vertices + their grants. Every link
 // op is granted to the `operator` role (scope any) — the residence /

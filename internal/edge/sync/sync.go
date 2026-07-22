@@ -20,10 +20,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/edge/transport"
-	"github.com/asolgan/lattice/internal/refractor/control/controlwire"
-	"github.com/asolgan/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/refractor/control/controlwire"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
 )
 
 const (

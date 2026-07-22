@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
 // AnchorDeleteResult reports the projection (delete) key that a now-tombstoned

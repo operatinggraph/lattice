@@ -62,7 +62,7 @@ The spike's three areas all map to specific architectural assumptions made durin
 ## Library / Environment
 
 - **Go version:** 1.26.1 (confirmed via root `go.mod`)
-- **Go module:** `github.com/asolgan/lattice` (root `go.mod` exists; this spike is `internal/spike/starlark/` within it)
+- **Go module:** `github.com/operatinggraph/lattice` (root `go.mod` exists; this spike is `internal/spike/starlark/` within it)
 - **Library:** `go.starlark.net` (the canonical Go Starlark interpreter from Google). Run `go get go.starlark.net@latest` (Bypass permissions enabled; this should succeed). Pin the exact version in the report.
 - **No NATS in this spike** — Story 1.2 is purely about Starlark execution. NATS is irrelevant here (Story 1.1 already validated NATS atomic batch separately).
 

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 func TestBuildEventList_OrderAndIDs(t *testing.T) {

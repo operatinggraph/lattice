@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // LegacyDurable is the pre-per-lane single consumer name. A startup migration

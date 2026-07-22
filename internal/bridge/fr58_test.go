@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/bridge"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/bridge"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // newHarness wires embedded NATS + a wrapped substrate.Conn + provisioning + a

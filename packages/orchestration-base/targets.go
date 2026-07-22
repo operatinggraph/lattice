@@ -1,6 +1,6 @@
 package orchestrationbase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's single meta.weaverTarget: unroutedTasks
 // (Contract #10 §10.1 FR29 — "unrouted tasks surface; never silently

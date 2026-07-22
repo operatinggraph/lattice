@@ -1,6 +1,6 @@
 package clinicreminders
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // AppointmentRemindersTarget is the §10.8 TargetID == the appointmentReminders
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.

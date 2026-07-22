@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 func main() {

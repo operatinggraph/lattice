@@ -40,7 +40,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 )
 
 const defaultBootstrapJSONPath = "./lattice.bootstrap.json"

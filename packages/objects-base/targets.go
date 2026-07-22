@@ -1,6 +1,6 @@
 package objectsbase
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract #10
 // §10.8) — the v1b GC's Loop A (orphan → reclaim). TargetID == the

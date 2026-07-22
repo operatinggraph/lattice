@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // TestBackoffInterval pins the collapse-only reclaim backoff curve: count 0 and 1

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/asolgan/lattice/internal/bootstrap"
-	loftspacedomain "github.com/asolgan/lattice/packages/loftspace-domain"
+	"github.com/operatinggraph/lattice/internal/bootstrap"
+	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
 )
 
 // applicantSummary is one applicant's standing against a unit, as the landlord

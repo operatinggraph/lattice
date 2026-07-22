@@ -1,6 +1,6 @@
 package edgemanifest
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Lenses returns the package's nine Personal-Lens declarations
 // (edge-showcase-app-design.md §3.2; the two manifest.ent entity lenses per

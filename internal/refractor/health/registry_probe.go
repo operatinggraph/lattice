@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // defaultRegistryProbeGraceWindow is how long RegistryProbe waits after

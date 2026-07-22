@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asolgan/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 // TestLeaseSigning_PlaybookColumnsMatchLens (test 6 — the §10.2↔§10.8 seam, §4

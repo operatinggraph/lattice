@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/substrate/keys"
+	"github.com/operatinggraph/lattice/internal/substrate/keys"
 )
 
 // Lane is the JetStream lane enum per Contract #2 §2.3.

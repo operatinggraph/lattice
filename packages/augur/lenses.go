@@ -1,6 +1,6 @@
 package augur
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // AugurProposalsBucket is the NATS-KV read model the augurProposals lens projects
 // into — the **P5 query surface** for "what reasoning proposals exist and what is

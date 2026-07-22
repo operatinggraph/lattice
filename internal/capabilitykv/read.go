@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // KVGetter is the minimal NATS KV surface a Capability KV reader needs. The

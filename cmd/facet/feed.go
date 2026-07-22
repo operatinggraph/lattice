@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/edge/agent"
-	"github.com/asolgan/lattice/internal/edge/overlay"
-	edgevault "github.com/asolgan/lattice/internal/edge/vault"
-	"github.com/asolgan/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/edge/agent"
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
+	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // frame is one SSE event pushed to every connected browser tab. kind selects

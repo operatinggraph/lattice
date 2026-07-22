@@ -9,9 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/store"
-	edgesync "github.com/asolgan/lattice/internal/edge/sync"
-	"github.com/asolgan/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/edge/store"
+	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
 )
 
 // TestFeed_SyncDegradedTransitions pins the connectivity frame's second axis:

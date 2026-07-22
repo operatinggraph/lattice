@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/refractor/subjects"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/refractor/subjects"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // Neighbors returns the edge list for nodeID from the Adjacency KV.

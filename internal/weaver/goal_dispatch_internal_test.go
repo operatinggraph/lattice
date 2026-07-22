@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // --- Unit-level: resolveGoalAction (Fire 6, R1 — design

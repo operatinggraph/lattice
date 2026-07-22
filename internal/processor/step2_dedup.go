@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // DedupOutcome is the result of a step-2 tracker lookup.

@@ -15,7 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/asolgan/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/edge/store"
 )
 
 const testVtxKey = "vtx.lease.Lk2Pn6mQrtwzKbcXvP3T"

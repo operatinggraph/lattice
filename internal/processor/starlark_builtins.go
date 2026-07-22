@@ -9,8 +9,8 @@ import (
 	starlarklib "go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 
-	"github.com/asolgan/lattice/internal/starlarksandbox"
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // nanoidModule returns a Starlark struct exposing `nanoid.new()` and

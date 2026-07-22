@@ -11,14 +11,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	edgeoverlay "github.com/asolgan/lattice/internal/edge/overlay"
-	edgestore "github.com/asolgan/lattice/internal/edge/store"
-	"github.com/asolgan/lattice/internal/edge/transport/natstransport"
-	edgevault "github.com/asolgan/lattice/internal/edge/vault"
-	"github.com/asolgan/lattice/internal/refractor/control"
-	"github.com/asolgan/lattice/internal/substrate"
-	"github.com/asolgan/lattice/internal/testutil"
-	corevault "github.com/asolgan/lattice/internal/vault"
+	edgeoverlay "github.com/operatinggraph/lattice/internal/edge/overlay"
+	edgestore "github.com/operatinggraph/lattice/internal/edge/store"
+	"github.com/operatinggraph/lattice/internal/edge/transport/natstransport"
+	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
+	"github.com/operatinggraph/lattice/internal/refractor/control"
+	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/testutil"
+	corevault "github.com/operatinggraph/lattice/internal/vault"
 )
 
 // testIdentityID is a valid Contract #1 NanoID used throughout — mirrors

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"syscall/js"
 
-	"github.com/asolgan/lattice/internal/edge/transport"
+	"github.com/operatinggraph/lattice/internal/edge/transport"
 )
 
 // jsTransport satisfies the Edge engine's transport seam

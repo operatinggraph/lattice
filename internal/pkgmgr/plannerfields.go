@@ -3,8 +3,8 @@ package pkgmgr
 import (
 	"fmt"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
-	"github.com/asolgan/lattice/internal/weaver/planner"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/weaver/planner"
 )
 
 // Planner-extension target modes (Contract #10 §10.8 Planner extension).

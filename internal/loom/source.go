@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/asolgan/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // patternSourceDurablePrefix is the JetStream durable-consumer name prefix for

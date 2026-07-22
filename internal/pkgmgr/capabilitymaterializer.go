@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/asolgan/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/guardgrammar"
 )
 
 // EnabledArtifactKinds is the artifact-kind allow-list for the capability-author

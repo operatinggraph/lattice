@@ -1,6 +1,6 @@
 package clinicreminders
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Canonical names (Contract #1 §1.5 — globally unique). The split mirrors
 // orchestration-base's freshnessMarker (vertexType, owns the op script) +

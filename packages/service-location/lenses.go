@@ -1,6 +1,6 @@
 package servicelocation
 
-import "github.com/asolgan/lattice/internal/pkgmgr"
+import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Lenses returns the package's Lens declarations.
 //
