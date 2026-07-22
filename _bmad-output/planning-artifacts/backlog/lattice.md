@@ -54,7 +54,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Bootstrap] `cmd/bootstrap` has no test files — the seed decision is inspection-only** | The probe, re-seed, and two-phase reopen are covered in `internal/bootstrap`, but the branch that *decides* to re-seed lives in `package main` and is untested. Consumer: the freshness probe's own decision path. Either extract the decision into `internal/bootstrap` or add a `cmd/bootstrap` test binary. | ★ | XS–S | 📋 ready · `cmd/bootstrap/main.go:110-140` |
 | **[CI] `edge-browser-store` reds the gate on a slow headless-Chrome cold start** | `wasmbrowsertest` waits a chromedp-hardcoded 20s for Chrome's DevTools banner and exposes no knob for it (`test-edge-idb-conformance`). `-p 1` already removed self-contention, yet one cold start still overran on a loaded runner — observed on main, green on re-run, whole gate red meanwhile. Nothing retries the suite. Retry once on the `websocket url timeout reached` signature alone, so real failures stay unmasked. | ★★ | XS–S | 📋 ready |
-| **[Weaver] Drain the `__effect` windows polluted before the attempt-booking fix** | The attempt-booking fix stops NEW unanswerable episodes but cannot drain windows already full. The live stack holds standing `LensEffectMismatch` windows (`leaseApplicationComplete`) that cannot self-clear — one close flips one slot. Needs a one-time reset of the affected `__effect` keys, or a durable window-age-out. | ★★ | XS–S | 📐 needs-design (Designer) · age-out touches ratified planner-mandate §3.2 clock-free ring; alt = one-time state reset |
+| **[Weaver] Drain the `__effect` windows polluted before the attempt-booking fix** | The attempt-booking fix stops NEW unanswerable episodes but cannot drain windows already full. The live stack holds standing `LensEffectMismatch` windows (`leaseApplicationComplete`) that cannot self-clear. Design: a narrow `resetConfidence` control verb (disable < reset < revoke ladder); no age-out, ratified §3.2 untouched. | ★★ | XS–S | 📐 awaiting-Andrew · [design](../../implementation-artifacts/weaver-effect-window-drain-design.md) |
 
 ### Survey log (round-robin rotation)
 
@@ -118,7 +118,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > driver-blocked, so the live picks are the **📋 ready rows in Component maintenance** above. Top of that
 > stack now: **[Refractor] backfill the two protected lenses** (★★ XS–S), then **[Loom] poll-until-created
 > in the e2e harness** (★ XS–S) and **[CI] `edge-browser-store` retry** (★★ XS–S — Whetstone's lane). The
-> ★★ **[Weaver] drain the polluted windows** is now 📐 needs-design (its durable fix touches ratified §3.2).
+> ★★ **[Weaver] drain the polluted windows** is designed (📐 awaiting-Andrew — `resetConfidence` verb).
 > A stale callout starves the lane — whoever ships the top pick renames this to the next.
 
 > 📐 **Awaiting Andrew — one contract edit staged uncommitted in `main`.**
