@@ -72,6 +72,7 @@ func TestPackage_DeclaresControlOperatorRoleDistinctFromPrimordialOperator(t *te
 func TestPackage_EveryControlOpHasExpectedGrantees(t *testing.T) {
 	wantSoleControlOperator := []string{
 		"ctrl.weaver.read", "ctrl.weaver.disable", "ctrl.weaver.enable", "ctrl.weaver.revoke",
+		"ctrl.weaver.resetConfidence",
 		"ctrl.loom.read", "ctrl.loom.pause", "ctrl.loom.resume",
 		"ctrl.refractor.read", "ctrl.refractor.rebuild", "ctrl.refractor.pause", "ctrl.refractor.resume",
 		"ctrl.refractor.delete",

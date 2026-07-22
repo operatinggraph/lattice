@@ -24,19 +24,20 @@ import (
 )
 
 // engineControl is the minimal interface this package needs from
-// *weaver.Engine — list/disable/enable/revoke. Defining it here
-// (rather than depending on the full *weaver.Engine) keeps the dependency
-// surface to exactly these four methods plus weaver.TargetSummary.
+// *weaver.Engine — list/disable/enable/revoke/resetConfidence. Defining it
+// here (rather than depending on the full *weaver.Engine) keeps the dependency
+// surface to exactly these five methods plus weaver.TargetSummary.
 type engineControl interface {
 	ListTargets(ctx context.Context) ([]weaver.TargetSummary, error)
 	Disable(ctx context.Context, targetID string) error
 	Enable(ctx context.Context, targetID string) error
 	Revoke(ctx context.Context, targetID string) error
+	ResetConfidence(ctx context.Context, targetID string) (int, error)
 }
 
 // subjectPrefix is the wildcard subject pattern the control endpoints are
 // registered under. "list" is registered on the exact subject
-// subjectPrefix+".list"; disable/enable/revoke are registered on
+// subjectPrefix+".list"; disable/enable/revoke/resetConfidence are registered on
 // subjectPrefix+".*.<op>" — wildcards let one endpoint handler serve all
 // target IDs, since the Weaver does not know the full set of target IDs at
 // registration time.
@@ -53,13 +54,15 @@ const handlerTimeout = 5 * time.Second
 // On success (disable op): Disable is present.
 // On success (enable op): Enable is present.
 // On success (revoke op): Revoke is present.
+// On success (resetConfidence op): ResetConfidence is present.
 // On error: only Error is present.
 type ControlResponse struct {
-	Targets []weaver.TargetSummary `json:"targets,omitempty"`
-	Disable *DisableResult         `json:"disable,omitempty"`
-	Enable  *EnableResult          `json:"enable,omitempty"`
-	Revoke  *RevokeResult          `json:"revoke,omitempty"`
-	Error   string                 `json:"error,omitempty"`
+	Targets         []weaver.TargetSummary `json:"targets,omitempty"`
+	Disable         *DisableResult         `json:"disable,omitempty"`
+	Enable          *EnableResult          `json:"enable,omitempty"`
+	Revoke          *RevokeResult          `json:"revoke,omitempty"`
+	ResetConfidence *ResetConfidenceResult `json:"resetConfidence,omitempty"`
+	Error           string                 `json:"error,omitempty"`
 }
 
 // DisableResult is the synchronous acknowledgement returned by the
@@ -80,18 +83,28 @@ type RevokeResult struct {
 	Revoked bool `json:"revoked"`
 }
 
-// listOp and the disable/enable/revoke per-target ops registered as
-// individual NATS Services endpoints.
+// ResetConfidenceResult is the synchronous acknowledgement returned by the
+// "resetConfidence" op. WindowsDeleted is how many `__effect` confidence
+// windows the reset removed — zero is a success (nothing to drain), and a
+// window a concurrent booking changed mid-pass is skipped rather than
+// clobbered, so a rerun can report more.
+type ResetConfidenceResult struct {
+	WindowsDeleted int `json:"windowsDeleted"`
+}
+
+// listOp and the disable/enable/revoke/resetConfidence per-target ops
+// registered as individual NATS Services endpoints.
 const (
-	opList    = "list"
-	opDisable = "disable"
-	opEnable  = "enable"
-	opRevoke  = "revoke"
+	opList            = "list"
+	opDisable         = "disable"
+	opEnable          = "enable"
+	opRevoke          = "revoke"
+	opResetConfidence = "resetConfidence"
 )
 
 // targetOps enumerates the per-target (wildcard-subject) ops registered
 // under subjectPrefix+".*.<op>".
-var targetOps = []string{opDisable, opEnable, opRevoke}
+var targetOps = []string{opDisable, opEnable, opRevoke, opResetConfidence}
 
 // Service is the Weaver control-plane NATS responder. It wraps an
 // engineControl (in production, *weaver.Engine) and a CapabilityChecker.
@@ -227,8 +240,8 @@ func (s *Service) handleList(req micro.Request) {
 	s.respondMicro(req, ControlResponse{Targets: targets})
 }
 
-// dispatchEndpoint is the entry point for the disable/enable/revoke
-// endpoints. It extracts the target ID from the subject, authorizes the
+// dispatchEndpoint is the entry point for the disable/enable/revoke/
+// resetConfidence endpoints. It extracts the target ID from the subject, authorizes the
 // operation, dispatches by op, and writes the JSON response.
 func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 	subject := req.Subject()
@@ -269,6 +282,14 @@ func (s *Service) dispatchEndpoint(op string, req micro.Request) {
 			return
 		}
 		s.respondMicro(req, ControlResponse{Revoke: &RevokeResult{Revoked: true}})
+	case opResetConfidence:
+		deleted, err := s.engine.ResetConfidence(ctx, targetID)
+		if err != nil {
+			s.respondMicro(req, ControlResponse{Error: err.Error()})
+			return
+		}
+		s.respondMicro(req, ControlResponse{
+			ResetConfidence: &ResetConfidenceResult{WindowsDeleted: deleted}})
 	default:
 		// Unreachable — targetOps gates the endpoint registration.
 		s.respondMicro(req, ControlResponse{Error: fmt.Sprintf("unknown operation: %s", op)})

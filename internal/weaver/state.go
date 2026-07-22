@@ -691,6 +691,48 @@ func (m *markStore) isDisabledKey(ctx context.Context, key string) (bool, error)
 	return cm.Disabled, nil
 }
 
+// deleteEffectWindows deletes every `<targetId>.__effect.<gapColumn>.<actionRef>`
+// confidence window belonging to targetID and returns how many were removed.
+// The reserved marker pins the boundary exactly — targetID is an
+// install-validated dot-free token, so "t1.__effect." can never match a key
+// under target "t10" — and nothing outside that shape is touched: marks,
+// `…__count` retry budgets, and the `__control` marker all survive, which is
+// what separates this from deleteByTargetPrefix.
+//
+// Each delete is conditioned on the revision read in this pass (mirroring the
+// sweep's deleteEffect): a dispatch or close that lands between the read and
+// the delete wins the conflict and survives as honest new history, so the
+// count can under-report and the drain is never destructive to fresh state. A
+// key that vanishes mid-scan (the sweep's orphan leg won the race) is already
+// in the desired state and is skipped, not an error.
+func (m *markStore) deleteEffectWindows(ctx context.Context, targetID string) (deleted int, err error) {
+	keys, err := m.conn.KVListKeys(ctx, m.bucket)
+	if err != nil {
+		return 0, err
+	}
+	prefix := targetID + effectKeyMarker
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		entry, getErr := m.conn.KVGet(ctx, m.bucket, key)
+		if getErr != nil {
+			if errors.Is(getErr, substrate.ErrKeyNotFound) {
+				continue
+			}
+			return deleted, fmt.Errorf("weaver: read effect window %s: %w", key, getErr)
+		}
+		if delErr := m.conn.KVDeleteRevision(ctx, m.bucket, key, entry.Revision); delErr != nil {
+			if errors.Is(delErr, substrate.ErrRevisionConflict) || errors.Is(delErr, substrate.ErrKeyNotFound) {
+				continue
+			}
+			return deleted, fmt.Errorf("weaver: delete effect window %s: %w", key, delErr)
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
 // deleteByTargetPrefix deletes every weaver-state key with prefix
 // "<targetID>." — every `<targetId>.<entityId>.<gapColumn>` in-flight mark,
 // the `<targetId>.__control` dispatch-skip marker, and every

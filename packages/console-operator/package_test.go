@@ -151,6 +151,7 @@ func TestPackage_EveryOpGrantsOnlyToConsoleOperatorScopeAny(t *testing.T) {
 	want := []string{
 		"ShredIdentityKey", "RevokeActor", "UnrevokeActor", "AttachObject", "DetachObject",
 		"ctrl.weaver.read", "ctrl.weaver.disable", "ctrl.weaver.enable", "ctrl.weaver.revoke",
+		"ctrl.weaver.resetConfidence",
 		"ctrl.loom.read", "ctrl.loom.pause", "ctrl.loom.resume",
 		"ctrl.refractor.read", "ctrl.refractor.rebuild", "ctrl.refractor.pause", "ctrl.refractor.resume",
 		"ctrl.refractor.delete", "ctrl.refractor.register", "ctrl.refractor.deregister", "ctrl.refractor.hydrate",

@@ -677,6 +677,11 @@ Services responder (`internal/weaver/control`), mirroring Refractor's control pl
 | `lattice.ctrl.weaver.<targetId>.disable` | `disable` — pause dispatch for `<targetId>` |
 | `lattice.ctrl.weaver.<targetId>.enable` | `enable` — resume dispatch for `<targetId>` |
 | `lattice.ctrl.weaver.<targetId>.revoke` | `revoke` — immediate cleanup + disable for `<targetId>` |
+| `lattice.ctrl.weaver.<targetId>.resetConfidence` | `resetConfidence` — drain `<targetId>`'s `__effect` confidence windows; returns `windowsDeleted` |
+
+The three mutating verbs form one operator-severity ladder: `disable` (pause, delete nothing) ·
+`resetConfidence` (delete advisory confidence only) · `revoke` (delete everything under the target
+prefix + disable).
 
 `TargetSummary.state` is a 2-value enum — there is no durable "revoked" state; `revoke` is a
 strict superset of `disable` (see below) and reports `"disabled"`.
@@ -761,6 +766,34 @@ prevent the target from being re-installed via a fresh `meta.weaverTarget` verte
 not retire the target's underlying Lens. Fully decommissioning a target requires also retiring
 its Lens (out of this story's scope — an op-path/Refractor concern).
 
+### `resetConfidence`
+
+`resetConfidence <targetId>` deletes every `<targetId>.__effect.<gapColumn>.<actionRef>` confidence
+window (Contract #10 §10.3) and **nothing else** — in-flight marks, `…__count` retry budgets, the
+`__control` marker, and every other target's windows all survive, and the target's enable/disable
+state is untouched. It returns how many windows it removed.
+
+Why it exists: a full `__effect` window with zero observed closes raises a standing
+`LensEffectMismatch` on the heartbeat, and the sweep deliberately never content-resets a *live*
+(target, gapColumn) pair — so a window polluted by a bookkeeping bug (or by a genuinely stuck
+episode re-booked across many sweep passes) has no exit path and the warning stands forever.
+`revoke` would clear it but also deletes every live mark and the lane-1 durable, whose
+`DeliverLastPerSubject` re-add fires fresh episodes with fresh `claimId`s — minting duplicate
+userTasks beside the open ones. `resetConfidence` is the narrow verb between the two.
+
+Each delete is conditioned on the revision read in that pass: a dispatch or close landing
+mid-drain wins and survives as honest new history, so the count can under-report and a rerun is
+the remedy (rerunning is idempotent — a drained target reports `0`). An unregistered `targetId`
+is an error, mirroring `disable`/`enable`; an orphaned window whose target is gone is the sweep's
+job, not an operator's.
+
+The windows are advisory-only — `flagEffectMismatches`' heartbeat scan and the planner's
+`effectCloseRate`, both of which read a missing key as "no data" rather than a zero close rate. So
+after a reset the next heartbeat scan lists nothing for the target and the standing issues clear
+through the existing reconciliation loop; windows rebuild honestly from the next genuine episode.
+A window that legitimately refills to capacity with zero closes is the alert telling the truth —
+the remedy there is on the data side, not another reset.
+
 ### Capability authorization
 
 `internal/weaver/control` ships a `StubCapabilityChecker` (allow-all, logs every call) — mirroring
@@ -776,9 +809,9 @@ it reuses.
 | Path | Role |
 |------|------|
 | `internal/weaver/` | Engine: Sensorium, 3-lane work stream, Evaluator tiers, Strategist dispatcher, Actuator |
-| `internal/weaver/control/` | Operator control plane (FR30): `list`/`disable`/`enable`/`revoke` NATS Services responder |
+| `internal/weaver/control/` | Operator control plane (FR30): `list`/`disable`/`enable`/`revoke`/`resetConfidence` NATS Services responder |
 | `cmd/weaver/` | Binary entry point (extractable; shares only `substrate/*`) — starts the control-plane listener alongside the engine |
-| `cmd/lattice/weaver/` | `lattice weaver list\|disable\|enable\|revoke` CLI command group |
+| `cmd/lattice/weaver/` | `lattice weaver list\|disable\|enable\|revoke\|reset-confidence` CLI command group |
 
 **Package data:** target Lens cypher, playbook definitions, gap→action mappings (`lease-signing`).
 
@@ -794,7 +827,7 @@ it reuses.
 | Out | ops via `core-operations` (`ops.<lane>`) | fire-and-forget; OCC `expectedRevision` payload; trigger-Loom |
 | Out | `@at` schedules via `core-schedules` (`schedule.weaver.timer.<targetId>.<entityId>`) | lane 3 scheduling leg; replace-on-reschedule (one schedule per subject) |
 | Out (own) | `weaver-state` bucket | in-flight convergence marks (anti-storm); per-key TTL backstop (2× lease) + reconciler sweep |
-| In/Out | `micro.Service` endpoints at `lattice.ctrl.weaver.<targetId>.<op>` and `lattice.ctrl.weaver.list` | Control plane (FR30): operator `list`/`disable`/`enable`/`revoke` — see "Control plane" below |
+| In/Out | `micro.Service` endpoints at `lattice.ctrl.weaver.<targetId>.<op>` and `lattice.ctrl.weaver.list` | Control plane (FR30): operator `list`/`disable`/`enable`/`revoke`/`resetConfidence` — see "Control plane" below |
 
 ---
 
@@ -832,7 +865,7 @@ What ships today in `internal/weaver` + `cmd/weaver`, and what is deliberately d
 | **Actions** | `triggerLoom` (→ `StartLoomPattern` op, never a Go call), `assignTask` (→ `CreateTask` with episode-deterministic `taskId`), `directOp` ✅. External idempotent I/O is `triggerLoom` of a Loom `externalTask` pattern — the **bridge** executes the call (`docs/components/bridge.md`); Weaver never holds an adapter. `proposedOp` ✅ (the Augur's Fire 2b "Augur dispatch") sources its op + params from the ROW — not playbook config — for the primordial `augurDispatch` target only: it materialises an approved proposal's `proposedAction`/`proposedParams` after a dispatch-time re-validation (action vocabulary + default-deny scope to the TRUSTED candidate + live-registry resolution), fires it under a **proposal-scoped deterministic `requestId`** (collapse-only under a sweep reclaim, unlike every other action's episode-scoped id), then submits `RecordProposalDispatch` as a same-dispatch follow-up (a failed follow-up publish self-heals on the next sweep, never Naks the episode). `surface` ✅ (FR29 — `orchestration-base`'s `unroutedTasks` target) dispatches **no op and creates no mark**: while the gap column stays true it raises a named `IssueCode`/`IssueSeverity` Health-KV issue (default severity `warning`); the issue clears via the ordinary level-reconciled mark-clearing pass once the row stops naming the column (`clearClosedMarks` special-cases it — a surface gap never had a mark to clean up). Manual-intervention-only; unlike every other action it never touches `ops.<lane>`. An action the playbook names outside this set fails closed (a loud `PlaybookConfigError` Health issue), never a silent skip. |
 | **Health** | ✅ Contract #5 heartbeat at `health.weaver.<instance>` (metrics: `consumers`, `targets`, `marksInFlight`, `sweepReclaims`, `sweepOrphansDeleted`, `sweepCorrupt`, `sweepLastRunAt`, `timersScheduled`, `timersFired`) + per-consumer pause-state docs at `health.weaver.consumer-state.<name>` (consumer-scoped, not instance-scoped — survives a restart under a new instance); config/data errors surface as issues. |
 | **Lane 3 (temporal)** | ✅ Shipped (Contract #10 §10.4). One **fixed supervised durable** `weaver-temporal` on `core-schedules` filtered `schedule.weaver.timer.fired.>`; the lane-1 row handler's **scheduling leg** re-arms `@at(freshUntil)` per delivery (level-driven, replace-on-reschedule); the fired→op conversion submits `MarkExpired` under the **deterministic timer `requestId`** (schedule subject + fire instant) with **no weaver-state mark**. See "Temporal lane" above for the convention column and the accepted Phase 2 bounds. |
-| **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
+| **Control API/CLI (Pause/Resume surface)** | ✅ Shipped (FR30). `internal/weaver/control` exposes `list`/`disable`/`enable`/`revoke`/`resetConfidence` over a `nats-io/nats.go/micro` Services responder; `lattice weaver` CLI group. See "Control plane" above. |
 | **Lane 2 (event-targeted-audit) + `weaver-work`** | ⏳ Phase 3 (§10.3: no durable bucket today). |
 | **Real target Lens via Refractor + playbook package data** | ✅ Shipped — the `lease-signing` reference vertical provides a real convergence target + §10.8 playbook; the engine also runs against test-written §10.2 fixture rows. |
 | **Planner mandate (dispatcher → solver)** | 🏗️ Building (Contract #10 §10.8 "Planner extension", ratified 2026-07-04). Fire 1 ✅: op-DDL `Effects` (`internal/pkgmgr` `DDLSpec.Effects`, §10.5 guard-grammar predicates a commit entails, parsed by the new standalone `internal/guardgrammar` package) + install-time validation (`validateEffects`); the `lease-signing` package declares `SignLease`→`.signature present` and `RecordLeaseServiceOutcome`→`.outcome present`. Fire 2 ✅: the `__effect` confidence window (see above). Fire 3 ✅: the pure `internal/weaver/planner` goal-regression library (see above) — table-tested, catalog-permutation-stable. Fire 4 ✅: `mode`/`candidates`/`goal` install-validated parsing + the shadow-compare diagnostic (see above) — zero dispatch-decision change; the Strategist's real dispatch reads only `ga.Action`. Fire 5 ✅: `mode:"planned"` candidate selection actually dispatches (see above) — the first fire that changes a real decision; mark-pinned across reclaim, byte-identical for every other mode/explicit-action gap. Fire 6 Increments 1–3 ✅: the runtime op-effects catalog, the goal-regression State-schema (row↔aspect) bridge, and the per-gap `actions` planning-catalog parse/install-validation (see above) — all zero dispatch-decision change. Fire 6 R1 ✅: `resolveGoalAction`'s dispatch wiring — `planner.Synthesize` over a gap's `actions` catalog, per-leg dispatch + pin, and `releaseCompletedLeg`'s effects-hold leg-advance (see "Goal-regression dispatch + per-leg pin/release" above) — the first fire a `goal` gap actually dispatches. Fire 6 R1 pkgmgr ✅: `pkgmgr` authoring fields for `mode`/`goal`/`goalColumns`/`actions` (see "pkgmgr authoring" above) — a package now authors a goal-mode target directly; `Candidates` (Fire 5) authoring remains a separate, unbuilt pkgmgr surface. Fire 7 ✅: the contraction monitor + oscillation detector (see above) — heartbeat-surfaced diagnostics only, zero dispatch-decision change (a goal leg's own ref→effects oscillation bridge is unwired follow-up polish). Fire 8 ✅: admission control (dispatch-pacing token bucket + §10.2 `priority` column). Fire 9 (Augur floor) remains: `_bmad-output/implementation-artifacts/weaver-planner-mandate-design.md` §8. |

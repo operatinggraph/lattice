@@ -1,5 +1,5 @@
 // Package weaver implements the lattice weaver command group: operator
-// list/disable/enable/revoke controls for Weaver convergence targets (FR30),
+// list/disable/enable/revoke/reset-confidence controls for Weaver convergence targets (FR30),
 // via the lattice.ctrl.weaver.* NATS Services control plane.
 package weaver
 
@@ -40,12 +40,13 @@ func validateTargetID(targetID string) error {
 func NewCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "weaver",
-		Short: "Operate Weaver convergence targets (list/disable/enable/revoke)",
+		Short: "Operate Weaver convergence targets (list/disable/enable/revoke/reset-confidence)",
 	}
 	cmd.AddCommand(newListCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newDisableCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newEnableCommand(natsURL, outputFmt, defaultActor))
 	cmd.AddCommand(newRevokeCommand(natsURL, outputFmt, defaultActor))
+	cmd.AddCommand(newResetConfidenceCommand(natsURL, outputFmt, defaultActor))
 	return cmd
 }
 
@@ -244,6 +245,52 @@ func newRevokeCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				return output.PrintJSON(resp.Revoke)
 			}
 			fmt.Printf("target %q revoked\n", targetID)
+			return nil
+		},
+	}
+	addActorFlag(cmd, &actor, &actorToken)
+	return cmd
+}
+
+// newResetConfidenceCommand builds `lattice weaver reset-confidence
+// <targetId>` — the middle rung of the operator-severity ladder between
+// disable (deletes nothing) and revoke (deletes everything): it drains the
+// target's `__effect` confidence windows and nothing else, clearing a standing
+// LensEffectMismatch raised by windows the pre-5b58f66 bookkeeping polluted.
+func newResetConfidenceCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
+	var actor string
+	var actorToken string
+	cmd := &cobra.Command{
+		Use:   "reset-confidence <targetId>",
+		Short: "Drain a target's __effect confidence windows (advisory data only; dispatch state untouched)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if actor == "" {
+				actor = *defaultActor
+			}
+			targetID := args[0]
+			if err := validateTargetID(targetID); err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+			resp, err := request(*natsURL, control.TargetSubject(targetID, "resetConfidence"), resolveActorHeader(actor, actorToken))
+			if err != nil {
+				if *outputFmt == "json" {
+					return output.PrintJSONError("ControlError", err.Error())
+				}
+				return err
+			}
+
+			if *outputFmt == "json" {
+				return output.PrintJSON(resp.ResetConfidence)
+			}
+			deleted := 0
+			if resp.ResetConfidence != nil {
+				deleted = resp.ResetConfidence.WindowsDeleted
+			}
+			fmt.Printf("target %q confidence reset (%d window(s) deleted)\n", targetID, deleted)
 			return nil
 		},
 	}

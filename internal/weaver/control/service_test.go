@@ -20,7 +20,7 @@ import (
 )
 
 // fakeEngine satisfies the unexported engineControl interface structurally —
-// it implements ListTargets/Disable/Enable/Revoke with the exact same
+// it implements ListTargets/Disable/Enable/Revoke/ResetConfidence with the exact same
 // signatures as *weaver.Engine, so control.NewService accepts it. No real
 // *weaver.Engine is needed for this package's tests (internal/weaver's own
 // tests cover the real engine wiring, per Task 3).
@@ -29,6 +29,8 @@ type fakeEngine struct {
 	targets []weaver.TargetSummary
 	calls   []string // op:targetID, in call order
 	errOn   map[string]error
+	// resetDeleted is the window count ResetConfidence reports on success.
+	resetDeleted int
 }
 
 func newFakeEngine(targets ...weaver.TargetSummary) *fakeEngine {
@@ -53,6 +55,15 @@ func (f *fakeEngine) Enable(_ context.Context, targetID string) error {
 
 func (f *fakeEngine) Revoke(_ context.Context, targetID string) error {
 	return f.record("revoke", targetID)
+}
+
+func (f *fakeEngine) ResetConfidence(_ context.Context, targetID string) (int, error) {
+	if err := f.record("resetConfidence", targetID); err != nil {
+		return 0, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resetDeleted, nil
 }
 
 func (f *fakeEngine) record(op, targetID string) error {
@@ -187,6 +198,70 @@ func TestControl_Revoke(t *testing.T) {
 	require.NotNil(t, resp.Revoke)
 	assert.True(t, resp.Revoke.Revoked)
 	assert.Equal(t, []string{"revoke:t1"}, eng.callLog())
+}
+
+// TestControl_ResetConfidence verifies the "resetConfidence" op invokes
+// Engine.ResetConfidence for the target ID extracted from the subject and
+// returns the engine's deleted-window count verbatim — the operator's only
+// feedback that the drain reached anything.
+func TestControl_ResetConfidence(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	eng.resetDeleted = 3
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("t1", "resetConfidence"))
+
+	require.Empty(t, resp.Error)
+	require.NotNil(t, resp.ResetConfidence)
+	assert.Equal(t, 3, resp.ResetConfidence.WindowsDeleted)
+	assert.Equal(t, []string{"resetConfidence:t1"}, eng.callLog())
+	// A reset is confidence-only: it must never be dispatched as a disable,
+	// enable, or revoke on the way through.
+	assert.Nil(t, resp.Disable)
+	assert.Nil(t, resp.Enable)
+	assert.Nil(t, resp.Revoke)
+}
+
+// TestControl_ResetConfidence_EngineError verifies an unregistered target's
+// engine error surfaces in Error rather than reporting a successful zero-window
+// drain.
+func TestControl_ResetConfidence_EngineError(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	eng.errOn["resetConfidence:ghost"] = errors.New("weaver: target \"ghost\" not registered")
+	svc := control.NewService(eng, control.NewStubCapabilityChecker(nil), nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("ghost", "resetConfidence"))
+
+	require.Nil(t, resp.ResetConfidence)
+	assert.Contains(t, resp.Error, "not registered")
+}
+
+// TestControl_ResetConfidence_CapabilityDenied verifies the new verb is gated
+// by the same per-op capability check as every other mutating op — it deletes
+// engine state, so an ungranted actor must never reach the engine.
+func TestControl_ResetConfidence_CapabilityDenied(t *testing.T) {
+	nc := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	eng := newFakeEngine()
+	svc := control.NewService(eng, denyCapability{err: errors.New("capability denied")}, nil)
+	require.NoError(t, svc.StartNATSListener(ctx, nc))
+
+	resp := sendRequest(t, nc, control.TargetSubject("t1", "resetConfidence"))
+
+	assert.Contains(t, resp.Error, "capability denied")
+	assert.Empty(t, eng.callLog(), "a denied resetConfidence must never reach the engine")
 }
 
 // TestControl_Disable_EngineError verifies that an error returned by

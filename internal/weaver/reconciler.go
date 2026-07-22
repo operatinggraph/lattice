@@ -288,9 +288,11 @@ func (s *sweeper) sweepMark(ctx context.Context, key string) {
 // left untouched regardless of its window contents — level reconcile here
 // never resets confidence, only removes what can no longer accumulate it (a
 // full-target removal is also covered for free by deleteByTargetPrefix on
-// Disable/Enable/Revoke, since `__effect` keys share the `<targetId>.` prefix
-// — this leg is what catches the narrower orphan-column case and a target
-// removed between reconciler passes).
+// Revoke, the one verb that prefix-deletes, since `__effect` keys share the
+// `<targetId>.` prefix — this leg is what catches the narrower orphan-column
+// case and a target removed between reconciler passes). Resetting a LIVE
+// pair's window is the operator's call, not the sweep's:
+// Engine.ResetConfidence.
 func (s *sweeper) sweepEffect(ctx context.Context, key string) {
 	e := s.engine
 	entry, err := e.conn.KVGet(ctx, e.cfg.WeaverStateBucket, key)

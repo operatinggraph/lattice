@@ -1,5 +1,5 @@
 name: console-operator
-version: 0.4.0
+version: 0.5.0
 description: |
   Declares a scoped consoleOperator role and grants it the default-lane
   console ops (ShredIdentityKey, RevokeActor, UnrevokeActor, AttachObject,
@@ -53,6 +53,9 @@ declares:
       scope: any
       grantsTo: [consoleOperator]
     - operationType: ctrl.weaver.revoke
+      scope: any
+      grantsTo: [consoleOperator]
+    - operationType: ctrl.weaver.resetConfidence
       scope: any
       grantsTo: [consoleOperator]
     - operationType: ctrl.loom.read

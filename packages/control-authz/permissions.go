@@ -2,7 +2,7 @@ package controlauthz
 
 import "github.com/asolgan/lattice/internal/pkgmgr"
 
-// Permissions returns the 17 ctrl.<component>.<verb> platform permissions,
+// Permissions returns the 18 ctrl.<component>.<verb> platform permissions,
 // each granting `scope: any` (v1 — the only working platform scope,
 // control-plane-capability-authz-design.md §2(a)) to the control-operator
 // role. The op→verb tables here MUST stay in lockstep with
@@ -20,7 +20,7 @@ import "github.com/asolgan/lattice/internal/pkgmgr"
 // regardless of capability scope — see personalLensPermissions.
 func Permissions() []pkgmgr.PermissionSpec {
 	perms := []pkgmgr.PermissionSpec{}
-	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke"})...)
+	perms = append(perms, componentPermissions("weaver", []string{"read", "disable", "enable", "revoke", "resetConfidence"})...)
 	perms = append(perms, componentPermissions("loom", []string{"read", "pause", "resume"})...)
 	perms = append(perms, componentPermissions("refractor", []string{"read", "rebuild", "pause", "resume", "delete"})...)
 	perms = append(perms, personalLensPermissions("register", "deregister", "hydrate", "sessionkey", "syncgap")...)

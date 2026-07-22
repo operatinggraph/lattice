@@ -11,13 +11,18 @@ type OpMeta struct {
 }
 
 // WeaverOps mirrors internal/weaver/control/service.go's op constants
-// (opList/opDisable/opEnable/opRevoke). A per-cmd wiring test asserts this
-// table stays in lockstep with the service's dispatch tables (design R5).
+// (opList/opDisable/opEnable/opRevoke/opResetConfidence). A per-cmd wiring
+// test asserts this table stays in lockstep with the service's dispatch tables
+// (design R5). resetConfidence carries its own verb rather than reusing
+// revoke's: it is a strictly narrower deletion (advisory confidence windows
+// only), and folding it under an existing verb would grant the wider one to
+// every actor that needs the narrower.
 var WeaverOps = map[string]OpMeta{
-	"list":    {Verb: "read", Read: true},
-	"disable": {Verb: "disable", Read: false},
-	"enable":  {Verb: "enable", Read: false},
-	"revoke":  {Verb: "revoke", Read: false},
+	"list":            {Verb: "read", Read: true},
+	"disable":         {Verb: "disable", Read: false},
+	"enable":          {Verb: "enable", Read: false},
+	"revoke":          {Verb: "revoke", Read: false},
+	"resetConfidence": {Verb: "resetConfidence", Read: false},
 }
 
 // LoomOps mirrors internal/loom/control/service.go's exactOps/nameOps

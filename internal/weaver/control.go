@@ -226,6 +226,46 @@ func (e *Engine) Revoke(ctx context.Context, targetID string) error {
 	return nil
 }
 
+// ResetConfidence deletes every `<targetId>.__effect.<gapColumn>.<actionRef>`
+// confidence window registered under targetID and returns how many were
+// removed. It is the middle rung of the operator-severity ladder — `disable`
+// pauses and deletes nothing, `resetConfidence` deletes advisory confidence
+// only, `revoke` deletes everything under the target prefix and disables.
+//
+// Only `__effect` keys are touched: in-flight marks, `…__count` retry budgets,
+// and the `<targetId>.__control` marker all survive, and so do every other
+// target's windows. The target's dispatch state is untouched — a reset neither
+// disables nor enables, and the lane-1 consumer keeps pumping.
+//
+// Each delete is conditioned on the revision read in this pass (mirroring the
+// sweep's deleteEffect): a dispatch or close that lands between the list and
+// the delete wins the conflict and survives as honest new history, so a reset
+// can never silently discard a window it never observed. A skipped key is not
+// an error and is not counted; re-running the verb is the remedy.
+//
+// The window is advisory-only today (`flagEffectMismatches`' heartbeat scan
+// and planner_shadow's effectCloseRate, which no installed target enables), and
+// every reader treats a missing key as "no data" rather than a zero close rate
+// — so deletion is safe by construction. Once the windows are gone the next
+// heartbeat scan lists nothing for the target and the standing
+// LensEffectMismatch issues clear through the existing reconciliation loop;
+// honest windows rebuild from the next genuine episode.
+//
+// Returns an error if targetID is not currently registered (mirroring
+// Disable/Enable — a window whose target is gone is already sweepEffect's
+// orphan leg, not an operator's).
+func (e *Engine) ResetConfidence(ctx context.Context, targetID string) (int, error) {
+	if _, ok := e.source.target(targetID); !ok {
+		return 0, fmt.Errorf("weaver: target %q not registered", targetID)
+	}
+	deleted, err := e.marks.deleteEffectWindows(ctx, targetID)
+	if err != nil {
+		return deleted, fmt.Errorf("weaver: reset confidence %q: %w", targetID, err)
+	}
+	e.logger.Info("weaver: target confidence reset", "targetId", targetID, "windowsDeleted", deleted)
+	return deleted, nil
+}
+
 // freezeOscillatingPair disables both fighting targets (Engine.Disable — the
 // same operator-facing `__control` seam a manual freeze uses) and raises ONE
 // standing Health issue naming the causal pair and the contested aspect

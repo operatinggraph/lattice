@@ -31,6 +31,9 @@ func (e listErrEngine) ListTargets(context.Context) ([]weaver.TargetSummary, err
 func (e listErrEngine) Disable(context.Context, string) error { return nil }
 func (e listErrEngine) Enable(context.Context, string) error  { return nil }
 func (e listErrEngine) Revoke(context.Context, string) error  { return nil }
+func (e listErrEngine) ResetConfidence(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // TestControl_List_CapabilityDenied verifies a denied "list" op surfaces the
 // authorizer's error and never reaches the engine.

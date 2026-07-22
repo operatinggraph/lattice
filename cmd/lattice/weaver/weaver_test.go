@@ -25,6 +25,8 @@ import (
 type fakeEngine struct {
 	targets []internalweaver.TargetSummary
 	errOn   map[string]error
+	// resetDeleted is the window count ResetConfidence reports on success.
+	resetDeleted int
 }
 
 func (f *fakeEngine) ListTargets(_ context.Context) ([]internalweaver.TargetSummary, error) {
@@ -41,6 +43,13 @@ func (f *fakeEngine) Enable(_ context.Context, targetID string) error {
 
 func (f *fakeEngine) Revoke(_ context.Context, targetID string) error {
 	return f.errOn["revoke:"+targetID]
+}
+
+func (f *fakeEngine) ResetConfidence(_ context.Context, targetID string) (int, error) {
+	if err := f.errOn["resetConfidence:"+targetID]; err != nil {
+		return 0, err
+	}
+	return f.resetDeleted, nil
 }
 
 // startWeaverControlTest starts an embedded NATS server with a
@@ -248,6 +257,60 @@ func TestWeaverDisable_NotRegistered_JSON(t *testing.T) {
 	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
 
 	out, err := runCmd(t, cmd, []string{"disable", "ghost"})
+	require.Error(t, err)
+	assert.Contains(t, out, "ghost")
+	assert.Contains(t, out, `"ok":false`)
+}
+
+// TestWeaverResetConfidence_HappyPath verifies `reset-confidence <targetId>`
+// reaches the resetConfidence endpoint and reports the engine's deleted-window
+// count — the operator's confirmation the drain found the fossils.
+func TestWeaverResetConfidence_HappyPath(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, resetDeleted: 4}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := ""
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"reset-confidence", "t1"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `target "t1" confidence reset`)
+	assert.Contains(t, out, "4 window(s) deleted")
+}
+
+// TestWeaverResetConfidence_JSONReportsCount pins the machine-readable shape
+// operators and Loupe read.
+func TestWeaverResetConfidence_JSONReportsCount(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{}, resetDeleted: 2}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"reset-confidence", "t1"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `"ok":true`)
+	assert.Contains(t, out, `"windowsDeleted":2`)
+}
+
+// TestWeaverResetConfidence_NotRegistered_JSON verifies an unregistered target
+// fails loudly rather than printing a successful zero-window drain.
+func TestWeaverResetConfidence_NotRegistered_JSON(t *testing.T) {
+	eng := &fakeEngine{errOn: map[string]error{
+		"resetConfidence:ghost": errors.New(`weaver: target "ghost" not registered`),
+	}}
+	url := startWeaverControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := "json"
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"reset-confidence", "ghost"})
 	require.Error(t, err)
 	assert.Contains(t, out, "ghost")
 	assert.Contains(t, out, `"ok":false`)
