@@ -128,18 +128,10 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	defer s.engines.Release(identityID)
 
 	writeSSE(w, r, s.logger, eng.feed, func() []frame {
-		entries, err := eng.store.ScanPrefix("manifest.")
+		frames, err := eng.feed.snapshotManifestFrames(eng.store, eng.overlay)
 		if err != nil {
 			s.logger.Error("facet: scan manifest prefix failed", "identityId", identityID, "err", err)
 			return nil
-		}
-		frames := make([]frame, 0, len(entries))
-		for _, e := range entries {
-			v, ok, err := eng.overlay.Read(e.Key)
-			if err != nil || !ok {
-				continue
-			}
-			frames = append(frames, eng.feed.manifestFrame(e.Key, v))
 		}
 		return frames
 	})

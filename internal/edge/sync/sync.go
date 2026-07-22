@@ -52,11 +52,20 @@ const (
 // Refractor-internal package whose deltaEnvelope type is unexported, and the
 // Edge is a separate application consuming only the documented wire contract.
 type deltaEnvelope struct {
-	Op            string          `json:"op"` // "upsert" | "delete" | "hydrationComplete"
+	Op            string          `json:"op"` // "upsert" | "delete" | "keyset" | "hydrationComplete"
 	Key           string          `json:"key,omitempty"`
 	Revision      uint64          `json:"revision"`
 	ProjectionSeq uint64          `json:"projectionSeq"`
 	Data          json.RawMessage `json:"data,omitempty"`
+	// Lens is the producing Personal Lens's rule ID (personal-lens-
+	// retraction-design.md §3.1), set on "upsert" and "keyset" envelopes.
+	// Empty on an "upsert" from a pre-R1 wire producer — handle() treats that
+	// as an unattributed write, exactly as before this design.
+	Lens string `json:"lens,omitempty"`
+	// Keys carries a "keyset" envelope's complete, authoritative business-key
+	// set for its actor+lens as of Revision — nil/empty is the meaningful
+	// last-row-retraction case.
+	Keys []string `json:"keys,omitempty"`
 }
 
 // Config configures a Manager. IdentityID and DeviceID are required;
@@ -301,8 +310,22 @@ func (m *Manager) hydrate(ctx context.Context) error {
 	if err := m.registerInterest(ctx); err != nil {
 		return fmt.Errorf("personal.register: %w", err)
 	}
-	if _, err := m.callHydrate(ctx); err != nil {
+	_, lenses, err := m.callHydrate(ctx)
+	if err != nil {
 		return fmt.Errorf("personal.hydrate: %w", err)
+	}
+	// A lens dropped from the DDL, or re-minted under a new rule ID, has no
+	// emitter left to heal its stranded attributions (personal-lens-
+	// retraction-design.md §3.4) — a completed hydrate is what closes that
+	// gap. Best-effort: a failure here does not undo the hydrate the control
+	// plane already confirmed.
+	pruned, pruneErr := m.store.PruneDeadLensAttributions(lenses)
+	if pruneErr != nil {
+		m.logger.Error("edge/sync: prune dead lens attributions failed", "err", pruneErr)
+	} else if m.cfg.OnChange != nil {
+		for _, k := range pruned {
+			m.cfg.OnChange(k, true)
+		}
 	}
 	return nil
 }
@@ -326,21 +349,21 @@ func (m *Manager) registerInterest(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) callHydrate(ctx context.Context) (revision uint64, err error) {
+func (m *Manager) callHydrate(ctx context.Context) (revision uint64, lenses []string, err error) {
 	resp, err := m.controlRequest(ctx, "hydrate", controlwire.ControlRequest{
 		IdentityID: m.cfg.IdentityID,
 		DeviceID:   m.cfg.DeviceID,
 	})
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if resp.Error != "" {
-		return 0, fmt.Errorf("%s", resp.Error)
+		return 0, nil, fmt.Errorf("%s", resp.Error)
 	}
 	if resp.PersonalHydrate == nil || !resp.PersonalHydrate.Hydrated {
-		return 0, fmt.Errorf("control plane did not confirm hydration")
+		return 0, nil, fmt.Errorf("control plane did not confirm hydration")
 	}
-	return resp.PersonalHydrate.Revision, nil
+	return resp.PersonalHydrate.Revision, resp.PersonalHydrate.Lenses, nil
 }
 
 // controlRequest issues one request-reply against the "personal" pseudo-lens
@@ -374,7 +397,7 @@ func (m *Manager) handle(_ context.Context, d transport.Delta) transport.Decisio
 	}
 	switch env.Op {
 	case "upsert":
-		applied, err := m.store.ApplyUpsert(env.Key, env.Revision, env.Data)
+		applied, err := m.store.ApplyUpsert(env.Key, env.Lens, env.Revision, env.Data)
 		if err != nil {
 			if decision, terminal := m.classifyApplyError("upsert", env.Key, err); terminal {
 				return decision
@@ -396,6 +419,21 @@ func (m *Manager) handle(_ context.Context, d transport.Delta) transport.Decisio
 		}
 		if applied && m.cfg.OnChange != nil {
 			m.cfg.OnChange(env.Key, true)
+		}
+	case "keyset":
+		if env.Lens == "" {
+			m.logger.Warn("edge/sync: keyset envelope missing lens, ignoring", "subject", d.Subject)
+			break
+		}
+		pruned, _, err := m.store.ApplyKeySet(env.Lens, env.Revision, env.Keys)
+		if err != nil {
+			m.logger.Error("edge/sync: apply keyset failed", "lens", env.Lens, "err", err)
+			return transport.Nak
+		}
+		if m.cfg.OnChange != nil {
+			for _, key := range pruned {
+				m.cfg.OnChange(key, true)
+			}
 		}
 	case "hydrationComplete":
 		m.logger.Info("edge/sync: hydration complete", "revision", env.Revision)

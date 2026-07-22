@@ -174,7 +174,7 @@ func openTestStore(t *testing.T) edgestore.Store {
 // embedded nil Store makes any other call panic loudly if the path changes.
 type transientErrStore struct{ edgestore.Store }
 
-func (transientErrStore) ApplyUpsert(string, uint64, json.RawMessage) (bool, error) {
+func (transientErrStore) ApplyUpsert(string, string, uint64, json.RawMessage) (bool, error) {
 	return false, errors.New("edge/store: simulated transient backing-engine failure")
 }
 
@@ -509,6 +509,134 @@ func TestManager_Handle_OnChangeFiresOnlyOnApplied(t *testing.T) {
 	mgr.handle(ctx, transport.Delta{Sequence: 4, Body: body(deltaEnvelope{Op: "delete", Key: key, Revision: 1})})
 
 	require.Equal(t, []change{{key, false}, {key, true}}, changes)
+}
+
+// TestManager_Handle_KeysetPrunesAndFiresOnChange proves a "keyset" delta
+// retracts a key that dropped out of its lens's frame (personal-lens-
+// retraction-design.md §3.3) and fires OnChange(key, true) exactly as an
+// explicit delete would.
+func TestManager_Handle_KeysetPrunesAndFiresOnChange(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn := newSyncTestConn(t, ctx)
+	st := openTestStore(t)
+
+	var changes []string
+	mgr, err := New(natstransport.New(conn), st, Config{
+		IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger(),
+		OnChange: func(key string, deleted bool) {
+			if deleted {
+				changes = append(changes, key)
+			}
+		},
+	})
+	require.NoError(t, err)
+
+	body := func(env deltaEnvelope) []byte {
+		b, err := json.Marshal(env)
+		require.NoError(t, err)
+		return b
+	}
+	leaseID, err := substrate.NewNanoID()
+	require.NoError(t, err)
+	key := substrate.VertexKey("lease", leaseID)
+
+	decision := mgr.handle(ctx, transport.Delta{
+		Sequence: 1,
+		Body:     body(deltaEnvelope{Op: "upsert", Key: key, Lens: "lensQueued", Revision: 1, Data: json.RawMessage(`{"x":1}`)}),
+	})
+	require.Equal(t, transport.Ack, decision)
+
+	// An empty frame is the last-row-retraction case (§3.2 rule 1).
+	decision = mgr.handle(ctx, transport.Delta{
+		Sequence: 2,
+		Body:     body(deltaEnvelope{Op: "keyset", Lens: "lensQueued", Revision: 5}),
+	})
+	require.Equal(t, transport.Ack, decision)
+
+	entry, ok, err := st.Get(key)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, entry.Deleted, "the empty keyset frame must retract the key")
+	require.Equal(t, []string{key}, changes)
+}
+
+// TestManager_Handle_KeysetMissingLensIgnoredCursorStillAdvances proves a
+// malformed keyset envelope (no lens — never emitted by a conforming
+// producer) is logged and skipped rather than blocking the pipeline, the same
+// posture as an unrecognized op.
+func TestManager_Handle_KeysetMissingLensIgnoredCursorStillAdvances(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn := newSyncTestConn(t, ctx)
+	st := openTestStore(t)
+	mgr, err := New(natstransport.New(conn), st, Config{IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger()})
+	require.NoError(t, err)
+
+	b, err := json.Marshal(deltaEnvelope{Op: "keyset", Revision: 5})
+	require.NoError(t, err)
+	decision := mgr.handle(ctx, transport.Delta{Sequence: 7, Body: b})
+	require.Equal(t, transport.Ack, decision, "a malformed keyset must not block the pipeline")
+
+	cursor, ok, err := st.Cursor()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(7), cursor)
+}
+
+// TestManager_Hydrate_PrunesDeadLensAttributions proves the hydrate-response
+// lens-set prune (personal-lens-retraction-design.md §3.4): a lens dropped
+// from the DDL (or re-minted under a new rule ID) has no emitter left to heal
+// its stranded attributions, so a completed hydrate drops any attribution
+// whose lens is absent from the response's Lenses set — and only that one.
+func TestManager_Hydrate_PrunesDeadLensAttributions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	st := openTestStore(t)
+	deadKey := "manifest.task.deadlensdeadlensdead"
+	liveKey := "manifest.task.livelenslivelenslive"
+	_, err := st.ApplyUpsert(deadKey, "lensDead", 1, []byte(`{"a":1}`))
+	require.NoError(t, err)
+	_, err = st.ApplyUpsert(liveKey, "lensLive", 1, []byte(`{"a":1}`))
+	require.NoError(t, err)
+
+	tr := &fakeControlTransport{}
+	tr.reply = func(op string, _ controlwire.ControlRequest) (controlwire.ControlResponse, error) {
+		switch op {
+		case "register":
+			return controlwire.ControlResponse{PersonalRegister: &controlwire.PersonalRegisterResult{Registered: true}}, nil
+		case "hydrate":
+			return controlwire.ControlResponse{PersonalHydrate: &controlwire.PersonalHydrateResult{Hydrated: true, Revision: 1, Lenses: []string{"lensLive"}}}, nil
+		default:
+			return controlwire.ControlResponse{Error: "unexpected op " + op}, nil
+		}
+	}
+
+	var changes []string
+	mgr, err := New(tr, st, Config{
+		IdentityID: "identityA", DeviceID: "deviceX", Logger: testutil.TestLogger(),
+		OnChange: func(key string, deleted bool) {
+			if deleted {
+				changes = append(changes, key)
+			}
+		},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, mgr.hydrate(ctx))
+
+	entry, ok, err := st.Get(deadKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, entry.Deleted, "a lens absent from the hydrate response's live set must have its attribution pruned")
+
+	entry, ok, err = st.Get(liveKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, entry.Deleted, "a lens present in the live set must survive")
+
+	require.Equal(t, []string{deadKey}, changes)
 }
 
 // TestManager_UpdateInterest_RegistersWithoutHydrating proves the Interest

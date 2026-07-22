@@ -29,7 +29,7 @@ func TestRead_AbsentEverywhereReturnsNotOK(t *testing.T) {
 
 func TestRead_ConfirmedOnly(t *testing.T) {
 	o, st := openTestOverlay(t)
-	_, err := st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err := st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 
 	v, ok, err := o.Read(testKey)
@@ -41,7 +41,7 @@ func TestRead_ConfirmedOnly(t *testing.T) {
 
 func TestApply_ShowsPendingImmediately(t *testing.T) {
 	o, st := openTestOverlay(t)
-	_, err := st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err := st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 
 	require.NoError(t, o.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
@@ -67,7 +67,7 @@ func TestApply_OnNeverConfirmedKey(t *testing.T) {
 
 func TestRead_RetiresOverlayOnceConfirmedAdvancesPastBaseline(t *testing.T) {
 	o, st := openTestOverlay(t)
-	_, err := st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err := st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 	require.NoError(t, o.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
 
@@ -75,7 +75,7 @@ func TestRead_RetiresOverlayOnceConfirmedAdvancesPastBaseline(t *testing.T) {
 	// unrelated concurrent write does) — either way, once the confirmed
 	// revision moves past the overlay's baseline, R3 says the overlay is
 	// cleared by the authoritative value, never by local success alone.
-	_, err = st.ApplyUpsert(testKey, 4, []byte(`{"rent":175}`))
+	_, err = st.ApplyUpsert(testKey, "", 4, []byte(`{"rent":175}`))
 	require.NoError(t, err)
 
 	v, ok, err := o.Read(testKey)
@@ -92,13 +92,13 @@ func TestRead_RetiresOverlayOnceConfirmedAdvancesPastBaseline(t *testing.T) {
 
 func TestRead_KeepsOverlayWhileConfirmedStillAtBaseline(t *testing.T) {
 	o, st := openTestOverlay(t)
-	_, err := st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err := st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 	require.NoError(t, o.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
 
 	// An unrelated redelivery at the SAME revision (JetStream at-least-once)
 	// must not falsely retire the overlay.
-	_, err = st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err = st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 
 	v, ok, err := o.Read(testKey)
@@ -109,7 +109,7 @@ func TestRead_KeepsOverlayWhileConfirmedStillAtBaseline(t *testing.T) {
 
 func TestDiscard_DropsOverlayAndFallsBackToConfirmed(t *testing.T) {
 	o, st := openTestOverlay(t)
-	_, err := st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err := st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 	require.NoError(t, o.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
 
@@ -178,11 +178,11 @@ func TestLinks_OutDirection_ConfirmedAndPending(t *testing.T) {
 	otherRelation := "lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.hasTenant.identity.Dk2Pn6mQrtwzKbcXvP3T"
 	otherHub := "lnk.lease.Zk2Pn6mQrtwzKbcXvP3T.hasBooking.booking.Bk2Pn6mQrtwzKbcXvP3T"
 
-	_, err := st.ApplyUpsert(confirmedLink, 1, []byte(`{}`))
+	_, err := st.ApplyUpsert(confirmedLink, "", 1, []byte(`{}`))
 	require.NoError(t, err)
-	_, err = st.ApplyUpsert(otherRelation, 1, []byte(`{}`))
+	_, err = st.ApplyUpsert(otherRelation, "", 1, []byte(`{}`))
 	require.NoError(t, err)
-	_, err = st.ApplyUpsert(otherHub, 1, []byte(`{}`))
+	_, err = st.ApplyUpsert(otherHub, "", 1, []byte(`{}`))
 	require.NoError(t, err)
 	require.NoError(t, o.Apply(pendingLink, "req1", []byte(`{}`), false))
 
@@ -196,7 +196,7 @@ func TestLinks_OutDirection_ExcludesPendingDeletedLink(t *testing.T) {
 	hub := "vtx.lease.Lk2Pn6mQrtwzKbcXvP3T"
 	link := "lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.hasBooking.booking.Bk2Pn6mQrtwzKbcXvP3T"
 
-	_, err := st.ApplyUpsert(link, 1, []byte(`{}`))
+	_, err := st.ApplyUpsert(link, "", 1, []byte(`{}`))
 	require.NoError(t, err)
 	// A local intent tombstones the link before the cloud confirms it.
 	require.NoError(t, o.Apply(link, "req1", nil, true))
@@ -212,9 +212,9 @@ func TestLinks_InDirection(t *testing.T) {
 	link := "lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.hasBooking.booking.Bk2Pn6mQrtwzKbcXvP3T"
 	unrelated := "lnk.lease.Lk2Pn6mQrtwzKbcXvP3T.hasBooking.booking.Ck2Pn6mQrtwzKbcXvP3T"
 
-	_, err := st.ApplyUpsert(link, 1, []byte(`{}`))
+	_, err := st.ApplyUpsert(link, "", 1, []byte(`{}`))
 	require.NoError(t, err)
-	_, err = st.ApplyUpsert(unrelated, 1, []byte(`{}`))
+	_, err = st.ApplyUpsert(unrelated, "", 1, []byte(`{}`))
 	require.NoError(t, err)
 
 	links, err := o.Links(hub, "hasBooking", "in")

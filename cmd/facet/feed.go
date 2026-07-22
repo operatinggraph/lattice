@@ -10,6 +10,7 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/edge/agent"
 	"github.com/operatinggraph/lattice/internal/edge/overlay"
+	"github.com/operatinggraph/lattice/internal/edge/store"
 	edgevault "github.com/operatinggraph/lattice/internal/edge/vault"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
@@ -178,6 +179,33 @@ func (f *feed) manifestFrame(key string, v overlay.Value) frame {
 		Pending: v.Pending,
 		Data:    f.selfName.Decorate(context.Background(), key, v.Data),
 	}
+}
+
+// snapshotManifestFrames scans st's manifest.* rows and builds the burst a
+// fresh SSE connection replays (server.go's handleFeed). A tombstoned row is
+// excluded — whether tombstoned by an explicit delete or by a Personal
+// Lens's keyset frame retracting it (personal-lens-retraction-design.md
+// §3.3) — a snapshot replays the current world, not its history; the live
+// path already tells the browser about a row's retraction the moment it
+// happens (publishManifestKey), so a stale-then-immediately-deleted flash on
+// (re)connect would be pure noise, not new information.
+func (f *feed) snapshotManifestFrames(st store.Store, ov *overlay.Overlay) ([]frame, error) {
+	entries, err := st.ScanPrefix("manifest.")
+	if err != nil {
+		return nil, err
+	}
+	frames := make([]frame, 0, len(entries))
+	for _, e := range entries {
+		v, ok, err := ov.Read(e.Key)
+		if err != nil || !ok {
+			continue
+		}
+		if v.Deleted {
+			continue
+		}
+		frames = append(frames, f.manifestFrame(e.Key, v))
+	}
+	return frames, nil
 }
 
 func (f *feed) publishReady(revision uint64) {

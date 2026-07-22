@@ -60,6 +60,15 @@ type Entry struct {
 	Revision uint64          `json:"revision"`
 	Data     json.RawMessage `json:"data,omitempty"`
 	Deleted  bool            `json:"deleted"`
+	// Sources maps each Personal Lens rule ID currently asserting this key to
+	// the revision at which it last did so (personal-lens-retraction-
+	// design.md §3.3) — the refcount that lets one lens's keyset frame retract
+	// its own attribution while a same-key overlapping lens (e.g.
+	// edgeTasksQueued / edgeTasks both projecting manifest.task.<id>) still
+	// asserts the key. Nil/empty for an upsert applied with an empty lens
+	// (pre-R2 wire back-compat) — such a key is never attribution-tracked and
+	// can only be retracted by an explicit ApplyDelete, exactly as before.
+	Sources map[string]uint64 `json:"sources,omitempty"`
 }
 
 // PendingEntry is one optimistic-overlay record (edge-lattice-full-design.md
@@ -95,17 +104,57 @@ type IntentRecord struct {
 // engine passes before the semantics packages are pointed at it.
 type Store interface {
 	// ApplyUpsert applies an inbound "upsert" delta (edge-lattice-full-
-	// design.md §3.2) under last-writer-wins-by-revision: the write lands iff
-	// revision is greater than or equal to the currently-stored revision for
-	// key (a stale/duplicate/reordered delta — an at-least-once feed can
-	// reorder — is dropped). Returns applied=false for a dropped delta, with
-	// no error. key must be a valid Contract #1 vertex/aspect/link key, or
-	// carry the reserved manifest prefix.
-	ApplyUpsert(key string, revision uint64, data json.RawMessage) (applied bool, err error)
+	// design.md §3.2) under last-writer-wins-by-revision: the body/Revision
+	// lands iff revision is greater than or equal to the currently-stored
+	// revision for key (a stale/duplicate/reordered delta — an at-least-once
+	// feed can reorder — is dropped). Returns applied=false for a dropped
+	// delta, with no error. key must be a valid Contract #1 vertex/aspect/link
+	// key, or carry the reserved manifest prefix.
+	//
+	// lens is the producing Personal Lens's rule ID (personal-lens-
+	// retraction-design.md §3.1/§3.3), or "" for a pre-R2 wire producer with
+	// no attribution to report. A non-empty lens additionally, and
+	// independently of the body LWW outcome, records this lens's assertion of
+	// key at revision (Entry.Sources[lens] = revision) iff revision is at or
+	// above whatever this lens last asserted for key — so an upsert that
+	// loses the body LWW race still updates its own source's attribution.
+	// This attribution write is subject to one more gate: if a prior
+	// ApplyKeySet frame from lens has advanced past revision (§3.3's
+	// frameHW[lens]) and key is not currently attributed to lens, the whole
+	// delta — body and attribution alike — is dropped as applied=false: a
+	// Nak'd-then-redelivered stale upsert must not resurrect a key a newer
+	// frame already retracted by omission.
+	ApplyUpsert(key, lens string, revision uint64, data json.RawMessage) (applied bool, err error)
 	// ApplyDelete applies an inbound "delete" delta: tombstones the local key
-	// under the same last-writer-wins-by-revision gate as ApplyUpsert.
-	// Returns applied=false for a dropped (stale/duplicate) delete.
+	// under the same last-writer-wins-by-revision gate as ApplyUpsert, and
+	// clears every lens's attribution for key (the legacy, lens-agnostic
+	// retraction path — personal-lens-retraction-design.md §3.3 keeps it only
+	// for wire back-compat; nothing emits "delete" for a Personal Lens key
+	// after R1, which publishes "keyset" frames instead). Returns
+	// applied=false for a dropped (stale/duplicate) delete.
 	ApplyDelete(key string, revision uint64) (applied bool, err error)
+	// ApplyKeySet applies an inbound "keyset" frame (personal-lens-retraction-
+	// design.md §3.1/§3.3): lens asserts that, as of revision, it projects
+	// exactly keys for this identity. Guarded by a per-lens frame high-water
+	// mark — a frame older than the last one applied for lens is dropped
+	// whole (applied=false, no prunedKeys), the same redelivery-safety ApplyUpsert's
+	// revision gate gives the body. Otherwise: for every stored key currently
+	// attributed to lens at a source revision at or below revision, and
+	// absent from keys, lens's attribution is removed; a key whose Sources
+	// thereby empties is tombstoned exactly as ApplyDelete would (Deleted set,
+	// Data cleared, Revision stamped to revision) and returned in prunedKeys
+	// so the caller can fire its own change notification. A key present in
+	// keys that the store does not hold is ignored — its row arrives as a
+	// separate upsert.
+	ApplyKeySet(lens string, revision uint64, keys []string) (prunedKeys []string, applied bool, err error)
+	// PruneDeadLensAttributions removes every stored key's attribution for any
+	// lens not present in liveLenses (personal-lens-retraction-design.md
+	// §3.4's hydrate-response lens-set prune: a lens dropped from the DDL, or
+	// re-minted under a new rule ID, has no emitter left to heal its stranded
+	// attributions, so a completed hydrate is what closes the gap). A key
+	// whose Sources thereby empties is tombstoned exactly as ApplyKeySet's
+	// prune and returned in prunedKeys.
+	PruneDeadLensAttributions(liveLenses []string) (prunedKeys []string, err error)
 	// Get returns the currently-stored entry for key, or ok=false if the
 	// store holds nothing for it (never hydrated, or evicted by local GC).
 	Get(key string) (entry Entry, ok bool, err error)

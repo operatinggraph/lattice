@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/edge/overlay"
 	"github.com/operatinggraph/lattice/internal/edge/store"
 	edgesync "github.com/operatinggraph/lattice/internal/edge/sync"
 	"github.com/operatinggraph/lattice/internal/edge/transport"
@@ -69,6 +70,44 @@ func TestFeed_SyncDegradedTransitions(t *testing.T) {
 	connected, degraded = fd.connectivityState()
 	require.False(t, connected)
 	require.False(t, degraded)
+}
+
+// TestFeed_SnapshotManifestFrames_ExcludesRetractedRows proves a fresh SSE
+// connection's snapshot burst (server.go's handleFeed) never replays a
+// tombstoned manifest row — whether tombstoned by an explicit delete or by a
+// Personal Lens keyset frame retracting its last attribution (personal-lens-
+// retraction-design.md §3.3) — the same posture internal/edge/browser.Host's
+// Snapshot already held. A live row still replays.
+func TestFeed_SnapshotManifestFrames_ExcludesRetractedRows(t *testing.T) {
+	st, err := store.Open(t.TempDir() + "/edge.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	ov := overlay.New(st)
+
+	liveKey := "manifest.task.livelenslivelenslive"
+	deletedKey := "manifest.task.deletedkeydeletedkey"
+	retractedKey := "manifest.task.retractedretractedret"
+
+	_, err = st.ApplyUpsert(liveKey, "", 1, []byte(`{"a":1}`))
+	require.NoError(t, err)
+	_, err = st.ApplyUpsert(deletedKey, "", 1, []byte(`{"a":1}`))
+	require.NoError(t, err)
+	_, err = st.ApplyDelete(deletedKey, 2)
+	require.NoError(t, err)
+	_, err = st.ApplyUpsert(retractedKey, "lensQueued", 1, []byte(`{"a":1}`))
+	require.NoError(t, err)
+	_, _, err = st.ApplyKeySet("lensQueued", 5, nil)
+	require.NoError(t, err)
+
+	fd := newFeed(nil)
+	frames, err := fd.snapshotManifestFrames(st, ov)
+	require.NoError(t, err)
+
+	keys := make([]string, 0, len(frames))
+	for _, fr := range frames {
+		keys = append(keys, fr.Key)
+	}
+	require.Equal(t, []string{liveKey}, keys, "only the live row belongs in a fresh snapshot")
 }
 
 // deadControlTransport fails every control RPC — a Manager built over it

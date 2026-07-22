@@ -154,6 +154,8 @@ type deltaEnvelope struct {
 	Key      string          `json:"key,omitempty"`
 	Revision uint64          `json:"revision"`
 	Data     json.RawMessage `json:"data,omitempty"`
+	Lens     string          `json:"lens,omitempty"`
+	Keys     []string        `json:"keys,omitempty"`
 }
 
 func TestHost_DeliverAppliesToMirror(t *testing.T) {
@@ -225,6 +227,29 @@ func TestHost_SnapshotReadsMirrorThroughOverlay(t *testing.T) {
 	}
 	if !manifest["manifest.me.profile"] || !manifest["manifest.tasks.t1"] {
 		t.Fatalf("snapshot missing rows: %v", manifest)
+	}
+}
+
+// TestHost_SnapshotExcludesKeysetRetractedRow proves a row a Personal Lens's
+// keyset frame retracted (personal-lens-retraction-design.md §3.3 — the
+// last-attribution-drops case) never replays in a fresh Snapshot burst,
+// exactly as an explicit "delete" delta already didn't.
+func TestHost_SnapshotExcludesKeysetRetractedRow(t *testing.T) {
+	shell := newFakeShell()
+	defer shell.release()
+	h := startHost(t, shell)
+
+	pushDelta(t, h, deltaEnvelope{Op: "upsert", Key: "manifest.tasks.t2", Revision: 1, Lens: "lensQueued", Data: json.RawMessage(`{"title":"pickup"}`)}, 1)
+	pushDelta(t, h, deltaEnvelope{Op: "keyset", Lens: "lensQueued", Revision: 5}, 2)
+
+	frames, err := h.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	for _, f := range frames {
+		if f.Kind == "manifest" && f.Key == "manifest.tasks.t2" {
+			t.Fatalf("snapshot replayed a keyset-retracted row: %+v", f)
+		}
 	}
 }
 

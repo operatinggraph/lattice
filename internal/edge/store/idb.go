@@ -40,13 +40,19 @@ const (
 	storePending = "pending" // overlay: optimistic values for in-flight intents (§3.4).
 	storeIntents = "intents" // agent: durable FIFO of queued operation envelopes (§3.5).
 
-	idbCursorKey = "cursor"
+	idbCursorKey     = "cursor"
+	idbFrameHWPrefix = "frameHW:" // + lens ruleID, in storeMeta.
 
 	// idbSchemaVersion is the IndexedDB database version. Bump it only
 	// alongside an upgrade path in onupgradeneeded; the mirror itself is
 	// disposable (an eviction or a schema reset re-hydrates from the cursor
 	// gap), but the intent queue is not, so a version bump must preserve it.
-	idbSchemaVersion = 1
+	//
+	// Version 2 (personal-lens-retraction-design.md §3.3): entries gained
+	// Sources attribution, which a pre-2 entry never recorded and cannot be
+	// safely diffed against a keyset frame — onupgradeneeded purges the
+	// mirror + cursor for any oldVersion in [1, 2), same as boltSchemaVersion.
+	idbSchemaVersion = 2
 )
 
 // IDBStore is the IndexedDB-backed Store the browser host runs on.
@@ -68,7 +74,7 @@ func OpenIDB(name string) (*IDBStore, error) {
 	}
 	req := idb.Call("open", name, idbSchemaVersion)
 
-	upgrade := js.FuncOf(func(_ js.Value, _ []js.Value) any {
+	upgrade := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		db := req.Get("result")
 		names := db.Get("objectStoreNames")
 		for _, s := range []string{storeVAL, storeLocal, storeMeta, storePending} {
@@ -84,6 +90,19 @@ func OpenIDB(name string) (*IDBStore, error) {
 		if !names.Call("contains", storeIntents).Bool() {
 			opts := map[string]any{"autoIncrement": true}
 			db.Call("createObjectStore", storeIntents, opts)
+		}
+		var oldVersion int
+		if len(args) > 0 {
+			oldVersion = args[0].Get("oldVersion").Int()
+		}
+		if oldVersion > 0 && oldVersion < idbSchemaVersion {
+			// Sources-attribution migration (idbSchemaVersion's doc comment):
+			// purge the mirror + cursor on the same versionchange transaction
+			// that bumped the database, so a store the Sync Manager touches
+			// after Open never mixes pre-attribution entries with new ones.
+			tx := req.Get("transaction")
+			tx.Call("objectStore", storeVAL).Call("clear")
+			tx.Call("objectStore", storeMeta).Call("delete", idbCursorKey)
 		}
 		return nil
 	})
@@ -144,21 +163,262 @@ func (s *IDBStore) Close() error {
 
 // ApplyUpsert applies an inbound "upsert" delta under last-writer-wins-by-
 // revision; a stale/duplicate/reordered delta is dropped (applied=false, no
-// error).
-func (s *IDBStore) ApplyUpsert(key string, revision uint64, data json.RawMessage) (applied bool, err error) {
+// error). See the Store interface doc for the lens attribution + frameHW
+// guard semantics.
+func (s *IDBStore) ApplyUpsert(key, lens string, revision uint64, data json.RawMessage) (applied bool, err error) {
 	if !isStorableKey(key) {
 		return false, fmt.Errorf("edge/store: ApplyUpsert: %q: %w", key, ErrUnstorableKey)
 	}
-	return s.applyDelta(key, Entry{Key: key, Revision: revision, Data: data})
+	if lens == "" {
+		// Not applyDelta: that helper overwrites with a wholly fresh Entry,
+		// which would silently drop any Sources attribution an earlier
+		// attributed upsert already recorded on this key (bolt.go's
+		// equivalent path preserves it via `next := cur`; engine parity
+		// matters even though no wire producer sends lens="" today).
+		tx, val := s.tx(storeVAL, "readwrite")
+		var decodeErr error
+		chainWrite(val.Call("get", key), func(res js.Value) {
+			var cur Entry
+			ok := res.Truthy()
+			if ok {
+				if uErr := json.Unmarshal([]byte(res.String()), &cur); uErr != nil {
+					decodeErr = fmt.Errorf("edge/store: decode entry %q: %w", key, uErr)
+					return
+				}
+				if revision < cur.Revision {
+					return // stale/duplicate — drop, not applied.
+				}
+			}
+			next := cur
+			next.Key = key
+			next.Revision = revision
+			next.Data = data
+			next.Deleted = false
+			applied = true
+			v, mErr := json.Marshal(next)
+			if mErr != nil {
+				decodeErr = fmt.Errorf("edge/store: encode entry %q: %w", key, mErr)
+				return
+			}
+			val.Call("put", string(v), key)
+		})
+		if txErr := awaitTx(tx); txErr != nil {
+			return false, fmt.Errorf("edge/store: ApplyUpsert %q: %w", key, txErr)
+		}
+		if decodeErr != nil {
+			return false, decodeErr
+		}
+		return applied, nil
+	}
+
+	tx, stores := s.txMulti([]string{storeVAL, storeMeta}, "readwrite")
+	val, meta := stores[storeVAL], stores[storeMeta]
+	var decodeErr error
+	chainWrite(val.Call("get", key), func(getRes js.Value) {
+		var cur Entry
+		ok := getRes.Truthy()
+		if ok {
+			if uErr := json.Unmarshal([]byte(getRes.String()), &cur); uErr != nil {
+				decodeErr = fmt.Errorf("edge/store: decode entry %q: %w", key, uErr)
+				return
+			}
+		}
+		chainWrite(meta.Call("get", idbFrameHWPrefix+lens), func(hwRes js.Value) {
+			var hw uint64
+			hasHW := hwRes.Truthy()
+			if hasHW {
+				if uErr := json.Unmarshal([]byte(hwRes.String()), &hw); uErr != nil {
+					decodeErr = fmt.Errorf("edge/store: decode frameHW %q: %w", lens, uErr)
+					return
+				}
+			}
+			_, attributed := cur.Sources[lens]
+			if hasHW && revision < hw && !attributed {
+				return // resurrection guard — dropped whole, not applied.
+			}
+
+			bodyWins := !ok || revision >= cur.Revision
+			sourceRev, attributedNow := cur.Sources[lens]
+			sourceWins := !attributedNow || revision >= sourceRev
+			if !bodyWins && !sourceWins {
+				return // stale/duplicate on every axis — drop, not applied.
+			}
+
+			next := cur
+			next.Key = key
+			if bodyWins {
+				next.Revision = revision
+				next.Data = data
+				next.Deleted = false
+			}
+			if sourceWins {
+				if next.Sources == nil {
+					next.Sources = make(map[string]uint64, 1)
+				}
+				next.Sources[lens] = revision
+			}
+			applied = bodyWins
+			v, mErr := json.Marshal(next)
+			if mErr != nil {
+				decodeErr = fmt.Errorf("edge/store: encode entry %q: %w", key, mErr)
+				return
+			}
+			val.Call("put", string(v), key)
+		})
+	})
+	if txErr := awaitTx(tx); txErr != nil {
+		return false, fmt.Errorf("edge/store: ApplyUpsert %q: %w", key, txErr)
+	}
+	if decodeErr != nil {
+		return false, decodeErr
+	}
+	return applied, nil
 }
 
 // ApplyDelete tombstones key under the same last-writer-wins-by-revision gate
-// as ApplyUpsert.
+// as ApplyUpsert, clearing every lens's attribution.
 func (s *IDBStore) ApplyDelete(key string, revision uint64) (applied bool, err error) {
 	if !isStorableKey(key) {
 		return false, fmt.Errorf("edge/store: ApplyDelete: %q: %w", key, ErrUnstorableKey)
 	}
 	return s.applyDelta(key, Entry{Key: key, Revision: revision, Deleted: true})
+}
+
+// ApplyKeySet applies an inbound "keyset" frame: see the Store interface doc
+// for the frame high-water guard + per-key attribution-prune semantics.
+func (s *IDBStore) ApplyKeySet(lens string, revision uint64, keys []string) (prunedKeys []string, applied bool, err error) {
+	keep := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		keep[k] = struct{}{}
+	}
+	tx, stores := s.txMulti([]string{storeVAL, storeMeta}, "readwrite")
+	val, meta := stores[storeVAL], stores[storeMeta]
+
+	var decodeErr error
+	chainWrite(meta.Call("get", idbFrameHWPrefix+lens), func(hwRes js.Value) {
+		var hw uint64
+		hasHW := hwRes.Truthy()
+		if hasHW {
+			if uErr := json.Unmarshal([]byte(hwRes.String()), &hw); uErr != nil {
+				decodeErr = fmt.Errorf("edge/store: decode frameHW %q: %w", lens, uErr)
+				return
+			}
+		}
+		if hasHW && revision < hw {
+			return // stale/duplicate frame — drop whole, not applied.
+		}
+		applied = true
+		v, mErr := json.Marshal(revision)
+		if mErr != nil {
+			decodeErr = fmt.Errorf("edge/store: encode frameHW %q: %w", lens, mErr)
+			return
+		}
+		meta.Call("put", string(v), idbFrameHWPrefix+lens)
+		walkCursor(val, func(e Entry) (next Entry, write bool) {
+			srcRev, attributed := e.Sources[lens]
+			if !attributed || srcRev > revision {
+				return e, false
+			}
+			if _, present := keep[e.Key]; present {
+				return e, false
+			}
+			delete(e.Sources, lens)
+			if len(e.Sources) == 0 {
+				e.Deleted = true
+				e.Revision = revision
+				e.Data = nil
+				prunedKeys = append(prunedKeys, e.Key)
+			}
+			return e, true
+		}, &decodeErr)
+	})
+	if txErr := awaitTx(tx); txErr != nil {
+		return nil, false, fmt.Errorf("edge/store: ApplyKeySet %q: %w", lens, txErr)
+	}
+	if decodeErr != nil {
+		return nil, false, decodeErr
+	}
+	return prunedKeys, applied, nil
+}
+
+// PruneDeadLensAttributions removes every stored key's attribution for any
+// lens absent from liveLenses; see the Store interface doc.
+func (s *IDBStore) PruneDeadLensAttributions(liveLenses []string) (prunedKeys []string, err error) {
+	live := make(map[string]struct{}, len(liveLenses))
+	for _, l := range liveLenses {
+		live[l] = struct{}{}
+	}
+	tx, val := s.tx(storeVAL, "readwrite")
+	var decodeErr error
+	walkCursor(val, func(e Entry) (next Entry, write bool) {
+		dead := false
+		for l := range e.Sources {
+			if _, ok := live[l]; !ok {
+				dead = true
+				break
+			}
+		}
+		if !dead {
+			return e, false
+		}
+		for l := range e.Sources {
+			if _, ok := live[l]; !ok {
+				delete(e.Sources, l)
+			}
+		}
+		if len(e.Sources) == 0 {
+			e.Deleted = true
+			e.Data = nil
+			prunedKeys = append(prunedKeys, e.Key)
+		}
+		return e, true
+	}, &decodeErr)
+	if txErr := awaitTx(tx); txErr != nil {
+		return nil, fmt.Errorf("edge/store: PruneDeadLensAttributions: %w", txErr)
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	return prunedKeys, nil
+}
+
+// walkCursor walks every record in objStore (already scoped to an active
+// transaction), decoding each as an Entry and calling decide. When decide
+// reports write=true, the record is overwritten in place with next before
+// the cursor advances — the write's own request must complete first (like
+// every other request here) to keep the transaction active across the walk.
+func walkCursor(objStore js.Value, decide func(e Entry) (next Entry, write bool), errOut *error) {
+	req := objStore.Call("openCursor")
+	var onSuccess js.Func
+	onSuccess = js.FuncOf(func(_ js.Value, _ []js.Value) any {
+		cur := req.Get("result")
+		if !cur.Truthy() {
+			onSuccess.Release()
+			return nil
+		}
+		var e Entry
+		if uErr := json.Unmarshal([]byte(cur.Get("value").String()), &e); uErr != nil {
+			*errOut = fmt.Errorf("edge/store: decode entry: %w", uErr)
+			onSuccess.Release()
+			return nil
+		}
+		next, write := decide(e)
+		if !write {
+			cur.Call("continue")
+			return nil
+		}
+		v, mErr := json.Marshal(next)
+		if mErr != nil {
+			*errOut = fmt.Errorf("edge/store: encode entry %q: %w", next.Key, mErr)
+			onSuccess.Release()
+			return nil
+		}
+		chainWrite(cur.Call("update", string(v)), func(_ js.Value) {
+			cur.Call("continue")
+		})
+		return nil
+	})
+	req.Set("onsuccess", onSuccess)
 }
 
 // applyDelta is the shared last-writer-wins gate: it lands next iff its
@@ -352,6 +612,23 @@ func (s *IDBStore) SetCursor(seq uint64) error {
 func (s *IDBStore) tx(name, mode string) (tx js.Value, objStore js.Value) {
 	tx = s.db.Call("transaction", js.ValueOf([]any{name}), mode)
 	return tx, tx.Call("objectStore", name)
+}
+
+// txMulti opens a transaction spanning every store in names and returns each
+// store's handle keyed by name — for a read-modify-write that must see and
+// mutate more than one object store atomically (e.g. ApplyUpsert's frameHW
+// read alongside its val write).
+func (s *IDBStore) txMulti(names []string, mode string) (tx js.Value, stores map[string]js.Value) {
+	anyNames := make([]any, len(names))
+	for i, n := range names {
+		anyNames[i] = n
+	}
+	tx = s.db.Call("transaction", js.ValueOf(anyNames), mode)
+	stores = make(map[string]js.Value, len(names))
+	for _, n := range names {
+		stores[n] = tx.Call("objectStore", n)
+	}
+	return tx, stores
 }
 
 // put writes one JSON-encoded value and waits for the transaction to commit.

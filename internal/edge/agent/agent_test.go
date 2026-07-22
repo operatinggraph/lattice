@@ -253,10 +253,10 @@ func TestDrain_MultipleIntentsSubmitInFIFOOrder(t *testing.T) {
 
 func TestGC_PrunesSupersededOverlays(t *testing.T) {
 	st, ov := openTestStack(t)
-	_, err := st.ApplyUpsert(testKey, 3, []byte(`{"rent":100}`))
+	_, err := st.ApplyUpsert(testKey, "", 3, []byte(`{"rent":100}`))
 	require.NoError(t, err)
 	require.NoError(t, ov.Apply(testKey, "req1", []byte(`{"rent":150}`), false))
-	_, err = st.ApplyUpsert(testKey, 4, []byte(`{"rent":175}`))
+	_, err = st.ApplyUpsert(testKey, "", 4, []byte(`{"rent":175}`))
 	require.NoError(t, err)
 
 	a := New(nil, st, ov, nil, Config{})

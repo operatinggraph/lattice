@@ -193,7 +193,7 @@ func TestReader_Read_PassesThroughPlaintext(t *testing.T) {
 
 	st := openTestStore(t)
 	ov := edgeoverlay.New(st)
-	_, err = st.ApplyUpsert("vtx.lease.Lk2Pn6mQrtwzKbcXvP3T", 1, json.RawMessage(`{"status":"active"}`))
+	_, err = st.ApplyUpsert("vtx.lease.Lk2Pn6mQrtwzKbcXvP3T", "", 1, json.RawMessage(`{"status":"active"}`))
 	require.NoError(t, err)
 
 	reader := edgevault.NewReader(ov, client)
@@ -226,7 +226,7 @@ func TestReader_Read_DecryptsSensitiveAspect(t *testing.T) {
 
 	st := openTestStore(t)
 	ov := edgeoverlay.New(st)
-	_, err = st.ApplyUpsert("vtx.identity."+testIdentityID+".ssn", 1, ctJSON)
+	_, err = st.ApplyUpsert("vtx.identity."+testIdentityID+".ssn", "", 1, ctJSON)
 	require.NoError(t, err)
 
 	reader := edgevault.NewReader(ov, client)
