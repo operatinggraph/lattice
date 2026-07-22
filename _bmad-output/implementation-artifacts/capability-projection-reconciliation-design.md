@@ -1,34 +1,29 @@
 # Auth-plane projection reconciliation — capability first-projection loss
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-07-22 · board row:
+**Status: ✅ RATIFIED (Andrew, 2026-07-21)** · Designer fire 2026-07-22 · board row:
 [lattice.md → Component maintenance → Refractor capability first-projection loss](../planning-artifacts/backlog/lattice.md)
 
-> **For Andrew**
+> **What ships.** The auth plane (Capability KV) gains a reconciliation loop: a per-actor
+> `reproject` control verb (targeted heal, mirrors `personal.hydrate`) plus a bounded in-Refractor
+> convergence sweep that detects and repairs graph↔Capability-KV divergence and surfaces it on
+> Health KV — closing the class where a missed projection is permanent, invisible, silent grant
+> loss. The defect is availability-gap-shaped, not a fan-out race (the board's original suspect is
+> falsified, §2.1); live demo-box evidence in §2.3.
 >
-> **What it does in two lines.** Gives the auth plane (Capability KV) a reconciliation loop: a
-> per-actor `reproject` control verb (targeted heal, mirrors `personal.hydrate`) plus a bounded
-> in-Refractor convergence sweep that detects and repairs graph↔Capability-KV divergence and
-> surfaces it on Health KV. Today a missed projection is permanent, invisible, silent grant loss.
->
-> **The grounded mechanism is NOT the board's suspect.** The filed suspicion ("actor-aggregate
-> fan-out vs adjacency-build ordering") is falsified in code and live logs (§2): the fan-out path
-> is correct and CAS-guarded. The real defect is class-level: the auth plane's correctness rests on
-> *gapless CDC consumption forever*, and any availability gap (dead durables after a stream
-> recreation, a restart mid-drain, a multi-ten-minute `DeliverLastPerSubject` rescan, a DLQ'd
-> write) leaves actors doc-less with **no re-drive, no detection, and no recovery short of an
-> operator rebuild nobody is signaled to run**. Live demo-box evidence in §2.3.
->
-> **Posture call (the one thing needing your eye).** Contract #6 §6.2 defines `projectionSeq` as
-> "the stream sequence of *the triggering CDC message*" — a reconciliation write has no triggering
-> message. The design widens §6.2 with a second sanctioned ordering token: the pipeline's
-> **last-applied stream sequence captured before re-evaluation** (§3.4 — provably loses to every
-> later real CDC write; it is *not* the shred-nullifier's `MaxInt64` always-wins stamp, and must
-> never be). The actual §6.2 edit is staged **UNCOMMITTED** in `docs/contracts/06-capability-kv.md`
-> — the diff is the proposal. Affected consumers: Refractor's guarded NATS-KV adapter only (the
-> Processor reads docs, never watermarks; Postgres targets are §6.2-exempt).
->
-> No Gateway / D1 / Vault / multi-cell / HA-NATS fork is touched. Build order: Fire 1 (verb) →
-> Fire 2 (sweep + health signal) → Fire 3 (demo/deploy hardening, script-only).
+> **Ratification record.**
+> - **§6.2 contract edit ratified and committed with this banner.** Contract #6 sanctions exactly
+>   two non-CDC `projectionSeq` token classes: **reconciliation** = the pipeline's last-applied
+>   stream sequence captured before re-evaluation (subordinate — loses every race against real CDC
+>   under the `≤`-rejects guard, §3.4); **shred** = `MaxInt64` (terminal, always wins). Any third
+>   class requires a contract change. Affected consumers: Refractor's guarded NATS-KV adapter only
+>   (the Processor reads docs, never watermarks; Postgres targets are §6.2-exempt).
+> - **Fires collapsed 3→2** (fewer-larger-fires): **Fire 1** = verb + sweep + health signal, one
+>   `internal/refractor` fire with the verb built first (§3.1 = Fire 1a, §3.2 = Fire 1b);
+>   **Fire 2** = seed readiness wait + demo runbook (§3.3, `scripts/` + `deploy/demo/` only).
+> - The F20 framing was corrected pre-ratification: F20 is not blocked — it shipped (`0690381e`)
+>   past this bug only via the lucky ~1h full rescan; the class is unhealed and re-opens on every
+>   demo-world reset.
+> - No Gateway / D1 / Vault / multi-cell / HA-NATS fork is touched.
 
 ---
 
@@ -37,8 +32,9 @@
 **Backlog row (★★★, M–L):** a fresh identity's first AssignRole can mint no `cap.roles.<actor>`
 doc — absent 30+ minutes, surviving a Refractor restart, with nothing re-driving it — while a
 later holdsRole on a doc-holding actor folds in seconds. Silent grant loss at the auth plane;
-blocks Loupe F20 exposure (the demo-operator grant boundary depends on `cap.roles.*` docs
-existing for the demo personas).
+the F20 demo-operator enablement hit it live (73 step-3 denials, §2.3). F20 has since shipped
+(`0690381e`) only because the ~1-hour full rescan happened to replay the lost events — the class
+is unhealed, and every demo-world reset re-opens the window.
 
 Intent traces to the architecture's own bar: *"Capability KV is a lens projection — projection
 correctness = auth correctness"* (lattice-architecture.md; Contract #6). The write path defends
@@ -129,7 +125,7 @@ the component, not in Weaver or the Processor); **reuse the per-actor machinery 
 stays the single write-ordering authority** (reconciliation writes flow through the same guarded
 adapter and must lose every race against real CDC writes).
 
-### 3.1 Fire 1 — per-actor `reproject` control verb (S–M)
+### 3.1 Fire 1a — per-actor `reproject` control verb
 
 A control-plane op `lattice.ctrl.refractor.<lensId>.reproject`, request `{actorKey}`, on any
 **actor-aggregate pipeline** (`envelopeFn != nil`; structurally refused otherwise — plain lenses
@@ -150,14 +146,14 @@ Semantics, per invocation:
    missing-actor `Delete`.
 3. **Skip-if-identical:** read the stored row via `adapter.RowReader.GetRow` (exists on
    `NatsKVAdapter`) and drop the write when the computed body equals the stored one (modulo
-   `projectionSeq`) — a converged actor costs zero KV writes, so the verb (and Fire 2's sweep) is
+   `projectionSeq`) — a converged actor costs zero KV writes, so the verb (and Fire 1b's sweep) is
    churn-free at steady state.
 4. Divergent → write through the normal guarded path stamped with `seq` (§3.4).
 
 CLI: `lattice lens reproject <lens> --actor <vertexKey>`. This alone turns the observed incident
 from "wedge until someone rebuilds the world" into a one-command targeted heal.
 
-### 3.2 Fire 2 — auth-plane convergence sweep + health signal (M)
+### 3.2 Fire 1b — auth-plane convergence sweep + health signal
 
 A periodic, rate-limited self-audit **per auth-plane actor-aggregate lens** (`IsAuthPlane` ∧
 `envelopeFn != nil` — derived from the compiled plan, never a canonical-name list, mirroring
@@ -167,7 +163,7 @@ A periodic, rate-limited self-audit **per auth-plane actor-aggregate lens** (`Is
   KV (`vtx.<anchorType>.` prefix — Refractor is the read side; lens evaluation already reads Core
   KV wholesale) and the target's live keys (`adapter.KeyLister.ListKeys`, exists). An anchor with
   no target key, or a target key with no live anchor, is *definite* divergence → heal immediately
-  via Fire 1's path.
+  via Fire 1a's path.
 - **Round-robin deep verify (bounded):** a persistent cursor walks all anchors, re-executing at
   most `sweepBatch` actors per `sweepInterval` tick (defaults: 25 actors / 60s — a 10k-actor cell
   fully re-verifies in ~7h; both deployment-overridable like the cap-lag threshold). The deep pass
@@ -187,7 +183,7 @@ rejected (§6): remediation here is a *projection write*, which only Refractor m
 routing it through Weaver would either have Weaver nudge Refractor's control plane (a new
 cross-engine reflex) or violate P2/engine-boundary rules outright.
 
-### 3.3 Fire 3 — seed/deploy hardening (S, scripts + runbook only)
+### 3.3 Fire 2 — seed/deploy hardening (scripts + runbook only)
 
 The demo box compounded the platform gap with two deploy-side defects, fixed where they live:
 
@@ -241,10 +237,10 @@ and the `MaxInt64` prohibition. No other contract text changes; §6.13/§6.14 ar
 - **`Rebuild`** is the whole-bucket hammer (forced truncate on guarded buckets, full rescan —
   ~40 min on the demo box) and operator-driven with no signal telling the operator to swing it.
 - **`personal.hydrate`** is exactly this verb for the Personal Lens — per-actor, on-demand,
-  capture-seq-then-reproject. Fire 1 is its auth-plane mirror; the precedent transfers because
+  capture-seq-then-reproject. Fire 1a is its auth-plane mirror; the precedent transfers because
   both are envelope pipelines with per-actor evaluation.
 - **Bootstrap's readiness gate** verifies primordial cap.* projections at kernel bring-up; it
-  never extended to package lenses or seeded actors — Fire 3 extends the posture, not new
+  never extended to package lenses or seeded actors — Fire 2 extends the posture, not new
   machinery.
 - **The parallel ★★ inert-`emptyBehavior` row** (same-day finding: the envelope's delete path is
   dead code without a `realnessFilter`, so a last-role revocation leaves a stale doc) is a
@@ -263,17 +259,17 @@ nothing (skip-if-identical).
 
 **Tests (colocated, per house rule):**
 
-- *Fire 1:* unit — verb refuses non-envelope pipelines; skip-if-identical writes nothing;
+- *Fire 1a:* unit — verb refuses non-envelope pipelines; skip-if-identical writes nothing;
   divergent actor heals (missing→create, stale→overwrite, role-less→the envelope's empty
   semantics, missing-actor→delete); token = captured `lastAppliedSeq`. E2E — **reproduce the incident**: seed identity +
   AssignRole with the lens consumer detached, confirm step-3 `NoCapabilityEntry`, invoke
   `reproject`, confirm the doc and an authorized submit. Race vector — reproject concurrent with
   a revocation event: final state is the revocation (guard order), `-race`.
-- *Fire 2:* unit — prefilter both directions; cursor bounds/resume; rebuild/pause suppression;
+- *Fire 1b:* unit — prefilter both directions; cursor bounds/resume; rebuild/pause suppression;
   debounced issue raise/clear. E2E — kill a doc under a live pipeline (fabricated divergence),
   sweep detects + heals + raises `CapabilityCoverageDivergence`; converged world sweeps clean
   (zero writes, pinned).
-- *Fire 3:* deploy scripts exercised under the real systemd unit per
+- *Fire 2:* deploy scripts exercised under the real systemd unit per
   the demo-box runbook (served-outcome acceptance), not just locally.
 
 **Verification gates:** the standard set (`go build ./...`, `make vet`, `golangci-lint`,
@@ -286,7 +282,7 @@ nothing (skip-if-identical).
   this was the reflex first shape. Rejected on layering: the remediation is a projection write
   only Refractor may perform; Weaver's remediation vocabulary is ops via the Processor (P2), and
   a `ctrl.refractor.*` dispatch from Weaver would make the auth plane's integrity depend on a
-  second engine's health. A *variant* worth keeping: once Fire 2's health signal exists, a Weaver
+  second engine's health. A *variant* worth keeping: once Fire 1b's health signal exists, a Weaver
   target could watch it and nudge `reproject` — deferred until a consumer needs cross-engine
   escalation; the signal is designed so that adding it later requires no rework (the verb already
   exists as the actuation surface).
@@ -328,17 +324,17 @@ test; (3) `MaxInt64` precedent bleed — added the explicit contract prohibition
 plain/personal pipelines — made the refusal structural (predicate, not docs); (5) rebuild
 interleave — added `rebuildInFlight` suppression + steady-state-equivalence argument; (6) cursor
 loss on restart — persisted in the existing Health-KV entry rather than new state; (7) demo seed
-retry loop — moved from "platform should be faster" to Fire 3's readiness-gate posture (the
+retry loop — moved from "platform should be faster" to Fire 2's readiness-gate posture (the
 platform being temporarily behind must be *observable and waitable*, not raced).
 
 ## 9. Fire decomposition for the Steward
 
 | Fire | Scope | Size | Ships green when |
 |---|---|---|---|
-| 1 | `reproject` ctrl verb + CLI + incident-repro e2e | S–M | verb heals the reproduced loss end-to-end; all gates green |
-| 2 | convergence sweep + `CapabilityCoverageDivergence` health signal | M | fabricated divergence detected+healed+alerted; converged sweep writes nothing |
-| 3 | seed readiness wait + demo runbook | S | demo-up seed completes with zero step-3 denials on a fresh world |
+| 1 | `reproject` ctrl verb + CLI (1a, built first) + convergence sweep + `CapabilityCoverageDivergence` health signal (1b) + incident-repro e2e | M–L | verb heals the reproduced loss end-to-end; fabricated divergence detected+healed+alerted; converged sweep writes nothing; all gates green |
+| 2 | seed readiness wait + demo runbook | S | demo-up seed completes with zero step-3 denials on a fresh world |
 
-Fires 1 and 2 are platform code (Lattice lane, `internal/refractor` + `cmd/refractor` +
-`internal/substrate` untouched); Fire 3 is `scripts/` + `deploy/demo/` only. Fire 1 unblocks the
-Loupe F20 exposure runbook immediately (targeted heal); Fire 2 removes the class.
+Fire 1 is platform code (Lattice lane, `internal/refractor` + `cmd/refractor`;
+`internal/substrate` untouched); Fire 2 is `scripts/` + `deploy/demo/` only. Fire 1's verb half
+alone already turns the demo box's reset-window wedge into a one-command targeted heal; the sweep
+half removes the class.

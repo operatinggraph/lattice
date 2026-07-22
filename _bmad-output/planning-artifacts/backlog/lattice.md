@@ -52,7 +52,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Bootstrap] `cmd/bootstrap` has no test files — the seed decision is inspection-only** | The probe, re-seed, and two-phase reopen are covered in `internal/bootstrap`, but the branch that *decides* to re-seed lives in `package main` and is untested. Consumer: the freshness probe's own decision path. Either extract the decision into `internal/bootstrap` or add a `cmd/bootstrap` test binary. | ★ | XS–S | 📋 ready · `cmd/bootstrap/main.go:110-140` |
 | **[Refractor] `emptyBehavior` is inert without a `realnessFilter`** | The envelope reaches `EmptyAction()` only inside `if !anyReal && d.RealnessFilter != ""` (`projection/driver.go:99`), so a lens declaring `emptyBehavior:"delete"` with no realness field never deletes. Only myTasks sets one; `capabilityRoles`/`capability`/`capabilityRead` don't. Proven live: after `RevokeRole` takes an actor's last role, `cap.roles.<id>` survives with `lanes:["default"]` — not deleted as §6.8 absence=denial declares. | ★★ | S | 📋 ready |
-| **[Refractor] Auth-plane projection reconciliation (capability first-projection loss)** | A CDC event missed during a pipeline-availability gap leaves an actor's `cap.roles` doc absent forever — no re-drive, no detection, restart never replays (suspected fan-out race falsified). Fix: `reproject` ctrl verb + bounded convergence sweep + health signal; §6.2 edit staged uncommitted. Blocks Loupe F20. | ★★★ | M–L | 📐 awaiting-Andrew · [design](../../implementation-artifacts/capability-projection-reconciliation-design.md) |
+| **[Refractor] Auth-plane projection reconciliation (capability first-projection loss)** | A CDC event missed during a pipeline-availability gap leaves an actor's `cap.roles` doc absent forever — no re-drive, no detection, restart never replays (suspected fan-out race falsified). Fix: `reproject` ctrl verb + bounded convergence sweep + health signal; §6.2 two-token bullet ratified+committed. F20 shipped past it via a lucky rescan; class unhealed. | ★★★ | M–L | ✅ ratified (2026-07-21) · [design](../../implementation-artifacts/capability-projection-reconciliation-design.md) |
 
 ### Survey log (round-robin rotation)
 
@@ -112,19 +112,13 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Every ✅ ratified row in the feature tables below is Andrew-gated or
-> driver-blocked, so the live picks are the **📋 ready rows in Component maintenance** above. The ★★★
-> **[Refractor] auth-plane projection reconciliation** is 📐 awaiting-Andrew (builds on ratification;
-> unblocks Loupe F20). Top of the buildable stack now: **[Refractor] inert `emptyBehavior`** (★★ S —
-> proven live, auth-plane; composes with the reconciliation design), then the Steward's own **[Weaver]
-> fresh-episode/reclaim error-branch coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S).
+> 🎯 **Build-ready now.** Top of the stack: the ★★★ **[Refractor] auth-plane projection
+> reconciliation** (✅ ratified 2026-07-21) — Fire 1 (verb + sweep + signal) first. **[Refractor]
+> inert `emptyBehavior`** (★★ S — proven live, auth-plane) composes with it and lands independently.
+> Then the **📋 ready rows in Component maintenance**: **[Weaver] fresh-episode/reclaim error-branch
+> coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S). Every ✅ ratified row in the
+> feature tables below stays Andrew-gated or driver-blocked.
 > A stale callout starves the lane — whoever ships the top pick renames this to the next.
-
-> 📐 **Awaiting Andrew — one contract edit staged uncommitted in `main`.**
-> `docs/contracts/07-primordial-bootstrap.md` §7.4 makes `lattice.bootstrap.json` authoritative for the
-> skip-seeding decision; `a44651f` makes **Core KV** the authority (the file stays authoritative for the
-> *identity* of the set). The uncommitted diff is the proposal. Consumers: `cmd/bootstrap` only — no
-> package or app reads §7.4 semantics. Ratify by committing it, or say the word and I'll revert.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |

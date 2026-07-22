@@ -200,6 +200,16 @@ a close-`Delete` and re-write a revoked grant, with no further CDC event to re-d
   that the guard would reject against live high-seq watermarks. Resolution: guarded buckets either force
   `truncate=true` (watermark cleared with the data) or the rebuild bypasses the guard for the replay —
   defined and tested in 12.1b.
+- **Non-CDC writes (reconciliation and shred — the only two sanctioned token classes):** a write with no
+  triggering CDC message must still carry a `projectionSeq`, and exactly two token classes are sanctioned.
+  (1) A **reconciliation write** (the auth-plane reproject verb / convergence sweep) is stamped with the
+  pipeline's **last-applied stream sequence captured before re-evaluation** — a subordinate token: every
+  CDC event not yet reflected in the reconciliation read carries a strictly greater sequence and
+  overwrites it under the `≤`-rejects rule, so reconciliation can heal a missing/stale doc but can never
+  outrank real stream truth. (2) A **shred nullification** (`keyShredded` listener) is stamped `MaxInt64`
+  — a terminal, always-wins authority. These must never be swapped: a reconciliation write stamped
+  `MaxInt64` would permanently freeze the key against all future CDC writes. Any further non-CDC write
+  class requires a contract change, not a new ad-hoc token.
 
 See §6.8 for the soft-tombstone that carries the watermark across a delete.
 
