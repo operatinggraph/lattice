@@ -94,6 +94,18 @@ const (
 	tenant2Email = "sam.okafor@showcase.dev.lattice.local"
 	staffName    = "Dana Whitfield"
 	staffEmail   = "dana.whitfield@showcase.dev.lattice.local"
+
+	// The staff-worklist beat: a vacant third unit + a walk-in applicant whose
+	// signed lease application sits undecided on the staff persona's worklist
+	// (DecideLeaseApplication is frontOfHouse's own verb). The leaseapp id is
+	// caller-supplied, so it is this increment's idempotency anchor — the
+	// applicant identity is minted and never needs recovering.
+	unit3ID         = "aCEFf63f9K6tR7eGnJ69"
+	leaseApp3ID     = "pbCxpGRQHx9V23TZaC6H"
+	unit3Key        = "vtx.unit." + unit3ID
+	leaseApp3Key    = "vtx.leaseapp." + leaseApp3ID
+	applicant3Name  = "Alex Kim"
+	applicant3Email = "alex.kim@showcase.dev.lattice.local"
 )
 
 // showcaseLocationNames is the class-2 display copy (display-name-convention-
@@ -104,11 +116,12 @@ var showcaseLocationNames = map[string]map[string]any{
 	buildingKey: {"name": "Riverside Building", "icon": "building"},
 	unit1Key:    {"name": "Unit 1", "icon": "door"},
 	unit2Key:    {"name": "Unit 2", "icon": "door"},
+	unit3Key:    {"name": "Unit 3", "icon": "door"},
 }
 
 // showcaseLocationOrder fixes the iteration order a map does not have, so a
 // rerun submits its ops — and prints its lines — deterministically.
-var showcaseLocationOrder = []string{buildingKey, unit1Key, unit2Key}
+var showcaseLocationOrder = []string{buildingKey, unit1Key, unit2Key, unit3Key}
 
 // legacyMislabeledTemplates are the two backgroundCheck-classed templates
 // seed-edge-demo.go minted, branded "Maple Laundry" via .presentation — §7.3
@@ -159,6 +172,7 @@ func main() {
 		frontOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
 		staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, buildingKey, staffName, staffEmail)
 		fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
+		seedStaffWorklistApplication(ctx, conn, adminKey)
 		fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
 		return
 	}
@@ -259,6 +273,8 @@ func main() {
 		map[string]any{"instanceKey": instKey, "status": "completed", "completedAt": "2026-07-15T09:00:00Z"},
 		&processor.ContextHint{Reads: []string{instKey}})
 	fmt.Println("==> instance:        " + instKey + " (laundry, tenant1, completed) — Activity timeline seed")
+
+	seedStaffWorklistApplication(ctx, conn, adminKey)
 
 	// Cold-start race guard (verticals.md "Facet cold-start races the cap
 	// projection", ef45e83): wait for both tenants' consumer role grant to
@@ -618,6 +634,11 @@ func slotClaimKeys(hub string, start, end time.Time) []string {
 // seedClinicTemplate.
 func seedLocationPresentation(ctx context.Context, conn *substrate.Conn, adminKey string) {
 	for _, locKey := range showcaseLocationOrder {
+		// A location a later increment has not created yet on this world is
+		// skipped, not named — its creator writes the presentation itself.
+		if !alive(ctx, conn, locKey) {
+			continue
+		}
 		if alive(ctx, conn, locKey+".presentation") {
 			continue
 		}
@@ -626,6 +647,44 @@ func seedLocationPresentation(ctx context.Context, conn *substrate.Conn, adminKe
 			&processor.ContextHint{Reads: []string{locKey}})
 		fmt.Printf("==> named location:  %s (%s)\n", locKey, showcaseLocationNames[locKey]["name"])
 	}
+}
+
+// seedStaffWorklistApplication keeps the staff persona's worklist non-empty
+// on a fresh world: a vacant third unit plus a signed-but-undecided lease
+// application from a walk-in applicant — the actionable staff beat
+// (DecideLeaseApplication is frontOfHouse's own verb). The leaseapp vertex is
+// the increment's idempotency anchor (its id is caller-supplied; the minted
+// applicant identity never needs recovering). A visitor deciding the
+// application empties the pane until the next reset — the same
+// defacement-bounded model as every other demo write.
+func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adminKey string) {
+	if !alive(ctx, conn, unit3Key) {
+		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+			map[string]any{"locationType": "unit", "locationId": unit3ID,
+				"presentation": showcaseLocationNames[unit3Key]}, nil)
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+			map[string]any{"child": unit3Key, "parent": buildingKey},
+			&processor.ContextHint{Reads: []string{unit3Key, buildingKey}})
+	}
+	if !alive(ctx, conn, leaseApp3Key) {
+		salt, err := substrate.NewNanoID()
+		must(err, "generate applicant claim-key salt")
+		reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+			map[string]any{"name": applicant3Name, "email": applicant3Email,
+				"claimKeyHash": mustSHA256Hex("showcase-applicant-" + salt)}, nil)
+		applicantKey := reply.PrimaryKey
+		submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
+			map[string]any{"applicant": applicantKey, "unit": unit3Key, "leaseAppId": leaseApp3ID,
+				"moveInDate":      time.Now().UTC().AddDate(0, 0, 30).Format("2006-01-02"),
+				"leaseTermMonths": 12, "requestedRent": 2100},
+			&processor.ContextHint{Reads: []string{applicantKey, unit3Key}})
+	}
+	if !alive(ctx, conn, leaseApp3Key+".signature") {
+		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
+			map[string]any{"leaseAppKey": leaseApp3Key},
+			&processor.ContextHint{Reads: []string{leaseApp3Key}})
+	}
+	fmt.Println("==> staff worklist:  " + leaseApp3Key + " (" + applicant3Name + " → Unit 3, signed, awaiting decision)")
 }
 
 // retireLegacyTemplates soft-deletes the two backgroundCheck-classed
