@@ -8,6 +8,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 export PATH="/usr/local/go/bin:$PATH"
+# systemd runs the demo units with no HOME; Go derives GOPATH/GOMODCACHE/GOCACHE
+# from it, so an unset HOME kills every `go build` in the up chain.
+export HOME="${HOME:-/root}"
 
 make up-full
 make provision-gateway-identity-provisioner
