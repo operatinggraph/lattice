@@ -40,6 +40,11 @@ var consumerRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
 // consumerRoleKey validity check use kv.Read instead (Contract #2 §2.5):
 // both keys may legitimately be absent, and a declared-but-absent
 // ContextHint read faults (HydrationMiss) before the script runs.
+// RecordIdentityPII's role-confinement check (a STANDING, non-operator caller
+// may target only an unclaimed identity — facet-staff-worlds-design.md §3.2)
+// is the one sanctioned live enumeration, read-posture (e): the actor's
+// holdsRole links, mirroring the F4 workplace guard's own
+// actor_holds_operator walk.
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		{
@@ -81,7 +86,13 @@ func DDLs() []pkgmgr.DDLSpec {
 				"opaque-mode; otherwise no PII. " +
 				"RotateClaimKey: staff-gated re-issue of an unclaimed identity's claimKeyHash (the lost-secret " +
 				"recovery path — Lattice never held the plaintext to recover). Overwrites .claimKey; fails closed " +
-				"unless state==unclaimed.",
+				"unless state==unclaimed. " +
+				"RecordIdentityPII: a STANDING (no authContext) frontOfHouse/backOfHouse caller may target only " +
+				"an unclaimed identity — the walk-in-registration beat this op exists for; a claimed identity's " +
+				"PII belongs to an already-onboarded person, and AuthDenied there closes the unscoped-write gap " +
+				"facet-staff-worlds-design.md §3.2 flagged. Root (operator) is exempt, and so is any " +
+				"task/self-scoped submission (authContextTarget set) — e.g. lease-signing's onboarding userTask, " +
+				"where the applicant records their own PII and is already bound by the task's own grant.",
 			Script: identityDDLScript,
 			InputSchema: `{"type":"object","properties":` +
 				`{"name":{"type":"string","maxLength":200,"description":"Person's display name. Required for CreateUnclaimedIdentity."},` +
@@ -180,7 +191,9 @@ func DDLs() []pkgmgr.DDLSpec {
 					Payload: map[string]any{"identityKey": "vtx.identity.<NanoID>", "ssn": "123-45-6789", "dob": "1990-01-15"},
 					ExpectedOutcome: "Validates formats, writes sensitive vtx.identity.<NanoID>.ssn (normalized to 123456789) and " +
 						".dob aspects onto the existing identity; the identity vertex root data is not mutated. " +
-						"A sensitive ssn/dob aspect on any non-identity vertex is rejected by the step-6 sensitiveAspectScope rule.",
+						"A sensitive ssn/dob aspect on any non-identity vertex is rejected by the step-6 sensitiveAspectScope rule. " +
+						"A STANDING (no authContext) frontOfHouse/backOfHouse caller targeting an already-claimed " +
+						"identity is rejected AuthDenied; operator and any task/self-scoped submission are exempt.",
 				},
 				{
 					Name:    "ProvisionConsumerIdentity — Gateway first-touch auto-provisioning",
@@ -566,6 +579,35 @@ def read_merged_into(state, identity_key):
 def enforce_not_merged(current_state, merged_into):
     if current_state == "merged":
         fail("IdentityMerged: mergedInto=" + (merged_into if merged_into != None else "<unknown>"))
+
+PII_ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    # Byte-identical in spirit to the F4 workplace guard's own
+    # actor_holds_operator (cafe-domain/clinic-domain/lease-signing/
+    # wellness-domain/maintenance-domain) -- this package has no location to
+    # pair it with, so only the operator-exemption half is needed here.
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, PII_ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
 
 def validate_state_transition(current, new):
     if current == None:
@@ -1253,6 +1295,30 @@ def execute(state, op):
             fail("InvalidArgument: identityKey: no such identity")
         current_state = read_state(state, identity_key)
         enforce_not_merged(current_state, read_merged_into(state, identity_key))
+
+        # facet-staff-worlds-design.md §3.2's carried-forward scoping question:
+        # this write predates the staff read spine and, unconfined, reaches ANY
+        # identity -- F4's location-derived guard cannot bind it because a
+        # walk-in identity has no location to confine against. The domain-shaped
+        # boundary is the state machine instead: a STANDING front-desk grant
+        # (frontOfHouse/backOfHouse, scope=any, no authContext) may only target
+        # an unclaimed identity -- the walk-in-registration beat this op exists
+        # for, which by construction targets an identity CreateUnclaimedIdentity
+        # just minted. Once claimed, the PII belongs to an already-onboarded
+        # person, and an unscoped standing-grant write over it is exactly the
+        # over-broad reach the design flagged.
+        #
+        # Binds the STANDING path only -- exactly F4's require_workplace: a
+        # non-empty op.authContextTarget means this is a scope=self or
+        # task-scoped submission (e.g. lease-signing's onboarding userTask,
+        # assignee == the applicant identity itself, patterns.go), which is
+        # already bound by its own narrower grant (the task's own scopedTo, or
+        # the self-match) and legitimately targets a claimed identity -- an
+        # applicant recording their own PII mid-application is not the walk-in
+        # front-desk case this confinement is about. Root (operator) is exempt
+        # too, mirroring every other confinement guard in the platform.
+        if op.authContextTarget == "" and current_state != "unclaimed" and not actor_holds_operator(op.actor):
+            fail("AuthDenied: " + op.actor + " may only RecordIdentityPII on an unclaimed identity (walk-in registration); state=" + str(current_state))
 
         # SSN: 9 digits; any hyphens are accepted and stripped regardless of
         # position; any other character is rejected. Stored normalized (digits

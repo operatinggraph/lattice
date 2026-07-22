@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -47,7 +48,19 @@ const (
 	gatewayActorID  = "JgtwyActHJKMNPQRSTUV"
 	gatewayActorKey = "vtx.identity." + gatewayActorID
 	gatewayCapKey   = "cap.identity." + gatewayActorID
+
+	// frontDeskActorID/Key/CapKey is a real (non-operator) frontOfHouse staff
+	// actor — used by RecordIdentityPII's confinement tests (§3.2), which need
+	// to distinguish "staff" from "root" the way staffActorKey (operator-
+	// equivalent, despite the name) cannot.
+	frontDeskActorID  = "JfrntDskHJKMNPQRSTUV"
+	frontDeskActorKey = "vtx.identity." + frontDeskActorID
+	frontDeskCapKey   = "cap.identity." + frontDeskActorID
 )
+
+// frontOfHouseRoleKey is identity-domain's own frontOfHouse role, resolved
+// the same deterministic way consumerRoleKey is in the package's own script.
+var frontOfHouseRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
 
 // staffCapDoc seeds a cap doc granting the operator-equivalent staff
 // actor the platformPermissions used by identity-domain tests:
@@ -138,9 +151,35 @@ func gatewayCapDoc() *processor.CapabilityDoc {
 	}
 }
 
+// frontDeskCapDoc seeds a cap doc for a real frontOfHouse staff actor —
+// granted RecordIdentityPII (scope=any) at the capability-KV/step-3 layer, so
+// RecordIdentityPII's own script-level confinement (§3.2) is what a rejection
+// in these tests actually proves, not a missing platform grant.
+func frontDeskCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    frontDeskCapKey,
+		Actor:                  frontDeskActorKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{frontDeskActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "RecordIdentityPII", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{frontOfHouseRoleKey},
+	}
+}
+
 // setupTestEnv assembles the standard identity-domain test environment:
 // embedded NATS, KV buckets, primordials seeded, Phase 1 packages
-// installed, staff + consumer + gateway cap docs seeded.
+// installed, staff + consumer + gateway + frontDesk cap docs seeded. staffKey
+// and frontDeskActorKey both get their GRAPH holdsRole link seeded too (not
+// just the cap doc) — RecordIdentityPII's confinement guard walks the graph
+// (testutil.SeedHoldsRole's doc comment), so an actor carrying only a cap doc
+// looks like an unprivileged caller no matter what it grants.
 func setupTestEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	t.Helper()
 	ctx, conn := testutil.SetupPackageTestEnv(t)
@@ -148,6 +187,9 @@ func setupTestEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	testutil.SeedCapDoc(t, ctx, conn, consumerCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, secondCredCapDoc())
 	testutil.SeedCapDoc(t, ctx, conn, gatewayCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, frontDeskCapDoc())
+	testutil.SeedHoldsRole(t, ctx, conn, staffActorKey, bootstrap.RoleOperatorKey)
+	testutil.SeedHoldsRole(t, ctx, conn, frontDeskActorKey, frontOfHouseRoleKey)
 	return ctx, conn
 }
 

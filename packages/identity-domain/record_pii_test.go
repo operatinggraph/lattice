@@ -316,6 +316,125 @@ func TestRecordPII_RejectsBadFormats(t *testing.T) {
 	}
 }
 
+// TestRecordPII_StaffRejectedOnClaimedIdentity — the §3.2 scoping fix: a real
+// (non-operator) frontOfHouse actor may RecordIdentityPII on an unclaimed
+// identity (the walk-in-registration beat) but is AuthDenied on an
+// already-claimed one — closing the unscoped-write gap
+// facet-staff-worlds-design.md §3.2 flagged (F4's location-derived
+// confinement cannot reach this op; a walk-in identity has no location).
+func TestRecordPII_StaffRejectedOnClaimedIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newPIIPipeline(t, ctx, conn, "pii-staff-claimed")
+
+	claimedKey := "vtx.identity." + testutil.GenReqID("PIIStaffClaimed")
+	seedDirectIdentity(t, ctx, conn, claimedKey, "claimed", "")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIStaffClaimedOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
+		ContextHint:   recordPIIReads(claimedKey),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	if kvExists(t, ctx, conn, claimedKey+".ssn") {
+		t.Errorf("ssn aspect written despite AuthDenied rejection")
+	}
+	if kvExists(t, ctx, conn, claimedKey+".dob") {
+		t.Errorf("dob aspect written despite AuthDenied rejection")
+	}
+
+	// Positive control, same actor: an unclaimed identity is exactly the
+	// walk-in-registration case the op exists for, and is accepted.
+	unclaimedKey := createIdentity(t, ctx, conn, cp, cons, "PIIStaffUnclaimed")
+	env2 := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIStaffUnclaimedOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:01Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + unclaimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
+		ContextHint:   recordPIIReads(unclaimedKey),
+	}
+	testutil.PublishOp(t, conn, env2)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestRecordPII_TaskScopedNotConfinedToUnclaimed — the §3.2 confinement binds
+// the STANDING path only (exactly F4's require_workplace), not a task/self-
+// scoped submission: lease-signing's onboarding userTask assigns
+// RecordIdentityPII to the applicant identity itself (assignee == subject,
+// internal/loom/engine.go's §10.5 invariant), which by the time the applicant
+// performs it may already be claimed. A non-operator actor submitting with
+// AuthContext.Target set succeeds on a claimed identity — where the same
+// actor submitting the STANDING way (no AuthContext) would be denied.
+func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newPIIPipeline(t, ctx, conn, "pii-task-scoped")
+
+	claimedKey := "vtx.identity." + testutil.GenReqID("PIITaskScoped")
+	seedDirectIdentity(t, ctx, conn, claimedKey, "claimed", "")
+
+	reads := recordPIIReads(claimedKey)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIITaskScopedOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
+		AuthContext:   &processor.AuthContext{Target: claimedKey},
+		ContextHint:   reads,
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	ssn := readDecryptedAspectData(t, ctx, conn, claimedKey, "ssn")
+	if got, _ := ssn["value"].(string); got != "123456789" {
+		t.Fatalf("ssn aspect value = %q, want normalized 123456789", got)
+	}
+}
+
+// TestRecordPII_OperatorAllowedOnClaimedIdentity — root is exempt from the
+// §3.2 confinement, mirroring every other confinement guard in the platform
+// (F4's workplace guard): operator may RecordIdentityPII on an already-claimed
+// identity (e.g. a data-correction), where a real staff actor is denied.
+func TestRecordPII_OperatorAllowedOnClaimedIdentity(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newPIIPipeline(t, ctx, conn, "pii-operator-claimed")
+
+	claimedKey := "vtx.identity." + testutil.GenReqID("PIIOpClaimed")
+	seedDirectIdentity(t, ctx, conn, claimedKey, "claimed", "")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIOpClaimedOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         staffActorKey,
+		SubmittedAt:   "2026-07-22T11:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
+		ContextHint:   recordPIIReads(claimedKey),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	ssn := readDecryptedAspectData(t, ctx, conn, claimedKey, "ssn")
+	if got, _ := ssn["value"].(string); got != "123456789" {
+		t.Fatalf("ssn aspect value = %q, want normalized 123456789", got)
+	}
+}
+
 // TestRecordPII_RejectsBadTarget — missing / non-identity identityKey is
 // rejected (the existing-identity guard).
 func TestRecordPII_RejectsBadTarget(t *testing.T) {
