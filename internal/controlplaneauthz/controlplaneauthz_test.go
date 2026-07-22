@@ -333,6 +333,9 @@ func (f *fakeEngine) Disable(_ context.Context, targetID string) error {
 }
 func (f *fakeEngine) Enable(context.Context, string) error { return nil }
 func (f *fakeEngine) Revoke(context.Context, string) error { return nil }
+func (f *fakeEngine) ResetConfidence(context.Context, string) (int, error) {
+	return 0, nil
+}
 
 // TestControlPlaneAuthz_OperatorAllowedIntruderDeniedAnonymousDenied is the
 // FR30 Fire 1b Gate-3 proof: a real weaver control.Service wired with the
