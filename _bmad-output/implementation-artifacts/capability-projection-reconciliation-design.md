@@ -1,6 +1,6 @@
 # Auth-plane projection reconciliation — capability first-projection loss
 
-**Status: ✅ RATIFIED (Andrew, 2026-07-21)** · Designer fire 2026-07-22 · board row:
+**Status: ✅ RATIFIED (Andrew, 2026-07-21) · BUILT — both fires shipped** · Designer fire 2026-07-22 · board row:
 [lattice.md → Component maintenance → Refractor capability first-projection loss](../planning-artifacts/backlog/lattice.md)
 
 > **What ships.** The auth plane (Capability KV) gains a reconciliation loop: a per-actor
@@ -331,8 +331,8 @@ platform being temporarily behind must be *observable and waitable*, not raced).
 
 | Fire | Scope | Size | Ships green when |
 |---|---|---|---|
-| 1 | `reproject` ctrl verb + CLI (1a, built first) + convergence sweep + `CapabilityCoverageDivergence` health signal (1b) + incident-repro e2e | M–L | verb heals the reproduced loss end-to-end; fabricated divergence detected+healed+alerted; converged sweep writes nothing; all gates green |
-| 2 | seed readiness wait + demo runbook | S | demo-up seed completes with zero step-3 denials on a fresh world |
+| 1 | `reproject` ctrl verb + CLI (1a, built first) + convergence sweep + `CapabilityCoverageDivergence` health signal (1b) + incident-repro e2e | M–L | **SHIPPED** — verb heals the reproduced loss end-to-end; the sweep finds the hole with nobody naming the actor, heals it, alerts, then goes quiet with zero writes |
+| 2 | seed readiness wait + demo runbook | S | **SHIPPED** — demo-up seeds behind an auth-plane convergence wait rather than a fixed timeout |
 
 Fire 1 is platform code (Lattice lane, `internal/refractor` + `cmd/refractor`;
 `internal/substrate` untouched); Fire 2 is `scripts/` + `deploy/demo/` only. Fire 1's verb half

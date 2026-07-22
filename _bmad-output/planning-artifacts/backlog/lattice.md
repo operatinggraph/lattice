@@ -53,7 +53,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Bootstrap] `cmd/bootstrap` has no test files — the seed decision is inspection-only** | The probe, re-seed, and two-phase reopen are covered in `internal/bootstrap`, but the branch that *decides* to re-seed lives in `package main` and is untested. Consumer: the freshness probe's own decision path. Either extract the decision into `internal/bootstrap` or add a `cmd/bootstrap` test binary. | ★ | XS–S | 📋 ready · `cmd/bootstrap/main.go:110-140` |
 | **[Refractor] `emptyBehavior` is inert without a `realnessFilter`** | The envelope reaches `EmptyAction()` only inside `if !anyReal && d.RealnessFilter != ""` (`projection/driver.go:99`), so a lens declaring `emptyBehavior:"delete"` with no realness field never deletes. Only myTasks sets one; `capabilityRoles`/`capability`/`capabilityRead` don't. Proven live: after `RevokeRole` takes an actor's last role, `cap.roles.<id>` survives with `lanes:["default"]` — not deleted as §6.8 absence=denial declares. | ★★ | S | 📋 ready |
 | **[Refractor] A role-queued task's Personal-Lens row never reaches the mirror** | A 2nd `CreateTask` queuedFor a staff role yields a correct `cap.ephemeral` grant and a correct `cap-read` slice carrying the task anchor, yet no `manifest.task` row reaches the device across a host restart + re-hydrate; a stale row for a `complete` task stays un-retracted. Lens and read gate both exonerated live (see the design's F5 Inc 2 note). | ★★★ | M | 📋 ready · consumer: [F5 claim](../../implementation-artifacts/facet-staff-worlds-design.md) |
-| **[Refractor] Auth-plane projection reconciliation (capability first-projection loss)** | A CDC event missed during a pipeline-availability gap leaves an actor's `cap.roles` doc absent forever — no re-drive, no detection, restart never replays (fan-out race falsified). Fix: `reproject` verb + bounded convergence sweep + health signal. | ★★★ | M–L | 🏗️ Fire 1a SHIPPED (verb + CLI, live-proven); next: Fire 1b sweep · [design](../../implementation-artifacts/capability-projection-reconciliation-design.md) |
 
 ### Survey log (round-robin rotation)
 
@@ -113,12 +112,13 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top of the stack: the ★★★ **[Refractor] auth-plane projection
-> reconciliation** (✅ ratified 2026-07-21) — Fire 1 (verb + sweep + signal) first. **[Refractor]
-> inert `emptyBehavior`** (★★ S — proven live, auth-plane) composes with it and lands independently.
-> **[Refractor/Facet] host health emission** (★★ S–M) is ✅ ratified (A2) and build-ready. Then the **📋 ready rows in Component maintenance**: **[Weaver] fresh-episode/reclaim error-branch
-> coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S). Every ✅ ratified row in the
-> feature tables below stays Andrew-gated or driver-blocked.
+> 🎯 **Build-ready now.** Top of the stack: **[Refractor] inert `emptyBehavior`** (★★ S — proven
+> live, auth-plane; the last-role-revocation half of the reconciliation work, which the shipped
+> sweep now inherits the empty semantics of) and **[Refractor] role-queued task's Personal-Lens row**
+> (★★★ M — F5 claim is its consumer). **[Refractor/Facet] host health emission** (★★ S–M) is
+> ✅ ratified (A2) and build-ready. Then the **📋 ready rows in Component maintenance**: **[Weaver]
+> fresh-episode/reclaim error-branch coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests**
+> (★ XS–S). Every ✅ ratified row in the feature tables below stays Andrew-gated or driver-blocked.
 > A stale callout starves the lane — whoever ships the top pick renames this to the next.
 
 ### Security & trust boundary
@@ -185,6 +185,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · `ac4d46b8` · [refractor] auth-plane convergence sweep heals graph↔Capability-KV divergence via the reproject path — `CapabilityCoverageDivergence` + `reconciled` counter; closes the projection-reconciliation item
 - 2026-07-22 · `222f66a5` · [CI] `edge-browser-store` retries once on the `websocket url timeout reached` signature alone — a cold-start miss no longer reds the gate, every other failure still fails unretried
 - 2026-07-22 · `52fc791f` · [weaver] `resetConfidence` control verb + CLI drains a target's `__effect` confidence windows — the disable<reset<revoke ladder's middle rung; grants to control-authz + console-operator, never demo-operator
 - 2026-07-22 · `9af5aed5` · [loom] poll-until-created in the e2e harness (new `waitTaskCreated`) — closes the `taskCreated`-after-`waitTaskKey` relay race across 8 sites; `-race -count=5` clean
@@ -209,10 +210,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-19 · `6c3adac` · [processor/outbox] consumer decision surface — New/handle →100% (poison Term, publish-failure Nak with aspect retained, tombstone-failure Ack), package 78.1→95.9%
 - 2026-07-19 · `af6b7a0` · [loom] guard-sandbox Starlark Value interfaces — str/bool/dir/getattr/iterate + unhashable negatives, targeted methods 0→100%
 - 2026-07-19 · `3a39324` · [weaver] doc drift — dropped the stale op-vertex-pruner deferred bullet
-- 2026-07-19 · `3a39324` · [objmgr] doc drift — static-healthy-heartbeat Known-gap replaced with the shipped aggregateStatus behavior
-- 2026-07-19 · `3a39324` · [core] doc drift — processor.md UninstallPackage now documents the shipped per-key OCC
-- 2026-07-19 · `28e2be3` · [refractor] rebuild completion watched `NumPending`, so an unacked in-flight message read as drained and persisted health `active` on a paused mid-rebuild lens — new `OutstandingForConsumer` (+`NumAckPending`)
-- 2026-07-19 · `28e2be3` · [CI] `edge-browser-store` `websocket url timeout reached` flake — two wasm packages cold-started their own Chrome concurrently, both missing chromedp's hardcoded 20s banner budget; serialized with `-p 1`
-- 2026-07-18 · `c26a7d6` · [objectcrypto] cover the Vault wrap/unwrap RPC seam (0%) + AEAD error guards — fake-Vault responder pins marshaling, round-trip, resp.Error propagation, transport + malformed-reply failure; 46.6%→91.4%
-- 2026-07-18 · `029256d` · [loom] fix `TestLoomE2E_MidRunRestartExactlyOnce` flake — submit counter trails the write-ahead pending token, so poll `fp.submitted`≥1 (new `waitSubmitted`) instead of reading once; -race -count=8 clean
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

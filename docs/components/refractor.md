@@ -497,6 +497,41 @@ edge that triggered it; the bootstrapper's later `Build` for the same edge is a
 no-op. A link whose endpoints reach no actor (e.g. a `book → author` link)
 enumerates to the empty set and is a correct no-op.
 
+### Auth-plane convergence sweep
+
+Both mechanisms above order and correct writes that **happen**. Neither can conjure a
+write that never did: a grant landing while the pipeline is not consuming — a restart
+window, or the multi-ten-minute drain after a source stream is recreated — leaves
+`cap.*.<actor>` physically absent, surviving restarts, with nothing re-driving it. Zero
+consumer lag is not converged truth.
+
+So every **auth-plane actor-aggregate** lens (the `IsAuthPlane` ∧ envelope-installed
+predicate, derived from the compiled plan) runs a periodic self-audit beside its pump
+(`pipeline.RunSweep`, `internal/refractor/pipeline/sweep.go`;
+capability-projection-reconciliation-design.md §3.2). Every other lens kind is excluded
+structurally — the driver simply never installs a `SweepPlan` for it.
+
+- A **coverage prefilter** compares two key listings, the lens's anchor-type vertices in
+  Core KV against the target's live keys, and catches both definite directions: an anchor
+  with no target key (the lost first projection) and a target key whose anchor is gone (an
+  over-grant). A tombstoned anchor legitimately has no key and is excluded, or the
+  accumulated tombstone set would starve the walk below.
+- A **bounded round-robin deep verify** (default 25 anchors per 60s tick, both
+  overridable) re-executes the projection from a persisted cursor. This is the only
+  detector for a row that is present but *stale* — the over-grant the prefilter cannot
+  see, since a revoked actor keeps both its vertex and its key.
+- Repair reuses the `reproject` verb's path exactly (§3.1), so reconciliation has one
+  write path and one ordering token: the pipeline's last-applied stream sequence, captured
+  before evaluation, which always loses to a later real CDC event under the §6.2 guard.
+  Skip-if-identical makes a converged pass cost **zero writes**.
+- Each heal increments `metrics.capabilityLens.<name>.reconciled` and raises
+  `CapabilityCoverageDivergence` (warning; `error` once two consecutive passes each heal
+  something). Healing is deliberately loud — a nonzero rate is the signal to go find the
+  delivery gap.
+- The sweep suppresses itself while a rebuild is in flight (a rebuild is a superset) and
+  while the lens is paused (operator intent wins). The cursor and heal count persist on the
+  lens's existing health entry, so a restart resumes rather than restarts the walk.
+
 ---
 
 ## Capability KV envelope (Contract #6 §6.2)

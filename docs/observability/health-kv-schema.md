@@ -430,7 +430,7 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "consumerLag": <uint64>, "alert": "ok | paused | lagging"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "consumerLag": <uint64>, "alert": "ok | paused | lagging", "reconciled": <uint64>}
     },
     "lensLiveness": {
       "<lensCanonicalName>": {"status": "active | paused | rebuilding", "projectionLag": <uint64>, "lastProjectedAt": "<RFC3339>", "alert": "ok | paused | lagging"}
@@ -439,6 +439,7 @@ currently reserved-but-unemitted.
   "issues": [
     {"code": "CapabilityLensPaused", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityLensLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilityCoverageDivergence", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
@@ -459,6 +460,19 @@ business lens is a real outage for that vertical but must not escalate the whole
 Refractor instance to `unhealthy` the way a frozen auth-plane lens does. Each `issues[]`
 entry's `since` persists across heartbeats while the condition holds and is dropped once
 it resolves.
+
+`CapabilityCoverageDivergence` is the auth-plane convergence sweep's alert
+(capability-projection-reconciliation-design.md §3.2), and it is the only capability issue
+that is **not** derived from consumer state: `CapabilityLens{Paused,Lagging}` watch whether
+the pipeline is running and caught up, whereas a pipeline that is active with zero lag can
+still have *missed* an event and left a projection hole. The sweep re-derives each anchor's
+projection from the graph, heals what diverges, and reports it here — `warning` after one
+divergent sweep pass (a repaired incident), escalating to `error` once two consecutive
+passes each heal something (events are still being lost, so the sweep is papering over an
+ongoing gap rather than a past one), and clearing on the first clean pass.
+`metrics.capabilityLens.<name>.reconciled` is the matching cumulative counter: it is
+deliberately loud, because a nonzero *rate* is itself the signal to go find the delivery
+gap. `0` for a lens with no sweeper, which is every non-auth-plane target.
 
 ### `health.weaver.<instance>` — Weaver heartbeat
 
@@ -618,7 +632,9 @@ the scan failed; `timers*` only when the temporal lane is wired).
   "lastUpdated": "<RFC3339>",
   "ruleEngine": "<engineName>",
   "lastProjectedAt": "<RFC3339>",
-  "projectionLag": <uint64>
+  "projectionLag": <uint64>,
+  "sweepCursor": "<anchorVertexKey>",
+  "sweepReconciled": <uint64>
 }
 ```
 
@@ -628,6 +644,12 @@ lens's last successful target write — `""` until its first projection (design:
 lens-projection-liveness-design.md §3.2); a freshness signal, never an alert input on its own
 (a genuinely quiet, no-match lens naturally has an old value). `projectionLag` is the
 operator-facing alias of `consumerLag` (same NumPending value under both names).
+`sweepCursor` / `sweepReconciled` are the auth-plane convergence sweep's round-robin
+position and cumulative heal count; both are omitted for a lens that does not sweep. They
+live on this existing entry rather than in new state, so a restarted Refractor resumes the
+walk where it stopped instead of re-verifying from the head every boot, and the heal count
+an operator reads survives the restart. Neither is reset by a status transition — a
+pause/resume must not silently restart the walk.
 
 ### `health.bootstrap.complete`
 
