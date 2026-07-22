@@ -7,7 +7,8 @@
 # `git pull` to apply updates.
 set -euo pipefail
 
-DEMO_HOST="${1:?usage: demo-bootstrap.sh <demo-host>}"
+DEMO_HOST="${1:?usage: demo-bootstrap.sh <demo-host> [loupe-demo-host]}"
+DEMO_LOUPE_HOST="${2:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
@@ -44,6 +45,25 @@ cp "$HERE/env.demo" "$REPO_ROOT/.env"
 
 echo "==> Installing Caddyfile for ${DEMO_HOST}..."
 sed "s/{\$DEMO_HOST}/${DEMO_HOST}/" "$HERE/Caddyfile" >/etc/caddy/Caddyfile
+# The optional second host serves the read-only demo Loupe (F20). Its marker
+# file is what demo-up.sh keys the whole Loupe-demo path off; removing the
+# argument removes the marker, the vhost and (on the next demo-up) the process.
+if [[ -n "$DEMO_LOUPE_HOST" ]]; then
+	echo "==> Adding demo-Loupe vhost for ${DEMO_LOUPE_HOST}..."
+	cat >>/etc/caddy/Caddyfile <<CADDY
+
+${DEMO_LOUPE_HOST} {
+	encode zstd gzip
+	# /api/events/stream is SSE — stream unbuffered.
+	reverse_proxy 127.0.0.1:7778 {
+		flush_interval -1
+	}
+}
+CADDY
+	printf '%s\n' "$DEMO_LOUPE_HOST" >"$REPO_ROOT/demo-loupe-host"
+else
+	rm -f "$REPO_ROOT/demo-loupe-host"
+fi
 systemctl enable --now docker
 systemctl enable caddy
 systemctl reload caddy 2>/dev/null || systemctl restart caddy
