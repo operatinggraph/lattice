@@ -1,20 +1,20 @@
 # Facet host health emission (`health.facet.<instance>`) — design
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-07-21 · lane row: backlog/lattice.md → Component maintenance → *[Refractor/Facet] Facet host health emission*
+**Status: ✅ RATIFIED — Option A2 (Andrew, 2026-07-21)** · Designer fire 2026-07-21 · lane row: backlog/lattice.md → Component maintenance → *[Refractor/Facet] Facet host health emission*
 
-## For Andrew
+## Ratification record
 
-The Facet host process (`cmd/facet`) starts emitting a Contract #5 heartbeat
-(`health.facet.<instance>`) so a crash-looping per-user sync engine — today FE-visible only via the
-syncDegraded frame — becomes visible to the Lamplighter / `lattice health` rollup. It mirrors the
-vertical apps' `healthkv.Reporter` wiring exactly; the per-identity engine plane is untouched.
+The Facet host process (`cmd/facet`) emits a Contract #5 heartbeat (`health.facet.<instance>`) so a
+crash-looping per-user sync engine — today FE-visible only via the syncDegraded frame — becomes
+visible to the Lamplighter / `lattice health` rollup. It mirrors the vertical apps'
+`healthkv.Reporter` wiring; the per-identity engine plane is untouched.
 
-**Trust-boundary fork (the row's "host service credential vs Gateway-mediated vs stays-FE-only" —
-your call):** my recommendation is **Option A2** — give the host its own platform NKey user
-(`facet`) that is the **narrowest row in the matrix** (publish: `$KV.health-kv.>` + `$JS.FC.>` only
-— no `$JS.API.>`, no `ops.>`), *and* add the small per-component `subscribe` allow so this one
-user's subscribe side is pinned to `_INBOX.>` instead of today's uniform `">"`. §5 lays out A1/A2/B/C
-with trade-offs. **No frozen-contract change** — this builds to Contract #5 as written (§6).
+The trust-boundary fork (host service credential vs Gateway-mediated vs stays-FE-only) resolved to
+**A2**: the host gets its own platform NKey user (`facet`), the **narrowest row in the matrix**
+(publish: `$KV.health-kv.>` + `$JS.FC.>` only — no `$JS.API.>`, no `ops.>`), plus the new
+per-component `SubscribeAllow` axis pinning this one user's subscribe side to `_INBOX.>` instead of
+the uniform `">"` (§4.2; alternatives in §5). **No frozen-contract change** — builds to Contract #5
+as written (§6). One fire (§11).
 
 ## 1. Problem + intent
 
@@ -24,8 +24,9 @@ frame has parity. The *operator-facing* half was re-filed as this row: a Facet e
 crash-loops its sync manager is invisible to the platform's observability plane, because `cmd/facet`
 holds **no platform NATS credential by documented design** (`cmd/facet/main.go`'s "No Health-KV
 reporting" block): every NATS connection the process opens is a **per-identity** engine connection,
-confined by `internal/gateway/natsauth`'s issued permission set to exactly
-`lattice.sync.user.<U>` + its own `_INBOX.edge.<U>.>` + the `personal.*` control RPCs. Publishing to
+confined by `internal/gateway/natsauth`'s issued permission set to
+`lattice.sync.user.<U>` + its own `_INBOX.edge.<U>.>` + the `personal.*` control RPCs (plus the
+identity's own durable-scoped `$JS.API.CONSUMER.*.SYNC.…`/`$JS.ACK.SYNC.…` grants). Publishing to
 health-kv on those connections is a permissions violation, not a missing grant to request — and
 widening the *per-identity* grant is the one move this design explicitly rules out (§8.1: any edge
 user could then spoof platform health).
@@ -41,8 +42,9 @@ own heartbeat"); the Facet host is the one running platform process that doesn't
 
 - **Emitter:** `internal/healthkv.Reporter` — the shared Contract #5 heartbeat loop for
   consumer-less daemons (probe each tick, never echo a boot snapshot; interval-derived TTL per §5.6;
-  `starting`/`shuttingDown` lifecycle emissions; panic-safe probe). Already used by all four vertical
-  apps + the Gateway (`dcfe4af`).
+  `starting`/`shuttingDown` lifecycle emissions; panic-safe probe). Already used by the four vertical
+  apps + `cmd/processor` (the `vault` component) + `cmd/chronicler`; the Gateway runs its own bespoke
+  `Heartbeater` (`internal/gateway/health.go`) that shares only the TTL-multiplier constant.
 - **Probe:** `cmd/loftspace-app/health.go` — dependency-probing (`NatsUnreachable`,
   `ReadModelUnreachable`, auth-posture), severity → status fold. Facet's probe is the same shape
   plus the engine-fleet aggregates (§4.3).
@@ -53,8 +55,9 @@ own heartbeat"); the Facet host is the one running platform process that doesn't
 - **Write mechanics (guard named precisely):** the Reporter's only substrate call is
   `Conn.KVPutWithTTL` — a bare `js.PublishMsg` to `$KV.health-kv.<key>` with a `Nats-TTL` header
   (per-key message TTL, NATS ADR-48, in-pin since 2.11; our pin is **NATS 2.14**, `docs/vendors.md`).
-  It opens **no KV handle** (no `$JS.API.STREAM.INFO`), and the write is an **unconditional
-  overwrite** — correct here by construction, because the key embeds the instance's own boot-minted
+  It opens **no KV handle** (no `$JS.API.STREAM.INFO`; the primitive's `ttl<=0` fallback would open
+  one via plain `KVPut`, but the Reporter's interval-derived TTL is always positive), and the write is
+  an **unconditional overwrite** — correct here by construction, because the key embeds the instance's own boot-minted
   NanoID, so the sole writer to `health.facet.<instance>` is that instance (§5.7); LWW is the
   contract's own §5.6 semantics, not an unguarded hazard.
 - **Modes:** `up-facet` (host-engine mode: `engineManager` multiplexes one in-process engine per
@@ -62,8 +65,11 @@ own heartbeat"); the Facet host is the one running platform process that doesn't
   static file server; engines run in-page over the :9222 WebSocket). The probe must be honest in
   both (§4.3).
 
-Parallel-design check: no other 📐/🏗️ design touches `health.facet`, the natsperm matrix, or the
-Reporter (grepped `_bmad-output/implementation-artifacts/` 2026-07-21).
+Parallel-design check: no other 📐/🏗️ design touches `health.facet`, the natsperm matrix's semantics,
+or the Reporter (grepped `_bmad-output/implementation-artifacts/` 2026-07-21). One shared-artifact
+coordination point: the 🏗️ lease-doc-external-io fire also runs `deploy/gen-dev-nkeys` and re-commits
+`deploy/nats-server.conf` — whichever fire lands second re-runs the regen (`TestConfMatchesMatrix` is
+the drift gate); no semantic conflict.
 
 ## 3. The trust split (why a host credential is posture-consistent)
 
@@ -95,7 +101,7 @@ credentials, unchanged.
     // + $JS.FC.>; KVPutWithTTL needs nothing else (no $JS.API.>, no KV-handle
     // open). The narrowest user in the matrix, by design — this host fronts
     // the hosted demo.
-    SubscribeAllow: []string{"_INBOX.>"}, // A2 — see §5; drop this field under A1
+    SubscribeAllow: []string{"_INBOX.>"}, // §5 — ratified A2
 },
 ```
 
@@ -150,7 +156,9 @@ change to acquire/release/reap.
   mirroring `LOFTSPACE_APP_HEARTBEAT_EVERY`). Unconfigured ⇒ one warn log, no reporter — the absent
   card is itself the operator signal (loftspace's "gated on a live NATS dial" posture), and older
   launchers keep working unchanged. The "No Health-KV reporting" doc block is **rewritten** to
-  describe the two-plane posture as it now is (no history narration).
+  describe the two-plane posture as it now is (no history narration), and states the per-identity
+  allow-list precisely — its current "exactly three subjects" phrasing omits the durable-scoped
+  JetStream consumer/ack grants natsauth also issues.
 - Launchers: `Makefile` gains `NKEY_FACET ?= $(NKEY_DIR)/facet.nk`; `up-facet`, `up-facet-edge` (and
   `run-facet`) pass `NATS_NKEY=$(NKEY_FACET)`; the hosted-demo launcher `deploy/demo/demo-up.sh`
   gains the same env.
@@ -212,7 +220,8 @@ self-report-only. Health KV direct writes are the sanctioned P2 exception (CLAUD
 ## 8. Risks + adversarial pass (run 2026-07-21, findings folded in)
 
 1. **Spoofing via the edge plane** — could a per-identity connection write `health.facet.*`?
-   No: natsauth issues an exact allow-list (`lattice.sync.user.<U>`, own inbox, `personal.*`);
+   No: natsauth issues a fixed per-identity allow-list (sync subject, own inbox, `personal.*` RPCs,
+   and the identity's own durable-scoped JetStream consumer/ack grants — `natsauth.go` `PermissionsFor`);
    `$KV.health-kv.>` is not in it and never becomes so under this design. This was the checked-and-
    rejected alternative transport (widening per-identity grants), kept rejected.
 2. **Privacy of a broadly-readable bucket** (§5.7: any NATS-cluster actor reads Health KV) — the
