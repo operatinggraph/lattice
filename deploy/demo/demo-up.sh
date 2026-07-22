@@ -44,36 +44,16 @@ fi
 personas="$(printf '[{"id":"%s","label":"Riley Chen","sub":"Resident · Unit 1"},{"id":"%s","label":"Sam Okafor","sub":"Resident · Unit 2"},{"id":"%s","label":"Dana Whitfield","sub":"Staff · Front of house"}]' "$tenant1" "$tenant2" "$staff")"
 
 # Hosted read-only Loupe (F20): provisioned + started only when the box
-# declares a public host for it (demo-bootstrap.sh's second argument). A
-# provisioning failure degrades to no Loupe demo — never a failed bring-up,
-# Facet is the primary surface.
-loupe_host_file="$REPO_ROOT/demo-loupe-host"
-if [[ -f "$loupe_host_file" ]]; then
-	loupe_host="$(cat "$loupe_host_file")"
-	if "$REPO_ROOT/deploy/demo/provision-demo-operator.sh"; then
-		demo_op_key="$(jq -r '.operatorActorKey' "$REPO_ROOT/loupe-demo-operator.json")"
-		echo "==> Starting the read-only demo Loupe (:7778) for https://${loupe_host}..."
-		LOUPE_ADDR=127.0.0.1:7778 \
-			LOUPE_DEMO_MODE=1 \
-			LOUPE_OPERATOR_ACTOR_KEY="$demo_op_key" \
-			LOUPE_DEV_AUTH=1 \
-			LOUPE_PUBLIC_ORIGIN="https://${loupe_host}" \
-			NATS_URL="${NATS_URL:-nats://localhost:4222}" \
-			NATS_NKEY=deploy/nkeys/loupe.nk \
-			BOOTSTRAP_JSON_PATH="$REPO_ROOT/lattice.bootstrap.json" \
-			LOUPE_PG_DSN="${LOUPE_PG_DSN:-postgres://loupe_pg:loupe_pg_dev@localhost:5432/lattice?sslmode=disable}" \
-			nohup ./bin/loupe >loupe-demo.log 2>&1 </dev/null &
-		for _ in $(seq 1 20); do
-			if curl -fsS -o /dev/null -H "Host: ${loupe_host}" http://127.0.0.1:7778/login; then
-				echo "==> Demo Loupe up on :7778 (actor=$demo_op_key)"
-				break
-			fi
-			sleep 1
-		done
-	else
-		echo "demo-up: WARNING — demo-operator provisioning failed; the Loupe demo stays down (Facet unaffected)" >&2
-	fi
-fi
+# declares a public host for it (demo-bootstrap.sh's second argument). Bounded,
+# non-blocking attempt — a fresh-world rescan routinely outlasts any timeout
+# reasonable to wait on here, so this never holds up the rest of bring-up (or
+# the nightly reset unit); lattice-demo-loupe-retry.timer keeps retrying every
+# few minutes until the rescan actually drains (F21 Fire 3). A provisioning
+# failure degrades to no Loupe demo for now — never a failed bring-up, Facet
+# is the primary surface.
+PROVISION_TIMEOUT_SECONDS="${PROVISION_TIMEOUT_SECONDS:-90}" \
+	"$REPO_ROOT/deploy/demo/start-demo-loupe.sh" ||
+	echo "demo-up: demo Loupe not ready yet; lattice-demo-loupe-retry.timer will keep trying" >&2
 
 echo "==> Restarting facet in demo-persona posture..."
 pkill -f "bin/facet" 2>/dev/null || true

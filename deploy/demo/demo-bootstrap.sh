@@ -72,11 +72,17 @@ echo "==> Bringing the demo up..."
 "$HERE/demo-up.sh"
 
 echo "==> Installing systemd units..."
-for unit in lattice-demo.service lattice-demo-reset.service lattice-demo-reset.timer; do
+for unit in lattice-demo.service lattice-demo-reset.service lattice-demo-reset.timer \
+	lattice-demo-loupe-retry.service lattice-demo-loupe-retry.timer; do
 	sed "s|__REPO__|${REPO_ROOT}|g" "$HERE/systemd/$unit" >"/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 systemctl enable lattice-demo.service
 systemctl enable --now lattice-demo-reset.timer
+if [[ -n "$DEMO_LOUPE_HOST" ]]; then
+	systemctl enable --now lattice-demo-loupe-retry.timer
+else
+	systemctl disable --now lattice-demo-loupe-retry.timer 2>/dev/null || true
+fi
 
 echo "==> Done. Demo: https://${DEMO_HOST}/login · nightly reset: lattice-demo-reset.timer (09:10 UTC)"

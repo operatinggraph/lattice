@@ -70,3 +70,6 @@ loupe-operator.json
 # Hosted-demo box state written by deploy/demo scripts (per-world, per-box).
 demo-loupe-host
 loupe-demo-operator.json
+loupe-demo-operator.pending.json
+provision-demo-operator.lock
+loupe-demo.pid

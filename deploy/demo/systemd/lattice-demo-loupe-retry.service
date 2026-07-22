@@ -1,0 +1,28 @@
+# Installed by demo-bootstrap.sh with __REPO__ substituted; only enabled when
+# the box has a demo-Loupe host configured. Bounded catch-up for the read-only
+# demo Loupe: a no-op if it's already up, otherwise one bounded provisioning
+# attempt so a single tick never blocks longer than PROVISION_TIMEOUT_SECONDS.
+# Scheduling lives in lattice-demo-loupe-retry.timer.
+[Unit]
+Description=Lattice hosted demo — retry starting the read-only demo Loupe
+# Ordered after the units that already attempt a demo-Loupe start themselves,
+# so a retry tick doesn't race provision-demo-operator.sh's own lock against a
+# concurrent boot/reset run for no reason (the lock makes it safe either way,
+# this just avoids the wasted no-op).
+After=docker.service lattice-demo.service lattice-demo-reset.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=__REPO__
+Environment=PROVISION_TIMEOUT_SECONDS=120
+# Budget must exceed PROVISION_TIMEOUT_SECONDS (same rule as the sibling units,
+# commit 5345fd76) — otherwise systemd's own default can SIGTERM the wait
+# before the script's own bound does.
+TimeoutStartSec=300
+ExecStart=__REPO__/deploy/demo/start-demo-loupe.sh
+# start-demo-loupe.sh backgrounds bin/loupe with `nohup … &` and returns; on a
+# successful tick that's the ONLY process this run needs to survive past
+# ExecStart exiting. Without this, the default control-group cleanup kills it
+# the moment the oneshot deactivates (same failure lattice-demo-reset.service
+# already guards against — see its own comment).
+KillMode=process

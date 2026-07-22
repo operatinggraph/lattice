@@ -9,12 +9,13 @@ Requires=docker.service
 Type=oneshot
 WorkingDirectory=__REPO__
 ExecStart=__REPO__/deploy/demo/demo-reset.sh
-# The wipe rebuilds every Refractor durable, so the next start rescans the whole
-# graph before the auth plane answers for any new actor — tens of minutes on a
-# 2 vCPU box. provision-demo-operator.sh waits that out (PROVISION_TIMEOUT_SECONDS,
-# default 45m), so this budget must exceed it or systemd kills the reset partway
-# and the demo comes back without its Loupe operator.
-TimeoutStartSec=4200
+# Covers the wipe, stack rebuild, package installs and showcase seed. The
+# post-wipe auth-plane rescan itself (tens of minutes to multiple hours on a
+# 2 vCPU box) runs in the background and outlives this unit; demo-up.sh's own
+# demo-Loupe attempt is bounded (PROVISION_TIMEOUT_SECONDS=90) rather than
+# waiting it out, and lattice-demo-loupe-retry.timer picks the Loupe start up
+# later, whenever the rescan actually drains (F21 Fire 3).
+TimeoutStartSec=1800
 # demo-up.sh leaves the stack's host processes (processor … facet) running in
 # the background, lifecycle-managed by the scripts' own pkills; the default
 # control-group cleanup would reap them all the moment the oneshot deactivates.

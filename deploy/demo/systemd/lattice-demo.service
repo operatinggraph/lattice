@@ -11,9 +11,9 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=__REPO__
 ExecStart=__REPO__/deploy/demo/demo-up.sh
-# Same rescan applies at boot: demo-up.sh provisions the demo operator, which
-# waits for the auth plane to converge before Loupe can start.
-TimeoutStartSec=4200
+# Covers a cold-box stack bring-up + showcase seed; the demo-Loupe attempt
+# inside demo-up.sh is bounded (PROVISION_TIMEOUT_SECONDS=90), not a long wait.
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target

@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # provision-demo-operator.sh — the hosted read-only Loupe's actor (F20): install
-# the demo-operator grant package, mint a fresh identity holding ONLY the
+# the demo-operator grant package, mint an identity holding ONLY the
 # demoOperator role, wait until the platform actually authorizes it, and persist
-# the key to loupe-demo-operator.json for demo-up.sh.
+# the key to loupe-demo-operator.json for demo-up.sh / start-demo-loupe.sh.
 #
 # The showcase world (and with it this identity) dies with every nightly reset,
-# so demo-up.sh runs this on every bring-up. Idempotent per-world: a marker key
-# that still authorizes is reused; a stale one (fresh world) is replaced. The
-# minted email carries a per-attempt random suffix — email is an identity-index
-# dedup key, so a fixed address would wedge every re-mint on the same world.
+# so demo-up.sh runs this on every bring-up, and lattice-demo-loupe-retry.timer
+# re-runs it every few minutes until the post-reset rescan drains (F21 Fire 3;
+# PROVISION_TIMEOUT_SECONDS bounds a single invocation — the caller decides how
+# patient THIS attempt is, retrying is what covers the full drain). Idempotent
+# per-world: a confirmed marker that still authorizes is reused; a pending
+# (assigned-but-not-yet-authorized) identity from THIS world is reused across
+# retries rather than re-minted, so a slow drain doesn't leave a trail of
+# abandoned identities — only a genuinely fresh world re-mints. The minted
+# email carries a per-attempt random suffix — email is an identity-index dedup
+# key, so a fixed address would wedge every re-mint on the same world.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -21,6 +27,18 @@ NKEY_CLI="deploy/nkeys/lattice.nk"
 NKEY_PKG="deploy/nkeys/lattice-pkg.nk"
 BOOTSTRAP_JSON="${BOOTSTRAP_JSON_PATH:-$REPO_ROOT/lattice.bootstrap.json}"
 MARKER="$REPO_ROOT/loupe-demo-operator.json"
+PENDING="$REPO_ROOT/loupe-demo-operator.pending.json"
+
+# demo-up.sh (boot/reset) and lattice-demo-loupe-retry.timer can both invoke
+# this script; without serializing them, two overlapping runs that both see
+# no MARKER/PENDING yet would each mint their own identity. A non-blocking
+# lock makes an overlapping run a cheap no-op (treated as "not ready yet")
+# rather than a race.
+exec 9>"$REPO_ROOT/provision-demo-operator.lock"
+if ! flock -n 9; then
+	echo "provision-demo-operator: another run is already in flight — skipping this attempt." >&2
+	exit 1
+fi
 
 # authorizes <actorKey>: submits a class-less ctrl.weaver.read as the actor.
 # Step-3 authorization precedes step-4 hydration, so AuthDenied means the
@@ -58,6 +76,8 @@ for a in d.get("account_details",[]):
 print(t)' 2>/dev/null || echo -1
 }
 
+ADMIN_KEY="vtx.identity.$(jq -r '.primordialIDs.bootstrapIdentity' "$BOOTSTRAP_JSON")"
+
 if [[ -f "$MARKER" ]]; then
 	existing="$(jq -r '.operatorActorKey // empty' "$MARKER")"
 	if [[ -n "$existing" ]] && authorizes "$existing"; then
@@ -67,26 +87,41 @@ if [[ -f "$MARKER" ]]; then
 	echo "==> Stale demo-operator marker (fresh world) — re-provisioning."
 fi
 
-echo "==> Installing demo-operator grant package (idempotent)..."
-NATS_URL="$NATS_URL" NATS_NKEY="$NKEY_PKG" BOOTSTRAP_JSON_PATH="$BOOTSTRAP_JSON" \
-	./bin/lattice-pkg install packages/demo-operator
-make provision-readpath >/dev/null
-echo "==> Read-path provisioned for demoOperatorReadGrants."
+OP_KEY=""
+if [[ -f "$PENDING" ]]; then
+	pendingAdmin="$(jq -r '.adminKey // empty' "$PENDING")"
+	pendingKey="$(jq -r '.operatorActorKey // empty' "$PENDING")"
+	if [[ "$pendingAdmin" == "$ADMIN_KEY" && -n "$pendingKey" ]]; then
+		echo "==> Reusing pending demo operator from this world (still converging): $pendingKey"
+		OP_KEY="$pendingKey"
+	else
+		echo "==> Pending demo-operator marker is from a prior world — discarding."
+		rm -f "$PENDING"
+	fi
+fi
 
-ADMIN_KEY="vtx.identity.$(jq -r '.primordialIDs.bootstrapIdentity' "$BOOTSTRAP_JSON")"
-ROLE_KEY="$(go run ./scripts/print-role-id.go demo-operator demoOperator)"
-suffix="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
-OP_KEY="$(NATS_URL="$NATS_URL" NATS_NKEY="$NKEY_CLI" ./bin/lattice identity create-unclaimed \
-	--actor "$ADMIN_KEY" --output json \
-	--payload "{\"name\":\"Demo Operator\",\"email\":\"demo-operator-${suffix}@demo.lattice.local\"}" \
-	| jq -r '.data.primaryKey')"
-[[ -n "$OP_KEY" && "$OP_KEY" != "null" ]] || { echo "provision-demo-operator: identity mint failed" >&2; exit 1; }
-echo "==> Demo operator identity: $OP_KEY"
-NATS_URL="$NATS_URL" NATS_NKEY="$NKEY_CLI" ./bin/lattice op submit \
-	--operation-type AssignRole --actor "$ADMIN_KEY" --output json \
-	--payload "{\"actorKey\":\"$OP_KEY\",\"roleKey\":\"$ROLE_KEY\"}" \
-	--context-hint-reads "$OP_KEY,$ROLE_KEY" >/dev/null
-echo "==> demoOperator assigned; waiting for the capability projection..."
+if [[ -z "$OP_KEY" ]]; then
+	echo "==> Installing demo-operator grant package (idempotent)..."
+	NATS_URL="$NATS_URL" NATS_NKEY="$NKEY_PKG" BOOTSTRAP_JSON_PATH="$BOOTSTRAP_JSON" \
+		./bin/lattice-pkg install packages/demo-operator
+	make provision-readpath >/dev/null
+	echo "==> Read-path provisioned for demoOperatorReadGrants."
+
+	ROLE_KEY="$(go run ./scripts/print-role-id.go demo-operator demoOperator)"
+	suffix="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+	OP_KEY="$(NATS_URL="$NATS_URL" NATS_NKEY="$NKEY_CLI" ./bin/lattice identity create-unclaimed \
+		--actor "$ADMIN_KEY" --output json \
+		--payload "{\"name\":\"Demo Operator\",\"email\":\"demo-operator-${suffix}@demo.lattice.local\"}" \
+		| jq -r '.data.primaryKey')"
+	[[ -n "$OP_KEY" && "$OP_KEY" != "null" ]] || { echo "provision-demo-operator: identity mint failed" >&2; exit 1; }
+	echo "==> Demo operator identity: $OP_KEY"
+	NATS_URL="$NATS_URL" NATS_NKEY="$NKEY_CLI" ./bin/lattice op submit \
+		--operation-type AssignRole --actor "$ADMIN_KEY" --output json \
+		--payload "{\"actorKey\":\"$OP_KEY\",\"roleKey\":\"$ROLE_KEY\"}" \
+		--context-hint-reads "$OP_KEY,$ROLE_KEY" >/dev/null
+	printf '{"operatorActorKey":"%s","adminKey":"%s"}\n' "$OP_KEY" "$ADMIN_KEY" >"$PENDING"
+	echo "==> demoOperator assigned; waiting for the capability projection..."
+fi
 
 # Wait for the projection, not for a stopwatch. The deadline is generous
 # because the honest bound is "however long the rescan takes", and progress is
@@ -115,4 +150,5 @@ until authorizes "$OP_KEY"; do
 	sleep 5
 done
 printf '{"operatorActorKey":"%s"}\n' "$OP_KEY" >"$MARKER"
+rm -f "$PENDING"
 echo "==> Demo operator ready: $OP_KEY (persisted to $MARKER)"

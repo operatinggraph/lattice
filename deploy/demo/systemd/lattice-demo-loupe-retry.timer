@@ -1,0 +1,13 @@
+# Installed by demo-bootstrap.sh; only enabled when the box has a demo-Loupe
+# host configured. Fires indefinitely so the demo Loupe self-heals within
+# minutes of the post-reset auth-plane rescan actually draining, however long
+# that turns out to take on a given night (F21 Fire 3).
+[Unit]
+Description=Periodic retry for the read-only demo Loupe after a world reset
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
