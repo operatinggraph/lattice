@@ -172,7 +172,7 @@ func main() {
 		frontOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
 		staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, buildingKey, staffName, staffEmail)
 		fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
-		seedStaffWorklistApplication(ctx, conn, adminKey)
+		seedStaffWorklistApplication(ctx, conn, adminKey, staffKey)
 		fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
 		return
 	}
@@ -274,7 +274,7 @@ func main() {
 		&processor.ContextHint{Reads: []string{instKey}})
 	fmt.Println("==> instance:        " + instKey + " (laundry, tenant1, completed) — Activity timeline seed")
 
-	seedStaffWorklistApplication(ctx, conn, adminKey)
+	seedStaffWorklistApplication(ctx, conn, adminKey, staffKey)
 
 	// Cold-start race guard (verticals.md "Facet cold-start races the cap
 	// projection", ef45e83): wait for both tenants' consumer role grant to
@@ -657,7 +657,7 @@ func seedLocationPresentation(ctx context.Context, conn *substrate.Conn, adminKe
 // applicant identity never needs recovering). A visitor deciding the
 // application empties the pane until the next reset — the same
 // defacement-bounded model as every other demo write.
-func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adminKey string) {
+func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adminKey, staffKey string) {
 	if !alive(ctx, conn, unit3Key) {
 		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
 			map[string]any{"locationType": "unit", "locationId": unit3ID,
@@ -665,6 +665,22 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
 			map[string]any{"child": unit3Key, "parent": buildingKey},
 			&processor.ContextHint{Reads: []string{unit3Key, buildingKey}})
+	}
+	// The landlord read model only projects an application whose unit has a
+	// `manages` link (its MATCH walks unit ← manages ← identity); the staff
+	// persona doubles as Unit 3's manager. Wired before the application so a
+	// fresh world's projection walk finds the whole chain on first sight.
+	managesLnk := linkKey(staffKey, "manages", unit3Key)
+	if !alive(ctx, conn, managesLnk) {
+		submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
+			map[string]any{"landlord": staffKey, "unit": unit3Key},
+			&processor.ContextHint{Reads: []string{staffKey, unit3Key}})
+	}
+	if !alive(ctx, conn, unit3Key+".address") {
+		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
+			map[string]any{"unit": unit3Key, "line1": "12 Riverside Walk", "city": "Riverside",
+				"region": "CA", "postal": "92501"},
+			&processor.ContextHint{Reads: []string{unit3Key}})
 	}
 	if !alive(ctx, conn, leaseApp3Key) {
 		salt, err := substrate.NewNanoID()
