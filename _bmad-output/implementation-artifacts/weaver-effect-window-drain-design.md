@@ -1,6 +1,16 @@
 # Weaver `__effect` window drain (`resetConfidence` control verb) — design
 
-**Status: ✅ Andrew-ratified (2026-07-21)** · Designer fire 2026-07-21 · lane row: backlog/lattice.md → Component maintenance → *[Weaver] Drain the `__effect` windows polluted before the attempt-booking fix*
+**Status: ✅ SHIPPED (2026-07-22, `52fc791f`)** — ratified by Andrew 2026-07-21, built as designed in one
+fire · Designer fire 2026-07-21 · lane row retired to backlog/lattice.md's Done log.
+
+Two §9 details did not survive contact with the code, corrected here rather than silently:
+`make verify-package-control-authz` / `verify-package-console-operator` **do not exist** as Makefile
+targets — the packages' own `package_test.go` grant-surface assertions are the real gate (both updated,
+plus demo-operator's deny-list). And `substrate.Conn` is a concrete type with no fake-conn seam, so the
+revision-conflict arm is pinned at the `KVDeleteRevision` seam the loop calls rather than by injection
+inside it; a timing-driven race would have been the fixed-sleep synchronisation the house rules forbid.
+The key surgery landed in `markStore.deleteEffectWindows` (state.go), where every other `weaver-state`
+key/CAS helper lives, with `Engine.ResetConfidence` holding the registration gate and the log line.
 
 ## For Andrew
 

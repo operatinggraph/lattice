@@ -52,7 +52,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Bootstrap] `cmd/bootstrap` has no test files — the seed decision is inspection-only** | The probe, re-seed, and two-phase reopen are covered in `internal/bootstrap`, but the branch that *decides* to re-seed lives in `package main` and is untested. Consumer: the freshness probe's own decision path. Either extract the decision into `internal/bootstrap` or add a `cmd/bootstrap` test binary. | ★ | XS–S | 📋 ready · `cmd/bootstrap/main.go:110-140` |
 | **[CI] `edge-browser-store` reds the gate on a slow headless-Chrome cold start** | `wasmbrowsertest` waits a chromedp-hardcoded 20s for Chrome's DevTools banner and exposes no knob for it (`test-edge-idb-conformance`). `-p 1` already removed self-contention, yet one cold start still overran on a loaded runner — observed on main, green on re-run, whole gate red meanwhile. Nothing retries the suite. Retry once on the `websocket url timeout reached` signature alone, so real failures stay unmasked. | ★★ | XS–S | 📋 ready |
-| **[Weaver] Drain the `__effect` windows polluted before the attempt-booking fix** | The attempt-booking fix stops NEW unanswerable episodes but cannot drain windows already full. The live stack holds standing `LensEffectMismatch` windows (`leaseApplicationComplete`) that cannot self-clear. Design: a narrow `resetConfidence` control verb (disable < reset < revoke ladder); no age-out, ratified §3.2 untouched. | ★★ | XS–S | ✅ Andrew-ratified (2026-07-21) · [design](../../implementation-artifacts/weaver-effect-window-drain-design.md) |
 | **[Refractor] Capability first-projection loss — a new actor's first holdsRole can mint no `cap.roles` doc** | A fresh identity's first AssignRole projected no doc (absent 30+ min; survives Refractor restart; nothing re-drives it), while a later holdsRole on a doc-holding actor folds the same role in seconds — silent grant loss at the auth plane. Suspect: actor-aggregate fan-out vs adjacency-build ordering. Blocks Loupe F20 exposure. Repro: demo box 2026-07-22. | ★★★ | M–L | 📋 ready |
 
 ### Survey log (round-robin rotation)
@@ -115,9 +114,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now.** Every ✅ ratified row in the feature tables below is Andrew-gated or
 > driver-blocked, so the live picks are the **📋 ready rows in Component maintenance** above. Top of that
-> stack now: the ★★ **[Weaver] drain the polluted windows** (✅ ratified — build the `resetConfidence` verb),
-> then **[CI] `edge-browser-store` retry** (★★ XS–S — Whetstone's lane), the Steward's own
-> **[Weaver] fresh-episode/reclaim error-branch coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S).
+> stack now: the ★★★ **[Refractor] capability first-projection loss** (silent grant loss at the auth
+> plane; blocks Loupe F20 exposure), then **[CI] `edge-browser-store` retry** (★★ XS–S — Whetstone's lane),
+> the Steward's own **[Weaver] fresh-episode/reclaim error-branch coverage** (★ S–M) and
+> **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S).
 > A stale callout starves the lane — whoever ships the top pick renames this to the next.
 
 > 📐 **Awaiting Andrew — one contract edit staged uncommitted in `main`.**
@@ -190,6 +190,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · `52fc791f` · [weaver] `resetConfidence` control verb + CLI drains a target's `__effect` confidence windows — the disable<reset<revoke ladder's middle rung; grants to control-authz + console-operator, never demo-operator
 - 2026-07-22 · `9af5aed5` · [loom] poll-until-created in the e2e harness (new `waitTaskCreated`) — closes the `taskCreated`-after-`waitTaskKey` relay race across 8 sites; `-race -count=5` clean
 - 2026-07-22 · confirm-only · [refractor] the two protected lenses (`landlordUnitsRead`/`landlordLeaseApplicationsRead`) confirmed clean live — 0 target rows vs a graph with 0 `manages` links: nothing to reconcile
 - 2026-07-21 · `7b74ce70` · [packages] demo-operator inspect-only grant package (F20.3) — console-operator minus every write: `demoOperator` role + read lens + 3 `ctrl.*.read` grants; the platform boundary for public Loupe exposure (Andrew-gated)
