@@ -242,6 +242,33 @@ func (s *Seeder) PrimordialSeeded(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+// DecideReseed is the file/bucket-agreement check `cmd/bootstrap` runs before
+// deciding whether to invoke SeedPrimordial. A freshly generated ID set (no
+// prior file, or a crash-recovered `in-progress` one) always needs seeding.
+// Otherwise it consults PrimordialSeeded: if Core KV already holds the
+// primordial set, no reseed is needed; if not — a recreated or wiped bucket
+// behind a surviving `status="committed"` file — it reopens the two-phase
+// commit window at bootstrapJSONPath (keeping the file's stable NanoIDs) and
+// reports that seeding must run.
+func DecideReseed(ctx context.Context, seeder *Seeder, bootstrapJSONPath string, freshlyGenerated bool, logger *slog.Logger) (shouldSeed bool, err error) {
+	if freshlyGenerated {
+		return true, nil
+	}
+	seeded, err := seeder.PrimordialSeeded(ctx)
+	if err != nil {
+		return false, fmt.Errorf("probe Core KV for the primordial set: %w", err)
+	}
+	if seeded {
+		return false, nil
+	}
+	logger.Warn("lattice.bootstrap.json says committed but Core KV holds no op tracker — bucket recreated or wiped; re-seeding with the file's stable NanoIDs",
+		"path", bootstrapJSONPath, "key", BootstrapOpKey)
+	if err := PersistInProgress(bootstrapJSONPath); err != nil {
+		return false, fmt.Errorf("mark %s in-progress: %w", bootstrapJSONPath, err)
+	}
+	return true, nil
+}
+
 // Kernel composition:
 //
 //   - 1 bootstrap op tracker

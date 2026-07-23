@@ -110,34 +110,16 @@ func main() {
 	// `lattice.bootstrap.json` is file-local: it records what a bootstrap run
 	// once did on some Core KV, not what this Core KV currently holds. A
 	// recreated or wiped bucket behind a surviving status="committed" file
-	// would otherwise come up "ready" with silently-empty reads. Probe the
-	// bucket itself — provisioning above has ensured it exists — and seed on
-	// the bucket's answer. The NanoIDs loaded from the file are stable, so
-	// re-seeding restores exactly the keys existing packages and data
-	// already reference.
-	if !freshlyGenerated {
-		probeCtx, cancelProbe := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-		seeded, err := seeder.PrimordialSeeded(probeCtx)
-		cancelProbe()
-		if err != nil {
-			logger.Error("failed to probe Core KV for the primordial set", "error", err)
-			os.Exit(1)
-		}
-		if !seeded {
-			logger.Warn("lattice.bootstrap.json says committed but Core KV holds no op tracker — bucket recreated or wiped; re-seeding with the file's stable NanoIDs",
-				"path", bootstrapJSONPath, "key", bootstrap.BootstrapOpKey)
-			// Re-open the two-phase commit window before seeding. The file
-			// says "committed", but that claim does not cover this Core KV;
-			// leaving it would let a seed that dies partway read as complete
-			// to the next run — the exact state this probe exists to catch,
-			// and one the op tracker's write-first position would then mask.
-			// Only the status changes; the NanoIDs are untouched.
-			if err := bootstrap.PersistInProgress(bootstrapJSONPath); err != nil {
-				logger.Error("failed to mark lattice.bootstrap.json in-progress", "error", err)
-				os.Exit(1)
-			}
-			freshlyGenerated = true
-		}
+	// would otherwise come up "ready" with silently-empty reads.
+	// bootstrap.DecideReseed probes the bucket itself — provisioning above
+	// has ensured it exists — and reopens the two-phase commit window
+	// (keeping the file's stable NanoIDs) if the bucket disagrees with it.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	freshlyGenerated, err = bootstrap.DecideReseed(probeCtx, seeder, bootstrapJSONPath, freshlyGenerated, logger)
+	cancelProbe()
+	if err != nil {
+		logger.Error("failed to decide whether to re-seed", "error", err)
+		os.Exit(1)
 	}
 
 	if freshlyGenerated {
