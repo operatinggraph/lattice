@@ -2083,12 +2083,65 @@ function toLocalInputValue(rfc3339) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// nowLocalInputValue returns the current local wall time as the
-// "YYYY-MM-DDTHH:MM" a <input type=datetime-local min=...> expects. Used as a
-// first line of defence so the browser's own picker discourages a past time; the
-// CreateAppointment / RescheduleAppointment op is the authority (ScheduleInPast).
+// GRID_MS is the clinic's mandatory 15-minute booking grid (SlotGridViolation
+// otherwise; ddls.go enforce_grid), in milliseconds. Every real-world UTC
+// offset in use today is itself a multiple of 15 minutes, so rounding a LOCAL
+// wall-clock instant to the nearest quarter hour always lands on a
+// grid-aligned UTC instant too — no timezone-aware handling needed here.
+const GRID_MS = 15 * 60000;
+
+// snapToGridInputValue rounds a <input type=datetime-local> value to the
+// nearest 15-minute grid mark (:00/:15/:30/:45). Used to keep #startsAt /
+// #rs-startsAt always holding a grid time, since the browser's own datetime
+// picker does not restrict its minute list to step-aligned values (only
+// keyboard arrow-stepping and submit-time validation honor `step`) — silently
+// snapping on change is what actually keeps a non-grid pick from reaching
+// submit.
+function snapToGridInputValue(localValue) {
+  const d = new Date(localValue);
+  if (isNaN(d)) return localValue;
+  const snapped = Math.round(d.getTime() / GRID_MS) * GRID_MS;
+  return toLocalInputValue(new Date(snapped).toISOString());
+}
+
+// applyGridSnapToField re-snaps a datetime-local field in place and, only when
+// the snap actually moved the value, shows a brief inline note in the
+// sibling hint element (hidden again once the field holds a grid time). Wired
+// to the field's `change` event for live feedback while typing/picking; a
+// second, silent call to snapToGridInputValue right before a submit payload
+// is built is the authoritative backstop for paths that set .value directly
+// (e.g. the "Find available times" slot buttons) and so never fire `change`.
+function applyGridSnapToField(inputSel, noteSel) {
+  const input = $(inputSel);
+  const note = $(noteSel);
+  if (!input.value) {
+    if (note) note.hidden = true;
+    return;
+  }
+  const snapped = snapToGridInputValue(input.value);
+  if (snapped && snapped !== input.value) {
+    input.value = snapped;
+    if (note) {
+      note.textContent = "Snapped to the nearest 15-minute grid mark.";
+      note.hidden = false;
+    }
+  } else if (note) {
+    note.hidden = true;
+  }
+}
+
+// nowLocalInputValue returns the current local wall time, rounded UP to the
+// clinic's 15-minute booking grid, as the "YYYY-MM-DDTHH:MM" a
+// <input type=datetime-local step=900> expects for its min. A min that is
+// itself off-grid shifts the browser's whole valid-step range with it (step
+// validity is computed as min + step·n, not from :00) — that both rejected
+// on-the-grid times like :30 and offered non-grid "nearest valid values" back.
+// Used as a first line of defence so the browser's own picker discourages a
+// past time; the CreateAppointment / RescheduleAppointment op is the
+// authority (ScheduleInPast).
 function nowLocalInputValue() {
-  return toLocalInputValue(new Date().toISOString());
+  const ms = Math.ceil(Date.now() / GRID_MS) * GRID_MS;
+  return toLocalInputValue(new Date(ms).toISOString());
 }
 
 // durationMinutes derives the appointment length (minutes) from its start/end so
@@ -2111,11 +2164,15 @@ async function submitBook(ev) {
     toast("Select a provider.", "err");
     return;
   }
-  const when = $("#startsAt").value;
-  if (!when) {
+  if (!$("#startsAt").value) {
     toast("Pick a date and time.", "err");
     return;
   }
+  // Authoritative backstop: re-snap even if the field's last change came from
+  // a direct .value set (the "Find available times" slot buttons) rather than
+  // the change-listener path above.
+  applyGridSnapToField("#startsAt", "#grid-snap-note");
+  const when = $("#startsAt").value;
   const startsAt = toRFC3339(when);
   const endsAt = addMinutesRFC3339(when, Number($("#duration").value || 30));
   if (!startsAt || !endsAt) {
@@ -2935,7 +2992,13 @@ async function submitStartSeries() {
   const submit = $("#series-start-submit");
   submit.disabled = true;
   try {
-    const reply = await submitOp("StartVisitSeries", "", payload, [state.patient, providerKey]);
+    // The op claims a deterministic per-patient+provider guard aspect
+    // (activeVisitSeriesWith<providerId>) that rejects ActiveVisitSeriesExists
+    // for a second concurrently-active series on the same pair — class-(d)
+    // declared optionalReads (absence is the common case: this pair's first-ever
+    // series). Mirrors clinic-domain's slotClaimKeys dispatch pattern.
+    const optionalReads = [state.patient + ".activeVisitSeriesWith" + vtxId(providerKey)];
+    const reply = await submitOp("StartVisitSeries", "", payload, [state.patient, providerKey], { optionalReads });
     const msg = rejectionMessage(reply);
     if (msg) {
       toast(msg, "err");
@@ -3641,11 +3704,13 @@ async function submitReschedule(ev) {
     closeReschedule();
     return;
   }
-  const when = $("#rs-startsAt").value;
-  if (!when) {
+  if (!$("#rs-startsAt").value) {
     toast("Pick a new date and time.", "err");
     return;
   }
+  // Authoritative backstop, mirrors submitBook's re-snap.
+  applyGridSnapToField("#rs-startsAt", "#rs-grid-snap-note");
+  const when = $("#rs-startsAt").value;
   const startsAt = toRFC3339(when);
   const endsAt = addMinutesRFC3339(when, Number($("#rs-duration").value || 30));
   if (!startsAt || !endsAt) {
@@ -3923,6 +3988,7 @@ function init() {
     $("#startsAt").min = nowLocalInputValue();
   });
   $("#startsAt").addEventListener("change", () => {
+    applyGridSnapToField("#startsAt", "#grid-snap-note");
     refreshTimeOffWarning();
     refreshSlots(); // keep the slot highlight in sync with a typed time
   });
@@ -3945,6 +4011,9 @@ function init() {
     if (e.target === $("#reschedule-overlay")) closeReschedule();
   });
   $("#reschedule-form").addEventListener("submit", submitReschedule);
+  $("#rs-startsAt").addEventListener("change", () => {
+    applyGridSnapToField("#rs-startsAt", "#rs-grid-snap-note");
+  });
 
   $("#encounter-cancel").addEventListener("click", closeEncounter);
   $("#encounter-overlay").addEventListener("click", (e) => {
