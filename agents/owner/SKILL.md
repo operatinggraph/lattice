@@ -32,6 +32,14 @@ Read before proposing anything:
 Summarize the existing pattern + constraints. Do **not** redesign from scratch (ground first — this is the
 antidote to proposing shapes that drift from the code).
 
+**Then compile the FIRE BRIEF (Phase 0 — mandatory for M+ / multi-package / security-plane work; template +
+gate: [`agents/fire-brief-template.md`](../fire-brief-template.md)):** verified touch-list + precedents to
+mirror + increment order with runnable green checks + in-scope gotchas + adjacent finds (filed to the board
+*before* the first edit) + non-goals, gated by the **scope-diff** against the item's ratified scope sentence
+(narrow-only; dependencies re-verified both ways), appended to the owning design doc as its build note and
+committed (docs, in `main`) before code. If the Steward handed you a brief, re-verify its citations still
+hold and build from it; if activated without one, produce it first.
+
 **Architecture invariants you build to (lattice-architecture.md — honor, don't relearn the hard way):**
 
 - **P2 — the Processor is the sole writer to Core KV.** Mutate state by *submitting operations*

@@ -48,6 +48,10 @@ you are building*:
 1. **Ground:** read the UX design (Sally's spec) + the existing FE (`cmd/loupe/web/*`, the relevant
    `cmd/loupe/*.go` handler) — match the existing idioms (the vanilla-JS patterns, `style.css`, the
    `server.go` route + `embed` pattern). **Never reframework** a vanilla-JS surface.
+   **Then compile the fire brief** per [`agents/fire-brief-template.md`](../fire-brief-template.md)
+   (Phase 0 — mandatory for M+; scope-diff gate against the ratified scope sentence, narrow-only; adjacent
+   finds filed *before* the first edit; brief committed to the owning design doc as its build note). Build
+   from the brief; if the Steward handed one, re-verify its citations before trusting them.
 2. **Implement:** the HTML/CSS/JS plus any Go handler/endpoint the view needs. **Source data per the P5 rule
    above** — a vertical app reads **lens read-model buckets** (copy `cmd/loftspace-app/*.go`); only Loupe (the
    console) reads Core KV. Health KV + control planes are fine to read for operator surfaces; writes are

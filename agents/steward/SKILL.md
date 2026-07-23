@@ -223,6 +223,20 @@ types; only generic types exist, and a cold generic agent would just re-derive w
 You are Winston throughout: follow the playbook, build, and **admit (§4) yourself** — there is no separate
 hand-up.
 
+**Phase 0 — compile the fire brief BEFORE any edit (mandatory; template + full rules:
+[`agents/fire-brief-template.md`](../fire-brief-template.md)).** Between selecting the item and opening a
+worktree: fan out **read-only scout sub-agent(s)** (Read/Grep/Glob + read-only git; no make/docker/builds/
+writes — scouts are generic agents, the *roles* below are still followed inline, never spawned) over the code
+the fire touches, then compile their reports into the **fire brief** — scope sentence verbatim · verified
+touch-list (`file:line` checked live) · precedents to mirror · increment order + runnable green checks ·
+in-scope gotchas · **adjacent finds filed to the board NOW** · non-goals — and run the **scope-diff gate**:
+brief vs the ratified scope sentence, item-by-item, narrow-only, never substituting an adjacent mechanism;
+declared dependencies re-verified both ways. Append the brief to the owning design doc as its build note and
+**commit it (docs, in `main`) before code**. The brief is what lets builder sub-agents run mechanical
+increments on a cheaper tier, and it moves residual-filing *before* the build — §4's residual harvest then
+catches only true surprises (frequent mid-build residuals = a brief-quality defect). XS/S single-file fires
+may compress the brief in-context; the scope-diff gate applies at every size.
+
 Pick the role: **Verticals** → package work via the **owner** playbook + **UX-then-FE**; **Lattice** → the
 **owner** playbook (named component) or **Lamplighter** (observability) — **and Loupe operator-surface FE
 (`cmd/loupe/web`) is UX-then-FE too** (Loupe is a Lattice component: owner for its backend/handlers, UX-then-FE

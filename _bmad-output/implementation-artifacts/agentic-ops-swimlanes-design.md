@@ -138,6 +138,15 @@ Each advancer fire:
    commit; **then exit.** No "drain", no "budget" guessing.
 5. **Multi-fire** for big items: persistent worktree + a 🏗️ CHECKPOINT; merge only when complete + green.
 
+**Between Select and Advance, every build fire compiles a FIRE BRIEF (Phase 0; rules + template:
+`agents/fire-brief-template.md` — Winston 2026-07-23, first trialed on persona-worlds W0):** read-only
+scouts → a committed build-note artifact (verified touch-list · precedents to mirror · increment order +
+runnable green checks · in-scope gotchas · adjacent finds filed pre-build · non-goals) → the **scope-diff
+gate** against the ratified scope sentence (narrow-only, dependencies re-verified both ways). Design docs
+stay outcome-level on purpose; the brief is the just-in-time story compilation that lets the builder
+execute instead of rediscover — and lets mechanical increments run on a cheaper tier. It is the old
+create-story→dev-story chain's story file, reborn per-fire at selection time.
+
 Cadence: both advancers fire densely + staggered; the two hydrators on their own cadence. Tune **up** until the
 limiter occasionally trips — that trip is the signal the window is fully used.
 
