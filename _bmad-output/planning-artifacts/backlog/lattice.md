@@ -139,7 +139,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Edge & personal lenses
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Persona-worlds platform seams (whoami hats + appsession kit)** | `GET /v1/actor` grows `roles[]`+`anchors[]` (the app-facing "which hats do I hold" answer) and Facet's session block (login page, cookie, refresh, login-time resolution, persona fence) extracts to a shared `internal/appsession` kit all five FE binaries adopt. | ★★★ | M | ✅ ratified · [design §8 P1–P2](../../implementation-artifacts/persona-worlds-design.md) |
+| **Persona-worlds platform seams (whoami hats + appsession kit)** | `GET /v1/actor` grows `roles[]`+`anchors[]` (the app-facing "which hats do I hold" answer) and Facet's session block (login page, cookie, refresh, login-time resolution, persona fence) extracts to a shared `internal/appsession` kit all five FE binaries adopt. | ★★★ | M | 🏗️ building · [design §8 P1–P2](../../implementation-artifacts/persona-worlds-design.md) · next: P2 appsession kit |
 | Personal / Secure Lens | Refractor projects a per-identity security-filtered subgraph stream; the Interest-Set watchlist; RLS-style link filtering. | ★★ | L | ✅ effectively done · [design](../../implementation-artifacts/personal-secure-lens-design.md) · Fires 1–5 shipped (D1 + Vault gates closed); PL.6 WS half subsumed by the ratified [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md); multicast dedup stays deferred (bandwidth trigger) |
 | Edge Lattice (full) | The sovereign per-user node: local VAL (SQLite/IndexedDB), local Starlark, offline-first, reconcile-by-revision. EDGE.1–3 (Go node, offline loop, untrusted security turn-on) shipped; EDGE.4–5 per the §7 gates. | ★★★ | XL | ✅ effectively done · [design §7](../../implementation-artifacts/edge-lattice-full-design.md) · EDGE.1–4 + EDGE.5 W1–W4 all shipped + tested · [EDGE.5 design](../../implementation-artifacts/edge-browser-node-design.md) · attended :9222 browser Gate-3 run = optional live demo, not a gate |
 
@@ -180,6 +180,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-23 · `a16b7589` · [gateway,identity-domain] whoami hats — `/v1/actor` reports roles[]+anchors[] via the new `identityAnchors` lens (persona-worlds P1; first Phase-0-brief fire)
 - 2026-07-22 · `1ab88603` · [bootstrap] `VerifyKernel`/`InspectKernel` (the `make verify-kernel` gate logic) gain embedded-NATS defect-injection tests; package 71.2%→82.9%
 - 2026-07-22 · `737e687e` · [bootstrap] `DecideReseed` extracted from `cmd/bootstrap`'s untested probe-then-reopen branch into `internal/bootstrap`, covered by 4 embedded-NATS tests
 - 2026-07-22 · `907d0d34` · [weaver] fresh-episode/reclaim error-branch coverage — `fireEpisode` stale-mark reclaim + dispatch/effect-bump + `reconcileConsumers` Add/Remove faults; package 86.5%→87.9%

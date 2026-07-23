@@ -385,6 +385,17 @@ changes; no W0 seeds; no CORS (filed instead).
 **Scope-diff gate: PASS** — every touch traces to `roles[]`/`anchors[]`; the green bar narrowed (recorded
 above), never widened; declared "depends on nothing" re-verified true.
 
+**As-built (2026-07-23, `a16b7589`):** shipped per brief, sonnet builder, all gates green. Deviations
+(each precedent-grounded): the roles reader takes `*substrate.Conn` directly (every `ReadAndMerge` caller
+does; `*substrate.KV` lacks the bucket-keyed Get); `RealnessFilter:"key"` + `Freshness:"auto"` added —
+without a realness filter, degenerate OPTIONAL-MATCH collect entries keep `EmptyBehavior:"delete"` from
+ever firing (myTasks precedent); `Lanes` omitted (a capability-kv-only semantic); no identity-domain
+lens-count pin exists to extend (the manifest cross-check covers it). **Live-verified** on the running
+stack (2026-07-23): identity-domain 0.4.1→0.5.0 diff-applied in place; Refractor auto-created
+`identity-anchors` at activation (gateway restart logged no unavailable-warning); `bin/gateway` cycled per
+the up-full recipe; `/v1/actor` returns Dana → `[frontOfHouse]` + `worksAt` Riverside Building, Riley →
+`[consumer]` + `residesIn` Unit 1 (container Riverside, names projected). Three-role assertion → W0.
+
 ### Fire W0 fire brief (build note, 2026-07-23)
 
 **1 · Scope sentence (verbatim §8):** *"Fire W0 `[verticals]` — the provider spine (packages).
