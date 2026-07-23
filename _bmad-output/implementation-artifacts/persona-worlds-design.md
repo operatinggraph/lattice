@@ -385,6 +385,112 @@ changes; no W0 seeds; no CORS (filed instead).
 **Scope-diff gate: PASS** — every touch traces to `roles[]`/`anchors[]`; the green bar narrowed (recorded
 above), never widened; declared "depends on nothing" re-verified true.
 
+### Fire W0 fire brief (build note, 2026-07-23)
+
+**1 · Scope sentence (verbatim §8):** *"Fire W0 `[verticals]` — the provider spine (packages).
+identity-domain seeds role `provider` + `personalLensPermissions` lockstep; clinic/wellness/service-domain
+bindings + bind ops + grant producers + provider ops/grants + manifest provider slices + read-grant slices;
+seed-showcase personas. Green: seeded Dr. Osei logs in in Facet and sees her schedule + provider ops, scoped
+to her; the multi-hat human's three worlds compose; verify-package + protected-lens tests green. Depends on:
+P1."* **Narrowings (recorded):** wellness "roster attendance" has NO substrate anywhere (no attendance
+machinery exists) — dropped from W0, owned by W3's design pass; instructor ops scope to cancel-own-session
+(`TombstoneSession` grant + guard). Provider-hat W0 GrantTable producer ships for **clinic only** — wellness/
+service-domain have no Protected table to consume one (orphan-grant avoidance); W3/W2 add theirs with their
+read boundaries.
+
+**2–3 · Touch-list + precedents (scouted live @ `8e9d4c6c`; scout detail in git — this is the checklist):**
+- **Frozen link seam** (everything else builds against these): `lnk.provider.<id>.identifiedBy.identity.<id>`
+  · `lnk.instructor.<id>.identifiedBy.identity.<id>` · `lnk.serviceprovider.<id>.identifiedBy.identity.<id>`
+  (all mirror the patient link, clinic `ddls.go:918-931`) · `lnk.instructor.<id>.teachesAt.studio.<id>` ·
+  `lnk.session.<id>.ledBy.instructor.<id>` · existing type-open `providedBy` reused untouched
+  (`service-domain/ddls.go:429-439`).
+- `packages/identity-domain` — RoleSpec `provider` (package.go:39-44) + tests (package_test.go:27-45) +
+  `scripts/verify-package-identity.go:105`; bump 0.4.1→0.5.0. **Load-bearing non-package edit:**
+  `cmd/lattice-pkg/main.go:565` roleIDsFromBootstrap += "provider" — without it every downstream
+  `GrantsTo:["provider"]` install fails (each install is a separate lattice-pkg process).
+- `packages/control-authz` — permissions.go:63 GrantsTo += "provider" (+Note) + package_test.go:80 +
+  manifest grantsTo ×5; bump 0.6.0→0.7.0.
+- `packages/clinic-domain` (bump 0.23.1→0.24.0): `BindProviderIdentity` in the provider vertexType DDL —
+  identifiedBy mint + **idempotent** holdsRole mint (AssignRole's state-check branch, rbac `ddls.go:337-339`,
+  role key pinned via the `__EXPECTED_*__`/`strings.ReplaceAll` idiom, identity-domain `ddls.go:17,526`) +
+  CreateOnly guards BOTH sides (entity-keyed `.identityClaim` + identity-keyed `.providerClaim`, mirroring
+  `claim_identity` `ddls.go:888-903`). Provider grants **scope=any** + a third standing binder (actor
+  identity `identifiedBy`-bound to the target provider, beside `require_workplace` — its doc `:1395-1401`
+  frames binders as complementary): `SetProviderHours`/`SetProviderTimeOff` (guard added from scratch —
+  import the operator-exemption walk), `SetAppointmentStatus`/`RescheduleAppointment` (extend the standing
+  branch; the consumer self branch stays patient-only). NEW op-metas: SetProviderHours + SetProviderTimeOff
+  (`TargetType "provider"`, authContext standing) — granted-but-meta-less ops are invisible (`forOperation`
+  links mint only with a meta). GrantTable producer `providerIdentityReadGrants`: staffReadGrants shape
+  (`service-location/lenses.go:67-74,165-172` — unanchored, `GrantSource "cap-read.provider.clinic"`,
+  `DiffRetraction: true` — link-revocation retraction cannot ride an anchor tombstone), cypher
+  `holdsRole→provider × (pr)-[:identifiedBy]→(i)` → `{identity-nanoid, provider-nanoid}`. Tests:
+  TestPackage_Permissions tuples, lens pins (10→11), protected_lens_test both-links-required +
+  either-link-dropped vectors.
+- `packages/wellness-domain` (bump 0.8.1→0.9.0): `instructor` vertexType DDL (Create/Tombstone/
+  BindInstructorIdentity; profile aspect; optional `teachesAt` studio param) + optional `instructor` param on
+  CreateSession minting `ledBy`; TombstoneSession GrantsTo += provider + standing guard (session `ledBy`
+  instructor × instructor `identifiedBy` actor — known-key probes) + op-meta "Cancel class"
+  (`TargetType "session"`). **No attendance** (§1 narrowing). P7 gate: no `.class/.family/.kind` aspects.
+- `packages/service-domain` (bump 0.8.0→0.9.0): lean `serviceprovider` vertexType DDL (Create/Bind + guard
+  aspects); `WireProvidedBy` op (mirrors the seed's Wire* idiom) to wire the live laundry template;
+  `RecordServiceOutcome` GrantsTo += provider + standing ownership chain guard
+  (`instanceOf → providedBy → identifiedBy`, caller-declared known keys) — **the advance op already exists;
+  build none**. Verify rides `verify-package-service-location`.
+- `packages/edge-manifest` (bump 0.8.0→0.9.0, one atomic change with its grants — the Fire-1
+  invisible-rows trap, lenses.go:14-28): me-lens selfAnchors += three inbound-`identifiedBy` walks
+  (provider/instructor/serviceprovider); `edgeProviderSchedule` — **ns `manifest.ent`, entityType
+  `"appointment"`** (a `manifest.sched` ns would render NOWHERE — renderer knows seven namespaces;
+  entityType must equal the entityKey's vtx-type segment for op-attach + payload-resolve), walk
+  `(identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt)`, columns
+  reason/status/startsAt/endsAt/providerKey — **D3: no patient names on SYNC rows**; `edgeProviderQueue` —
+  ns `manifest.ent`, entityType `"service"`, walk `<-[:identifiedBy]-(sp)<-[:providedBy]-(tpl)
+  <-[:instanceOf]-(inst)` (instance→template is `instanceOf`, NOT providedTo), title from template
+  presentation, status via the edgeInstances CASE idiom, no startsAt (always-current); `edgeInstructorSessions`
+  — ns `manifest.ent`, entityType `"session"`, RETURN **byte-identical to edgeEntitySessionsSpec** (the
+  resident-instructor LWW overlap must be idempotent); third read-grant producer
+  `edgeManifestProviderReadGrants` → `cap-read.edgeManifestProvider.{actorSuffix}` (separate producer per the
+  staff-slice cross-product rationale, lenses.go:697-703) with the three anchor branches. Structure pins:
+  package_test 13→17 lenses; manifest.yaml declares; `scripts/verify-package-edge-manifest.go` map.
+- `scripts/seed-showcase.go` — **harden `ensureStaff`/`ensureMaintenanceTech` first**: exclude candidates
+  holding `consumer` (the seed invariant "Dana is purely staff"; a second `frontOfHouse` holder otherwise
+  re-creates the `35ca90f5` mis-resolution). Then: Dr. Amara Osei = NEW second fixed-id provider (+
+  practicesAt + identity + bind + role; Patel stays UNBOUND — the scoping negative); fixed-id patient
+  (identityKey=Riley) + one future 15-min-grid appointment per provider (day-derived ids); Kai = NEW
+  serviceprovider + identity + bind + `WireProvidedBy` laundry + one OPEN instance providedTo Sam; Sam =
+  the §3.4 multi-hat human (consumer+residesIn kept; + frontOfHouse + worksAt; + instructor `identifiedBy`
+  + `teachesAt` studio + `ledBy` on the day-rolled session — re-wire per reseed). Env prints
+  `FACET_PROVIDER_NANOID` + `FACET_LAUNDRY_NANOID` in BOTH branches; `waitForRoleGrant` per new persona.
+
+**4 · Increments:** (1) identity-domain role + lattice-pkg roster; (2) control-authz lockstep; (3) clinic
+spine; (4) wellness spine; (5) service spine; (6) edge-manifest slices+grants; (7) seed; (8) gates + live.
+1→(2..5); 3/4/5 parallel (disjoint); 6 after the link seam is frozen (parallel to 3-5 by files); 7 after
+3-6; 8 last. **Green script:** reinstall ×6 bumped packages → `make provision-readpath` (clinic GrantTable)
+→ `make seed-showcase` → dev-login Osei on :7810 → SSE snapshot to `ready` → grep `manifest.ent` +
+`"entityType":"appointment"` (hers) + `manifest.op` provider op + **negative**: no Patel-appointment id in
+her feed → same for Kai (queue row + RecordServiceOutcome op) → Sam's feed shows all three hats' rows.
+
+**5 · Gotchas:** every new script read carries `# read-posture:` annotations ((a)/(d) per the clinic
+patterns — new scripts land clean); cypher ceilings (no UNION → sibling lens per path; `when` reserved →
+`startsAt`; `<> null`; degenerate collect entries expected; every row aliases `anchor`); NanoID alphabet
+(no l/I/O/0) — mint new fixed ids with `substrate.NewNanoID`; manifest grantsTo lists mirror permissions
+field-by-field; appointment times future + 15-min grid; `isUpcoming` hides past appointments (act-on-past =
+W1/W5 residue); wrong-hat op cards attach cross-hat and fail closed in-script (W5 grouping residue);
+`selfAnchorKey` answers only when exactly one entity of a type exists.
+
+**6 · Adjacent finds:** none new filed — all residues attach to already-filed fires: attendance design →
+W3; act-on-past-appointment + hat-grouped rendering of target-less provider ops (SetProviderHours renders
+only on provider entity detail until W5's landing) → W5/W1; hosted-demo persona-card redeploy (demo-up.sh
+labels) → deployment task named at W5, not a lane row.
+
+**7 · Non-goals:** no attendance domain; no wellness/service GrantTable producers; no cmd/facet changes;
+no cmd/<app> FE changes (W1–W4); no Protected-table changes (rows already carry provider anchors); no
+contract text; no hosted-demo box redeploy.
+
+**Scope-diff gate: PASS** — all touches trace to the §8 sentence; two narrowings recorded (attendance out,
+clinic-only producer), no widening (lattice-pkg roster + ensureStaff hardening are load-bearing enablers of
+in-scope items, recorded here); dependency re-verified: P1 confirmed (Andrew, standing) and satisfied by
+build order.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
