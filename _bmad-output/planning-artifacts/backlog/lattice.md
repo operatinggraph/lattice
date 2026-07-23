@@ -48,7 +48,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
-| **[Weaver] Fresh-episode/reclaim error-branch coverage** | `fireEpisode`'s stale-mark reclaim path (NanoID-mint + `marks.replace` failures, 41.4% cov), `bumpDispatchCount`/`bumpEffectDispatch` failure-log branches (50%), `sweeper.deleteEffect` conflict/delete-failure (44.4%), and `reconcileConsumers` supervisor Add/UpdateSpec/Reset/Remove + health-sink-delete failure paths (62.7%) are the lowest-covered branches in an otherwise 86.8%-covered package (`internal/weaver/evaluator.go`, `reconciler.go`, `engine.go`). | ★ | S–M | 📋 ready |
 | **[Bootstrap] `cmd/bootstrap` has no test files — the seed decision is inspection-only** | The probe, re-seed, and two-phase reopen are covered in `internal/bootstrap`, but the branch that *decides* to re-seed lives in `package main` and is untested. Consumer: the freshness probe's own decision path. Either extract the decision into `internal/bootstrap` or add a `cmd/bootstrap` test binary. | ★ | XS–S | 📋 ready · `cmd/bootstrap/main.go:110-140` |
 
 ### Survey log (round-robin rotation)
@@ -110,10 +109,9 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now.** No `✅ Andrew-ratified, build-ready` design is currently unblocked — top
-> pick is the **📋 ready rows in Component maintenance**: **[Weaver] fresh-episode/reclaim
-> error-branch coverage** (★ S–M) and **[Bootstrap] `cmd/bootstrap` tests** (★ XS–S). Every
-> ✅ ratified row in the feature tables below stays Andrew-gated or driver-blocked. A stale callout
-> starves the lane — whoever ships the top pick renames this to the next.
+> pick is the **📋 ready row in Component maintenance**: **[Bootstrap] `cmd/bootstrap` tests**
+> (★ XS–S). Every ✅ ratified row in the feature tables below stays Andrew-gated or driver-blocked.
+> A stale callout starves the lane — whoever ships the top pick renames this to the next.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -179,6 +177,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-22 · `907d0d34` · [weaver] fresh-episode/reclaim error-branch coverage — `fireEpisode` stale-mark reclaim + dispatch/effect-bump + `reconcileConsumers` Add/Remove faults; package 86.5%→87.9%
 - 2026-07-22 · `6e1c7557` · [gateway] `GATEWAY_CORS_ORIGINS` dev default gains `127.0.0.1` twins for all four vertical apps (only :7810 had both) — live-verified via CORS preflight, closes the silent-write-block
 - 2026-07-22 · `6b68fde4` · [processor,bootstrap,pkgmgr] tombstone body-preservation Fire 1 — emitter sweep drops the isDeleted/data husk, schema relaxed, parser warns (not silently drops) a tombstone-with-document; Fire 2 (warn→reject) next
 - 2026-07-22 · `74883406` · [refractor,edge] Personal Lens retraction R2 — Edge-client keyset consumption (both engines) + hydrate dead-lens prune; unblocks the verticals staff-worlds claim beat
