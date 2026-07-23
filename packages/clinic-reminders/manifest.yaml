@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.4.0
+version: 0.5.0
 description: |
   Clinic appointment & follow-up reminders + recurring visit series — the clinic
   vertical's orchestration. Two one-shot @at convergences over clinic-domain's
@@ -49,6 +49,8 @@ declares:
     - canonicalName: visitSeriesProgress
       class: meta.ddl.aspectType
     - canonicalName: visitSeriesPaused
+      class: meta.ddl.aspectType
+    - canonicalName: visitSeriesGuard
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: appointmentReminders

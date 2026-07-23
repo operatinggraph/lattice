@@ -18,8 +18,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	  .paused   = {value: bool}                                  (optional lifecycle toggle)
 //	lnk.visitseries.<id>.forPatient.patient.<id>       (series → patient, later-arriving source)
 //	lnk.visitseries.<id>.withProvider.provider.<id>    (series → provider, later-arriving source)
+//	vtx.patient.<id>.activeVisitSeriesWith<providerId>  (class visitSeriesGuard) = {seriesKey, activeUntil?}
+//	  per-(patient,provider) uniqueness guard, StartVisitSeries-only (create or, once its
+//	  denormalized activeUntil has passed, OCC-revive) — a paused series still holds the
+//	  guard (resume it rather than starting a duplicate)
 //
 //	op StartVisitSeries{patientKey, providerKey, intervalDays, startAt, activeUntil?}
+//	  rejects ActiveVisitSeriesExists if the pair already holds an unexpired guard
 //	op PauseVisitSeries{seriesKey} / ResumeVisitSeries{seriesKey}
 //	op AdvanceVisitSeries{seriesKey, dueFor, intervalDays, occurrenceCount?}  (the directOp the playbook dispatches)
 //	lens visitSeriesDue (weaver-target, full)   (freshUntil = .progress.nextDueAt; rolls forward on each advance)
@@ -37,6 +42,7 @@ const (
 	visitSeriesAspectDDL       = "visitSeriesDefinition"
 	visitSeriesProgressAspect  = "visitSeriesProgress"
 	visitSeriesPausedAspectDDL = "visitSeriesPaused"
+	visitSeriesGuardAspectDDL  = "visitSeriesGuard"
 
 	startVisitSeriesOp   = "StartVisitSeries"
 	pauseVisitSeriesOp   = "PauseVisitSeries"
@@ -57,6 +63,7 @@ func visitSeriesDDLs() []pkgmgr.DDLSpec {
 		visitSeriesDefinitionAspectTypeDDL(),
 		visitSeriesProgressAspectTypeDDL(),
 		visitSeriesPausedAspectTypeDDL(),
+		visitSeriesGuardAspectTypeDDL(),
 	}
 }
 
@@ -69,10 +76,13 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 		},
 		Description: "Clinic recurring visit series DDL. Vertex shape: vtx.visitseries.<NanoID>, class=visitseries, " +
 			"root data = {} (minimal, D5). StartVisitSeries validates patientKey/providerKey are alive + correctly " +
-			"classed, mints the series + its .series {intervalDays, startAt, activeUntil?} + .progress {nextDueAt: " +
-			"startAt, occurrenceCount: 0} aspects, and writes the forPatient + withProvider links (Contract #1 §1.1 — " +
-			"the series is the later-arriving source). PauseVisitSeries / ResumeVisitSeries toggle the .paused " +
-			"{value} aspect (absent = not paused). AdvanceVisitSeries is the directOp the visitSeriesDue §10.8 " +
+			"classed, rejects ActiveVisitSeriesExists if the pair already holds an active series (see the " +
+			"visitSeriesGuard aspect-type DDL), then mints the series + its .series {intervalDays, startAt, " +
+			"activeUntil?} + .progress {nextDueAt: startAt, occurrenceCount: 0} aspects, and writes the forPatient + " +
+			"withProvider links (Contract #1 §1.1 — the series is the later-arriving source). PauseVisitSeries / " +
+			"ResumeVisitSeries toggle the .paused {value} aspect (absent = not paused) — a paused series still holds " +
+			"its patient+provider pair (resume it; StartVisitSeries will not treat the pair as free). " +
+			"AdvanceVisitSeries is the directOp the visitSeriesDue §10.8 " +
 			"playbook dispatches when missing_series_advance opens: it rolls .progress forward — lastOccurrenceAt = dueFor (the " +
 			"deadline just serviced, NOT $now — keeps the cadence on a fixed grid), nextDueAt = dueFor + " +
 			"intervalDays·days, occurrenceCount + 1 — re-arming the next occurrence. Reads [seriesKey] to " +
@@ -91,7 +101,7 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.visitseries.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"patientKey":      "Full vtx.patient.<NanoID> key the series is for. StartVisitSeries validates it is alive + class=patient and writes the forPatient link.",
+			"patientKey":      "Full vtx.patient.<NanoID> key the series is for. StartVisitSeries validates it is alive + class=patient, writes the forPatient link, and claims a per-provider activeVisitSeriesWith guard aspect on it (ActiveVisitSeriesExists if the pair already holds an active one).",
 			"providerKey":     "Full vtx.provider.<NanoID> key the series is with. StartVisitSeries validates it is alive + class=provider and writes the withProvider link.",
 			"intervalDays":    "Days between occurrences. Stored on .series and re-supplied by the visitSeriesDue playbook on every AdvanceVisitSeries so the roll-forward math needs no extra read.",
 			"startAt":         "RFC3339 instant of the first occurrence. Seeds .progress.nextDueAt (the first deadline anchors on startAt, not an interval offset).",
@@ -236,6 +246,48 @@ func visitSeriesPausedAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// visitSeriesGuardAspectTypeDDL declares the .activeVisitSeriesWith<providerId>
+// aspect (class visitSeriesGuard) — a deterministic per-(patient,provider)
+// uniqueness marker on the PRE-EXISTING patient hub, the write-path idiom
+// clinic-domain's slot-claim / café's cafeOpenTabGuard establish (Cap-KV §06: the
+// op's own Starlark logic licenses the check; a deterministic guard key needs no
+// enumeration primitive). The local name is provider-suffixed (not a fixed
+// canonical name) because a patient may hold at most one such guard PER provider,
+// mirroring providerSlotClaim's per-cell local-name pattern.
+func visitSeriesGuardAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     visitSeriesGuardAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{startVisitSeriesOp},
+		Description: "Per-(patient,provider) active-visit-series uniqueness guard (clinic-reminders). Stored as " +
+			"vtx.patient.<NanoID>.activeVisitSeriesWith<providerId> (class visitSeriesGuard) = {seriesKey}. " +
+			"Non-sensitive. Written ONLY by StartVisitSeries: a class-(d) declared-optionalReads dedup key — " +
+			"absent mints the guard fresh (create-only, the concurrent-race backstop); present names a prior " +
+			"series, whose OWN LIVE .series/.paused aspects StartVisitSeries re-reads (class-(e) follow-up read off " +
+			"the guard's data-derived seriesKey — never a denormalized copy, since paused is mutable and the " +
+			".series aspect's own doc names \"pause + start a new series\" as the intended cadence-change flow) to " +
+			"decide: paused, or past its .series.activeUntil → OCC-revives the guard onto the new series " +
+			"(expectedRevision = the read guard's revision); otherwise still active → rejects the new " +
+			"StartVisitSeries with ActiveVisitSeriesExists. Nothing else ever writes or releases this aspect — " +
+			"unlike a slot-claim's per-appointment lifecycle, a visit series has no terminal/cancel op, so the next " +
+			"StartVisitSeries for the same pair is the only place \"is the old one really still active\" gets " +
+			"decided, and it always re-checks live.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"seriesKey":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"seriesKey": "The vtx.visitseries.<NanoID> currently holding this patient+provider pair's active-series slot.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "active visit-series guard aspect",
+				Payload:         map[string]any{"seriesKey": "vtx.visitseries.<NanoID>"},
+				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.activeVisitSeriesWith<providerId>; claimed or OCC-revived by StartVisitSeries.",
+			},
+		},
+	}
+}
+
 // visitSeriesScript handles all four visit-series operationTypes in one script (the
 // appointment-DDL multi-command idiom).
 const visitSeriesScript = `
@@ -252,6 +304,14 @@ def make_aspect_upsert(vtx_key, local_name, cls, data):
     return {"op": "update", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_aspect_upsert_occ(vtx_key, local_name, cls, data, expected_revision):
+    # Like make_aspect_upsert but carries an explicit expectedRevision so the
+    # commit applies an OCC condition (an update with no expectedRevision commits
+    # UNCONDITIONED — step8_commit.go). Mirrors clinic-domain's ddls.go.
+    m = make_aspect_upsert(vtx_key, local_name, cls, data)
+    m["expectedRevision"] = expected_revision
+    return m
 
 def make_link(key, source, target, cls, local_name, data):
     return {"op": "create", "key": key,
@@ -336,7 +396,7 @@ def execute(state, op):
         patient_key = required_string(p, "patientKey")
         parts_of(patient_key, "patientKey", "patient")
         provider_key = required_string(p, "providerKey")
-        parts_of(provider_key, "providerKey", "provider")
+        _, provider_id = parts_of(provider_key, "providerKey", "provider")
         interval_days = required_int(p, "intervalDays")
         if interval_days <= 0:
             fail("InvalidArgument: intervalDays: must be positive")
@@ -350,6 +410,41 @@ def execute(state, op):
         if not vertex_alive_of_class(state, provider_key, "provider"):
             fail("UnknownProvider: " + provider_key + " is absent, tombstoned, or not a provider")
 
+        # At most one ACTIVE series per (patient, provider) pair (Cap-KV §06 — the
+        # op's own logic licenses the check). The guard is a deterministic pointer
+        # on the patient hub, keyed by provider; "active" is re-derived from the
+        # PRIOR series' own live .series/.paused aspects (never denormalized —
+        # paused is mutable and .series' doc already documents "pause + start a
+        # new series" as the intended cadence-change workflow, so a paused prior
+        # series must NOT block a fresh one).
+        # read-posture: (d) declared optionalReads by StartVisitSeries's
+        # dispatcher (deterministic per patient+provider dedup key; mirrors
+        # clinic-domain's claim_cell — kv.Read only decides which mutation verb
+        # to emit, CreateOnly/expectedRevision at commit is the actual safety
+        # property against a concurrent double-start/double-revive).
+        guard_name = "activeVisitSeriesWith" + provider_id
+        guard_key = patient_key + "." + guard_name
+        guard = kv.Read(guard_key)
+        guard_revision = None
+        if guard != None and not guard.isDeleted:
+            guard_revision = guard.revision
+            prior_series_key = guard.data.get("seriesKey")
+            # read-posture: (e) per-candidate follow-up read off the guard's
+            # data-derived seriesKey (at most one guard per patient+provider, so
+            # this is never a keyspace scan).
+            prior_series = kv.Read(prior_series_key + ".series")
+            prior_paused = kv.Read(prior_series_key + ".paused")
+            prior_is_paused = prior_paused != None and not prior_paused.isDeleted and prior_paused.data.get("value") == True
+            # A prior series whose .series aspect can't be read (should never
+            # happen — StartVisitSeries always writes it atomically with the
+            # guard) fails closed: unreadable counts as still-active rather than
+            # silently allowing a duplicate.
+            prior_readable = prior_series != None and not prior_series.isDeleted
+            prior_active_until = prior_series.data.get("activeUntil") if prior_readable else None
+            prior_ended = prior_readable and prior_active_until != None and time.rfc3339_utc(op.submittedAt) > prior_active_until
+            if not prior_is_paused and not prior_ended:
+                fail("ActiveVisitSeriesExists: patient " + patient_key + " already has an active visit series with provider " + provider_key)
+
         series_id = nanoid.new()
         series_key = "vtx.visitseries." + series_id
 
@@ -358,17 +453,23 @@ def execute(state, op):
             series_data["activeUntil"] = active_until
         progress_data = {"nextDueAt": start_at, "occurrenceCount": 0}
 
+        if guard_revision != None:
+            guard_mutation = make_aspect_upsert_occ(patient_key, guard_name, "visitSeriesGuard", {"seriesKey": series_key}, guard_revision)
+        else:
+            guard_mutation = make_aspect(patient_key, guard_name, "visitSeriesGuard", {"seriesKey": series_key})
+
         # forPatient / withProvider: the series (later-arriving) is the source, the
         # pre-existing patient / provider is the target (Contract #1 §1.1).
         # Sentences: "visitseries forPatient patient", "visitseries withProvider
         # provider".
         for_patient_lnk = "lnk.visitseries." + series_id + ".forPatient.patient." + patient_key.split(".")[2]
-        with_provider_lnk = "lnk.visitseries." + series_id + ".withProvider.provider." + provider_key.split(".")[2]
+        with_provider_lnk = "lnk.visitseries." + series_id + ".withProvider.provider." + provider_id
 
         mutations = [
             make_vtx(series_key, "visitseries", {}),
             make_aspect(series_key, "series", "visitSeriesDefinition", series_data),
             make_aspect(series_key, "progress", "visitSeriesProgress", progress_data),
+            guard_mutation,
             make_link(for_patient_lnk, series_key, patient_key, "forPatient", "forPatient", {}),
             make_link(with_provider_lnk, series_key, provider_key, "withProvider", "withProvider", {}),
         ]

@@ -23,19 +23,20 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the twelve DDLs — the appointment-reminder pair
+// TestPackage_DDLs pins the thirteen DDLs — the appointment-reminder pair
 // (appointmentReminderOp vertexType + appointmentReminder aspectType), the
 // follow-up-reminder pair (followUpReminderOp + followUpReminder), the two
 // notification-outcome replyOp pairs (appointmentReminderNotificationOp +
 // appointmentReminderNotification, followUpReminderNotificationOp +
 // followUpReminderNotification), and the visit-series group (visitseries
-// vertexType + its three aspectType gates). Each op vertexType owns its
+// vertexType + its four aspectType gates: definition, progress, paused, and the
+// per-patient+provider active-series guard). Each op vertexType owns its
 // Record*/Start*/Advance* script; each aspectType is the step-6 write gate and
-// MUST be NON-sensitive (a timestamp / cadence on an appointment/visitseries,
-// not an identity).
+// MUST be NON-sensitive (a timestamp / cadence / guard pointer on an
+// appointment/visitseries/patient, not an identity).
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 12 {
-		t.Fatalf("expected 12 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 13 {
+		t.Fatalf("expected 13 DDLs, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -102,6 +103,7 @@ func TestPackage_DDLs(t *testing.T) {
 		{"visitSeriesDefinition", "StartVisitSeries"},
 		{"visitSeriesProgress", "StartVisitSeries"},
 		{"visitSeriesPaused", "PauseVisitSeries"},
+		{"visitSeriesGuard", "StartVisitSeries"},
 	}
 	for _, sa := range seriesAspects {
 		asp, ok := byName[sa.name]

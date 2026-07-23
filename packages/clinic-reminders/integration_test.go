@@ -508,3 +508,119 @@ func TestPauseResumeVisitSeries_TogglesPaused(t *testing.T) {
 		t.Fatalf("paused.value = %v, want false after ResumeVisitSeries", rd["value"])
 	}
 }
+
+// crGuardDoc reads the per-(patient,provider) active-visit-series guard aspect
+// and returns its seriesKey field ("" if the aspect is absent/tombstoned/unset).
+func crGuardDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, patientKey, providerID string) string {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, patientKey+".activeVisitSeriesWith"+providerID)
+	if err != nil {
+		return ""
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(entry.Value, &doc); err != nil {
+		t.Fatalf("unmarshal guard doc: %v", err)
+	}
+	if doc["isDeleted"] == true {
+		return ""
+	}
+	d, _ := doc["data"].(map[string]any)
+	sk, _ := d["seriesKey"].(string)
+	return sk
+}
+
+// TestStartVisitSeries_RejectsDuplicateActiveSeries proves the fix for the
+// reported bug: a second StartVisitSeries for the SAME (patient,provider) pair,
+// while the first is live and neither paused nor past its activeUntil, is
+// Rejected (ActiveVisitSeriesExists) — before the fix both committed, producing
+// two simultaneously active series. The guard aspect still points at the FIRST
+// series afterward, proving the rejected attempt left no trace.
+func TestStartVisitSeries_RejectsDuplicateActiveSeries(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsdup", Instance: "cr-vsdup"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsdpat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsdprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+
+	seriesID1 := crSubmit(t, ctx, conn, cp, cons, "crvsdstart1", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+
+	// Second call, same pair, same cadence — mirrors the live-confirmed repro
+	// (two calls both committing, 2 active series).
+	crSubmit(t, ctx, conn, cp, cons, "crvsdstart2", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":14,"startAt":"2026-08-15T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeRejected)
+
+	if got := crGuardDoc(t, ctx, conn, patientKey, providerID); got != "vtx.visitseries."+seriesID1 {
+		t.Fatalf("guard seriesKey = %q, want unchanged vtx.visitseries.%s (rejected attempt must not revive it)", got, seriesID1)
+	}
+}
+
+// TestStartVisitSeries_AllowsNewSeriesAfterPause proves a PAUSED prior series
+// does NOT block a new one — the .series aspect-type DDL documents "pause +
+// start a new series" as the intended cadence-change workflow, so the guard
+// must re-derive activeness from the prior series' LIVE .paused aspect, never a
+// denormalized copy. The guard is expected to now point at the NEW series.
+func TestStartVisitSeries_AllowsNewSeriesAfterPause(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vspaused", Instance: "cr-vspaused"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsupat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsuprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+
+	seriesID1 := crSubmit(t, ctx, conn, cp, cons, "crvsustart1", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	seriesKey1 := "vtx.visitseries." + seriesID1
+
+	crSubmit(t, ctx, conn, cp, cons, "crvsupause1", "PauseVisitSeries", "", `{"seriesKey":"`+seriesKey1+`"}`, []string{seriesKey1}, processor.OutcomeAccepted)
+
+	seriesID2 := crSubmit(t, ctx, conn, cp, cons, "crvsustart2", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":14,"startAt":"2026-09-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+
+	if got := crGuardDoc(t, ctx, conn, patientKey, providerID); got != "vtx.visitseries."+seriesID2 {
+		t.Fatalf("guard seriesKey = %q, want revived onto vtx.visitseries.%s", got, seriesID2)
+	}
+	// The paused series itself is untouched — superseded in the guard, not
+	// deleted or mutated.
+	series1 := crReadDoc(t, ctx, conn, seriesKey1+".series")
+	if series1["class"] != "visitSeriesDefinition" {
+		t.Fatalf("original paused series .series aspect disturbed: %v", series1)
+	}
+}
+
+// TestStartVisitSeries_AllowsNewSeriesAfterActiveUntilExpired proves a prior
+// series whose activeUntil has passed (relative to op.submittedAt) — a "clean
+// termination" per the .series aspect-type DDL's own doc, which explicitly
+// needs no cancel op — frees the (patient,provider) pair for a new series, and
+// the guard OCC-revives onto it.
+func TestStartVisitSeries_AllowsNewSeriesAfterActiveUntilExpired(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsexp", Instance: "cr-vsexp"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsxpat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvsxprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+
+	// Both startAt and activeUntil are well before crSubmittedAnchor
+	// (2026-01-01), so this series has already "ended" by the time every
+	// crSubmit call in this test runs.
+	crSubmit(t, ctx, conn, cp, cons, "crvsxstart1", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2025-06-01T09:00:00Z","activeUntil":"2025-07-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+
+	seriesID2 := crSubmit(t, ctx, conn, cp, cons, "crvsxstart2", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":14,"startAt":"2026-09-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+
+	if got := crGuardDoc(t, ctx, conn, patientKey, providerID); got != "vtx.visitseries."+seriesID2 {
+		t.Fatalf("guard seriesKey = %q, want revived onto vtx.visitseries.%s", got, seriesID2)
+	}
+}
