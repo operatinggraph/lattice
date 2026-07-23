@@ -41,8 +41,7 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-
-*(nothing open.)*
+| **Loupe package install can't resolve non-operator GrantsTo roles** | `cmd/loupe/pkg.go` `kernelRoleIDs()` resolves only `operator`, so installing/upgrading any package whose permissions grant `consumer`/`frontOfHouse`/`backOfHouse`/`provider` through Loupe's admin UI fails on GrantsTo resolution (pre-existing; CLI installs use `cmd/lattice-pkg`'s full roster). Mirror that roster or resolve via the roleindex. | ★★ | S | 📋 ready |
 
 ## Parked
 

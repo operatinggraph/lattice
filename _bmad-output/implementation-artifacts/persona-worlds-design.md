@@ -502,6 +502,16 @@ clinic-only producer), no widening (lattice-pkg roster + ensureStaff hardening a
 in-scope items, recorded here); dependency re-verified: P1 confirmed (Andrew, standing) and satisfied by
 build order.
 
+**Wave-1 build corrections (2026-07-23; increments 1–3 green in the worktree; W1–W4 briefs inherit these):**
+(1) **A permission's identity is `(operationType, scope)` — Contract #8 §8.1** — so granting `provider` on
+an existing op means *widening the existing scope=any row's GrantsTo*, never adding a second row (the
+brief said "new rows"; the installer rejects the collision — proven live in tests). (2) A DDL script that
+never minted links has no `make_link` helper — the bind ops import it. (3) Every test harness that
+installs a package carrying provider grants needs `"provider": pkgmgr.RoleID("identity-domain",
+"provider")` in its `inst.RoleIDs` map — clinic-domain, clinic-ledger, clinic-reminders fixed; siblings
+checked proactively. (4) Adjacent find, filed to the Loupe lane: `cmd/loupe/pkg.go` `kernelRoleIDs()`
+resolves only `operator` — Loupe-UI installs of packages granting any other role fail (pre-existing).
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
