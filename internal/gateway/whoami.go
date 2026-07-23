@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/rolesanchors"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -14,12 +15,18 @@ import (
 // opaque-mode binding a browser cannot compute its own derived ActorID, so
 // without this endpoint no FE can fill authContext.target for any
 // self-scoped op (ClaimIdentity, InitiateCredentialLink,
-// CompleteCredentialLink) or declare the credentialindex dedup read.
+// CompleteCredentialLink) or declare the credentialindex dedup read. Roles
+// and Anchors report the resolved actor's role-derived grant keys and
+// residence/workplace anchors (persona-worlds-design.md §10) — both omitted
+// (omitempty) when no resolver is configured or the resolver reports
+// nothing.
 type whoamiResponse struct {
-	ActorID              string `json:"actorId"`
-	ResolvedActorID      string `json:"resolvedActorId"`
-	CredentialIndexKey   string `json:"credentialIndexKey"`
-	ExistingIdentityHint bool   `json:"existingIdentityHint,omitempty"`
+	ActorID              string                `json:"actorId"`
+	ResolvedActorID      string                `json:"resolvedActorId"`
+	CredentialIndexKey   string                `json:"credentialIndexKey"`
+	ExistingIdentityHint bool                  `json:"existingIdentityHint,omitempty"`
+	Roles                []string              `json:"roles,omitempty"`
+	Anchors              []rolesanchors.Anchor `json:"anchors,omitempty"`
 }
 
 // handleWhoami implements GET /v1/actor. Runs the same authenticate →
@@ -27,9 +34,12 @@ type whoamiResponse struct {
 // write — the natural "first authenticated call" for a fresh FE session —
 // and reports the verified raw actor, its resolved business identity (if
 // any credential binding exists), and the credentialindex key the caller
-// would declare on a ClaimIdentity/CompleteCredentialLink dedup read.
-// Read-only at the platform level: the only write it can trigger is the
-// shipped idempotent ProvisionConsumerIdentity op (P2-clean).
+// would declare on a ClaimIdentity/CompleteCredentialLink dedup read. When a
+// roles/anchors resolver is configured, the response additionally carries
+// the resolved actor's role-derived grant keys and residence/workplace
+// anchors (persona-worlds-design.md §10). Read-only at the platform level:
+// the only write it can trigger is the shipped idempotent
+// ProvisionConsumerIdentity op (P2-clean).
 //
 // `?probe=1` additionally computes existingIdentityHint
 // (multi-credential-identity-linking-design.md §3.4): a direct, P5-clean
@@ -74,6 +84,10 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		ActorID:            actor.ActorID,
 		ResolvedActorID:    resolvedActor,
 		CredentialIndexKey: "vtx.credentialindex." + substrate.SHA256NanoID(actor.ActorID),
+	}
+
+	if s.rolesAnchors != nil {
+		resp.Roles, resp.Anchors = s.rolesAnchors.Resolve(ctx, resolvedActor)
 	}
 
 	if r.URL.Query().Get("probe") == "1" {

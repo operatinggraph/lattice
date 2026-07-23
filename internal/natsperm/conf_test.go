@@ -372,6 +372,35 @@ func TestCapabilityKVWriteIsolation(t *testing.T) {
 	assertDeniedPuts(t, url, "capability-kv", []string{"processor", "loom", "weaver", "loupe", "lattice", "gateway", "chronicler"})
 }
 
+// TestGatewayCapabilityKVReadAccess proves the read-side complement to
+// TestCapabilityKVWriteIsolation's gateway write-deny pin above (unchanged):
+// the Gateway's whoami roles resolver (internal/gateway/rolesanchors,
+// persona-worlds-design.md §10) reads the rbac-domain capabilityRoles
+// projection out of capability-kv, and the Gateway's per-bucket deny list
+// only closes stream-management/write subjects there (mirrors
+// TestBridgeCoreKVReadIsolation's positive-control shape, bridge_egress_
+// test.go:99) — $JS.API.> stays broadly allowed for the Gateway's publish
+// set, so a KVGet reaches the store exactly like the refractor owner's.
+func TestGatewayCapabilityKVReadAccess(t *testing.T) {
+	t.Parallel()
+	url := startServerFromConf(t)
+
+	boot := connectAs(t, url, "bootstrap")
+	provision(t, boot, "capability-kv")
+
+	ref := connectAs(t, url, "refractor")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := ref.KVPut(ctx, "capability-kv", "cap.roles.identity.test", []byte(`{"roles":["vtx.role.test"]}`)); err != nil {
+		t.Fatalf("refractor KVPut capability-kv: want success, got %v", err)
+	}
+
+	gw := connectAs(t, url, "gateway")
+	if _, err := gw.KVGet(ctx, "capability-kv", "cap.roles.identity.test"); err != nil {
+		t.Fatalf("gateway KVGet capability-kv: want success, got %v", err)
+	}
+}
+
 // TestChroniclerOrchestrationHistoryWriteAccess: chronicler (the eventStream
 // lens materializer) may write its own orchestration-history read model; a
 // non-chronicler component cannot — the direct proof for

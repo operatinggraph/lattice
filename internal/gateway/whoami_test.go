@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/operatinggraph/lattice/internal/gateway/rolesanchors"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -57,6 +59,20 @@ type fakeIdentityIndexHintResolver struct {
 func (f *fakeIdentityIndexHintResolver) Lookup(_ context.Context, indexKey string) (string, bool, error) {
 	f.gotKey = indexKey
 	return f.identityKey, f.found, f.err
+}
+
+// fakeRolesAnchorsResolver is a fixed-answer RolesAnchorsResolver (mirrors
+// fakeIdentityIndexHintResolver): Resolve always reports the configured
+// roles/anchors and records the actor key it was called with.
+type fakeRolesAnchorsResolver struct {
+	roles    []string
+	anchors  []rolesanchors.Anchor
+	gotActor string
+}
+
+func (f *fakeRolesAnchorsResolver) Resolve(_ context.Context, actorKey string) ([]string, []rolesanchors.Anchor) {
+	f.gotActor = actorKey
+	return f.roles, f.anchors
 }
 
 func doWhoamiProbe(t *testing.T, s *Server, token string) *httptest.ResponseRecorder {
@@ -348,5 +364,85 @@ func TestHandleWhoami_Probe_NoResolverConfigured(t *testing.T) {
 	}
 	if resp.ExistingIdentityHint {
 		t.Fatal("existingIdentityHint = true, want false (no resolver configured)")
+	}
+}
+
+// TestHandleWhoami_RolesAnchors_Present proves a configured resolver's
+// roles/anchors surface in the whoami response, keyed by the resolved actor
+// (persona-worlds-design.md §10 Fire P1).
+func TestHandleWhoami_RolesAnchors_Present(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "NcxqoP292Z4a7uPKftM6")
+	s := newTestServer(t, authn, nil)
+	resolver := &fakeRolesAnchorsResolver{
+		roles: []string{"vtx.role.frontOfHouse00000001"},
+		anchors: []rolesanchors.Anchor{
+			{Key: "vtx.location.workplace00000001", Name: "Building A", Relation: "worksAt"},
+		},
+	}
+	s.ConfigureRolesAnchors(resolver)
+
+	w := doWhoami(t, s, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp whoamiResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Roles) != 1 || resp.Roles[0] != "vtx.role.frontOfHouse00000001" {
+		t.Fatalf("roles = %v, want [vtx.role.frontOfHouse00000001]", resp.Roles)
+	}
+	if len(resp.Anchors) != 1 || resp.Anchors[0].Relation != "worksAt" {
+		t.Fatalf("anchors = %+v, want one worksAt anchor", resp.Anchors)
+	}
+	wantActor := "vtx.identity.NcxqoP292Z4a7uPKftM6"
+	if resolver.gotActor != wantActor {
+		t.Fatalf("resolver called with actor %q, want the resolved actor %q", resolver.gotActor, wantActor)
+	}
+}
+
+// TestHandleWhoami_RolesAnchors_NilResolver proves an unconfigured resolver
+// (the default) omits roles/anchors from the response entirely — the raw
+// body carries neither field, not just zero-valued ones — back-compat for
+// every existing whoami caller.
+func TestHandleWhoami_RolesAnchors_NilResolver(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "NcxqoP292Z4a7uPKftM6")
+	s := newTestServer(t, authn, nil)
+
+	w := doWhoami(t, s, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"roles"`) {
+		t.Fatalf("body carries roles with no resolver configured: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"anchors"`) {
+		t.Fatalf("body carries anchors with no resolver configured: %s", w.Body.String())
+	}
+}
+
+// TestHandleWhoami_RolesAnchors_EmptyOmitted proves a resolver reporting no
+// roles/anchors (e.g. a fresh identity with neither) omits both fields via
+// omitempty — the same wire shape as the unconfigured case.
+func TestHandleWhoami_RolesAnchors_EmptyOmitted(t *testing.T) {
+	priv := newTestKey(t)
+	authn := testAuthenticator(t, priv, "k1")
+	token := signToken(t, priv, "k1", "NcxqoP292Z4a7uPKftM6")
+	s := newTestServer(t, authn, nil)
+	s.ConfigureRolesAnchors(&fakeRolesAnchorsResolver{})
+
+	w := doWhoami(t, s, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"roles"`) {
+		t.Fatalf("body carries roles with an empty resolver result: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"anchors"`) {
+		t.Fatalf("body carries anchors with an empty resolver result: %s", w.Body.String())
 	}
 }

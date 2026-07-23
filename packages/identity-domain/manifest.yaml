@@ -1,5 +1,5 @@
 name: identity-domain
-version: 0.4.1
+version: 0.5.0
 description: |
   Identity vertex creation, claim, and state-machine management. Provides
   CreateUnclaimedIdentity, UpdateIdentityState, ClaimIdentity, RotateClaimKey,
@@ -52,6 +52,10 @@ declares:
       table: read_identity_credentials
       engine: full
       protected: true
+    - canonicalName: identityAnchors
+      adapter: nats-kv
+      bucket: identity-anchors
+      engine: full
   permissions:
     - operationType: CreateUnclaimedIdentity
       scope: any

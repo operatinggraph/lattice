@@ -124,6 +124,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/gateway/identityindexhint"
 	"github.com/operatinggraph/lattice/internal/gateway/natsauth"
 	"github.com/operatinggraph/lattice/internal/gateway/revocation"
+	"github.com/operatinggraph/lattice/internal/gateway/rolesanchors"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -281,6 +282,23 @@ func run(logger *slog.Logger) error {
 		identityIndexHintResolver = identityindexhint.New(hintKV)
 	}
 
+	// The whoami roles[]/anchors[] resolver (persona-worlds-design.md §10 Fire
+	// P1) is additive/best-effort like the seams above: capability-kv is
+	// pre-provisioned by bootstrap, so the roles half reads through conn
+	// directly (it already satisfies capabilitykv.KVGetter, mirroring every
+	// other ReadAndMerge caller — cmd/{refractor,weaver,loom}/main.go's
+	// NewCapabilityKVChecker), but the identity-anchors bucket only exists
+	// once the identity-domain package's identityAnchors lens first
+	// activates — an unopened bucket disables the anchors half without
+	// refusing to start.
+	var rolesAnchorsResolver gateway.RolesAnchorsResolver
+	anchorsKV, err := conn.OpenKV(context.Background(), rolesanchors.AnchorsBucketName)
+	if err != nil {
+		logger.Warn("gateway: identity-anchors bucket unavailable; whoami anchors disabled", "error", err)
+	} else {
+		rolesAnchorsResolver = rolesanchors.New(conn, bootstrap.CapabilityKVBucket, anchorsKV, logger)
+	}
+
 	rawInstance, err := substrate.NewNanoID()
 	if err != nil {
 		return fmt.Errorf("generate instance id: %w", err)
@@ -303,6 +321,9 @@ func run(logger *slog.Logger) error {
 	}
 	if identityIndexHintResolver != nil {
 		srv.ConfigureIdentityIndexHint(identityIndexHintResolver)
+	}
+	if rolesAnchorsResolver != nil {
+		srv.ConfigureRolesAnchors(rolesAnchorsResolver)
 	}
 
 	readModels, err := loadReadModels(os.Getenv("GATEWAY_READ_MODELS_DIR"))

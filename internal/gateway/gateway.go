@@ -26,6 +26,7 @@ import (
 
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/rolesanchors"
 	"github.com/operatinggraph/lattice/internal/opstatus"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -94,6 +95,11 @@ type Server struct {
 	// nil until configured, in which case whoami `?probe=1` always omits
 	// existingIdentityHint (best-effort — absence never denies anything).
 	identityIndexHint IdentityIndexHintResolver
+
+	// rolesAnchors backs ConfigureRolesAnchors (persona-worlds-design.md §10
+	// Fire P1): nil until configured, in which case whoami omits both the
+	// roles and anchors fields (best-effort — absence never denies anything).
+	rolesAnchors RolesAnchorsResolver
 }
 
 // CredentialBindingResolver is the credential→identity resolution surface
@@ -117,6 +123,17 @@ type IdentityIndexHintResolver interface {
 	// Lookup answers whether a live identityindex vertex exists at indexKey
 	// and which identity it points at. found=false (no error) means no hint.
 	Lookup(ctx context.Context, indexKey string) (identityKey string, found bool, err error)
+}
+
+// RolesAnchorsResolver is the whoami roles[]/anchors[] read seam
+// (persona-worlds-design.md §10 Fire P1). internal/gateway/rolesanchors
+// provides the substrate-backed implementation reading the rbac-domain
+// capabilityRoles projection and the identity-domain package's
+// identityAnchors lens bucket.
+type RolesAnchorsResolver interface {
+	// Resolve reports actorKey's role-derived grant keys and residence/
+	// workplace anchors, degrading to empty results on any absence or error.
+	Resolve(ctx context.Context, actorKey string) (roles []string, anchors []rolesanchors.Anchor)
 }
 
 // provisionedCacheMaxEntries caps provisionedCache's memory: it holds one
@@ -264,6 +281,13 @@ func (s *Server) ConfigureCredentialBindings(r CredentialBindingResolver) {
 // existingIdentityHint from the response.
 func (s *Server) ConfigureIdentityIndexHint(r IdentityIndexHintResolver) {
 	s.identityIndexHint = r
+}
+
+// ConfigureRolesAnchors wires the whoami roles[]/anchors[] read seam
+// (persona-worlds-design.md §10 Fire P1). Unconfigured (nil resolver, the
+// default), the response omits both fields.
+func (s *Server) ConfigureRolesAnchors(r RolesAnchorsResolver) {
+	s.rolesAnchors = r
 }
 
 // claimIdentityOperationType is the one carve-out resolveActor's caller must
