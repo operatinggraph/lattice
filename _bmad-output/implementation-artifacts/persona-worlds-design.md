@@ -330,7 +330,62 @@ carve-out (§3.5; trigger: a real client deployment).
   readers, no contract edits.
 - *Fleet interaction:* rows file 📐; stewards build only post-ratification, W-fires sequenced per §8.
 
-## 10. Non-goals
+## 10. Build notes (fire briefs)
+
+### Fire P1 fire brief (build note, 2026-07-23)
+
+**1 · Scope sentence (verbatim §8):** *"Fire P1 `[lattice]` — whoami hats. `GET /v1/actor` gains `roles[]` +
+`anchors[]` (F2). Green: an authenticated call returns the seeded multi-hat identity's three roles +
+relation-stamped anchors; existing callers unaffected. Depends on: nothing."* **Green restated (narrowed):**
+no multi-hat identity is seeded until W0 — P1 greens on existing personas (Dana → `[frontOfHouse]` + one
+`worksAt` anchor; Riley → `[consumer]` + one `residesIn` anchor); the three-role assertion discharges in W0.
+
+**2–3 · Verified touch-list + precedents (scouted live @ `8e9d4c6c`):**
+- `packages/identity-domain/lenses.go` — NEW **`identityAnchors`** lens: `nats-kv` actorAggregate → own
+  bucket **`identity-anchors`**, `OutputKeyPattern "anchors.{actorSuffix}"`, body `["anchors"]`,
+  `EmptyBehavior "delete"`; cypher mirrors the me-lens anchors walk (`edge-manifest/lenses.go:293-313` —
+  OPTIONAL MATCH `residesIn`/`worksAt`, relation stamped as a literal, entry shape
+  `{key,name,container,containerName,relation}`). Bucket auto-created by Refractor at lens activation
+  (`cmd/refractor/main.go:396-411`); no provisioning, no contract text. *Rejected paths:* landing the doc in
+  `capability-kv` (Contract #6 §6.1/§6.2 are key-class/shape-closed → frozen-contract touch, against §9) and
+  extending rbac's `cap.roles` doc (same contract closure + rbac would acquire a topology dependency).
+- `packages/identity-domain/package.go` — **version bump** (package edits don't reach live stacks without one).
+- `internal/gateway/rolesanchors/` (NEW) — mirror `internal/gateway/identityindexhint/` exactly (kvGetter
+  interface + compile-time `*substrate.KV` pin + warn-and-degrade): **roles** =
+  `capabilitykv.ReadAndMerge` single GET on `RolesKeyFromActor(resolvedActor)` (`capabilitykv/keys.go:28-34`;
+  never wire `bootstrap.SystemActorKeys` — it scans core-kv); **anchors** = `OpenKV("identity-anchors")` GET.
+- `internal/gateway/whoami.go:18-23,71-83` — response gains `Roles []string` (role **vertex keys**) +
+  `Anchors []` (`omitempty`), keyed by the resolved actor. Both existing decoders are lenient
+  (`cmd/facet/session.go:377-380,407`; `whoami_test.go`) — additive-safe; whoami is login-cold-path.
+- `internal/gateway/gateway.go` + `cmd/gateway/main.go:272-283` — `Configure*` seam + best-effort wiring
+  beside the identity-index-hint block.
+- `internal/gateway/whoami_test.go` — fake-resolver vectors (mirror `fakeIdentityIndexHintResolver` :50-60).
+- natsperm — **no matrix change** (daemon reads are unrestricted; the capability-kv write-deny pin
+  `conf_test.go:372` stays untouched); add a positive gateway-read vector mirroring
+  `bridge_egress_test.go:99` inverted.
+
+**4 · Increments + green script:** (1) identity-domain lens + bump; (2) gateway resolver pkg + response
+fields + wiring → `go test ./internal/gateway/...`; (3) natsperm vector + ALL `scripts/lint-*.go` + gates;
+(4) live: cycle `bin/gateway` (up-full inline recipe; MERGED ≠ RUNNING), `make reinstall-package
+PKG=identity-domain`, then
+`TOK=$(gateway dev-token <dana|riley>) && curl -s -H "Authorization: Bearer $TOK" :8080/v1/actor | jq '.roles,.anchors'`
+→ Dana: frontOfHouse role key + `worksAt` anchor (building container); Riley: consumer + `residesIn`.
+
+**5 · In-scope gotchas:** roles are vertex keys, not names (labels come later via canonicalName consumers);
+gateway is absent from lint-conventions `platformCmds` — keep core-kv strings out of it; fresh worktree
+(three stale ones exist); `jsstore.Dir(t)` for any embedded-NATS test.
+
+**6 · Adjacent finds (filed pre-build):** `/v1/actor` writes no CORS headers unlike its sibling handlers
+(`gateway.go:423-431`) → XS row filed to the lattice lane (consumer: any browser-direct whoami caller; the
+appsession kit resolves server-side, so no current one).
+
+**7 · Non-goals:** no contract text; no natsperm matrix edit; no SystemActorKeys in the gateway; no Facet
+changes; no W0 seeds; no CORS (filed instead).
+
+**Scope-diff gate: PASS** — every touch traces to `roles[]`/`anchors[]`; the green bar narrowed (recorded
+above), never widened; declared "depends on nothing" re-verified true.
+
+## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
 supplier domain; no Loupe changes; no change to Contract #1/#6/#11 semantics; no touch of planning artifacts
