@@ -552,6 +552,61 @@ no-revive pattern shared with rbac `AssignRole` (lattice lane). Everything the r
 the bind-guard 6-combo matrix, the standing-guard confinement, the byte-identical LWW lens overlap, degenerate
 rows, Facet-now rendering — stands.
 
+### Fire P2 fire brief (build note, 2026-07-24)
+
+**1 · Scope sentence (verbatim §8):** *"Fire P2 `[lattice]` — `internal/appsession` kit. Extract Facet's
+session block (§5); Facet refactors onto it (behavior-identical). Green: Facet login/refresh/logout unchanged
+end-to-end on the kit; the kit's tests cover fence, cookie, refresh-grace, resolution. Depends on: nothing
+(P1 parallel-ok)."*
+
+**2–3 · Verified touch-list + precedents (scouted live @ `23a1ad56`):**
+- `internal/appsession/` (NEW, the first `internal/` home for session cookies — the two shipped
+  implementations both live under `cmd/`: `cmd/facet/session.go`, `cmd/loupe/readauth.go:93-468`).
+  `signer.go` = `Signer`/`Mint`/`NewDevSigner(envPrefix, loopback)` + `Truthy`/`IsLoopbackHost`/`HostOf`
+  lifted verbatim from `cmd/facet/claim.go:59-135`; `personas.go` = `Persona`/`ParsePersonas`
+  (`session.go:70-106`); `session.go` = `Manager` + the seven handlers, `RequireSession`, cookie issue/clear,
+  `Identity`/`ViaCookie`/`WithSession` ctx accessors, `NewAuthenticators` (`session.go:537-558`).
+  Wiring precedent for the env-prefix seam: `internal/controlauth/wire_actor_verifier.go:42-86`.
+- `cmd/facet/session.go` — **deleted** (whole file moves); `cmd/facet/claim.go:59-135` loses
+  `devSigner`/`mint`/`setupDevSigner`/`isTruthy`/`isLoopbackHost`/`hostOf`.
+- Call-site rewires: `server.go:29-106` (struct fields `authn`/`refreshAuthn`/`loopback`/`personas` collapse
+  into one `session *appsession.Manager`; `registerRoutes` delegates the six session routes), `main.go:131-217`,
+  `claim.go:158-190`, `credentials.go:115-351` (7 sites), `staff.go:180-191`, `browserengine.go:136-144`,
+  `enginemanager.go:26,120-125`.
+- Tests: `cmd/facet/session_test.go` (534 lines, 29 tests) moves to `internal/appsession/session_test.go`
+  against a `Manager`; `credentials_test.go:18-31` + `browserengine_test.go` switch to
+  `appsession.WithSession`; `claim_test.go:24-32`'s `testDevSigner` builds an `appsession.Signer`.
+
+**4 · Increments + green script:** (1) the kit + its moved tests → `go test ./internal/appsession/...`;
+(2) Facet refactor + test rewires → `go test ./cmd/facet/...`. Both land in ONE commit (Facet does not
+compile in between). Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, all `scripts/lint-*.go`. Live: cycle `bin/facet`, then
+`curl` whoami → login-options → dev-login (cookie) → whoami → session/refresh → logout, plus one browser load.
+
+**5 · In-scope gotchas (behavior-identical is the bar):** cookie name stays exactly `facet_session` and every
+route path stays exactly as shipped — `web/login.html:144,153`, `web/app.js:344,421,521` and `web/boot.mjs:150,216`
+hard-code them (§5's "`POST /api/login`" is prose; the shipped name is `/api/dev-login`). Preserve: present-but-invalid
+cookie **fails closed** while an absent cookie falls back to the boot identity (`session.go:212-225`); the persona
+fence applied **twice** — at the typed credential and again at the whoami-resolved identity (`:325,357`);
+credential-binding resolve **fails OPEN** (`:346-352`); logout purges the local mirror only when the cookie's
+subject differs from the boot identity (`:430`); refresh returns the raw token **and** re-sets the cookie
+(`:523-524`) and never re-runs resolution; `Secure: !loopback`. `/api/claim` is Facet-only exempt → injected,
+not hard-coded. P5/P2 clean: the kit's only outbound call is the Gateway's own `/v1/actor` door.
+
+**6 · Adjacent finds (filed pre-build):** the four vertical apps + Loupe each carry a verbatim copy of
+`devSigner`/`mint`/`isTruthy`/`isLoopbackHost` — de-duplicated onto this kit by W1–W4, no new row needed
+(§8 already scopes it). None of the four validate the dev-token subject is a NanoID before minting, and
+wellness/café read the body uncapped (`readauth.go:132`/`:129`) — both close when they adopt the kit.
+
+**7 · Non-goals:** the four vertical apps do **not** adopt the kit here (W1–W4); no route renames; no shared
+default login page — each vertical's login UX is its own fire's FE work (§7: "a dedicated vertical adds UX,
+never capability"), so the kit takes the page as an injected asset; no Loupe operator-session change; no
+production-IdP branch (§5 keeps verify-only, F4 defers OIDC); no `/v1/actor` change (P1 shipped it).
+
+**Scope-diff gate: PASS** — every touch traces to "extract Facet's session block + Facet refactors onto it";
+the green bar is unchanged, not widened; "depends on nothing" re-verified (the kit reads P1's `/v1/actor`
+only through the two fields it already decoded before P1).
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
