@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -23,7 +24,7 @@ const engineReapInterval = time.Minute
 // creates shares, plus the signer it mints fresh device credentials with.
 type engineManagerDeps struct {
 	engineConfig
-	Signer *devSigner
+	Signer *appsession.Signer
 }
 
 // engineEntry is one identity's engine plus its holder count. refCount
@@ -117,12 +118,12 @@ func (m *engineManager) Acquire(identityID string) (*engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate device id: %w", err)
 	}
-	token, _, err := m.deps.Signer.mint(identityID)
+	token, _, err := m.deps.Signer.Mint(identityID)
 	if err != nil {
 		return nil, fmt.Errorf("mint engine credential: %w", err)
 	}
 	tokenSource := func() (string, error) {
-		t, _, err := m.deps.Signer.mint(identityID)
+		t, _, err := m.deps.Signer.Mint(identityID)
 		return t, err
 	}
 	eng, err := newEngine(m.baseCtx, m.deps.engineConfig, identityID, deviceID, token, tokenSource)

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,23 +11,39 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
 
-// testDevSigner builds a devSigner with a throwaway key (never the checked-in
-// shared dev key — this test never verifies the JWT, only that handleClaim
-// builds the right envelope and maps the fake Gateway's replies correctly;
-// the ClaimIdentity mechanics themselves are proven once, against a real
-// Processor, by packages/identity-domain/claim_test.go).
-func testDevSigner(t *testing.T) *devSigner {
-	t.Helper()
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	return &devSigner{priv: priv, kid: "test", ttl: devTokenTTL, now: time.Now}
+// TestClaim_ExemptFromSessionAtTheMux proves the exemption end-to-end through
+// the real mux (registerRoutes → session.RequireSession), not just by calling
+// handleClaim directly: a request with NO cookie and NO boot identity
+// configured must still reach the claim handler rather than being redirected
+// to /login or 401ed by RequireSession. Today's only other claim tests call
+// srv.handleClaim in isolation, which cannot catch the exemption being
+// dropped from ExtraExemptPaths.
+func TestClaim_ExemptFromSessionAtTheMux(t *testing.T) {
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), session: testSession(t, nil)}
+	mux := http.NewServeMux()
+	srv.registerRoutes(mux)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(`{}`))
+	mux.ServeHTTP(w, r)
+
+	// No session at all resolves for this request (no cookie, no boot
+	// identity), so RequireSession would otherwise redirect a browser
+	// navigation or 401 an API call. Reaching handleClaim's own validation
+	// (missing fields → 400) instead of either of those proves the exemption
+	// held.
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.NotEqual(t, http.StatusFound, w.Code)
+	require.NotEqual(t, http.StatusUnauthorized, w.Code)
+	require.Contains(t, w.Body.String(), "targetIdentityKey")
 }
 
 func TestHandleClaim_DisabledWithoutDevSigner(t *testing.T) {
-	srv := &server{logger: slog.Default()}
+	srv := &server{logger: slog.Default(), session: testSession(t, nil)}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(`{}`))
 	srv.handleClaim(w, r)
@@ -37,7 +51,7 @@ func TestHandleClaim_DisabledWithoutDevSigner(t *testing.T) {
 }
 
 func TestHandleClaim_RequiresBothFields(t *testing.T) {
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t)}
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), session: testSession(t, nil)}
 	for _, body := range []string{`{}`, `{"targetIdentityKey":"vtx.identity.abc"}`, `{"claimKey":"secret"}`} {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))
@@ -47,7 +61,7 @@ func TestHandleClaim_RequiresBothFields(t *testing.T) {
 }
 
 func TestHandleClaim_MethodNotAllowed(t *testing.T) {
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t)}
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), session: testSession(t, nil)}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/claim", nil)
 	srv.handleClaim(w, r)
@@ -58,7 +72,9 @@ func TestHandleClaim_DisabledInDemoPersonaPosture(t *testing.T) {
 	srv := &server{
 		logger:    slog.Default(),
 		devSigner: testDevSigner(t),
-		personas:  []demoPersona{{ID: "aaaaaaaaaaaaaaaaaaaa", Label: "Riley"}},
+		session: testSession(t, func(c *appsession.Config) {
+			c.Personas = []appsession.Persona{{ID: "aaaaaaaaaaaaaaaaaaaa", Label: "Riley"}}
+		}),
 	}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(`{"targetIdentityKey":"vtx.identity.abc","claimKey":"secret"}`))
@@ -83,7 +99,7 @@ func TestHandleClaim_SubmitsExpectedEnvelopeAndReturnsCredential(t *testing.T) {
 	}))
 	defer gw.Close()
 
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL, session: testSession(t, nil)}
 	body := `{"targetIdentityKey":"vtx.identity.targetnano01","claimKey":"the-plaintext-secret"}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))
@@ -116,31 +132,6 @@ func TestHandleClaim_SubmitsExpectedEnvelopeAndReturnsCredential(t *testing.T) {
 	require.NotEqual(t, resp["claimedIdentityKey"], resp["credentialKey"])
 }
 
-func TestSetupDevSigner_DisabledByDefault(t *testing.T) {
-	signer, err := setupDevSigner(slog.Default(), true)
-	require.NoError(t, err)
-	require.Nil(t, signer)
-}
-
-func TestSetupDevSigner_RefusesNonLoopbackBind(t *testing.T) {
-	t.Setenv("FACET_DEV_AUTH", "1")
-	signer, err := setupDevSigner(slog.Default(), false)
-	require.Error(t, err)
-	require.Nil(t, signer)
-	require.Contains(t, err.Error(), "loopback")
-}
-
-func TestIsLoopbackHost(t *testing.T) {
-	require.True(t, isLoopbackHost("127.0.0.1"))
-	require.True(t, isLoopbackHost("localhost"))
-	require.True(t, isLoopbackHost("::1"))
-	require.False(t, isLoopbackHost("0.0.0.0"))
-	require.False(t, isLoopbackHost("10.0.0.5"))
-	require.False(t, isLoopbackHost(""))
-	require.Equal(t, "127.0.0.1", hostOf("127.0.0.1:7810"))
-	require.Equal(t, "", hostOf(":7810"))
-}
-
 func TestHandleClaim_RetriesTransientAuthLagThenSucceeds(t *testing.T) {
 	var calls int
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +147,7 @@ func TestHandleClaim_RetriesTransientAuthLagThenSucceeds(t *testing.T) {
 	}))
 	defer gw.Close()
 
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL, session: testSession(t, nil)}
 
 	orig := claimRetryBackoffs
 	claimRetryBackoffs = []time.Duration{time.Millisecond}
@@ -182,7 +173,7 @@ func TestHandleClaim_PersistentDenialDoesNotRetryForever(t *testing.T) {
 	}))
 	defer gw.Close()
 
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL, session: testSession(t, nil)}
 	orig := claimRetryBackoffs
 	claimRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
 	defer func() { claimRetryBackoffs = orig }()
@@ -205,7 +196,7 @@ func TestHandleClaim_GatewayRejectionSurfacesAsError(t *testing.T) {
 	}))
 	defer gw.Close()
 
-	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL}
+	srv := &server{logger: slog.Default(), devSigner: testDevSigner(t), gatewayURL: gw.URL, session: testSession(t, nil)}
 	body := `{"targetIdentityKey":"vtx.identity.targetnano01","claimKey":"wrong-secret"}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/claim", strings.NewReader(body))

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
 
 // facet-staff-worlds-design.md §3.4: the Protected worklist pane. Unlike the
@@ -177,7 +179,7 @@ func (s *server) handleStaffWorklist(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "GET required")
 		return
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return
@@ -188,7 +190,7 @@ func (s *server) handleStaffWorklist(w http.ResponseWriter, r *http.Request) {
 	// cross-identity PII surface, exactly as credentials.go refuses it for the
 	// SENSITIVE credential set. RLS would still confine the rows to the boot
 	// identity's grants; it cannot tell that the caller isn't that identity.
-	if !sessionViaCookie(r.Context()) {
+	if !appsession.ViaCookie(r.Context()) {
 		s.writeError(w, http.StatusForbidden, "sign in to view the staff worklist")
 		return
 	}

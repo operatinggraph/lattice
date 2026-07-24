@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
 
 // writeAssetDirs lays down a fake wasm dir + shell dir so the serving handlers
@@ -36,6 +38,7 @@ func browserModeServer(t *testing.T, wasmDir, shellDir string) *server {
 	return &server{
 		logger:     slog.Default(),
 		gatewayURL: "http://gw.example:8080",
+		session:    testSession(t, nil),
 		browserEngine: &browserEngineConfig{
 			wasmDir:  wasmDir,
 			shellDir: shellDir,
@@ -47,9 +50,9 @@ func browserModeServer(t *testing.T, wasmDir, shellDir string) *server {
 func TestBrowserEngine_ServesWasmAndShellAssets(t *testing.T) {
 	wasmDir, shellDir := writeAssetDirs(t)
 	srv := browserModeServer(t, wasmDir, shellDir)
-	// A boot identity lets requireSession resolve for these non-exempt asset
+	// A boot identity lets RequireSession resolve for these non-exempt asset
 	// GETs without a cookie (the assets themselves carry no per-user data).
-	srv.bootIdentityID = "bootident0123456789x"
+	withBootIdentity(t, srv, "bootident0123456789x")
 
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
@@ -77,17 +80,20 @@ func TestBrowserEngine_ServesWasmAndShellAssets(t *testing.T) {
 func TestBrowserEngine_InjectsBootConfigForCookieSession(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	signer := &devSigner{priv: priv, kid: "test", ttl: devTokenTTL, now: time.Now}
+	signer := appsession.NewSigner(priv, "test", appsession.DevTokenTTL, time.Now)
 	authn, err := buildTestVerifier(&priv.PublicKey, "test")
 	require.NoError(t, err)
 
 	wasmDir, shellDir := writeAssetDirs(t)
 	srv := browserModeServer(t, wasmDir, shellDir)
 	srv.devSigner = signer
-	srv.authn = authn
+	srv.session = testSession(t, func(c *appsession.Config) {
+		c.Signer = signer
+		c.Authn = authn
+	})
 
 	identity := testNanoID(t)
-	token, _, err := signer.mint(identity)
+	token, _, err := signer.Mint(identity)
 	require.NoError(t, err)
 
 	mux := http.NewServeMux()
@@ -117,7 +123,8 @@ func TestBrowserEngine_InjectsBootConfigForCookieSession(t *testing.T) {
 func TestBrowserEngine_ModeOffLeavesShippedHostUnchanged(t *testing.T) {
 	// browserEngine nil = shipped Go host. The index is served verbatim and
 	// the browser-native asset routes do not exist.
-	srv := &server{logger: slog.Default(), bootIdentityID: "bootident0123456789x"}
+	srv := &server{logger: slog.Default()}
+	withBootIdentity(t, srv, "bootident0123456789x")
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
 
@@ -138,7 +145,7 @@ func TestBrowserEngine_NoInjectionWithoutSessionToken(t *testing.T) {
 	// verbatim and app.js falls back to the SSE source.
 	wasmDir, shellDir := writeAssetDirs(t)
 	srv := browserModeServer(t, wasmDir, shellDir)
-	srv.bootIdentityID = "bootident0123456789x" // no bootToken set
+	withBootIdentity(t, srv, "bootident0123456789x") // no bootToken set
 
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
@@ -153,7 +160,7 @@ func TestBrowserEngine_NoInjectionWithoutSessionToken(t *testing.T) {
 func TestBrowserEngine_BootFallbackInjectsProcessToken(t *testing.T) {
 	wasmDir, shellDir := writeAssetDirs(t)
 	srv := browserModeServer(t, wasmDir, shellDir)
-	srv.bootIdentityID = "bootident0123456789x"
+	withBootIdentity(t, srv, "bootident0123456789x")
 	srv.bootToken = "process-edge-token"
 
 	mux := http.NewServeMux()
@@ -179,14 +186,4 @@ func TestInjectedIndex_EscapesTokenAgainstScriptBreakout(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(out), "</script><script>alert(1)", "the raw breakout must be escaped away")
 	require.Contains(t, string(out), "\\u003c/script\\u003e", "the token's < and > are escaped to their \\u00xx form")
-}
-
-func TestBrowserEngineTruthyGate(t *testing.T) {
-	// FACET_BROWSER_ENGINE rides the shared isTruthy gate (claim.go).
-	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
-		require.Truef(t, isTruthy(v), "value=%q", v)
-	}
-	for _, v := range []string{"", "0", "false", "no", "off", "  "} {
-		require.Falsef(t, isTruthy(v), "value=%q", v)
-	}
 }

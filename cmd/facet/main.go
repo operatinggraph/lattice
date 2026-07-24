@@ -12,7 +12,7 @@
 // Inc 2 (design §7.2): Facet is no longer per-process single-tenant. Each
 // signed-in identity gets its own engine (engine.go), multiplexed by
 // engineManager (enginemanager.go) and selected per-request by a session
-// cookie (session.go) — "same binary, different identity, different app"
+// cookie (internal/appsession) — "same binary, different identity, different app"
 // (design §1) now has a runtime delivery vehicle, not just the claim
 // ceremony's one-shot unclaimed→claimed transition.
 //
@@ -31,7 +31,7 @@
 //	                   required alongside EDGE_IDENTITY_ID
 //	FACET_HTTP_ADDR    HTTP listen address (default: 127.0.0.1:7810)
 //	FACET_DEV_AUTH     set to enable POST /api/claim + the /login session flow
-//	                   (session.go, claim.go) — mints demo JWTs in-process for
+//	                   (claim.go, internal/appsession) — mints demo JWTs in-process for
 //	                   any caller-named identity; loopback-only, demo posture only
 //	FACET_DEMO_PERSONAS  OPTIONAL JSON array [{"id","label","sub"}] of curated
 //	                   sign-in personas (deploy/demo): the login page offers
@@ -90,6 +90,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/edge/agent"
 	"github.com/operatinggraph/lattice/internal/healthkv"
@@ -97,6 +98,10 @@ import (
 )
 
 const (
+	// appName names the process in logs and derives its session cookie
+	// (facet_session); envPrefix names its dev-auth env vars.
+	appName            = "facet"
+	envPrefix          = "FACET"
 	defaultHTTPAddr    = "127.0.0.1:7810"
 	defaultGatewayURL  = "http://localhost:8080"
 	defaultStoreDir    = "./facet-store"
@@ -128,16 +133,16 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("create store dir %q: %w", storeDir, err)
 	}
 
-	loopback := isLoopbackHost(hostOf(httpAddr))
-	signer, err := setupDevSigner(logger, loopback)
+	loopback := appsession.IsLoopbackHost(appsession.HostOf(httpAddr))
+	signer, err := appsession.NewDevSigner(logger, envPrefix, loopback)
 	if err != nil {
 		return err
 	}
-	authn, refreshAuthn, err := setupSessionAuthn(logger, signer)
+	authn, refreshAuthn, err := appsession.NewAuthenticators(logger, envPrefix, signer)
 	if err != nil {
 		return err
 	}
-	personas, err := parseDemoPersonas(os.Getenv("FACET_DEMO_PERSONAS"))
+	personas, err := appsession.ParsePersonas(envPrefix+"_DEMO_PERSONAS", os.Getenv(envPrefix+"_DEMO_PERSONAS"))
 	if err != nil {
 		return err
 	}
@@ -191,7 +196,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	var browserEngine *browserEngineConfig
-	if isTruthy(os.Getenv("FACET_BROWSER_ENGINE")) {
+	if appsession.Truthy(os.Getenv("FACET_BROWSER_ENGINE")) {
 		browserEngine = &browserEngineConfig{
 			wasmDir:  envOrDefault("FACET_EDGE_WASM_DIR", defaultEdgeWasmDir),
 			shellDir: envOrDefault("FACET_EDGE_SHELL_DIR", defaultEdgeShellDir),
@@ -201,19 +206,43 @@ func run(logger *slog.Logger) error {
 			"wasmDir", browserEngine.wasmDir, "shellDir", browserEngine.shellDir, "wsUrl", browserEngine.wsURL)
 	}
 
+	loginPage, err := webFS.ReadFile("web/login.html")
+	if err != nil {
+		return fmt.Errorf("read embedded login page: %w", err)
+	}
+	session, err := appsession.New(appsession.Config{
+		AppName:            appName,
+		EnvPrefix:          envPrefix,
+		Logger:             logger,
+		GatewayURL:         gatewayURL,
+		Signer:             signer,
+		Authn:              authn,
+		RefreshAuthn:       refreshAuthn,
+		Loopback:           loopback,
+		FallbackIdentityID: bootIdentityID,
+		Personas:           personas,
+		LoginPage:          loginPage,
+		// A not-yet-claimed identity has no session to present, and that
+		// ceremony is how a fresh user gets into the system in the first
+		// place.
+		ExtraExemptPaths: []string{"/api/claim"},
+		// Purge the signed-in identity's local mirror on sign-out (§4.4).
+		OnSignOut: engines.Purge,
+	})
+	if err != nil {
+		return err
+	}
+
 	srv := &server{
 		logger:         logger,
 		gatewayURL:     gatewayURL,
 		devSigner:      signer,
-		authn:          authn,
-		refreshAuthn:   refreshAuthn,
+		session:        session,
 		engines:        engines,
 		bootIdentityID: bootIdentityID,
-		loopback:       loopback,
 		pgPool:         pgPool,
 		browserEngine:  browserEngine,
 		bootToken:      os.Getenv("EDGE_TOKEN"),
-		personas:       personas,
 	}
 	// Contract #5 heartbeat — a SECOND, host-level connection distinct from
 	// every per-identity engine connection above (see the doc comment's

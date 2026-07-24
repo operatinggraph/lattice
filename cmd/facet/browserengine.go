@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
 
 // browserEngineConfig holds the browser-native serving mode's wiring (EDGE.5
@@ -133,14 +135,14 @@ func (s *server) bootConfigForSession(r *http.Request) (edgeBootConfig, bool) {
 	if s.browserEngine == nil {
 		return edgeBootConfig{}, false
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		return edgeBootConfig{}, false
 	}
 	var token string
 	switch {
-	case sessionViaCookie(r.Context()):
-		token = sessionCookieToken(r)
+	case appsession.ViaCookie(r.Context()):
+		token = s.session.CookieToken(r)
 	case identityID == s.bootIdentityID:
 		token = s.bootToken
 	}

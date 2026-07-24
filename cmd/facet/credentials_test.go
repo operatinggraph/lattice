@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -11,23 +10,22 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
 
 // withSession returns r carrying identityID as its resolved session — what
-// requireSession installs before any handler runs, so a handler test can
+// RequireSession installs before any handler runs, so a handler test can
 // exercise the handler alone. viaCookie is true: these tests cover a real
 // signed-in session, the only kind the credential surfaces serve.
 func withSession(r *http.Request, identityID string) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), sessionIdentityContextKey{},
-		sessionInfo{identityID: identityID, viaCookie: true}))
+	return r.WithContext(appsession.WithSession(r.Context(), identityID, true))
 }
 
 // withBootSession is the boot-env fallback: an identity resolved from the
 // process's own env, proven by no cookie at all.
 func withBootSession(r *http.Request, identityID string) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), sessionIdentityContextKey{},
-		sessionInfo{identityID: identityID}))
+	return r.WithContext(appsession.WithSession(r.Context(), identityID, false))
 }
 
 // TestCredentialSurfaces_RefuseTheBootFallbackSession — credentialBinding is

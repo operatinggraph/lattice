@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -25,30 +25,21 @@ var webFS embed.FS
 // talks to cmd/facet's own localhost HTTP surface"). Inc 2 (§7.2) replaced
 // the single process-lifetime engine Fire 2/3 held here with one engine per
 // signed-in identity, multiplexed by engines and resolved per-request by
-// requireSession — see engine.go/enginemanager.go/session.go.
+// the session kit — see engine.go/enginemanager.go/internal/appsession.
 type server struct {
 	logger *slog.Logger
-	// gatewayURL and devSigner back /api/claim (claim.go, Fire 3) and
-	// /api/dev-login (session.go, Inc 2) — standalone Gateway calls / engine
-	// credentials authenticated by a freshly-minted JWT, independent of any
-	// one engine.
+	// gatewayURL and devSigner back /api/claim (claim.go) and the session
+	// kit's login endpoint — standalone Gateway calls / engine credentials
+	// authenticated by a freshly-minted JWT, independent of any one engine.
 	gatewayURL string
-	devSigner  *devSigner
-	// authn verifies a session cookie's token (session.go); nil when
-	// devSigner is nil (no minter configured ⇒ nothing to verify).
-	authn *auth.Authenticator
-	// refreshAuthn is authn's sliding-session sibling — same trusted key,
-	// sessionRefreshGrace tolerance instead of the strict default — and
-	// backs ONLY POST /api/session/refresh (session.go). Nil under the same
-	// condition as authn.
-	refreshAuthn *auth.Authenticator
-	engines      *engineManager
+	devSigner  *appsession.Signer
+	// session serves the login/logout/whoami/refresh surface and resolves
+	// every request to a signed-in identity (internal/appsession).
+	session *appsession.Manager
+	engines *engineManager
 	// bootIdentityID is the boot-env EDGE_IDENTITY_ID fallback identity —
-	// see resolveSessionIdentity.
+	// the single-user posture a browser with no cookie resolves to.
 	bootIdentityID string
-	// loopback gates the session cookie's Secure flag, mirroring
-	// cmd/loupe/readauth.go's setOperatorSessionCookie.
-	loopback bool
 	// pgPool backs GET /api/credentials (credentials.go, Inc 3) — the
 	// identityCredentialsRead Protected Postgres lens, mirroring
 	// cmd/loftspace-app's read boundary. Nil when FACET_PG_DSN is unset;
@@ -67,10 +58,6 @@ type server struct {
 	// is the token injected for that identity (there is no cookie to read it
 	// from). Empty in a login-only deployment.
 	bootToken string
-	// personas, when non-empty, puts the process in the demo-persona posture
-	// (FACET_DEMO_PERSONAS, session.go): the login page offers exactly these
-	// identities, dev-login refuses all others, and /api/claim is disabled.
-	personas []demoPersona
 }
 
 func (s *server) registerRoutes(mux *http.ServeMux) {
@@ -96,13 +83,8 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/credentials/link", s.handleCredentialsLink)
 	inner.HandleFunc("/api/credentials/unlink", s.handleCredentialsUnlink)
 	inner.HandleFunc("/api/staff/worklist", s.handleStaffWorklist)
-	inner.HandleFunc(loginPagePath, s.handleLoginPage)
-	inner.HandleFunc(loginOptionsPath, s.handleLoginOptions)
-	inner.HandleFunc(devLoginPath, s.handleDevLogin)
-	inner.HandleFunc(logoutPath, s.handleLogout)
-	inner.HandleFunc(whoamiPath, s.handleWhoami)
-	inner.HandleFunc(sessionRefreshPath, s.handleSessionRefresh)
-	mux.Handle("/", s.requireSession(inner))
+	s.session.RegisterRoutes(inner)
+	mux.Handle("/", s.session.RequireSession(inner))
 }
 
 // handleFeed implements GET /api/feed (SSE) — see feed.go's writeSSE.
@@ -115,7 +97,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET required", http.StatusMethodNotAllowed)
 		return
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return
@@ -172,7 +154,7 @@ func (s *server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return

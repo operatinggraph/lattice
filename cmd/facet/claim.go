@@ -2,21 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/rsa"
 	"encoding/json"
-	"fmt"
 	"io"
-	"log/slog"
-	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-
 	"github.com/operatinggraph/lattice/internal/edge/agent"
-	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -49,91 +41,6 @@ func isTransientAuthLag(reply *processor.OperationReply) bool {
 	return reason == "NoCapabilityEntry" || reason == "OperationNotPermitted"
 }
 
-// edge-showcase-app-design.md §7.1 (Fire 3 build note): the claim ceremony's
-// only demo-posture credential need is a throwaway device JWT to authenticate
-// the ClaimIdentity raw-credential carve-out — the same shared-dev-key
-// stand-in cmd/loftspace-app/readauth.go and cmd/clinic-app already use for
-// their read boundaries, applied here instead to a write. Nil unless
-// FACET_DEV_AUTH is enabled; a nil signer disables /api/claim (404), the
-// same fail-closed default as the other apps' dev-auth posture.
-type devSigner struct {
-	priv *rsa.PrivateKey
-	kid  string
-	ttl  time.Duration
-	now  func() time.Time
-}
-
-const devTokenTTL = 30 * time.Minute
-
-func (d *devSigner) mint(subject string) (string, time.Time, error) {
-	now := d.now()
-	exp := now.Add(d.ttl)
-	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
-		Subject:   subject,
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(exp),
-	})
-	tok.Header["kid"] = d.kid
-	signed, err := tok.SignedString(d.priv)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	return signed, exp, nil
-}
-
-// setupDevSigner mirrors readauth.go's DEMO posture (same shared dev key,
-// same loopback defense-in-depth) minus its PRODUCTION verify-only branch:
-// Facet has no read boundary to configure, and a deployed IdP issuing real
-// tokens has no Facet-side counterpart to wire — the app never signs on an
-// external IdP's behalf, same as readauth.go's package doc.
-func setupDevSigner(logger *slog.Logger, loopback bool) (*devSigner, error) {
-	if !isTruthy(os.Getenv("FACET_DEV_AUTH")) {
-		return nil, nil
-	}
-	if !loopback {
-		return nil, fmt.Errorf("FACET_DEV_AUTH is only permitted on a loopback bind (the in-process minter trusts any subject)")
-	}
-	priv, err := auth.LoadDevSigningKey(os.Getenv("FACET_DEV_PRIVATE_KEY_PATH"))
-	if err != nil {
-		return nil, fmt.Errorf("dev-auth: load shared dev signing key: %w", err)
-	}
-	logger.Warn("FACET_DEV_AUTH ENABLED: /api/claim mints demo JWTs in-process (NOT for production)")
-	return &devSigner{priv: priv, kid: auth.DevKeyID, ttl: devTokenTTL, now: time.Now}, nil
-}
-
-func isTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
-// isLoopbackHost mirrors cmd/loftspace-app/main.go's helper of the same
-// name. An empty host (the bare ":7810" form) means all interfaces and is
-// NOT loopback — fail safe.
-func isLoopbackHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
-}
-
-func hostOf(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return ""
-	}
-	return host
-}
-
 // claimRequest is what the browser POSTs to /api/claim (facet-app-ux.md
 // §3.7's claim/link entry, Fire 3). Facet mints its own throwaway device
 // credential server-side — the browser never sees a Gateway URL or a bearer
@@ -159,10 +66,10 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, "claim is disabled (FACET_DEV_AUTH not set)")
 		return
 	}
-	// Demo-persona posture (FACET_DEMO_PERSONAS, session.go): the world's
-	// residents are fixed and pre-claimed, so the ceremony's write surface
-	// stays closed — same fail-closed shape as the nil-signer gate above.
-	if len(s.personas) > 0 {
+	// Demo-persona posture (FACET_DEMO_PERSONAS): the world's residents are
+	// fixed and pre-claimed, so the ceremony's write surface stays closed —
+	// same fail-closed shape as the nil-signer gate above.
+	if s.session.HasPersonaFence() {
 		s.writeError(w, http.StatusNotFound, "claim is disabled (demo-persona deployment)")
 		return
 	}
@@ -187,7 +94,7 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "generate device credential: "+err.Error())
 		return
 	}
-	token, _, err := s.devSigner.mint(deviceBareID)
+	token, _, err := s.devSigner.Mint(deviceBareID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint device credential: "+err.Error())
 		return

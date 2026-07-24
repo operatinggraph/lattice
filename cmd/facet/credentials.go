@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/operatinggraph/lattice/internal/appsession"
 
 	"github.com/operatinggraph/lattice/internal/edge/agent"
 	"github.com/operatinggraph/lattice/internal/processor"
@@ -112,7 +113,7 @@ func (s *server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "GET required")
 		return
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return
@@ -124,7 +125,7 @@ func (s *server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	// boot identity would otherwise expose an identity's bound credentials
 	// to any network caller. RLS would still confine the row to the boot
 	// identity; it cannot tell that the caller isn't that identity.
-	if !sessionViaCookie(r.Context()) {
+	if !appsession.ViaCookie(r.Context()) {
 		s.writeError(w, http.StatusForbidden, "sign in to manage sign-in methods")
 		return
 	}
@@ -176,7 +177,7 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, "linking is disabled (FACET_DEV_AUTH not set)")
 		return
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return
@@ -184,7 +185,7 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 	// Mutating a credential set is per-user by definition — the boot-env
 	// fallback proves no identity, so it never reaches this (same reasoning
 	// as handleCredentials).
-	if !sessionViaCookie(r.Context()) {
+	if !appsession.ViaCookie(r.Context()) {
 		s.writeError(w, http.StatusForbidden, "sign in to manage sign-in methods")
 		return
 	}
@@ -199,7 +200,7 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	uToken, _, err := s.devSigner.mint(identityID)
+	uToken, _, err := s.devSigner.Mint(identityID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint session credential: "+err.Error())
 		return
@@ -244,7 +245,7 @@ func (s *server) handleCredentialsLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a2Key := "vtx.identity." + deviceBareID
-	a2Token, _, err := s.devSigner.mint(deviceBareID)
+	a2Token, _, err := s.devSigner.Mint(deviceBareID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint device credential: "+err.Error())
 		return
@@ -321,7 +322,7 @@ func (s *server) handleCredentialsUnlink(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, http.StatusNotFound, "unlinking is disabled (FACET_DEV_AUTH not set)")
 		return
 	}
-	identityID, ok := sessionIdentity(r.Context())
+	identityID, ok := appsession.Identity(r.Context())
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "no session identity")
 		return
@@ -329,7 +330,7 @@ func (s *server) handleCredentialsUnlink(w http.ResponseWriter, r *http.Request)
 	// Mutating a credential set is per-user by definition — the boot-env
 	// fallback proves no identity, so it never reaches this (same reasoning
 	// as handleCredentials).
-	if !sessionViaCookie(r.Context()) {
+	if !appsession.ViaCookie(r.Context()) {
 		s.writeError(w, http.StatusForbidden, "sign in to manage sign-in methods")
 		return
 	}
@@ -348,7 +349,7 @@ func (s *server) handleCredentialsUnlink(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	token, _, err := s.devSigner.mint(identityID)
+	token, _, err := s.devSigner.Mint(identityID)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "mint session credential: "+err.Error())
 		return
