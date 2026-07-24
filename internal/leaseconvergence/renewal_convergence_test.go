@@ -103,7 +103,7 @@ func (h *harness) assignLandlord(unitKey string) (landlordKey string) {
 	h.t.Helper()
 	claimSum := sha256.Sum256([]byte("renewal-landlord-claim-" + mustNanoID(h.t)))
 	idReply := h.submitOp("CreateUnclaimedIdentity", "identity", "default", bootstrap.BootstrapIdentityKey, map[string]any{
-		"name":         "Renewal Landlord",
+		"name":         "Renewal Landlord " + mustNanoID(h.t),
 		"email":        "landlord-" + mustNanoID(h.t) + "@loftspace.example",
 		"claimKeyHash": hex.EncodeToString(claimSum[:]),
 	}, nil)

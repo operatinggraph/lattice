@@ -1421,7 +1421,7 @@ test-rollback:
 ## lapse in bounded wall-clock (the production window stays 5m).
 .PHONY: test-lease-convergence
 test-lease-convergence:
-	go test -tags leaseshortwindow ./internal/leaseconvergence/... -run TestLeaseConvergence -v -p 1 -count=1 -timeout 10m
+	go test -tags leaseshortwindow ./internal/leaseconvergence/... -run 'TestLeaseConvergence|TestRenewalConvergence' -v -p 1 -count=1 -timeout 10m
 
 ## test-object-gc — v1b object-GC Loop A+B convergence gate. Self-contained:
 ## embedded NATS, boots Processor + outbox + Refractor + Weaver + the
