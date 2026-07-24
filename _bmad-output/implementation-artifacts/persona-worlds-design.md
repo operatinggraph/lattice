@@ -823,16 +823,38 @@ stray cross-link cannot surface staff content. Live-verified in-browser on the s
 identity sees all seven tabs + New-patient; a `residesIn`-only patient sees only the two. Gating is UX
 curation — every op these views submit stays enforced by its `GrantsTo` + RLS.
 
-**Gating-signal choice + the provider-hat prerequisite.** The design (§4) frames gating as roles-driven, but
-whoami's `roles[]` arrives as **opaque role vertex keys** (`vtx.role.<id>`), not canonical names, so the FE
-cannot name the `frontOfHouse` role directly. The `worksAt` anchor is the readable, already-projected signal
-that means "works the desk" in the clinic persona model, so front-desk/patient gates on it cleanly with **no
-Lattice-lane dependency**. The **provider hat** cannot: a provider has **no** `worksAt`/`residesIn` anchor
-(she `practicesAt` / is `identifiedBy`), only a `provider` role key. So the provider-hat increment's
-**prerequisite** is Gateway-whoami **role-name resolution** — expose canonical role names (or a `roleNames[]`)
-alongside the keys, a `internal/gateway/rolesanchors` change (resolve each `vtx.role.<id>` → its
-`.canonicalName`). A Lattice-lane item; named here so the provider-hat fire flags it rather than re-discovering
-it. `state.roles` is deliberately **not** stashed FE-side yet (no consumer until then).
+**Gating-signal choice — the anchor, not role-name resolution.** The design (§4) frames gating as roles-driven,
+but whoami's `roles[]` arrives as **opaque role vertex keys** (`vtx.role.<id>`), not canonical names — and that
+is **frozen**: Contract #6 §6 (line 232) specifies `cap.roles.<actor>.roles` = *vertex keys of role vertices*,
+consumed by the Processor's FR22 denial builder, so making it emit names is a frozen-contract change, not a
+package edit. Gating therefore rides **anchors**, exactly as §4.1 already specifies (`anchors[]` = the
+relation-stamped `residesIn` / `worksAt` / **`identifiedBy`-inverse** bindings). Front-desk/patient gates on the
+`worksAt` anchor. The **provider hat** gates on the **`identifiedBy` anchor** — a provider has no
+`worksAt`/`residesIn` (she `practicesAt` / is `identifiedBy`-bound), so before Inc 2c she projected *no anchors
+at all* and was invisible to the hats surface. No role-name resolution, no Lattice-lane item, no frozen-contract
+touch — the enabling lens edit is package work, shipped in Inc 2c below.
+
+**Inc 2c — `identityAnchors` projects the `identifiedBy` binding anchor SHIPPED (2026-07-24, `2dbc8232`).**
+The shipped `identityAnchors` lens (identity-domain) walked only `residesIn` + `worksAt`, so §4.1's third
+binding was missing and every provider identity produced an empty (deleted) anchors doc. Added the untyped
+inbound `(identity)<-[:identifiedBy]-(bound)` walk (mirroring the production `edge-manifest` `edgeIdentitySpec`),
+stamped `relation: 'identifiedBy'`, carrying `bound.key`. The lens stays domain-agnostic: it reports every
+binding (provider/patient/instructor/serviceprovider) by key, leaving hat interpretation to the domain-aware
+caller — a provider's display name lives on `.profile.data.fullName`, which the generic lens cannot resolve per
+bound-entity type, and a patient binding is a `vtx.patient` key the clinic FE's `vtx.provider` gate skips.
+identity-domain 0.6.0→0.7.0; live-applied (diff-apply, no teardown); colocated deterministic full-engine
+coverage proves the Osei case (provider-only binding → one `identifiedBy` anchor, no residesIn/worksAt) and
+patient-key distinctness. *Live-backfill note:* a lens-spec change reprojects per-actor on the next adjacency
+CDC event, so an already-bound provider's anchors doc populates when her binding is next touched (or via a
+control-plane `lens reproject`); the provider-hat FE fire that consumes the anchor is the natural trigger.
+*(The clinic FE's `app.js:3808` gating comment still describes the pre-2c "needs role-name resolution" framing;
+it is rewritten by the provider-hat FE fire when that fire wires the anchor and cycles the binary.)*
+
+*Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
+reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only
+for its own caller and takes no provider argument by design. Its consumer is the **provider hat** FE increment
+(a signed-in provider viewing their own day, gated on the Inc 2c `identifiedBy` anchor); the handler and its
+RLS test stay for that.
 
 *Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
 reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only
