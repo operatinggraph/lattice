@@ -72,7 +72,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 		}
 	}
 	return []pkgmgr.PermissionSpec{
-		mk("CreatePatient"),
+		{
+			OperationType: "CreatePatient",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to register a patient. Unconfined: a patient vertex is practice-wide (no building), so there is no location to workplace-confine to — front-desk registration mirrors the operator grant and identity-domain's own frontOfHouse CreateUnclaimedIdentity.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 		mk("TombstonePatient"),
 		mk("CreateProvider"),
 		mk("TombstoneProvider"),
@@ -89,7 +94,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit SetProviderTimeOff operations, and a bound provider the right to set THEIR OWN time off (the script's standing guard confines a non-operator caller to the provider it is identifiedBy-bound to).",
 			GrantsTo:      []string{"operator", "provider"},
 		},
-		mk("CreateAppointment"),
+		{
+			OperationType: "CreateAppointment",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to book an appointment on behalf of a patient. The script's standing workplace guard confines a non-operator caller to providers practising at a building it worksAt (mirrors RescheduleAppointment / SetAppointmentStatus) — a front-desk actor cannot book with a provider at a building it does not staff.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 		{
 			OperationType: "CreateAppointment",
 			Scope:         "self",

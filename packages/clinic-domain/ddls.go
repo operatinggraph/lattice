@@ -1655,16 +1655,39 @@ def workplace_exempt():
     # raises where the op previously succeeded. Call sites therefore gate on
     # this; require_workplace re-checks it anyway, so a site that forgets the
     # gate is still CORRECT, only slower.
-    return op.authContextTarget != "" or actor_holds_operator(op.actor)
+    #
+    # The self-service exemption keys on authContextTarget == op.actor, NOT on
+    # authContextTarget != "": step 3 authorizes a scope=ANY grant WITHOUT
+    # inspecting authContext.target (step3_auth_capability.go: the "any" case
+    # returns Authorized immediately), and the Gateway forwards the client's
+    # authContext verbatim -- so a staff caller holding a scope=any grant can
+    # attach ANY target it likes. Gating on mere presence would let that caller
+    # forge the consumer exemption and skip workplace confinement entirely. The
+    # genuine scope=self path always carries target == actor (step 3 REQUIRES it
+    # for scope=self: "platform scope=self: target != actor" is a hard denial),
+    # so equality admits exactly that path and nothing a scope=any actor can
+    # manufacture. A scope=any caller that sets target == its own actor gains
+    # nothing: the op's own identifiedBy check then binds the patient to the
+    # caller's identity, i.e. the legitimate self-book, never an arbitrary one.
+    return op.authContextTarget == op.actor or actor_holds_operator(op.actor)
 
 def require_workplace(location_keys, what):
-    # Binds the STANDING path only -- operator and staff role grants, which
-    # submit with no authContext (scope=any never sets one). A scope=self caller
-    # is bound instead by its own op's ownership probe (the applicationFor /
+    # Binds the STANDING path only -- operator and staff role grants. A scope=self
+    # caller is bound instead by its own op's ownership probe (the applicationFor /
     # identifiedBy indirection): a resident legitimately holds no worksAt link,
     # and confining them by a rule written for staff would deny every
     # self-service write. The two guards are complementary, not alternatives --
     # each binds the path the other cannot see.
+    #
+    # The self-service exemption keys on authContextTarget == op.actor, NOT on
+    # authContextTarget != "" (mirrors workplace_exempt -- the cheap pre-gate that
+    # this function deliberately re-checks). Step 3 authorizes a scope=ANY grant
+    # WITHOUT inspecting authContext.target, and the Gateway forwards the client's
+    # authContext verbatim, so a staff caller holding a scope=any grant can attach
+    # ANY target. Exempting on mere presence would let that caller forge the
+    # consumer exemption and skip confinement entirely; the genuine scope=self path
+    # always carries target == actor (step 3 REQUIRES it), so equality admits
+    # exactly that path and nothing a scope=any actor can manufacture.
     #
     # location_keys is a LIST of candidate locations, and covering ANY ONE of
     # them authorizes the write: a target can legitimately sit at several places
@@ -1672,7 +1695,7 @@ def require_workplace(location_keys, what):
     # are equally entitled to it. An empty list -- a target whose location
     # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
     # unwired topology fails closed rather than falling open.
-    if op.authContextTarget != "":
+    if op.authContextTarget == op.actor:
         return
     if actor_holds_operator(op.actor):
         return
@@ -2018,6 +2041,19 @@ def execute(state, op):
         # Both endpoints alive + the right class (endpoint validation at the op).
         require_live_typed(state, patient, "patient", "patient")
         require_live_typed(state, provider, "provider", "provider")
+
+        # Staff-standing confinement (frontOfHouse's scope=any grant): a front-desk
+        # actor may book only with a provider practising at a building it worksAt --
+        # the same withProvider -> practicesAt confinement RescheduleAppointment /
+        # SetAppointmentStatus apply, resolved here off the PAYLOAD provider
+        # (validated alive + class=provider just above) since no appointment exists
+        # yet. No-op for operator (workplace_exempt) and for the consumer self-book
+        # path (authContextTarget set), which the identifiedBy probe below binds
+        # instead. No bound-provider branch: a provider role holds no
+        # CreateAppointment grant (providers accept/reschedule their own
+        # appointments, never originate them), so the third binder cannot apply here.
+        if not workplace_exempt():
+            require_workplace(sites_for_provider(provider), "cannot book an appointment with provider " + provider)
 
         # Patient-self (consumer's scope=self grant only): step 3 authorizes
         # scope=self by checking authContext.target == actor (Contract #6), but

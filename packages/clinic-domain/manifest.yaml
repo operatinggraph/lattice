@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.25.0
+version: 0.26.0
 depends:
   - location-domain
 description: |
@@ -171,7 +171,7 @@ declares:
   permissions:
     - operationType: CreatePatient
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
     - operationType: TombstonePatient
       scope: any
       grantsTo: [operator]
@@ -192,7 +192,7 @@ declares:
       grantsTo: [operator, provider]
     - operationType: CreateAppointment
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, frontOfHouse]
     - operationType: CreateAppointment
       scope: self
       grantsTo: [consumer]

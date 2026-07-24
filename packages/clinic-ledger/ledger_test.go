@@ -72,6 +72,12 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install clinic-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	// CreateAppointment's workplace-confinement guard reads the holdsRole LINK to
+	// decide whether its caller is root (actor_holds_operator), not the cap doc's
+	// Roles — so the operator actor needs the link, exactly as clinic-domain's own
+	// fixture seeds it. In production the cap doc's operator role is projected FROM
+	// this link, so seeding it makes the fixture realistic rather than adding anything.
+	testutil.SeedHoldsRole(t, ctx, conn, ledgerActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 

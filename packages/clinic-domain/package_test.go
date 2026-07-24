@@ -171,7 +171,7 @@ func TestPackage_Permissions(t *testing.T) {
 	}
 	operatorOnly := func() []*wantGrant { return op("operator") }
 	wantPerms := map[string][]*wantGrant{
-		"CreatePatient": operatorOnly(), "TombstonePatient": operatorOnly(),
+		"CreatePatient": op("operator", "frontOfHouse"), "TombstonePatient": operatorOnly(),
 		"CreateProvider": operatorOnly(), "TombstoneProvider": operatorOnly(),
 		"SetProviderProfile": operatorOnly(),
 		// A permission's identity is its (operationType, scope) pair (Contract
@@ -180,7 +180,7 @@ func TestPackage_Permissions(t *testing.T) {
 		// rejects that as a duplicate before any KV write).
 		"SetProviderHours":   op("operator", "provider"),
 		"SetProviderTimeOff": op("operator", "provider"),
-		"CreateAppointment":  {{scope: "any", grantsTo: []string{"operator"}}, {scope: "self", grantsTo: []string{"consumer"}}},
+		"CreateAppointment":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse"}}, {scope: "self", grantsTo: []string{"consumer"}}},
 		// The staff-widened front-desk ops — now also widened to the bound provider.
 		"RescheduleAppointment": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
 		"SetAppointmentStatus":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},

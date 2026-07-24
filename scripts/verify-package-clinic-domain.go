@@ -87,16 +87,16 @@ type permGrant struct {
 }
 
 var clinicOpGrants = map[string][]permGrant{
-	"CreatePatient":         {{"any", "operator"}},
+	"CreatePatient":         {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstonePatient":      {{"any", "operator"}},
 	"CreateProvider":        {{"any", "operator"}},
 	"TombstoneProvider":     {{"any", "operator"}},
 	"SetProviderProfile":    {{"any", "operator"}},
 	"SetProviderHours":      {{"any", "operator"}, {"any", "provider"}},
 	"SetProviderTimeOff":    {{"any", "operator"}, {"any", "provider"}},
-	"CreateAppointment":     {{"any", "operator"}, {"self", "consumer"}},
-	"RescheduleAppointment": {{"any", "operator"}, {"any", "provider"}, {"self", "consumer"}},
-	"SetAppointmentStatus":  {{"any", "operator"}, {"any", "provider"}, {"self", "consumer"}},
+	"CreateAppointment":     {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
+	"RescheduleAppointment": {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
+	"SetAppointmentStatus":  {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}, {"self", "consumer"}},
 	"RecordEncounter":       {{"any", "operator"}},
 	"TombstoneAppointment":  {{"any", "operator"}},
 	"SetSiteProfile":        {{"any", "operator"}},
