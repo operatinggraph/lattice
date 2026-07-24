@@ -107,18 +107,16 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Persona-worlds P1+P2 (the lattice half) + the `/v1/actor` CORS surface are
-> shipped. **No clean-buildable `📋 ready` feature remains in this lane** — the two highest-intent items
-> (`Forgeable authContext.target` ★★★, `Read-grant dual-enumeration S2` ★★★) are both `📐 awaiting-Andrew`
-> (each flags a genuine fork/policy call), every `✅ ratified` row is done or driver-blocked, and the open
-> `📋 ready` rows are Whetstone's (embedded-NATS flakes) or parking-lot. Next Steward fires fall to
-> continuous-improvement (§2.4 filler) until the Designer stocks a ratified design or a driver clears a
-> gate. A stale callout starves the lane — whoever ships the next pick renames this.
+> 🎯 **Build-ready now: `Forgeable authContext.target` ★★★** — ratified 2026-07-24, two fires, Fire 1
+> (primitive + four-package migration) is the next Steward pick and closes the ★★★ security row; Fire 2
+> (identity-domain tighten + the mandatory `authcontext-target` lint gate) follows. Beyond it, every
+> `✅ ratified` row is done or driver-blocked and the open `📋 ready` rows are Whetstone's (embedded-NATS
+> flakes) or parking-lot. A stale callout starves the lane — whoever ships the next pick renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Forgeable `authContext.target` defeats scope=any self/workplace guards** | Guards keying a self-exemption on `authContextTarget != ""` are forgeable by any scope=any holder; cafe/wellness/maintenance/lease-signing share it, clinic fixed in W1 Inc 2a. A blanket platform blank was tried + REVERTED (breaks identity onboarding's legitimate scope=any+non-actor target) — the fix is per-op semantic, not one platform change. | ★★★ | M–L | 📐 awaiting-Andrew · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) |
+| **Forgeable `authContext.target` defeats scope=any self/workplace guards** | Guards keying a self-exemption on `authContextTarget != ""` are forgeable by any scope=any holder; cafe/wellness/maintenance/lease-signing share it, clinic fixed in W1 Inc 2a. A blanket platform blank was tried + REVERTED (breaks identity onboarding's legitimate scope=any+non-actor target) — the fix is per-op semantic, not one platform change. | ★★★ | M–L | ✅ ratified (2026-07-24) · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) · 2 fires |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 

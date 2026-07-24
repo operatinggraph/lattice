@@ -1,6 +1,6 @@
 # `op.authTargetValidated` — a validated-target primitive that closes the forgeable-`authContext.target` bypass per-op
 
-**Status: 📐 awaiting-Andrew (ratification).** Supersedes the FALSIFIED + REVERTED platform-blank
+**Status: ✅ Andrew-ratified (2026-07-24) — build-ready.** Supersedes the FALSIFIED + REVERTED platform-blank
 approach in [`authcontext-target-forgery-platform-fix-design.md`](authcontext-target-forgery-platform-fix-design.md)
 (that doc's §Falsified stands as the record of why one blanket rule cannot work). This design keeps the
 vulnerability's per-op nature but pays down the shared root with **one small, additive platform primitive**
@@ -8,7 +8,7 @@ the guards adopt, instead of five bespoke script patches.
 
 ---
 
-## For Andrew (ratification summary)
+## Ratification record (Andrew, 2026-07-24)
 
 **What it does, in two lines.** Adds a wire-immune, script-visible boolean `op.authTargetValidated` — true
 iff step-3 *validated* `authContext.target` (scope=self requires `target == actor`; a task grant requires
@@ -17,24 +17,30 @@ unchecked, forgeable hint). The four still-vulnerable packages (cafe / wellness 
 lease-signing) rekey their workplace-confinement exemption from the forgeable `authContextTarget != ""` onto
 `op.authTargetValidated`, closing the bypass **without** breaking maintenance's legitimate task path.
 
-**One architectural fork for your call — the exposure mechanism.** The primitive must reach the script from
-step-3's resolved permission. My recommendation is a `json:"-"` transient field on `OperationEnvelope`
-(`AuthTargetValidated bool`), set by `commit_path.go` right after `Authorize`, read by
-`operationEnvelopeToStarlark`. It is unforgeable (a client's `"authTargetValidated":true` is dropped on
-unmarshal) and needs no interface change. The alternative — widening the `Executor.Execute` signature — is
-cleaner in separation-of-concerns but touches every executor + test double. See §5. **No frozen-contract
-change** is required; I recommend one *additive documentation* line in Contract #2 §2.8 (the `op.*` script
-surface is not a frozen table — verified §4), which I have **not** staged.
+**The four decisions taken at ratification:**
 
-**One per-op verdict I am flagging rather than shipping.** `identity-domain`'s `RecordIdentityPII` has the
-same shape (target-presence exempts a standing caller from the unclaimed-only confinement), and its
-`TestRecordPII_TaskScopedNotConfinedToUnclaimed` currently asserts a **scope=any front-desk** caller may
-record PII on a *claimed* identity by setting target — the exact forgeable pattern, which the reverted
-platform blank tripped over. Tightening it (rekey onto `authTargetValidated`, rewrite the test to submit via
-the real task grant) is the *consistent* fix, but it **changes identity-domain behavior** and your §Falsified
-note treats that front-desk flow as legitimate. I keep it OUT of the build scope and recommend a decision:
-**(A)** tighten identity too (my lean — the unclaimed-only gate is otherwise defeated by any front-desk
-staff), or **(B)** leave it as deliberate policy. Either way the four named packages ship. See §3.5 + §7.
+1. **Exposure mechanism = the `json:"-"` envelope field** (`AuthTargetValidated bool` on
+   `opwire.OperationEnvelope`), set in `commit_path.go` after `Authorize`. Unforgeable (dropped on unmarshal,
+   overwritten post-auth) with no interface churn. The `Executor.Execute` signature widening (§5.3) is
+   **rejected** — cleaner separation does not pay for touching every executor + test double.
+2. **identity-domain idiom C = (A), tighten.** `RecordIdentityPII` rekeys onto the primitive and
+   `TestRecordPII_TaskScopedNotConfinedToUnclaimed` is rewritten to submit the *real* task grant. The
+   unclaimed-only confinement is otherwise defeated by any front-desk staff, which is not a policy we want
+   standing. This is now **in build scope** (Fire 2), not a flagged option.
+3. **The lint gate is MANDATORY, not an optional follow-on** (Andrew: *"Lint is how agents are actually
+   forced to do the right thing. Everything else is 'fingers-crossed'."*). A migration that clears the debt
+   without closing the door leaves the next agent free to reintroduce the forgeable idiom, and the codebase
+   has no other mechanism that would catch it. §5.5's "it cannot classify idiom A vs idiom B" objection is
+   **withdrawn and resolved**: the gate does not classify — it **default-denies the bare idiom and requires
+   the author to declare the safe shape**, mirroring the shipped `# read-posture:` annotation convention
+   (`scripts/lint-conventions.go:132/317/493`). Fail-closed, structural, no semantic analysis. See §5.5 + Fire 2.
+4. **Fires 1+2 collapse into one fire** (fewer-larger-fires: the primitive's only consumer is the migration —
+   coupled, ships together). Final plan is two fires, §8.
+
+**No frozen-contract change.** The `op.*` Starlark surface is not a frozen table (verified §4), so
+`op.authTargetValidated` is additive build-to. The one *additive documentation* sentence in Contract #2 §2.8
+is **accepted and folded into Fire 1's scope** — it keeps the script-author surface discoverable; nothing is
+staged uncommitted.
 
 ---
 
@@ -239,7 +245,7 @@ neither: it is scope=any-standing only (no self/task path, `permissions.go:116`)
 never legitimately true and a scope=any forger cannot make it true — the plain `workplace_exempt()` migration
 is correct there.
 
-### 3.5 identity-domain `RecordIdentityPII` (idiom C) — flagged, not shipped
+### 3.5 identity-domain `RecordIdentityPII` (idiom C) — RATIFIED (A): tighten, in scope
 
 The consistent fix is `if not op.authTargetValidated and current_state != "unclaimed" and not
 actor_holds_operator(...)`. Under it: the real onboarding **userTask** (assignee == subject == actor,
@@ -248,8 +254,9 @@ But `TestRecordPII_TaskScopedNotConfinedToUnclaimed` (`record_pii_test.go:378`) 
 `{Target: claimedKey}` with no `Task`** — resolving via scope=any (unvalidated) — and asserts **accepted**.
 The consistent fix reds that test; making it green means rewriting it to submit the *real* task path
 (`{Task, Target}` matching a seeded `ephemeralGrant`). That is a genuine behavior tightening, and §Falsified
-records that front-desk-with-target is currently treated as legitimate. **Decision for Andrew (§7):** tighten
-(A, my lean) or preserve (B). The four named packages do not depend on this and ship either way.
+records that front-desk-with-target *was* treated as legitimate. **Ratified (A):** tighten. The behavior
+change is intended — a front-desk actor who needs to record PII on a claimed identity must carry the real
+task grant, not a self-declared target. Builds in **Fire 2**; the four named packages do not depend on it.
 
 ## 4. Contract surface
 
@@ -259,10 +266,9 @@ records that front-desk-with-target is currently treated as legitimate. **Decisi
   `03-mutation-batch-event-list.md:118/125` — there is no enumerated, frozen op-field list). Adding
   `op.authTargetValidated` is therefore **build-to, additive, non-breaking** — the same class as the existing
   `op.authContextTarget`/`op.authContextService` fields, which were added without a contract amendment.
-- **Recommended (not required, not staged):** one additive sentence in §2.8 documenting the derived field,
-  so the script-author-facing surface stays discoverable. This is a doc addition, not a change to any frozen
-  invariant — no `git`-staged contract edit accompanies this design. If Andrew prefers it committed with
-  ratification, it is a one-line insert I will prepare.
+- **Ratified — in Fire 1's scope:** one additive sentence in §2.8 documenting the derived field, so the
+  script-author-facing surface stays discoverable. This is a doc addition, not a change to any frozen
+  invariant, so it lands *with* the build rather than as a staged pre-ratification edit.
 
 ## 5. Alternatives considered
 
@@ -278,17 +284,27 @@ records that front-desk-with-target is currently treated as legitimate. **Decisi
    leaving every legitimate reader intact.
 3. **Widen `Executor.Execute(ctx, env, state, authTargetValidated bool)`.** A cleaner separation (no field on
    the wire struct), but changes the `Executor` interface (`step_interfaces.go:25`) and every implementation +
-   test double. **Deferred to Andrew as the fork (§For-Andrew).** I lean to the `json:"-"` field for its
-   smaller blast radius; the interface widening is defensible if he prefers the envelope stay auth-agnostic.
+   test double. **REJECTED at ratification** — the separation-of-concerns gain does not pay for the blast
+   radius; the `json:"-"` field is equally unforgeable.
 4. **Expose `op.authContextValidatedTarget` (the validated key string, "" when unvalidated)** instead of a
    bool. Rejected as over-carrying: every idiom-A site needs only "was it validated", and idiom B already
    reads the raw `authContextTarget` for its own ownership derivation (which is safe). A bool is the minimum
    the use needs — carrying the string invites a new site to trust it as an address it isn't
    (representation-follows-use).
-5. **A `lint-conventions` rule banning `authContextTarget != ""` in an exemption position.** Useful as
-   defense-in-depth *after* the migration (catches a regression), but it is a *detector*, not the fix, and it
-   cannot tell an exemption `!= ""` (idiom A, unsafe) from an ownership-binding `!= ""` (idiom B, safe)
-   without semantic analysis. Filed as an optional follow-on (§8), not the mechanism.
+5. **A `lint-conventions` rule over every `op.authContextTarget` site.** ~~Filed as an optional follow-on.~~
+   **RATIFIED AS MANDATORY (Fire 2)** — not an alternative to the primitive but its required companion. The
+   earlier objection ("a detector, not the fix; it cannot tell exemption `!= ""` from ownership-binding
+   `!= ""` without semantic analysis") is **withdrawn**: it assumed the gate must *classify* the site. It
+   must not. The gate **default-denies every bare `op.authContextTarget` comparison in `packages/**` and
+   requires the author to declare which safe shape it is** — exactly the shipped `# read-posture:` pattern,
+   where `lint-conventions` scans `packages/**` non-test Go files (Starlark lives in Go string literals),
+   matches an annotation regex, and fails the unannotated case (`scripts/lint-conventions.go:132`, `:317`,
+   `:493`). Declaring is cheap; forgetting fails closed. See §8 Fire 2 for the annotation vocabulary.
+
+   The reasoning that makes this mandatory rather than nice-to-have: a migration clears *today's* debt, but
+   the forgeable idiom is what an agent writes by default when adding the next confined op — and nothing else
+   in the toolchain would catch it. Clearing the debt without closing the door means re-litigating this
+   ★★★ security row the next time someone writes a guard.
 
 **Dead-scaffolding test:** the primitive has five immediate consumers (all idiom-A sites) the moment it
 lands; it realizes value before any future dependency. Not scaffolding.
@@ -305,12 +321,13 @@ lands; it realizes value before any future dependency. Not scaffolding.
 - *New state?* None persisted. The bool is derived from the step-3 decision the Processor already computes;
   it lives only for the op's execution.
 
-## 7. Open questions — resolved
+## 7. Open questions — all closed at ratification
 
-- **Exposure mechanism (fork):** `json:"-"` envelope field (recommended) vs `Execute` signature widening —
-  **Andrew's call**, defaulted to the field.
-- **identity-domain idiom C:** tighten (A) vs preserve (B) — **Andrew's call**, my lean A. Does not gate the
-  four-package ship.
+- **Exposure mechanism (fork):** **DECIDED — the `json:"-"` envelope field.** `Execute` signature widening
+  rejected (§5.3).
+- **identity-domain idiom C:** **DECIDED — (A) tighten**, in Fire 2 (§3.5).
+- **Is the lint gate optional?** **DECIDED — no, mandatory** (§5.5, Fire 2). Lint is the only mechanism that
+  binds *future* authors; everything else relies on each agent re-deriving the hazard.
 - **Does exempting the maintenance task claimant from workplace confinement over-grant?** *It does today, and
   a naive migration would preserve the gap* — the adversarial pass (CONFIRMED) proved `ac.Target` (the grant's
   `scopedTo`, validated by `matchEphemeralGrant`) is **never bound** to `payload.workOrderKey` (the resolved
@@ -344,25 +361,42 @@ is package DDL) so warm stacks pick up the new script ([[reference_package_edit_
   `packages/*` suites; the reverted attempt reddened a package suite that internal/processor + review both
   passed ([[feedback_local_test_scope_must_include_script_consumers]], [[feedback_full_suite_for_wide_default_change]]).
 
-**Fire decomposition for the Steward** (each independently shippable + green):
+**Fire decomposition for the Steward** — **two fires** as ratified (the original Fires 1+2 collapsed: the
+primitive's only consumer is the migration, so they are coupled-ships-together per fewer-larger-fires).
 
-- **Fire 1 — the primitive.** Add `authTargetValidated(rp)` + the `json:"-"` envelope field + set it in
-  `commit_path.go` after step 3 + expose `op.authTargetValidated` in `starlark_runner.go`. Processor unit +
-  commit-path tests. **No guard changes yet** — the field lands unused-by-scripts but fully tested. (Not
-  dead scaffolding: Fire 2 is the same-session consumer; landing the primitive first keeps each fire green.)
-- **Fire 2 — migrate the four packages.** Rekey `workplace_exempt()`/`require_workplace()` in cafe /
-  wellness / maintenance / lease-signing onto `op.authTargetValidated`; **add the §3.4.1 resource bind
-  (`authContextTarget == wkey`) to maintenance `ResolveWorkOrder`**; leave cafe `Charge`'s `is_self`
-  (`ddls.go:655`) on `authContextTarget` with a one-line "intentionally not a confinement exemption" comment;
-  version-bump each. Per-package positive+negative vectors incl. **(i)** the maintenance task-path positive
-  (grant target == payload work order → still exempt), **(ii)** the maintenance task-path *substitution
-  negative* (grant target WO-A, payload WO-B, actor not at WO-B's building → now DENIED — the §3.4.1 defect
-  regression test), and the `internal/bypass` residual. This is the fire that closes the ★★★ row.
-- **Fire 3 (conditional on Andrew's §7-B answer = A) — tighten identity-domain.** Rekey `RecordIdentityPII`
-  idiom C; rewrite `TestRecordPII_TaskScopedNotConfinedToUnclaimed` to the real task path; version-bump
-  identity-domain. Ships only if Andrew chooses (A).
-- **Fire 4 (optional follow-on) — a `lint-conventions` detector** flagging a bare `authContextTarget != ""`
-  in an exemption return, to prevent regression. Defense-in-depth, not required for closure.
+- **Fire 1 — the primitive + the four-package migration** (internal build order: primitive first, then the
+  guards, so the tree is green at each step but lands as one commit).
+  1. Add `authTargetValidated(rp)` + the `json:"-"` envelope field on `opwire.OperationEnvelope`; set it in
+     `commit_path.go` after step 3 — **once, outside the commit retry loop** (`:303` re-executes without
+     re-auth, per the §10 implementation note); expose `op.authTargetValidated` in `starlark_runner.go`.
+  2. Rekey `workplace_exempt()`/`require_workplace()` in cafe / wellness / maintenance / lease-signing onto
+     `op.authTargetValidated`; **add the §3.4.1 resource bind (`authContextTarget == wkey`) to maintenance
+     `ResolveWorkOrder`**; leave cafe `Charge`'s `is_self` (`ddls.go:655`) on `authContextTarget` with a
+     one-line "intentionally not a confinement exemption" comment; version-bump each package.
+  3. Add the additive Contract #2 §2.8 sentence documenting `op.authTargetValidated` (§4).
+  - Tests: the processor `(Path, Scope)` matrix + commit-path assertions; per-package positive+negative
+    vectors incl. **(i)** the maintenance task-path positive (grant target == payload work order → still
+    exempt) and **(ii)** the task-path *substitution negative* (grant WO-A, payload WO-B, actor not at
+    WO-B's building → DENIED — the §3.4.1 regression test); the `internal/bypass` residual.
+  - This is the fire that closes the ★★★ row.
+
+- **Fire 2 — identity-domain tighten + the MANDATORY lint gate** (this order is forced: the gate cannot go
+  green while a bare idiom remains, and idiom C must not be annotated "safe" since §3.5 ratified it unsafe).
+  1. Rekey `RecordIdentityPII` idiom C onto the primitive; rewrite
+     `TestRecordPII_TaskScopedNotConfinedToUnclaimed` to submit the real task path (`{Task, Target}` against
+     a seeded `ephemeralGrant`); version-bump identity-domain.
+  2. Extend `scripts/lint-conventions.go` with an `authcontext-target` rule mirroring `# read-posture:`
+     (`:132` regex, `:317` packages-scoped scan, `:493` finding shape): **every `op.authContextTarget`
+     comparison in a `packages/**` non-test file must carry an annotation declaring its shape** —
+     `# authcontext-target: (ownership)` for the idiom-B stricter-proof binding, `# authcontext-target:
+     (selector) <why>` for cafe `Charge`'s branch selector, `# authcontext-target: (resource-bind)` for the
+     §3.4.1 `== <resourceKey>` form. **An unannotated comparison, and any bare `!= ""` / `== ""` in an
+     exemption position, is an ERROR** — the correct spelling of an exemption is `op.authTargetValidated`.
+     Land it **blocking from day one** (not warn-first): Fire 1 + step 1 above leave zero unannotated sites,
+     so there is no debt window to phase out, and a warn-first gate is precisely the "fingers-crossed" state
+     this fire exists to end.
+  3. Annotate the surviving safe sites (cafe/wellness/lease-signing idiom B, cafe `Charge` selector) and
+     assert the gate reds on a reintroduced bare exemption (a fixture-based lint self-test).
 
 ## 9. Risks
 
@@ -405,5 +439,9 @@ design. Verdicts:
   loop (`commit_path.go:303` re-executes without re-auth) — a stale `false` would be fail-closed, but the set
   belongs outside the loop as §3.3 specifies.
 
-With these folded in, the design is build-ready pending Andrew's two §For-Andrew decisions (the exposure-
-mechanism fork and the identity-domain §3.5 verdict).
+With these folded in, the design went to ratification and is now **build-ready**: Andrew took the exposure
+fork (envelope field), the identity-domain §3.5 verdict (A, tighten), the fire collapse, and made the lint
+gate mandatory. Ratification-session due diligence re-verified every load-bearing citation independently
+against code — `gateway.go` target forwarding, `step3_auth_capability.go:498/:505/:346`, the four still-
+unmigrated packages, clinic's shipped `== op.actor` fix, and maintenance `integration_test.go:289`'s
+`Target: workOrderKey` — all confirmed, no drift.
