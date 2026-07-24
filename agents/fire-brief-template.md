@@ -55,3 +55,9 @@ With a complete brief the builder is **executing, not discovering**: mechanical 
 builder sub-agents on a **cheaper model tier**; judgment-heavy increments (naming, security posture, UX
 taste) stay with the lead. A brief whose builder repeatedly stalls mid-increment is a **brief-quality
 defect** — fix the compilation, don't silently widen the build.
+
+**Builder conduct — finds go up, not out.** A builder that hits an out-of-scope defect **reports it in its
+final report** for Winston to triage; it does **not** `spawn_task` a user-facing chip, edit the board, or
+widen its own scope. Winston files the board row (canonical demand) and, only if a one-click convenience is
+wanted, spawns a chip whose prompt **names the skill to run** (`/steward <stream>` + the row). Dispatched
+builder prompts should state this explicitly. See [[feedback_chip_prompts_name_the_skill]].

@@ -101,7 +101,10 @@ keys were touched. Update `docs/components/<component>.md` (docs-in-Definition-o
 ## 7. Hand up
 
 Report to Winston: what changed, gate results, the review verdict, and any escalation (contract touch /
-cross-component interface / needs another component). Winston merges to `main` (L2) or routes to Andrew (L3).
+cross-component interface / needs another component). **Out-of-scope finds go in this report for Winston to
+triage into a board row — do NOT `spawn_task` a user-facing chip yourself; the board row is the canonical
+demand, and a chip (if any) is Winston's routed convenience that must name the skill to run.** Winston merges
+to `main` (L2) or routes to Andrew (L3).
 Owners **file and prepare**; they never self-prioritize above Winston or commit directly. **Any board update
 you hand up is a ONE-LINE status + SHA** (the board is an index, not a journal — §5 of the swimlanes design):
 the detail — what you built, the findings, coverage — lives in the **commit message + the design doc**, never

@@ -94,7 +94,9 @@ you are building*:
    (`make verify-package-*` is not self-contained — it targets the shared stack's `NATS_URL`.))
 4. **Gates:** `go build ./...`, `make vet`, `golangci-lint run ./...`,
    `STRICT=1 go run ./scripts/lint-conventions.go`, and `go test ./cmd/loupe/...`.
-5. **Hand up** to Winston with a screenshot / proof + the gate results.
+5. **Hand up** to Winston with a screenshot / proof + the gate results. **Out-of-scope finds go in the
+   hand-up for Winston to triage into a board row — do NOT `spawn_task` a user-facing chip yourself** (the
+   board row is the canonical demand; a chip is Winston's routed convenience and must name the skill to run).
 
 ## Notes
 
