@@ -12,6 +12,7 @@
 const PATIENT_KEY = "clinic.patient";
 const state = {
   identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
+  canSignOut: false, // whether whoami reports a real cookie session (drives the keepalive + the sign-out affordance)
   patients: [], // append-only lookup cache — every patient the FE has ever seen, never shrinks (so an
   // already-selected patient's contact lookup survives a later ?q= filter)
   patientOptions: [], // the roster currently rendered in the #patient select — the full cache, or a
@@ -143,21 +144,86 @@ async function sessionWriteToken(force) {
   return body.token;
 }
 
+// ---- Session keepalive (sliding renewal) ----
+//
+// The session cookie and its paired write token both age out at the kit's
+// session TTL. A browse-only session that never submits a write would otherwise
+// hard-lapse mid-read; a periodic renewal slides it forward while the tab is in
+// use. Each renewal is a forced sessionWriteToken(), which POSTs
+// /api/session/refresh — re-setting the cookie AND refreshing the cached write
+// token in one round trip, so a subsequent write is instant too. Renewal is
+// gated on recent activity so an abandoned tab still lapses on the server's own
+// schedule rather than staying signed in for as long as the tab exists. Mirrors
+// cmd/facet/web/boot.mjs's createTokenRefresher.
+const KEEPALIVE_INTERVAL_MS = 20 * 60 * 1000; // inside the session TTL, with margin
+const KEEPALIVE_IDLE_MS = 30 * 60 * 1000; // one TTL of no interaction ends the slide
+let lastActivityAt = Date.now();
+let lastKeepaliveAt = 0;
+
+function noteActivity() {
+  lastActivityAt = Date.now();
+}
+
+async function keepaliveTick() {
+  if (Date.now() - lastActivityAt > KEEPALIVE_IDLE_MS) return; // idle: let it lapse
+  lastKeepaliveAt = Date.now();
+  // A forced refresh slides the cookie + write token. A network hiccup is ridden
+  // out (keep the current session); a 401 bounces to /login via sessionWriteToken
+  // itself (onSessionLapsed), and the thrown error is swallowed here.
+  try {
+    await sessionWriteToken(true);
+  } catch (_) {
+    /* transient — keep the current session; the next interaction re-checks */
+  }
+}
+
+// startSessionKeepalive wires the renewal cadence: a bounded interval plus the
+// activity + tab-visibility signals that gate it. Called once, only for a real
+// cookie session (canSignOut) — there is nothing to slide otherwise.
+function startSessionKeepalive() {
+  setInterval(keepaliveTick, KEEPALIVE_INTERVAL_MS);
+  for (const name of ["pointerdown", "keydown"]) {
+    document.addEventListener(name, noteActivity, { passive: true });
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    // Refocusing the tab is itself activity, so note it BEFORE the gate reads the
+    // clock — a tab left hidden and returned to is a user who came back, not left.
+    noteActivity();
+    if (Date.now() - lastKeepaliveAt > KEEPALIVE_INTERVAL_MS) keepaliveTick();
+  });
+}
+
+// whoamiRetryBackoffsMs bounds loadWhoami's retry: a transient failure at first
+// paint must not permanently render a real cookie session as anonymous.
+const whoamiRetryBackoffsMs = [200, 500, 1200];
+
 // loadWhoami records who is signed in — the single actor every read and write
 // runs as — and offers sign-out only for a real cookie session. A boot-env
 // fallback identity is authenticated by no cookie, so there is nothing for a
 // sign-out to end: offering it would clear a cookie nobody used and bounce the
-// browser straight back in.
+// browser straight back in. A network hiccup is retried before concluding
+// anonymous, so a stumble at first paint does not strand a signed-in patient
+// rendered as staff with sign-out hidden.
 async function loadWhoami() {
-  try {
-    const body = await api("/api/whoami", { credentials: "same-origin" });
-    state.identityId = (body && body.loggedIn && body.identityId) || null;
-    const btn = $("#sign-out");
-    if (btn) btn.hidden = !(body && body.canSignOut);
-    const who = $("#signed-in-as");
-    if (who) who.textContent = state.identityId ? "Signed in · " + state.identityId.slice(0, 8) + "…" : "";
-  } catch (_) {
-    state.identityId = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const body = await api("/api/whoami", { credentials: "same-origin" });
+      state.identityId = (body && body.loggedIn && body.identityId) || null;
+      state.canSignOut = !!(body && body.canSignOut);
+      const btn = $("#sign-out");
+      if (btn) btn.hidden = !state.canSignOut;
+      const who = $("#signed-in-as");
+      if (who) who.textContent = state.identityId ? "Signed in · " + state.identityId.slice(0, 8) + "…" : "";
+      return;
+    } catch (_) {
+      if (attempt >= whoamiRetryBackoffsMs.length) {
+        state.identityId = null;
+        state.canSignOut = false;
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
+    }
   }
 }
 
@@ -647,7 +713,7 @@ async function submitNewPatient(ev) {
 
 async function loadProviders() {
   try {
-    const data = await api("/api/providers");
+    const data = await appGet("/api/providers");
     state.providers = data.providers || [];
   } catch (_) {
     state.providers = [];
@@ -677,13 +743,13 @@ function bookFilterOpts() {
 
 async function loadSites() {
   try {
-    const data = await api("/api/sites");
+    const data = await appGet("/api/sites");
     state.sites = data.sites || [];
   } catch (_) {
     state.sites = [];
   }
   try {
-    const data = await api("/api/provider-sites");
+    const data = await appGet("/api/provider-sites");
     state.providerSites = data.providerSites || [];
   } catch (_) {
     state.providerSites = [];
@@ -1397,7 +1463,7 @@ function refreshTimeOffWarning() {
 async function providerAppointments(provider) {
   if (state.slotApptCache[provider]) return state.slotApptCache[provider];
   try {
-    const data = await api("/api/appointments?provider=" + encodeURIComponent(provider));
+    const data = await appGet("/api/appointments?provider=" + encodeURIComponent(provider));
     state.slotApptCache[provider] = data.appointments || [];
   } catch (e) {
     state.slotApptCache[provider] = [];
@@ -3573,7 +3639,7 @@ async function openWellnessBooking(a) {
   $("#wellness-session-hint").textContent = "";
   $("#wellness-overlay").hidden = false;
   try {
-    const data = await api("/api/wellness/sessions");
+    const data = await appGet("/api/wellness/sessions");
     const sessions = (data.sessions || []).filter((se) => se.capacity <= 0 || se.bookedCount < se.capacity);
     state.wellnessBooking.sessions = sessions;
     if (!sessions.length) {
@@ -3763,6 +3829,9 @@ function init() {
   // own record vs the front desk acting on someone's behalf), so it has to be
   // known before the first render that reads it.
   loadWhoami().then(() => {
+    // Only a real cookie session has anything to slide; a no-cookie boot-env
+    // identity would 401 the refresh and bounce a legitimately-signed-in user.
+    if (state.canSignOut) startSessionKeepalive();
     loadPatients();
     loadProviders();
     loadSites();
