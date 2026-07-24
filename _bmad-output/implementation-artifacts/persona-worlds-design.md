@@ -508,13 +508,28 @@ key) with all four provider ops in her catalog — and **zero** rows for Patel's
 control passes). **Kai** sees his open "Maple Laundry" instance + the Record-outcome op. **Sam** holds all
 three hats at the authoritative layer (whoami: consumer+frontOfHouse+provider, residesIn Unit 2 + worksAt
 Riverside) and his instructor session ("Evening Flow", the fixed 19:00 hour) renders in Facet. `ensureStaff`
-hardening held (FACET_STAFF_NANOID stayed Dana despite Sam gaining frontOfHouse). **Known tail (filed,
-lattice lane):** Sam's `manifest.me` summary row is frozen at his pre-hat first-projection state (only
-consumer+residesIn, 2 of 5 selfAnchor types) — the Personal-lens update-over-existing reconciliation gap
-([[project_capability_projection_reconciliation]]), presentation-only (authz + per-hat data all correct),
-which stalls the multi-hat Work-tab/hat-summary display until that Refractor gap is closed. **CI miss caught
-post-merge:** `verify-package-clinic-domain` (stack-gate only, invisible to `go test`) asserted the pre-W0
-provider-DDL command count; fixed in `a8069d16`.
+hardening held (FACET_STAFF_NANOID stayed Dana despite Sam gaining frontOfHouse). **Known tail —
+investigated + resolved at the server level (2026-07-24, `6aa4959c`):** Sam's `manifest.me` summary row was
+observed frozen at his pre-hat first-projection state (consumer+residesIn only). The originally-filed
+mechanism — "guarded-write ordering-token reconciliation" ([[project_capability_projection_reconciliation]])
+— was **disproven**: a `nats-subject` Personal lens has no such guard. `NatsSubjectAdapter` is fire-and-forget
+(`internal/refractor/adapter/natssubject.go`, no CAS concept), and `Reproject` explicitly refuses
+`KeySetPublisher` adapters (`internal/refractor/pipeline/reproject.go`) — the §6.2 ordering-token guard lives
+only on the `nats-kv` actorAggregate path, a different adapter. The full server chain was then traced and
+**proven sound** end-to-end: (1) a pure `KindLink` event (`worksAt` / a 2nd `holdsRole` / an inbound
+`identifiedBy`) fans out to the recipient — `evaluateLinkFanOut` enumerates both endpoints and the
+identity-typed one fast-paths, and a `Personal:true` lens IS on the `actorEnumerator` path
+(`InstallPersonalLens` sets it, `PersonalActorType="identity"`); (2) re-execution re-runs the self-anchored
+cypher live, growing its `collect()` columns; (3) the D1 read-gate passes a self-anchored row because the
+kernel base `cap-read.identity.<actor>` slice (`internal/bootstrap/lenses.go` `CapabilityReadLensDefinition`)
+grants an actor read of its own vertex; (4) the publish stamps a strictly-advancing revision
+(`ProjectionSeq = msg.Sequence`), and the client LWW gate applies on `>=`. The regression e2e
+`TestPersonalLens_SelfAnchoredRow_GrowsWhenActorGainsALink_E2E` (an existing self-anchored row grows from one
+hat to two on a later `holdsRole` link, D1 gate active) guards this. So **there is no Refractor bug**; any
+residual freeze that still reproduces live is client-side (Facet/Edge sync re-subscribe / re-render) and needs
+a live repro to confirm — not a server build. Presentation-only either way (authz + per-hat data all correct).
+**CI miss caught post-merge:** `verify-package-clinic-domain` (stack-gate only, invisible to `go test`)
+asserted the pre-W0 provider-DDL command count; fixed in `a8069d16`.
 
 **Wave-1 build corrections (2026-07-23; increments 1–3 green in the worktree; W1–W4 briefs inherit these):**
 (1) **A permission's identity is `(operationType, scope)` — Contract #8 §8.1** — so granting `provider` on

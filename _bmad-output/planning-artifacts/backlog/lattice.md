@@ -47,7 +47,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
-| **[Refractor] Personal-lens `manifest.me` frozen when an identity gains links after first projection** | An identity later gaining hats (worksAt, more holdsRole, new selfAnchor types) keeps a stale me-row — the update-over-existing write is dropped (guarded-write ordering-token reconciliation). Live-proven on multi-hat Sam; presentation-only (authz correct), blocks the multi-hat hat display. | ★★ | M | 📋 ready · [design](../../implementation-artifacts/persona-worlds-design.md) §10 |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
 
 ### Survey log (round-robin rotation)
@@ -109,10 +108,10 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now.** Persona-worlds P1+P2 (the lattice half) are shipped; W1–W5 are verticals-lane.
-> Open `📋 ready` here: the me-row reconciliation gap, `/v1/actor`
-> CORS (rbac tombstoned-`holdsRole` revive shipped; dual-enumeration S1 shipped, S2 is Designer-lane).
-> Every `✅ ratified` row stays Andrew-gated
-> or driver-blocked. A stale callout starves the lane — whoever ships the next pick renames this.
+> Open `📋 ready` here: `/v1/actor` CORS (no browser-direct caller yet). The me-row freeze: server
+> chain proven sound (regression e2e), filed "ordering-token" mechanism disproven — residual (if still
+> live) is client-side, verticals-lane. Every `✅ ratified` row stays Andrew-gated or driver-blocked. A
+> stale callout starves the lane — whoever ships the next pick renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -182,6 +181,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-24 · `6aa4959c` · [refractor,test] manifest.me self-anchored reprojection proven sound — e2e (existing personal row grows on a 2nd holdsRole link, D1 self-gate active); filed "ordering-token" freeze mechanism disproven, no server bug
 - 2026-07-24 · `473929e3` · [rbac,clinic,wellness,service] revive a tombstoned grant instead of failing — grant_link/revive at 6 sites so a RevokeRole'd identity + re-bound provider can be re-granted; pkg versions bumped
 - 2026-07-24 · `68ffc584` · [lint,edge-manifest] dual-enumeration S1 done — `lint-lens-anchors` CI gate (every non-self Personal-lens anchor kind needs a producer branch) + provider-world coverage; testkit now spans all 3 personas
 - 2026-07-24 · `385c26a7` · [edge-manifest,test] read-grant/lens dual-enumeration coverage proof (Stage-1 testkit) — asserts every non-self anchor a Personal lens projects is granted, no vacuous pass; resident+staff personas
