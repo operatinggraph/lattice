@@ -790,6 +790,26 @@ proven by a discriminating test in `internal/appsession/signer_test.go`. The rem
 (unreachable verify-only posture, refresh 404 wrong-cause, no proactive refresh loop, silent-empty reads,
 `asSelf` per-row, terminal whoami) stay under Inc 2b — they need the FE + browser verification.
 
+**Inc 2b session-resilience tail SHIPPED (2026-07-24, `4fe21968`).** Three of the carried FE findings landed
+as a self-contained FE fire (no hat-gating, no provider hat — those remain Inc 2b's headline). (1) *No
+proactive renewal* — a browse-only session that never submits a write hard-lapsed at the session TTL mid-read;
+`cmd/clinic-app/web/app.js` now runs an activity-gated sliding keepalive (a forced `sessionWriteToken()` on a
+20-min interval, idle cap 30 min, visibility catch-up) that re-sets the cookie + cached write token in one
+round trip, mirroring `cmd/facet/web/boot.mjs`'s `createTokenRefresher`; started only for a real cookie
+session (`canSignOut`). (2) *Silent-empty reads* — the five lapse-blind `api()` reads (providers, sites,
+provider-sites, the slot-picker appointments, wellness sessions) now go through `appGet`, so a 401 bounces to
+`/login` instead of a swallowed empty; the appointments one had made the booking slot picker offer
+already-taken times. The residents read stays bare (deliberately tolerant of unreachability — "book without
+lease confinement"). (3) *Terminal whoami* — retried on a bounded backoff, so a transient stumble at first
+paint no longer strands a real session rendered as staff with sign-out hidden. **Not-a-live-bug (verified,
+dropped):** the `asSelf`-per-row finding — the two `actingAsSelf()` sites (book-submit, My-Appointments) are
+single-patient by construction (`/api/my-appointments` rows carry no `patientKey`), so the once-per-render
+value already equals each row's; the `actingAsSelf(patientKey)` parameter serves a *future* mixed-patient
+worklist render, not these. **Still open under Inc 2b:** unreachable verify-only posture (a kit/deployment
+concern — the kit can only set a cookie via its own minter) and the refresh-404-wrong-cause item (the kit now
+serves `/api/session/refresh` via `RegisterRoutes`, so the 404 itself is gone; any residual message wording is
+FE-cosmetic).
+
 *Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
 reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only
 for its own caller and takes no provider argument by design. Its consumer is **Inc 2's provider hat**
