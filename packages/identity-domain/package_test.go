@@ -26,7 +26,7 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 
 func TestPackage_DeclaresUserFacingRoles(t *testing.T) {
 	want := map[string]bool{
-		"consumer": true, "frontOfHouse": true, "backOfHouse": true,
+		"consumer": true, "frontOfHouse": true, "backOfHouse": true, "provider": true,
 		// Not user-facing (system role for the Gateway's own identity), but
 		// declared in the same Roles slice as the others.
 		"identityProvisioner": true,

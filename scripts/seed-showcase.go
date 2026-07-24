@@ -110,6 +110,37 @@ const (
 	applicant3Email = "alex.kim@showcase.dev.lattice.local"
 )
 
+// The W0 provider-spine increment (persona-worlds-design.md Fire W0): a
+// second, BOUND clinic provider (Dr. Amara Osei — Dr. Maya Patel, providerID
+// above, stays deliberately UNBOUND as the scoping negative), a clinic
+// patient record for tenant1 with a future appointment against each
+// provider, a bound laundry serviceprovider (Kai) with one OPEN instance,
+// and a wellness instructor entity binding tenant2 (Sam Okafor) into the
+// §3.4 one-human-many-hats scenario. Fixed, checked-in handles like the
+// block above — every entity id this loader mints itself is pinned; the
+// identities BOUND to them stay minted-and-recovered, never fixed, exactly
+// like every other persona in this file (CreateUnclaimedIdentity accepts no
+// caller-supplied id).
+const (
+	oseiProviderID       = "6gerUBMpr5voBfo3dbS7"
+	rileyPatientID       = "w5sDPrw4eraPfUHk96wo"
+	kaiServiceProviderID = "JMzG4F5ierfew7ZvBkym"
+	kaiInstanceID        = "EVc2u9YLmmZd8sqs1Kkn"
+	samInstructorID      = "CYsYdVQ6unntMoHYffTF"
+
+	oseiProviderKey       = "vtx.provider." + oseiProviderID
+	rileyPatientKey       = "vtx.patient." + rileyPatientID
+	kaiServiceProviderKey = "vtx.serviceprovider." + kaiServiceProviderID
+	kaiInstanceKey        = "vtx.service." + kaiInstanceID
+	samInstructorKey      = "vtx.instructor." + samInstructorID
+
+	oseiName        = "Dr. Amara Osei"
+	oseiEmail       = "amara.osei@showcase.dev.lattice.local"
+	kaiBusinessName = "Kai's Laundry Co."
+	kaiName         = "Kai"
+	kaiEmail        = "kai@showcase.dev.lattice.local"
+)
+
 // showcaseLocationNames is the class-2 display copy (display-name-convention-
 // design.md D2) for the three showcase locations, shared by the from-scratch
 // CreateLocation path and the live-world SetLocationPresentation path so the
@@ -148,10 +179,18 @@ func main() {
 	defer conn.Close()
 
 	adminKey := bootstrap.BootstrapIdentityKey
+	// Computed once, up front, so both branches below can use them — the
+	// already-loaded branch needs consumerRoleKey for ensureStaff/
+	// ensureMaintenanceTech's hardening (a second frontOfHouse/backOfHouse
+	// holder who ALSO holds consumer must never mis-resolve as the canonical
+	// staff/maintenance persona) and providerRoleKey for the W0 provider
+	// binds, exactly as much as the from-scratch branch does.
+	consumerRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
+	providerRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "provider")
 
 	if alive(ctx, conn, buildingKey) {
 		fmt.Println("==> showcase world already loaded (building", buildingKey, "is alive) — recovering persona keys, layering in any missing increment.")
-		recoverTenants(ctx, conn, adminKey)
+		tenant1Key, tenant2Key := recoverTenants(ctx, conn, adminKey)
 		retireLegacyTemplates(ctx, conn)
 		// The building's liveness only proves the ORIGINAL world loaded; a
 		// later increment (e.g. the §7.4 clinic template, the wellness
@@ -172,15 +211,32 @@ func main() {
 		fmt.Println("==> provider: " + providerKey + " practicesAt building")
 		seedLocationPresentation(ctx, conn, adminKey)
 		frontOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
-		staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, buildingKey, staffName, staffEmail)
+		staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, consumerRoleKey, buildingKey, staffName, staffEmail)
 		fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
 		seedStaffWorklistApplication(ctx, conn, adminKey, staffKey)
 		fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
-		maintKey := seedMaintenanceBeat(ctx, conn, adminKey)
+		maintKey := seedMaintenanceBeat(ctx, conn, adminKey, consumerRoleKey)
 		fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
+
+		oseiIdentityKey := seedOseiProvider(ctx, conn, adminKey, providerRoleKey)
+		fmt.Printf("==> provider (bound): %s (%s) practicesAt building, identifiedBy %s\n", oseiProviderKey, oseiName, oseiIdentityKey)
+		fmt.Println("FACET_PROVIDER_NANOID=" + strings.TrimPrefix(oseiIdentityKey, "vtx.identity."))
+
+		if tenant1Key != "" {
+			seedRileyClinicWorld(ctx, conn, adminKey, tenant1Key)
+			fmt.Println("==> patient:         " + rileyPatientKey + " (" + tenant1Name + ") identifiedBy tenant1, booked with Osei + Patel")
+		}
+
+		if tenant2Key != "" {
+			kaiIdentityKey := seedKaiServiceProvider(ctx, conn, adminKey, providerRoleKey, tenant2Key)
+			fmt.Printf("==> serviceprovider (bound): %s (%s) providedBy laundry template, identifiedBy %s\n", kaiServiceProviderKey, kaiBusinessName, kaiIdentityKey)
+			fmt.Println("FACET_LAUNDRY_NANOID=" + strings.TrimPrefix(kaiIdentityKey, "vtx.identity."))
+
+			seedSamMultiHat(ctx, conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey)
+			fmt.Printf("==> multi-hat:       %s (%s) gains frontOfHouse (worksAt building) + instructor (teachesAt studio, ledBy Evening Flow)\n", tenant2Key, tenant2Name)
+		}
 		return
 	}
-	consumerRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "consumer")
 
 	// --- building + two units --------------------------------------------
 
@@ -215,7 +271,7 @@ func main() {
 	// --- one staff persona, working at the building (not residing in a unit) --
 
 	frontOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "frontOfHouse")
-	staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, buildingKey, staffName, staffEmail)
+	staffKey := ensureStaff(ctx, conn, adminKey, frontOfHouseRoleKey, consumerRoleKey, buildingKey, staffName, staffEmail)
 	fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
 
 	// --- two service templates, correct families, both availableAt the building --
@@ -293,7 +349,19 @@ func main() {
 
 	retireLegacyTemplates(ctx, conn)
 
-	maintKey := seedMaintenanceBeat(ctx, conn, adminKey)
+	maintKey := seedMaintenanceBeat(ctx, conn, adminKey, consumerRoleKey)
+
+	oseiIdentityKey := seedOseiProvider(ctx, conn, adminKey, providerRoleKey)
+	fmt.Printf("==> provider (bound): %s (%s) practicesAt building, identifiedBy %s\n", oseiProviderKey, oseiName, oseiIdentityKey)
+
+	seedRileyClinicWorld(ctx, conn, adminKey, tenant1Key)
+	fmt.Println("==> patient:         " + rileyPatientKey + " (" + tenant1Name + ") identifiedBy tenant1, booked with Osei + Patel")
+
+	kaiIdentityKey := seedKaiServiceProvider(ctx, conn, adminKey, providerRoleKey, tenant2Key)
+	fmt.Printf("==> serviceprovider (bound): %s (%s) providedBy laundry template, identifiedBy %s\n", kaiServiceProviderKey, kaiBusinessName, kaiIdentityKey)
+
+	seedSamMultiHat(ctx, conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey)
+	fmt.Printf("==> multi-hat:       %s (%s) gains frontOfHouse (worksAt building) + instructor (teachesAt studio, ledBy Evening Flow)\n", tenant2Key, tenant2Name)
 
 	fmt.Println()
 	fmt.Println("==> showcase world seeded.")
@@ -301,6 +369,8 @@ func main() {
 	fmt.Println("FACET_TENANT2_NANOID=" + strings.TrimPrefix(tenant2Key, "vtx.identity."))
 	fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
 	fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
+	fmt.Println("FACET_PROVIDER_NANOID=" + strings.TrimPrefix(oseiIdentityKey, "vtx.identity."))
+	fmt.Println("FACET_LAUNDRY_NANOID=" + strings.TrimPrefix(kaiIdentityKey, "vtx.identity."))
 }
 
 // seedMaintenanceBeat loads the offline maintenance beat
@@ -322,9 +392,9 @@ func main() {
 // the same ids (per-mutation idempotent, like every seeder here).
 //
 // Returns the tech's identity key.
-func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey string) string {
+func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
 	backOfHouseRoleKey := "vtx.role." + pkgmgr.RoleID("identity-domain", "backOfHouse")
-	techKey := ensureMaintenanceTech(ctx, conn, adminKey, backOfHouseRoleKey)
+	techKey := ensureMaintenanceTech(ctx, conn, adminKey, backOfHouseRoleKey, consumerRoleKey)
 	fmt.Printf("==> maintenance:     %s (%s) worksAt building, holds backOfHouse\n", techKey, maintName)
 
 	day := time.Now().UTC().Format("2006-01-02")
@@ -364,14 +434,19 @@ func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey str
 // distinguishes them. A tombstoned worksAt link is re-wired rather than read as
 // absent — the same revive path ensureStaff needed once a retraction vector had
 // unwired its persona.
-func ensureMaintenanceTech(ctx context.Context, conn *substrate.Conn, adminKey, roleKey string) string {
+//
+// consumerRoleKey excludes any candidate that ALSO holds consumer (§3.4's Sam
+// Okafor, once he gains frontOfHouse/backOfHouse alongside his existing
+// consumer hat, must never be resolved as the canonical staff-only persona —
+// Theo, like Dana, is deliberately staff-only; see ensureStaff).
+func ensureMaintenanceTech(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, consumerRoleKey string) string {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
 	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	must(err, "list core-kv keys")
 
-	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey)
+	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey, consumerRoleKey)
 	if existing == "" {
 		return seedStaff(ctx, conn, adminKey, roleKey, buildingKey, maintName, maintEmail)
 	}
@@ -435,14 +510,24 @@ func seedTenant(ctx context.Context, conn *substrate.Conn, adminKey, consumerRol
 // findLinkedIdentity returns the alphabetically-first live candidate — can
 // silently resolve to the WRONG identity. Mirrors ensureMaintenanceTech's own
 // role-scoped lookup, added when that ambiguity first appeared.
-func ensureStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, buildingKey, name, email string) string {
+//
+// consumerRoleKey excludes any candidate that ALSO holds consumer: the seed
+// invariant is that Dana is deliberately staff-only (seedStaff's own doc
+// comment above), so once a SECOND frontOfHouse holder exists who is ALSO a
+// consumer (§3.4's Sam Okafor, granted frontOfHouse on top of his existing
+// resident hat), a bare holdsRole(frontOfHouse) scan can resolve to either —
+// the 35ca90f5 mis-resolution one level up from the worksAt-only bug above.
+// Filtering the consumer-holding candidate out of contention is what keeps
+// FACET_STAFF_NANOID pinned to the pure-staff persona regardless of how many
+// other identities pick up the same role.
+func ensureStaff(ctx context.Context, conn *substrate.Conn, adminKey, roleKey, consumerRoleKey, buildingKey, name, email string) string {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
 	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	must(err, "list core-kv keys")
 
-	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey)
+	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "holdsRole", roleKey, consumerRoleKey)
 	if existing == "" {
 		return seedStaff(ctx, conn, adminKey, roleKey, buildingKey, name, email)
 	}
@@ -688,6 +773,292 @@ func seedClinicProvider(ctx context.Context, conn *substrate.Conn, adminKey stri
 	}
 }
 
+// seedOseiProvider mints the showcase's SECOND clinic provider — Dr. Amara
+// Osei, BOUND to a login identity (persona-worlds-design.md Fire W0's
+// scoping positive; Dr. Maya Patel, providerKey above, stays UNBOUND as the
+// negative — a provider-scoped feed must show Osei's own appointments and
+// must never show Patel's). Fixed handle; per-mutation idempotent, mirroring
+// seedClinicProvider exactly. Returns Osei's identity key.
+func seedOseiProvider(ctx context.Context, conn *substrate.Conn, adminKey, providerRoleKey string) string {
+	if !alive(ctx, conn, oseiProviderKey) {
+		submitOp(ctx, conn, adminKey, "CreateProvider", "provider",
+			map[string]any{"fullName": oseiName, "specialty": "Sports Medicine", "providerId": oseiProviderID}, nil)
+	}
+	practicesLnk := linkKey(oseiProviderKey, "practicesAt", buildingKey)
+	if !alive(ctx, conn, practicesLnk) {
+		submitOp(ctx, conn, adminKey, "AssignProviderSite", "clinicSiteAssignment",
+			map[string]any{"provider": oseiProviderKey, "building": buildingKey},
+			&processor.ContextHint{
+				Reads:         []string{oseiProviderKey, buildingKey},
+				OptionalReads: []string{practicesLnk},
+			})
+	}
+	identityKey := ensureProviderIdentity(ctx, conn, adminKey, providerRoleKey, oseiProviderKey, oseiName, oseiEmail)
+	waitForRoleGrant(ctx, conn, identityKey, "ctrl.refractor.register")
+	return identityKey
+}
+
+// ensureProviderIdentity resolves the identity BindProviderIdentity has
+// bound to the given FIXED clinic provider entity (entityKey), minting a
+// fresh unclaimed identity and binding it only if the provider carries no
+// bind yet. Unlike ensureStaff/ensureMaintenanceTech (whose PERSONA is
+// unknown and recovered by scanning FOR an identity), the provider entity's
+// own id is the fixed, checked-in half here — only the identity id is ever
+// minted — so this is the recovery seam BindProviderIdentity's CreateOnly
+// guard leaves: a second CreateUnclaimedIdentity + BindProviderIdentity
+// attempt against an already-bound provider is rejected (ProviderAlreadyBound),
+// so a rerun must find and return the existing bind rather than attempt a
+// new one.
+func ensureProviderIdentity(ctx context.Context, conn *substrate.Conn, adminKey, providerRoleKey, entityKey, name, email string) string {
+	js := conn.JetStream()
+	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
+	must(err, "open core-kv")
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
+	must(err, "list core-kv keys")
+
+	if existing, found := findBoundIdentity(allKeys, entityKey); found {
+		return existing
+	}
+
+	salt, err := substrate.NewNanoID()
+	must(err, "generate provider claim-key salt")
+	claimSum := mustSHA256Hex("showcase-provider-" + salt)
+	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum}, nil)
+	identityKey := reply.PrimaryKey
+
+	submitOp(ctx, conn, adminKey, "BindProviderIdentity", "provider",
+		map[string]any{"providerKey": entityKey, "identityKey": identityKey},
+		&processor.ContextHint{
+			Reads: []string{entityKey, identityKey},
+			OptionalReads: []string{
+				entityKey + ".identityClaim",
+				identityKey + ".providerClaim",
+				linkKey(identityKey, "holdsRole", providerRoleKey),
+			},
+		})
+
+	submitOp(ctx, conn, adminKey, "UpdateIdentityState", "identity",
+		map[string]any{"identityKey": identityKey, "newState": "claimed"},
+		&processor.ContextHint{Reads: []string{identityKey, identityKey + ".state"}})
+
+	return identityKey
+}
+
+// seedKaiServiceProvider mints the showcase's laundry serviceprovider —
+// Kai's Laundry Co., BOUND to a login identity and wired providedBy onto the
+// existing laundry template (persona-worlds-design.md Fire W0's
+// service-domain provider archetype). One OPEN instance providedTo Sam
+// (tenant2) demonstrates the provider's own work queue; the existing
+// completed instance (instance1ID) stays untouched — it is never given an
+// outcome here. Fixed handles; per-mutation idempotent. Returns Kai's
+// identity key.
+func seedKaiServiceProvider(ctx context.Context, conn *substrate.Conn, adminKey, providerRoleKey, tenant2Key string) string {
+	if !alive(ctx, conn, kaiServiceProviderKey) {
+		submitOp(ctx, conn, adminKey, "CreateServiceProvider", "serviceprovider",
+			map[string]any{"displayName": kaiBusinessName, "serviceProviderId": kaiServiceProviderID}, nil)
+	}
+	identityKey := ensureServiceProviderIdentity(ctx, conn, adminKey, providerRoleKey, kaiServiceProviderKey, kaiName, kaiEmail)
+	waitForRoleGrant(ctx, conn, identityKey, "ctrl.refractor.register")
+
+	providedByLnk := linkKey(laundryTplKey, "providedBy", kaiServiceProviderKey)
+	if !alive(ctx, conn, providedByLnk) {
+		submitOp(ctx, conn, adminKey, "WireProvidedBy", "service",
+			map[string]any{"template": laundryTplKey, "providedBy": kaiServiceProviderKey},
+			wireHint(laundryTplKey, "providedBy", kaiServiceProviderKey))
+	}
+
+	if !alive(ctx, conn, kaiInstanceKey) {
+		submitOp(ctx, conn, adminKey, "CreateServiceInstance", "service",
+			map[string]any{"family": "laundry", "instanceId": kaiInstanceID, "template": laundryTplKey, "providedTo": tenant2Key},
+			&processor.ContextHint{Reads: []string{laundryTplKey, tenant2Key}})
+	}
+	return identityKey
+}
+
+// ensureServiceProviderIdentity is ensureProviderIdentity's service-domain
+// mirror: resolves the identity BindServiceProviderIdentity has bound to the
+// given FIXED serviceprovider entity, minting + binding a fresh one only if
+// still unbound. See ensureProviderIdentity for the full rationale.
+func ensureServiceProviderIdentity(ctx context.Context, conn *substrate.Conn, adminKey, providerRoleKey, entityKey, name, email string) string {
+	js := conn.JetStream()
+	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
+	must(err, "open core-kv")
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
+	must(err, "list core-kv keys")
+
+	if existing, found := findBoundIdentity(allKeys, entityKey); found {
+		return existing
+	}
+
+	salt, err := substrate.NewNanoID()
+	must(err, "generate service provider claim-key salt")
+	claimSum := mustSHA256Hex("showcase-serviceprovider-" + salt)
+	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+		map[string]any{"name": name, "email": email, "claimKeyHash": claimSum}, nil)
+	identityKey := reply.PrimaryKey
+
+	submitOp(ctx, conn, adminKey, "BindServiceProviderIdentity", "serviceprovider",
+		map[string]any{"serviceProviderKey": entityKey, "identityKey": identityKey},
+		&processor.ContextHint{
+			Reads: []string{entityKey, identityKey},
+			OptionalReads: []string{
+				entityKey + ".identityClaim",
+				identityKey + ".serviceProviderClaim",
+				linkKey(identityKey, "holdsRole", providerRoleKey),
+			},
+		})
+
+	submitOp(ctx, conn, adminKey, "UpdateIdentityState", "identity",
+		map[string]any{"identityKey": identityKey, "newState": "claimed"},
+		&processor.ContextHint{Reads: []string{identityKey, identityKey + ".state"}})
+
+	return identityKey
+}
+
+// seedRileyClinicWorld gives Riley Chen (tenant1) a clinic patient record
+// bound to their own login identity, and books one future appointment with
+// EACH clinic provider — the Osei/Patel scoping positive/negative
+// (persona-worlds-design.md Fire W0): Osei's own provider-scoped feed must
+// show the Osei appointment and must NOT show the Patel one. Fixed patient
+// handle; day-derived appointment ids on the 15-minute grid, offset a whole
+// distinct days AND distinct fixed hours (futureDayAt) so neither the derived
+// id nor the patient's own slot claims can collide between the two bookings —
+// nor across a reseed a day later, when the +1-day booking lands on the +2-day
+// booking's date (distinct hours keep them off the same patient-hub slot). A
+// rerun on the same UTC day converges on the same ids (mirrors
+// seedWellnessEntities/seedMaintenanceBeat's day-derived idiom).
+func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, tenant1Key string) {
+	if !alive(ctx, conn, rileyPatientKey) {
+		submitOp(ctx, conn, adminKey, "CreatePatient", "patient",
+			map[string]any{"fullName": tenant1Name, "patientId": rileyPatientID, "identityKey": tenant1Key},
+			&processor.ContextHint{
+				Reads:         []string{tenant1Key},
+				OptionalReads: []string{tenant1Key + ".patientClaim"},
+			})
+	}
+
+	oseiStart := futureDayAt(1, 14)
+	oseiEnd := oseiStart.Add(30 * time.Minute)
+	oseiApptID := substrate.DeriveNanoID("showcase-appointment-osei", oseiStart.Format("2006-01-02"))
+	oseiApptKey := "vtx.appointment." + oseiApptID
+	if !alive(ctx, conn, oseiApptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient": rileyPatientKey, "provider": oseiProviderKey, "appointmentId": oseiApptID,
+				"startsAt": oseiStart.Format(time.RFC3339), "endsAt": oseiEnd.Format(time.RFC3339),
+				"reason": "Sports physical",
+			},
+			&processor.ContextHint{
+				Reads: []string{rileyPatientKey, oseiProviderKey},
+				OptionalReads: append(
+					slotClaimKeys(oseiProviderKey, oseiStart, oseiEnd),
+					slotClaimKeys(rileyPatientKey, oseiStart, oseiEnd)...),
+			})
+	}
+
+	patelStart := futureDayAt(2, 16)
+	patelEnd := patelStart.Add(30 * time.Minute)
+	patelApptID := substrate.DeriveNanoID("showcase-appointment-patel", patelStart.Format("2006-01-02"))
+	patelApptKey := "vtx.appointment." + patelApptID
+	if !alive(ctx, conn, patelApptKey) {
+		submitOp(ctx, conn, adminKey, "CreateAppointment", "appointment",
+			map[string]any{
+				"patient": rileyPatientKey, "provider": providerKey, "appointmentId": patelApptID,
+				"startsAt": patelStart.Format(time.RFC3339), "endsAt": patelEnd.Format(time.RFC3339),
+				"reason": "Annual checkup",
+			},
+			&processor.ContextHint{
+				Reads: []string{rileyPatientKey, providerKey},
+				OptionalReads: append(
+					slotClaimKeys(providerKey, patelStart, patelEnd),
+					slotClaimKeys(rileyPatientKey, patelStart, patelEnd)...),
+			})
+	}
+}
+
+// seedSamMultiHat layers the §3.4 "one human, many hats" acceptance scenario
+// onto Sam Okafor (tenant2): consumer + residesIn (already seeded) stays
+// untouched; this adds frontOfHouse + worksAt (the front-desk hat) and the
+// wellness instructor archetype (provider role via BindInstructorIdentity,
+// teachesAt the showcase studio, ledBy on a second, own-led session) — one
+// identity, one login, three bindings. Sam's SECOND session lives in its own
+// day-derived id namespace, two whole days out (mirroring the appointment
+// offsets above, for the same collision-free reason), so it is always minted
+// fresh on the first run of this increment: the existing day-rolled Vinyasa
+// Flow session was created with no instructor and cannot be re-wired after
+// the fact. Per-mutation idempotent; safe to call on every run once
+// ensureStaff/ensureMaintenanceTech's hardening (above) is in place, since
+// Sam then also holds frontOfHouse — the very ambiguity that hardening
+// exists to resolve.
+func seedSamMultiHat(ctx context.Context, conn *substrate.Conn, adminKey, tenant2Key, frontOfHouseRoleKey, providerRoleKey string) {
+	frontOfHouseLnk := linkKey(tenant2Key, "holdsRole", frontOfHouseRoleKey)
+	if !alive(ctx, conn, frontOfHouseLnk) {
+		submitOp(ctx, conn, adminKey, "AssignRole", "",
+			map[string]any{"actorKey": tenant2Key, "roleKey": frontOfHouseRoleKey},
+			&processor.ContextHint{
+				Reads:         []string{tenant2Key, frontOfHouseRoleKey},
+				OptionalReads: []string{frontOfHouseLnk},
+			})
+	}
+	if !alive(ctx, conn, linkKey(tenant2Key, "worksAt", buildingKey)) {
+		submitOp(ctx, conn, adminKey, "WireWorksAt", "serviceLocation",
+			map[string]any{"identity": tenant2Key, "location": buildingKey},
+			wireHint(tenant2Key, "worksAt", buildingKey))
+	}
+
+	if !alive(ctx, conn, samInstructorKey) {
+		submitOp(ctx, conn, adminKey, "CreateInstructor", "instructor",
+			map[string]any{"displayName": tenant2Name, "studio": studioKey, "instructorId": samInstructorID},
+			&processor.ContextHint{Reads: []string{studioKey}})
+	}
+
+	identifiedByLnk := linkKey(samInstructorKey, "identifiedBy", tenant2Key)
+	if !alive(ctx, conn, identifiedByLnk) {
+		submitOp(ctx, conn, adminKey, "BindInstructorIdentity", "instructor",
+			map[string]any{"instructorKey": samInstructorKey, "identityKey": tenant2Key},
+			&processor.ContextHint{
+				Reads: []string{samInstructorKey, tenant2Key},
+				OptionalReads: []string{
+					samInstructorKey + ".identityClaim",
+					tenant2Key + ".instructorClaim",
+					linkKey(tenant2Key, "holdsRole", providerRoleKey),
+				},
+			})
+	}
+
+	waitForRoleGrant(ctx, conn, tenant2Key, "ctrl.refractor.register")
+
+	start := futureDayAt(2, 19)
+	end := start.Add(time.Hour)
+	sessID := substrate.DeriveNanoID("showcase-wellness-session-sam", start.Format("2006-01-02"))
+	sessKey := "vtx.session." + sessID
+	if !alive(ctx, conn, sessKey) {
+		submitOp(ctx, conn, adminKey, "CreateSession", "session",
+			map[string]any{
+				"studio": studioKey, "sessionId": sessID, "name": "Evening Flow with Sam",
+				"startsAt": start.Format(time.RFC3339), "endsAt": end.Format(time.RFC3339),
+				"capacity": 12, "instructor": samInstructorKey,
+			},
+			&processor.ContextHint{
+				Reads:         []string{studioKey, samInstructorKey},
+				OptionalReads: slotClaimKeys(studioKey, start, end),
+			})
+	}
+}
+
+// futureDayAt returns the instant `days` days ahead at a fixed whole hour in
+// UTC. The wall-clock slot is a function of the entity, NOT of when the seed
+// runs — so two day-derived entities at different day offsets can never
+// rendezvous on the same calendar day at the same slot (which would collide on
+// a shared patient/studio hub when a reseed one day later lands the +1-day
+// entity on the +2-day entity's date). The date is stable across same-day
+// reruns, so both the DeriveNanoID(date) id and the slot claims converge.
+func futureDayAt(days, hour int) time.Time {
+	day := time.Now().UTC().Add(time.Duration(days) * 24 * time.Hour).Truncate(24 * time.Hour)
+	return day.Add(time.Duration(hour) * time.Hour)
+}
+
 // slotClaimKeys enumerates the studio's per-cell slot-claim aspect keys a
 // CreateSession span covers (15-minute grid) — the declared optionalReads
 // for the double-book guard. Mirrors seed-classic-demo.go's helper.
@@ -803,15 +1174,19 @@ func retireLegacyTemplates(ctx context.Context, conn *substrate.Conn) {
 // idempotent rerun, re-wiring any whose residence was unwired, and prints them
 // in the same machine-readable form the from-scratch path does. The staff
 // persona is the same recovery one relation over, and ensureStaff owns it —
-// including printing FACET_STAFF_NANOID.
-func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey string) {
+// including printing FACET_STAFF_NANOID. Returns (tenant1Key, tenant2Key) —
+// either may come back "" on a world whose residence link cannot be found at
+// all, which the caller must check before using it (the W0 personas hanging
+// off tenant1/tenant2 all key on their identity, not their fixed unit).
+func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey string) (string, string) {
 	js := conn.JetStream()
 	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
 	must(err, "open core-kv")
 	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
 	must(err, "list core-kv keys")
 
-	for _, t := range []struct {
+	var tenantKeys [2]string
+	for i, t := range []struct {
 		envVar  string
 		unitKey string
 	}{
@@ -832,14 +1207,18 @@ func recoverTenants(ctx context.Context, conn *substrate.Conn, adminKey string) 
 			fmt.Printf("==> healed:          re-wired %s residesIn %s (link was tombstoned)\n", tenantKey, t.unitKey)
 		}
 		fmt.Println(t.envVar + "=" + strings.TrimPrefix(tenantKey, "vtx.identity."))
+		tenantKeys[i] = tenantKey
 	}
+	return tenantKeys[0], tenantKeys[1]
 }
 
 // findResidentOf scans for a lnk.identity.<id>.residesIn.unit.<unitId> key
 // (service-location's WireResidesIn shape) and returns its source identity key
-// plus whether that link is still alive.
+// plus whether that link is still alive. No exclusion: both showcase tenants
+// legitimately hold consumer, so residence recovery never filters on it
+// (contrast ensureStaff/ensureMaintenanceTech's holdsRole scans, below).
 func findResidentOf(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[string]struct{}, unitKey string) (string, bool) {
-	return findLinkedIdentity(ctx, coreKV, allKeys, "residesIn", unitKey)
+	return findLinkedIdentity(ctx, coreKV, allKeys, "residesIn", unitKey, "")
 }
 
 // findLinkedIdentity scans for a lnk.identity.<id>.<relation>.<type>.<id> key
@@ -857,7 +1236,18 @@ func findResidentOf(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[
 // Candidates are visited in sorted order so a world carrying several dead
 // links into the same target resolves identically on every rerun, rather than
 // on Go's map iteration order.
-func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[string]struct{}, relation, targetKey string) (string, bool) {
+//
+// excludeIfHoldsRoleKey, when non-empty, skips any live candidate that ALSO
+// holds this role — the seed invariant that the canonical staff/maintenance
+// persona is staff-ONLY (seedStaff's doc comment: "no consumer role"): once a
+// second holder of the scanned role also holds this excluded one (§3.4's Sam
+// Okafor, granted frontOfHouse on top of his existing consumer hat), a bare
+// holdsRole scan can no longer tell the two apart, and — since candidates are
+// visited in a fixed sorted order — would otherwise resolve to whichever
+// identity id happens to sort first (the 35ca90f5 mis-resolution). Pass "" to
+// opt out (residence recovery, findResidentOf, legitimately targets consumer
+// holders and must never exclude them).
+func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys map[string]struct{}, relation, targetKey, excludeIfHoldsRoleKey string) (string, bool) {
 	suffix := "." + relation + "." + strings.TrimPrefix(targetKey, "vtx.")
 	candidates := make([]string, 0, 4)
 	for k := range allKeys {
@@ -883,9 +1273,48 @@ func findLinkedIdentity(ctx context.Context, coreKV jetstream.KeyValue, allKeys 
 			}
 			continue
 		}
+		if excludeIfHoldsRoleKey != "" {
+			excludedEnv, excludedErr := pkgverify.GetEnvelope(ctx, coreKV, linkKey(src, "holdsRole", excludeIfHoldsRoleKey))
+			if excludedErr == nil {
+				if excludedDel, _ := excludedEnv["isDeleted"].(bool); !excludedDel {
+					continue
+				}
+			}
+		}
 		return src, true
 	}
 	return tombstoned, false
+}
+
+// findBoundIdentity scans for a lnk.<type>.<id>.identifiedBy.identity.<id>
+// key FROM a known, fixed entity key (entityKey) and returns the identity it
+// is bound to. The mirror image of findLinkedIdentity above (which recovers
+// an unknown identity SOURCE by scanning TO a known target): a
+// provider-archetype bind (clinic provider / wellness instructor /
+// service-domain serviceprovider) instead runs entity→identity (Contract #1
+// §1.1), and the bound entity's own id is the FIXED, checked-in half here —
+// it is the identity id that recovery must discover. Existence alone (live
+// or tombstoned) is enough: Bind*Identity's own CreateOnly guard aspect never
+// releases, so a second bind attempt against an already-claimed entity fails
+// regardless of the link's own liveness, and no Unbind op exists to revive
+// it — unlike worksAt/residesIn there is nothing to re-wire here.
+func findBoundIdentity(allKeys map[string]struct{}, entityKey string) (string, bool) {
+	prefix := "lnk." + strings.TrimPrefix(entityKey, "vtx.") + ".identifiedBy.identity."
+	candidates := make([]string, 0, 2)
+	for k := range allKeys {
+		if strings.HasPrefix(k, prefix) {
+			candidates = append(candidates, k)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	sort.Strings(candidates)
+	identityID := strings.TrimPrefix(candidates[0], prefix)
+	if identityID == "" {
+		return "", false
+	}
+	return "vtx.identity." + identityID, true
 }
 
 // linkSourceIdentity derives the source identity key from a 6-segment link key

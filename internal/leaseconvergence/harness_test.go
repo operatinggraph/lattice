@@ -339,7 +339,7 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 // ops.meta; the meta-lane Processor commits each atomic batch).
 func (h *harness) installChain() {
 	installer := pkgmgr.NewInstaller(h.conn, bootstrap.BootstrapIdentityKey)
-	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	installer.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
 	for _, pkg := range []pkgmgr.Definition{
 		rbacdomain.Package,
 		identitydomain.Package,

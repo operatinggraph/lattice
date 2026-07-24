@@ -1,30 +1,53 @@
 package wellnessdomain
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"strings"
 
-// Canonical names. Three vertexType DDLs own the op scripts (each op is
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
+
+// instructorRoleKey is identity-domain's "provider" role key, computed
+// deterministically (pkgmgr.RoleID mirrors what the installer mints at
+// install time — no KV read required). BindInstructorIdentity's script pins
+// its holdsRole grant against this literal rather than trusting any live
+// vtx.role.* the caller supplies — mirrors clinic-domain's providerRoleKey
+// pin (packages/clinic-domain/ddls.go): the grant matrix already restricts
+// who can call the op, but the op's OWN script should not be steerable into
+// granting a different role to the bound identity.
+var instructorRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "provider")
+
+// Canonical names. Four vertexType DDLs own the op scripts (each op is
 // admitted by EXACTLY ONE vertexType DDL — the operationType→script index
 // drops an op claimed by two, so no overlap is allowed there). Aspect-type
 // DDLs are step-6 write gates only, mirroring clinic-domain's split.
 const (
-	studioVertexDDL  = "studio"
-	sessionVertexDDL = "session"
-	bookingVertexDDL = "booking"
+	studioVertexDDL     = "studio"
+	sessionVertexDDL    = "session"
+	bookingVertexDDL    = "booking"
+	instructorVertexDDL = "instructor"
 
 	studioProfileAspectDDL    = "studioProfile"
 	sessionScheduleAspectDDL  = "sessionSchedule"
 	studioSlotClaimAspectDDL  = "studioSlotClaim"
 	sessionSeatClaimAspectDDL = "sessionSeatClaim"
 	bookingStatusAspectDDL    = "bookingStatus"
+
+	instructorProfileAspectDDL       = "instructorProfile"
+	instructorIdentityClaimAspectDDL = "instructorIdentityClaim"
+	identityInstructorClaimAspectDDL = "identityInstructorClaim"
 )
 
-// DDLs returns the package's eight DDL meta-vertex declarations:
+// DDLs returns the package's twelve DDL meta-vertex declarations:
 //
 //   - studio (vertexType) — owns CreateStudio + TombstoneStudio.
 //   - session (vertexType) — owns CreateSession + TombstoneSession.
 //   - booking (vertexType) — owns CreateBooking + CancelBooking.
+//   - instructor (vertexType) — owns CreateInstructor + TombstoneInstructor +
+//     BindInstructorIdentity (the provider-archetype binding,
+//     persona-worlds-design.md Fire W0).
 //   - studioProfile / sessionSchedule / studioSlotClaim / sessionSeatClaim /
-//     bookingStatus (aspectType) — step-6 write gates.
+//     bookingStatus / instructorProfile / instructorIdentityClaim /
+//     identityInstructorClaim (aspectType) — step-6 write gates.
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
 // loftspace-domain): the scripts read ONLY by known key. No prefix scans, no
@@ -34,11 +57,15 @@ func DDLs() []pkgmgr.DDLSpec {
 		studioVertexTypeDDL(),
 		sessionVertexTypeDDL(),
 		bookingVertexTypeDDL(),
+		instructorVertexTypeDDL(),
 		studioProfileAspectTypeDDL(),
 		sessionScheduleAspectTypeDDL(),
 		studioSlotClaimAspectTypeDDL(),
 		sessionSeatClaimAspectTypeDDL(),
 		bookingStatusAspectTypeDDL(),
+		instructorProfileAspectTypeDDL(),
+		instructorIdentityClaimAspectTypeDDL(),
+		identityInstructorClaimAspectTypeDDL(),
 	}
 }
 
@@ -134,9 +161,18 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"per cell on the studio hub (vtx.studio.<s>.slot<cellcode>) — the write-path CreateOnly/expectedRevision " +
 			"conditioning on each cell key IS the double-book lock (Capability-KV §06 — the op's own Starlark " +
 			"logic): a live claim on any covered cell rejects with StudioConflict (no two overlapping sessions in " +
-			"the same studio). TombstoneSession requires the session's actual studio (verified via the atStudio " +
-			"link) to release the held slot cells in the same atomic batch, then soft-deletes the session (no " +
-			"cascade onto its bookings — they simply drop from the wellnessBookings roster's session join).",
+			"the same studio). CreateSession also accepts an optional instructor param (vtx.instructor.<NanoID>, " +
+			"validated alive + class=instructor): when supplied it writes the session ledBy instructor LINK " +
+			"(lnk.session.<id>.ledBy.instructor.<iid>, Contract #1 §1.1 later-arriving source), beside atStudio — " +
+			"omitted means the session carries no instructor (persona-worlds-design.md Fire W0). TombstoneSession " +
+			"requires the session's actual studio (verified via the atStudio link) to release the held slot cells " +
+			"in the same atomic batch, then soft-deletes the session (no cascade onto its bookings — they simply " +
+			"drop from the wellnessBookings roster's session join). TombstoneSession's standing guard: the " +
+			"operator passes unconditionally; a bound instructor may additionally cancel only a class THEY " +
+			"lead — the caller supplies the instructor param and the script requires BOTH " +
+			"lnk.session.<id>.ledBy.instructor.<iid> AND lnk.instructor.<iid>.identifiedBy.identity.<actor> to be " +
+			"alive (known keys), rejecting AuthDenied otherwise; front-of-house staff hold no TombstoneSession " +
+			"grant.",
 		Script: sessionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"studio":{"type":"string","description":"vtx.studio.<NanoID> the session runs at (CreateSession; required, validated alive + class=studio; on TombstoneSession it must be the session's actual studio, validated via the atStudio link)."},` +
@@ -144,6 +180,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
 			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
 			`"capacity":{"type":"integer","description":"Maximum concurrent bookings (CreateSession; required, 1..200). Bounds the seat-claim loop CreateBooking walks."},` +
+			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading the session (CreateSession; validated alive + class=instructor; writes the ledBy link). Listed in ContextHint.Reads when supplied. On TombstoneSession, required for an instructor (non-operator) caller cancelling their OWN class — validated via ledBy + identifiedBy."},` +
 			`"sessionId":{"type":"string","description":"Optional bare NanoID for the new session vertex (CreateSession); absent → minted."},` +
 			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of an existing session (TombstoneSession; required, validated alive)."}},` +
 			`"required":[]}`,
@@ -155,6 +192,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"startsAt":   "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required). Must align to the 15-minute grid (SlotGridViolation).",
 			"endsAt":     "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
 			"capacity":   "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted).",
+			"instructor": "Optional full vtx.instructor.<NanoID> key leading the session. CreateSession validates it is alive + class=instructor and writes the ledBy link; MUST be listed in ContextHint.Reads when supplied. TombstoneSession's standing guard requires it (plus the caller's own identifiedBy binding to it) for a non-operator, instructor-role caller to cancel their own class.",
 			"sessionId":  "Optional bare NanoID (no dots / key segments) for the new session vertex. Absent → minted with nanoid.new().",
 			"sessionKey": "Full vtx.session.<NanoID> key of an existing session (TombstoneSession releases its held studioSlotClaim cells then tombstones it).",
 		},
@@ -175,11 +213,31 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 					"(SlotGridViolation), or a studio double-book (StudioConflict).",
 			},
 			{
-				Name:    "TombstoneSession — cancel a scheduled session",
+				Name: "CreateSession — schedule a class with an instructor",
+				Payload: map[string]any{
+					"studio":     "vtx.studio.<NanoID>",
+					"instructor": "vtx.instructor.<NanoID>",
+					"name":       "Vinyasa Flow",
+					"startsAt":   "2026-07-08T09:00:00Z",
+					"endsAt":     "2026-07-08T10:00:00Z",
+					"capacity":   20,
+				},
+				ExpectedOutcome: "As above, plus validates the instructor is alive + class=instructor and writes " +
+					"lnk.session.<id>.ledBy.instructor.<NanoID>. Rejects a dead / wrong-class instructor.",
+			},
+			{
+				Name:    "TombstoneSession — cancel a scheduled session (operator or front-of-house)",
 				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>"},
 				ExpectedOutcome: "Validates the session is alive + class=session and the supplied studio is its " +
 					"actual studio (via the atStudio link), releases every held studioSlotClaim cell, then soft-" +
 					"deletes the session. Returns primaryKey.",
+			},
+			{
+				Name:    "TombstoneSession — an instructor cancels their own class",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "instructor": "vtx.instructor.<NanoID>"},
+				ExpectedOutcome: "As above, plus (for a non-operator caller) requires lnk.session.<id>.ledBy.instructor.<NanoID> " +
+					"AND lnk.instructor.<NanoID>.identifiedBy.identity.<actor> to both be alive — rejects AuthDenied " +
+					"if the caller is not the session's own bound instructor.",
 			},
 		},
 	}
@@ -319,6 +377,72 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+func instructorVertexTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     instructorVertexDDL,
+		Class:             "meta.ddl.vertexType",
+		PermittedCommands: []string{"CreateInstructor", "TombstoneInstructor", "BindInstructorIdentity"},
+		Description: "Wellness instructor DDL. Vertex shape: vtx.instructor.<NanoID>, class=instructor, root data = " +
+			"{} (minimal, D5 — the data lives in the .profile aspect). CreateInstructor mints the instructor + " +
+			"writes the .profile aspect {displayName (required)} atomically, and — when the optional studio param " +
+			"is supplied — the instructor teachesAt studio LINK (lnk.instructor.<id>.teachesAt.studio.<sid>, class " +
+			"\"teachesAt\"; source = the later-arriving instructor, target = the pre-existing studio, Contract #1 " +
+			"§1.1; validated alive + class=studio). TombstoneInstructor soft-deletes one (no cascade onto sessions " +
+			"it leads — the projection lenses anchor on the live root, mirroring the studio/session no-cascade " +
+			"rule). BindInstructorIdentity binds an existing instructor to a pre-minted vtx.identity (both " +
+			"validated alive + typed): it mints lnk.instructor.<id>.identifiedBy.identity.<id> (instructor " +
+			"identifiedBy identity, Contract #1 §1.1), claims a CreateOnly guard aspect on EACH side " +
+			"(.identityClaim on the instructor, .instructorClaim on the identity — mutually exclusive: one " +
+			"identity per instructor, one wellness instructor per identity), and idempotently grants the " +
+			"identity-domain `provider` role via holdsRole (mirrors clinic-domain's BindProviderIdentity verbatim " +
+			"— persona-worlds-design.md Fire W0; a link already alive is left untouched rather than re-created).",
+		Script: instructorDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"displayName":{"type":"string","description":"The instructor's display name (CreateInstructor; required)."},` +
+			`"studio":{"type":"string","description":"Optional vtx.studio.<NanoID> the instructor teaches at (CreateInstructor; validated alive + class=studio; writes the teachesAt link). Listed in ContextHint.Reads when supplied."},` +
+			`"instructorId":{"type":"string","description":"Optional bare NanoID for the new instructor vertex (CreateInstructor); absent → minted."},` +
+			`"instructorKey":{"type":"string","description":"vtx.instructor.<NanoID> of an existing instructor (TombstoneInstructor / BindInstructorIdentity; required, validated alive)."},` +
+			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity to bind to the instructor (BindInstructorIdentity; required, validated alive + class=identity)."}},` +
+			`"required":[]}`,
+		OutputSchema: `{"type":"object","properties":` +
+			`{"primaryKey":{"type":"string","description":"vtx.instructor.<NanoID> the operation wrote (BindInstructorIdentity returns the identifiedBy link key instead)."}}}`,
+		FieldDescription: map[string]string{
+			"displayName":   "The instructor's display name. Stored on the .profile aspect (CreateInstructor; required).",
+			"studio":        "Optional full vtx.studio.<NanoID> key the instructor teaches at. Validated alive + class=studio; CreateInstructor writes the instructor teachesAt studio link. MUST be listed in ContextHint.Reads when supplied.",
+			"instructorId":  "Optional bare NanoID (no dots / key segments) for the new instructor vertex. Absent → minted with nanoid.new().",
+			"instructorKey": "Full vtx.instructor.<NanoID> key of an existing instructor vertex (TombstoneInstructor tombstones it; BindInstructorIdentity binds it to a login identity).",
+			"identityKey":   "Full vtx.identity.<NanoID> key of a pre-minted identity to bind (BindInstructorIdentity; required). Must be alive + class=identity; wires the identifiedBy link, claims CreateOnly guard aspects on BOTH sides (rejected if either side is already bound), and idempotently grants the identity the provider role.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:    "CreateInstructor — register an instructor",
+				Payload: map[string]any{"displayName": "Kai Nakamura"},
+				ExpectedOutcome: "Mints vtx.instructor.<NanoID> (class=instructor, root {}) + the .profile aspect " +
+					"{displayName}. Returns primaryKey (the instructor key).",
+			},
+			{
+				Name:    "CreateInstructor — register an instructor who teaches at a studio",
+				Payload: map[string]any{"displayName": "Kai Nakamura", "studio": "vtx.studio.<NanoID>"},
+				ExpectedOutcome: "Mints the instructor + .profile as above, validates the studio is alive + " +
+					"class=studio, and writes lnk.instructor.<id>.teachesAt.studio.<NanoID>. Rejects a dead / " +
+					"wrong-class studio.",
+			},
+			{
+				Name:            "TombstoneInstructor — remove an instructor",
+				Payload:         map[string]any{"instructorKey": "vtx.instructor.<NanoID>"},
+				ExpectedOutcome: "Soft-deletes the instructor vertex. Returns primaryKey. Rejects an absent / already-dead instructor.",
+			},
+			{
+				Name:    "BindInstructorIdentity — bind an instructor to its login identity",
+				Payload: map[string]any{"instructorKey": "vtx.instructor.<NanoID>", "identityKey": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Validates both endpoints alive + typed, mints lnk.instructor.<id>.identifiedBy.identity.<id>, " +
+					"claims CreateOnly guard aspects on both sides (rejected if either side is already bound), and " +
+					"idempotently grants the identity the provider role via holdsRole. Returns primaryKey (the identifiedBy link key).",
+			},
+		},
+	}
+}
+
 func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     bookingStatusAspectDDL,
@@ -380,6 +504,102 @@ func sessionSeatClaimAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "session seat-claim aspect",
 				Payload:         map[string]any{},
 				ExpectedOutcome: "Stored as vtx.session.<NanoID>.seat<n>; claimed by CreateBooking, released by CancelBooking.",
+			},
+		},
+	}
+}
+
+// instructorProfileAspectTypeDDL declares the .profile aspect (class
+// instructorProfile) — the step-6 write gate for CreateInstructor.
+// Declaration-only; NON-sensitive.
+func instructorProfileAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     instructorProfileAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateInstructor"},
+		Description: "Instructor profile aspect (wellness). Stored as vtx.instructor.<NanoID>.profile (class " +
+			"instructorProfile) = {displayName}. Non-sensitive. Written by CreateInstructor (whose instructor " +
+			"vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. Declaration-only: no " +
+			"op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"displayName":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"displayName": "The instructor's display name.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "instructor profile aspect",
+				Payload:         map[string]any{"displayName": "Kai Nakamura"},
+				ExpectedOutcome: "Stored as vtx.instructor.<NanoID>.profile; written by CreateInstructor.",
+			},
+		},
+	}
+}
+
+// instructorIdentityClaimAspectTypeDDL declares the .identityClaim guard
+// aspect on the INSTRUCTOR side of a BindInstructorIdentity pair — the
+// entity-keyed half of the bind's mutual-exclusivity guard
+// (identityInstructorClaimAspectTypeDDL below is the identity-keyed half).
+// Mirrors clinic-domain's providerIdentityClaimAspectTypeDDL exactly.
+// Declaration-only; NON-sensitive.
+func instructorIdentityClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     instructorIdentityClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"BindInstructorIdentity"},
+		Description: "Instructor identity-claim guard aspect. Stored as vtx.instructor.<NanoID>.identityClaim " +
+			"(class instructorIdentityClaim) = {} — a pure existence marker, no relationship field. " +
+			"BindInstructorIdentity writes ONE per claimed instructorKey, CreateOnly: the key ITSELF is the lock " +
+			"— a second, different identity binding the SAME instructor collides at commit (RevisionConflict), " +
+			"never a silent double-bind. Declaration-only: no op handler (BindInstructorIdentity's script, owned " +
+			"by the instructor vertexType DDL, writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the instructor), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "instructor identity-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.instructor.<NanoID>.identityClaim; claimed once by BindInstructorIdentity. A second, different identity binding the same instructor is rejected.",
+			},
+		},
+	}
+}
+
+// identityInstructorClaimAspectTypeDDL declares the .instructorClaim aspect
+// ATTACHED onto an identity-domain vtx.identity — the identity-keyed half of
+// BindInstructorIdentity's mutual-exclusivity guard, mirroring
+// clinic-domain's identityProviderClaimAspectTypeDDL exactly, just keyed
+// "instructorClaim" instead of "providerClaim". Declaration-only;
+// NON-sensitive.
+func identityInstructorClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     identityInstructorClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"BindInstructorIdentity"},
+		Description: "Identity instructor-claim guard aspect (wellness, attached onto an identity-domain vertex). " +
+			"Stored as vtx.identity.<NanoID>.instructorClaim (class identityInstructorClaim) = {} — a pure " +
+			"existence marker, no relationship field. BindInstructorIdentity writes ONE per claimed identityKey, " +
+			"CreateOnly: the key ITSELF (identical regardless of WHICH instructor is claiming) is the lock — a " +
+			"second, different instructor passing the same identityKey collides at commit (RevisionConflict), " +
+			"never a silent double-bind. Declaration-only: no op handler (BindInstructorIdentity's script, owned " +
+			"by the instructor vertexType DDL, writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the identity), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "identity instructor-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.instructorClaim; claimed once by BindInstructorIdentity's identityKey wiring. A second, different instructor claiming the same identity is rejected.",
 			},
 		},
 	}
@@ -564,6 +784,17 @@ def required_int(p, name, lo, hi):
         fail("InvalidArgument: " + name + ": must be an integer; got " + type(v))
     if v < lo or v > hi:
         fail("InvalidArgument: " + name + ": must be in [" + str(lo) + ", " + str(hi) + "]; got " + str(v))
+    return v
+
+def optional_string(p, name):
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or type(v) != type(""):
+        return None
+    v = v.strip()
+    if len(v) == 0:
+        return None
     return v
 
 def bare_nanoid_or_mint(p, name):
@@ -837,6 +1068,17 @@ def execute(state, op):
             make_aspect(sess_key, "schedule", "sessionSchedule", sched),
             make_link(at_studio_lnk, sess_key, studio, "atStudio", "atStudio", {}),
         ]
+        # Optional instructor leading the class (persona-worlds-design.md Fire
+        # W0): validated alive + typed, minted beside atStudio. Sentence:
+        # "session ledBy instructor". Omitted → the session carries no
+        # instructor, exactly the studio locatedAt idiom's optional-endpoint
+        # shape (studioDDLScript's CreateStudio, above).
+        instructor = optional_string(p, "instructor")
+        if instructor != None:
+            require_live_typed(state, instructor, "instructor", "instructor")
+            _, instructor_id = parts_of(instructor, "instructor", "instructor")
+            mutations.append(make_link("lnk.session." + sess_id + ".ledBy.instructor." + instructor_id,
+                                       sess_key, instructor, "ledBy", "ledBy", {}))
         for c in cells:
             cc = slot_cellcode(c)
             mutations.append(claim_cell(studio, cc, "studioSlotClaim", "StudioConflict", "studio"))
@@ -854,6 +1096,30 @@ def execute(state, op):
 
         studio = required_string(p, "studio")
         require_matching_studio(sess_id, studio)
+
+        # Standing binder: operator passes unconditionally (unchanged); a
+        # bound instructor may additionally cancel only a class THEY lead —
+        # the caller supplies the instructor param and BOTH the session's
+        # ledBy link to it AND the caller's own identifiedBy binding to it
+        # must be alive (known keys, mirroring clinic-domain's
+        # actor_bound_to_provider two-hop shape). front-of-house holds no
+        # TombstoneSession grant, so no workplace binder is needed here.
+        if not actor_holds_operator(op.actor):
+            instr_key = optional_string(p, "instructor")
+            if instr_key == None:
+                fail("AuthDenied: " + op.actor + " may not cancel session " + sess_key + " (no instructor supplied)")
+            _, instr_id = parts_of(instr_key, "instructor", "instructor")
+            _, actor_id = parts_of(op.actor, "actor", "identity")
+            # read-posture: (d) declared optionalReads by TombstoneSession's
+            # dispatcher for the instructor-standing path (absence is a
+            # meaningful AuthDenied, not a correctness error).
+            led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
+            if led_by == None or led_by.isDeleted:
+                fail("AuthDenied: " + instr_key + " does not lead session " + sess_key)
+            # read-posture: (d) declared optionalReads by TombstoneSession's dispatcher.
+            bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
+            if bound == None or bound.isDeleted:
+                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
 
         # read-posture: (a) declared reads at TombstoneSession dispatch —
         # required for cell release.
@@ -1126,6 +1392,203 @@ def execute(state, op):
         ]
         events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
+
+    fail("UnknownOperation: " + ot)
+`
+
+// instructorDDLScript handles CreateInstructor + TombstoneInstructor +
+// BindInstructorIdentity. BindInstructorIdentity mirrors clinic-domain's
+// BindProviderIdentity verbatim (identifiedBy mint + idempotent holdsRole
+// grant + CreateOnly mutual-exclusivity guards on both sides) —
+// instructorDDLScript is derived from instructorDDLScriptTemplate by pinning
+// the placeholder — identity-domain's own "provider" role key — to its real,
+// deterministic value (see instructorRoleKey above).
+var instructorDDLScript = strings.ReplaceAll(instructorDDLScriptTemplate, "__EXPECTED_PROVIDER_ROLE_KEY__", instructorRoleKey)
+
+const instructorDDLScriptTemplate = `
+def make_vtx(key, cls, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False, "data": data}}
+
+def make_aspect(vtx_key, local_name, cls, data):
+    return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_link(key, source, target, cls, local_name, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": data}}
+
+def make_tombstone(key):
+    return {"op": "tombstone", "key": key,
+            "document": {"isDeleted": True, "data": {}}}
+
+def required_string(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": required non-empty string")
+    return v.strip()
+
+def optional_string(p, name):
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or type(v) != type(""):
+        return None
+    v = v.strip()
+    if len(v) == 0:
+        return None
+    return v
+
+def bare_nanoid_or_mint(p, name):
+    if not hasattr(p, name):
+        return nanoid.new()
+    v = getattr(p, name)
+    if v == None:
+        return nanoid.new()
+    if type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": must be a non-empty id string")
+    v = v.strip()
+    for bad in [".", "*", ">", " ", "\t", "\n"]:
+        if bad in v:
+            fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
+    return v
+
+def parts_of(key, name, want_type):
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
+
+def vertex_alive(state, key):
+    if key not in state:
+        return False
+    doc = state[key]
+    if doc == None:
+        return False
+    if hasattr(doc, "isDeleted") and doc.isDeleted:
+        return False
+    return True
+
+def class_of(state, key):
+    if key not in state:
+        return None
+    doc = state[key]
+    if doc == None or not hasattr(doc, "class"):
+        return None
+    return getattr(doc, "class")
+
+def require_live_typed(state, key, name, want_class):
+    # Endpoint validation: the linked vertex MUST be alive AND the expected
+    # class. A dead or wrong-class studio/identityKey is never wired.
+    if not vertex_alive(state, key):
+        fail("UnknownEndpoint: " + name + ": " + key + " is absent or tombstoned")
+    cls = class_of(state, key)
+    if cls != want_class:
+        fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
+
+def claim_instructor_identity(instr_key):
+    # Entity-keyed guard: at most one identity may ever bind THIS instructor
+    # (nothing releases the claim, so it is never tombstoned) — mirrors
+    # clinic-domain's claim_provider_identity idiom, keyed on the INSTRUCTOR
+    # side of the pair. kv.Read here is LAZY (§2.5 idiom) — it only picks the
+    # error message; the safety property is the atomic batch's CreateOnly
+    # conditioning at commit.
+    # read-posture: (d) declared in contextHint.optionalReads by
+    # BindInstructorIdentity's dispatcher (absence is the common first-bind case)
+    existing = kv.Read(instr_key + ".identityClaim")
+    if existing != None:
+        fail("InstructorAlreadyBound: " + instr_key + " is already bound to another identity")
+    return make_aspect(instr_key, "identityClaim", "instructorIdentityClaim", {})
+
+def claim_identity_instructor(identity_key):
+    # Identity-keyed guard: at most one wellness instructor may ever bind
+    # THIS identity (nothing releases the claim, so it is never tombstoned)
+    # — mirrors clinic-domain's claim_identity_provider idiom and its
+    # cross-package aspect-attachment shape exactly, just keyed
+    # "instructorClaim".
+    # read-posture: (d) declared in contextHint.optionalReads by
+    # BindInstructorIdentity's dispatcher (absence is the common first-bind case)
+    existing = kv.Read(identity_key + ".instructorClaim")
+    if existing != None:
+        fail("IdentityAlreadyBoundToInstructor: " + identity_key + " is already bound to another wellness instructor")
+    return make_aspect(identity_key, "instructorClaim", "identityInstructorClaim", {})
+
+def execute(state, op):
+    ot = op.operationType
+    p = op.payload
+
+    if ot == "CreateInstructor":
+        display_name = required_string(p, "displayName")
+        iid = bare_nanoid_or_mint(p, "instructorId")
+        ikey = "vtx.instructor." + iid
+        mutations = [
+            make_vtx(ikey, "instructor", {}),
+            make_aspect(ikey, "profile", "instructorProfile", {"displayName": display_name}),
+        ]
+        studio = optional_string(p, "studio")
+        if studio != None:
+            require_live_typed(state, studio, "studio", "studio")
+            _, studio_id = parts_of(studio, "studio", "studio")
+            mutations.append(make_link("lnk.instructor." + iid + ".teachesAt.studio." + studio_id,
+                                       ikey, studio, "teachesAt", "teachesAt", {}))
+        events = [{"class": "wellness.instructorCreated", "data": {"instructorKey": ikey}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": ikey}}
+
+    if ot == "TombstoneInstructor":
+        ikey = required_string(p, "instructorKey")
+        parts_of(ikey, "instructorKey", "instructor")
+        if not vertex_alive(state, ikey):
+            fail("UnknownInstructor: " + ikey)
+        mutations = [make_tombstone(ikey)]
+        events = [{"class": "wellness.instructorTombstoned", "data": {"instructorKey": ikey}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": ikey}}
+
+    if ot == "BindInstructorIdentity":
+        ikey = required_string(p, "instructorKey")
+        _, instr_id = parts_of(ikey, "instructorKey", "instructor")
+        require_live_typed(state, ikey, "instructorKey", "instructor")
+
+        identity_key = required_string(p, "identityKey")
+        _, identity_id = parts_of(identity_key, "identityKey", "identity")
+        require_live_typed(state, identity_key, "identityKey", "identity")
+
+        # instructor identifiedBy identity (Contract #1 §1.1: the
+        # later-arriving instructor is the source, the pre-existing identity
+        # is the target). Sentence: "instructor identifiedBy identity".
+        # Mirrors clinic-domain's provider identifiedBy mint verbatim.
+        identified_by_lnk = "lnk.instructor." + instr_id + ".identifiedBy.identity." + identity_id
+        mutations = [make_link(identified_by_lnk, ikey, identity_key, "identifiedBy", "identifiedBy", {})]
+
+        # Mutual exclusivity, both sides.
+        mutations.append(claim_instructor_identity(ikey))
+        mutations.append(claim_identity_instructor(identity_key))
+
+        # Grant the provider role, exactly as clinic-domain's
+        # BindProviderIdentity does — IDEMPOTENT (mirrors rbac AssignRole's
+        # state-check branch): a holdsRole link already alive is left
+        # untouched rather than re-created.
+        provider_role_key = "__EXPECTED_PROVIDER_ROLE_KEY__"
+        provider_role_id = provider_role_key[len("vtx.role."):]
+        holds_role_lnk = "lnk.identity." + identity_id + ".holdsRole.role." + provider_role_id
+        # read-posture: (d) declared in contextHint.optionalReads by
+        # BindInstructorIdentity's dispatcher (absence is the common
+        # first-bind case, mirroring rbac's AssignRole idempotency check)
+        existing_role_grant = kv.Read(holds_role_lnk)
+        if existing_role_grant == None or existing_role_grant.isDeleted:
+            mutations.append(make_link(holds_role_lnk, identity_key, provider_role_key, "holdsRole", "holdsRole", {}))
+
+        events = [{"class": "wellness.instructorIdentityBound",
+                   "data": {"instructorKey": ikey, "identityKey": identity_key}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": identified_by_lnk}}
 
     fail("UnknownOperation: " + ot)
 `

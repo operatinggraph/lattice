@@ -365,6 +365,74 @@ func TestClinicProviderReadGrants_SelfAnchorsEachProvider(t *testing.T) {
 	require.Equal(t, "cap-read.clinic.provider", v["grant_source"])
 }
 
+// TestProviderIdentityReadGrants proves the providerIdentityReadGrants
+// producer's cypher (persona-worlds-design.md Fire W0 §3.2/§3.3): a grant row
+// exists only while a login identity BOTH holds the identity-domain
+// `provider` role AND is identifiedBy-bound to a clinic provider entity — the
+// bound login inherits the provider vertex's own anchor tokens
+// (providerAppointmentsRead's authz_anchors, projected by
+// TestProviderAppointmentsRead_ProjectsProviderSelfAnchor above). Mirrors
+// staffReadGrants' both-links-required shape (service-location/lenses.go,
+// TestStaffReadGrants_RequiresBothLinks) and
+// TestClinicProviderReadGrants_SelfAnchorsEachProvider's assertion style.
+func TestProviderIdentityReadGrants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	t.Run("both links present grants one row", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.vtx(t, "drOsei", "identity")
+		f.vtx(t, "roleProvider", "role")
+		f.aspect(t, "roleProvider", "canonicalName", "canonicalName", map[string]any{"value": "provider"})
+		f.vtx(t, "provOsei", "provider")
+		f.aspect(t, "provOsei", "profile", "providerProfile", map[string]any{"fullName": "Dr. Amara Osei", "specialty": "Cardiology"})
+		f.edge(t, "holdsRole", "drOsei", "roleProvider")
+		f.edge(t, "identifiedBy", "provOsei", "drOsei")
+
+		rows := f.project(t, providerIdentityReadGrantsSpec)
+		require.Len(t, rows, 1)
+		v := rows[0].Values
+		require.Equal(t, f.ids["drOsei"], v["actor_id"], "the BOUND LOGIN is the grant's actor, not the provider entity")
+		require.Equal(t, f.ids["provOsei"], v["anchor_id"], "the grant anchors on the provider entity's own NanoID")
+		require.Equal(t, "cap-read.provider.clinic", v["grant_source"])
+	})
+
+	t.Run("role without identifiedBy grants nothing", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.vtx(t, "drOsei", "identity")
+		f.vtx(t, "roleProvider", "role")
+		f.aspect(t, "roleProvider", "canonicalName", "canonicalName", map[string]any{"value": "provider"})
+		f.vtx(t, "provOsei", "provider")
+		f.aspect(t, "provOsei", "profile", "providerProfile", map[string]any{"fullName": "Dr. Amara Osei", "specialty": "Cardiology"})
+		f.edge(t, "holdsRole", "drOsei", "roleProvider")
+
+		require.Empty(t, f.project(t, providerIdentityReadGrantsSpec))
+	})
+
+	t.Run("identifiedBy without the role grants nothing", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.vtx(t, "drOsei", "identity")
+		f.vtx(t, "provOsei", "provider")
+		f.aspect(t, "provOsei", "profile", "providerProfile", map[string]any{"fullName": "Dr. Amara Osei", "specialty": "Cardiology"})
+		f.edge(t, "identifiedBy", "provOsei", "drOsei")
+
+		require.Empty(t, f.project(t, providerIdentityReadGrantsSpec))
+	})
+
+	t.Run("a different role with identifiedBy grants nothing", func(t *testing.T) {
+		f := newLensFixture(t)
+		f.vtx(t, "drOsei", "identity")
+		f.vtx(t, "roleConsumer", "role")
+		f.aspect(t, "roleConsumer", "canonicalName", "canonicalName", map[string]any{"value": "consumer"})
+		f.vtx(t, "provOsei", "provider")
+		f.aspect(t, "provOsei", "profile", "providerProfile", map[string]any{"fullName": "Dr. Amara Osei", "specialty": "Cardiology"})
+		f.edge(t, "holdsRole", "drOsei", "roleConsumer")
+		f.edge(t, "identifiedBy", "provOsei", "drOsei")
+
+		require.Empty(t, f.project(t, providerIdentityReadGrantsSpec), "the canonicalName predicate excludes every other role")
+	})
+}
+
 func ruleengineFilterByKey(rows []ruleengine.ProjectionResult, col, id string) []ruleengine.ProjectionResult {
 	out := make([]ruleengine.ProjectionResult, 0, 1)
 	for _, r := range rows {

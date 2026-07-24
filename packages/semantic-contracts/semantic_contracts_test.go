@@ -69,7 +69,7 @@ func setupBcEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	defer stop()
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": bcConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse")}
+	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": bcConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
 	if _, err := inst.Install(ctx, orchestrationbase.Package); err != nil {
 		t.Fatalf("install orchestration-base: %v", err)
 	}

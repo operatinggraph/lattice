@@ -1,23 +1,29 @@
 name: edge-manifest
-version: 0.8.0
+version: 0.9.0
 description: |
-  The Facet edge app's world manifest: ten Personal Lenses (edgeIdentity/
+  The Facet edge app's world manifest: fourteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
-  edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings)
-  projecting identity, reachable services, the op descriptor vocabulary,
-  open and queued tasks, service instances, and browsable dispatch-target
-  entities (wellness sessions via studio locatedAt, clinic providers via
-  practicesAt, the actor's own bookings via bookedBy — manifest.ent rows a
-  declared dispatch.targetType resolves against) into the manifest.*
+  edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/
+  edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue/
+  edgeInstructorSessions) projecting identity (incl. the provider/instructor/
+  serviceprovider self-anchors, persona-worlds-design.md Fire W0), reachable
+  services, the op descriptor vocabulary, open and queued tasks, the
+  maintenance work orders at a staff actor's workplace, service instances,
+  and browsable dispatch-target entities (wellness sessions via studio
+  locatedAt, clinic providers via practicesAt, the actor's own bookings via
+  bookedBy, a bound provider's own appointments, a bound serviceprovider's
+  own instance queue, a bound instructor's own led sessions — manifest.ent
+  rows a declared dispatch.targetType resolves against) into the manifest.*
   namespace over the per-actor SYNC transport.
-  Plus edgeManifestReadGrants, a cap-read.edgeManifest.<actor> read-grant
-  producer lens (Fire 2): every non-self-anchored manifest row is otherwise
-  dropped by Refractor's D1 readableAnchors fail-closed gate, which is
-  never derived from the manifest lenses' own reachability. This is an
-  actorAggregate nats-kv lens (the same shape internal/bootstrap/lenses.go's
-  CapabilityReadLensDefinition uses at the kernel level, this package's own
-  instance of it) — not a Postgres GrantTable (that's Path A / RLS for
-  Protected reads, irrelevant here).
+  Plus edgeManifestReadGrants, edgeManifestStaffReadGrants, and
+  edgeManifestProviderReadGrants, three cap-read.edgeManifest*.<actor>
+  read-grant producer lenses (Fire 2; provider slice Fire W0): every
+  non-self-anchored manifest row is otherwise dropped by Refractor's D1
+  readableAnchors fail-closed gate, which is never derived from the manifest
+  lenses' own reachability. These are actorAggregate nats-kv lenses (the same
+  shape internal/bootstrap/lenses.go's CapabilityReadLensDefinition uses at
+  the kernel level, this package's own instance of it) — not a Postgres
+  GrantTable (that's Path A / RLS for Protected reads, irrelevant here).
 depends:
   - identity-domain
   - orchestration-base
@@ -58,9 +64,21 @@ declares:
     - canonicalName: edgeStaffWorkOrders
       adapter: nats-subject
       engine: full
+    - canonicalName: edgeProviderSchedule
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeProviderQueue
+      adapter: nats-subject
+      engine: full
+    - canonicalName: edgeInstructorSessions
+      adapter: nats-subject
+      engine: full
     - canonicalName: edgeManifestStaffReadGrants
       adapter: nats-kv
       engine: full
     - canonicalName: edgeManifestReadGrants
+      adapter: nats-kv
+      engine: full
+    - canonicalName: edgeManifestProviderReadGrants
       adapter: nats-kv
       engine: full

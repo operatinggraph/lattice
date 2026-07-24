@@ -8,21 +8,32 @@
 //
 //	5 vertexType DDLs: patient (CreatePatient + TombstonePatient), provider
 //	  (CreateProvider + TombstoneProvider + SetProviderProfile + SetProviderHours +
-//	  SetProviderTimeOff), appointment (CreateAppointment + RescheduleAppointment +
-//	  SetAppointmentStatus + RecordEncounter + TombstoneAppointment), clinicSite
-//	  (SetSiteProfile), clinicSiteAssignment (AssignProviderSite +
-//	  RemoveProviderSite — the provider→building practicesAt link, mirroring
-//	  loftspace-domain's loftspaceOwnership), each with its self-description.
-//	10 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
+//	  SetProviderTimeOff + BindProviderIdentity), appointment (CreateAppointment +
+//	  RescheduleAppointment + SetAppointmentStatus + RecordEncounter +
+//	  TombstoneAppointment), clinicSite (SetSiteProfile), clinicSiteAssignment
+//	  (AssignProviderSite + RemoveProviderSite — the provider→building
+//	  practicesAt link, mirroring loftspace-domain's loftspaceOwnership), each
+//	  with its self-description.
+//	12 aspectType DDLs: patientDemographics, providerProfile, appointmentSchedule,
 //	  appointmentStatus, providerHours, providerTimeOff, providerSlotClaim,
 //	  patientSlotClaim, appointmentEncounter, clinicSiteProfile (the .site aspect
-//	  a location-domain building carries) — their step-6 write gates.
+//	  a location-domain building carries), providerIdentityClaim /
+//	  identityProviderClaim (BindProviderIdentity's mutual-exclusivity guard
+//	  pair, persona-worlds-design.md Fire W0) — their step-6 write gates.
 //	The retired providerBookingGuard / patientBookingGuard DDLs are asserted ABSENT
 //	(clinic-booking-write-path-slot-claims-design.md — write-path slot claims
 //	replaced the scalar OCC epoch + hasBooking-link enumeration).
-//	16 permission vertices: one per op (scope any, granted to operator), plus
-//	  a second CreateAppointment vertex (scope self, granted to consumer —
-//	  the real-actor-write-auth-e2e patient-books-their-own-appointment idiom).
+//	19 permission vertices: one per (operationType, scope) pair (Contract #8
+//	  §8.1 — a permission's identity IS that pair, so a widened grantee set
+//	  lands on the SAME vertex, never a second one): most ops carry a single
+//	  scope=any vertex granted to operator; CreateAppointment/
+//	  RescheduleAppointment/SetAppointmentStatus additionally carry a scope=self
+//	  vertex granted to consumer (the real-actor-write-auth-e2e
+//	  patient-books-their-own-appointment idiom); SetProviderHours/
+//	  SetProviderTimeOff/RescheduleAppointment/SetAppointmentStatus's scope=any
+//	  vertex is ALSO granted to provider (a bound provider's own availability/
+//	  appointments); BindProviderIdentity carries its own scope=any vertex
+//	  granted to operator only (the role-minting bind ceremony is operator-only).
 //	1 package vertex + manifest aspect (name=clinic-domain).
 //
 // Run via: go run ./scripts/verify-package-clinic-domain.go
@@ -51,17 +62,25 @@ var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment",
-	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
+	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite", "BindProviderIdentity",
 }
 
 // permGrant is one expected (scope, grantee-role) pair for an operationType's
-// permission vertex. Every op here carries exactly one, except
-// CreateAppointment, RescheduleAppointment, and SetAppointmentStatus, which
-// each carry two distinct permission vertices — packages/clinic-domain/
-// permissions.go grants the operator role scope=any AND the consumer role
-// scope=self (the real-actor-write-auth-e2e idiom: a patient books,
-// reschedules, or cancels their own appointment; SetAppointmentStatus's self
-// grant is further restricted in-script to status=cancelled only).
+// permission vertex. Every op here carries exactly one vertex per DISTINCT
+// scope (Contract #8 §8.1 — a permission's identity is its (operationType,
+// scope) pair, so a widened grantee set lands on the SAME vertex, never a
+// second one): CreateAppointment/RescheduleAppointment/SetAppointmentStatus
+// each carry a scope=any vertex (operator, ALSO provider for the latter two —
+// a bound provider's own appointments) AND a scope=self vertex (consumer —
+// the real-actor-write-auth-e2e idiom: a patient books, reschedules, or
+// cancels their own appointment; SetAppointmentStatus's self grant is further
+// restricted in-script to status=cancelled only). SetProviderHours/
+// SetProviderTimeOff's single scope=any vertex is ALSO granted to provider (a
+// bound provider's own availability). BindProviderIdentity (the role-minting
+// bind ceremony) carries its own scope=any vertex, operator only — it mints
+// the provider role and confers cross-building access, so it is not delegated
+// to front-desk (matching operator-only CreateProvider). The pins below assert
+// exactly the declared (scope, role) pairs per op; no role is added implicitly.
 type permGrant struct {
 	scope   string
 	grantee string
@@ -73,16 +92,17 @@ var clinicOpGrants = map[string][]permGrant{
 	"CreateProvider":        {{"any", "operator"}},
 	"TombstoneProvider":     {{"any", "operator"}},
 	"SetProviderProfile":    {{"any", "operator"}},
-	"SetProviderHours":      {{"any", "operator"}},
-	"SetProviderTimeOff":    {{"any", "operator"}},
+	"SetProviderHours":      {{"any", "operator"}, {"any", "provider"}},
+	"SetProviderTimeOff":    {{"any", "operator"}, {"any", "provider"}},
 	"CreateAppointment":     {{"any", "operator"}, {"self", "consumer"}},
-	"RescheduleAppointment": {{"any", "operator"}, {"self", "consumer"}},
-	"SetAppointmentStatus":  {{"any", "operator"}, {"self", "consumer"}},
+	"RescheduleAppointment": {{"any", "operator"}, {"any", "provider"}, {"self", "consumer"}},
+	"SetAppointmentStatus":  {{"any", "operator"}, {"any", "provider"}, {"self", "consumer"}},
 	"RecordEncounter":       {{"any", "operator"}},
 	"TombstoneAppointment":  {{"any", "operator"}},
 	"SetSiteProfile":        {{"any", "operator"}},
 	"AssignProviderSite":    {{"any", "operator"}},
 	"RemoveProviderSite":    {{"any", "operator"}},
+	"BindProviderIdentity":  {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -324,9 +344,18 @@ func main() {
 			continue
 		}
 		grants := clinicOpGrants[op]
-		if len(permIDs) != len(grants) {
+		// Vertex count = DISTINCT scopes, not len(grants): a permission's
+		// identity is its (operationType, scope) pair (Contract #8 §8.1), so
+		// two grants sharing a scope (e.g. SetProviderHours' operator +
+		// provider) land on the SAME vertex via two grantedBy links, never a
+		// second vertex.
+		wantScopes := map[string]bool{}
+		for _, g := range grants {
+			wantScopes[g.scope] = true
+		}
+		if len(permIDs) != len(wantScopes) {
 			fail(fmt.Sprintf("vtx.permission.*[operationType=%s]", op),
-				fmt.Sprintf("found %d permission vertices, want %d (%v)", len(permIDs), len(grants), grants))
+				fmt.Sprintf("found %d permission vertices, want %d distinct scope(s) (%v)", len(permIDs), len(wantScopes), grants))
 			continue
 		}
 		for _, grant := range grants {

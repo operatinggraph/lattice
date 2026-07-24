@@ -64,7 +64,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	// "consumer") needs a role id registered directly, since these tests don't
 	// install identity-domain (the lease-signing lsConsumerRoleID idiom).
 	const ledConsumerRoleID = "LEDConsumerRoZeHJKMN"
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": ledConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse")}
+	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": ledConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
 	if _, err := inst.Install(ctx, clinicdomain.Package); err != nil {
 		t.Fatalf("install clinic-domain: %v", err)
 	}

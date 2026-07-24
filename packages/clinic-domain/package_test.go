@@ -24,16 +24,18 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the sixteen DDLs: five vertexType owners (patient,
-// provider, appointment, clinicSite, clinicSiteAssignment) and eleven aspectType
-// step-6 gates (nine attach to patient/provider/appointment vertices;
-// identityPatientClaim attaches onto an identity-domain vertex, the clinic-
-// reminders idiom; clinicSiteProfile attaches onto a location-domain building,
-// the loftspace-domain aspect-contribution idiom). All aspect DDLs MUST be
-// NON-sensitive, and each names ONLY its writer op(s) in permittedCommands.
+// TestPackage_DDLs pins the eighteen DDLs: five vertexType owners (patient,
+// provider, appointment, clinicSite, clinicSiteAssignment) and thirteen
+// aspectType step-6 gates (nine attach to patient/provider/appointment
+// vertices; identityPatientClaim and identityProviderClaim attach onto an
+// identity-domain vertex, the clinic-reminders idiom; clinicSiteProfile
+// attaches onto a location-domain building, the loftspace-domain
+// aspect-contribution idiom; providerIdentityClaim attaches onto the
+// package's own provider vertex). All aspect DDLs MUST be NON-sensitive, and
+// each names ONLY its writer op(s) in permittedCommands.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 16 {
-		t.Fatalf("expected 16 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 18 {
+		t.Fatalf("expected 18 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -43,7 +45,7 @@ func TestPackage_DDLs(t *testing.T) {
 
 	vertexCmds := map[string][]string{
 		"patient":              {"CreatePatient", "TombstonePatient"},
-		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff"},
+		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
 		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
 		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
@@ -74,17 +76,19 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 
 	aspectWriters := map[string][]string{
-		"patientDemographics":  {"CreatePatient"},
-		"providerProfile":      {"CreateProvider", "SetProviderProfile"},
-		"appointmentSchedule":  {"CreateAppointment", "RescheduleAppointment"},
-		"appointmentStatus":    {"CreateAppointment", "SetAppointmentStatus"},
-		"providerHours":        {"SetProviderHours"},
-		"providerTimeOff":      {"SetProviderTimeOff"},
-		"providerSlotClaim":    {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
-		"patientSlotClaim":     {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
-		"appointmentEncounter": {"RecordEncounter"},
-		"identityPatientClaim": {"CreatePatient"},
-		"clinicSiteProfile":    {"SetSiteProfile"},
+		"patientDemographics":   {"CreatePatient"},
+		"providerProfile":       {"CreateProvider", "SetProviderProfile"},
+		"appointmentSchedule":   {"CreateAppointment", "RescheduleAppointment"},
+		"appointmentStatus":     {"CreateAppointment", "SetAppointmentStatus"},
+		"providerHours":         {"SetProviderHours"},
+		"providerTimeOff":       {"SetProviderTimeOff"},
+		"providerSlotClaim":     {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		"patientSlotClaim":      {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "TombstoneAppointment"},
+		"appointmentEncounter":  {"RecordEncounter"},
+		"identityPatientClaim":  {"CreatePatient"},
+		"clinicSiteProfile":     {"SetSiteProfile"},
+		"providerIdentityClaim": {"BindProviderIdentity"},
+		"identityProviderClaim": {"BindProviderIdentity"},
 	}
 	for name, wantCmds := range aspectWriters {
 		asp, ok := byName[name]
@@ -137,17 +141,25 @@ func TestPackage_NoCommandOverlapAcrossVertexTypes(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the exact role SET on every grant. Three
-// postures are distinguished and each is load-bearing:
+// TestPackage_Permissions pins the exact role SET on every grant. Each
+// (operationType, scope) pair carries exactly ONE permission row (Contract
+// #8 §8.1 permTag — a duplicate pair would collapse onto the same
+// vtx.permission.<id> key), so widening an op's grantees means widening its
+// EXISTING row, never adding a second one at the same scope. Four postures
+// are distinguished and each is load-bearing:
 //
-//   - operator-only (scope any) — the clinical + roster + provider surface.
-//   - operator + frontOfHouse (scope any) — the front-desk schedule beat:
-//     RescheduleAppointment and SetAppointmentStatus, and ONLY those two. A
-//     widening that leaks to RecordEncounter or CreatePatient fails here.
+//   - operator-only (scope any) — the clinical + roster surface.
+//   - operator + frontOfHouse + provider, all on the SAME scope=any row
+//     (SetProviderHours/SetProviderTimeOff/RescheduleAppointment/
+//     SetAppointmentStatus) — the front-desk schedule beat, widened so a
+//     bound provider also reaches their OWN availability/appointments
+//     (confined in-script to the caller's own identifiedBy-bound provider).
+//     BindProviderIdentity (the role-minting bind ceremony) stays
+//     operator-only — it is not provider- or front-desk-reachable.
 //   - consumer (scope self) — patient self-booking / self-reschedule /
 //     self-cancel.
 //
-// Plus the ten projection lenses and the location-domain dependency.
+// Plus the eleven projection lenses and the location-domain dependency.
 func TestPackage_Permissions(t *testing.T) {
 	type wantGrant struct {
 		scope     string
@@ -161,13 +173,20 @@ func TestPackage_Permissions(t *testing.T) {
 	wantPerms := map[string][]*wantGrant{
 		"CreatePatient": operatorOnly(), "TombstonePatient": operatorOnly(),
 		"CreateProvider": operatorOnly(), "TombstoneProvider": operatorOnly(),
-		"SetProviderProfile": operatorOnly(), "SetProviderHours": operatorOnly(), "SetProviderTimeOff": operatorOnly(),
-		"CreateAppointment": {{scope: "any", grantsTo: []string{"operator"}}, {scope: "self", grantsTo: []string{"consumer"}}},
-		// The two front-desk ops — staff-widened, and the only two.
-		"RescheduleAppointment": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse"}}, {scope: "self", grantsTo: []string{"consumer"}}},
-		"SetAppointmentStatus":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse"}}, {scope: "self", grantsTo: []string{"consumer"}}},
+		"SetProviderProfile": operatorOnly(),
+		// A permission's identity is its (operationType, scope) pair (Contract
+		// #8 §8.1) — the provider widening lands on the SAME row as operator's,
+		// never a second scope=any row (validatePermissionIdentityUniqueness
+		// rejects that as a duplicate before any KV write).
+		"SetProviderHours":   op("operator", "provider"),
+		"SetProviderTimeOff": op("operator", "provider"),
+		"CreateAppointment":  {{scope: "any", grantsTo: []string{"operator"}}, {scope: "self", grantsTo: []string{"consumer"}}},
+		// The staff-widened front-desk ops — now also widened to the bound provider.
+		"RescheduleAppointment": {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
+		"SetAppointmentStatus":  {{scope: "any", grantsTo: []string{"operator", "frontOfHouse", "provider"}}, {scope: "self", grantsTo: []string{"consumer"}}},
 		"RecordEncounter":       operatorOnly(), "TombstoneAppointment": operatorOnly(),
 		"SetSiteProfile": operatorOnly(), "AssignProviderSite": operatorOnly(), "RemoveProviderSite": operatorOnly(),
+		"BindProviderIdentity": {{scope: "any", grantsTo: []string{"operator"}}},
 	}
 	wantCount := 0
 	for _, grants := range wantPerms {
@@ -205,8 +224,8 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends=[location-domain], got %v", got)
 	}
 
-	if got := len(Package.Lenses); got != 10 {
-		t.Fatalf("expected 10 lenses, got %d", got)
+	if got := len(Package.Lenses); got != 11 {
+		t.Fatalf("expected 11 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -252,6 +271,10 @@ func TestPackage_Permissions(t *testing.T) {
 	if l, ok := lensByName["clinicProviderReadGrants"]; !ok ||
 		l.Adapter != "postgres" || !l.GrantTable || l.Protected {
 		t.Fatalf("unexpected clinicProviderReadGrants shape: %+v", lensByName["clinicProviderReadGrants"])
+	}
+	if l, ok := lensByName["providerIdentityReadGrants"]; !ok ||
+		l.Adapter != "postgres" || !l.GrantTable || l.Protected || !l.DiffRetraction || l.GrantSource != "cap-read.provider.clinic" {
+		t.Fatalf("unexpected providerIdentityReadGrants shape: %+v", lensByName["providerIdentityReadGrants"])
 	}
 	if got := len(Package.WeaverTargets); got != 0 {
 		t.Fatalf("expected 0 weaverTargets, got %d", got)
@@ -344,9 +367,46 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`SetProviderProfile`,                     // profile-edit op handler
 		`make_aspect_upsert(prkey, "profile"`,    // replaces the .profile aspect
 		`clinic.providerProfileSet`,              // profile-edit event
+		`BindProviderIdentity`,                   // bind op handler
+		`.identifiedBy.identity.`,                // provider identifiedBy identity link shape
+		`ProviderAlreadyBound`,                   // entity-keyed exclusivity guard
+		`IdentityAlreadyBoundToProvider`,         // identity-keyed exclusivity guard
+		`.holdsRole.role.`,                       // idempotent provider-role grant
+		`actor_holds_operator`,                   // the standing operator exemption
+		`actor_bound_to_provider`,                // the standing provider-binding guard
+		`AuthDenied`,                             // the standing guard's denial
 	} {
 		if !strings.Contains(providerDDLScript, want) {
 			t.Errorf("provider script must reference %q", want)
+		}
+	}
+
+	// The bind op's role-key pin must actually be substituted at package-init
+	// (providerDDLScriptTemplate carries the placeholder; providerDDLScript is
+	// its ReplaceAll'd product) — a regression here would leave the literal
+	// placeholder in the shipped script, minting a holdsRole link whose target
+	// is the string "__EXPECTED_PROVIDER_ROLE_KEY__" instead of a real role key.
+	if !strings.Contains(providerDDLScriptTemplate, "__EXPECTED_PROVIDER_ROLE_KEY__") {
+		t.Errorf("providerDDLScriptTemplate must carry the __EXPECTED_PROVIDER_ROLE_KEY__ placeholder")
+	}
+	if strings.Contains(providerDDLScript, "__EXPECTED_PROVIDER_ROLE_KEY__") {
+		t.Errorf("providerDDLScript must not contain the unsubstituted __EXPECTED_PROVIDER_ROLE_KEY__ placeholder")
+	}
+	if !strings.Contains(providerDDLScript, providerRoleKey) {
+		t.Errorf("providerDDLScript must contain the substituted providerRoleKey literal %q", providerRoleKey)
+	}
+
+	// The appointment script's standing guard gains a THIRD binder (the bound
+	// provider), alongside operator/workplace — RescheduleAppointment and
+	// SetAppointmentStatus both extend the same standing branch.
+	for _, want := range []string{
+		`def appointment_provider(appt_id)`,                                // factored-out provider resolution (no double read)
+		`def sites_for_provider(provider)`,                                 // factored-out site walk
+		`def actor_bound_to_appointment_provider`,                          // the third standing binder
+		`actor_bound_to_appointment_provider(op.actor, standing_provider)`, // wired into both standing branches
+	} {
+		if !strings.Contains(appointmentDDLScript, want) {
+			t.Errorf("appointment script must reference %q", want)
 		}
 	}
 }

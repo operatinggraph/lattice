@@ -545,8 +545,8 @@ func loadBootstrap(path string) (*bootstrapJSON, string, error) {
 
 // roleIDsFromBootstrap returns the canonical-name → NanoID map for
 // kernel-seeded roles. The kernel seeds the `operator` role; the other
-// roles (consumer, frontOfHouse, backOfHouse, identityProvisioner) are
-// declared by identity-domain (Definition.Roles) and minted with
+// roles (consumer, frontOfHouse, backOfHouse, provider, identityProvisioner)
+// are declared by identity-domain (Definition.Roles) and minted with
 // deterministic NanoIDs (pkgmgr.RoleID("identity-domain", canonicalName) —
 // the same computation cmd/gateway/main.go's ConfigureProvisioning call
 // already relies on to resolve the consumer role without a KV round-trip).
@@ -562,7 +562,7 @@ func roleIDsFromBootstrap(bs *bootstrapJSON) map[string]string {
 	if id := bs.PrimordialIDs["roleOperator"]; id != "" {
 		out["operator"] = id
 	}
-	for _, name := range []string{"consumer", "frontOfHouse", "backOfHouse", "identityProvisioner"} {
+	for _, name := range []string{"consumer", "frontOfHouse", "backOfHouse", "provider", "identityProvisioner"} {
 		out[name] = pkgmgr.RoleID("identity-domain", name)
 	}
 	// Legacy fields tolerated for warm-tree compatibility — override the

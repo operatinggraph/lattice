@@ -62,6 +62,12 @@ func setupServiceEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac+identity+hygiene
 	installServiceDeps(t, ctx, conn)
 	testutil.SeedCapDoc(t, ctx, conn, staffCapDoc())
+	// The capability doc's Roles field is only half the claim —
+	// RecordServiceOutcome's standing guard (persona-worlds-design.md Fire
+	// W0) reads the GRAPH's own holdsRole link via actor_holds_operator, not
+	// the capability doc, mirroring clinic-domain's / wellness-domain's own
+	// setup (their standing binders read the same way).
+	testutil.SeedHoldsRole(t, ctx, conn, svcStaffActorKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 

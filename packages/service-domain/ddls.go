@@ -1,11 +1,46 @@
 package servicedomain
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"strings"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
+
+// serviceProviderRoleKey is identity-domain's "provider" role key, computed
+// deterministically (pkgmgr.RoleID mirrors what the installer mints at
+// install time — no KV read required). BindServiceProviderIdentity's script
+// pins its holdsRole grant against this literal rather than trusting any
+// live vtx.role.* the caller supplies — mirrors clinic-domain's
+// providerRoleKey pin (packages/clinic-domain/ddls.go).
+var serviceProviderRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "provider")
+
+// Canonical names for the serviceprovider vertexType DDL + its guard
+// aspects (the provider-archetype binding, persona-worlds-design.md Fire
+// W0) — a lean, generic entity template-attached vendors (e.g. a laundry
+// operator) bind their login to, distinct from the `service` DDL above.
+const (
+	serviceProviderVertexDDL              = "serviceprovider"
+	serviceProviderProfileAspectDDL       = "serviceProviderProfile"
+	serviceProviderIdentityClaimAspectDDL = "serviceProviderIdentityClaim"
+	identityServiceProviderClaimAspectDDL = "identityServiceProviderClaim"
+)
+
+// aspectDeclarationOnlyScript is the shared no-op script for every
+// declaration-only aspect-type DDL — its op handler lives on the owning
+// vertexType DDL, so this script never executes as a dispatch target (the
+// operationType→script index always resolves to the vertexType DDL first).
+// Mirrors clinic-domain's / wellness-domain's identical helper.
+const aspectDeclarationOnlyScript = `
+def execute(state, op):
+    fail("InvalidState: this aspect-type DDL is declaration-only; its op is owned by a vertexType DDL")
+`
 
 // DDLs returns the package's DDL meta-vertex declarations.
 //
-// Single DDL `service` (vertex-type class) handles all three lifecycle ops
-// for both the template and instance classes of every service family.
+// The `service` DDL (vertex-type class) handles all lifecycle + wiring ops
+// for both the template and instance classes of every service family. The
+// `serviceprovider` DDL + its two guard aspect-type DDLs are the
+// provider-archetype binding (persona-worlds-design.md Fire W0).
 //
 // Architectural rules (binding — same known-key discipline as
 // orchestration-base / identity-domain):
@@ -65,7 +100,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     when present upgrades that rejection to a structured
 //     OutcomeAlreadyRecorded ScriptError.
 func DDLs() []pkgmgr.DDLSpec {
-	return []pkgmgr.DDLSpec{serviceDDL()}
+	return []pkgmgr.DDLSpec{
+		serviceDDL(),
+		serviceProviderVertexTypeDDL(),
+		serviceProviderProfileAspectTypeDDL(),
+		serviceProviderIdentityClaimAspectTypeDDL(),
+		identityServiceProviderClaimAspectTypeDDL(),
+	}
 }
 
 // OpMetas declares the ops a downstream story (14.4's externalTask path)
@@ -85,7 +126,45 @@ func DDLs() []pkgmgr.DDLSpec {
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{OperationType: "CreateServiceInstance"},
-		{OperationType: "RecordServiceOutcome"},
+		{
+			OperationType: "RecordServiceOutcome",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Record outcome",
+				Description: "Record the outcome of this service run.",
+				Icon:        "check",
+				Tone:        "primary",
+				SubmitLabel: "Record",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"instanceKey":{"type":"string","description":"vtx.service.<NanoID> of the instance to record an outcome for — auto-filled from the instance being viewed."},` +
+				`"status":{"type":"string","enum":["completed","failed"],"description":"The terminal outcome: completed or failed."},` +
+				`"completedAt":{"type":"string","description":"RFC3339 instant the run completed."},` +
+				`"template":{"type":"string","description":"vtx.service.<NanoID> of the instance's own template — required for a provider (non-operator) caller."},` +
+				`"serviceprovider":{"type":"string","description":"vtx.serviceprovider.<NanoID> of your own service-provider record — required for a provider (non-operator) caller."}},` +
+				`"required":["instanceKey","status","completedAt"]}`,
+			FieldDescriptions: map[string]string{
+				"instanceKey":     "The instance this outcome is for — auto-filled by the client from the instance being viewed (dispatch.targetField), not user-entered.",
+				"status":          "completed or failed.",
+				"completedAt":     "RFC3339 instant the run completed.",
+				"template":        "The instance's own template — required for a provider caller (the script's standing guard walks instance→template→serviceprovider→identity).",
+				"serviceprovider": "Your own service-provider record — required for a provider caller. Must be providedBy the instance's template and identifiedBy-bound to you.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "service",
+				AuthContext: "standing",
+				TargetField: "instanceKey",
+				TargetType:  "service",
+				// The instanceOf/providedBy/identifiedBy ownership-chain
+				// probes. Absence of any is a meaningful rejection the
+				// script renders (AuthDenied), not a correctness error —
+				// the same shape wellness-domain's CancelBooking uses.
+				OptionalReads: []string{
+					"lnk.service.{payload.instanceKey:id}.instanceOf.service.{payload.template:id}",
+					"lnk.service.{payload.template:id}.providedBy.serviceprovider.{payload.serviceprovider:id}",
+					"lnk.serviceprovider.{payload.serviceprovider:id}.identifiedBy.identity.{actor:id}",
+				},
+			},
+		},
 		{
 			OperationType: "RequestService",
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -115,7 +194,7 @@ func serviceDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "service",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateServiceTemplate", "CreateServiceInstance", "RecordServiceOutcome", "RequestService", "RetireServiceTemplate"},
+		PermittedCommands: []string{"CreateServiceTemplate", "CreateServiceInstance", "RecordServiceOutcome", "RequestService", "RetireServiceTemplate", "WireProvidedBy"},
 		Description: "Service domain DDL. Vertex shape: vtx.service.<NanoID>, root data = {} " +
 			"(minimal, D5). A service vertex is a TEMPLATE (an offering) or an INSTANCE (a run of an " +
 			"offering), discriminated by the vertex ENVELOPE class (service.<x>.template / " +
@@ -147,10 +226,22 @@ func serviceDDL() pkgmgr.DDLSpec {
 			"RecordServiceOutcome records the external-call result as the .outcome aspect {status " +
 			"(completed|failed), completedAt (canonical-UTC RFC3339)} on the instance; the outcome lives " +
 			"in the aspect, never on root data (D5). It rejects a non-existent / template (not instance) / " +
-			"already-recorded target and asserts the instance root revision (OCC, Contract #2 §2.6). " +
+			"already-recorded target and asserts the instance root revision (OCC, Contract #2 §2.6). Its standing " +
+			"binder (persona-worlds-design.md Fire W0): the operator passes unconditionally; otherwise the caller " +
+			"must supply template + serviceprovider and the script requires ALL THREE known-key links to be alive " +
+			"— instanceOf (this instance → the named template), providedBy (that template → the named " +
+			"serviceprovider), and identifiedBy (that serviceprovider → the caller's own identity) — rejecting " +
+			"AuthDenied otherwise, so a bound serviceprovider records outcomes only for instances of templates " +
+			"they themselves provide. " +
 			"RetireServiceTemplate (§7.3, admin-only cleanup) soft-deletes (tombstones) a live template that no " +
 			"longer belongs — e.g. one presenting a family its envelope class contradicts; it rejects a " +
-			"non-existent or already-retired template and a target that is an instance, not a template.",
+			"non-existent or already-retired template and a target that is an instance, not a template. " +
+			"WireProvidedBy wires an EXISTING live template to a provider entity of any type (validated alive " +
+			"only — type-open, mirroring CreateServiceTemplate's own create-time providedBy mint): it mints " +
+			"lnk.service.<tplId>.providedBy.<provType>.<provId> (service providedBy provider, Contract #1 §1.1) " +
+			"idempotently — a link already alive is left untouched, never re-created. The caller's ContextHint " +
+			"MUST declare this deterministic link key in OptionalReads (Contract #2 §2.5) so a repeat wire reads " +
+			"it as already-alive rather than attempting a fresh create against a live key.",
 		Script: serviceDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"family":{"type":"string","enum":["backgroundCheck","payment","laundry","fitness","clinic","wellness","cafe"],"description":"The service family <x> (backgroundCheck|payment|laundry|fitness|clinic|wellness|cafe). Sets the vertex envelope class service.<x>.template|instance."},` +
@@ -165,23 +256,25 @@ func serviceDDL() pkgmgr.DDLSpec {
 			`"instanceKey":{"type":"string","description":"vtx.service.<NanoID> of the instance to record an outcome for (RecordServiceOutcome; required, validated alive + is an instance + not already recorded)."},` +
 			`"status":{"type":"string","enum":["completed","failed"],"description":"The terminal outcome (RecordServiceOutcome): completed = the external call succeeded with a satisfying result; failed = the call failed or returned a non-satisfying result."},` +
 			`"completedAt":{"type":"string","description":"RFC3339 instant the external call completed (RecordServiceOutcome; normalized to canonical UTC whole-second RFC3339). The freshness-predicate input."},` +
-			`"expectedRevision":{"type":"integer","description":"Optional OCC guard (RecordServiceOutcome): the instance root revision the caller read; the outcome write is rejected if the instance changed concurrently."}},` +
+			`"expectedRevision":{"type":"integer","description":"Optional OCC guard (RecordServiceOutcome): the instance root revision the caller read; the outcome write is rejected if the instance changed concurrently."},` +
+			`"serviceprovider":{"type":"string","description":"Optional vtx.serviceprovider.<NanoID> (RecordServiceOutcome). Required, alongside template, for a non-operator provider-role caller — the script requires it to be providedBy the named template AND identifiedBy-bound to the caller's own identity."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.service.<NanoID> of the created/updated service vertex (the operation's principal key)."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.service.<NanoID> of the created/updated service vertex (the operation's principal key), or the providedBy link key for WireProvidedBy."}}}`,
 		FieldDescription: map[string]string{
 			"family":           "The service family <x>, one of {backgroundCheck, payment, laundry, fitness, clinic, wellness, cafe}. Determines the vertex envelope class (service.<x>.template for CreateServiceTemplate, service.<x>.instance for CreateServiceInstance). Required for the create ops.",
 			"templateId":       "Optional bare NanoID (no dots / key segments) for the template vertex (vtx.service.<templateId>) created by CreateServiceTemplate. Absent → minted with nanoid.new().",
-			"providedBy":       "Optional full vtx.<provType>.<NanoID> key of the provider of the template offering. CreateServiceTemplate validates it is alive and writes the providedBy link only when supplied.",
+			"providedBy":       "Optional full vtx.<provType>.<NanoID> key of the provider of the template offering (CreateServiceTemplate, validated alive, link written only when supplied). Required for WireProvidedBy (validated alive; type-open — any vertex type).",
 			"presentation":     "Optional client-facing display metadata {name, description?, icon, category?} (CreateServiceTemplate). Written verbatim as the template's .presentation aspect; absent → no aspect written (a template stays undescribed, per edge-showcase-app-design.md §3.3's degrade-gracefully rule).",
 			"instanceId":       "Optional bare NanoID (no dots / key segments) for the instance vertex (vtx.service.<instanceId>) created by CreateServiceInstance or RequestService. Supplied by a caller that must know the instance key before the op commits — e.g. a Loom externalTask step write-aheading its token.<instanceKey> handle. Absent → minted with nanoid.new(). A crash-retry with the same id collapses on the Contract #4 tracker.",
-			"template":         "Full vtx.service.<NanoID> key of the template this instance is a run of (CreateServiceInstance), or the template to retire (RetireServiceTemplate). Validated alive and a template.",
+			"template":         "Full vtx.service.<NanoID> key of the template this instance is a run of (CreateServiceInstance), the template to retire (RetireServiceTemplate), the LIVE template to wire providedBy onto (WireProvidedBy, required, validated alive + a template), or the instance's own template (RecordServiceOutcome's provider standing-guard path, required alongside serviceprovider for a non-operator caller).",
 			"providedTo":       "Full vtx.identity.<NanoID> key of the applicant this instance is provided to. CreateServiceInstance requires it, validates the identity is alive, and writes the providedTo link (the convergence link a downstream lens reads across).",
 			"service":          "Full vtx.service.<NanoID> key of the template being requested (RequestService). Required, must be alive + a template, and must equal the authorized authContext.service — a mismatch is rejected (the payload cannot name a different template than the one step 3 authorized).",
 			"instanceKey":      "Full vtx.service.<NanoID> key of the instance to record an outcome for. RecordServiceOutcome validates it is alive, is an instance (not a template), and has no outcome yet.",
 			"status":           "The terminal outcome value: completed (the external call succeeded with a satisfying result) or failed (the call failed or returned a non-satisfying result). Stored on the .outcome aspect.",
 			"completedAt":      "RFC3339 timestamp the external call completed. Normalized to canonical UTC whole-second RFC3339 and stored on the .outcome aspect — the freshness-predicate input a downstream lens compares lexically.",
 			"expectedRevision": "Optional OCC guard for RecordServiceOutcome: the revision the caller read for the instance root. When supplied, the outcome write asserts it (Contract #2 §2.6) so a concurrent change on the same instance cannot be clobbered.",
+			"serviceprovider":  "Full vtx.serviceprovider.<NanoID> key (RecordServiceOutcome). Required, alongside template, for a non-operator provider-role caller: must be providedBy the named template AND identifiedBy-bound to the caller's own identity, or the op is rejected AuthDenied.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -220,7 +313,7 @@ func serviceDDL() pkgmgr.DDLSpec {
 					"template, or payload.service does not match the authorized authContext.service.",
 			},
 			{
-				Name: "RecordServiceOutcome — record a passing background check",
+				Name: "RecordServiceOutcome — record a passing background check (operator)",
 				Payload: map[string]any{
 					"instanceKey": "vtx.service.<instanceNanoID>",
 					"status":      "completed",
@@ -232,6 +325,19 @@ func serviceDDL() pkgmgr.DDLSpec {
 					"template, or already has an outcome.",
 			},
 			{
+				Name: "RecordServiceOutcome — a bound serviceprovider records their own run's outcome",
+				Payload: map[string]any{
+					"instanceKey":     "vtx.service.<instanceNanoID>",
+					"status":          "completed",
+					"completedAt":     "2026-06-18T14:00:00Z",
+					"template":        "vtx.service.<templateNanoID>",
+					"serviceprovider": "vtx.serviceprovider.<spNanoID>",
+				},
+				ExpectedOutcome: "As above, plus (for a non-operator caller) requires instanceOf(instance,template) AND " +
+					"providedBy(template,serviceprovider) AND identifiedBy(serviceprovider,caller) to all be alive — " +
+					"rejects AuthDenied if the caller is not the template's own bound provider.",
+			},
+			{
 				Name: "RetireServiceTemplate — soft-delete a template that no longer belongs",
 				Payload: map[string]any{
 					"template": "vtx.service.<templateNanoID>",
@@ -240,9 +346,331 @@ func serviceDDL() pkgmgr.DDLSpec {
 					"primaryKey (the template key). Rejects with ScriptError if the template is absent, already retired, or is " +
 					"an instance, not a template.",
 			},
+			{
+				Name:    "WireProvidedBy — wire an existing serviceprovider onto a live template",
+				Payload: map[string]any{"template": "vtx.service.<templateNanoID>", "providedBy": "vtx.serviceprovider.<spNanoID>"},
+				ExpectedOutcome: "Validates the template is alive + a template and the providedBy endpoint is alive (type-open — " +
+					"any vertex type), then writes lnk.service.<templateNanoID>.providedBy.serviceprovider.<spNanoID> " +
+					"(idempotent: a replay where the link is already alive commits nothing). Returns primaryKey (the link key).",
+			},
 		},
 	}
 }
+
+// serviceProviderVertexTypeDDL declares the lean `serviceprovider` vertex
+// type — the provider-archetype binding for a template-attached vendor
+// (e.g. a laundry operator), distinct from clinic-domain's rich `provider`
+// (hours, time-off, practicesAt) and wellness-domain's `instructor` (teaches
+// sessions, teachesAt) — persona-worlds-design.md Fire W0 F3: per-domain
+// provider entities, not one shared type. BindServiceProviderIdentity
+// mirrors clinic-domain's BindProviderIdentity verbatim.
+func serviceProviderVertexTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     serviceProviderVertexDDL,
+		Class:             "meta.ddl.vertexType",
+		PermittedCommands: []string{"CreateServiceProvider", "BindServiceProviderIdentity"},
+		Description: "Generic template-attached service provider DDL (e.g. a laundry operator). Vertex shape: " +
+			"vtx.serviceprovider.<NanoID>, class=serviceprovider, root data = {} (minimal, D5 — the data lives " +
+			"in the .profile aspect). CreateServiceProvider mints the serviceprovider + writes the .profile " +
+			"aspect {displayName (required)} atomically. BindServiceProviderIdentity binds an existing " +
+			"serviceprovider to a pre-minted vtx.identity (both validated alive + typed): it mints " +
+			"lnk.serviceprovider.<id>.identifiedBy.identity.<id> (serviceprovider identifiedBy identity, " +
+			"Contract #1 §1.1), claims a CreateOnly guard aspect on EACH side (.identityClaim on the " +
+			"serviceprovider, .serviceProviderClaim on the identity — mutually exclusive: one identity per " +
+			"serviceprovider, one serviceprovider per identity), and idempotently grants the identity-domain " +
+			"`provider` role via holdsRole (mirrors clinic-domain's BindProviderIdentity verbatim — " +
+			"persona-worlds-design.md Fire W0; a link already alive is left untouched rather than re-created). " +
+			"A template's providedBy link to a serviceprovider is wired separately, by the `service` DDL's " +
+			"WireProvidedBy op (above) or at CreateServiceTemplate time.",
+		Script: serviceProviderDDLScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"displayName":{"type":"string","description":"The service provider's display name (CreateServiceProvider; required)."},` +
+			`"serviceProviderId":{"type":"string","description":"Optional bare NanoID for the new serviceprovider vertex (CreateServiceProvider); absent → minted."},` +
+			`"serviceProviderKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> of an existing serviceprovider (BindServiceProviderIdentity; required, validated alive)."},` +
+			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity to bind to the serviceprovider (BindServiceProviderIdentity; required, validated alive + class=identity)."}},` +
+			`"required":[]}`,
+		OutputSchema: `{"type":"object","properties":` +
+			`{"primaryKey":{"type":"string","description":"vtx.serviceprovider.<NanoID> the operation wrote (BindServiceProviderIdentity returns the identifiedBy link key instead)."}}}`,
+		FieldDescription: map[string]string{
+			"displayName":        "The service provider's display name. Stored on the .profile aspect (CreateServiceProvider; required).",
+			"serviceProviderId":  "Optional bare NanoID (no dots / key segments) for the new serviceprovider vertex. Absent → minted with nanoid.new().",
+			"serviceProviderKey": "Full vtx.serviceprovider.<NanoID> key of an existing serviceprovider vertex (BindServiceProviderIdentity binds it to a login identity).",
+			"identityKey":        "Full vtx.identity.<NanoID> key of a pre-minted identity to bind (BindServiceProviderIdentity; required). Must be alive + class=identity; wires the identifiedBy link, claims CreateOnly guard aspects on BOTH sides (rejected if either side is already bound), and idempotently grants the identity the provider role.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:    "CreateServiceProvider — register a service provider",
+				Payload: map[string]any{"displayName": "Kai's Laundry"},
+				ExpectedOutcome: "Mints vtx.serviceprovider.<NanoID> (class=serviceprovider, root {}) + the .profile " +
+					"aspect {displayName}. Returns primaryKey (the serviceprovider key).",
+			},
+			{
+				Name:    "BindServiceProviderIdentity — bind a service provider to its login identity",
+				Payload: map[string]any{"serviceProviderKey": "vtx.serviceprovider.<NanoID>", "identityKey": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Validates both endpoints alive + typed, mints lnk.serviceprovider.<id>.identifiedBy.identity.<id>, " +
+					"claims CreateOnly guard aspects on both sides (rejected if either side is already bound), and " +
+					"idempotently grants the identity the provider role via holdsRole. Returns primaryKey (the identifiedBy link key).",
+			},
+		},
+	}
+}
+
+// serviceProviderProfileAspectTypeDDL declares the .profile aspect (class
+// serviceProviderProfile) — the step-6 write gate for CreateServiceProvider.
+// Declaration-only; NON-sensitive.
+func serviceProviderProfileAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     serviceProviderProfileAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateServiceProvider"},
+		Description: "Service provider profile aspect. Stored as vtx.serviceprovider.<NanoID>.profile (class " +
+			"serviceProviderProfile) = {displayName}. Non-sensitive. Written by CreateServiceProvider (whose " +
+			"serviceprovider vertexType DDL owns the script); this aspect-type DDL is the step-6 write gate. " +
+			"Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"displayName":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"displayName": "The service provider's display name.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "service provider profile aspect",
+				Payload:         map[string]any{"displayName": "Kai's Laundry"},
+				ExpectedOutcome: "Stored as vtx.serviceprovider.<NanoID>.profile; written by CreateServiceProvider.",
+			},
+		},
+	}
+}
+
+// serviceProviderIdentityClaimAspectTypeDDL declares the .identityClaim
+// guard aspect on the SERVICEPROVIDER side of a BindServiceProviderIdentity
+// pair — the entity-keyed half of the bind's mutual-exclusivity guard
+// (identityServiceProviderClaimAspectTypeDDL below is the identity-keyed
+// half). Mirrors clinic-domain's providerIdentityClaimAspectTypeDDL exactly.
+// Declaration-only; NON-sensitive.
+func serviceProviderIdentityClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     serviceProviderIdentityClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"BindServiceProviderIdentity"},
+		Description: "Service provider identity-claim guard aspect. Stored as " +
+			"vtx.serviceprovider.<NanoID>.identityClaim (class serviceProviderIdentityClaim) = {} — a pure " +
+			"existence marker, no relationship field. BindServiceProviderIdentity writes ONE per claimed " +
+			"serviceProviderKey, CreateOnly: the key ITSELF is the lock — a second, different identity binding " +
+			"the SAME serviceprovider collides at commit (RevisionConflict), never a silent double-bind. " +
+			"Declaration-only: no op handler (BindServiceProviderIdentity's script, owned by the serviceprovider " +
+			"vertexType DDL, writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the serviceprovider), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "service provider identity-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.serviceprovider.<NanoID>.identityClaim; claimed once by BindServiceProviderIdentity. A second, different identity binding the same serviceprovider is rejected.",
+			},
+		},
+	}
+}
+
+// identityServiceProviderClaimAspectTypeDDL declares the .serviceProviderClaim
+// aspect ATTACHED onto an identity-domain vtx.identity — the identity-keyed
+// half of BindServiceProviderIdentity's mutual-exclusivity guard, mirroring
+// clinic-domain's identityProviderClaimAspectTypeDDL exactly, just keyed
+// "serviceProviderClaim". Declaration-only; NON-sensitive.
+func identityServiceProviderClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     identityServiceProviderClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"BindServiceProviderIdentity"},
+		Description: "Identity service-provider-claim guard aspect (attached onto an identity-domain vertex). " +
+			"Stored as vtx.identity.<NanoID>.serviceProviderClaim (class identityServiceProviderClaim) = {} — a " +
+			"pure existence marker, no relationship field. BindServiceProviderIdentity writes ONE per claimed " +
+			"identityKey, CreateOnly: the key ITSELF (identical regardless of WHICH serviceprovider is claiming) " +
+			"is the lock — a second, different serviceprovider passing the same identityKey collides at commit " +
+			"(RevisionConflict), never a silent double-bind. Declaration-only: no op handler " +
+			"(BindServiceProviderIdentity's script, owned by the serviceprovider vertexType DDL, writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the identity), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "identity service-provider-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.serviceProviderClaim; claimed once by BindServiceProviderIdentity's identityKey wiring. A second, different serviceprovider claiming the same identity is rejected.",
+			},
+		},
+	}
+}
+
+// serviceProviderDDLScript handles CreateServiceProvider +
+// BindServiceProviderIdentity. BindServiceProviderIdentity mirrors
+// clinic-domain's BindProviderIdentity verbatim (identifiedBy mint +
+// idempotent holdsRole grant + CreateOnly mutual-exclusivity guards on both
+// sides) — serviceProviderDDLScript is derived from
+// serviceProviderDDLScriptTemplate by pinning the placeholder —
+// identity-domain's own "provider" role key — to its real, deterministic
+// value (see serviceProviderRoleKey above).
+var serviceProviderDDLScript = strings.ReplaceAll(serviceProviderDDLScriptTemplate, "__EXPECTED_PROVIDER_ROLE_KEY__", serviceProviderRoleKey)
+
+const serviceProviderDDLScriptTemplate = `
+def make_vtx(key, cls, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False, "data": data}}
+
+def make_aspect(vtx_key, local_name, cls, data):
+    return {"op": "create", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_link(key, source, target, cls, local_name, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": data}}
+
+def required_string(p, name):
+    if not hasattr(p, name):
+        fail("InvalidArgument: " + name + ": required")
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": required non-empty string")
+    return v.strip()
+
+def bare_nanoid_or_mint(p, name):
+    if not hasattr(p, name):
+        return nanoid.new()
+    v = getattr(p, name)
+    if v == None:
+        return nanoid.new()
+    if type(v) != type("") or len(v.strip()) == 0:
+        fail("InvalidArgument: " + name + ": must be a non-empty id string")
+    v = v.strip()
+    for bad in [".", "*", ">", " ", "\t", "\n"]:
+        if bad in v:
+            fail("InvalidArgument: " + name + ": must carry no dots / key segments, wildcards, or whitespace; got " + v)
+    return v
+
+def parts_of(key, name, want_type):
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
+
+def vertex_alive(state, key):
+    if key not in state:
+        return False
+    doc = state[key]
+    if doc == None:
+        return False
+    if hasattr(doc, "isDeleted") and doc.isDeleted:
+        return False
+    return True
+
+def class_of(state, key):
+    if key not in state:
+        return None
+    doc = state[key]
+    if doc == None or not hasattr(doc, "class"):
+        return None
+    return getattr(doc, "class")
+
+def require_live_typed(state, key, name, want_class):
+    if not vertex_alive(state, key):
+        fail("UnknownEndpoint: " + name + ": " + key + " is absent or tombstoned")
+    cls = class_of(state, key)
+    if cls != want_class:
+        fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
+
+def claim_serviceprovider_identity(sp_key):
+    # Entity-keyed guard: at most one identity may ever bind THIS
+    # serviceprovider (nothing releases the claim, so it is never
+    # tombstoned) — mirrors clinic-domain's claim_provider_identity idiom.
+    # read-posture: (d) declared optionalReads by BindServiceProviderIdentity's
+    # dispatcher (absence is the common first-bind case).
+    existing = kv.Read(sp_key + ".identityClaim")
+    if existing != None:
+        fail("ServiceProviderAlreadyBound: " + sp_key + " is already bound to another identity")
+    return make_aspect(sp_key, "identityClaim", "serviceProviderIdentityClaim", {})
+
+def claim_identity_serviceprovider(identity_key):
+    # Identity-keyed guard: at most one serviceprovider may ever bind THIS
+    # identity (nothing releases the claim, so it is never tombstoned) —
+    # mirrors clinic-domain's claim_identity_provider idiom.
+    # read-posture: (d) declared optionalReads by BindServiceProviderIdentity's
+    # dispatcher (absence is the common first-bind case).
+    existing = kv.Read(identity_key + ".serviceProviderClaim")
+    if existing != None:
+        fail("IdentityAlreadyBoundToServiceProvider: " + identity_key + " is already bound to another service provider")
+    return make_aspect(identity_key, "serviceProviderClaim", "identityServiceProviderClaim", {})
+
+def execute(state, op):
+    ot = op.operationType
+    p = op.payload
+
+    if ot == "CreateServiceProvider":
+        display_name = required_string(p, "displayName")
+        spid = bare_nanoid_or_mint(p, "serviceProviderId")
+        spkey = "vtx.serviceprovider." + spid
+        mutations = [
+            make_vtx(spkey, "serviceprovider", {}),
+            make_aspect(spkey, "profile", "serviceProviderProfile", {"displayName": display_name}),
+        ]
+        events = [{"class": "service.serviceProviderCreated", "data": {"serviceProviderKey": spkey}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": spkey}}
+
+    if ot == "BindServiceProviderIdentity":
+        spkey = required_string(p, "serviceProviderKey")
+        _, sp_id = parts_of(spkey, "serviceProviderKey", "serviceprovider")
+        require_live_typed(state, spkey, "serviceProviderKey", "serviceprovider")
+
+        identity_key = required_string(p, "identityKey")
+        _, identity_id = parts_of(identity_key, "identityKey", "identity")
+        require_live_typed(state, identity_key, "identityKey", "identity")
+
+        # serviceprovider identifiedBy identity (Contract #1 §1.1: the
+        # later-arriving serviceprovider is the source, the pre-existing
+        # identity is the target). Sentence: "serviceprovider identifiedBy
+        # identity". Mirrors clinic-domain's provider identifiedBy mint.
+        identified_by_lnk = "lnk.serviceprovider." + sp_id + ".identifiedBy.identity." + identity_id
+        mutations = [make_link(identified_by_lnk, spkey, identity_key, "identifiedBy", "identifiedBy", {})]
+
+        # Mutual exclusivity, both sides.
+        mutations.append(claim_serviceprovider_identity(spkey))
+        mutations.append(claim_identity_serviceprovider(identity_key))
+
+        # Grant the provider role, exactly as clinic-domain's
+        # BindProviderIdentity does — IDEMPOTENT (mirrors rbac AssignRole's
+        # state-check branch): a holdsRole link already alive is left
+        # untouched rather than re-created.
+        provider_role_key = "__EXPECTED_PROVIDER_ROLE_KEY__"
+        provider_role_id = provider_role_key[len("vtx.role."):]
+        holds_role_lnk = "lnk.identity." + identity_id + ".holdsRole.role." + provider_role_id
+        # read-posture: (d) declared optionalReads by BindServiceProviderIdentity's
+        # dispatcher (absence is the common first-bind case, mirroring rbac's
+        # AssignRole idempotency check).
+        existing_role_grant = kv.Read(holds_role_lnk)
+        if existing_role_grant == None or existing_role_grant.isDeleted:
+            mutations.append(make_link(holds_role_lnk, identity_key, provider_role_key, "holdsRole", "holdsRole", {}))
+
+        events = [{"class": "service.serviceProviderIdentityBound",
+                   "data": {"serviceProviderKey": spkey, "identityKey": identity_key}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": identified_by_lnk}}
+
+    fail("serviceprovider DDL: unknown operationType: " + ot)
+`
 
 // serviceDDLScript handles the three service lifecycle ops. Known-key reads
 // only (validates every link endpoint by the keys the caller listed in
@@ -401,6 +829,32 @@ def vertex_class(state, key):
         return None
     return getattr(doc, "class")
 
+SERVICE_ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator') --
+    # the same idiom clinic-domain's / wellness-domain's standing binders use.
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, SERVICE_ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -554,7 +1008,7 @@ def execute(state, op):
 
     if ot == "RecordServiceOutcome":
         inst_key = required_string(p, "instanceKey")
-        parts_of(inst_key, "instanceKey", "service")
+        _, inst_id = parts_of(inst_key, "instanceKey", "service")
         status = required_status(p)
         # Normalize completedAt to canonical UTC whole-second RFC3339 (the same
         # form the Refractor's $now uses) so a downstream lexical freshness
@@ -570,6 +1024,38 @@ def execute(state, op):
         inst_class = vertex_class(state, inst_key)
         if inst_class == None or not inst_class.endswith(".instance"):
             fail("NotAnInstance: " + inst_key + " is not a service instance")
+
+        # Standing binder (persona-worlds-design.md Fire W0): operator passes
+        # unconditionally; otherwise the caller must be the identity bound to
+        # the SPECIFIC serviceprovider that provides this instance's
+        # template -- the three-hop known-key chain instance->template
+        # (instanceOf), template->serviceprovider (providedBy),
+        # serviceprovider->identity (identifiedBy). Mirrors clinic-domain's
+        # actor_bound_to_provider, extended one hop for the template
+        # indirection a bare provider entity doesn't need.
+        if not actor_holds_operator(op.actor):
+            template = optional_string(p, "template")
+            serviceprovider = optional_string(p, "serviceprovider")
+            if template == None or serviceprovider == None:
+                fail("AuthDenied: " + op.actor + " must supply template + serviceprovider to record an outcome as a provider")
+            _, tpl_id = parts_of(template, "template", "service")
+            _, sp_id = parts_of(serviceprovider, "serviceprovider", "serviceprovider")
+            _, actor_id = parts_of(op.actor, "actor", "identity")
+            # read-posture: (d) declared optionalReads by RecordServiceOutcome's
+            # dispatcher for the provider-standing path (absence is a
+            # meaningful AuthDenied, not a correctness error).
+            instance_of = kv.Read("lnk.service." + inst_id + ".instanceOf.service." + tpl_id)
+            if instance_of == None or instance_of.isDeleted:
+                fail("AuthDenied: " + inst_key + " is not an instance of template " + template)
+            # read-posture: (d) declared optionalReads by RecordServiceOutcome's dispatcher.
+            provided_by = kv.Read("lnk.service." + tpl_id + ".providedBy.serviceprovider." + sp_id)
+            if provided_by == None or provided_by.isDeleted:
+                fail("AuthDenied: template " + template + " is not providedBy serviceprovider " + serviceprovider)
+            # read-posture: (d) declared optionalReads by RecordServiceOutcome's dispatcher.
+            identified_by = kv.Read("lnk.serviceprovider." + sp_id + ".identifiedBy.identity." + actor_id)
+            if identified_by == None or identified_by.isDeleted:
+                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to serviceprovider " + serviceprovider)
+
         # The outcome is recorded once, guarded on two load-bearing paths:
         #   - SEQUENTIAL second-record (the first has committed): the
         #     .outcome aspect is written CreateOnly below, so the second
@@ -648,6 +1134,37 @@ def execute(state, op):
         events = [{"class": "service.templateRetired", "data": {"serviceKey": tpl_key}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tpl_key}}
+
+    if ot == "WireProvidedBy":
+        # Wires an EXISTING live template to a provider entity of any type
+        # (validated alive only -- type-open, mirroring
+        # CreateServiceTemplate's own create-time providedBy mint above).
+        # Idempotent: a replay against an already-alive link commits nothing.
+        template = required_string(p, "template")
+        _, tpl_id = parts_of(template, "template", "service")
+        if not vertex_alive(state, template):
+            fail("UnknownTemplate: " + template)
+        tpl_class = vertex_class(state, template)
+        if tpl_class == None or not tpl_class.endswith(".template"):
+            fail("NotATemplate: " + template + " is not a service template")
+
+        provided_by = required_string(p, "providedBy")
+        prov_type, prov_id = parts_of(provided_by, "providedBy", "")
+        if not vertex_alive(state, provided_by):
+            fail("UnknownProvider: " + provided_by)
+
+        provby_lnk = "lnk.service." + tpl_id + ".providedBy." + prov_type + "." + prov_id
+        # The deterministic link key is a declared optionalReads entry
+        # (Contract #2 §2.5) -- a first wire legitimately finds it absent, so
+        # this is a STATE lookup (the caller's declared read, already
+        # hydrated), never a live kv.Read.
+        existing = state[provby_lnk] if provby_lnk in state else None
+        if existing != None and not (hasattr(existing, "isDeleted") and existing.isDeleted):
+            return {"mutations": [], "events": []}
+        mutations = [make_link(provby_lnk, template, provided_by, "providedBy", "providedBy", {})]
+        events = [{"class": "service.providedByWired",
+                   "data": {"service": template, "providedBy": provided_by, "linkKey": provby_lnk}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": provby_lnk}}
 
     fail("service DDL: unknown operationType: " + ot)
 `

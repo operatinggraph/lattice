@@ -8,18 +8,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // SetAppointmentStatus — mirroring service-domain's RequestService op-meta,
 // the only other package to adopt the vocabulary so far (Fire 5,
 // edge-showcase-app-design.md §7 "adoption across clinic/café/wellness
-// consumer-shaped ops").
+// consumer-shaped ops") — plus SetProviderHours and SetProviderTimeOff, the
+// PROVIDER-hat standing (AuthContext "standing", not "self") ops
+// persona-worlds-design.md Fire W0 adds: granted-but-meta-less ops are
+// invisible to a descriptor-driven client (forOperation links mint only with
+// a meta), so a bound provider's own availability/time-off ops need one too.
 //
-// Each InputSchema below is the narrow, consumer-facing slice of the DDL's
-// full merged schema (appointmentVertexTypeDDL's InputSchema) — the fields a
-// self-service patient actually supplies, not the operator-only ones
-// (site/leaseAppKey on CreateAppointment; every non-cancel status value on
-// SetAppointmentStatus, which the self grant rejects in-script anyway).
-// SetAppointmentStatus's op-meta describes ONLY the cancel path: the operator
-// continues to call the op directly (no descriptor needed — the trusted admin
-// tool hardcodes its own status transitions), so narrowing the one op-meta to
-// what a consumer can actually submit is honest, not a loss of operator
-// capability.
+// Each InputSchema below is the narrow, consumer/provider-facing slice of the
+// DDL's full merged schema (appointmentVertexTypeDDL's / providerVertexTypeDDL's
+// InputSchema) — the fields a self-service caller actually supplies, not the
+// operator-only ones (site/leaseAppKey on CreateAppointment; every non-cancel
+// status value on SetAppointmentStatus, which the self grant rejects in-script
+// anyway). SetAppointmentStatus's op-meta describes ONLY the cancel path: the
+// operator continues to call the op directly (no descriptor needed — the
+// trusted admin tool hardcodes its own status transitions), so narrowing the
+// one op-meta to what a consumer can actually submit is honest, not a loss of
+// operator capability.
 //
 // Adding these op-metas does not by itself make the ops Facet-visible: the
 // edge-manifest catalog lens (edgeCatalogSpec) only reaches an op-meta via a
@@ -30,10 +34,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // — is the named next increment; this one lands the metadata layer so that
 // wiring has descriptors to link to.
 //
-// Dispatch.Class on each entry is "appointment" — the appointment DDL's own
-// CanonicalName (appointmentVertexDDL), the Contract #2 §2.1 envelope `class`
-// DDL-hint (mirrors service-domain's RequestService op-meta doc comment:
-// Dispatch.Class = the owning DDL's CanonicalName, never the vertical name).
+// Dispatch.Class on each entry is the owning vertexType DDL's own
+// CanonicalName ("appointment" for the three appointment ops, "provider" for
+// SetProviderHours/SetProviderTimeOff — providerVertexDDL), the Contract #2
+// §2.1 envelope `class` DDL-hint (mirrors service-domain's RequestService
+// op-meta doc comment: Dispatch.Class = the owning DDL's CanonicalName, never
+// the vertical name).
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -126,6 +132,54 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
+			},
+		},
+		{
+			OperationType: "SetProviderHours",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set working hours",
+				Description: "Set your recurring weekly availability windows.",
+				Icon:        "clock",
+				Tone:        "primary",
+				SubmitLabel: "Save hours",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of the provider these hours belong to — auto-filled from the provider being viewed."},` +
+				`"windows":{"type":"array","description":"Your recurring weekly availability windows. Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}}},` +
+				`"required":["providerKey","windows"]}`,
+			FieldDescriptions: map[string]string{
+				"providerKey": "The provider whose hours are being set — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
+				"windows":     "Your recurring weekly availability windows. Pass an empty array to clear all constraints (become unconstrained).",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "provider",
+				AuthContext: "standing",
+				TargetField: "providerKey",
+				TargetType:  "provider",
+			},
+		},
+		{
+			OperationType: "SetProviderTimeOff",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set time off",
+				Description: "Set date-specific blackout ranges on top of your weekly hours.",
+				Icon:        "calendar-off",
+				Tone:        "primary",
+				SubmitLabel: "Save time off",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of the provider this time off belongs to — auto-filled from the provider being viewed."},` +
+				`"ranges":{"type":"array","description":"Your date-specific blackout ranges, on top of your weekly hours. Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}},` +
+				`"required":["providerKey","ranges"]}`,
+			FieldDescriptions: map[string]string{
+				"providerKey": "The provider whose time off is being set — auto-filled by the client from the provider being viewed (dispatch.targetField), not user-entered.",
+				"ranges":      "Your date-specific blackout ranges, on top of your weekly hours. Pass an empty array to clear all blackouts.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "provider",
+				AuthContext: "standing",
+				TargetField: "providerKey",
+				TargetType:  "provider",
 			},
 		},
 	}

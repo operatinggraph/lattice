@@ -33,11 +33,12 @@ func TestPackage_NoDDLsOrPermissions(t *testing.T) {
 	}
 }
 
-// manifestLensNames are the eleven Personal Lenses (edge-showcase-app-
+// manifestLensNames are the fourteen Personal Lenses (edge-showcase-app-
 // design.md §3.2; the three manifest.ent entity lenses per
-// facet-entity-browse-design.md; the two staff siblings per
+// facet-entity-browse-design.md; the staff siblings per
 // facet-staff-worlds-design.md §3.3; the workplace-spine work-order lens per
-// its §6 F5). readGrantLensNames are their read-grant
+// its §6 F5; the three provider-hat siblings per persona-worlds-design.md
+// Fire W0). readGrantLensNames are their read-grant
 // producers (nats-kv, actorAggregate) — a structurally different class (never
 // Personal, never nats-subject) that
 // TestPackage_LensesAreNatsSubjectPersonal/
@@ -47,25 +48,28 @@ var manifestLensNames = map[string]bool{
 	"edgeTasks": true, "edgeInstances": true,
 	"edgeEntitySessions": true, "edgeEntityProviders": true,
 	"edgeEntityBookings": true,
-	"edgeCatalogRoles": true, "edgeTasksQueued": true,
-	"edgeStaffWorkOrders": true,
+	"edgeCatalogRoles":   true, "edgeTasksQueued": true,
+	"edgeStaffWorkOrders":  true,
+	"edgeProviderSchedule": true, "edgeProviderQueue": true,
+	"edgeInstructorSessions": true,
 }
 
 const readGrantLensName = "edgeManifestReadGrants"
 
 // readGrantLensNames is every Path B cap-read producer this package ships. The
-// staff slice is separate from the base one on purpose (§3.3): §6.14 unions
-// slices, so a second slice costs nothing, while folding its two branches into
-// the base producer would multiply that lens's existing cross-product fan-out
-// for every actor.
+// staff and provider slices are each separate from the base one on purpose
+// (§3.3 / persona-worlds-design.md Fire W0): §6.14 unions slices, so a new
+// slice costs nothing, while folding its branches into the base producer
+// would multiply that lens's existing cross-product fan-out for every actor.
 var readGrantLensNames = map[string]bool{
-	readGrantLensName:             true,
-	"edgeManifestStaffReadGrants": true,
+	readGrantLensName:                true,
+	"edgeManifestStaffReadGrants":    true,
+	"edgeManifestProviderReadGrants": true,
 }
 
-func TestPackage_ThirteenLenses(t *testing.T) {
-	if got := len(Package.Lenses); got != 13 {
-		t.Fatalf("expected 13 lenses (11 manifest + 2 read-grant producers), got %d", got)
+func TestPackage_SeventeenLenses(t *testing.T) {
+	if got := len(Package.Lenses); got != 17 {
+		t.Fatalf("expected 17 lenses (14 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
 	for _, l := range Package.Lenses {
@@ -185,6 +189,14 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		// The work-order lens is its own namespace: it answers "what work
 		// exists at my workplace", not "what has been handed to me".
 		"edgeStaffWorkOrders": `"manifest.work" AS ns`,
+		// The provider-hat siblings (persona-worlds-design.md Fire W0) share
+		// manifest.ent with the browse lenses above — same reason as the
+		// staff siblings: same ns + same entityId means a row reachable by
+		// both a provider binding and residence/staff reachability projects
+		// the identical row under the identical key.
+		"edgeProviderSchedule":   `"manifest.ent" AS ns`,
+		"edgeProviderQueue":      `"manifest.ent" AS ns`,
+		"edgeInstructorSessions": `"manifest.ent" AS ns`,
 	}
 	for _, l := range Package.Lenses {
 		if readGrantLensNames[l.CanonicalName] {

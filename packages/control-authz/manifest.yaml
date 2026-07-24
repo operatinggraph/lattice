@@ -1,5 +1,5 @@
 name: control-authz
-version: 0.6.0
+version: 0.7.0
 description: |
   Grants ctrl.<component>.<verb> control-plane permissions (Weaver/Loom/Refractor)
   to a new control-operator role, declared in the package definition and created
@@ -11,22 +11,24 @@ description: |
   control-plane-capability-authz-design.md §3.5 (FR30 Fire 1b).
 
   ctrl.refractor.{register,deregister,hydrate,sessionkey,syncgap} additionally
-  grant scope=any to the consumer role (identity-domain) —
-  per-identity-nats-subscribe-acl-design.md §3.3/§3.4 (Fire 2, ratified
-  2026-07-10); edge-lattice-full-design.md §3.6 (EDGE.4, sessionkey);
-  edge-syncgap-control-rpc-design.md (syncgap, warm-resume gap detection off
-  the STREAM.INFO admin API). This is
-  a broad grant (every claimed/unclaimed identity holds consumer) that is
-  safe ONLY because internal/refractor/control/service.go's dispatchEndpoint
-  unconditionally binds the op's body.IdentityID to the caller's own
-  VERIFIED actor id for these ops (§3.4), rejecting a mismatching
-  client-asserted value — the capability's scope=any never actually lets one
-  identity act on another's Personal Lens interest set or read another
-  identity's Vault session key; the effect is confined server-side
-  regardless of what the capability grants. Granting this without that
-  binding (or granting it without also opening the matching transport RPCs
-  in internal/gateway/natsauth's controlRPCs) would reopen the original
-  Fire 1 HIGH finding.
+  grant scope=any to the consumer / frontOfHouse / backOfHouse / provider
+  roles (identity-domain) — per-identity-nats-subscribe-acl-design.md
+  §3.3/§3.4 (Fire 2, ratified 2026-07-10); edge-lattice-full-design.md §3.6
+  (EDGE.4, sessionkey); edge-syncgap-control-rpc-design.md (syncgap,
+  warm-resume gap detection off the STREAM.INFO admin API); the provider
+  role (persona-worlds-design.md Fire W0) joins the same grant so a bound
+  provider's client can register its own Personal Lens interest exactly as
+  any other identity-bound role does. This is a broad grant (every claimed
+  identity holding one of these roles) that is safe ONLY because
+  internal/refractor/control/service.go's dispatchEndpoint unconditionally
+  binds the op's body.IdentityID to the caller's own VERIFIED actor id for
+  these ops (§3.4), rejecting a mismatching client-asserted value — the
+  capability's scope=any never actually lets one identity act on another's
+  Personal Lens interest set or read another identity's Vault session key;
+  the effect is confined server-side regardless of what the capability
+  grants. Granting this without that binding (or granting it without also
+  opening the matching transport RPCs in internal/gateway/natsauth's
+  controlRPCs) would reopen the original Fire 1 HIGH finding.
 depends:
   - rbac-domain
   - identity-domain
@@ -76,16 +78,16 @@ declares:
       grantsTo: [control-operator]
     - operationType: ctrl.refractor.register
       scope: any
-      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse]
+      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse, provider]
     - operationType: ctrl.refractor.deregister
       scope: any
-      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse]
+      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse, provider]
     - operationType: ctrl.refractor.hydrate
       scope: any
-      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse]
+      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse, provider]
     - operationType: ctrl.refractor.sessionkey
       scope: any
-      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse]
+      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse, provider]
     - operationType: ctrl.refractor.syncgap
       scope: any
-      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse]
+      grantsTo: [control-operator, consumer, frontOfHouse, backOfHouse, provider]

@@ -27,7 +27,7 @@
 //	  InitiateCredentialLink    → consumer
 //	  CompleteCredentialLink    → consumer
 //	  UnlinkCredential          → consumer
-//	4 role vertices (consumer, frontOfHouse, backOfHouse — user-facing;
+//	5 role vertices (consumer, frontOfHouse, backOfHouse, provider — user-facing;
 //	  identityProvisioner — system-only) seeded by PreInstall hook (vtx.role.<NanoID>)
 //	1 identityIndexHint Lens meta-vertex (vtx.meta.<NanoID>) with class=meta.lens
 //	3 Lens aspects: .canonicalName=identityIndexHint, .spec (contains
@@ -102,7 +102,7 @@ var identityOpScopes = map[string]string{
 }
 
 // userFacingRoles are seeded by identity-domain's PreInstall hook.
-var identityUserFacingRoles = []string{"consumer", "frontOfHouse", "backOfHouse"}
+var identityUserFacingRoles = []string{"consumer", "frontOfHouse", "backOfHouse", "provider"}
 
 // identitySystemRoles are declared alongside the user-facing roles but are
 // not user-facing (identityProvisioner is granted only to the Gateway's own
@@ -381,7 +381,7 @@ func main() {
 	}
 
 	// -------------------------------------------------------------------------
-	// 8. Assert 3 user-facing role vertices seeded by PreInstall, plus the
+	// 8. Assert 4 user-facing role vertices seeded by PreInstall, plus the
 	// identityProvisioner system role.
 	// -------------------------------------------------------------------------
 	for _, roleName := range append(append([]string{}, identityUserFacingRoles...), identitySystemRoles...) {

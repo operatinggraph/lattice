@@ -2,12 +2,14 @@ package edgemanifest
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Lenses returns the package's nine Personal-Lens declarations
-// (edge-showcase-app-design.md §3.2; the two manifest.ent entity lenses per
-// facet-entity-browse-design.md; the two staff siblings edgeCatalogRoles +
-// edgeTasksQueued per facet-staff-worlds-design.md §3.3) — the first real
+// Lenses returns the package's fourteen Personal-Lens declarations
+// (edge-showcase-app-design.md §3.2; the manifest.ent entity lenses per
+// facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
+// edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
+// §3.3; the provider-hat siblings edgeProviderSchedule + edgeProviderQueue +
+// edgeInstructorSessions per persona-worlds-design.md Fire W0) — the first real
 // `nats-subject` / Personal Lens package in the repo (the adapter plumbing
-// shipped latent in Fire 0; this is its first production consumer) — plus TWO
+// shipped latent in Fire 0; this is its first production consumer) — plus THREE
 // read-grant PRODUCER lenses, edgeManifestReadGrants (Fire 2 fix, added
 // building
 // cmd/facet): every non-self-anchored Personal Lens row (edgeServices/
@@ -34,15 +36,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // console-operator, clinic-domain — is the OTHER kind, a Postgres
 // GrantTable feeding Path A; this is Path B, and edge-manifest is Path B's
 // first package producer). One combined `cap-read.edgeManifest.<actor>`
-// slice covers all six non-self anchor kinds
-// (service/op/task/instance/session/provider) — no need for separate
+// slice covers all seven non-self anchor kinds
+// (service/op/task/instance/session/provider/booking) — no need for separate
 // lenses, since the actor's effective readable
 // set is already a union over every slice class, and one slice may itself
 // list many anchors. edgeManifestStaffReadGrants is the SECOND slice, covering
-// the two anchor kinds the staff lenses add (role-granted op metas, role-queued
-// tasks) — kept separate precisely because §6.14 unions slices, so the base
-// producer's cross-product fan-out need not grow for every actor to serve a
-// staff-only reachability path.
+// the anchor kinds the staff lenses add (role-granted op metas, role-queued
+// tasks, workplace work orders) — kept separate precisely because §6.14 unions
+// slices, so the base producer's cross-product fan-out need not grow for every
+// actor to serve a staff-only reachability path. edgeManifestProviderReadGrants
+// is the THIRD slice (persona-worlds-design.md Fire W0), covering the three
+// anchor kinds the provider-hat lenses add (own appointments, own service
+// queue, own led sessions) for the same cross-product-avoidance reason.
 //
 // Every Personal-Lens cypher below is Personal:true (Refractor's
 // cross-vertex fan-out re-executes the cypher once per reachable identity,
@@ -199,6 +204,39 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:          edgeStaffWorkOrdersSpec,
 		},
 		{
+			CanonicalName: "edgeProviderSchedule",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Spec:          edgeProviderScheduleSpec,
+		},
+		{
+			CanonicalName: "edgeProviderQueue",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Spec:          edgeProviderQueueSpec,
+		},
+		{
+			CanonicalName: "edgeInstructorSessions",
+			Class:         "meta.lens",
+			Adapter:       "nats-subject",
+			SubjectPrefix: manifestSubjectPrefix,
+			Stream:        manifestStream,
+			Personal:      true,
+			Engine:        "full",
+			IntoKey:       []string{"__actor", "ns", "entityId"},
+			Spec:          edgeInstructorSessionsSpec,
+		},
+		{
 			CanonicalName:  "edgeManifestStaffReadGrants",
 			Class:          "meta.lens",
 			Adapter:        "nats-kv",
@@ -231,6 +269,23 @@ func Lenses() []pkgmgr.LensSpec {
 				Lanes:            []string{"default"},
 			},
 			Spec: edgeManifestReadGrantsSpec,
+		},
+		{
+			CanonicalName:  "edgeManifestProviderReadGrants",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "capability-kv",
+			Engine:         "full",
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "identity",
+				OutputKeyPattern: "cap-read.edgeManifestProvider.{actorSuffix}",
+				BodyColumns:      []string{"readableAnchors"},
+				EmptyBehavior:    "delete",
+				Freshness:        "auto",
+				Lanes:            []string{"default"},
+			},
+			Spec: edgeManifestProviderReadGrantsSpec,
 		},
 	}
 }
@@ -281,15 +336,19 @@ const (
 // has no vertex-type-from-key function, and the type is a declaration of
 // what the walk means, not a derivation from what it returned. One
 // OPTIONAL MATCH per anchor type; adding a type is one more walk plus one
-// more collect entry. Two types ship: `leaseapp` (a resident's own lease
-// application) and `workplace` (a staff actor's worksAt location — the
+// more collect entry. Five types ship: `leaseapp` (a resident's own lease
+// application), `workplace` (a staff actor's worksAt location — the
 // anchor a standing staff op like ReportIssue fills its `location` from, so
-// the form asks only for what is genuinely typed). Contract #1 direction:
-// the leaseapp is the later-arriving source of `applicationFor`, so the walk
-// into the pre-existing identity runs backwards; `worksAt` runs forwards off
+// the form asks only for what is genuinely typed), and the three
+// provider-archetype bindings (persona-worlds-design.md Fire W0) —
+// `provider` (clinic), `instructor` (wellness), `serviceprovider`
+// (service-domain) — each an inbound `identifiedBy` walk exactly mirroring
+// the leaseapp shape (the provider entity is the later-arriving source of
+// `identifiedBy`, so the walk into the pre-existing identity runs
+// backwards). Contract #1 direction: `worksAt` runs forwards off
 // the identity and is matched once for the `anchors` grouping already. A degenerate {key:null} entry when
-// the identity has no lease is the same expected shape roles/anchors carry
-// and is dropped client-side.
+// the identity holds none of these bindings is the same expected shape
+// roles/anchors carry and is dropped client-side.
 const edgeIdentitySpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
@@ -298,6 +357,9 @@ OPTIONAL MATCH (loc)-[:containedIn]->(container)
 OPTIONAL MATCH (identity)-[:worksAt]->(work)
 OPTIONAL MATCH (work)-[:containedIn]->(workContainer)
 OPTIONAL MATCH (identity)<-[:applicationFor]-(leaseapp:leaseapp)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(prov:provider)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(instr:instructor)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(sp:serviceprovider)
 RETURN
   identity.key AS anchor,
   "manifest.me" AS ns,
@@ -309,7 +371,10 @@ RETURN
   collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name, relation: 'residesIn'}) +
   collect(DISTINCT {key: work.key, name: work.presentation.data.name, container: workContainer.key, containerName: workContainer.presentation.data.name, relation: 'worksAt'}) AS anchors,
   collect(DISTINCT {type: 'leaseapp', key: leaseapp.key}) +
-  collect(DISTINCT {type: 'workplace', key: work.key}) AS selfAnchors
+  collect(DISTINCT {type: 'workplace', key: work.key}) +
+  collect(DISTINCT {type: 'provider', key: prov.key}) +
+  collect(DISTINCT {type: 'instructor', key: instr.key}) +
+  collect(DISTINCT {type: 'serviceprovider', key: sp.key}) AS selfAnchors
 `
 
 // edgeServicesSpec projects one `manifest.svc.<tplId>` row per service
@@ -688,6 +753,101 @@ RETURN
   wo.resolution.data.notes AS resolutionNotes
 `
 
+// edgeProviderScheduleSpec projects one `manifest.ent.<appointmentId>` row
+// per clinic appointment the actor's OWN bound provider is withProvider of —
+// the provider-hat schedule (persona-worlds-design.md Fire W0). Reachability
+// is the actor's own inbound `identifiedBy` binding to a clinic provider,
+// NOT the residence chain the browse lenses above walk: a provider's
+// schedule is private to that provider, never locality-scoped.
+//
+// The namespace is deliberately `manifest.ent` with `entityType: "appointment"`
+// (not a bespoke `manifest.sched` namespace): the renderer only knows the
+// seven shipped namespaces, and entityType must equal the entityKey's own
+// vtx-type segment for op-attach + payload-resolve to work, exactly like
+// every other manifest.ent row.
+//
+// No patient name is projected (D3 — no plaintext identity PII on the SYNC
+// plane): `title` carries the visit reason (an appointment's own .schedule
+// data, not a person's), `subtitle` the status.
+const edgeProviderScheduleSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt:appointment)
+WITH appt, pr
+WHERE appt.key <> null
+RETURN
+  appt.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(appt.key) AS entityId,
+  appt.key AS entityKey,
+  "appointment" AS entityType,
+  appt.schedule.data.reason AS title,
+  appt.status.data.value AS subtitle,
+  appt.schedule.data.startsAt AS startsAt,
+  appt.schedule.data.endsAt AS endsAt,
+  pr.key AS providerKey
+`
+
+// edgeProviderQueueSpec projects one `manifest.ent.<instanceId>` row per
+// service instance whose template is providedBy the actor's OWN bound
+// serviceprovider — the provider-hat work queue (persona-worlds-design.md
+// Fire W0): "what runs do I need to complete". Reachability is the actor's
+// own inbound `identifiedBy` binding to a serviceprovider, then that
+// serviceprovider's providedBy templates, then each template's instances
+// (instanceOf, NOT providedTo — the instance→template direction, mirroring
+// edgeInstancesSpec's own walk). No startsAt: a service instance is
+// always-current work, not a scheduled thing (unlike a session/appointment).
+//
+// `subtitle` mirrors edgeInstancesSpec's status CASE idiom exactly: absent
+// `.outcome` reads "open" (not yet recorded), present reads the outcome's
+// own status.
+const edgeProviderQueueSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(sp:serviceprovider)<-[:providedBy]-(tpl:service)<-[:instanceOf]-(inst:service)
+WITH inst, tpl, sp
+WHERE inst.key <> null
+RETURN
+  inst.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(inst.key) AS entityId,
+  inst.key AS entityKey,
+  "service" AS entityType,
+  tpl.presentation.data.name AS title,
+  (CASE WHEN inst.outcome.data.status <> null THEN inst.outcome.data.status ELSE "open" END) AS subtitle,
+  tpl.key AS templateKey,
+  sp.key AS serviceproviderKey
+`
+
+// edgeInstructorSessionsSpec projects one `manifest.ent.<sessionId>` row per
+// wellness session the actor's OWN bound instructor leads — the provider-hat
+// "my classes to teach" queue (persona-worlds-design.md Fire W0). Reachability
+// is the actor's own inbound `identifiedBy` binding to an instructor, then
+// that instructor's `ledBy`-inverse sessions, NOT the residence chain
+// edgeEntitySessionsSpec walks: an instructor teaches wherever they're
+// assigned, not only where they happen to live.
+//
+// The RETURN is byte-identical to edgeEntitySessionsSpec's (same aliases,
+// same title/subtitle/startsAt expressions, same entityType "session") on
+// purpose: a resident who is ALSO the instructor of a session reachable by
+// BOTH walks projects the identical row under the identical key — an
+// LWW-idempotent overlap, the same pattern edgeCatalogRolesSpec already
+// proves for a dual-reachable op meta.
+const edgeInstructorSessionsSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)
+OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
+WITH sess, studio
+WHERE sess.key <> null
+RETURN
+  sess.key AS anchor,
+  "manifest.ent" AS ns,
+  nanoIdFromKey(sess.key) AS entityId,
+  sess.key AS entityKey,
+  "session" AS entityType,
+  sess.schedule.data.name AS title,
+  studio.profile.data.name AS subtitle,
+  sess.schedule.data.startsAt AS startsAt
+`
+
 // edgeManifestStaffReadGrantsSpec is the Path B read-grant slice covering the
 // two anchor kinds the staff lenses introduce: role-granted op metas and
 // role-queued tasks. Without it Refractor's D1 readableAnchors gate silently
@@ -755,5 +915,38 @@ RETURN
   collect(DISTINCT {anchorType: 'session', anchorId: nanoIdFromKey(sess.key), via: ['locatedAt', 'atStudio']}) +
   collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['practicesAt']}) +
   collect(DISTINCT {anchorType: 'booking', anchorId: nanoIdFromKey(bk.key), via: ['bookedBy']})
+  AS readableAnchors
+`
+
+// edgeManifestProviderReadGrantsSpec is the Path B read-grant slice covering
+// the three provider-hat anchor kinds edgeProviderSchedule /
+// edgeProviderQueue / edgeInstructorSessions introduce (persona-worlds-
+// design.md Fire W0). Without it Refractor's D1 readableAnchors gate
+// silently drops every row those three lenses project — the same
+// fail-closed trap edgeManifestStaffReadGrantsSpec's own doc comment names,
+// which is why this slice lands in the SAME change as its lenses.
+//
+// A THIRD separate slice rather than more branches on edgeManifestReadGrants
+// (or folded into the staff slice): Contract #6 §6.14 unions every
+// cap-read.*.<actor> slice into one effective readable set, and each
+// existing producer's own doc comment already flags its multi-branch
+// cross-product fan-out — adding three more independent branches to either
+// existing producer would multiply it for every actor, provider-bound or
+// not. An identity holding none of the three provider bindings simply gets
+// an empty slice, deleted by EmptyBehavior.
+//
+// Each branch mirrors its sibling lens's own walk exactly (the same
+// identifiedBy-rooted reachability, just collecting the anchor instead of
+// projecting a full row).
+const edgeManifestProviderReadGrantsSpec = `
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt:appointment)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(sp:serviceprovider)<-[:providedBy]-(tpl:service)<-[:instanceOf]-(inst:service)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)
+RETURN
+  identity.key AS actorKey,
+  collect(DISTINCT {anchorType: 'appointment', anchorId: nanoIdFromKey(appt.key), via: ['identifiedBy', 'withProvider']}) +
+  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(inst.key), via: ['identifiedBy', 'providedBy', 'instanceOf']}) +
+  collect(DISTINCT {anchorType: 'session', anchorId: nanoIdFromKey(sess.key), via: ['identifiedBy', 'ledBy']})
   AS readableAnchors
 `

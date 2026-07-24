@@ -317,6 +317,54 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          clinicProviderReadGrantsSpec,
 		},
+		{
+			// providerIdentityReadGrants — the cap-read.provider.clinic Path A
+			// producer for the PROVIDER HAT (persona-worlds-design.md Fire W0
+			// §3.2/§3.3): once BindProviderIdentity links a login identity to a
+			// clinic provider entity, the BOUND LOGIN inherits the provider
+			// vertex's own anchor tokens — providerAppointmentsRead's
+			// authz_anchors is the provider's bare NanoID (see
+			// clinicProviderReadGrants above) — so this producer is what lets
+			// the IDENTITY (not just the entity) match that anchor: without
+			// it, a real human logging in as their bound identity would see
+			// an empty "My Schedule" even though the provider ENTITY's rows
+			// are correctly anchored.
+			//
+			// Mirrors service-location's staffReadGrants shape EXACTLY
+			// (service-location/lenses.go), not clinicPatientReadGrants /
+			// clinicProviderReadGrants above: those two are ENTITY-as-actor
+			// self-anchors (actor_id == anchor_id == the entity's own bare
+			// NanoID, no role or link walk), while this one is an
+			// ACTOR-DIFFERENT-FROM-ANCHOR producer — actor_id is the BOUND
+			// IDENTITY's NanoID, anchor_id is the PROVIDER ENTITY's NanoID.
+			// Rows stay unchanged (the row shape is identical to
+			// staffReadGrants' {actor_id, anchor_id, grant_source} triple);
+			// clinicProviderReadGrants (the entity-as-actor producer) remains
+			// for nothing new — there is no caller today minting a JWT
+			// subject directly on a provider's own bare NanoID, and retiring
+			// it is out of this fire's scope.
+			//
+			// Deliberately UNANCHORED (no $actorKey) — DiffRetraction compares
+			// this query's full result set against the target's live key set,
+			// which is sound only when the result set is already the complete
+			// current truth (Refractor's ValidateUnanchoredForDiffRetraction
+			// enforces this at activation; staffReadGrants' own doc comment
+			// explains why an $actorKey-scoped variant would retract every
+			// OTHER provider's grant on its first event). The grant exists
+			// only while BOTH links do (holdsRole provider + identifiedBy), so
+			// retraction cannot ride an anchor tombstone — an unbind
+			// tombstones a LINK, not a vertex, so DiffRetraction's
+			// shrinking-row-set IS the revocation transport, scoped to this
+			// producer's own grant_source (GrantSource, below).
+			CanonicalName:  "providerIdentityReadGrants",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			GrantTable:     true,
+			GrantSource:    "cap-read.provider.clinic",
+			DiffRetraction: true,
+			Engine:         "full",
+			Spec:           providerIdentityReadGrantsSpec,
+		},
 	}
 }
 
@@ -580,4 +628,23 @@ RETURN
   nanoIdFromKey(pr.key)       AS actor_id,
   nanoIdFromKey(pr.key)       AS anchor_id,
   'cap-read.clinic.provider'  AS grant_source
+`
+
+// providerIdentityReadGrantsSpec projects one grant row per (bound login
+// identity, clinic provider) pair — the provider hat's read-grant producer
+// (persona-worlds-design.md Fire W0 §3.2/§3.3). Both MATCHes are REQUIRED, so
+// a row exists only while the identity BOTH holds the identity-domain
+// `provider` role AND is the target of a clinic provider's identifiedBy
+// link: drop either and the pair stops being derived, and the target-diff
+// revokes the grant (mirrors service-location's staffReadGrantsSpec exactly
+// — see providerIdentityReadGrants' doc comment above for the shape
+// rationale). The role is matched by canonicalName, the same way
+// rbac-domain's capabilityRoleIndex / staffReadGrantsSpec read a role's name.
+const providerIdentityReadGrantsSpec = `MATCH (i:identity)-[:holdsRole]->(r:role)
+WHERE r.canonicalName.data.value = 'provider'
+MATCH (pr:provider)-[:identifiedBy]->(i)
+RETURN
+  nanoIdFromKey(i.key)       AS actor_id,
+  nanoIdFromKey(pr.key)      AS anchor_id,
+  'cap-read.provider.clinic' AS grant_source
 `

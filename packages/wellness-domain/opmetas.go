@@ -31,6 +31,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // viewed manifest.ent row as a substitution source (edge-showcase-app-design.md
 // §3.3) — filled from the `sessionKey` column edge-manifest's
 // edgeEntityBookings lens projects alongside the booking.
+//
+// TombstoneSession's op-meta (persona-worlds-design.md Fire W0) is the
+// PROVIDER-hat standing (AuthContext "standing", not "self") counterpart: a
+// bound instructor cancels a class THEY lead. `instructor` is declared
+// `{me.instructor}` — the same self-anchor substitution ReportIssue's
+// `location` field uses for `{me.workplace}` (maintenance-domain/
+// permissions.go) — since edge-manifest's edgeIdentity lens projects a
+// bound instructor as a `selfAnchors` entry of type `instructor`; an
+// identity with no instructor binding cannot answer it and a descriptor-
+// driven client declines to offer the self-cancel path, leaving the
+// operator/front-of-house surface untouched.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -101,6 +112,45 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{
 					"lnk.booking.{payload.bookingKey:id}.forSession.session.{payload.session:id}",
 					"lnk.booking.{payload.bookingKey:id}.bookedBy.identity.{actor:id}",
+				},
+			},
+		},
+		{
+			OperationType: "TombstoneSession",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Cancel class",
+				Description: "Cancel this class.",
+				Icon:        "cancel",
+				Tone:        "destructive",
+				SubmitLabel: "Cancel class",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"sessionKey":{"type":"string","description":"vtx.session.<NanoID> of the session to cancel — auto-filled from the session being viewed."},` +
+				`"studio":{"type":"string","description":"vtx.studio.<NanoID> — must be the session's actual studio."},` +
+				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> of your own instructor record — required when cancelling as an instructor rather than staff."}},` +
+				`"required":["sessionKey","studio"]}`,
+			FieldDescriptions: map[string]string{
+				"sessionKey": "The session being cancelled — auto-filled by the client from the session being viewed (dispatch.targetField), not user-entered.",
+				"studio":     "Must match the session's actual atStudio link — a client renders this from the session row it already loaded.",
+				"instructor": "Your own instructor record — auto-filled from your identity's own instructor self-anchor. Required when cancelling as an instructor (a class you lead); staff cancel with no instructor field.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "session",
+				AuthContext: "standing",
+				TargetField: "sessionKey",
+				TargetType:  "session",
+				// `{me.instructor}` addresses the `instructor` selfAnchor
+				// edgeIdentity's edge-manifest lens projects for a bound
+				// instructor (Fire W0) — the exact vocabulary ReportIssue's
+				// `{me.workplace}` proves (maintenance-domain/permissions.go).
+				ContextParams: map[string]string{"instructor": "{me.instructor}"},
+				// The ledBy and identifiedBy ownership probes. Absence of
+				// either is a meaningful rejection the script renders
+				// (AuthDenied), not a correctness error — the same shape
+				// CancelBooking's OptionalReads use above.
+				OptionalReads: []string{
+					"lnk.session.{payload.sessionKey:id}.ledBy.instructor.{payload.instructor:id}",
+					"lnk.instructor.{payload.instructor:id}.identifiedBy.identity.{actor:id}",
 				},
 			},
 		},

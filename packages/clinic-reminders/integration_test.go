@@ -76,7 +76,7 @@ func setupRemEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	// "consumer") needs a role id registered directly, since these tests don't
 	// install identity-domain (the lease-signing lsConsumerRoleID idiom).
 	const remConsumerRoleID = "REMConsumerRoZeHJKMN"
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": remConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse")}
+	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": remConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
 	for _, p := range []pkgmgr.Definition{orchestrationbase.Package, clinicdomain.Package, clinicreminders.Package} {
 		if _, err := inst.Install(ctx, p); err != nil {
 			stop()

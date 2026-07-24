@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.23.1
+version: 0.24.0
 depends:
   - location-domain
 description: |
@@ -77,6 +77,14 @@ description: |
   (mirrors identity-hygiene's duplicateCandidates: nats-kv, composite IntoKey,
   DiffRetraction) — the FE site directory + site-scoped booking are the next
   increment (clinic-multisite-design.md).
+  BindProviderIdentity binds a provider to a login identity: it mints the provider's identifiedBy link, claims a
+  CreateOnly guard aspect on EACH side (.identityClaim on the provider, .providerClaim on the identity) so the bind
+  is mutually exclusive, and idempotently grants the identity-domain `provider` role via holdsRole. SetProviderHours,
+  SetProviderTimeOff, SetAppointmentStatus, and RescheduleAppointment additionally grant `provider` scope=any: the
+  script confines a bound, non-operator, non-workplace caller to the SPECIFIC provider it is identifiedBy-bound to
+  (persona-worlds-design.md Fire W0). providerIdentityReadGrants is the new cap-read.provider.clinic GrantTable
+  producer (mirrors service-location's staffReadGrants shape) that lets a bound login inherit its provider entity's
+  own read anchors.
 declares:
   ddls:
     - canonicalName: patient
@@ -110,6 +118,10 @@ declares:
     - canonicalName: identityPatientClaim
       class: meta.ddl.aspectType
     - canonicalName: clinicSiteProfile
+      class: meta.ddl.aspectType
+    - canonicalName: providerIdentityClaim
+      class: meta.ddl.aspectType
+    - canonicalName: identityProviderClaim
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: clinicAppointments
@@ -147,6 +159,9 @@ declares:
     - canonicalName: clinicProviderReadGrants
       adapter: postgres
       engine: full
+    - canonicalName: providerIdentityReadGrants
+      adapter: postgres
+      engine: full
   permissions:
     - operationType: CreatePatient
       scope: any
@@ -165,10 +180,10 @@ declares:
       grantsTo: [operator]
     - operationType: SetProviderHours
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, provider]
     - operationType: SetProviderTimeOff
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, provider]
     - operationType: CreateAppointment
       scope: any
       grantsTo: [operator]
@@ -177,13 +192,13 @@ declares:
       grantsTo: [consumer]
     - operationType: RescheduleAppointment
       scope: any
-      grantsTo: [operator, frontOfHouse]
+      grantsTo: [operator, frontOfHouse, provider]
     - operationType: RescheduleAppointment
       scope: self
       grantsTo: [consumer]
     - operationType: SetAppointmentStatus
       scope: any
-      grantsTo: [operator, frontOfHouse]
+      grantsTo: [operator, frontOfHouse, provider]
     - operationType: SetAppointmentStatus
       scope: self
       grantsTo: [consumer]
@@ -202,7 +217,12 @@ declares:
     - operationType: RemoveProviderSite
       scope: any
       grantsTo: [operator]
+    - operationType: BindProviderIdentity
+      scope: any
+      grantsTo: [operator]
   opMetas:
     - operationType: CreateAppointment
     - operationType: RescheduleAppointment
     - operationType: SetAppointmentStatus
+    - operationType: SetProviderHours
+    - operationType: SetProviderTimeOff

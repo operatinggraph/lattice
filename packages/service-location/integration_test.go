@@ -107,7 +107,7 @@ func setupSLEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac+identity+hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
 	for _, pkg := range []pkgmgr.Definition{
 		locationdomain.Package,
 		servicedomain.Package,

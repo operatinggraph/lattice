@@ -1,21 +1,26 @@
 name: service-domain
-version: 0.8.0
+version: 0.9.0
 description: |
-  Service template + instance vertex type (the service DDL + lifecycle ops
-  CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome,
-  RequestService, RetireServiceTemplate). A service instance is a real linked
-  vertex (instanceOf a template, providedTo an applicant identity) whose
-  external-call outcome (status + completedAt) is recorded as aspects per D5
-  — vertex root data minimal. The family enum is {backgroundCheck, payment,
-  laundry, fitness, clinic, wellness, cafe} (edge-showcase-app-design.md
-  §7.3, §7.4, §7.6 — widened honestly for the showcase dataset). RequestService (edge-manifest Fire 1) is the
+  Service template + instance vertex type (the service DDL + lifecycle/wiring
+  ops CreateServiceTemplate, CreateServiceInstance, RecordServiceOutcome,
+  RequestService, RetireServiceTemplate, WireProvidedBy) plus the lean
+  serviceprovider DDL (CreateServiceProvider, BindServiceProviderIdentity —
+  the provider-archetype binding, persona-worlds-design.md Fire W0). A
+  service instance is a real linked vertex (instanceOf a template, providedTo
+  an applicant identity) whose external-call outcome (status + completedAt)
+  is recorded as aspects per D5 — vertex root data minimal. The family enum
+  is {backgroundCheck, payment, laundry, fitness, clinic, wellness, cafe}
+  (edge-showcase-app-design.md §7.3, §7.4, §7.6 — widened honestly for the
+  showcase dataset). RequestService (edge-manifest Fire 1) is the
   consumer-invocable service-path counterpart to CreateServiceInstance:
   authorized structurally via authContext.service against the cap.svc
   availability grant, not a standing PermissionSpec — it carries no
   permission grant below. RetireServiceTemplate (§7.3) is admin-only cleanup
-  that soft-deletes a live template that no longer belongs. Declares no lens
-  (the serviceAccess / cap.svc read-path auth plane is Phase-3 deferred).
-  Depends on identity-domain and orchestration-base.
+  that soft-deletes a live template that no longer belongs. RecordServiceOutcome
+  grants operator plus a bound serviceprovider, confined in-script to
+  templates that serviceprovider itself provides. Declares no lens (the
+  serviceAccess / cap.svc read-path auth plane is Phase-3 deferred). Depends
+  on identity-domain and orchestration-base.
 depends:
   - identity-domain
   - orchestration-base
@@ -23,6 +28,14 @@ declares:
   ddls:
     - canonicalName: service
       class: meta.ddl.vertexType
+    - canonicalName: serviceprovider
+      class: meta.ddl.vertexType
+    - canonicalName: serviceProviderProfile
+      class: meta.ddl.aspectType
+    - canonicalName: serviceProviderIdentityClaim
+      class: meta.ddl.aspectType
+    - canonicalName: identityServiceProviderClaim
+      class: meta.ddl.aspectType
   permissions:
     - operationType: CreateServiceTemplate
       scope: any
@@ -32,8 +45,17 @@ declares:
       grantsTo: [operator]
     - operationType: RecordServiceOutcome
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, provider]
     - operationType: RetireServiceTemplate
+      scope: any
+      grantsTo: [operator]
+    - operationType: CreateServiceProvider
+      scope: any
+      grantsTo: [operator]
+    - operationType: BindServiceProviderIdentity
+      scope: any
+      grantsTo: [operator]
+    - operationType: WireProvidedBy
       scope: any
       grantsTo: [operator]
   opMetas:

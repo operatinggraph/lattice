@@ -1,6 +1,20 @@
 package clinicdomain
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"strings"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
+
+// providerRoleKey is identity-domain's "provider" role key, computed
+// deterministically (pkgmgr.RoleID mirrors what the installer mints at
+// install time — no KV read required). BindProviderIdentity's script pins
+// its holdsRole grant against this literal rather than trusting any live
+// vtx.role.* the caller supplies — mirrors identity-domain's own
+// consumerRoleKey pin (identity-domain/ddls.go:17): the grant matrix already
+// restricts who can call the op, but the op's OWN script should not be
+// steerable into granting a different role to the bound identity.
+var providerRoleKey = "vtx.role." + pkgmgr.RoleID("identity-domain", "provider")
 
 // Canonical names. Three vertexType DDLs own the op scripts (each op is admitted
 // by EXACTLY ONE vertexType DDL — the operationType→script index drops an op
@@ -33,7 +47,9 @@ const (
 	providerSlotClaimAspectDDL = "providerSlotClaim"
 	patientSlotClaimAspectDDL  = "patientSlotClaim"
 
-	identityPatientClaimAspectDDL = "identityPatientClaim"
+	identityPatientClaimAspectDDL  = "identityPatientClaim"
+	providerIdentityClaimAspectDDL = "providerIdentityClaim"
+	identityProviderClaimAspectDDL = "identityProviderClaim"
 )
 
 // DDLs returns the package's seven DDL meta-vertex declarations:
@@ -93,6 +109,8 @@ func DDLs() []pkgmgr.DDLSpec {
 		encounterAspectTypeDDL(),
 		identityPatientClaimAspectTypeDDL(),
 		clinicSiteProfileAspectTypeDDL(),
+		providerIdentityClaimAspectTypeDDL(),
+		identityProviderClaimAspectTypeDDL(),
 	}
 }
 
@@ -188,11 +206,90 @@ func identityPatientClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// providerIdentityClaimAspectTypeDDL declares the .identityClaim guard aspect
+// on the PROVIDER side of a BindProviderIdentity pair — the entity-keyed half
+// of the bind's mutual-exclusivity guard (identityProviderClaimAspectTypeDDL
+// below is the identity-keyed half). Stored as vtx.provider.<NanoID>.identityClaim
+// (class providerIdentityClaim) = {} — a pure existence marker, mirroring
+// identityPatientClaim's shape above. BindProviderIdentity writes ONE per
+// claimed providerKey, CreateOnly: the key ITSELF is the lock — a second,
+// different identity binding the SAME provider collides at commit
+// (RevisionConflict), never a silent double-bind. Declaration-only: no op
+// handler (BindProviderIdentity's script, owned by the provider vertexType
+// DDL, writes it).
+func providerIdentityClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     providerIdentityClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"BindProviderIdentity"},
+		Description: "Provider identity-claim guard aspect. Stored as vtx.provider.<NanoID>.identityClaim " +
+			"(class providerIdentityClaim) = {} — a pure existence marker, no relationship field. " +
+			"BindProviderIdentity writes ONE per claimed providerKey, CreateOnly: the key ITSELF is the lock — " +
+			"a second, different identity binding the SAME provider collides at commit (RevisionConflict), never " +
+			"a silent double-bind. Declaration-only: no op handler (BindProviderIdentity's script, owned by the " +
+			"provider vertexType DDL, writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the provider), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "provider identity-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.identityClaim; claimed once by BindProviderIdentity. A second, different identity binding the same provider is rejected.",
+			},
+		},
+	}
+}
+
+// identityProviderClaimAspectTypeDDL declares the .providerClaim aspect
+// ATTACHED onto an identity-domain vtx.identity — the identity-keyed half of
+// BindProviderIdentity's mutual-exclusivity guard, mirroring
+// identityPatientClaimAspectTypeDDL's cross-package aspect-attachment shape
+// (clinic-reminders' .reminder-onto-appointment idiom) exactly, just keyed
+// "providerClaim" instead of "patientClaim". Stored as
+// vtx.identity.<NanoID>.providerClaim (class identityProviderClaim) = {} — a
+// pure existence marker. BindProviderIdentity writes ONE per claimed
+// identityKey, CreateOnly: the key ITSELF (identical regardless of WHICH
+// provider is claiming) is the lock — a second, different provider passing
+// the same identityKey collides at commit (RevisionConflict), never a silent
+// double-bind. Declaration-only: no op handler (BindProviderIdentity's
+// script, owned by the provider vertexType DDL, writes it).
+func identityProviderClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     identityProviderClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"BindProviderIdentity"},
+		Description: "Identity provider-claim guard aspect (clinic-domain, attached onto an identity-domain vertex). " +
+			"Stored as vtx.identity.<NanoID>.providerClaim (class identityProviderClaim) = {} — a pure existence " +
+			"marker, no relationship field. BindProviderIdentity writes ONE per claimed identityKey, CreateOnly: the " +
+			"key ITSELF (identical regardless of WHICH provider is claiming) is the lock — a second, different " +
+			"provider passing the same identityKey collides at commit (RevisionConflict), never a silent " +
+			"double-bind. Declaration-only: no op handler (BindProviderIdentity's script, owned by the provider " +
+			"vertexType DDL, writes it).",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. Exclusivity is enforced by the KEY (the identity), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "identity provider-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.identity.<NanoID>.providerClaim; claimed once by BindProviderIdentity's identityKey wiring. A second, different provider claiming the same identity is rejected.",
+			},
+		},
+	}
+}
+
 func providerVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     providerVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff"},
+		PermittedCommands: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
 		Description: "Clinic provider DDL. Vertex shape: vtx.provider.<NanoID>, class=provider, root data = {} " +
 			"(minimal, D5 — the data lives in the .profile aspect). CreateProvider mints the provider + writes the " +
 			".profile aspect {fullName (required), specialty (required), credentials?, bio?} atomically. " +
@@ -206,7 +303,13 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			"SetProviderTimeOff upserts the .timeOff exceptions aspect {ranges: [{from, to, reason?}]} (RFC3339 UTC " +
 			"instants) — the opt-in date-specific blackout layer on top of the recurring hours (vacation / holiday / " +
 			"out-sick): a booking overlapping any blocked range is rejected ProviderUnavailable, even if it falls " +
-			"inside the weekly .hours; an absent .timeOff aspect or ranges=[] means no blackouts.",
+			"inside the weekly .hours; an absent .timeOff aspect or ranges=[] means no blackouts. BindProviderIdentity " +
+			"binds an existing provider to a pre-minted vtx.identity (both validated alive + typed): it mints " +
+			"lnk.provider.<id>.identifiedBy.identity.<id> (provider identifiedBy identity, Contract #1 §1.1), claims a " +
+			"CreateOnly guard aspect on EACH side (.identityClaim on the provider, .providerClaim on the identity — " +
+			"mutually exclusive: one identity per provider, one clinic provider per identity), and idempotently grants " +
+			"the identity-domain `provider` role via holdsRole (mirrors ClaimIdentity's consumer grant; a link already " +
+			"alive is left untouched rather than re-created).",
 		Script: providerDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"fullName":{"type":"string","description":"The provider's full name (CreateProvider / SetProviderProfile; required)."},` +
@@ -214,9 +317,10 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			`"credentials":{"type":"string","description":"Post-nominal credentials, e.g. MD (CreateProvider / SetProviderProfile; optional)."},` +
 			`"bio":{"type":"string","description":"Short provider bio (CreateProvider / SetProviderProfile; optional)."},` +
 			`"providerId":{"type":"string","description":"Optional bare NanoID for the new provider vertex (CreateProvider); absent → minted."},` +
-			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderProfile / SetProviderHours / SetProviderTimeOff; required, validated alive)."},` +
+			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> of an existing provider (TombstoneProvider / SetProviderProfile / SetProviderHours / SetProviderTimeOff / BindProviderIdentity; required, validated alive)."},` +
 			`"windows":{"type":"array","description":"Availability windows (SetProviderHours; required). Each {day:0-6 (Sun=0), openSec:0-86400, closeSec:0-86400} with openSec<closeSec; UTC seconds-of-day. An empty array clears the constraint.","items":{"type":"object","properties":{"day":{"type":"integer"},"openSec":{"type":"integer"},"closeSec":{"type":"integer"}}}},` +
-			`"ranges":{"type":"array","description":"Time-off blackout ranges (SetProviderTimeOff; required). Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. A booking overlapping any range is rejected (ProviderUnavailable). An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}},` +
+			`"ranges":{"type":"array","description":"Time-off blackout ranges (SetProviderTimeOff; required). Each {from, to, reason?} with from/to RFC3339 UTC instants and from<to. A booking overlapping any range is rejected (ProviderUnavailable). An empty array clears all blackouts.","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}},` +
+			`"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of a pre-minted identity to bind to the provider (BindProviderIdentity; required, validated alive + class=identity)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.provider.<NanoID> the operation wrote."}}}`,
@@ -226,9 +330,10 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			"credentials": "Optional post-nominal credentials (e.g. MD, RN). Stored on the .profile aspect when present (CreateProvider / SetProviderProfile).",
 			"bio":         "Optional short provider bio. Stored on the .profile aspect when present (CreateProvider / SetProviderProfile).",
 			"providerId":  "Optional bare NanoID (no dots / key segments) for the new provider vertex. Absent → minted with nanoid.new().",
-			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderProfile edits its profile; SetProviderHours sets its recurring availability; SetProviderTimeOff sets its date-specific blackouts).",
+			"providerKey": "Full vtx.provider.<NanoID> key of an existing provider vertex (TombstoneProvider tombstones it; SetProviderProfile edits its profile; SetProviderHours sets its recurring availability; SetProviderTimeOff sets its date-specific blackouts; BindProviderIdentity binds it to a login identity).",
 			"windows":     "Availability windows (SetProviderHours). A list of {day:0-6 (Sun=0), openSec, closeSec} where openSec/closeSec are UTC seconds-of-day (0..86400) and openSec<closeSec. An empty list clears the constraint (provider becomes unconstrained).",
 			"ranges":      "Time-off blackout ranges (SetProviderTimeOff). A list of {from, to, reason?} where from/to are RFC3339 UTC instants and from<to. A booking whose [start,end) overlaps any range is rejected (ProviderUnavailable) even when it falls inside the weekly .hours. An empty list clears all blackouts.",
+			"identityKey": "Full vtx.identity.<NanoID> key of a pre-minted identity to bind (BindProviderIdentity; required). Must be alive + class=identity; wires the identifiedBy link, claims CreateOnly guard aspects on BOTH sides (rejected if either side is already bound), and idempotently grants the identity the provider role.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -276,6 +381,13 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 					"UTC, from<to), then upserts vtx.provider.<NanoID>.timeOff {ranges}. Subsequent CreateAppointment / " +
 					"RescheduleAppointment reject a booking overlapping any range (ProviderUnavailable), even inside the " +
 					"weekly .hours. ranges=[] clears all blackouts.",
+			},
+			{
+				Name:    "BindProviderIdentity — bind a provider to its login identity",
+				Payload: map[string]any{"providerKey": "vtx.provider.<NanoID>", "identityKey": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Validates both endpoints alive + typed, mints lnk.provider.<id>.identifiedBy.identity.<id>, " +
+					"claims CreateOnly guard aspects on both sides (rejected if either side is already bound), and " +
+					"idempotently grants the identity the provider role via holdsRole. Returns primaryKey (the identifiedBy link key).",
 			},
 		},
 	}
@@ -946,9 +1058,15 @@ def execute(state, op):
     fail("patient DDL: unknown operationType: " + ot)
 `
 
-// providerDDLScript handles CreateProvider + TombstoneProvider. Same idioms as the
-// patient script.
-const providerDDLScript = `
+// providerDDLScript handles CreateProvider + TombstoneProvider +
+// SetProviderProfile/Hours/TimeOff + BindProviderIdentity. Same idioms as the
+// patient script. providerDDLScript is derived from providerDDLScriptTemplate
+// by pinning the placeholder — identity-domain's own "provider" role key —
+// to its real, deterministic value (see providerRoleKey above): mirrors
+// identity-domain's own identityDDLScript/__EXPECTED_CONSUMER_ROLE_KEY__ pin.
+var providerDDLScript = strings.ReplaceAll(providerDDLScriptTemplate, "__EXPECTED_PROVIDER_ROLE_KEY__", providerRoleKey)
+
+const providerDDLScriptTemplate = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -964,6 +1082,12 @@ def make_aspect_upsert(vtx_key, local_name, cls, data):
     return {"op": "update", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
+def make_link(key, source, target, cls, local_name, data):
+    return {"op": "create", "key": key,
+            "document": {"class": cls, "isDeleted": False,
+                         "sourceVertex": source, "targetVertex": target,
+                         "localName": local_name, "data": data}}
 
 def make_tombstone(key):
     return {"op": "tombstone", "key": key,
@@ -1030,6 +1154,56 @@ def class_of(state, key):
         return None
     return getattr(doc, "class")
 
+def require_live_typed(state, key, name, want_class):
+    # Endpoint validation: the linked vertex MUST be alive AND the expected
+    # class. A dead or wrong-class providerKey/identityKey is never wired.
+    if not vertex_alive(state, key):
+        fail("UnknownEndpoint: " + name + ": " + key + " is absent or tombstoned")
+    cls = class_of(state, key)
+    if cls != want_class:
+        fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
+
+OPERATOR_ROLE_PAGE_LIMIT = 50
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator') --
+    # the same idiom the appointment DDL's workplace guard uses.
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, OPERATOR_ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def actor_bound_to_provider(actor_key, provider_key):
+    # The standing provider-binding guard: an actor identifiedBy-bound to
+    # THIS SPECIFIC provider may manage its own hours/time-off even without
+    # an operator grant -- complementary to actor_holds_operator, never a
+    # replacement (mirrors the appointment DDL's require_workplace/
+    # workplace_exempt framing: two binders, each covering the path the
+    # other cannot see).
+    _, actor_id = parts_of(actor_key, "actor", "identity")
+    _, target_provider_id = parts_of(provider_key, "providerKey", "provider")
+    # read-posture: (d) declared in contextHint.optionalReads by the standing
+    # caller's dispatcher (probing whether THIS actor is bound to the TARGET
+    # provider; absent -> AuthDenied, mirroring claim-style absence-tolerance)
+    lnk = kv.Read("lnk.provider." + target_provider_id + ".identifiedBy.identity." + actor_id)
+    return lnk != None and not lnk.isDeleted
+
 def require_int_in(w, name, lo, hi):
     # Each window arrives as a dict (a nested JSON object). day / openSec / closeSec
     # must be integers in range. Whole-number JSON decodes to a Starlark int.
@@ -1043,6 +1217,40 @@ def require_int_in(w, name, lo, hi):
     if v < lo or v > hi:
         fail("InvalidArgument: windows: " + name + ": must be in [" + str(lo) + ", " + str(hi) + "]; got " + str(v))
     return v
+
+def claim_provider_identity(provider_key):
+    # Entity-keyed guard: at most one identity may ever bind THIS provider
+    # (nothing releases the claim, so it is never tombstoned) -- mirrors
+    # claim_identity's exclusivity idiom (patient DDL, ddls.go's
+    # patientDDLScript), keyed on the PROVIDER side of the pair instead of
+    # the identity side. kv.Read here is LAZY (§2.5 idiom) -- it only picks
+    # the error message; the safety property is the atomic batch's CreateOnly
+    # conditioning at commit: two DIFFERENT identities passing the same
+    # providerKey both read it absent and both emit op:create for the
+    # IDENTICAL key, but CreateOnly on a key at revision 0 commits exactly
+    # once -- the loser's whole batch RevisionConflicts (fail closed, never a
+    # silent double-bind).
+    # read-posture: (d) declared in contextHint.optionalReads by
+    # BindProviderIdentity's dispatcher (no cmd/<app> FE submits this op yet
+    # this fire -- W1/W5 land it; absence is the common first-bind case)
+    existing = kv.Read(provider_key + ".identityClaim")
+    if existing != None:
+        fail("ProviderAlreadyBound: " + provider_key + " is already bound to another identity")
+    return make_aspect(provider_key, "identityClaim", "providerIdentityClaim", {})
+
+def claim_identity_provider(identity_key):
+    # Identity-keyed guard: at most one clinic provider may ever bind THIS
+    # identity (nothing releases the claim, so it is never tombstoned) --
+    # mirrors claim_identity's exclusivity idiom (patient DDL,
+    # patientDDLScript) and its cross-package aspect-attachment shape
+    # (identityPatientClaim) exactly, just keyed "providerClaim".
+    # read-posture: (d) declared in contextHint.optionalReads by
+    # BindProviderIdentity's dispatcher (no cmd/<app> FE submits this op yet
+    # this fire -- W1/W5 land it; absence is the common first-bind case)
+    existing = kv.Read(identity_key + ".providerClaim")
+    if existing != None:
+        fail("IdentityAlreadyBoundToProvider: " + identity_key + " is already bound to another clinic provider")
+    return make_aspect(identity_key, "providerClaim", "identityProviderClaim", {})
 
 def execute(state, op):
     ot = op.operationType
@@ -1086,6 +1294,13 @@ def execute(state, op):
         cls = class_of(state, prkey)
         if cls != "provider":
             fail("WrongClass: providerKey: " + prkey + " has class " + str(cls) + ", required provider")
+        # Standing binder: operator passes unconditionally; otherwise the
+        # actor must be identifiedBy-bound to THIS provider (a provider sets
+        # only their OWN hours). Two binders, complementary, mirroring the
+        # appointment DDL's actor_holds_operator/require_workplace framing.
+        if not actor_holds_operator(op.actor):
+            if not actor_bound_to_provider(op.actor, prkey):
+                fail("AuthDenied: " + op.actor + " may not set hours for provider " + prkey)
         # windows is required (pass [] to clear the constraint). Each window is
         # {day:0-6 (Sun=0), openSec, closeSec} in UTC seconds-of-day, openSec<closeSec.
         if not hasattr(p, "windows"):
@@ -1118,6 +1333,13 @@ def execute(state, op):
         cls = class_of(state, prkey)
         if cls != "provider":
             fail("WrongClass: providerKey: " + prkey + " has class " + str(cls) + ", required provider")
+        # Standing binder: operator passes unconditionally; otherwise the
+        # actor must be identifiedBy-bound to THIS provider (a provider sets
+        # only their OWN time off). Two binders, complementary, mirroring the
+        # appointment DDL's actor_holds_operator/require_workplace framing.
+        if not actor_holds_operator(op.actor):
+            if not actor_bound_to_provider(op.actor, prkey):
+                fail("AuthDenied: " + op.actor + " may not set time off for provider " + prkey)
         # ranges is required (pass [] to clear all blackouts). Each range is
         # {from, to, reason?} — from/to RFC3339 UTC instants with from<to. Normalize
         # both to canonical whole-second UTC (time.rfc3339_utc — pure, no clock read)
@@ -1183,6 +1405,50 @@ def execute(state, op):
         events = [{"class": "clinic.providerProfileSet", "data": {"providerKey": prkey}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": prkey}}
+
+    if ot == "BindProviderIdentity":
+        prkey = required_string(p, "providerKey")
+        _, provider_id = parts_of(prkey, "providerKey", "provider")
+        require_live_typed(state, prkey, "providerKey", "provider")
+
+        identity_key = required_string(p, "identityKey")
+        _, identity_id = parts_of(identity_key, "identityKey", "identity")
+        require_live_typed(state, identity_key, "identityKey", "identity")
+
+        # provider identifiedBy identity (Contract #1 §1.1: the later-arriving
+        # provider is the source, the pre-existing identity is the target).
+        # Sentence: "provider identifiedBy identity". Mirrors the patient
+        # identifiedBy mint verbatim (patient DDL, patientDDLScript).
+        identified_by_lnk = "lnk.provider." + provider_id + ".identifiedBy.identity." + identity_id
+        mutations = [make_link(identified_by_lnk, prkey, identity_key, "identifiedBy", "identifiedBy", {})]
+
+        # Mutual exclusivity, both sides (doubles CreatePatient's single-sided
+        # claim_identity): at most one identity ever binds THIS provider, and
+        # at most one clinic provider ever binds THIS identity.
+        mutations.append(claim_provider_identity(prkey))
+        mutations.append(claim_identity_provider(identity_key))
+
+        # Grant the provider role, exactly as ClaimIdentity grants consumer
+        # (identity-domain's identityDDLScript) -- but IDEMPOTENT (mirrors
+        # rbac AssignRole's state-check branch, rbac-domain ddls.go:337-339):
+        # a holdsRole link already alive is left untouched rather than
+        # re-created, so a defensive re-bind ceremony never collides with its
+        # own prior grant.
+        provider_role_key = "__EXPECTED_PROVIDER_ROLE_KEY__"
+        provider_role_id = provider_role_key[len("vtx.role."):]
+        holds_role_lnk = "lnk.identity." + identity_id + ".holdsRole.role." + provider_role_id
+        # read-posture: (d) declared in contextHint.optionalReads by
+        # BindProviderIdentity's dispatcher (no cmd/<app> FE submits this op
+        # yet this fire -- W1/W5 land it; absence is the common first-bind
+        # case, mirroring rbac's AssignRole idempotency check)
+        existing_role_grant = kv.Read(holds_role_lnk)
+        if existing_role_grant == None or existing_role_grant.isDeleted:
+            mutations.append(make_link(holds_role_lnk, identity_key, provider_role_key, "holdsRole", "holdsRole", {}))
+
+        events = [{"class": "clinic.providerIdentityBound",
+                   "data": {"providerKey": prkey, "identityKey": identity_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": identified_by_lnk}}
 
     fail("provider DDL: unknown operationType: " + ot)
 `
@@ -1417,11 +1683,12 @@ def require_workplace(location_keys, what):
     fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
          str(location_keys) + "; " + what)
 
-def appointment_sites(appt_id):
-    # An appointment's locations are the buildings its provider practises at --
-    # the same provider -practicesAt-> building indirection clinicAppointmentsRead
-    # anchors its workplace read token on, so write confinement and read
-    # confinement resolve through exactly the same edge.
+def appointment_provider(appt_id):
+    # The appointment's OWN provider, resolved from the graph (never a
+    # caller-supplied payload field -- a caller cannot forge which provider
+    # it is writing against). Factored out of appointment_sites below so the
+    # standing provider-binding guard (actor_bound_to_appointment_provider)
+    # can resolve the same provider without a second read.
     # read-posture: (e) relation=withProvider epoch=none -- an appointment
     # carries exactly one withProvider link, so this is never a keyspace scan.
     ppage, _ = kv.Links("vtx.appointment." + appt_id, "withProvider", "out")
@@ -1429,6 +1696,13 @@ def appointment_sites(appt_id):
     for lk in ppage:
         if not lk.isDeleted:
             provider = lk.targetVertex
+    return provider
+
+def sites_for_provider(provider):
+    # A provider's practicesAt sites -- the buildings clinicAppointmentsRead
+    # anchors its workplace read token on, so write confinement and read
+    # confinement resolve through exactly the same edge. provider may be None
+    # (an appointment whose withProvider link is absent), which yields [].
     if provider == None:
         return []
     # read-posture: (e) relation=practicesAt epoch=none (a site assigned
@@ -1444,6 +1718,27 @@ def appointment_sites(appt_id):
         if not lk.isDeleted:
             sites.append(lk.targetVertex)
     return sites
+
+def appointment_sites(appt_id):
+    return sites_for_provider(appointment_provider(appt_id))
+
+def actor_bound_to_appointment_provider(actor_key, provider):
+    # The THIRD standing binder (beside operator/workplace, require_workplace's
+    # own doc frames those two as complementary): a provider-role actor may
+    # accept/reschedule/set-status on the SPECIFIC appointment its own
+    # identifiedBy binding covers, independent of any worksAt/workplace link.
+    # provider may be None (an appointment whose withProvider link is absent),
+    # which never matches.
+    if provider == None:
+        return False
+    _, actor_id = parts_of(actor_key, "actor", "identity")
+    _, provider_id = parts_of(provider, "provider", "provider")
+    # read-posture: (d) declared in contextHint.optionalReads by the standing
+    # caller's dispatcher (probing whether ITS OWN actor is this appointment's
+    # bound provider; absent -> falls through to require_workplace, never a
+    # hard failure)
+    lnk = kv.Read("lnk.provider." + provider_id + ".identifiedBy.identity." + actor_id)
+    return lnk != None and not lnk.isDeleted
 
 def class_of(state, key):
     if key not in state:
@@ -1904,9 +2199,14 @@ def execute(state, op):
         # Staff-standing confinement: the sites come from the appointment's OWN
         # withProvider -> practicesAt walk, never the payload, so a caller cannot
         # forge which building it is writing at. No-op on the patient-self path,
-        # which the identifiedBy probe below binds instead.
+        # which the identifiedBy probe below binds instead. The bound provider
+        # (identifiedBy-bound to THIS appointment's own withProvider provider)
+        # is a THIRD standing binder, alongside workplace: a provider need not
+        # also worksAt a building to reschedule their own appointment.
         if not workplace_exempt():
-            require_workplace(appointment_sites(appt_id), "cannot reschedule appointment " + appt_key)
+            standing_provider = appointment_provider(appt_id)
+            if not actor_bound_to_appointment_provider(op.actor, standing_provider):
+                require_workplace(sites_for_provider(standing_provider), "cannot reschedule appointment " + appt_key)
 
         # The appointment's provider / patient — required so the move is conflict-
         # checked against each book exactly as CreateAppointment is, and so the OLD
@@ -2030,9 +2330,12 @@ def execute(state, op):
         # Staff-standing confinement: same withProvider -> practicesAt derivation
         # as RescheduleAppointment. Bound here rather than on the terminal branch
         # alone -- a non-terminal status write (confirmed / checkedIn) is just as
-        # much a write into someone else's building.
+        # much a write into someone else's building. The bound provider is a
+        # THIRD standing binder alongside workplace, mirroring RescheduleAppointment.
         if not workplace_exempt():
-            require_workplace(appointment_sites(appt_id), "cannot set status on appointment " + appt_key)
+            standing_provider = appointment_provider(appt_id)
+            if not actor_bound_to_appointment_provider(op.actor, standing_provider):
+                require_workplace(sites_for_provider(standing_provider), "cannot set status on appointment " + appt_key)
 
         status = required_status(p)
 

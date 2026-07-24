@@ -29,6 +29,39 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // the rows their workplace grants open. Booking (CreateAppointment) and the
 // clinical/roster surface (RecordEncounter, CreatePatient, provider
 // administration) deliberately stay operator-only.
+//
+// BindProviderIdentity grants `operator` alone at scope=any — the bind
+// ceremony that establishes a provider's login (mints the provider's
+// identifiedBy link and idempotently grants the identity-domain `provider`
+// role). Operator-only because the bind confers the role-minting power plus,
+// through the provider guards' deliberate lack of a worksAt check,
+// cross-building appointment access; delegating it to front-desk would let a
+// front-desk actor bind an unbound provider at another building and escalate
+// past workplace confinement. It matches CreateProvider (also operator-only):
+// front-desk cannot create the provider entity a bind targets, so the grant
+// buys only attack surface. Not further narrowed to scope=self: the op's own
+// CreateOnly guards on BOTH sides make a bind mutually exclusive regardless of
+// who submits it (persona-worlds-design.md Fire W0 §3.2).
+//
+// SetProviderHours, SetProviderTimeOff, SetAppointmentStatus, and
+// RescheduleAppointment additionally grant `provider` at scope=any: a bound
+// provider manages their OWN availability and their OWN appointments. Scope
+// stays `any` (there is no scope=self equivalent for a non-identity target
+// vertex like provider/appointment), so the Starlark script itself confines
+// a provider-role, non-operator, non-workplace caller to the SPECIFIC
+// provider it is identifiedBy-bound to — a THIRD standing binder alongside
+// require_workplace's operator/worksAt pair (facet-staff-worlds-design.md
+// §3.5 frames those two as complementary; this is the provider-hat leg).
+// `provider` widens the EXISTING scope=any row on each of these four ops
+// (never a second row): a permission's identity is its (operationType,
+// scope) pair (Contract #8 §8.1 permTag — validatePermissionIdentityUniqueness
+// rejects a duplicate before any KV write), so a second scope=any row for an
+// op that already has one would collapse onto the SAME vtx.permission.<id>
+// key as the first — silently dropping whichever grantsTo lost the race,
+// never landing two grants. CreateAppointment's consumer widening (below)
+// only looks like a second row because it sits at a DIFFERENT scope (self);
+// BindProviderIdentity is a brand-new op, so its one row cannot collide with
+// anything.
 func Permissions() []pkgmgr.PermissionSpec {
 	mk := func(op string) pkgmgr.PermissionSpec {
 		return pkgmgr.PermissionSpec{
@@ -44,8 +77,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 		mk("CreateProvider"),
 		mk("TombstoneProvider"),
 		mk("SetProviderProfile"),
-		mk("SetProviderHours"),
-		mk("SetProviderTimeOff"),
+		{
+			OperationType: "SetProviderHours",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SetProviderHours operations, and a bound provider the right to set THEIR OWN working hours (the script's standing guard confines a non-operator caller to the provider it is identifiedBy-bound to).",
+			GrantsTo:      []string{"operator", "provider"},
+		},
+		{
+			OperationType: "SetProviderTimeOff",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SetProviderTimeOff operations, and a bound provider the right to set THEIR OWN time off (the script's standing guard confines a non-operator caller to the provider it is identifiedBy-bound to).",
+			GrantsTo:      []string{"operator", "provider"},
+		},
 		mk("CreateAppointment"),
 		{
 			OperationType: "CreateAppointment",
@@ -56,8 +99,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "RescheduleAppointment",
 			Scope:         "any",
-			Note:          "Grants the operator and front-of-house staff the right to submit RescheduleAppointment operations.",
-			GrantsTo:      []string{"operator", "frontOfHouse"},
+			Note:          "Grants the operator and front-of-house staff the right to submit RescheduleAppointment operations, and a bound provider the right to reschedule THEIR OWN appointments (the script's standing guard confines a non-operator, non-workplace caller to appointments withProvider the provider it is identifiedBy-bound to).",
+			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
 		},
 		{
 			OperationType: "RescheduleAppointment",
@@ -68,8 +111,8 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "SetAppointmentStatus",
 			Scope:         "any",
-			Note:          "Grants the operator and front-of-house staff the right to submit SetAppointmentStatus operations (the full transition surface, not the consumer cancel-slice).",
-			GrantsTo:      []string{"operator", "frontOfHouse"},
+			Note:          "Grants the operator and front-of-house staff the right to submit SetAppointmentStatus operations (the full transition surface, not the consumer cancel-slice), and a bound provider the right to set status on THEIR OWN appointments (the script's standing guard confines a non-operator, non-workplace caller to appointments withProvider the provider it is identifiedBy-bound to).",
+			GrantsTo:      []string{"operator", "frontOfHouse", "provider"},
 		},
 		{
 			OperationType: "SetAppointmentStatus",
@@ -82,5 +125,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 		mk("SetSiteProfile"),
 		mk("AssignProviderSite"),
 		mk("RemoveProviderSite"),
+		{
+			OperationType: "BindProviderIdentity",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to bind an existing provider to its login identity. The bind mints the identity-domain `provider` role and, via the provider guards' deliberate lack of a worksAt check, confers cross-building appointment access — a privilege escalation past workplace confinement if delegated to front-desk. It is operator-only to match its precondition CreateProvider (also operator-only): front-desk cannot create the provider entity a bind would target, so the grant would add only attack surface, never a standalone workflow.",
+			GrantsTo:      []string{"operator"},
+		},
 	}
 }

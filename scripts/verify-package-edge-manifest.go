@@ -51,6 +51,10 @@ var emExpectedLenses = map[string]string{
 	"edgeInstances":       "manifest.inst",
 	"edgeEntitySessions":  "manifest.ent",
 	"edgeEntityProviders": "manifest.ent",
+	// The provider-hat siblings (persona-worlds-design.md Fire W0).
+	"edgeProviderSchedule":   "manifest.ent",
+	"edgeProviderQueue":      "manifest.ent",
+	"edgeInstructorSessions": "manifest.ent",
 }
 
 func main() {

@@ -1,24 +1,29 @@
 name: wellness-domain
-version: 0.8.1
+version: 0.9.0
 description: |
-  Wellness bookable domain: studio / session / booking vertex types + their
-  aspects and links, written by Create*/Tombstone*/Cancel* ops. CreateSession
-  claims a deterministic studioSlotClaim per covered 15-minute cell
-  (double-session lock, mirrors clinic-domain's providerSlotClaim).
-  CreateBooking claims the first free sessionSeatClaim within the session's
-  capacity (SessionFull once exhausted — the same CreateOnly idiom extended
-  over a seat-index dimension) and, given an optional leaseAppKey, verifies
-  residency via lease-signing's applicationFor link before granting the
-  resident rate (a mismatch falls through to standard, never a hard
-  failure). Three projection lenses (wellnessStudios, wellnessSessions,
-  wellnessBookings) are the P5 read models a wellness FE reads. No PHI/PII,
-  no protected Postgres layer. Depends lease-signing (documentation only —
-  CreateBooking reads its leaseapp by known key, no install-order
-  requirement enforced at the Starlark level). CreateBooking and CancelBooking
-  each carry an op-meta with the edge-manifest descriptor vocabulary
-  (presentation/inputSchema/dispatch, edge-showcase-app-design.md §3.3, Fire
-  5 adoption) — metadata only; a client still needs a service-catalog path
-  (permitsOperation) to discover these ops.
+  Wellness bookable domain: studio / session / booking / instructor vertex
+  types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
+  ops. CreateSession claims a deterministic studioSlotClaim per covered
+  15-minute cell (double-session lock, mirrors clinic-domain's
+  providerSlotClaim). CreateBooking claims the first free sessionSeatClaim
+  within the session's capacity (SessionFull once exhausted — the same
+  CreateOnly idiom extended over a seat-index dimension) and, given an
+  optional leaseAppKey, verifies residency via lease-signing's applicationFor
+  link before granting the resident rate (a mismatch falls through to
+  standard, never a hard failure). BindInstructorIdentity binds an instructor
+  to a real login identity via the identity-domain `provider` archetype role
+  (persona-worlds-design.md Fire W0), mirroring clinic-domain's
+  BindProviderIdentity; a bound instructor's TombstoneSession grant is
+  confined, in-script, to sessions they lead. Three projection lenses
+  (wellnessStudios, wellnessSessions, wellnessBookings) are the P5 read models
+  a wellness FE reads. No PHI/PII, no protected Postgres layer. Depends
+  lease-signing (documentation only — CreateBooking reads its leaseapp by
+  known key, no install-order requirement enforced at the Starlark level).
+  CreateBooking, CancelBooking, and TombstoneSession each carry an op-meta
+  with the edge-manifest descriptor vocabulary (presentation/inputSchema/
+  dispatch, edge-showcase-app-design.md §3.3, Fire 5 adoption) — metadata
+  only; a client still needs a service-catalog path (permitsOperation) to
+  discover these ops.
 depends:
   - lease-signing
 declares:
@@ -29,6 +34,8 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: booking
       class: meta.ddl.vertexType
+    - canonicalName: instructor
+      class: meta.ddl.vertexType
     - canonicalName: studioProfile
       class: meta.ddl.aspectType
     - canonicalName: sessionSchedule
@@ -38,6 +45,12 @@ declares:
     - canonicalName: sessionSeatClaim
       class: meta.ddl.aspectType
     - canonicalName: bookingStatus
+      class: meta.ddl.aspectType
+    - canonicalName: instructorProfile
+      class: meta.ddl.aspectType
+    - canonicalName: instructorIdentityClaim
+      class: meta.ddl.aspectType
+    - canonicalName: identityInstructorClaim
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: wellnessStudios
@@ -64,7 +77,7 @@ declares:
       grantsTo: [operator, frontOfHouse]
     - operationType: TombstoneSession
       scope: any
-      grantsTo: [operator]
+      grantsTo: [operator, provider]
     - operationType: CreateBooking
       scope: any
       grantsTo: [operator]
@@ -77,6 +90,16 @@ declares:
     - operationType: CancelBooking
       scope: self
       grantsTo: [consumer]
+    - operationType: CreateInstructor
+      scope: any
+      grantsTo: [operator]
+    - operationType: TombstoneInstructor
+      scope: any
+      grantsTo: [operator]
+    - operationType: BindInstructorIdentity
+      scope: any
+      grantsTo: [operator]
   opMetas:
     - operationType: CreateBooking
     - operationType: CancelBooking
+    - operationType: TombstoneSession
