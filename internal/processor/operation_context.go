@@ -24,26 +24,3 @@ type ResolvedPermission struct {
 	AllowedOperation   *AllowedOperation
 	EphemeralGrant     *EphemeralGrant
 }
-
-// authTargetValidated reports whether the resolved grant actually validated
-// env.AuthContext.Target against the actor or a minted grant, making it safe to
-// forward to the operation script as op.authContextTarget. Only two authorized
-// paths bind the target: a platform scope=self grant (step 3 requires
-// target == actor) and a task/ephemeralGrant (matchEphemeralGrant matches
-// g.Target == ac.Target). The platform scope=any and service paths never inspect
-// target, so a target arriving through them is unvalidated client input a
-// scope=any holder can forge into a script's self/workplace exemption. Fail
-// closed: a nil permission or an unrecognized path is treated as unvalidated.
-func authTargetValidated(rp *ResolvedPermission) bool {
-	if rp == nil {
-		return false
-	}
-	switch rp.Path {
-	case "platform":
-		return rp.PlatformPermission != nil && rp.PlatformPermission.Scope == "self"
-	case "task":
-		return rp.EphemeralGrant != nil
-	default:
-		return false
-	}
-}

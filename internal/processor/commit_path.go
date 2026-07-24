@@ -268,28 +268,8 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 		"authPath", resolvedPermissionPath(resolvedPermission),
 		"projectedAt", resolvedPermissionProjectedAt(resolvedPermission))
 	// Emit FR23 auth trace for allowed decisions when flag is ON. The emitter
-	// guards internally on traceAllowDecisions; nil emitter is a no-op. It
-	// snapshots what it needs from env synchronously (its async write closes over
-	// only env.RequestID, never env.AuthContext), so the sanitize below is free to
-	// mutate env.AuthContext.Target without racing it.
+	// guards internally on traceAllowDecisions; nil emitter is a no-op.
 	cp.deps.TraceEmitter.Emit(env, decision)
-
-	// Sanitize a forgeable authContext.target before any script observes it. The
-	// Gateway forwards the client's authContext.target verbatim, but only a
-	// platform scope=self grant or a task ephemeralGrant validated it (step 3
-	// requires target == actor / g.Target == ac.Target). On every other
-	// authorized path — platform scope=any, service — target is unchecked, so a
-	// scope=any holder could forge one to defeat a script's self/workplace
-	// exemption (persona-worlds W1 Inc 2a). Blank the unvalidated target here, the
-	// single point where auth provenance is known, so no script keys a
-	// self-exemption on a target the platform never vouched for. Done once, before
-	// the commit-retry loop (auth is not re-run), so it holds across retries. The
-	// stub authorizer (test-only) resolves nil and makes no security claim; its
-	// envelope is left untouched.
-	if resolvedPermission != nil && env.AuthContext != nil &&
-		env.AuthContext.Target != "" && !authTargetValidated(resolvedPermission) {
-		env.AuthContext.Target = ""
-	}
 
 	// --- Steps 4-8: hydrate → execute → validate → commit, with a bounded
 	// internal retry on a §3.2-OCC revision conflict. ---
