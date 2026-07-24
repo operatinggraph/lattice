@@ -502,6 +502,20 @@ clinic-only producer), no widening (lattice-pkg roster + ensureStaff hardening a
 in-scope items, recorded here); dependency re-verified: P1 confirmed (Andrew, standing) and satisfied by
 build order.
 
+**As-built + live-verified (2026-07-23, `a8069d16`; CI green):** all six packages upgraded + seeded on the
+running stack. **Dr. Osei** logs into Facet and sees exactly her appointment ("Sports physical", her provider
+key) with all four provider ops in her catalog — and **zero** rows for Patel's provider (the scoping negative
+control passes). **Kai** sees his open "Maple Laundry" instance + the Record-outcome op. **Sam** holds all
+three hats at the authoritative layer (whoami: consumer+frontOfHouse+provider, residesIn Unit 2 + worksAt
+Riverside) and his instructor session ("Evening Flow", the fixed 19:00 hour) renders in Facet. `ensureStaff`
+hardening held (FACET_STAFF_NANOID stayed Dana despite Sam gaining frontOfHouse). **Known tail (filed,
+lattice lane):** Sam's `manifest.me` summary row is frozen at his pre-hat first-projection state (only
+consumer+residesIn, 2 of 5 selfAnchor types) — the Personal-lens update-over-existing reconciliation gap
+([[project_capability_projection_reconciliation]]), presentation-only (authz + per-hat data all correct),
+which stalls the multi-hat Work-tab/hat-summary display until that Refractor gap is closed. **CI miss caught
+post-merge:** `verify-package-clinic-domain` (stack-gate only, invisible to `go test`) asserted the pre-W0
+provider-DDL command count; fixed in `a8069d16`.
+
 **Wave-1 build corrections (2026-07-23; increments 1–3 green in the worktree; W1–W4 briefs inherit these):**
 (1) **A permission's identity is `(operationType, scope)` — Contract #8 §8.1** — so granting `provider` on
 an existing op means *widening the existing scope=any row's GrantsTo*, never adding a second row (the
@@ -511,6 +525,32 @@ installs a package carrying provider grants needs `"provider": pkgmgr.RoleID("id
 "provider")` in its `inst.RoleIDs` map — clinic-domain, clinic-ledger, clinic-reminders fixed; siblings
 checked proactively. (4) Adjacent find, filed to the Loupe lane: `cmd/loupe/pkg.go` `kernelRoleIDs()`
 resolves only `operator` — Loupe-UI installs of packages granting any other role fail (pre-existing).
+
+**Adversarial review (2026-07-23; full suite + golangci-lint green; blind-hunter + edge-case-hunter):** one
+MEDIUM finding actioned — the three `Bind*` ops (+ service `CreateServiceProvider`) were `{operator,
+frontOfHouse}`; because a bind mints the `provider` role and the provider guards deliberately omit a
+`worksAt` check, a front-desk actor could bind an *unbound* provider at another building (Patel is seeded as
+exactly that target) and escalate past workplace confinement. Fixed to **operator-only** — consistent with
+the operator-only entity-creation ops that are a bind's precondition, so the front-desk grant bought only
+attack surface, never a workflow (front-desk can't create the entity to bind). Two findings accepted
+by-design, recorded: `RecordServiceOutcome` authorizes at *template* granularity (an instance has no
+per-provider link to check against — tightening needs new mechanism; wiring is operator-only so not
+attacker-reachable); the `providerIdentityReadGrants` `WHERE`-between-MATCHes form is well-precedented and
+the `identifiedBy` MATCH is the real constraint (no over-grant) — activation confirmed by live-verify.
+
+**Edge-case review (2026-07-23; two HIGH actioned, remainder filed):** (1) the clinic provider DDL's
+`InputSchema` was malformed JSON — one extra `}` closed `properties` early, exposing `identityKey` to the
+root; fixed + validated (a broken schema Loupe/agents would silently reject). (2) the seed's day-derived
+appointments/sessions used `Now()`-relative times, so a reseed one day later landed the +1-day entity on the
++2-day entity's date at the same wall-clock slot → deterministic patient/studio hub collision; fixed with a
+run-time-independent `futureDayAt(days, hour)` pinning each W0 entity to a distinct fixed hour (same-day
+idempotency preserved). Also fixed incidentally: the verify-package-clinic-domain grantee pin already
+expected operator-only `BindProviderIdentity` while the real grant was `{operator, frontOfHouse}` — a latent
+CI-stack-gate mismatch the security fix resolved. Filed, not blocking: seed partial-failure recovery +
+ctx-window gaps (verticals lane — recoverable by a wipe, no runtime impact); the tombstoned-`holdsRole`
+no-revive pattern shared with rbac `AssignRole` (lattice lane). Everything the review "walked and sound" —
+the bind-guard 6-combo matrix, the standing-guard confinement, the byte-identical LWW lens overlap, degenerate
+rows, Facet-now rendering — stands.
 
 ## 10a. Non-goals
 
