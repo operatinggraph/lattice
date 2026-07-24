@@ -69,8 +69,9 @@ func Lenses() []pkgmgr.LensSpec {
 		},
 		{
 			// identityAnchors — an actor-aggregate projection of the identity's
-			// residence (residesIn) and workplace (worksAt) anchors, each entry
-			// carrying the anchor's own container (persona-worlds-design.md §10
+			// residence (residesIn), workplace (worksAt), and provider-binding
+			// (identifiedBy-inverse) anchors, the residence/workplace entries
+			// carrying their own container (persona-worlds-design.md §4.1/§10
 			// Fire P1: GET /v1/actor gains anchors[]). Own bucket
 			// (identity-anchors), disjoint from capability-kv: Contract #6
 			// §6.1/§6.2's key-class/shape are frozen for the auth surface, and
@@ -78,10 +79,10 @@ func Lenses() []pkgmgr.LensSpec {
 			// response reads this directly (internal/gateway/rolesanchors), the
 			// same P5-clean seam identityIndexHint established for the
 			// provision-time probe. RealnessFilter mirrors capabilityRoles'
-			// (rbac-domain/lenses.go): the OPTIONAL MATCH pair yields a
+			// (rbac-domain/lenses.go): each OPTIONAL MATCH yields a
 			// degenerate {key:null,...} entry per relation when the identity
-			// has neither a residence nor a workplace, and EmptyBehavior
-			// "delete" only fires once those are filtered out.
+			// lacks that binding, and EmptyBehavior "delete" only fires once
+			// those are filtered out.
 			CanonicalName:  "identityAnchors",
 			Class:          "meta.lens",
 			Adapter:        "nats-kv",
@@ -127,27 +128,38 @@ RETURN n.key AS key,
        n.data.identityKey AS identityKey,
        n.data.contactType AS contactType`
 
-// identityAnchorsSpec walks the identity's residence (residesIn) and
-// workplace (worksAt) anchors, each stamped with its own container —
-// adapted from the me-lens anchors walk (edge-manifest/lenses.go:293-313's
-// edgeIdentitySpec), keeping its null-handling/name-projection idioms
-// (relation stamped as a literal; `loc`/`container`/`work`/`workContainer`
-// project `.presentation.data.name` for a human label) but returning
+// identityAnchorsSpec walks the identity's residence (residesIn), workplace
+// (worksAt), and provider-binding (identifiedBy-inverse) anchors — the three
+// relation-stamped bindings persona-worlds-design.md §4.1 names as the
+// whoami `anchors[]` set, matching what `manifest.me` shows Facet
+// (edge-manifest/lenses.go's edgeIdentitySpec). The residence/workplace
+// walks each stamp their own container and project
+// `loc`/`container`/`work`/`workContainer` `.presentation.data.name` for a
+// human label; the identifiedBy walk runs backwards off the bound entity
+// (Contract #1 direction: the later-arriving provider/patient/instructor/
+// serviceprovider entity is the source of `identifiedBy`, the pre-existing
+// identity the target), untyped so identity-domain stays domain-agnostic —
+// it reports the binding's `key` (`vtx.provider.*`, `vtx.patient.*`, …) and
+// leaves naming to the domain-aware caller, since a provider's name lives on
+// `.profile.data.fullName`, not the generic `.presentation.data.name` this
+// lens has no way to resolve per bound-entity type. Returns
 // `identity.key AS actorKey` in place of the Personal Lens's `anchor`/`ns`
-// columns, since this is an actor-aggregate lens instead
-// (rbac-domain/lenses.go's capabilityRolesSpec RETURN contract). The
-// OPTIONAL MATCH pair yields a degenerate {key:null,...} entry per relation
-// when the identity has neither a residence nor a workplace — the expected
-// shape edgeIdentitySpec's own roles/anchors collects document — and the
-// lens's RealnessFilter:"key" drops those before EmptyBehavior evaluates.
+// columns, since this is an actor-aggregate lens
+// (rbac-domain/lenses.go's capabilityRolesSpec RETURN contract). Each
+// OPTIONAL MATCH yields a degenerate {key:null,...} entry when the identity
+// lacks that binding — the expected shape edgeIdentitySpec's own
+// roles/anchors collects document — and the lens's RealnessFilter:"key"
+// drops those before EmptyBehavior evaluates.
 const identityAnchorsSpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:residesIn]->(loc)
 OPTIONAL MATCH (loc)-[:containedIn]->(container)
 OPTIONAL MATCH (identity)-[:worksAt]->(work)
 OPTIONAL MATCH (work)-[:containedIn]->(workContainer)
+OPTIONAL MATCH (identity)<-[:identifiedBy]-(bound)
 RETURN
   identity.key AS actorKey,
   collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name, relation: 'residesIn'}) +
-  collect(DISTINCT {key: work.key, name: work.presentation.data.name, container: workContainer.key, containerName: workContainer.presentation.data.name, relation: 'worksAt'}) AS anchors
+  collect(DISTINCT {key: work.key, name: work.presentation.data.name, container: workContainer.key, containerName: workContainer.presentation.data.name, relation: 'worksAt'}) +
+  collect(DISTINCT {key: bound.key, relation: 'identifiedBy'}) AS anchors
 `
