@@ -1011,6 +1011,26 @@ an unvalidated `authContext.target` to scripts), so the clean fix may be one pro
 `authContext.target` when authorization did not go through a scope=self grant) rather than per-package edits.
 Filed to `lattice.md` as a security row; clinic is fixed here to make its own new grant sound.
 
+### Fire W2 (LoftSpace) build note
+
+**Inc 1 — applicant-hat grants audit SHIPPED (2026-07-24, `02be1f86`).** The §7.2 grants audit begins on the
+applicant hat. `SetApplicantProfile` and `WithdrawLeaseApplication` are self-service applicant ops but carried
+only an `operator` grant, so the loftspace FE submitted them via the trusted-tool admin mint
+(`submitOp("staff", …)`) — the dormant-grant failure mode ([[feedback_scoped_grant_dormant_if_write_uses_wildcard_actor]]:
+a scope=self capability masked by a wildcard-actor write). `CreateLeaseApplication` already modelled the fix; these
+were the two remaining applicant gaps. Each op gains a `consumer` scope=self grant (lease-signing 0.23.0→0.24.0) +
+an in-script owner guard, and its FE submit flips to `submitOp("applicant", …, {authContext:{target: state.applicant}})`
+(coupling the grant with the per-actor write, so it is not left dormant). Withdraw mirrors CreateLeaseApplication's
+`authContextTarget == applicant` guard verbatim (the applicant is already verified as the app's `applicationFor`
+endpoint); SetApplicantProfile derives the `applicationFor` link key from the actor's own id (no forgeable payload
+applicant) and rejects an absent link. The operator scope=any path is unchanged (the guard is a no-op when
+authContext is absent). Full adversarial review (opus) traced the guards against step-3 `authContext.target ==
+actor` and found no bypass/regression (keying on "authContext present" only further-restricts a scope=any caller,
+never escalates — consistent with the platform-level `lattice.md` security row on scope=any target forwarding).
+**Next (Inc 2):** the sign-in-first FE flip (delete the applicant picker + any-subject mint, whoami-driven hats) +
+the landlord submit migration off the admin mint (a landlord-role decision the design flags as possibly
+contract-ish — resolve or flag in-fire).
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
