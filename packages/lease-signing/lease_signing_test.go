@@ -182,10 +182,11 @@ func seedApplicant(t *testing.T, ctx context.Context, conn *substrate.Conn, id s
 	return key
 }
 
-// seedConsumerSelfCapDoc grants applicantKey (as its own actor) the
-// CreateLeaseApplication scope=self permission a real consumer holds
-// (permissions.go) — used only by the dedicated consumer-self-scope tests
-// below; the standing operator path (lsActorKey) never needs this.
+// seedConsumerSelfCapDoc grants applicantKey (as its own actor) the three
+// applicant scope=self permissions a real consumer holds (permissions.go):
+// create their own application, record its qualification profile, and withdraw
+// it — used only by the dedicated consumer-self-scope tests below; the standing
+// operator path (lsActorKey) never needs this.
 func seedConsumerSelfCapDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, applicantKey string) {
 	t.Helper()
 	now := time.Now().UTC()
@@ -198,6 +199,8 @@ func seedConsumerSelfCapDoc(t *testing.T, ctx context.Context, conn *substrate.C
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateLeaseApplication", Scope: "self"},
+			{OperationType: "SetApplicantProfile", Scope: "self"},
+			{OperationType: "WithdrawLeaseApplication", Scope: "self"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -1235,6 +1238,73 @@ func withdraw(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 	testutil.DriveOne(t, ctx, cp, cons, want)
 }
 
+// withdrawAsConsumer is withdraw on the consumer scope=self path: the acting
+// identity is authActor (Actor + authContext.target both authActor, the step-3
+// scope=self shape), while payload.applicant names the application's applicant.
+// The self-applicant is the case the new in-script guard binds — a consumer may
+// withdraw only their own application.
+func withdrawAsConsumer(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, unitKey, applicantKey, authActor string, want processor.MessageOutcome) {
+	t.Helper()
+	_, appID, _ := substrate.ParseVertexKey(leaseAppKey)
+	_, unitID, _ := substrate.ParseVertexKey(unitKey)
+	_, applicantID, _ := substrate.ParseVertexKey(applicantKey)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "WithdrawLeaseApplication",
+		Actor:         authActor,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","unit":"` + unitKey + `","applicant":"` + applicantKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{
+				leaseAppKey,
+				"lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID,
+				"lnk.leaseapp." + appID + ".applicationFor.identity." + applicantID,
+			},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+		},
+		AuthContext: &processor.AuthContext{Target: authActor},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
+// setProfileAsConsumer is setProfile on the consumer scope=self path: the acting
+// identity is authActor (Actor + authContext.target both authActor). The
+// consumer path declares the applicationFor self-link keyed on the actor's own
+// id — the read the in-script guard consults to bind the actor to their own
+// application.
+func setProfileAsConsumer(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, unit, authActor string, payload map[string]any, want processor.MessageOutcome) {
+	t.Helper()
+	payload["leaseAppKey"] = leaseAppKey
+	payload["unit"] = unit
+	b, _ := json.Marshal(payload)
+	_, appID, _ := substrate.ParseVertexKey(leaseAppKey)
+	_, unitID, _ := substrate.ParseVertexKey(unit)
+	_, authID, _ := substrate.ParseVertexKey(authActor)
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetApplicantProfile",
+		Actor:         authActor,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(b),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{
+				leaseAppKey,
+				"lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID,
+				"lnk.leaseapp." + appID + ".applicationFor.identity." + authID,
+			},
+			OptionalReads: []string{unit + ".listing"},
+		},
+		AuthContext: &processor.AuthContext{Target: authActor},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+}
+
 // guardLinkKey reconstructs the per-(applicant, unit) duplicate-guard link key
 // lnk.identity.<aid>.appliedToUnit.unit.<uid> from the full applicant + unit
 // vertex keys (the deterministic existence-uniqueness guard).
@@ -1300,6 +1370,48 @@ func TestWithdrawLeaseApplication(t *testing.T) {
 
 	// Double-withdraw the now-tombstoned first application → Rejected (UnknownLeaseApplication).
 	withdraw(t, ctx, conn, cp, cons, "wdDouble001", first, unit, applicant, processor.OutcomeRejected)
+}
+
+// TestWithdrawLeaseApplication_ConsumerSelfScope exercises the consumer
+// scope=self grant (permissions.go) end to end: step 3 authorizes scope=self by
+// checking authContext.target == actor, but never inspects the payload, so a
+// consumer could satisfy it while naming SOMEONE ELSE's application. The
+// in-script guard (scripts.go: authContextTarget == applicant) closes that gap —
+// an applicant withdraws only their own application. The operator path stays
+// covered by TestWithdrawLeaseApplication.
+func TestWithdrawLeaseApplication_ConsumerSelfScope(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "withdraw-consumer-self")
+
+	applicant := seedApplicant(t, ctx, conn, "BBWDCSAPPHJKMNPQRSTU")
+	attacker := seedApplicant(t, ctx, conn, "BBWDCSATKHJKMNPQRSTU")
+	unit := seedUnit(t, ctx, conn, "BBWDCSUNTHJKMNPQRSTU")
+	seedConsumerSelfCapDoc(t, ctx, conn, applicant)
+	seedConsumerSelfCapDoc(t, ctx, conn, attacker)
+
+	// The application is created FOR the applicant (operator path); the guard
+	// link is alive before any withdraw.
+	app := applyToUnit(t, ctx, conn, cp, cons, "wdcsCreate01", applicant, unit, processor.OutcomeAccepted)
+	if app == "" {
+		t.Fatalf("application should commit")
+	}
+
+	// Attacker acts as themselves (authContext.target == attacker) but names the
+	// victim as the application's applicant. alink resolves (the victim IS the
+	// applicant), so the ApplicantMismatch check passes — only the new
+	// authContextTarget == applicant guard rejects it (AuthDenied). The
+	// application must NOT be tombstoned.
+	withdrawAsConsumer(t, ctx, conn, cp, cons, "wdcsForge01", app, unit, applicant, attacker, processor.OutcomeRejected)
+	if d, _ := readDoc(t, ctx, conn, app)["isDeleted"].(bool); d {
+		t.Fatalf("a foreign-consumer withdraw must NOT tombstone the application")
+	}
+
+	// The applicant withdraws their OWN application → Accepted (tombstoned).
+	withdrawAsConsumer(t, ctx, conn, cp, cons, "wdcsSelf001", app, unit, applicant, applicant, processor.OutcomeAccepted)
+	if d, _ := readDoc(t, ctx, conn, app)["isDeleted"].(bool); !d {
+		t.Fatalf("a self withdraw must tombstone the application")
+	}
 }
 
 // TestSignLease_WritesSignatureAspect (test 8 — the assignTask gap closure; D5).
@@ -1687,4 +1799,45 @@ func TestSetApplicantProfile(t *testing.T) {
 		"annualIncome":     50000,
 		"employmentStatus": "employed",
 	}, processor.OutcomeRejected)
+}
+
+// TestSetApplicantProfile_ConsumerSelfScope exercises the consumer scope=self
+// grant (permissions.go) end to end: step 3 authorizes scope=self by checking
+// authContext.target == actor, but never inspects which application is named, so
+// a consumer could satisfy it while profiling SOMEONE ELSE's application. The
+// in-script guard (scripts.go: the applicationFor self-link keyed on the actor's
+// own id) closes that gap — an applicant profiles only their own application.
+// The operator path stays covered by TestSetApplicantProfile.
+func TestSetApplicantProfile_ConsumerSelfScope(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "setprofile-consumer-self")
+
+	applicant := seedApplicant(t, ctx, conn, "BBSPCSAPPHJKMNPQRSTU")
+	attacker := seedApplicant(t, ctx, conn, "BBSPCSATKHJKMNPQRSTU")
+	seedConsumerSelfCapDoc(t, ctx, conn, applicant)
+	seedConsumerSelfCapDoc(t, ctx, conn, attacker)
+
+	// The application (and its unit) are created FOR the applicant.
+	appKey := createApplication(t, ctx, conn, cp, cons, applicant)
+	unitKey := unitKeyFor(applicant)
+
+	profile := func() map[string]any {
+		return map[string]any{"annualIncome": 90000, "employmentStatus": "employed"}
+	}
+
+	// Attacker acts as themselves (authContext.target == attacker). The self-link
+	// keyed on the attacker's id does not exist on the applicant's application, so
+	// the guard rejects (AuthDenied); no .profile aspect is written.
+	setProfileAsConsumer(t, ctx, conn, cp, cons, "spcsForge01", appKey, unitKey, attacker, profile(), processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, appKey+".profile") {
+		t.Fatalf("a foreign-consumer SetApplicantProfile must NOT write the .profile aspect")
+	}
+
+	// The applicant profiles their OWN application → Accepted (.profile written).
+	setProfileAsConsumer(t, ctx, conn, cp, cons, "spcsSelf001", appKey, unitKey, applicant, profile(), processor.OutcomeAccepted)
+	pdata, _ := readDoc(t, ctx, conn, appKey+".profile")["data"].(map[string]any)
+	if got, _ := pdata["annualIncome"].(float64); got != 90000 {
+		t.Fatalf("self SetApplicantProfile should write annualIncome=90000, got %v", pdata["annualIncome"])
+	}
 }

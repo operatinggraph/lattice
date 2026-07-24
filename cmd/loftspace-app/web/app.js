@@ -325,12 +325,12 @@ function isTransientAuthLag(reply) {
 const retryBackoffsMs = [200, 400, 800, 1600];
 
 // submitOp posts an operation to the Gateway as the given actor kind:
-// "staff" — this app's own admin/operator actor, the trusted-tool posture
-// almost every write already used (SignLease/SetApplicantProfile/etc. are
-// still operator-only ops; see permissions.go). "applicant" — the signed-in
-// applicant's DEVICE identity (readToken() resolves state.applicant through
-// the claim ceremony below), used only for CreateLeaseApplication, the one op
-// with a real consumer scope=self grant (the design's proof case). The Gateway
+// "staff" — this app's own admin/operator actor, the trusted-tool posture the
+// landlord / staff writes still use (see permissions.go). "applicant" — the
+// signed-in applicant's DEVICE identity (readToken() resolves state.applicant
+// through the claim ceremony below), used for the applicant self-service ops
+// that carry a real consumer scope=self grant: CreateLeaseApplication,
+// SetApplicantProfile, and WithdrawLeaseApplication (persona-worlds §7.2). The Gateway
 // resolves the device token to the applicant's business identity via the
 // credential-bindings seam, so payload.applicant/authContext.target still name
 // the business identity (state.applicant), not the device identity. Because
@@ -1980,22 +1980,33 @@ async function submitProfile(ev, row) {
     if (cContact) payload.coApplicantContact = cContact;
   }
   try {
-    const reply = await submitOp("staff", {
-      operationType: "SetApplicantProfile",
-      class: "leaseapp",
-      // The appliesToUnit validation link is (a)-declared reads — required,
-      // absence is a caller error (UnitMismatch).
-      reads: [
-        row.entityKey,
-        "lnk.leaseapp." + shortKey(row.entityKey) + ".appliesToUnit.unit." + shortKey(row.unitKey),
-      ],
-      // The unit's listing rent (income-to-rent lookup) is (d)-declared
-      // optionalReads — absent falls through to an unknown income-to-rent
-      // signal, never a hard failure (scripts.go, script-read-posture-
-      // design.md §13 hard case 4).
-      optionalReads: [payload.unit + ".listing"],
-      payload,
-    });
+    // SetApplicantProfile carries the real consumer scope=self grant
+    // (persona-worlds §7.2): the applicant records the profile on their OWN
+    // application AS THEMSELVES, with authContext.target == the applicant, so
+    // the scope=self step-3 check and the in-script owner guard both hold.
+    const reply = await submitOp(
+      "applicant",
+      {
+        operationType: "SetApplicantProfile",
+        class: "leaseapp",
+        // The appliesToUnit validation link is (a)-declared reads — required,
+        // absence is a caller error (UnitMismatch). The applicationFor self-link
+        // (keyed on the acting identity) is the (a) read the in-script owner
+        // guard consults to bind the actor to their own application.
+        reads: [
+          row.entityKey,
+          "lnk.leaseapp." + shortKey(row.entityKey) + ".appliesToUnit.unit." + shortKey(row.unitKey),
+          "lnk.leaseapp." + shortKey(row.entityKey) + ".applicationFor.identity." + shortKey(state.applicant),
+        ],
+        // The unit's listing rent (income-to-rent lookup) is (d)-declared
+        // optionalReads — absent falls through to an unknown income-to-rent
+        // signal, never a hard failure (scripts.go, script-read-posture-
+        // design.md §13 hard case 4).
+        optionalReads: [payload.unit + ".listing"],
+        payload,
+      },
+      { authContext: { target: state.applicant } }
+    );
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Profile rejected — " + msg, "err");
@@ -2019,20 +2030,29 @@ async function withdrawApplication(row) {
   const unitId = shortKey(row.unitKey);
   const applicantId = shortKey(state.applicant);
   try {
-    // reads carries the two required validation links (script-read-posture-design.md
-    // §13, class-a); optionalReads carries the duplicate-application guard link
-    // WithdrawLeaseApplication frees (class-d) — absent when never guarded.
-    const reply = await submitOp("staff", {
-      operationType: "WithdrawLeaseApplication",
-      class: "leaseapp",
-      reads: [
-        row.entityKey,
-        "lnk.leaseapp." + appId + ".appliesToUnit.unit." + unitId,
-        "lnk.leaseapp." + appId + ".applicationFor.identity." + applicantId,
-      ],
-      optionalReads: ["lnk.identity." + applicantId + ".appliedToUnit.unit." + unitId],
-      payload: { leaseAppKey: row.entityKey, unit: row.unitKey, applicant: state.applicant },
-    });
+    // WithdrawLeaseApplication carries the real consumer scope=self grant
+    // (persona-worlds §7.2): the applicant withdraws their OWN application AS
+    // THEMSELVES, with authContext.target == the applicant, so the scope=self
+    // step-3 check and the in-script owner guard (authContextTarget ==
+    // applicant) both hold. reads carries the two required validation links
+    // (script-read-posture-design.md §13, class-a); optionalReads carries the
+    // duplicate-application guard link WithdrawLeaseApplication frees (class-d)
+    // — absent when never guarded.
+    const reply = await submitOp(
+      "applicant",
+      {
+        operationType: "WithdrawLeaseApplication",
+        class: "leaseapp",
+        reads: [
+          row.entityKey,
+          "lnk.leaseapp." + appId + ".appliesToUnit.unit." + unitId,
+          "lnk.leaseapp." + appId + ".applicationFor.identity." + applicantId,
+        ],
+        optionalReads: ["lnk.identity." + applicantId + ".appliedToUnit.unit." + unitId],
+        payload: { leaseAppKey: row.entityKey, unit: row.unitKey, applicant: state.applicant },
+      },
+      { authContext: { target: state.applicant } }
+    );
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not withdraw — " + msg, "err");

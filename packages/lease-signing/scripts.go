@@ -656,6 +656,19 @@ def execute(state, op):
         if alink == None or alink.isDeleted:
             fail("ApplicantMismatch: " + applicant + " is not the applicant of application " + app_key)
 
+        # Applicant-self (consumer's scope=self grant only): step 3 authorizes
+        # scope=self by checking authContext.target == actor (Contract #6), but
+        # never looks at the payload — a consumer could satisfy that check while
+        # naming a DIFFERENT identity as the applicant and free someone else's
+        # guard. The applicant is already verified above as THIS application's
+        # applicationFor endpoint, so requiring authContextTarget == applicant
+        # binds the acting identity to that endpoint: a consumer withdraws only
+        # their own application. The operator path (no authContext, scope=any —
+        # the trusted-tool / orchestrator) stays unconstrained, mirroring
+        # CreateLeaseApplication's applicant-self guard.
+        if op.authContextTarget != "" and op.authContextTarget != applicant:
+            fail("AuthDenied: an applicant may only withdraw their own application")
+
         # Tombstone the application. The applicationFor / appliesToUnit links are
         # left in place (non-cascading tombstone, the clinic-domain precedent) — they
         # dangle off a tombstoned anchor every reader filters.
@@ -692,6 +705,25 @@ def execute(state, op):
         _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
             fail("UnknownLeaseApplication: " + app_key)
+
+        # Applicant-self (consumer's scope=self grant only): step 3 authorizes
+        # scope=self by checking authContext.target == actor (Contract #6), but
+        # never looks at which application is being profiled — a consumer could
+        # satisfy that check while naming SOMEONE ELSE's application. The script
+        # closes that gap by requiring the acting identity to be THIS
+        # application's applicant, verified via the deterministic applicationFor
+        # link keyed on the actor's own id (no payload applicant field to forge).
+        # The operator path (no authContext, scope=any — the trusted-tool)
+        # stays unconstrained, mirroring CreateLeaseApplication's self guard.
+        if op.authContextTarget != "":
+            _, self_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
+            self_app_lnk = "lnk.leaseapp." + app_id + ".applicationFor.identity." + self_id
+            # read-posture: (a) declared reads at SetApplicantProfile dispatch on
+            # the consumer path (validation link; absence — AuthDenied — means
+            # the caller is not this application's applicant).
+            self_link = kv.Read(self_app_lnk)
+            if self_link == None or self_link.isDeleted:
+                fail("AuthDenied: an applicant may only set the profile on their own application")
 
         # The unit the application applies to — needed to read its listing rent for
         # the income-to-rent derivation. Verify it is genuinely THIS application's

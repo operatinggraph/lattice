@@ -26,6 +26,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     checked at step 3 (Contract #6, mirroring identity-domain's
 //     ClaimIdentity); the Starlark script separately requires
 //     payload.applicant == actor, since step 3 never sees the payload.
+//   - SetApplicantProfile and WithdrawLeaseApplication also grant `consumer`,
+//     scope=self (persona-worlds §7.2 applicant-hat grants audit): both are
+//     self-service applicant ops (record my qualification profile, withdraw my
+//     own application), so a signed-in applicant submits them AS THEMSELF, not
+//     via the trusted-tool operator mint. Step 3 checks authContext.target ==
+//     actor; the script closes the payload gap the CreateLeaseApplication row
+//     already closes — it requires the acting identity to be the application's
+//     own applicant, verified via the deterministic applicationFor link, so a
+//     consumer can only act on their own application. The operator (scope=any,
+//     no authContext) path is unchanged.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -83,6 +93,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "WithdrawLeaseApplication",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to withdraw their OWN lease application (the acting identity is the application's applicant — verified via the applicationFor link).",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
 			OperationType: "DecideLeaseApplication",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit DecideLeaseApplication (approve / decline an application via the trusted-tool app — the human gate the listing-flip waits behind; the front-desk \"applications to review\" beat).",
@@ -93,6 +109,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit SetApplicantProfile (the applicant records their qualification profile via the trusted-tool app — income / employment / references / co-applicant / guarantor; same operator model as SignLease).",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "SetApplicantProfile",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to record the qualification profile on their OWN lease application (the acting identity is the application's applicant — verified via the applicationFor link).",
+			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: "OpenRenewal",
