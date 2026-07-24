@@ -2,6 +2,7 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-19 · `e0ab660` · [refractor] ProtectedAdapter forwards ListKeys — the wrapper broke the KeyLister assertion, so landlordUnitsRead + landlordLeaseApplicationsRead silently never retracted; adapter-set invariant pinned
 - 2026-07-19 · `3d93697` · [pkgmgr] diffManifest revives a tombstoned key on re-add — deterministic entity keys made a dropped-then-re-added lens/role permanently uninstallable (create asserts rev 0 over subject history)
 - 2026-07-19 · `73557e8` · [refractor] grant-lens DiffRetraction scoped to its own `grant_source` (now a declared LensSpec field, enforced per write) + fail closed on a non-KeyLister adapter at activation
 - 2026-07-19 · `1e7f49c` · [service-location] Wire* revives a tombstoned link — update semantics + the link key as an optionalRead at every dispatcher; `op submit --context-hint-optional-reads`; unwire→re-wire vectors

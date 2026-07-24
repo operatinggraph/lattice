@@ -182,6 +182,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-24 · `acdcfc7c` · [controlauth,test] flush the responder SUB before the echo helpers return — kills the `no responders available` unit-1 flake (client raced the responder's subscription); deterministic, 20x -p4 clean
 - 2026-07-24 · `657861dd` · [gateway] `/v1/actor` answers its own CORS preflight — `handleWhoami` sets Vary/allow-listed headers + OPTIONS→204 before the GET-guard (mirrors `handleOperationStatus`); completes the whoami-hats browser surface
 - 2026-07-24 · `6aa4959c` · [refractor,test] manifest.me self-anchored reprojection proven sound — e2e (existing personal row grows on a 2nd holdsRole link, D1 self-gate active); filed "ordering-token" freeze mechanism disproven, no server bug
 - 2026-07-24 · `473929e3` · [rbac,clinic,wellness,service] revive a tombstoned grant instead of failing — grant_link/revive at 6 sites so a RevokeRole'd identity + re-bound provider can be re-granted; pkg versions bumped
@@ -216,5 +217,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-20 · `5b58f66` · [weaver] `__effect` window counts attempts, not dispatches — a collapse-only reclaim books no unanswerable episode, and a sweep-won close is credited; both LensEffectMismatch false-alarm biases
 - 2026-07-19 · `3a5cd35` · [health] classifyKey classifies component heartbeats structurally — gateway/bridge/objmgr/chronicler/vault/4 vertical apps no longer read "unknown" forever, and their error issues can reach red
 - 2026-07-19 · `7e5f1e6` · [processor] step 8 preserves the stored document across update/tombstone — creation triplet carries over (unforgeable), a tombstone keeps its whole body; sensitive aspects gain the soft-delete decrypt guard
-- 2026-07-19 · `e0ab660` · [refractor] ProtectedAdapter forwards ListKeys — the wrapper broke the KeyLister assertion, so landlordUnitsRead + landlordLeaseApplicationsRead silently never retracted; adapter-set invariant pinned
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*
