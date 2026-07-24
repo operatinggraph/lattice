@@ -107,9 +107,10 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now: `Forgeable authContext.target` ★★★** — ratified 2026-07-24, two fires, Fire 1
-> (primitive + four-package migration) is the next Steward pick and closes the ★★★ security row; Fire 2
-> (identity-domain tighten + the mandatory `authcontext-target` lint gate) follows. Beyond it, every
+> 🎯 **Build-ready now — two ★★★ ratified 2026-07-24, both clean picks.** (1) `Forgeable
+> authContext.target`: Fire 1 (primitive + four-package migration) closes the security row, Fire 2
+> (identity-domain tighten + the mandatory `authcontext-target` lint gate) follows. (2) `Read-grant
+> dual-enumeration S2`: one L fire, ends the dual-authored reachability walk. Beyond them every
 > `✅ ratified` row is done or driver-blocked and the open `📋 ready` rows are Whetstone's (embedded-NATS
 > flakes) or parking-lot. A stale callout starves the lane — whoever ships the next pick renames this.
 
@@ -153,7 +154,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — FTS interim consumer SHIPPED (`b105cf5`); OpenSearch adapter itself still has no consumer |
-| **Read-grant/lens dual-enumeration footgun** | Every non-self-anchored Personal lens re-states its reachability walk in a cap-read producer; drift = silent row drops (fail-closed) or over-grant. S1: lens-testkit coverage proof (anchors ⊆ grants over a seeded topology) + structural lint (every projected anchor kind has a producer branch). S2: one pkgmgr anchor-walk declaration compiles both (D1 runtime independence stays). | ★★★ | M (S1) · L (S2) | 📐 awaiting-Andrew (S2) · [design](../../implementation-artifacts/read-grant-single-source-walk-design.md) · S1 shipped (Done log) |
+| **Read-grant/lens dual-enumeration footgun** | Every non-self-anchored Personal lens re-states its reachability walk in a cap-read producer; drift = silent row drops (fail-closed) or over-grant. S1 (shipped): testkit coverage proof + structural lint. S2: one pkgmgr anchor-walk declaration compiles both (D1 runtime independence stays). | ★★★ | M (S1) · L (S2) | ✅ ratified (2026-07-24, S2 = one L fire) · [design](../../implementation-artifacts/read-grant-single-source-walk-design.md) |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
 
 ### Refinements & ops

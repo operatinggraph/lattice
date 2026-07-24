@@ -1,9 +1,18 @@
 # Read-grant single-source walk — one `AnchorWalk` declaration compiles both enumerations (dual-enumeration S2)
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-07-23 · Lattice lane
-(backlog row: *Read-grant/lens dual-enumeration footgun*, S2)
+**Status: ✅ Andrew-ratified (2026-07-24) — build-ready as ONE L fire** · Designer fire 2026-07-23 ·
+Lattice lane (backlog row: *Read-grant/lens dual-enumeration footgun*, S2)
 
-## For Andrew
+**Ratification decisions.** Ratified as designed, with one change: the Fire 1 / Fire 2 split is
+**collapsed into a single L fire** (§8) — the primitive's only consumer is the migration, so the
+inert-compiler window is removed rather than merely bounded. No fork, no contract change. Session due
+diligence re-verified every citation independently against code (the three producers, the
+character-identical appointment chain at `lenses.go:774`/`:943`, the four-walk resident fan-out, the
+audit-only `via`, the dormant `EmptyBehavior:"delete"`, and the S1 base the flip depends on) — no
+drift; one stale neighbour pointer in §2 corrected (the `manifest.me` gap closed 2026-07-24,
+`6aa4959c`).
+
+## For Andrew (as presented at ratification)
 
 Two lines: every non-self-anchored Personal lens states its actor→anchor reachability walk **twice**
 — once in the data-lens cypher, once in a hand-authored `actorAggregate` cap-read producer — and drift
@@ -96,11 +105,12 @@ prove the *compiler*, not the author.
   design generates one). There is no composite-key row-set to shrink, so no missing-Delete
   over-grant window. The target is the NATS-KV capability bucket — CAS-guarded, the same runtime
   path the hand-authored producers use today.
-- **In-flight collision check: none.** The only 📐 design in flight
-  (`authcontext-target-validated-primitive-design.md`) is write-path guard work. The nearest neighbor,
-  the `manifest.me` me-row reconciliation gap (persona-worlds-design.md §10, 📋 ready), shares the
-  edge-manifest package but is presentation-only and touches the guarded-write ordering token, not
-  this seam — the Steward should just not run the two fires concurrently in the same files.
+- **In-flight collision check: none.** The neighbouring 📐 design at the time of writing
+  (`authcontext-target-validated-primitive-design.md`, ratified 2026-07-24) is write-path guard work on
+  a disjoint seam. The nearest edge-manifest neighbour — the `manifest.me` me-row reconciliation gap —
+  **closed on 2026-07-24** (`6aa4959c`: the self-anchored Personal-lens reprojection chain was proven
+  sound and e2e-guarded; the filed "ordering-token" mechanism was disproven, so there was no server
+  bug to fix). No concurrent-fire caution remains.
 
 ## 3. The shape
 
@@ -355,8 +365,9 @@ only expressible one.
   the target is per-actor overwrite docs that reproject from Core KV).
 - **Manifest ordering:** `VerifyManifest` compares lens canonical names *index-wise*
   (`manifest.go:120-144`), and today's producers sit interleaved at positions 14–16 of `Lenses()`.
-  Generated producers are appended after the declared lenses in `ReadGrantDomains` order, and Fire 2
-  reorders the YAML manifest to match — a one-time, mechanical edit; no manifest-format change.
+  Generated producers are appended after the declared lenses in `ReadGrantDomains` order, and the
+  migration step reorders the YAML manifest to match — a one-time, mechanical edit; no
+  manifest-format change.
 - `via` content and binding-less-identity doc deletion change as called out For-Andrew (both pinned
   by the §6 migration proof); no load-bearing consumer of either (verified,
   `capabilityread.go:33-35`, `:104-106`).
@@ -366,20 +377,24 @@ only expressible one.
 
 ## 8. Decomposition for the Steward
 
-- **Fire 1 (M): the primitive.** `AnchorWalk` + `ReadGrantDomains` on
-  `internal/pkgmgr/definition.go`; the exported expansion pass (composition + validation + prefix
-  factoring + positional renaming) wired before every `validateAll`/`VerifyManifest` site; compiler
-  golden + validation-failure tests. Green and inert for at most one steward cadence; the consumer
-  is named and next (edge-manifest, Fire 2).
-- **Fire 2 (M–L): the migration + the flip.** edge-manifest's 13 lenses gain `Walk`s + tails (the 5
-  required-MATCH lenses' inline `WHERE`s hoisted per §3.2); the 3 hand-authored producer specs
-  deleted; `ReadGrantDomains` declared; YAML manifest reordered (§7); the three-part migration
-  equivalence test (then retired); testkit re-aimed at the expansion pass; `lint-lens-anchors` v2
-  lands here (same-fire, per §6); package version bump; live-stack verify per the run-full-stack
-  loop.
+**ONE L fire** (ratified 2026-07-24 — the two-fire split is withdrawn, not merely permitted). The
+primitive's only consumer is the edge-manifest migration, so they are coupled-ships-together per
+fewer-larger-fires, and taking them separately would land a green-but-inert compiler for a steward
+cadence with no value realized. Internal build order, each step leaving the tree green:
 
-Fires 1+2 may be taken as one L fire with this internal order if the Steward prefers — the only hard
-coupling is lint-v2-with-migration.
+1. **The primitive.** `AnchorWalk` + `ReadGrantDomains` on `internal/pkgmgr/definition.go`; the
+   exported expansion pass (composition + validation + prefix factoring + positional renaming) wired
+   before every `validateAll`/`VerifyManifest` site; compiler golden + validation-failure tests.
+2. **The migration.** edge-manifest's 13 lenses gain `Walk`s + tails (the 5 required-MATCH lenses'
+   inline `WHERE`s hoisted per §3.2); the 3 hand-authored producer specs deleted; `ReadGrantDomains`
+   declared; YAML manifest reordered (§7); the three-part migration equivalence test (then retired);
+   testkit re-aimed at the expansion pass; package version bump.
+3. **The lint flip.** `lint-lens-anchors` v2 — **hard-coupled to step 2 and non-optional**: the
+   current gate resolves hand-authored spec constants (`lint-lens-anchors.go:248-255`), so once
+   producers are generated it goes empty and would silently stop guarding every non-self lens. The
+   flip is what keeps the anchors⊆grants invariant enforced against the *next* author, which is the
+   whole point of S1+S2 (see [[feedback_lint_is_never_optional]]).
+4. **Live-stack verify** per the run-full-stack loop.
 
 ## 9. Adversarial pass (pre-build gate — run this fire, findings folded)
 
