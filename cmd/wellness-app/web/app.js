@@ -269,6 +269,12 @@ async function renderSchedule() {
         // (d)-declared optionalReads — absence just falls through to the
         // standard rate (ddls.go, script-read-posture-design.md §13).
         const optionalReads = seatKeys(se.sessionKey, se.capacity);
+        // The per-(session, booker) double-book guard (ddls.go). It MUST be
+        // declared, not merely relied on via CreateOnly-at-commit like the
+        // seats: the script reads its current state to tell absent (mint) from
+        // tombstoned (OCC-revive a re-book) from alive (clean DoubleBooked
+        // reject). Absence is the common case (first book), hence optionalReads.
+        optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
         if (leaseAppKey) {
           optionalReads.push(
             leaseAppKey,

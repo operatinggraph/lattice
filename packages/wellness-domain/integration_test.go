@@ -317,10 +317,14 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	// class over the session's capacity dimension (20 covers every capacity
 	// this suite's fixtures use; claim_first_free_seat bounds it at 200).
 	optionalReads := wdSeatKeys(sessionKey, 20)
+	// The per-(session, booker) double-book guard (ddls.go) — declared so the
+	// script can classify absent/tombstoned/alive (a re-book after cancel needs
+	// the tombstoned revision to OCC-revive).
+	_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
+	optionalReads = append(optionalReads, sessionKey+".bkr"+bookerID)
 	if leaseAppKey != "" {
 		payloadMap["leaseAppKey"] = leaseAppKey
 		_, leaseID, _ := substrate.ParseVertexKey(leaseAppKey)
-		_, bookerID, _ := substrate.ParseVertexKey(bookerKey)
 		optionalReads = append(optionalReads, leaseAppKey, leaseAppKey+".tenancy",
 			"lnk.leaseapp."+leaseID+".applicationFor.identity."+bookerID)
 	}
@@ -567,6 +571,133 @@ func TestCancelBooking_ReleasesSeatForNextClaimant(t *testing.T) {
 	}
 }
 
+// TestCreateBooking_RejectsDoubleBook proves the per-(session, booker)
+// double-book guard: a booker already holding a live booking on a session
+// cannot book it again. Capacity is 20 (not 1) so the SECOND booking cannot be
+// rejected for SessionFull — the only thing that rejects it is the guard; and
+// the FIRST booking being Accepted is the positive vector that keeps this from
+// passing for the wrong reason (feedback_negative_test_false_pass).
+func TestCreateBooking_RejectsDoubleBook(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookingdouble")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudio000020", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000020", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLBKERDBL2HJKMNP")
+
+	_, first := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000020", sessionKey, bookerKey, "")
+	if first != processor.OutcomeAccepted {
+		t.Fatalf("first CreateBooking outcome = %v, want Accepted", first)
+	}
+
+	_, second := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000021", sessionKey, bookerKey, "")
+	if second != processor.OutcomeRejected {
+		t.Fatalf("second CreateBooking (same booker + session, seats remain) outcome = %v, want Rejected (DoubleBooked)", second)
+	}
+
+	// A DIFFERENT booker on the same session is unaffected — the guard is
+	// per-(session, booker), not a per-session lock.
+	otherBookerKey := seedIdentity(t, ctx, conn, "BBWELLBKERUTH2HJKMNP")
+	_, other := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000022", sessionKey, otherBookerKey, "")
+	if other != processor.OutcomeAccepted {
+		t.Fatalf("a different booker on the same session outcome = %v, want Accepted", other)
+	}
+}
+
+// TestCreateBooking_RejectsPastSession proves the soft past-time guard: a
+// booking whose op.submittedAt is at or after the session's startsAt is
+// rejected (SessionInPast), mirroring clinic's ScheduleInPast. The session is
+// booked once BEFORE its start (Accepted, the positive vector) and once AFTER
+// (Rejected) — same session, same capacity, so the only difference is time.
+func TestCreateBooking_RejectsPastSession(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookingpast")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudio000021", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000021", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+
+	// Positive vector: booking BEFORE the session starts is accepted (the
+	// createBooking helper submits at 2026-07-07T12:00:00Z, well before start).
+	earlyBookerKey := seedIdentity(t, ctx, conn, "BBWELLBKEREAR2HJKMNP")
+	_, early := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000023", sessionKey, earlyBookerKey, "")
+	if early != processor.OutcomeAccepted {
+		t.Fatalf("booking before start outcome = %v, want Accepted", early)
+	}
+
+	// Negative vector: submittedAt AFTER the session's startsAt → SessionInPast.
+	lateBookerKey := seedIdentity(t, ctx, conn, "BBWELLBKERLAT2HJKMNP")
+	_, lateBookerID, _ := substrate.ParseVertexKey(lateBookerKey)
+	reqID := testutil.GenReqID("wdcreatebookin000024")
+	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": lateBookerKey})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T10:00:00Z", // after the 09:00 start
+		Class:         "booking",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{sessionKey, sessionKey + ".schedule", lateBookerKey},
+			OptionalReads: append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+lateBookerID),
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("booking after session start outcome = %v, want Rejected (SessionInPast)", outcome)
+	}
+}
+
+// TestCancelBooking_ReleasesGuardForRebook proves the double-book guard is
+// released on cancel so the same booker can re-book the same session — the
+// path that would silently fail if the guard were undeclared (its OCC-revive
+// needs the tombstoned revision from state). Distinct from the seat-release
+// test: same booker, re-booking the same session.
+func TestCancelBooking_ReleasesGuardForRebook(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookingrebook")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudio000022", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000022", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLBKERRBK2HJKMNP")
+
+	bookingKey, first := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000025", sessionKey, bookerKey, "")
+	if first != processor.OutcomeAccepted {
+		t.Fatalf("first CreateBooking outcome = %v, want Accepted", first)
+	}
+
+	// A re-book WITHOUT cancelling must still be rejected (guard is live).
+	_, dup := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000026", sessionKey, bookerKey, "")
+	if dup != processor.OutcomeRejected {
+		t.Fatalf("re-book before cancel outcome = %v, want Rejected (guard still live)", dup)
+	}
+
+	cancelReqID := testutil.GenReqID("wdcancelbookin000010")
+	cancelEnv := &processor.OperationEnvelope{
+		RequestID:     cancelReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CancelBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{
+			bookingKey, bookingKey + ".status",
+			forSessionLnkKey(t, bookingKey, sessionKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, cancelEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// The guard was released, so the booker can re-book — this OCC-revives the
+	// tombstoned guard aspect.
+	_, rebook := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000027", sessionKey, bookerKey, "")
+	if rebook != processor.OutcomeAccepted {
+		t.Fatalf("re-book after cancel outcome = %v, want Accepted (guard released + revived)", rebook)
+	}
+}
+
 func TestTombstoneSession_ReleasesStudioSlotCells(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "sessiontombstone")
@@ -629,7 +760,7 @@ func TestCreateBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{sessionKey, sessionKey + ".schedule", domainConsumerKey}, OptionalReads: wdSeatKeys(sessionKey, 20)},
+		ContextHint:   &processor.ContextHint{Reads: []string{sessionKey, sessionKey + ".schedule", domainConsumerKey}, OptionalReads: append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+domainConsumerID)},
 		AuthContext:   &processor.AuthContext{Target: domainConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -657,6 +788,7 @@ func TestCreateBooking_ConsumerSelfScope_RejectedForOtherBooker(t *testing.T) {
 
 	reqID := testutil.GenReqID("wdselfbooking000002")
 	payload, _ := json.Marshal(map[string]any{"session": sessionKey, "booker": otherBookerKey})
+	_, otherBookerID, _ := substrate.ParseVertexKey(otherBookerKey)
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
@@ -665,7 +797,7 @@ func TestCreateBooking_ConsumerSelfScope_RejectedForOtherBooker(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Reads: []string{sessionKey, sessionKey + ".schedule", otherBookerKey}, OptionalReads: wdSeatKeys(sessionKey, 20)},
+		ContextHint:   &processor.ContextHint{Reads: []string{sessionKey, sessionKey + ".schedule", otherBookerKey}, OptionalReads: append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+otherBookerID)},
 		AuthContext:   &processor.AuthContext{Target: domainConsumerKey},
 	}
 	testutil.PublishOp(t, conn, env)

@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.9.1
+version: 0.10.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -7,7 +7,12 @@ description: |
   15-minute cell (double-session lock, mirrors clinic-domain's
   providerSlotClaim). CreateBooking claims the first free sessionSeatClaim
   within the session's capacity (SessionFull once exhausted — the same
-  CreateOnly idiom extended over a seat-index dimension) and, given an
+  CreateOnly idiom extended over a seat-index dimension), rejects a booking on
+  an already-started/ended session (SessionInPast, mirroring clinic's
+  ScheduleInPast) and a booker's second live booking on the same session
+  (DoubleBooked, a deterministic per-(session, booker) sessionBookerClaim guard
+  mirroring cafe's cafeOpenTabGuard, released by CancelBooking so a re-book
+  re-claims it) and, given an
   optional leaseAppKey, verifies residency via lease-signing's applicationFor
   link before granting the resident rate (a mismatch falls through to
   standard, never a hard failure). BindInstructorIdentity binds an instructor
@@ -43,6 +48,8 @@ declares:
     - canonicalName: studioSlotClaim
       class: meta.ddl.aspectType
     - canonicalName: sessionSeatClaim
+      class: meta.ddl.aspectType
+    - canonicalName: sessionBookerClaim
       class: meta.ddl.aspectType
     - canonicalName: bookingStatus
       class: meta.ddl.aspectType

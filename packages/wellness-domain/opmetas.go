@@ -67,6 +67,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField:   "session",
 				TargetType:    "session",
 				ContextParams: map[string]string{"booker": "{actor}"},
+				// The per-(session, booker) double-book guard. It must be
+				// DECLARED (not merely relied on via CreateOnly-at-commit like
+				// the seat claim): the script reads its current state to
+				// distinguish absent (mint) from tombstoned (OCC-revive a prior
+				// cancelled booking's guard) from alive (clean DoubleBooked
+				// reject) — an undeclared guard would fail the re-book-after-
+				// cancel path. booker = {actor} here, so {actor:id} is its bare
+				// id. Absence is the common case (first book), hence optional.
+				OptionalReads: []string{
+					"vtx.session.{payload.session:id}.bkr{actor:id}",
+				},
 			},
 		},
 		{

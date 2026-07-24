@@ -26,18 +26,19 @@ const (
 	bookingVertexDDL    = "booking"
 	instructorVertexDDL = "instructor"
 
-	studioProfileAspectDDL    = "studioProfile"
-	sessionScheduleAspectDDL  = "sessionSchedule"
-	studioSlotClaimAspectDDL  = "studioSlotClaim"
-	sessionSeatClaimAspectDDL = "sessionSeatClaim"
-	bookingStatusAspectDDL    = "bookingStatus"
+	studioProfileAspectDDL      = "studioProfile"
+	sessionScheduleAspectDDL    = "sessionSchedule"
+	studioSlotClaimAspectDDL    = "studioSlotClaim"
+	sessionSeatClaimAspectDDL   = "sessionSeatClaim"
+	sessionBookerClaimAspectDDL = "sessionBookerClaim"
+	bookingStatusAspectDDL      = "bookingStatus"
 
 	instructorProfileAspectDDL       = "instructorProfile"
 	instructorIdentityClaimAspectDDL = "instructorIdentityClaim"
 	identityInstructorClaimAspectDDL = "identityInstructorClaim"
 )
 
-// DDLs returns the package's twelve DDL meta-vertex declarations:
+// DDLs returns the package's thirteen DDL meta-vertex declarations:
 //
 //   - studio (vertexType) — owns CreateStudio + TombstoneStudio.
 //   - session (vertexType) — owns CreateSession + TombstoneSession.
@@ -46,8 +47,9 @@ const (
 //     BindInstructorIdentity (the provider-archetype binding,
 //     persona-worlds-design.md Fire W0).
 //   - studioProfile / sessionSchedule / studioSlotClaim / sessionSeatClaim /
-//     bookingStatus / instructorProfile / instructorIdentityClaim /
-//     identityInstructorClaim (aspectType) — step-6 write gates.
+//     sessionBookerClaim / bookingStatus / instructorProfile /
+//     instructorIdentityClaim / identityInstructorClaim (aspectType) —
+//     step-6 write gates.
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
 // loftspace-domain): the scripts read ONLY by known key. No prefix scans, no
@@ -62,6 +64,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		sessionScheduleAspectTypeDDL(),
 		studioSlotClaimAspectTypeDDL(),
 		sessionSeatClaimAspectTypeDDL(),
+		sessionBookerClaimAspectTypeDDL(),
 		bookingStatusAspectTypeDDL(),
 		instructorProfileAspectTypeDDL(),
 		instructorIdentityClaimAspectTypeDDL(),
@@ -449,24 +452,26 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateBooking"},
 		Description: "Booking status aspect (wellness). Stored as vtx.booking.<NanoID>.status (class " +
-			"bookingStatus) = {value: booked, rate: standard|resident, seat}. Non-sensitive. Written by " +
+			"bookingStatus) = {value: booked, rate: standard|resident, seat, booker}. Non-sensitive. Written by " +
 			"CreateBooking (whose booking vertexType DDL owns the script); this aspect-type DDL is the step-6 " +
-			"write gate. seat is internal bookkeeping (the claimed seat index) CancelBooking reads to recompute " +
-			"which vtx.session.<s>.seat<n> cell to release, without a stored relationship-as-key-list (Contract " +
-			"#1). Declaration-only: no op handler.",
+			"write gate. seat + booker are internal bookkeeping (the claimed seat index, the booker's identity " +
+			"key) CancelBooking reads to recompute which vtx.session.<s>.seat<n> cell and vtx.session.<s>.bkr<b> " +
+			"double-book guard to release — a single anchor each, NOT a stored relationship-as-key-list (the booker " +
+			"relationship stays the bookedBy link, Contract #1). Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["booked"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"}}}`,
+			`{"value":{"type":"string","enum":["booked"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"booker":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value": "Booking status: booked (the only value this increment writes).",
-			"rate":  "standard | resident, derived by CreateBooking from the optional leaseAppKey residency check.",
-			"seat":  "The claimed seat index on the session (internal bookkeeping; CancelBooking reads it to release the correct seat cell).",
+			"value":  "Booking status: booked (the only value this increment writes).",
+			"rate":   "standard | resident, derived by CreateBooking from the optional leaseAppKey residency check.",
+			"seat":   "The claimed seat index on the session (internal bookkeeping; CancelBooking reads it to release the correct seat cell).",
+			"booker": "The booker's full vtx.identity.<NanoID> key (internal bookkeeping; CancelBooking reads it to release the correct per-(session, booker) double-book guard). A single anchor, not a relationship — the bookedBy link carries the relationship.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "booking status aspect",
-				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3},
+				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L"},
 				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CreateBooking.",
 			},
 		},
@@ -504,6 +509,48 @@ func sessionSeatClaimAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "session seat-claim aspect",
 				Payload:         map[string]any{},
 				ExpectedOutcome: "Stored as vtx.session.<NanoID>.seat<n>; claimed by CreateBooking, released by CancelBooking.",
+			},
+		},
+	}
+}
+
+// sessionBookerClaimAspectTypeDDL declares the .bkr<bookerId> aspect (class
+// sessionBookerClaim) — a deterministic per-(session, booker) existence marker
+// on the session hub that enforces at-most-one live booking per booker per
+// session. The exact repeatable-session uniqueness idiom cafe-domain's
+// cafeOpenTabGuard uses (create-only on a lease's first tab, OCC-revived from a
+// prior settled+tombstoned guard) and clinic-domain's patientSlotClaim (a
+// per-actor guard aspect with a dimension-encoded localName) — here the
+// dimension is the booker id. CreateBooking claims it (a second live booking by
+// the same booker on the same session collides at revision 0 → DoubleBooked);
+// CancelBooking tombstones it, so a later re-book OCC-revives it. Declaration-
+// only; NON-sensitive; created on demand, no CreateSession init needed.
+func sessionBookerClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     sessionBookerClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateBooking", "CancelBooking"},
+		Description: "Session booker-claim guard aspect (wellness). Stored as vtx.session.<NanoID>.bkr<bookerId> " +
+			"(class sessionBookerClaim) = {} — a pure existence marker, no relationship field (the booker " +
+			"relationship stays the bookedBy link, Contract #1). <bookerId> is the booking booker's bare " +
+			"Contract #1 identity id, so the KEY ITSELF is the (session, booker) lock: CreateBooking claims it " +
+			"CreateOnly and a SECOND live booking by the same booker on the same session collides at revision 0 " +
+			"and is rejected (DoubleBooked), while a booker booking a DIFFERENT session claims a different key and " +
+			"is unaffected. Repeatable, mirroring cafe-domain's cafeOpenTabGuard: CancelBooking tombstones the " +
+			"guard (unconditioned — a stale-tombstone race can only free it early, re-earnable on the next book), " +
+			"so a later re-book OCC-revives it from its prior revision. Non-sensitive; created on demand, no " +
+			"CreateSession init needed. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. The lock's job is done by the KEY (session hub + booker id), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "session booker-claim guard aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.session.<NanoID>.bkr<bookerId>; claimed by CreateBooking, released by CancelBooking. A second live booking by the same booker on the same session is rejected.",
 			},
 		},
 	}
@@ -1299,6 +1346,40 @@ def execute(state, op):
         if capacity == None:
             fail("InvalidState: " + session + ".schedule.capacity is missing; cannot book")
 
+        # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic),
+        # mirroring clinic-domain's enforce_future: the session MUST start strictly
+        # after op.submittedAt, so a booking on an already-started or already-ended
+        # class is rejected. submittedAt is caller-supplied (the host clock is not
+        # exposed to Starlark), so this is a soft guard appropriate to the trusted
+        # single-identity model. Normalize submittedAt to canonical whole-second
+        # UTC (time.rfc3339_utc — pure, no clock read); startsAt is already stored
+        # canonical UTC (sessionSchedule), and canonical-UTC RFC3339 compares
+        # lexically == chronologically.
+        starts_at = sched.data.get("startsAt")
+        if starts_at == None:
+            fail("InvalidState: " + session + ".schedule.startsAt is missing; cannot book")
+        submitted = time.rfc3339_utc(op.submittedAt)
+        if not (submitted < starts_at):
+            fail("SessionInPast: session " + session + " starts at " + str(starts_at) + ", not in the future (submitted " + submitted + ")")
+
+        # Double-book guard (Capability-KV §06): a deterministic per-(session,
+        # booker) existence marker on the session hub, the SAME create-only +
+        # OCC-revive idiom cafe-domain's cafeOpenTabGuard uses. The KEY alone is
+        # the lock — a second LIVE booking by this booker on this session collides
+        # at revision 0 (DoubleBooked); a booker booking a different session claims
+        # a different key. Present+alive → reject; present+tombstoned (a prior
+        # booking was cancelled and released it) → OCC-revive keyed on its own
+        # revision; absent → mint fresh. read-posture: (d) declared optionalReads
+        # at CreateBooking dispatch (the guard hydrates into state).
+        booker_guard_local = "bkr" + booker_id
+        booker_guard_key = session + "." + booker_guard_local
+        if booker_guard_key in state:
+            if vertex_alive(state, booker_guard_key):
+                fail("DoubleBooked: " + booker + " already holds a live booking on " + session)
+            booker_guard_mut = make_aspect_upsert_occ(session, booker_guard_local, "sessionBookerClaim", {}, state[booker_guard_key].revision)
+        else:
+            booker_guard_mut = make_aspect(session, booker_guard_local, "sessionBookerClaim", {})
+
         seat_n, seat_mutation = claim_first_free_seat(session, capacity)
 
         rate = "standard"
@@ -1335,10 +1416,11 @@ def execute(state, op):
 
         mutations = [
             make_vtx(book_key, "booking", {}),
-            make_aspect(book_key, "status", "bookingStatus", {"value": "booked", "rate": rate, "seat": seat_n}),
+            make_aspect(book_key, "status", "bookingStatus", {"value": "booked", "rate": rate, "seat": seat_n, "booker": booker}),
             make_link(for_session_lnk, book_key, session, "forSession", "forSession", {}),
             make_link(booked_by_lnk, book_key, booker, "bookedBy", "bookedBy", {}),
             seat_mutation,
+            booker_guard_mut,
         ]
         if rate == "resident":
             resident_rate_lnk = "lnk.booking." + book_id + ".residentRate.leaseapp." + lease_id
@@ -1390,6 +1472,18 @@ def execute(state, op):
             make_tombstone(book_key),
             make_tombstone(session + ".seat" + str(seat_n)),
         ]
+        # Release the per-(session, booker) double-book guard so this booker can
+        # re-book the session (cafe-domain's Settle→cafeOpenTabGuard release,
+        # unconditioned: a stale-tombstone race can only free it early, and the
+        # guard is re-earnable on the next book). The booker is read off the
+        # booking's own .status.booker (stored by CreateBooking) — CancelBooking's
+        # operator path carries no authContext.target, so it cannot derive the
+        # booker from authorization. A legacy booking predating this field (and
+        # thus predating the guard) has no guard to release, so skip cleanly.
+        booker = status.data.get("booker")
+        if booker != None:
+            _, guard_booker_id = parts_of(booker, "booker", "identity")
+            mutations.append(make_tombstone(session + ".bkr" + guard_booker_id))
         events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
