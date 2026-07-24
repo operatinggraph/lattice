@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-19 · `51a418b5` · Personal Lens keeps its business key columns across a cypher edit — hot-reload threaded none, dropping the executor to its single-key fallback; edgeCatalog's 142k-error retry loop cleared to 0
 - 2026-07-19 · `—` · Display-name N3 CLOSED — live-verified on the showcase stack: feed serves decrypted `displayName` "Riley Chen" + named anchors; tail was a stale device mirror, no code defect
 - 2026-07-19 · `—` · Display-name N3 tail localized — SYNC delta carries both N3 fields; cloud path clean end-to-end, device mirror serves a stale pre-N3 row (diagnosis only, no code change)
 - 2026-07-19 · `2a0af7e3` · Display-name N3 tail narrowed — both design-named candidates falsified (engine resolves both aspect shapes, now pinned; compiled rule is current); omission is downstream of projection

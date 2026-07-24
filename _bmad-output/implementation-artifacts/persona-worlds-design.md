@@ -847,19 +847,28 @@ coverage proves the Osei case (provider-only binding → one `identifiedBy` anch
 patient-key distinctness. *Live-backfill note:* a lens-spec change reprojects per-actor on the next adjacency
 CDC event, so an already-bound provider's anchors doc populates when her binding is next touched (or via a
 control-plane `lens reproject`); the provider-hat FE fire that consumes the anchor is the natural trigger.
-*(The clinic FE's `app.js:3808` gating comment still describes the pre-2c "needs role-name resolution" framing;
-it is rewritten by the provider-hat FE fire when that fire wires the anchor and cycles the binary.)*
+**Inc 2 provider hat — the provider's own My Schedule SHIPPED (2026-07-24, `a36625a3`).** The clinic FE
+gains the third hat. A clinician signed in as an identity BOUND to a provider entity (`BindProviderIdentity`,
+§3.2) now sees a **My Schedule** tab — her own day, served by the RLS-scoped `/api/my-schedule`
+(`handleMyProviderSchedule`) **as herself**, with no provider picker (the endpoint answers strictly for its
+own caller). Read-only; lifecycle transitions stay on the front-desk Schedule and a patient's own My
+Appointments. The gate `isProvider()` keys on the `identifiedBy` anchor whose bound key is a
+`vtx.provider.*` — **the named consumer of Inc 2c's `identityAnchors` `identifiedBy` walk**, closing the
+`/api/my-schedule` zero-FE-callers residual. A `vtx.patient.*` `identifiedBy` binding, `residesIn`, or no
+anchor leaves the tab hidden; a provider gets neither the front-desk tabs nor the patient New-patient
+control; the hat is additive (a `worksAt`+`identifiedBy` multi-hat sees both surfaces) and losing it bounces
+the active view to Book. The stale `app.js` role-name-resolution gating comment is rewritten to the shipped
+anchors framing. In-browser verified on the showcase stack: the real gate functions driven with all four
+anchor shapes + the real `/api/my-schedule` rendering Osei's two RLS-scoped rows.
 
-*Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
-reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only
-for its own caller and takes no provider argument by design. Its consumer is the **provider hat** FE increment
-(a signed-in provider viewing their own day, gated on the Inc 2c `identifiedBy` anchor); the handler and its
-RLS test stay for that.
-
-*Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
-reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only
-for its own caller and takes no provider argument by design. Its consumer is **Inc 2's provider hat**
-(a signed-in provider viewing their own day); the handler and its RLS test stay for that.
+*Live-demo dependency (stack freshness, not a defect):* Osei's `/api/whoami` still returns **empty anchors**
+on the currently-running showcase stack because its `identityAnchors` lens is **pre-Inc-2c** (every
+`identity-anchors` row was projected 07-18/07-20 and carries no `identifiedBy` anchor, even the bound
+patient/instructor). The FE degrades correctly (a provider with no anchor sees nothing extra), but for the
+provider hat to light up **live** the running stack must be brought to identity-domain 0.7.0 **and** each
+bound provider's row reprojected (`lattice lens reproject identityAnchors --actor-key <identityKey>` — the
+Inc 2c "natural trigger", needs a control-plane actor holding `ctrl.refractor.reproject`) or the binding
+CDC-touched. An ops/`demo-bootstrap` step, tracked with the demo box, not this FE fire.
 
 ### Fire W1 Inc 2a fire brief (build note, 2026-07-23)
 
