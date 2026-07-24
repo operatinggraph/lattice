@@ -810,6 +810,30 @@ concern — the kit can only set a cookie via its own minter) and the refresh-40
 serves `/api/session/refresh` via `RegisterRoutes`, so the 404 itself is gone; any residual message wording is
 FE-cosmetic).
 
+**Inc 2b hat-gating (front-desk vs patient) SHIPPED (2026-07-24, `a934fd8b`).** Clinic renders its hats from
+the signed-in identity's bindings instead of showing every surface to everyone. Two layers: (1) *the kit
+surfaces the hat hints* — `internal/appsession`'s `/api/whoami` now forwards the Gateway `/v1/actor` `roles[]`
+(role-derived grant keys) + `anchors[]` (residence/workplace bindings, each relation-stamped) for a real
+cookie session; a boot-env fallback carries no token and gates nothing. Soft: any `/v1/actor` failure yields
+empty hints, never a whoami failure (mirrors the resolver's degrade-to-empty). Shared groundwork W2–W4 reuse.
+(2) *the clinic FE gates* the five front-desk-only tabs (Schedule, Follow-ups, Series, Availability, Sites),
+the New-patient control, and the Book tab's cross-links to those tabs on a **`worksAt` anchor** — a patient
+session (residesIn or none) sees only Book + My Appointments; `showView` routes any gated view to Book so a
+stray cross-link cannot surface staff content. Live-verified in-browser on the showcase stack: a `worksAt`
+identity sees all seven tabs + New-patient; a `residesIn`-only patient sees only the two. Gating is UX
+curation — every op these views submit stays enforced by its `GrantsTo` + RLS.
+
+**Gating-signal choice + the provider-hat prerequisite.** The design (§4) frames gating as roles-driven, but
+whoami's `roles[]` arrives as **opaque role vertex keys** (`vtx.role.<id>`), not canonical names, so the FE
+cannot name the `frontOfHouse` role directly. The `worksAt` anchor is the readable, already-projected signal
+that means "works the desk" in the clinic persona model, so front-desk/patient gates on it cleanly with **no
+Lattice-lane dependency**. The **provider hat** cannot: a provider has **no** `worksAt`/`residesIn` anchor
+(she `practicesAt` / is `identifiedBy`), only a `provider` role key. So the provider-hat increment's
+**prerequisite** is Gateway-whoami **role-name resolution** — expose canonical role names (or a `roleNames[]`)
+alongside the keys, a `internal/gateway/rolesanchors` change (resolve each `vtx.role.<id>` → its
+`.canonicalName`). A Lattice-lane item; named here so the provider-hat fire flags it rather than re-discovering
+it. `state.roles` is deliberately **not** stashed FE-side yet (no consumer until then).
+
 *Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
 reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only
 for its own caller and takes no provider argument by design. Its consumer is **Inc 2's provider hat**
