@@ -23,6 +23,7 @@
   <nav class="tabs" role="tablist" aria-label="Clinic views">
     <button id="tab-book" class="tab active" role="tab" aria-selected="true" aria-controls="view-book">Book</button>
     <button id="tab-appts" class="tab" role="tab" aria-selected="false" aria-controls="view-appts">My Appointments</button>
+    <button id="tab-myschedule" class="tab" role="tab" aria-selected="false" aria-controls="view-myschedule">My Schedule</button>
     <button id="tab-schedule" class="tab" role="tab" aria-selected="false" aria-controls="view-schedule">Schedule</button>
     <button id="tab-followups" class="tab" role="tab" aria-selected="false" aria-controls="view-followups">Follow-ups</button>
     <button id="tab-series" class="tab" role="tab" aria-selected="false" aria-controls="view-series">Series</button>
@@ -153,6 +154,25 @@
       </div>
       <div id="appts" class="grid" aria-live="polite"></div>
       <div id="appts-empty" class="empty" hidden></div>
+    </section>
+
+    <!-- My Schedule — the signed-in provider's own day (provider hat) -->
+    <section id="view-myschedule" role="tabpanel" aria-labelledby="tab-myschedule" hidden>
+      <p class="hint">Your own appointments, served by the protected provider-schedule read model as you — the RLS boundary returns only your rows, never another provider's day.</p>
+      <div class="panel-controls">
+        <button id="reload-myschedule" class="ghost">Refresh</button>
+        <label for="myschedule-filter">Show</label>
+        <select id="myschedule-filter" aria-label="Filter your schedule by status">
+          <option value="all">All</option>
+          <option value="active">Active (scheduled / confirmed / checked-in)</option>
+          <option value="completed">Completed</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="noShow">No-show</option>
+        </select>
+        <span id="myschedule-summary" class="summary"></span>
+      </div>
+      <div id="myschedule" class="grid" aria-live="polite"></div>
+      <div id="myschedule-empty" class="empty" hidden></div>
     </section>
 
     <!-- Provider Schedule -->

@@ -23,6 +23,7 @@ const state = {
   sites: [], // clinic-domain clinicSites lens rows: {siteKey, name}
   providerSites: [], // clinic-domain providerSites lens rows: {providerKey, siteKey, providerName, siteName}
   appts: [],
+  mySchedule: [], // the signed-in provider's OWN appointments (PROTECTED, provider-self RLS via /api/my-schedule) — the provider hat's day view
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
   series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
@@ -2193,6 +2194,85 @@ function renderAppts() {
   $("#appts-summary").textContent = `${n} appointment${n === 1 ? "" : "s"}${suffix}`;
 }
 
+// ---- My Schedule (the signed-in provider's own day — provider hat) ----
+//
+// A provider reads her OWN appointments from the PROTECTED providerAppointmentsRead
+// model as an AUTHENTICATED actor (/api/my-schedule → handleMyProviderSchedule). The
+// actor is the verified JWT alone and RLS returns only her rows, so — unlike the
+// front-desk Schedule tab — there is no provider picker: the endpoint answers strictly
+// for its own caller and takes no provider argument, so no client can name a provider
+// and read their day. Read-only: lifecycle transitions live on the front-desk Schedule
+// and a patient's own My Appointments, not here.
+
+async function loadMySchedule() {
+  const grid = $("#myschedule");
+  const empty = $("#myschedule-empty");
+  $("#myschedule-summary").textContent = "loading…";
+  try {
+    const data = await appGet("/api/my-schedule");
+    state.mySchedule = data.appointments || [];
+  } catch (e) {
+    grid.innerHTML = "";
+    state.mySchedule = [];
+    empty.hidden = false;
+    empty.textContent = "Could not load your schedule: " + e.message;
+    $("#myschedule-summary").textContent = "";
+    return;
+  }
+  renderMySchedule();
+}
+
+function renderMySchedule() {
+  const grid = $("#myschedule");
+  const empty = $("#myschedule-empty");
+  grid.innerHTML = "";
+  if (state.mySchedule.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No appointments on your schedule yet.";
+    $("#myschedule-summary").textContent = "";
+    return;
+  }
+
+  const filter = ($("#myschedule-filter") && $("#myschedule-filter").value) || "all";
+  const matched = state.mySchedule.filter((a) => apptMatchesFilter(a, filter));
+  if (matched.length === 0) {
+    empty.hidden = false;
+    empty.textContent = "No appointments match this filter.";
+    $("#myschedule-summary").textContent = `0 of ${state.mySchedule.length}`;
+    return;
+  }
+  empty.hidden = true;
+
+  // Lead with today's list (the provider's actual day), then what's still to come,
+  // then history most-recent-first. The API sorts ascending, so past reads reversed.
+  const todayMid = startOfDay(new Date()).getTime();
+  const dayOf = (a) => {
+    const s = new Date(a.startsAt);
+    return isNaN(s) ? NaN : startOfDay(s).getTime();
+  };
+  const today = matched.filter((a) => dayOf(a) === todayMid);
+  const upcoming = matched.filter((a) => dayOf(a) > todayMid);
+  const past = matched.filter((a) => dayOf(a) < todayMid).reverse();
+
+  const section = (label, rows) => {
+    if (rows.length === 0) return;
+    const head = document.createElement("div");
+    head.className = "appts-section-head";
+    head.textContent = `${label} · ${rows.length}`;
+    grid.append(head);
+    // showProvider:false → the card's title is the patient (this is the provider's
+    // own day); cancelable:false → read-only, no lifecycle buttons here.
+    for (const a of rows) grid.append(renderApptCard(a, { showProvider: false, cancelable: false }));
+  };
+  section("Today", today);
+  section("Upcoming", upcoming);
+  section("Past", past);
+
+  const n = matched.length;
+  const suffix = filter === "all" ? "" : ` of ${state.mySchedule.length}`;
+  $("#myschedule-summary").textContent = `${n} appointment${n === 1 ? "" : "s"}${suffix}`;
+}
+
 // ---- Follow-ups worklist (clinic-wide staff queue) ----
 //
 // A documented visit (RecordEncounter) can flag followUpRequested + an optional
@@ -3803,7 +3883,7 @@ async function submitEncounter(ev) {
 
 // ---- Tabs ----
 
-const VIEWS = ["book", "appts", "schedule", "followups", "series", "availability", "sites"];
+const VIEWS = ["book", "appts", "myschedule", "schedule", "followups", "series", "availability", "sites"];
 
 // STAFF_VIEWS are the front-desk hat's surfaces: the clinic-wide worklists and
 // the site/availability admin. A patient (consumer hat) sees only Book + My
@@ -3813,32 +3893,61 @@ const VIEWS = ["book", "appts", "schedule", "followups", "series", "availability
 // never to a capability the graph would deny anyway.
 const STAFF_VIEWS = ["schedule", "followups", "series", "availability", "sites"];
 
+// PROVIDER_VIEWS are the provider hat's surfaces: a clinician's own-day view.
+// A provider is neither front-desk nor a patient — she reads only her own
+// schedule (the RLS-scoped /api/my-schedule), so this rides its own gate.
+const PROVIDER_VIEWS = ["myschedule"];
+
 // isFrontDesk marks a session that works the clinic desk. The signal is the
 // whoami `worksAt` anchor: in the clinic persona model a front-desk staffer
 // worksAt the building (ensureStaff), while a patient carries only a residesIn
-// anchor or none (persona-worlds §3.4). whoami's roles[] arrives as opaque role
-// vertex keys, not canonical names, so it cannot yet name the frontOfHouse role
-// FE-side; the provider hat (which has no worksAt anchor) is the consumer that
-// needs role-name resolution, filed to the Lattice lane.
+// anchor or none (persona-worlds §3.4). Gating rides anchors, not roles: whoami's
+// roles[] arrives as opaque role vertex keys (Contract #6 §6, frozen), never
+// canonical names, so it cannot name the frontOfHouse role FE-side.
 function isFrontDesk() {
   return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "worksAt");
 }
 
-// viewAllowed keeps a stray cross-link (or a stale active tab) from surfacing a
-// staff view to a patient session: showView routes a disallowed view to Book.
-function viewAllowed(view) {
-  return isFrontDesk() || !STAFF_VIEWS.includes(view);
+// isProvider marks a clinician session — a real login BOUND to a provider entity
+// (BindProviderIdentity, persona-worlds §3.2). The signal is the whoami
+// `identifiedBy` anchor whose bound key is a `vtx.provider.*`; the same anchor
+// stamped with a `vtx.patient.*` (or any other) key is someone else's hat and is
+// skipped. A provider carries no worksAt/residesIn (she practicesAt / is
+// identifiedBy-bound), so before the identityAnchors lens walked identifiedBy
+// (persona-worlds Inc 2c) she projected no anchors at all; this gate is that
+// walk's named consumer.
+function isProvider() {
+  return (
+    Array.isArray(state.anchors) &&
+    state.anchors.some(
+      (a) => a && a.relation === "identifiedBy" && typeof a.key === "string" && a.key.startsWith("vtx.provider."),
+    )
+  );
 }
 
-// applyHatGating hides the front-desk-only tabs, the New-patient control, and
-// the Book tab's cross-links to those tabs for a non-front-desk session, and
-// bounces the active view to Book if it just became disallowed. Idempotent;
-// re-run whenever whoami resolves.
+// viewAllowed keeps a stray cross-link (or a stale active tab) from surfacing a
+// hat's view to a session that lacks it: showView routes a disallowed view to Book.
+function viewAllowed(view) {
+  if (STAFF_VIEWS.includes(view)) return isFrontDesk();
+  if (PROVIDER_VIEWS.includes(view)) return isProvider();
+  return true;
+}
+
+// applyHatGating hides each hat's tabs from a session that lacks it — the
+// front-desk-only tabs + New-patient + the Book cross-links behind the worksAt
+// anchor, the provider tabs behind the identifiedBy-provider anchor — and bounces
+// the active view to Book if it just became disallowed. Idempotent; re-run
+// whenever whoami resolves.
 function applyHatGating() {
   const fd = isFrontDesk();
   for (const v of STAFF_VIEWS) {
     const tab = $("#tab-" + v);
     if (tab) tab.hidden = !fd;
+  }
+  const prov = isProvider();
+  for (const v of PROVIDER_VIEWS) {
+    const tab = $("#tab-" + v);
+    if (tab) tab.hidden = !prov;
   }
   const np = $("#new-patient");
   if (np) np.hidden = !fd;
@@ -3864,6 +3973,7 @@ function showView(view) {
   // series panel (state.mySeries, the PROTECTED patient-self RLS fetch) — a
   // sibling of the clinic-wide "series" tab's staff fetch, not the same data.
   if (view === "appts") loadAppts();
+  if (view === "myschedule") loadMySchedule();
   if (view === "schedule") loadSchedule();
   if (view === "followups") loadFollowups();
   if (view === "appts" || view === "series") loadSeries();
@@ -3981,6 +4091,7 @@ function init() {
 
   $("#tab-book").addEventListener("click", () => showView("book"));
   $("#tab-appts").addEventListener("click", () => showView("appts"));
+  $("#tab-myschedule").addEventListener("click", () => showView("myschedule"));
   $("#tab-schedule").addEventListener("click", () => showView("schedule"));
   $("#tab-followups").addEventListener("click", () => showView("followups"));
   $("#tab-series").addEventListener("click", () => showView("series"));
@@ -4000,6 +4111,8 @@ function init() {
   });
   $("#reload-appts").addEventListener("click", loadAppts);
   $("#appts-filter").addEventListener("change", renderAppts);
+  $("#reload-myschedule").addEventListener("click", loadMySchedule);
+  $("#myschedule-filter").addEventListener("change", renderMySchedule);
   $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("DebitAccount", "record the charge"));
   $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("CreditAccount", "record the payment"));
   $("#reload-followups").addEventListener("click", loadFollowups);
