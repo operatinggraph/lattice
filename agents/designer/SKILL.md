@@ -217,6 +217,22 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   seq-guarded; the *plain/protected* `PostgresAdapter` is **unconditional last-writer-wins**, `projectionSeq`
   ignored). A security column on an unguarded LWW target has a real reorder window.
 
+- **A LINT GATE IS NEVER AN "OPTIONAL FOLLOW-ON" — it is the only thing that binds the NEXT author.** When a
+  design's fix is a *migration* (rekey these five sites onto the safe idiom), the migration clears today's
+  debt and nothing stops tomorrow's agent from writing the unsafe idiom again — it is what they'll reach for
+  by default. Andrew, ratifying the `authTargetValidated` design (2026-07-24): *"Lint is how agents are
+  **actually** forced to do the right thing. Everything else is 'fingers-crossed'. Every single fire is
+  corrected by lint multiple times."* So: **if a design establishes a convention, the gate that enforces it
+  ships in the SAME design, as a required fire — never filed as defense-in-depth, never warn-first when the
+  migration leaves zero debt** (a warn-first gate over a clean tree is exactly the fingers-crossed state the
+  fire exists to end). **And do not reject a gate because "a linter can't tell the safe use from the unsafe
+  one without semantic analysis"** — that objection assumes the gate must *classify*. It must not: the gate
+  **default-denies the bare idiom and makes the author declare which safe shape it is**, mirroring the
+  shipped `# read-posture: (a|c|d|e|f)` convention (`scripts/lint-conventions.go:132/:317/:493` — a
+  `packages/**` scan, an annotation regex, a fail-closed finding). Declaring is cheap; forgetting fails
+  closed. That pattern makes almost any "needs semantics" convention lintable — reach for it before
+  concluding a rule is unenforceable.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
