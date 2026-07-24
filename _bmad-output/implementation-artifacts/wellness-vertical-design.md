@@ -137,6 +137,60 @@ distinguishes an active tenancy from a merely-applied-for one. A new regression 
 `.tenancy`) and asserts the fallback — verified to fail against the pre-fix logic before being folded
 into the fire (reverted the fix locally, confirmed the test catches it, restored).
 
+## Fire brief — CreateBooking double-book + past-time guards (build note, 2026-07-24)
+
+**1 · Scope sentence (verbatim, verticals.md):** *"`wellness-domain` `CreateBooking` (`ddls.go`)
+claims a free seat but never checks the booker already holds one on that session (unlike clinic's
+`PatientDoubleBook` slot-claim / café's `OpenTabAlreadyExists`), nor that `session.schedule.startsAt`
+is still future (unlike clinic's `ScheduleInPast`). Live-confirmed: identity `MQsmTTAgNkngkdEjQz9L`
+holds 2 live bookings on session `wvgK4ajnFVyfYJbuhYhJ`, whose class already ended."*
+
+**2 · Verified touch-list (scouted live):**
+- `packages/wellness-domain/ddls.go` — new `sessionBookerClaim` aspect-type DDL (constant + `DDLs()`
+  registration); `CreateBooking`: a past-time guard (`SessionInPast`, the `time.rfc3339_utc(submittedAt)
+  < startsAt` compare, mirroring clinic's `enforce_future` at `clinic-domain/ddls.go:1904-1906`) + a
+  double-book guard (the café `cafeOpenTab` create-only + OCC-revive idiom at `cafe-domain/ddls.go:614-634`,
+  keyed deterministically `vtx.session.<sessId>.bkr<bookerId>`) + `booker` stored on the `bookingStatus`
+  aspect for the release path; `CancelBooking`: tombstones the guard (reads `booker` off `.status`).
+- `packages/wellness-domain/opmetas.go` — `CreateBooking` `Dispatch.OptionalReads` gains the guard-key
+  template `vtx.session.{payload.session:id}.bkr{actor:id}` (edge/Facet dispatcher).
+- `cmd/wellness-app/web/app.js` — `CreateBooking` `optionalReads` gains `se.sessionKey + ".bkr" +
+  idOf(bookerKey)` (the browser-direct dispatcher — the path the live repro used).
+- `packages/wellness-domain/integration_test.go` — the 3 `CreateBooking` submitters declare the guard
+  key; new `TestCreateBooking_RejectsDoubleBook`, `TestCreateBooking_RejectsPastSession`,
+  `TestCancelBooking_ReleasesGuardForRebook`.
+- `packages/wellness-domain/package.go` — `Version` 0.9.1 → 0.10.0 (new aspect type; a same-version
+  edit no-ops on install — `lint-package-version`).
+
+**3 · Precedents mirrored:** café `cafeOpenTabGuard` (per-anchor uniqueness, create-only + OCC-revive,
+released by a tombstone on the closing op — the exact repeatable-session shape a booking has); clinic
+`enforce_future` (soft past-time guard, canonical-UTC lexical compare); clinic `patientSlotClaim`
+(a per-actor guard aspect with a dimension-encoded localName); café `tabStatus.leaseAppKey` (an anchor
+key stored on a status aspect for the closing op's release logic — the precedent for `booker` on status).
+
+**4 · Guard key + release-path key reconstruction.** The guard is a deterministic aspect
+`vtx.session.<sessId>.bkr<bookerId>` — the KEY alone is the (session, booker) lock, so a second live
+booking by the same booker on the same session collides (create-only at rev 0); a cancelled booking
+tombstones it, and a re-book OCC-revives it (café's pattern verbatim). `CancelBooking`'s operator path
+carries no `authContext.target`, so it cannot know the booker from authorization — the booker's full key
+is stored on `bookingStatus.data.booker` (a single anchor field parallel to the existing `seat` internal
+bookkeeping, **not** a relationship-index: the booker relationship stays the `bookedBy` link) and
+`CancelBooking` reads it off `.status` (already a required read) to reconstruct the guard key.
+
+**5 · Scope-diff gate: PASS.** Both guards trace verbatim to the scope sentence. In-fire additions,
+recorded: (a) `booker` on `bookingStatus` — required so the operator-path `CancelBooking` can release
+the deterministic guard; mirrors café `tabStatus.leaseAppKey`, a single anchor not a relationship-index.
+(b) the guard key declared at all three dispatchers (FE JS, op-meta, tests) per Contract #2 §2.5 — an
+undeclared read silently disables the guard, so this is a correctness requirement, not scope creep. No
+narrowing.
+
+**6 · Non-goals:** no cross-*session* dedup (a booker may hold bookings on many distinct sessions — the
+guard is strictly per-session); no lens change (`wellnessBookings` already sources `bookerKey` from the
+`bookedBy` link; the new status field is additive and unprojected); no new op; no contract text; no FE
+surfacing change beyond the `optionalReads` declaration. Booking a class that has *started but not yet
+ended* is rejected too (the guard is `startsAt`-based, mirroring clinic) — an in-progress class is not a
+sensible booking and the live repro's class had fully ended.
+
 ## Next (this design doc's checkpoint)
 
 - **Inc 2 — thin FE shipped** (`cmd/wellness-app`, `a7f5b52`). Live-data browser verify is pending the
