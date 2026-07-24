@@ -414,11 +414,26 @@ func (m *Manager) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 	m.writeJSON(w, http.StatusOK, map[string]any{"identityId": bareID, "expiresAt": exp.UTC().Format(time.RFC3339)})
 }
 
-// actorResponse is the Gateway's GET /v1/actor (whoami) body, decoded for the
-// one field login needs.
+// actorResponse is the Gateway's GET /v1/actor (whoami) body. Login reads only
+// the resolved-binding fields; whoami additionally forwards the hat hints
+// (roles + residence/workplace anchors, persona-worlds-design.md §4).
 type actorResponse struct {
-	ActorID         string `json:"actorId"`
-	ResolvedActorID string `json:"resolvedActorId"`
+	ActorID         string        `json:"actorId"`
+	ResolvedActorID string        `json:"resolvedActorId"`
+	Roles           []string      `json:"roles"`
+	Anchors         []ActorAnchor `json:"anchors"`
+}
+
+// ActorAnchor is one residence/workplace binding the Gateway's /v1/actor
+// reports for the signed-in identity (persona-worlds-design.md §4). The kit
+// forwards it verbatim to whoami so an app can render hats by provenance
+// without joining the SYNC plane; it carries only the fields a renderer needs.
+type ActorAnchor struct {
+	Key           string `json:"key"`
+	Name          string `json:"name"`
+	Container     string `json:"container"`
+	ContainerName string `json:"containerName"`
+	Relation      string `json:"relation"`
 }
 
 // resolveActorIdentity asks the Gateway which identity a token's credential
@@ -451,6 +466,35 @@ func (m *Manager) resolveActorIdentity(ctx context.Context, token string) (strin
 		return "", nil
 	}
 	return strings.TrimPrefix(body.ResolvedActorID, "vtx.identity."), nil
+}
+
+// fetchActorHats asks the Gateway's /v1/actor for the token's role-derived
+// grant keys and residence/workplace anchors — the whoami hat hints an app
+// renders its surfaces from (persona-worlds-design.md §4). A soft signal:
+// any error yields empty results and never fails whoami, mirroring the
+// Gateway resolver's own degrade-to-empty posture (rolesanchors.go:92-97).
+func (m *Manager) fetchActorHats(ctx context.Context, token string) ([]string, []ActorAnchor) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.cfg.GatewayURL+"/v1/actor", nil)
+	if err != nil {
+		return nil, nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+	var body actorResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&body); err != nil {
+		return nil, nil
+	}
+	return body.Roles, body.Anchors
 }
 
 // handleLogout implements POST /api/logout — clears the session cookie.
@@ -496,11 +540,26 @@ func (m *Manager) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	// the browser in a loop: sign-out clears a cookie nobody used, whoami
 	// still answers loggedIn (via the fallback), and the login page bounces
 	// straight back into the app.
-	m.writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"loggedIn":   true,
 		"identityId": si.identityID,
 		"canSignOut": si.viaCookie,
-	})
+	}
+	// Hat hints (roles + residence/workplace anchors) let an app render only
+	// the surfaces a signed-in identity's bindings authorize, without joining
+	// the SYNC plane (persona-worlds-design.md §4). Only a real cookie session
+	// carries a token to ask /v1/actor with; a boot-env fallback identity has
+	// none and gates nothing (it is the single-user operator). Soft: absence
+	// never fails whoami, and hats are UX curation — the graph's grants + RLS
+	// remain the authority.
+	if si.viaCookie {
+		if tok := m.CookieToken(r); tok != "" {
+			roles, anchors := m.fetchActorHats(r.Context(), tok)
+			resp["roles"] = roles
+			resp["anchors"] = anchors
+		}
+	}
+	m.writeJSON(w, http.StatusOK, resp)
 }
 
 // refreshResponse is what POST /api/session/refresh returns: the fresh bearer

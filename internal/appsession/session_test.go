@@ -265,6 +265,68 @@ func TestHandleDevLogin_SetsSessionCookieAndVerifies(t *testing.T) {
 	require.Equal(t, target, si.identityID)
 }
 
+func TestHandleWhoami_ForwardsActorHatsForCookieSession(t *testing.T) {
+	signer := testSigner(t)
+	authn, err := buildTestVerifier(&signer.priv.PublicKey, signer.kid)
+	require.NoError(t, err)
+	// A Gateway /v1/actor reporting the actor's roles + a workplace anchor.
+	// whoami forwards these so an app can render only the surfaces the
+	// identity's bindings authorize (persona-worlds-design.md §4).
+	gw := newActorStub(t, func(w http.ResponseWriter, r *http.Request) {
+		require.NotEmpty(t, r.Header.Get("Authorization"), "the kit must present the session token to /v1/actor")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"actorId":         "vtx.identity.x",
+			"resolvedActorId": "vtx.identity.x",
+			"roles":           []string{"frontOfHouse", "consumer"},
+			"anchors":         []map[string]string{{"key": "vtx.location.b", "name": "Front Desk", "relation": "worksAt"}},
+		})
+	})
+	m := newTestManager(t, func(c *Config) {
+		c.Signer = signer
+		c.Authn = authn
+		c.GatewayURL = gw
+	})
+
+	target := testNanoID(t)
+	w := httptest.NewRecorder()
+	m.handleDevLogin(w, httptest.NewRequest(http.MethodPost, DevLoginPath, strings.NewReader(`{"identityId":"`+target+`"}`)))
+	require.Equal(t, http.StatusOK, w.Code)
+	cookie := cookieNamed(w.Result(), testCookieName)
+	require.NotNil(t, cookie)
+
+	r := httptest.NewRequest(http.MethodGet, WhoamiPath, nil)
+	r.AddCookie(cookie)
+	ww := httptest.NewRecorder()
+	m.handleWhoami(ww, r)
+	require.Equal(t, http.StatusOK, ww.Code)
+
+	var body struct {
+		LoggedIn   bool          `json:"loggedIn"`
+		CanSignOut bool          `json:"canSignOut"`
+		Roles      []string      `json:"roles"`
+		Anchors    []ActorAnchor `json:"anchors"`
+	}
+	require.NoError(t, json.Unmarshal(ww.Body.Bytes(), &body))
+	require.True(t, body.LoggedIn)
+	require.True(t, body.CanSignOut)
+	require.Equal(t, []string{"frontOfHouse", "consumer"}, body.Roles)
+	require.Len(t, body.Anchors, 1)
+	require.Equal(t, "worksAt", body.Anchors[0].Relation)
+	require.Equal(t, "vtx.location.b", body.Anchors[0].Key)
+}
+
+func TestHandleWhoami_BootFallbackReportsNoHats(t *testing.T) {
+	m := newTestManager(t, func(c *Config) { c.FallbackIdentityID = "bootid12345678901234" })
+	ww := httptest.NewRecorder()
+	m.handleWhoami(ww, httptest.NewRequest(http.MethodGet, WhoamiPath, nil))
+	require.Equal(t, http.StatusOK, ww.Code)
+	// The boot-env single-user identity carries no cookie token to ask
+	// /v1/actor with and gates nothing — whoami must not fabricate hats.
+	require.NotContains(t, ww.Body.String(), `"roles"`)
+	require.NotContains(t, ww.Body.String(), `"anchors"`)
+	require.Contains(t, ww.Body.String(), `"canSignOut":false`)
+}
+
 func TestHandleDevLogin_AcceptsVtxIdentityPrefix(t *testing.T) {
 	m := newTestManager(t, func(c *Config) { c.Signer = testSigner(t) })
 	target := testNanoID(t)

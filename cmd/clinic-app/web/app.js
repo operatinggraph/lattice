@@ -13,6 +13,7 @@ const PATIENT_KEY = "clinic.patient";
 const state = {
   identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
   canSignOut: false, // whether whoami reports a real cookie session (drives the keepalive + the sign-out affordance)
+  anchors: [], // the signed-in identity's residence/workplace anchors (whoami hat hints, persona-worlds-design.md §4). A `worksAt` anchor marks a front-desk staffer; a patient carries only `residesIn`. Drives which hats' surfaces show. UX curation only — the graph's grants + RLS remain the authority.
   patients: [], // append-only lookup cache — every patient the FE has ever seen, never shrinks (so an
   // already-selected patient's contact lookup survives a later ?q= filter)
   patientOptions: [], // the roster currently rendered in the #patient select — the full cache, or a
@@ -211,15 +212,19 @@ async function loadWhoami() {
       const body = await api("/api/whoami", { credentials: "same-origin" });
       state.identityId = (body && body.loggedIn && body.identityId) || null;
       state.canSignOut = !!(body && body.canSignOut);
+      state.anchors = (body && Array.isArray(body.anchors) && body.anchors) || [];
       const btn = $("#sign-out");
       if (btn) btn.hidden = !state.canSignOut;
       const who = $("#signed-in-as");
       if (who) who.textContent = state.identityId ? "Signed in · " + state.identityId.slice(0, 8) + "…" : "";
+      applyHatGating();
       return;
     } catch (_) {
       if (attempt >= whoamiRetryBackoffsMs.length) {
         state.identityId = null;
         state.canSignOut = false;
+        state.anchors = [];
+        applyHatGating();
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
@@ -3800,7 +3805,53 @@ async function submitEncounter(ev) {
 
 const VIEWS = ["book", "appts", "schedule", "followups", "series", "availability", "sites"];
 
+// STAFF_VIEWS are the front-desk hat's surfaces: the clinic-wide worklists and
+// the site/availability admin. A patient (consumer hat) sees only Book + My
+// Appointments; a front-desk staffer sees these too (persona-worlds §7.1 hats).
+// Gating is UX curation — every op these views submit is still enforced by its
+// GrantsTo + RLS, so a stale/empty whoami degrades to "offer nothing extra",
+// never to a capability the graph would deny anyway.
+const STAFF_VIEWS = ["schedule", "followups", "series", "availability", "sites"];
+
+// isFrontDesk marks a session that works the clinic desk. The signal is the
+// whoami `worksAt` anchor: in the clinic persona model a front-desk staffer
+// worksAt the building (ensureStaff), while a patient carries only a residesIn
+// anchor or none (persona-worlds §3.4). whoami's roles[] arrives as opaque role
+// vertex keys, not canonical names, so it cannot yet name the frontOfHouse role
+// FE-side; the provider hat (which has no worksAt anchor) is the consumer that
+// needs role-name resolution, filed to the Lattice lane.
+function isFrontDesk() {
+  return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "worksAt");
+}
+
+// viewAllowed keeps a stray cross-link (or a stale active tab) from surfacing a
+// staff view to a patient session: showView routes a disallowed view to Book.
+function viewAllowed(view) {
+  return isFrontDesk() || !STAFF_VIEWS.includes(view);
+}
+
+// applyHatGating hides the front-desk-only tabs, the New-patient control, and
+// the Book tab's cross-links to those tabs for a non-front-desk session, and
+// bounces the active view to Book if it just became disallowed. Idempotent;
+// re-run whenever whoami resolves.
+function applyHatGating() {
+  const fd = isFrontDesk();
+  for (const v of STAFF_VIEWS) {
+    const tab = $("#tab-" + v);
+    if (tab) tab.hidden = !fd;
+  }
+  const np = $("#new-patient");
+  if (np) np.hidden = !fd;
+  for (const id of ["#go-availability", "#go-sites"]) {
+    const link = $(id);
+    const hint = link && link.closest(".hint");
+    if (hint) hint.hidden = !fd;
+  }
+  if (!viewAllowed(state.view)) showView("book");
+}
+
 function showView(view) {
+  if (!viewAllowed(view)) view = "book";
   state.view = view;
   for (const v of VIEWS) {
     const isV = v === view;
