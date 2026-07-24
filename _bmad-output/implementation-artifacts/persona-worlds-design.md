@@ -774,14 +774,21 @@ the FE has no proactive refresh loop, so a browse-only session hard-lapses at 30
 empties, one of which makes the slot picker offer already-taken times; `asSelf` is computed once per render
 from `state.patient` but applied per-row, and the per-row form `actingAsSelf(patientKey)` already exists
 unused; a failed whoami is terminal and un-retried, leaving a patient rendered as staff with sign-out
-hidden; `_JWT_AUDIENCE` is the one env var not `TrimSpace`d (whitespace ⇒ every token fails
-`ErrWrongAudience` with no startup signal); `parsePublicKeyPEM` accepts any PKIX key type, so an Ed25519 PEM
-boots clean and fails every verification. **Deployment note, pre-existing but now load-bearing for the whole
+hidden. **Deployment note, pre-existing but now load-bearing for the whole
 app rather than six reads:** `loopback` derives from the *bind* address, so a reverse proxy to `127.0.0.1`
 (the shape the hosted demo box already runs) both permits the in-process minter and drops the cookie's
 `Secure` flag — `CLINIC_APP_DEMO_PERSONAS` must be set before clinic is ever proxied. **Cleanup:**
 `clinicPatientReadGrants` (patient-as-actor) is now vestigial for any real session and is the honest tail of
 §7.1's "retires entity-as-actor"; it stays until Inc 2 so the A/B RLS cases keep their shape.
+
+**Inc 2 tail — IdP session-boundary hardening SHIPPED (2026-07-24, `6392ea7f`).** Two of the carried-into-Inc-2
+kit findings landed on their own (headless, no FE): `_JWT_AUDIENCE` is now `TrimSpace`d like issuer/kid/pemKey
+(a padded value no longer makes every token fail `ErrWrongAudience` with no startup signal), and
+`parsePublicKeyPEM` now refuses any non-RSA/ECDSA PKIX key at startup with a clear error (the verifier accepts
+only RS*/ES*, so an Ed25519 PEM used to boot clean then fail every verification). Both fail closed; each is
+proven by a discriminating test in `internal/appsession/signer_test.go`. The remaining carried FE items
+(unreachable verify-only posture, refresh 404 wrong-cause, no proactive refresh loop, silent-empty reads,
+`asSelf` per-row, terminal whoami) stay under Inc 2b — they need the FE + browser verification.
 
 *Residual with a named consumer:* `/api/my-schedule` has **zero FE callers** after Inc 1 — the Schedule tab
 reads the wildcard staff model and narrows client-side, deliberately, since `/api/my-schedule` answers only

@@ -59,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-24 · `6392ea7f` · IdP session-boundary hardened (kit) — `_JWT_AUDIENCE` trimmed + `parsePublicKeyPEM` refuses non-RSA/ECDSA keys at startup; two silent-misconfig boots now fail closed (persona-worlds W1 Inc 2 tail; discriminating tests)
 - 2026-07-24 · `82b9eaec` · Clinic front-desk (`frontOfHouse`) can run the Follow-ups tab — Start/Pause/ResumeVisitSeries grant frontOfHouse + workplace confinement (mirror CreateAppointment), operator-exempt-only guard; clinic-reminders 0.6.0
 - 2026-07-24 · `50ff65dd` · Wellness `CreateBooking` rejects double-books (per-(session,booker) `sessionBookerClaim` guard, café-idiom, released on cancel) + past-start sessions (`SessionInPast`); wellness-domain 0.10.0
 - 2026-07-24 · `6b1c667c` · Patient names out of open clinic nats-kv lenses — `clinicAppointments`/`clinicPatients` are key-only; names stay Protected (`clinicPatientsRead` RLS); provider directory stays public
@@ -90,7 +91,4 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-07-19 · `c3ec584b` · `reinstall-package` same-version edits reach the Processor again — op requestId now folds a mutation digest, so only genuinely identical work dedups; unblocked the live proof of `51a418b5`
 - 2026-07-19 · `51a418b5` · Personal Lens keeps its business key columns across a cypher edit — hot-reload threaded none, dropping the executor to its single-key fallback; edgeCatalog's 142k-error retry loop cleared to 0
 - 2026-07-19 · `—` · Display-name N3 CLOSED — live-verified on the showcase stack: feed serves decrypted `displayName` "Riley Chen" + named anchors; tail was a stale device mirror, no code defect
-- 2026-07-19 · `—` · Display-name N3 tail localized — SYNC delta carries both N3 fields; cloud path clean end-to-end, device mirror serves a stale pre-N3 row (diagnosis only, no code change)
-- 2026-07-19 · `2a0af7e3` · Display-name N3 tail narrowed — both design-named candidates falsified (engine resolves both aspect shapes, now pinned; compiled rule is current); omission is downstream of projection
-- 2026-07-19 · `93c6064d` · SetLocationPresentation replaces (was create-only → RevisionConflict on any second set, untested) + seed-showcase names an already-seeded world; live-verified on the showcase stack
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
