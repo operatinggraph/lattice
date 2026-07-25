@@ -94,9 +94,14 @@ func TestEgressReads_SensitiveKey_HydratesAsRef(t *testing.T) {
 	if !ok || ct["keyId"] != "k1" {
 		t.Fatalf("$sensitiveRef.ciphertext = %+v, want the at-rest ciphertext verbatim", sref["ciphertext"])
 	}
-	// No plaintext ever touched this execution.
-	if state.Context.SensitiveReads == nil || state.Context.SensitiveReads.plaintextRead {
-		t.Fatalf("egress disposition must never mark plaintextRead")
+	// No plaintext ever touched this execution. Asserted on plaintextKeys, not on
+	// plaintextRead: the flag is only set by CONSUMPTION now, so it is false after
+	// hydration for every disposition and would pass here vacuously.
+	if state.Context.SensitiveReads == nil {
+		t.Fatalf("hydration must wire a sensitive-read tracker")
+	}
+	if len(state.Context.SensitiveReads.plaintextKeys) != 0 {
+		t.Fatalf("egress disposition must record no plaintext key, got %v", state.Context.SensitiveReads.plaintextKeys)
 	}
 }
 
@@ -198,8 +203,24 @@ func TestEgressReads_SensitiveKeyRealVault_DecryptsToRefNotPlaintext(t *testing.
 	if got, _ := state.Context.Hydrated[aspectKey].Data["value"].(string); got != "123-45-6789" {
 		t.Fatalf("reads disposition data = %+v, want decrypted plaintext", state.Context.Hydrated[aspectKey].Data)
 	}
+	// The decrypt records the key; the flag waits for the script to consume it,
+	// so a surplus declared read cannot split an external-egress op's outcome on
+	// whether the key exists (design sensitive-read-tracker-consumption §1).
+	if _, ok := state.Context.SensitiveReads.plaintextKeys[aspectKey]; !ok {
+		t.Fatalf("reads disposition must record %s as carrying plaintext", aspectKey)
+	}
+	if state.Context.SensitiveReads.plaintextRead {
+		t.Fatalf("hydration alone must not mark plaintextRead")
+	}
+	if _, err := runKVScript(t, state.Context, `
+def execute(state, op):
+    v = kv.Read("`+aspectKey+`")
+    return {"mutations": [], "events": [{"class": "read-returned", "data": {}}]}
+`); err != nil {
+		t.Fatalf("run consuming script: %v", err)
+	}
 	if !state.Context.SensitiveReads.plaintextRead {
-		t.Fatalf("reads disposition must mark plaintextRead")
+		t.Fatalf("a script consuming the decrypted aspect must mark plaintextRead")
 	}
 
 	// egressReads (ref disposition): the SAME key, SAME live Vault — still a
@@ -217,8 +238,12 @@ func TestEgressReads_SensitiveKeyRealVault_DecryptsToRefNotPlaintext(t *testing.
 	if sref["ref"] != aspectKey {
 		t.Fatalf("$sensitiveRef.ref = %v, want %q", sref["ref"], aspectKey)
 	}
-	if state2.Context.SensitiveReads.plaintextRead {
-		t.Fatalf("egressReads disposition must never mark plaintextRead")
+	// Same key, same live Vault, and the ref disposition records nothing — so no
+	// consumption of it can ever flip the guard. Asserted on plaintextKeys for the
+	// same reason as the reads arm above: plaintextRead is consumption-keyed and
+	// would be false here regardless.
+	if len(state2.Context.SensitiveReads.plaintextKeys) != 0 {
+		t.Fatalf("egressReads disposition must record no plaintext key, got %v", state2.Context.SensitiveReads.plaintextKeys)
 	}
 }
 
@@ -368,8 +393,11 @@ func TestConnKVReader_EgressKey_ReturnsRefNotPlaintext(t *testing.T) {
 	if !ok || sref["ref"] != aspectKey {
 		t.Fatalf("data = %+v, want a $sensitiveRef marker", doc.Data)
 	}
-	if tracker.plaintextRead {
-		t.Fatalf("lazy egress read must never mark plaintextRead")
+	// The lazy seam's egress disposition records nothing, so this holds even
+	// though `consume` deliberately lives in the kv.Read builtin rather than in
+	// ReadVertex — asserting plaintextRead alone would pass with egress=false too.
+	if len(tracker.plaintextKeys) != 0 {
+		t.Fatalf("lazy egress read must record no plaintext key, got %v", tracker.plaintextKeys)
 	}
 }
 

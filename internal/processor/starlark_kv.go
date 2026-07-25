@@ -80,6 +80,11 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		// KnownAbsent instead, never in sc.Hydrated, so reaching the script
 		// with the key in sc.Hydrated guarantees it was present.
 		if doc, ok := sc.Hydrated[key]; ok {
+			// This read NAMES key, so it is the script consuming the document —
+			// including its decrypted plaintext when the class is sensitive. Step
+			// 6's external-egress guard keys on consumption, not on hydration
+			// (design sensitive-read-tracker-consumption §2).
+			sc.SensitiveReads.consume(key)
 			return vertexDocToStarlark(doc), nil
 		}
 		// Required-absent (§2.5 class (a)/(f)): the key was declared
@@ -119,6 +124,12 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 			// Absent or hard-tombstoned — the script branches on None.
 			return starlarklib.None, nil
 		}
+		// ReadVertex decrypted a sensitive doc under the same disposition rules as
+		// hydration; this read named the key, so consume it here rather than inside
+		// ReadVertex — step 6's governing-DDL walk shares this same KVReader
+		// (step6_resolve_ddl.go) and its Processor-internal reads must not flip the
+		// guard (design §2.3).
+		sc.SensitiveReads.consume(key)
 		return vertexDocToStarlark(*doc), nil
 	})
 

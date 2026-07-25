@@ -10,16 +10,63 @@ import (
 	"github.com/operatinggraph/lattice/internal/vault"
 )
 
-// sensitiveReadTracker records whether this operation's execution decrypted
-// any sensitive aspect as PLAINTEXT (the egress=false disposition below) —
+// sensitiveReadTracker records whether this operation's SCRIPT consumed any
+// sensitive aspect's decrypted PLAINTEXT (the egress=false disposition below) —
 // consulted by step 6's emission guard (design sensitive-param-egress §3.6):
-// an op that emits an `external.*`-domain event AND decrypted sensitive
+// an op that emits an `external.*`-domain event AND consumed sensitive
 // plaintext this execution is rejected, because sensitive data may reach an
 // external event only as an `egressReads` ref. Shared by pointer across step
-// 4's contextHint.reads/optionalReads/egressReads decrypt calls and the lazy
-// kv.Read() seam (connKVReader) for one execution.
+// 4's contextHint.reads/optionalReads/egressReads decrypt calls, the `state`
+// mapping, and the lazy kv.Read() seam (connKVReader) for one execution.
+//
+// Decryption alone does not set plaintextRead: hydration decrypts every present
+// declared sensitive key, so keying the flag on the decrypt made a *surplus*
+// declared read split an external-egress op's outcome on whether that key
+// exists — an existence oracle over sensitive-classed aspects, since the script
+// never names the key (design sensitive-read-tracker-consumption §1). Instead
+// the decrypt records the key in plaintextKeys, and the seams the script itself
+// reaches through consume it.
 type sensitiveReadTracker struct {
 	plaintextRead bool
+	plaintextKeys map[string]struct{}
+}
+
+// markPlaintext records that key's document body is readable by the script —
+// decrypted here, or never encrypted at rest in the first place — pending
+// consumption.
+func (t *sensitiveReadTracker) markPlaintext(key string) {
+	if t == nil {
+		return
+	}
+	if t.plaintextKeys == nil {
+		t.plaintextKeys = make(map[string]struct{})
+	}
+	t.plaintextKeys[key] = struct{}{}
+}
+
+// consume records that the script took the document under key. Sets
+// plaintextRead only when that document carries readable sensitive data, so a
+// script reading a non-sensitive working set never trips the egress guard.
+func (t *sensitiveReadTracker) consume(key string) {
+	if t == nil {
+		return
+	}
+	if _, ok := t.plaintextKeys[key]; ok {
+		t.plaintextRead = true
+	}
+}
+
+// consumeAll records an exposure that hands the script every hydrated document
+// without naming a key — `state.items()` / `state.values()`, and `String()`,
+// through which `str`/`repr`/`%`/`.format`/`+` render every document's data
+// (design §2.1). Flips only when at least one recorded plaintext key exists.
+func (t *sensitiveReadTracker) consumeAll() {
+	if t == nil {
+		return
+	}
+	if len(t.plaintextKeys) > 0 {
+		t.plaintextRead = true
+	}
 }
 
 // deferredMissTracker records the first declared-but-absent required read
@@ -60,7 +107,8 @@ func (t *deferredMissTracker) missed() string {
 // egress selects the disposition for a sensitive doc: false decrypts to
 // plaintext (v nil leaves the ciphertext untouched — the safe default for a
 // pipeline that never wired a Vault, most test harnesses that do not
-// exercise PII) and marks tracker plaintext-read; true never decrypts —
+// exercise PII) and records the key on tracker as carrying plaintext, which
+// the script's own read seams later consume; true never decrypts —
 // instead doc.Data becomes a `$sensitiveRef` marker (the aspect's at-rest
 // ciphertext verbatim, keyed by its own aspect key, Processor-authenticated
 // with a MAC when a Vault is wired — design sensitive-ref-mac-provenance
@@ -93,7 +141,11 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 	if !ok || vertexType != "identity" {
 		// A malformed or non-identity-anchored sensitive aspect should never
 		// have committed (step 6 rejects it at write time) — decrypt-on-read
-		// is not the place to re-litigate that; leave the document as-is.
+		// is not the place to re-litigate that; leave the document as-is. The
+		// body therefore reaches the script readable, so it still records.
+		if !egress {
+			tracker.markPlaintext(doc.Key)
+		}
 		return nil
 	}
 	if egress {
@@ -128,6 +180,15 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		doc.Data = map[string]interface{}{"$sensitiveRef": marker}
 		return nil
 	}
+	// Sensitive-classed and NOT the egress ref disposition: from here the body
+	// reaches the script readable whatever happens next, so record it before the
+	// Vault branch rather than after a successful decrypt. With no Vault wired
+	// step 6.5 never encrypted on the way in (commit_path.go), so the aspect sits
+	// in Core KV as plaintext and returning here without recording left step 6's
+	// egress guard vacuous for exactly the deployment that has no crypto boundary
+	// at all. Recording on "sensitive-classed and readable" instead of "I
+	// decrypted it" is the fail-closed predicate.
+	tracker.markPlaintext(doc.Key)
 	if v == nil {
 		return nil
 	}
@@ -148,9 +209,6 @@ func decryptSensitiveDoc(ctx context.Context, conn *substrate.Conn, bucket strin
 		return fmt.Errorf("unmarshal decrypted %s: %w", doc.Key, err)
 	}
 	doc.Data = value
-	if tracker != nil {
-		tracker.plaintextRead = true
-	}
 	return nil
 }
 

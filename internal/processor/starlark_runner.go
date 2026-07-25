@@ -442,14 +442,44 @@ func starlarkDictToGoMap(d *starlarklib.Dict) map[string]interface{} {
 // the key, so it raises the HydrationMiss step 4 deferred instead of reporting
 // "not found" — `state[K]`, `K in state` and `state.get(K)` all route through
 // Get, so all three fail closed identically.
+//
+// sensitiveReads is the step-6 external-egress guard's consumption tracker: the
+// dict's values are readable sensitive data for a sensitive class, so the paths
+// that hand a value to the script record the consumption (design
+// sensitive-read-tracker-consumption §2).
+//
+// Do NOT give this type an `Items()` method. Implementing starlark's
+// IterableMapping is the natural way to make `dict(state)` work, and it would
+// silently turn `json.encode(state)` into a full dump of every hydrated document
+// with no consume call at all: json's encoder tries IterableMapping FIRST
+// (lib/json), and only falls through to Iterable — which yields key names alone —
+// because that method is absent. A value-yielding surface has to record a
+// whole-set consumption, like String/items/values do.
 type stateMapValue struct {
 	d              *starlarklib.Dict
 	requiredAbsent map[string]struct{}
 	deferredMiss   *deferredMissTracker
+	sensitiveReads *sensitiveReadTracker
 }
 
-func (s *stateMapValue) String() string          { return s.d.String() }
-func (s *stateMapValue) Type() string            { return "state" }
+// String implements starlarklib.Value. A dict renders its VALUES, so this is a
+// whole-set exposure exactly like items()/values(): `str(state)`, `repr(state)`,
+// `"%s" % state`, `"{}".format(state)` and string concatenation all land here,
+// and each hands the script every hydrated document's data — decrypted
+// plaintext included — as a string it can put straight into an event. So it
+// records a whole-set consumption (design
+// sensitive-read-tracker-consumption §2.1), on the same footing as the
+// value-yielding enumerators.
+//
+// That makes String side-effecting. No Go-side caller renders the state value
+// today, and a spurious flip is the fail-closed direction — but don't reach for
+// it in a log line, or every external-egress op that got logged would reject.
+func (s *stateMapValue) String() string {
+	s.sensitiveReads.consumeAll()
+	return s.d.String()
+}
+
+func (s *stateMapValue) Type() string { return "state" }
 func (s *stateMapValue) Freeze()                 { s.d.Freeze() }
 func (s *stateMapValue) Truth() starlarklib.Bool { return s.d.Truth() }
 func (s *stateMapValue) Hash() (uint32, error)   { return 0, fmt.Errorf("state is not hashable") }
@@ -461,6 +491,10 @@ func (s *stateMapValue) Get(k starlarklib.Value) (v starlarklib.Value, found boo
 			s.deferredMiss.fault(string(ks))
 			return nil, false, fmt.Errorf("state: declared read is absent: %s", string(ks))
 		}
+		// Naming a key is the script consuming that document. `in` routes through
+		// Get too and is indistinguishable here, so membership counts as
+		// consumption — conservative, and never weaker than flipping at hydration.
+		s.sensitiveReads.consume(string(ks))
 	}
 	return s.d.Get(k)
 }
@@ -481,38 +515,82 @@ func (s *stateMapValue) Iterate() starlarklib.Iterator {
 	return s.d.Iterate()
 }
 
-// AttrNames implements starlarklib.HasAttrs — delegates to the underlying
-// dict so `state.get`, `state.keys`, etc. continue to work.
+// stateAttrs is the allowlisted attribute surface of the `state` mapping: the
+// four read accessors, each of which this wrapper has reasoned about. It is
+// deliberately NOT the underlying dict's method set.
+//
+// A dict also carries `pop`, `popitem`, `setdefault`, `clear` and `update`.
+// Three of those RETURN a stored value — `state.pop(K)` and
+// `state.setdefault(K, d)` hand back the document under K, `state.popitem()`
+// hands back an arbitrary pair — so delegating them would bypass both hooks Get
+// carries: the required-absent fault (a declared-absent key would answer the
+// default instead of `HydrationMiss`, softening a read the operation declared it
+// depends on) and the sensitive-plaintext consumption record. Freezing the dict
+// does not close them: `setdefault` on a key that already EXISTS never inserts,
+// so it returns the value without tripping the frozen check.
+//
+// Default-deny rather than an enumerated blocklist: a future go.starlark.net
+// that adds another value-returning dict method fails closed here instead of
+// silently opening the same hole. Mutating the snapshot is meaningless anyway —
+// the commit path reads ScriptContext.Hydrated, never this dict.
+var stateAttrs = []string{"get", "items", "keys", "values"}
+
+// AttrNames implements starlarklib.HasAttrs.
 func (s *stateMapValue) AttrNames() []string {
-	return s.d.AttrNames()
+	return stateAttrs
 }
 
 // Attr implements starlarklib.HasAttrs — delegates to the underlying dict for
-// every attr except `get`, which is re-bound so it agrees with Get.
+// every attr except `get`, re-bound so it agrees with Get, and the two
+// value-yielding enumerators, wrapped so they record consumption.
 //
 // A dict's own bound `get` closes over the dict, not over this wrapper, so
 // delegating it would let `state.get(K)` answer None for a required-absent key:
 // that call NAMES K, so it is a dependence on K and must fail closed like
-// `state[K]`. The enumerators (`keys`/`items`/`values`) name nothing and
-// delegate untouched, on the same reasoning as Iterate.
+// `state[K]`.
+//
+// `items`/`values` name nothing, so they do not fault on a required-absent key
+// (Iterate's reasoning) — but they DO hand the script every hydrated document,
+// already-decrypted plaintext included, so they record a whole-set consumption
+// for step 6's external-egress guard (design
+// sensitive-read-tracker-consumption §2.1). `keys` yields key names only and
+// delegates untouched, on both counts.
 func (s *stateMapValue) Attr(name string) (starlarklib.Value, error) {
-	if name != "get" {
-		return s.d.Attr(name)
-	}
-	return starlarklib.NewBuiltin("get", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
-		var key, fallback starlarklib.Value = nil, starlarklib.None
-		if err := starlarklib.UnpackPositionalArgs("get", args, kwargs, 1, &key, &fallback); err != nil {
-			return nil, err
-		}
-		v, found, err := s.Get(key)
+	switch name {
+	case "get":
+		return starlarklib.NewBuiltin("get", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+			var key, fallback starlarklib.Value = nil, starlarklib.None
+			if err := starlarklib.UnpackPositionalArgs("get", args, kwargs, 1, &key, &fallback); err != nil {
+				return nil, err
+			}
+			v, found, err := s.Get(key)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				return fallback, nil
+			}
+			return v, nil
+		}), nil
+	case "items", "values":
+		delegate, err := s.d.Attr(name)
 		if err != nil {
 			return nil, err
 		}
-		if !found {
-			return fallback, nil
+		fn, ok := delegate.(*starlarklib.Builtin)
+		if !ok {
+			return nil, fmt.Errorf("state.%s is not callable", name)
 		}
-		return v, nil
-	}), nil
+		return starlarklib.NewBuiltin(name, func(thread *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+			s.sensitiveReads.consumeAll()
+			return starlarklib.Call(thread, fn, args, kwargs)
+		}), nil
+	case "keys":
+		return s.d.Attr(name)
+	default:
+		// Not in stateAttrs — no such attribute (default-deny; see stateAttrs).
+		return nil, nil
+	}
 }
 
 // vertexMapToStarlarkWithHydrated builds the `state` global for a script.
@@ -523,7 +601,12 @@ func vertexMapToStarlarkWithHydrated(sc ScriptContext) *stateMapValue {
 	for k, v := range sc.Hydrated {
 		_ = d.SetKey(starlarklib.String(k), vertexDocToStarlark(v))
 	}
-	return &stateMapValue{d: d, requiredAbsent: sc.RequiredAbsent, deferredMiss: sc.DeferredMiss}
+	return &stateMapValue{
+		d:              d,
+		requiredAbsent: sc.RequiredAbsent,
+		deferredMiss:   sc.DeferredMiss,
+		sensitiveReads: sc.SensitiveReads,
+	}
 }
 
 // vertexDocToStarlark projects a single VertexDoc into the Starlark struct a
