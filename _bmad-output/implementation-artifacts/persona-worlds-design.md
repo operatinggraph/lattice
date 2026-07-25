@@ -1695,6 +1695,62 @@ exists, café/clinic/loftspace run on it) and on W0 (**SHIPPED `626763bc`** — 
 `BindInstructorIdentity`, the `provider` role grant and `TombstoneSession`'s instructor confinement are all
 present, verified at `ddls.go:1680-1727` and `permissions.go:57-62`), so nothing sequences ahead of it.
 
+**As-built — W3 Inc 1 SHIPPED (2026-07-25, `d3a7cc7b`).** Wellness is sign-in-first. Both mints and the fixed
+admin actor are gone, the per-user reads answer only a verified session and scope to its subject, and three
+hats render from whoami. wellness-domain 0.11.0.
+
+*The brief's two forks held.* The schedule stayed public-read while the app shell stayed sign-in-first, and the
+dirty grants audit resolved by removing three surfaces rather than widening a grant — exactly as §4 decided.
+
+*The brief's own completeness claim was wrong, and the review caught it.* §10 asserted `attendance` was "the
+one named item deliberately not built". It was not: **cancel-own-session** — `TombstoneSession`, whose
+`provider` grant and in-script `ledBy` + `identifiedBy` confinement W0 already shipped — had no FE surface
+either, and by the brief's own increment definition ("the three hats over already-granted ops") it belonged in
+Inc 1. Worse, the own-roster that *was* built would have been unreachable in practice: `CreateSession`'s
+optional `instructor` param had no field on the scheduling form, so every class created in-app projected no
+instructor and the hat would have lit up for seed data alone. Both were built rather than deferred — the
+consumer was the roster this same increment shipped. That needed one more lens (`wellnessInstructors`, backing
+the form's picker), which is why the package changed more than the brief predicted.
+
+*Three defects found in review, all fixed before the merge.*
+- **Stored XSS in the render path.** `instructorName` was a new `innerHTML` sink on a **public-read** endpoint,
+  and class names are staff-entered free text with no charset restriction. The chain was real: the app's own
+  origin serves `/api/session/refresh`, which returns the caller's raw Gateway bearer. The sign-in-first
+  conversion is what made it worth an attacker's time — before it there was no per-user session to steal. The
+  sibling `cafe-app` already had an `escapeHtml` helper and it simply had not been followed; every data sink
+  now escapes.
+- **A Gateway outage was reported as 401**, which the FE reads as "your session is over" and answers by
+  navigating to `/login` — so a transient upstream blip signed a valid session out. Split into `errNoSession`
+  (401) versus an unresolvable upstream (502), and `handleBookings` no longer consults the Gateway at all for
+  the own-bookings answer, which needs only the session's subject.
+- **`kvGetter` conflated "no such key" with "the read failed"**, so a NATS blip told an instructor their own
+  class was not theirs. The roster check now reads through `substrate.ErrKeyNotFound` directly.
+
+*A lens bug the new tests caught before it ever ran.* `wellnessInstructorsSpec`'s `WHERE` was written after its
+`OPTIONAL MATCH`, where it binds to the optional pattern instead of filtering the driving row — the
+profile-less instructor rostered anyway. The rule-engine test failed on it immediately; `wellnessStudiosSpec`'s
+ordering was the fix.
+
+*Live-verified against the running stack, both directions, with positive controls.* Uncredentialed:
+`/api/sessions` and `/api/studios` 200 while `/api/bookings`, `/api/my-residency` and `/api/instructors` 401.
+The seeded multi-hat human (Sam Okafor — member + `worksAt` staff + bound instructor, §3.4's acceptance
+scenario) renders all three hats and four tabs; a plain member renders two. **The discriminating pairs:** Sam's
+own bookings return 1 row against the same session's roster at 3; a plain member is 403 on that roster and sees
+only their own 3 bookings; and the same `TombstoneSession`, same actor, differs only in which session — the
+class Sam leads **committed** (releasing its four studio slot cells), the one they do not came back `AuthDenied:
+… does not lead session …` with that session still standing. In-browser, "Call off this class" appears on a
+class Sam leads and is absent on one they do not, the create-studio form is gone, and a member booked and
+cancelled a future class end-to-end (3 → 4 → 3 classes). A past-dated seeded class was correctly refused
+`SessionInPast` — a prior fire's guard, surfaced cleanly by the new toast.
+
+*Residuals, filed as rows in the same docs commit.* (a) `attendance` (Inc 2), consumer named: the instructor
+roster this increment shipped. (b) The three removed staff surfaces — create-studio and cancel-anyone's-booking
+are operator-only, and the clean form is a confined grant, not a wildcard one. (c) The staff READ hat is
+**workplace-unscoped**: any `worksAt` anchor anywhere grants every studio's roster, while wellness-domain's own
+staff *writes* are workplace-confined by a `locatedAt`→`containedIn` walk. It is the widest thing this fire
+opens, a strict improvement on the unauthenticated dump it replaces, and identical in shape to café's shipped
+hat — so the row is broadened to cross-vertical rather than duplicated.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café

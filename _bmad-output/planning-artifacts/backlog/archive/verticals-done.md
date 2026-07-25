@@ -2,6 +2,11 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-21 · `566d710a` · Showcase demo session no longer ages out — wellness session id rolls by UTC day so a reseed always mints a FUTURE class + Nearby hides past-start entities; live-proven (rolled FUTURE, legacy fixed PAST + filtered)
+- 2026-07-21 · `bded5cc8` · scope=self ownership guards treat a tombstoned link as absent — café/clinic/wellness `== None` probes adopt F4's `== None or .isDeleted` (7 sites); tombstoned applicationFor drives Rejected (accepts without the fix)
+- 2026-07-20 · `a3fa5318` · Facet staff worlds F4 — worksAt write confinement, the multi-org gate; live: staff AuthDenied at a second building, operator unconfined
+- 2026-07-20 · `21130319` · Facet staff worlds F3 pane — `GET /api/staff/worklist` (one txn, no workplace predicate; RLS is the boundary) + Worklist screen; live: staff reads 1 of 3 appointments, no-`worksAt` actor 0, no Work tab for a resident
+- 2026-07-19 · `c663a27e` · Cancel a booking from Facet — `edgeEntityBookings` own-bookings lens (bookedBy, inherently private) + `{entity.<column>}` fill seam; live-proven booking AND session seat both tombstoned, released seat re-booked
 - 2026-07-19 · `415e18f3` · Facet staff worlds F3 read spine — `staffReadGrants` (cap-read.staff, building-anchored) + workplace anchors on both worklist tables; live wire→read-1 / unwire→read-0
 - 2026-07-19 · `c662dc54` · ~~F3 anchors~~ — **this SHA never reached main** (dangling, on no branch); the work was reconstructed in `5c797e03` + `415e18f3`. Left as a marker: a Done-log SHA is not proof the code landed
 - 2026-07-19 · `58d165ee` · Facet staff worlds F2 — `permission forOperation meta` + role-derived catalog/queue sibling lenses + staff read-grant slice; frontOfHouse Personal-Lens control grant (staff device synced nothing without it)
