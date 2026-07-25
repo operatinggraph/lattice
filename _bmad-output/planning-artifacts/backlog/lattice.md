@@ -107,19 +107,20 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** `Read-grant dual-enumeration S2` (★★★, ratified 2026-07-24) is the clean top
-> pick: one L fire, ends the dual-authored reachability walk. Behind it the two residuals the
-> authContext.target item left (clinic `== op.actor` migration, annotation-window tightening) are ★★ S/S–M
-> and need no new design. Beyond those every `✅ ratified` row is done or driver-blocked and the open
-> `📋 ready` rows are Whetstone's (embedded-NATS flakes) or parking-lot. A stale callout starves the lane —
-> whoever ships the next pick renames this.
+> 🎯 **Build-ready now.** No ratified-unbuilt design is left — the flywheel needs the Designer to
+> restock. The best ready picks all need no new design: the two residuals the authContext.target item
+> left (clinic `== op.actor` migration ★★ S, annotation-window tightening ★★ S–M), then
+> `actor-aggregate backfill` (★★ S–M, now with a named live consumer) and the two appsession rows
+> (★★ M each — the production IdP posture is the one that blocks any non-loopback deploy). Every other
+> `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot. A stale callout
+> starves the lane — whoever ships the next pick renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | **clinic-domain's exemption still keys on `== op.actor`** | Its two `workplace_exempt`/`require_workplace` sites predate the `op.authTargetValidated` primitive and are declared `(legacy-self-exempt)`, admitted by name in `lint-conventions`. `== op.actor` is itself forgeable; harmless today only via each site's `identifiedBy` probe. Migrating is a behaviour change, not a cleanup. | ★★ | S | 📋 ready · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §6 |
 | **Annotation window lets a bare exemption ride a neighbour's declaration** | Both new gates (and the `# read-posture:` convention they mirror) honour an annotation for the following 8 lines, so a reference inserted INTO an annotated block inherits its declaration. Fail-closed against forgetting, not against mis-declaring. Fix binds coverage to the annotated statement's own indentation block. | ★★ | S–M | 📋 ready · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §12 |
-| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the obvious re-assert ops no-op when state already matches. `reproject`/`rebuild` exist but need an asserted control-plane actor, so no operator-reachable backfill. Consumer: LoftSpace's landlord hat — seeded landlords render with no Landlord tab until touched. | ★★ | S–M | 📋 ready |
+| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the obvious re-assert ops no-op when state already matches. `reproject`/`rebuild` need an asserted control-plane actor, so no operator-reachable backfill. Consumers: LoftSpace's landlord hat; 51 stale `cap-read.edgeManifest*` docs. | ★★ | S–M | 📋 ready · [live evidence](../../implementation-artifacts/read-grant-single-source-walk-design.md) §10 |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` configured nothing can issue the session cookie — the documented verify-only posture is unreachable. Fails closed (401 everywhere), and the per-request credential→identity resolve the old read boundary did now happens only at dev-login. Consumer: the first non-loopback deployment of any of the five FE binaries. | ★★ | M | 📋 ready |
 | **[appsession] Cookie sessions carry no CSRF defense** | The kit's sessions rest on `SameSite=Strict` alone; cookies are domain- not port-scoped, so loupe :7777 / clinic :7799 / loftspace :7788 are same-site to one another and a `no-cors` POST from one carries another's cookie. No CSRF token, no Origin / `Sec-Fetch-Site` check on state-changing POSTs. Strictly better than the pre-kit no-auth posture; bites once any two of these are co-hosted or a real IdP lands. | ★★ | M | 📋 ready |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
@@ -159,7 +160,6 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — FTS interim consumer SHIPPED (`b105cf5`); OpenSearch adapter itself still has no consumer |
-| **Read-grant/lens dual-enumeration footgun** | Every non-self-anchored Personal lens re-states its reachability walk in a cap-read producer; drift = silent row drops (fail-closed) or over-grant. S1 (shipped): testkit coverage proof + structural lint. S2: one pkgmgr anchor-walk declaration compiles both (D1 runtime independence stays). | ★★★ | M (S1) · L (S2) | ✅ ratified (2026-07-24, S2 = one L fire) · [design](../../implementation-artifacts/read-grant-single-source-walk-design.md) |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
 
 ### Refinements & ops
@@ -187,6 +187,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-24 · `185a47ee` · [edge-manifest,test] the generated cap-read producer driven through the projection driver — an emptied slice retracts its key, a reachable actor keeps every real entry
+- 2026-07-24 · `bd3b76ba` · [pkgmgr,edge-manifest,lint] one `AnchorWalk` declaration compiles both read-grant enumerations — closes the dual-enumeration footgun (S2); 13 lenses migrated, 3 producers generated, gate flipped
 - 2026-07-24 · `390a6754` · [identity-domain,lint] validated-target exemptions are declared, not assumed — RecordIdentityPII rekeyed + §3.4.1 resource-bound; closes the forgeable-`authContext.target` item (Fire 2 of 2)
 - 2026-07-24 · `390a6754` · [lint] `authcontext-target` + `workplace-exempt` blocking gates (derived helper set, fixture self-test) — closes the validated-target-exemption-without-a-resource-bind item
 - 2026-07-24 · `fe8378c0` · [processor,packages] `op.authTargetValidated` closes the forgeable-`authContext.target` confinement bypass — primitive + 4-package guard migration (Fire 1 of 2)
@@ -219,7 +221,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-21 · `7b74ce70` · [packages] demo-operator inspect-only grant package (F20.3) — console-operator minus every write: `demoOperator` role + read lens + 3 `ctrl.*.read` grants; the platform boundary for public Loupe exposure (Andrew-gated)
 - 2026-07-21 · `446b3549` · [weaver] revision-condition lane-1's mark delete so a lane-1/sweep race on one `__effect` close credits it once, not twice — a double-credit could mask a real LensEffectMismatch; -race regression test
 - 2026-07-21 · `6b86e9e4` · [bootstrap] the `up` target keeps a stale bootstrap file on an empty Core KV (recreated stack — binary re-seeds at stable NanoIDs), discards only on a real mismatch — new `CoreKVEmpty` / `probe-empty` discriminator
-- 2026-07-20 · `a44651f` · [bootstrap] Core KV, not `lattice.bootstrap.json`, decides whether to seed — a recreated bucket behind a committed file re-seeds at the file's stable NanoIDs, reopening the two-phase window first
-- 2026-07-20 · `dcfe4af` · [gateway] heartbeat armed with the §5.6 interval-derived TTL — the last bare-`KVPut` emitter no longer leaks a `health.gateway.<instance>` key per restart; fixture bucket mirrors bootstrap
-- 2026-07-20 · `5b58f66` · [weaver] `__effect` window counts attempts, not dispatches — a collapse-only reclaim books no unanswerable episode, and a sweep-won close is credited; both LensEffectMismatch false-alarm biases
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

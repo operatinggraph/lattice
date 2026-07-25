@@ -431,3 +431,106 @@ Survived attacks (recorded): the §4 tautology crux (runtime dual-enumeration + 
 hand tail both stand); tail rebinding via unlabeled var reuse (the engine *joins* bound vars,
 `executor.go:621-624`); in-place upgrade identity + the lint-v2 same-fire coupling (confirmed
 necessary — the current lint reds otherwise); no hidden Personal-lens surface outside edge-manifest.
+
+## 10. As built (2026-07-24, `bd3b76ba` + `185a47ee`)
+
+Shipped as one L fire, as ratified. The primitive is `internal/pkgmgr/anchorwalk.go`
+(`AnchorWalk`, `ReadGrantDomainSpec`, `ExpandReadGrantWalks`); edge-manifest 0.9.0 → 0.10.0
+migrates all 13 non-self lenses and deletes its three hand-authored producers;
+`lint-lens-anchors` flipped in the same commit.
+
+**Deviations from §3–§8, each deliberate:**
+
+1. **No manifest reorder was needed (§7).** The premise was off: the three producers were not
+   interleaved at 14–16, they were already *appended* at the tail in the order Staff, base,
+   Provider. Declaring `ReadGrantDomains()` in that same order lands the generated producers at
+   the same indices, so `manifest.yaml`'s lens list is byte-unchanged (only version + description
+   moved). The index-wise `VerifyAgainstDefinition` compare is now additionally guarded
+   registry-wide by `TestEveryPackageCompilesItsReadGrantWalks`, which compiles and
+   manifest-verifies all 30 shipped packages.
+2. **Row-set equality covers the 5 rewritten lenses, not all 13 (§6 assertion #1).** Those are
+   exactly the lenses whose cypher changed (required `MATCH` → all-`OPTIONAL` with the filter
+   hoisted). The other 8 compose byte-identically to their retired specs — independently
+   confirmed by review, and corroborated live: the in-place upgrade reported **10 updated, 0
+   created, 0 tombstoned**, i.e. the diff never touched those 8 lens specs at all. The layout
+   contract that makes them byte-identical is pinned by the pkgmgr golden test.
+3. **The migration test is kept, not retired.** Retiring it in the same commit would leave the
+   tree with no evidence for the one hazard D1 structurally cannot catch. It carries the frozen
+   pre-conversion cypher for the 5 rewritten lenses + the 3 producers as fixtures.
+4. **`lint-lens-anchors` is AST-only, not a consumer of the expansion pass.** A `//go:build
+   ignore` script cannot instantiate arbitrary packages' `Definition` values; §6 asked for both
+   and its own parenthetical said "(AST-visible)". The expansion pass is instead exercised
+   registry-wide by the test in (1), which is what enforces chain validity in CI.
+5. **A third deliberate observable change, not in the design.** The hand-authored staff producer
+   fused `holdsRole` into a required head `MATCH`, so an identity with a workplace but **no role**
+   got no staff slice at all and had every `edgeStaffWorkOrders` row silently dropped by D1 — even
+   though that lens's own reachability is `worksAt`. The generated all-OPTIONAL producer grants
+   them: a latent **under**-grant, closed. Asserted deliberately by
+   `TestMigration_StaffSliceNoLongerRequiresARole`.
+6. **The gate got a second rule and a tighter grammar** (from the adversarial pass, §11): a
+   package shipping Personal lenses may not also hand-author a Path-B `cap-read` producer, and a
+   chain hop must name exactly one relation type in one direction.
+
+**Live verification (§8 step 4), on the running dev stack:**
+
+- In-place upgrade: **10 updated, 0 created, 0 tombstoned** — the generated producers landed on
+  the *same* lens vertices at the same canonical names, confirming the §8.6 in-place upgrade.
+- `verify-package-edge-manifest`: **94 assertions passed**. `make verify-kernel` passed.
+- The stored `.spec` in Core KV is the compiled artifact: `edgeTasks` carries the composed head +
+  `OPTIONAL MATCH` chain + hoisted `WHERE`, and `edgeManifestStaffReadGrants` is the generated
+  producer with `realnessFilter: "anchorId"` in its stored Output descriptor.
+- Refractor hot-loaded the new specs with no restart and, after the auth-plane convergence sweep
+  ran, reports **healthy / zero issues**.
+
+**One live residue, correctness-neutral, and its cause.** The spec change made the auth-plane
+convergence sweep report `CapabilityCoverageDivergence` (33 + 20 rows healed over two sweeps)
+before settling healthy. Investigating one healed actor found its `holdsRole` link **tombstoned**:
+the 14 "lost" anchors were *stale grants* that should already have been retracted, and the sweep
+correctly healed them away — the divergence was pre-existing drift the spec change merely
+surfaced. After convergence, 39 of the 90 `cap-read.edgeManifest*` documents carry real anchors,
+51 are placeholder-only, none are tombstoned, and 1794 entries still carry the retired hand-typed
+`via`. This is correctness-neutral: `IsReadable` matches `anchorId` only, so a placeholder-only
+document grants exactly what an absent key grants, and `via` is audit-only — which is why
+Refractor is right to call the plane healthy. It is nonetheless the concrete consumer of the filed
+*actor-aggregate lens rows do not backfill on a lens change* item: those documents refresh only
+when a CDC event next touches each actor. The driver-level proof that the new filter *does* delete
+an emptied slice on the normal projection path is `TestMigration_EmptySliceIsDeletedByTheDriver`
+(`185a47ee`) — added because live verification found the claim untested.
+
+## 11. Implementation adversarial pass (2026-07-24, three read-only reviewers)
+
+A compiler-attack reviewer, a migration edge-case reviewer, and an acceptance auditor ran against
+the built change. **No over-grant and no functional regression was constructible.** Folded:
+
+1. **Anchor-alias detection was not identifier-bounded** — `strings.Contains(tail, v+".key AS
+   anchor")` accepted `art.key AS anchor` as variable `t`'s, letting a tail re-aim the anchor at a
+   vertex the producer never grants (100% of rows dropped, silently); and `t.key AS anchorId`
+   satisfied it. Missing the right boundary in `anchorVarOf` also let a decoy `AS anchorId` column
+   exempt a non-self lens from declaring a Walk. Both ends are now bounded.
+2. **`isSelfAnchoredSpec` matched `key: $actorKey` inside another property's quoted value**, so
+   `(wo:workorder {note: "key: $actorKey"})` self-exempted. It now requires the property itself.
+3. **An unvalidated `ReadGrantDomain.Name` could never be read.** A dotted name yields
+   `cap-read.edge.manifest.identity.<id>`, and readers enumerate with the single-token wildcard
+   `cap-read.*.<actorSuffix>` — so every row of that domain's lenses would be dropped, silently.
+   The name must now be a single key token.
+4. **The chain grammar admitted an over-broad hop.** An untyped `-[r*0..3]->` traverses every
+   relation, an alternation `[:a|:b]` traverses two while `via` reports one, and `<-[:r]->` parsed.
+   All three are now inexpressible; a typed variable-length hop stays legal.
+5. **The gate was default-allow on an unreadable `OutputKeyPattern`** (a const or a concatenation
+   yielded `""`, skipping the Path-B rule) and counted an explicit `Walk: nil` as a declaration.
+   It now resolves consts, fails closed on anything it cannot read, and ignores `Walk: nil`. Its
+   second rule was also narrowed to packages that ship Personal lenses, so §3.4's carve-out for a
+   `cap-read` slice with no lens counterpart stays legal.
+6. **Test gaps closed:** `edgeTasksQueued`'s hoisted status filter had no negative vector (deleting
+   it left the assertion vacuous); nothing pinned that the four newly-OPTIONAL lenses suppress the
+   degenerate all-null row; `scopedName`'s non-null branch never ran through the new `WITH` stage;
+   and migration assertion #3 was never driven through the projection driver. Each is now a test,
+   and the two new negative vectors were mutation-checked (each fails when its filter is removed).
+7. A stale CI step description and a false comment claiming the composed lenses no longer carry
+   their Walks were corrected.
+
+Survived: shared-prefix factoring and positional renaming (proved sound by induction over the
+transitive-inheritance, whole-chain-shared and repeated-clause cases); unrooted-scan injection into
+a chain; cypher injection through `AnchorType`/`AnchorVar`/relation names; an unexpanded Definition
+reaching a write path (every `def.Lenses` reader traced); and output determinism (no map iteration
+reaches emitted text).
