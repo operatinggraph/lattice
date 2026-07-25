@@ -108,9 +108,10 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now.** Top picks needing no new design: `lint-package-standard` (★★ M), the
-> **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit), the **suppressed-sweep
-> reports-healthy** row (★★ S, just filed), `actor-aggregate backfill` (★★ S–M, consumers now
-> `identityAnchors` + `myTasks`), then the two ★ Processor sensitive-predicate rows. The
+> **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit),
+> `actor-aggregate backfill` (★★ S–M, consumers now `identityAnchors` + `myTasks`), the
+> **rebuild-progress signal** + the **business-lens drop-on-unreadable** rows (★★/★, just filed),
+> then the two ★ Processor sensitive-predicate rows. The
 > **cap-read size bound** and the **appsession** production-IdP row need the Designer first. Every
 > `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot. The Designer
 > needs to restock. A stale callout starves the lane — whoever ships next renames this.
@@ -125,7 +126,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
 | **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the re-assert ops no-op when state already matches. `reproject`/`rebuild` need an asserted control-plane actor, so no operator-reachable backfill. Only auth-plane lenses get the convergence sweep; every other actorAggregate has no healer. | ★★ | S–M | 📋 ready · consumers: `identityAnchors` (whoami hats) + `myTasks` — no sweeper |
-| **[Refractor] A SUPPRESSED sweep still reports healthy** | `pass` returns before recording any verdict when suppressed (`RebuildInFlight` stuck true, or `reporter.GetStatus` erroring → fail-closed skip), so a sweep verifying nothing indefinitely publishes `alert: ok`, all counters 0; a `GetStatus` error also drops the lens from `metrics.capabilityLens`. `SweepStatus.LastPassAt` is read by nobody — carrying it into the heartbeat covers both. | ★★ | S | 📋 ready · consumer: operators, via `CapabilityRepairFailing` |
+| **[Refractor] A long-running rebuild has no progress signal** | A rebuild suppresses the sweep, so `CapabilitySweepStalled` reports it — but only as elapsed time, and cannot tell a rebuild that is draining from one wedged forever (`watchRebuildCompletion` retries an erroring `OutstandingForConsumer` indefinitely). Hence its deliberate no-escalation carve-out. A rebuild-progress signal (outstanding count, monotonic) would let the stall detector escalate a wedged rebuild. | ★★ | S–M | 📋 ready · consumer: operators, via the `sweep-stalled` warning that cannot escalate |
 | **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). The hand-chosen `ReadGrantDomain` split is the only lever today. | ★★ | M | 📋 ready · needs design · the freeze is now detected (`CapabilityRepairFailing`) |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere). Also needs a per-path origin-gate exemption: a cross-site OIDC `form_post` callback 403s. | ★★ | M | 📋 ready · Designer first (IdP→cookie handoff = arch fork) · [kit](../../../docs/components/appsession.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
@@ -165,6 +166,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
 | Elasticsearch target adapter | A third lens target adapter (only NATS-KV + Postgres ship; no consumer yet). | ★ | M | ✅ ratified (2026-07-02, OpenSearch pin + FTS-first interim) · [design](../../implementation-artifacts/search-target-adapter-design.md) · shelf — FTS interim consumer SHIPPED (`b105cf5`); OpenSearch adapter itself still has no consumer |
+| **[Refractor] A business lens whose liveness is unreadable is dropped, not reported** | `LensProvider` skips any non-auth-plane lens whose `GetStatus`/`Pending` errors, so it vanishes from `metrics.lensLiveness` with no issue — the same fail-open the auth-plane path closed with `CapabilityLensUnreadable`; mirror it as `LensProjectionUnreadable` (warning) with `projectionLag: null`. | ★ | XS–S | 📋 ready · consumer: operators watching a non-auth-plane read model |
 | **[Refractor] Cross-instance projection-latency rollup** | Aggregate per-lens projection latency across Refractor instances into one per-component view (single-instance today, so per-instance == per-component). Link-tombstone re-projection half **subsumed** by the link-aspect reprojection design. | ★ | S | 🚧 seq behind HA-NATS multi-instance · [link-aspect design](../../implementation-artifacts/link-aspect-triggered-reprojection-plain-lenses-design.md) subsumes the tombstone half; no multi-instance consumer yet |
 
 ### Refinements & ops
@@ -191,6 +193,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 ## Done log — lattice (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
+
+- 2026-07-25 · `831b0da9` · [refractor] a sweep that verifies nothing reports that, not the last pass's verdict — `CapabilitySweepStalled` (staleness clock + suppression cause) + `CapabilityLensUnreadable` (never dropped)
 
 - 2026-07-25 · `3b0798c8` · [refractor] the sweep reports what it could not REPAIR, not only what it healed — `CapabilityRepairFailing` + `failingActors` gauge, slot-yielding per-actor backoff, departed-actor reap
 
