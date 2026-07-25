@@ -1,11 +1,11 @@
-Copyright (c) 2026 Andrew Solgan (asolgan). All rights reserved.
+Copyright (c) 2026 Everdream Systems LLC. All rights reserved.
 
 PROPRIETARY AND CONFIDENTIAL — SOURCE-AVAILABLE, NOT OPEN SOURCE
 
 This repository and all of its contents (the "Software") — including, without
 limitation, source code, documentation, designs, specifications, and other
-materials — are the exclusive property of Andrew Solgan ("the Author") and are
-protected by copyright and other intellectual property laws.
+materials — are the exclusive property of Everdream Systems LLC ("the Owner")
+and are protected by copyright and other intellectual property laws.
 
 The Software is made publicly visible solely for the purposes of demonstration,
 evaluation, and personal reference. Making the source visible does NOT place it
@@ -23,7 +23,7 @@ the Software, unmodified, on machines you control, solely to evaluate it. This
 permission does not extend to any production, commercial, or hosted use, to
 creating derivative works, or to any redistribution.
 
-You MAY NOT, except as expressly permitted above or with the Author's prior
+You MAY NOT, except as expressly permitted above or with the Owner's prior
 written permission:
 
   1. use the Software, in whole or in part, for any purpose, commercial or
@@ -38,12 +38,12 @@ written permission:
   6. remove, alter, or obscure this notice or any copyright or attribution
      notice contained in the Software.
 
-All rights not expressly granted are reserved by the Author. To request
-permission for any use beyond the limited permission above, contact the Author.
+All rights not expressly granted are reserved by the Owner. To request
+permission for any use beyond the limited permission above, contact the Owner.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE OWNER BE
 LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
 CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
