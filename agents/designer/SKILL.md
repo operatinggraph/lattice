@@ -233,6 +233,25 @@ tombstones. **Capability KV is a lens projection** (projection correctness = aut
   closed. That pattern makes almost any "needs semantics" convention lintable — reach for it before
   concluding a rule is unenforceable.
 
+- **When a design REMOVES or REPLACES a component, enumerate everything that component was silently
+  carrying — not just its named job.** A design framed as "posture B is missing mechanism X" reasons about
+  X and quietly assumes everything else survives the swap. But the component you are removing is usually
+  load-bearing for things nobody wrote down, and each of those is a separate break. Make it a checklist,
+  not an intuition: **grep every call site and every consumer of the departing component, and for each ask
+  "what did this get from it besides the obvious?"** (Trialed 2026-07-25, the appsession OIDC design: the
+  production posture has no in-process `Signer`, and the draft designed the missing cookie-issuance. The
+  adversarial pass found the minter was *also* the only carrier of Contract #11 §11.4 credential→business
+  resolution — `handleDevLogin` re-**mints** for the resolved identity, and every app read boundary
+  consumes `Identity(ctx)` as already-resolved — so the design would have shipped reads-as-`A` /
+  writes-as-`U`, the exact split §11.4 forbids, breaking a shipped feature. It was *also* the source of
+  `DevTokenTTL = 30m`, off which two FE refresh loops hardcode a 20-minute cadence, so the draft's
+  "zero FE changes" claim was false too. One removed component, three silent obligations.) The tell that
+  you are in this failure mode: a design that says **"the FE/consumer contract is unchanged"** or
+  **"drop-in replacement."** That claim is a *hypothesis about every consumer*, and it is cheap to falsify
+  — go read them. This is the **substitution cousin** of the assumed-producer / assumed-transport /
+  assumed-retraction reflexes above: there a channel was assumed to exist; here a channel is assumed to
+  *survive*.
+
 **Run the pre-build gates you write into your own designs — "ratified" ≠ "build-ready."** If a design
 self-flags a pre-build adversarial / `bmad-party-mode` pass (a deferred gate), that pass is a **Designer-lane
 obligation**: run it and **record it as run** before the design is build-ready. Do not leave it dangling for
