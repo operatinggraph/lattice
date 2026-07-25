@@ -108,6 +108,23 @@ const (
 	leaseApp3Key    = "vtx.leaseapp." + leaseApp3ID
 	applicant3Name  = "Alex Kim"
 	applicant3Email = "alex.kim@showcase.dev.lattice.local"
+
+	// The landlord beat: a fourth unit managed by a persona whose only role is
+	// `consumer`, plus its own signed, undecided lease application. This is the
+	// PLAIN-landlord cell (persona-worlds-design.md §7.2) — the staff persona
+	// above manages Unit 3 as a front-desk landlord, but holds frontOfHouse
+	// rather than consumer, so it reaches the landlord ops only through the
+	// standing grant. A landlord whose authority is its `manages` link alone is
+	// what exercises the scope=self grants. The two cells own separate units so
+	// neither one's decision empties the other's pane.
+	unit4ID         = "XLVjcU1Tm6EdzefRFt52"
+	leaseApp4ID     = "7ZFNQMV7XWaZPDh9Dh65"
+	unit4Key        = "vtx.unit." + unit4ID
+	leaseApp4Key    = "vtx.leaseapp." + leaseApp4ID
+	landlordName    = "Nora Vance"
+	landlordEmail   = "nora.vance@showcase.dev.lattice.local"
+	applicant4Name  = "Priya Raman"
+	applicant4Email = "priya.raman@showcase.dev.lattice.local"
 )
 
 // The W0 provider-spine increment (persona-worlds-design.md Fire W0): a
@@ -150,11 +167,12 @@ var showcaseLocationNames = map[string]map[string]any{
 	unit1Key:    {"name": "Unit 1", "icon": "door"},
 	unit2Key:    {"name": "Unit 2", "icon": "door"},
 	unit3Key:    {"name": "Unit 3", "icon": "door"},
+	unit4Key:    {"name": "Unit 4", "icon": "door"},
 }
 
 // showcaseLocationOrder fixes the iteration order a map does not have, so a
 // rerun submits its ops — and prints its lines — deterministically.
-var showcaseLocationOrder = []string{buildingKey, unit1Key, unit2Key, unit3Key}
+var showcaseLocationOrder = []string{buildingKey, unit1Key, unit2Key, unit3Key, unit4Key}
 
 // legacyMislabeledTemplates are the two backgroundCheck-classed templates
 // seed-edge-demo.go minted, branded "Maple Laundry" via .presentation — §7.3
@@ -215,6 +233,9 @@ func main() {
 		fmt.Printf("==> staff:           %s (%s) worksAt building, holds frontOfHouse\n", staffKey, staffName)
 		seedStaffWorklistApplication(ctx, conn, adminKey, staffKey)
 		fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
+		landlordKey := seedLandlordWorld(ctx, conn, adminKey, consumerRoleKey)
+		fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
+		fmt.Println("LOFTSPACE_LANDLORD_NANOID=" + strings.TrimPrefix(landlordKey, "vtx.identity."))
 		maintKey := seedMaintenanceBeat(ctx, conn, adminKey, consumerRoleKey)
 		fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
 
@@ -336,6 +357,9 @@ func main() {
 
 	seedStaffWorklistApplication(ctx, conn, adminKey, staffKey)
 
+	landlordKey := seedLandlordWorld(ctx, conn, adminKey, consumerRoleKey)
+	fmt.Printf("==> landlord:        %s (%s) manages Unit 4, holds consumer\n", landlordKey, landlordName)
+
 	// Cold-start race guard (verticals.md "Facet cold-start races the cap
 	// projection", ef45e83): wait for both tenants' consumer role grant to
 	// project before this loader returns, so an immediate `make up-facet`
@@ -346,6 +370,9 @@ func main() {
 	// control-plane role — wait on one of them so a login never races
 	// cap.roles.<staff>.
 	waitForRoleGrant(ctx, conn, staffKey, "DecideLeaseApplication")
+	// The landlord's grants are the consumer scope=self rows the vertical
+	// packages declare, so the same wait applies one op over.
+	waitForRoleGrant(ctx, conn, landlordKey, "SetListingStatus")
 
 	retireLegacyTemplates(ctx, conn)
 
@@ -368,6 +395,7 @@ func main() {
 	fmt.Println("FACET_TENANT1_NANOID=" + strings.TrimPrefix(tenant1Key, "vtx.identity."))
 	fmt.Println("FACET_TENANT2_NANOID=" + strings.TrimPrefix(tenant2Key, "vtx.identity."))
 	fmt.Println("FACET_STAFF_NANOID=" + strings.TrimPrefix(staffKey, "vtx.identity."))
+	fmt.Println("LOFTSPACE_LANDLORD_NANOID=" + strings.TrimPrefix(landlordKey, "vtx.identity."))
 	fmt.Println("FACET_MAINT_NANOID=" + strings.TrimPrefix(maintKey, "vtx.identity."))
 	fmt.Println("FACET_PROVIDER_NANOID=" + strings.TrimPrefix(oseiIdentityKey, "vtx.identity."))
 	fmt.Println("FACET_LAUNDRY_NANOID=" + strings.TrimPrefix(kaiIdentityKey, "vtx.identity."))
@@ -1149,6 +1177,146 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 			&processor.ContextHint{Reads: []string{leaseApp3Key}})
 	}
 	fmt.Println("==> staff worklist:  " + leaseApp3Key + " (" + applicant3Name + " → Unit 3, signed, awaiting decision)")
+}
+
+// seedLandlordWorld mints the plain-landlord cell: a fourth unit, a persona
+// holding `consumer` and nothing else, its `manages` link over that unit, and
+// a signed-but-undecided lease application to act on.
+//
+// It is the staff-worklist beat's mirror image, and the difference is the
+// point. The staff persona reaches DecideLeaseApplication through the standing
+// frontOfHouse grant; this one holds no staff role at all, so every landlord op
+// it can submit is authorized by a `consumer` scope=self grant whose script then
+// proves the `manages` link. That path had no persona able to walk it: the
+// Gateway auto-grants `consumer` to actors it authenticates, but
+// ProvisionConsumerIdentity is first-touch only and returns a clean no-op for an
+// identity that already exists — so a seeded persona can never acquire the role
+// that way, and must be granted it here.
+//
+// Unit 4 is created before the persona because AssignUnitOwner requires a live
+// unit. Every step is liveness-guarded: this runs on an already-loaded world
+// too, where it layers in whatever is missing without re-submitting what is not.
+func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
+	if !alive(ctx, conn, unit4Key) {
+		submitOp(ctx, conn, adminKey, "CreateLocation", "location",
+			map[string]any{"locationType": "unit", "locationId": unit4ID,
+				"presentation": showcaseLocationNames[unit4Key]}, nil)
+		submitOp(ctx, conn, adminKey, "WireContainedIn", "location",
+			map[string]any{"child": unit4Key, "parent": buildingKey},
+			&processor.ContextHint{Reads: []string{unit4Key, buildingKey}})
+	}
+
+	landlordKey := ensureLandlord(ctx, conn, adminKey, consumerRoleKey)
+
+	if !alive(ctx, conn, unit4Key+".address") {
+		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
+			map[string]any{"unit": unit4Key, "line1": "40 Riverside Walk", "city": "Riverside",
+				"region": "CA", "postal": "92501"},
+			&processor.ContextHint{Reads: []string{unit4Key}})
+	}
+	// SetListingStatus is one of the five landlord ops, and it rejects a unit
+	// with no listing to transition — so the cell is not actually exercisable
+	// without one.
+	if !alive(ctx, conn, unit4Key+".listing") {
+		submitOp(ctx, conn, adminKey, "SetListing", "loftspaceListing",
+			map[string]any{"unit": unit4Key, "rentAmount": 2400, "rentCurrency": "USD",
+				"bedrooms": 2, "bathrooms": 1, "sqft": 880, "leaseTermMonths": 12,
+				"availableFrom": time.Now().UTC().AddDate(0, 0, 45).Format("2006-01-02"),
+				"status":        "available"},
+			&processor.ContextHint{Reads: []string{unit4Key}})
+	}
+	if !alive(ctx, conn, leaseApp4Key) {
+		salt, err := substrate.NewNanoID()
+		must(err, "generate landlord applicant claim-key salt")
+		reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+			map[string]any{"name": applicant4Name, "email": applicant4Email,
+				"claimKeyHash": mustSHA256Hex("showcase-landlord-applicant-" + salt)}, nil)
+		applicantKey := reply.PrimaryKey
+		submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
+			map[string]any{"applicant": applicantKey, "unit": unit4Key, "leaseAppId": leaseApp4ID,
+				"moveInDate":      time.Now().UTC().AddDate(0, 0, 45).Format("2006-01-02"),
+				"leaseTermMonths": 12, "requestedRent": 2400},
+			&processor.ContextHint{Reads: []string{applicantKey, unit4Key}})
+	}
+	if !alive(ctx, conn, leaseApp4Key+".signature") {
+		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
+			map[string]any{"leaseAppKey": leaseApp4Key},
+			&processor.ContextHint{Reads: []string{leaseApp4Key}})
+	}
+	fmt.Println("==> landlord queue:  " + leaseApp4Key + " (" + applicant4Name + " → Unit 4, signed, awaiting decision)")
+	return landlordKey
+}
+
+// ensureLandlord recovers the landlord persona by its `manages` link into Unit
+// 4, minting it only when that link has never existed.
+//
+// The link IS the identity of this persona, exactly as worksAt is for staff and
+// residesIn is for a tenant, and recovering by it is what makes a rerun safe:
+// CreateUnclaimedIdentity mints a fresh NanoID every call, so a blind re-run
+// would accumulate a second landlord — and could not, because the fixed
+// landlord email collides on the identity index and fails the seed.
+//
+// Unit 4 has exactly one manager by construction, so the lookup needs no
+// role-based tie-breaker (the discriminator ensureStaff and ensureMaintenanceTech
+// need for a relation several personas share). A tombstoned link recovers the
+// identity behind it and re-wires, rather than reading as an absent persona.
+func ensureLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
+	js := conn.JetStream()
+	coreKV, err := js.KeyValue(ctx, bootstrap.CoreKVBucket)
+	must(err, "open core-kv")
+	allKeys, err := pkgverify.ListAllKeys(ctx, coreKV)
+	must(err, "list core-kv keys")
+
+	existing, _ := findLinkedIdentity(ctx, coreKV, allKeys, "manages", unit4Key, "")
+	if existing == "" {
+		return seedLandlord(ctx, conn, adminKey, consumerRoleKey)
+	}
+	if !alive(ctx, conn, linkKey(existing, "manages", unit4Key)) {
+		assignUnitOwner(ctx, conn, adminKey, existing)
+		fmt.Printf("==> healed:          re-wired %s manages Unit 4 (link was absent or tombstoned)\n", existing)
+	}
+	return existing
+}
+
+// seedLandlord mints the landlord identity: `consumer` and no other role, no
+// residesIn (it does not live here) and no worksAt (it is not staff) — its
+// entire world composes from the `manages` link.
+//
+// State is flipped via UpdateIdentityState for the same reason seedTenant and
+// seedStaff do it: the real ClaimIdentity ceremony re-creates a holdsRole link
+// that would collide with the AssignRole grant above it.
+func seedLandlord(ctx context.Context, conn *substrate.Conn, adminKey, consumerRoleKey string) string {
+	salt, err := substrate.NewNanoID()
+	must(err, "generate landlord claim-key salt")
+	reply := submitOp(ctx, conn, adminKey, "CreateUnclaimedIdentity", "identity",
+		map[string]any{"name": landlordName, "email": landlordEmail,
+			"claimKeyHash": mustSHA256Hex("showcase-landlord-" + salt)}, nil)
+	landlordKey := reply.PrimaryKey
+
+	submitOp(ctx, conn, adminKey, "AssignRole", "",
+		map[string]any{"actorKey": landlordKey, "roleKey": consumerRoleKey},
+		&processor.ContextHint{Reads: []string{landlordKey, consumerRoleKey}})
+	assignUnitOwner(ctx, conn, adminKey, landlordKey)
+	submitOp(ctx, conn, adminKey, "UpdateIdentityState", "identity",
+		map[string]any{"identityKey": landlordKey, "newState": "claimed"},
+		&processor.ContextHint{Reads: []string{landlordKey, landlordKey + ".state"}})
+	return landlordKey
+}
+
+// assignUnitOwner submits the Unit 4 management grant under the operator
+// identity — the only role AssignUnitOwner is granted to, deliberately, since it
+// is the op that CONFERS management and a self-scoped grant on it would let any
+// signed-in identity make itself a landlord.
+//
+// The management link rides optionalReads because the script reads it on demand
+// to tell create from revive, and it legitimately does not exist on a fresh pair.
+func assignUnitOwner(ctx context.Context, conn *substrate.Conn, adminKey, landlordKey string) {
+	submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
+		map[string]any{"landlord": landlordKey, "unit": unit4Key},
+		&processor.ContextHint{
+			Reads:         []string{landlordKey, unit4Key},
+			OptionalReads: []string{linkKey(landlordKey, "manages", unit4Key)},
+		})
 }
 
 // retireLegacyTemplates soft-deletes the two backgroundCheck-classed
