@@ -159,12 +159,13 @@ func InstallActorAggregate(
 		return false
 	}
 
-	authPlane := IsAuthPlane(r)
-	if _, err := Compile(r); err != nil {
+	plan, err := Compile(r)
+	if err != nil {
 		logger.Error("actor-aggregate plan compile failed — refusing registration",
 			"lensId", r.ID, "err", err)
 		return false
 	}
+	authPlane := plan.AuthPlane
 
 	lensDefKey := "vtx.meta." + r.ID
 	p.SetEnvelopeFn(desc.EnvelopeFn(lensDefKey, projectionRevision))
@@ -185,18 +186,66 @@ func InstallActorAggregate(
 		})
 	}
 
-	guarded := authPlane || desc.RequiresGuardedTombstone()
+	guarded := plan.RequiresGuard()
 	if guarded {
 		if gErr := EnableProjectionGuard(adpt, r.ID); gErr != nil {
 			logger.Error("actor-aggregate guard", "lensId", r.ID, "err", gErr)
 			return false
 		}
+		// The requirement outlives this adapter instance. A lens whose writes
+		// need the §6.2 ordering token needs it for the lens's whole life, so
+		// the pipeline — the object that survives an adapter swap — is what
+		// carries it, and refuses any later adapter that cannot enforce it.
+		p.RequireGuardedAdapter()
 	}
 
 	logger.Info("actor-aggregate envelope + fan-out + delete-key + latency installed",
 		"lensId", r.ID, "lensDefKey", lensDefKey,
 		"anchorType", desc.AnchorType, "guarded", guarded, "authPlane", authPlane)
 	return true
+}
+
+// ApplyGuard binds a lens rule's §6.2 guard requirement to an adapter built for
+// that rule. The requirement is a property of the RULE, not of one adapter
+// instance, so EVERY adapter a lens ever writes through must carry it — the
+// activation-path adapter and equally a replacement built to swap into a
+// running pipeline on an INTO-only hot reload. That second caller is why this
+// is separable from InstallActorAggregate, which runs only at activation.
+//
+// A rule needing no guard leaves the adapter untouched. A rule needing one on a
+// target that cannot enforce it is an error, never a silent downgrade — the
+// same fail-closed posture EnableProjectionGuard takes, so a caller that
+// refuses to build or install the adapter keeps the guarded lens off rather
+// than running it open.
+func ApplyGuard(adpt adapter.Adapter, r *lens.Rule) error {
+	required, err := RequiresGuard(r)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil
+	}
+	return EnableProjectionGuard(adpt, r.ID)
+}
+
+// RequiresGuard reports whether a lens rule's writes must run under the §6.2
+// monotonic projection-write guard — true for an actor-aggregate lens that
+// projects an authorization surface or whose empty behavior produces a soft
+// tombstone. A lens that is not an actor-aggregate has no projection plan and
+// no guard.
+//
+// It answers from the rule alone, so a caller holding nothing but a lens
+// definition — the adapter builder, the hot-reload guard — decides the same way
+// InstallActorAggregate does.
+func RequiresGuard(r *lens.Rule) (bool, error) {
+	if !IsActorAggregate(r) {
+		return false, nil
+	}
+	plan, err := Compile(r)
+	if err != nil {
+		return false, fmt.Errorf("projection guard: lens %s: %w", r.ID, err)
+	}
+	return plan.RequiresGuard(), nil
 }
 
 // EnableProjectionGuard turns on the monotonic projection-write guard for a

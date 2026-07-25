@@ -44,6 +44,7 @@ const (
 	sentinelAgreementRes2   = "TsntBagreementRes222" // was node_agreement_res2
 	sentinelAgreementHr1    = "TsntCagreementHr1111" // was node_agreement_hr1
 	sentinelAgreementHr2    = "TsntDagreementHr2222" // was node_agreement_hr2
+	sentinelAgreementRefsd  = "TsntKagreementRefsd1"
 	sentinelAgreementRetry1 = "TsntGagreementRetry1" // was node_agreement_retry1
 	sentinelAgreementTerm1  = "TsntHagreementTerm11" // was node_agreement_term1
 	sentinelAgreementTerm2  = "TsntJagreementTerm22" // was node_agreement_term2
@@ -1417,4 +1418,82 @@ func TestPipeline_Rebuild_ProbeRecoveryKeepsRebuildingStatus(t *testing.T) {
 		assert.NotEqual(t, "active", s,
 			"premature active persisted while the rebuild was still draining: %v", statuses)
 	}
+}
+
+// guardedRecorder is a recorderAdapter that reports the §6.2 projection-write
+// guard as enabled, standing in for a NatsKVAdapter the installer has guarded.
+type guardedRecorder struct{ recorderAdapter }
+
+func (g *guardedRecorder) Guarded() bool { return true }
+
+// TestPipeline_HotReloadInto_RequireGuarded_RefusesUnguardedReplacement pins
+// the invariant that outlives an adapter instance: a lens whose writes need the
+// projection-write guard must never be swapped onto an adapter that cannot
+// enforce it, because a freshly built adapter starts open and the guard is what
+// stops a stale re-projection resurrecting a revoked capability.
+func TestPipeline_HotReloadInto_RequireGuarded_RefusesUnguardedReplacement(t *testing.T) {
+	adptA := &guardedRecorder{}
+	p, err := pipeline.New("rule-guarded", "nats_kv", "CORE", nil, nil, adptA, nil)
+	require.NoError(t, err)
+	p.RequireGuardedAdapter()
+
+	require.Error(t, p.HotReloadInto(&recorderAdapter{}),
+		"an adapter that does not report guardedness must be refused")
+
+	require.NoError(t, p.HotReloadInto(&guardedRecorder{}),
+		"a guarded replacement must still be accepted")
+}
+
+// TestPipeline_HotReloadInto_NoGuardRequirement_AcceptsAnyAdapter keeps the
+// refusal scoped to guarded lenses — every plain lens hot-reloads as before.
+func TestPipeline_HotReloadInto_NoGuardRequirement_AcceptsAnyAdapter(t *testing.T) {
+	p, err := pipeline.New("rule-plain", "nats_kv", "CORE", nil, nil, &recorderAdapter{}, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, p.HotReloadInto(&recorderAdapter{}))
+}
+
+// TestPipeline_HotReloadInto_GuardedReplacementArmsTheRequirement covers a lens
+// that becomes guarded mid-life: a rule edit can move it onto an authorization
+// surface, guarding the adapter built for it without the installer running
+// again. The swap that brings that adapter in latches the requirement, so a
+// later swap cannot quietly drop it.
+func TestPipeline_HotReloadInto_GuardedReplacementArmsTheRequirement(t *testing.T) {
+	p, err := pipeline.New("rule-becomes-guarded", "nats_kv", "CORE", nil, nil, &recorderAdapter{}, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, p.HotReloadInto(&guardedRecorder{}),
+		"a guarded adapter is accepted by a pipeline that did not previously require one")
+
+	require.Error(t, p.HotReloadInto(&recorderAdapter{}),
+		"once a guarded adapter is live, an unguarded replacement must be refused")
+}
+
+// TestPipeline_HotReloadInto_RefusedSwapKeepsWritingThroughTheGuardedAdapter
+// proves the refusal leaves the lens correct-and-stale rather than merely
+// erroring: after a refused swap the ORIGINAL guarded adapter is still the one
+// taking writes, and the rejected replacement never receives any.
+func TestPipeline_HotReloadInto_RefusedSwapKeepsWritingThroughTheGuardedAdapter(t *testing.T) {
+	env := startPipelineEnv(t)
+
+	eng, cr := compileFullRule(t,
+		"MATCH (a:agreement {key: $actorKey}) RETURN a.id AS agreement_id",
+		[]string{"agreement_id"})
+
+	guarded := &guardedRecorder{}
+	rejected := &recorderAdapter{}
+
+	p, err := pipeline.New("rule-refused-swap", "nats_kv", coreKVBucket, env.adjKV, env.coreKV, guarded, nil)
+	require.NoError(t, err)
+	p.UseFullEngine(eng, cr)
+	p.RequireGuardedAdapter()
+	startPipeline(t, env, p, "rule-refused-swap")
+
+	require.Error(t, p.HotReloadInto(rejected), "an unguarded replacement must be refused")
+
+	putNode(t, env.coreKV, "vtx.agreement."+sentinelAgreementRefsd, map[string]any{"id": "rs1", "isDeleted": false})
+	pollUntil(t, 2*time.Second, func() bool { return guarded.Count() >= 1 })
+
+	assert.Equal(t, 0, rejected.Count(),
+		"the refused adapter must never take a write — the lens keeps writing through the guarded one")
 }

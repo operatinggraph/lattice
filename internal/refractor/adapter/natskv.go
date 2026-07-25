@@ -53,7 +53,7 @@ type NatsKVAdapter struct {
 	// When true, Upsert/Delete write conditionally (CAS) so a lower-seq replay
 	// is rejected, a Delete becomes a soft tombstone carrying the watermark, and
 	// projectionSeq is stamped into the persisted body. Set per-lens via
-	// SetGuarded; the two at-risk lenses (capabilityEphemeral, myTasks) enable it.
+	// SetGuarded, from the lens's own compiled projection plan.
 	guarded bool
 }
 
@@ -65,8 +65,9 @@ type NatsKVAdapter struct {
 // it is fixed for the life of the adapter.
 //
 // The adapter is built unguarded; SetGuarded enables the projection-write guard
-// for the lenses that require it (the canonical-name switch in cmd/refractor
-// owns that decision, keeping this constructor free of lens-name knowledge).
+// for the lenses that require it. That decision is derived from the lens's
+// compiled projection plan (projection.RequiresGuard), never from a
+// canonical-name list, so this constructor carries no lens knowledge.
 func New(kv *substrate.KV, keyOrder []string, deleteMode DeleteMode) (*NatsKVAdapter, error) {
 	if len(keyOrder) == 0 {
 		return nil, errors.New("natskv: keyOrder must not be empty")

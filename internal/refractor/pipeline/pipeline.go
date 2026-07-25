@@ -97,6 +97,15 @@ type Pipeline struct {
 	adapterMu  sync.RWMutex    // protects adpt for concurrent hot-reload
 	adpt       adapter.Adapter // access via currentAdapter(); swap via HotReloadInto
 
+	// requireGuardedAdapter records that this lens's writes must run under the
+	// §6.2 monotonic projection-write guard. The guard is a property of the
+	// LENS (an auth-plane surface, or an empty-behavior soft tombstone), but it
+	// is enforced by the ADAPTER — and the adapter is swappable while the
+	// pipeline is not, so the requirement is held here and re-checked on every
+	// swap. Without that, replacing the adapter silently downgrades a guarded
+	// lens to last-writer-wins and reopens the revoke→resurrect window.
+	requireGuardedAdapter bool
+
 	reporter *health.Reporter // nil → skip health KV operations (optional)
 
 	// Retry queue (optional). When non-nil and retryMaxAttempts > 0, transient write
@@ -432,17 +441,53 @@ func (p *Pipeline) RebuildInFlight() bool {
 	return p.rebuildInFlight.Load()
 }
 
+// RequireGuardedAdapter declares that every adapter this pipeline writes
+// through must enforce the §6.2 monotonic projection-write guard. Called by the
+// installer once it has enabled the guard on the activation adapter; from then
+// on HotReloadInto refuses a replacement that cannot enforce it.
+func (p *Pipeline) RequireGuardedAdapter() {
+	p.adapterMu.Lock()
+	p.requireGuardedAdapter = true
+	p.adapterMu.Unlock()
+}
+
 // HotReloadInto atomically replaces the adapter. Any message already in processMsg
 // continues with the adapter it captured at the start of that call; the next message
 // will use newAdpt. Returns an error if newAdpt is nil.
 // Used by the orchestrator for INTO-only rule updates (FR4).
+//
+// A pipeline that requires the projection-write guard refuses an unguarded
+// replacement rather than swapping it in: the guard is what stops a stale
+// re-projection resurrecting a revoked capability, and an adapter is only
+// guarded because something flipped the flag on that instance — a freshly built
+// one starts open. Refusing leaves the running (guarded) adapter in place,
+// which keeps the lens correct and stale rather than live and unguarded.
+//
+// The requirement does not lapse when a rule edit would drop it: a lens that
+// stops projecting an authorization surface has changed identity, not its INTO
+// config, and a hot swap has no way to retract what the guarded lens already
+// wrote. That case is a delete-and-re-create, the same remedy an unsupported
+// secureColumns change takes.
 func (p *Pipeline) HotReloadInto(newAdpt adapter.Adapter) error {
 	if newAdpt == nil {
 		return errors.New("pipeline: HotReloadInto: newAdpt must not be nil")
 	}
 	p.adapterMu.Lock()
+	defer p.adapterMu.Unlock()
+	guard, reports := newAdpt.(adapter.SeqGuarded)
+	guarded := reports && guard.Guarded()
+	if p.requireGuardedAdapter && !guarded {
+		return fmt.Errorf("pipeline: HotReloadInto: lens %s requires the projection-write guard but the replacement adapter (%T) does not enforce it — delete and re-create the lens if it should no longer project an authorization surface", p.ruleID, newAdpt)
+	}
+	// A guarded adapter arms the requirement wherever it arrives from. A rule
+	// edit can move a lens ONTO an authorization surface, which guards the
+	// adapter built for it without the installer running again — so latching
+	// here is what keeps a lens that becomes guarded mid-life from being
+	// downgraded by the swap after it.
+	if guarded {
+		p.requireGuardedAdapter = true
+	}
 	p.adpt = newAdpt
-	p.adapterMu.Unlock()
 	return nil
 }
 

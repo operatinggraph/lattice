@@ -64,6 +64,14 @@ type pipelineEntry struct {
 	reporter      *health.Reporter
 	canonicalName string // keyed under lensLatency in heartbeats.
 	authPlane     bool   // projects the capability-kv authorization surface (projection.IsAuthPlane).
+	// guarded reports whether the RUNNING pipeline's lens requires the §6.2
+	// projection-write guard, and target/bucket are the surface it writes.
+	// A guarded lens is pinned to that surface: the guard orders writes against
+	// what is stored there, so moving the target would strand every key the
+	// lens already wrote with no way to retract it.
+	guarded bool
+	target  string
+	bucket  string
 	// secureColumns is the Secure-Lens column set the RUNNING pipeline's
 	// decryptor was built from. Hot-reload guards compare an incoming spec
 	// against this — not against the last-seen spec — so a refused update
@@ -423,7 +431,7 @@ func main() {
 		return out
 	}
 
-	buildAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
+	buildTargetAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
 		// DeleteMode is defaulted to "hard" and validated upstream (Parse /
 		// translateSpec); re-parse here to obtain the typed value for the adapter.
 		deleteMode, err := adapter.ParseDeleteMode(r.Into.DeleteMode)
@@ -498,6 +506,24 @@ func main() {
 		default:
 			return nil, fmt.Errorf("unknown adapter target %q", r.Into.Target)
 		}
+	}
+
+	// buildAdapter opens the rule's target and binds the rule's §6.2 guard
+	// requirement to it. The guard is a property of the RULE, so it belongs to
+	// every adapter built for that rule, whichever target the rule names and
+	// whichever path is building it — activation, or the replacement an
+	// INTO-only hot reload swaps in. A rule that requires the guard on a target
+	// that cannot enforce it fails to build, which keeps the lens off rather
+	// than running it open.
+	buildAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
+		adpt, err := buildTargetAdapter(r)
+		if err != nil {
+			return nil, err
+		}
+		if err := projection.ApplyGuard(adpt, r); err != nil {
+			return nil, err
+		}
+		return adpt, nil
 	}
 
 	// Share a single full.Engine across all full-engine lenses — the engine
@@ -759,6 +785,8 @@ func main() {
 		lensCtx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 
+		guardRequired, _ := projection.RequiresGuard(r)
+
 		mu.Lock()
 		registry[r.ID] = &pipelineEntry{
 			cancel:        cancel,
@@ -767,6 +795,9 @@ func main() {
 			reporter:      reporter,
 			canonicalName: r.CanonicalName,
 			authPlane:     projection.IsAuthPlane(r),
+			guarded:       guardRequired,
+			target:        r.Into.Target,
+			bucket:        r.Into.Bucket,
 			secureColumns: r.Into.SecureColumns,
 		}
 		mu.Unlock()
@@ -831,6 +862,20 @@ func main() {
 				(old.Into.Table != newLens.Into.Table || old.Into.DSN != newLens.Into.DSN) {
 				logger.Error("secure lens INTO update changes table/dsn — not hot-reloadable (no RLS re-verify on swap); delete and re-create the lens",
 					"lensId", newLens.ID)
+				return
+			}
+			// A guarded lens is pinned to the surface it was activated against.
+			// The §6.2 guard orders each write against what is already stored
+			// at the target, so moving the target strands every key the lens
+			// wrote there — unretractable, since the lens no longer addresses
+			// them — and a replacement target's own ordering is a different
+			// mechanism, not a continuation of this one. The baseline is the
+			// RUNNING pipeline's surface, not the last-seen spec, so a refused
+			// update cannot poison it.
+			if entry.guarded &&
+				(entry.target != newLens.Into.Target || entry.bucket != newLens.Into.Bucket) {
+				logger.Error("guarded lens INTO update changes target/bucket — not hot-reloadable (the guard binds to the surface the lens already wrote); delete and re-create the lens",
+					"lensId", newLens.ID, "target", entry.target, "bucket", entry.bucket)
 				return
 			}
 			newAdpt, err := buildAdapter(newLens)

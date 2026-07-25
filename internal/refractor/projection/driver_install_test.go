@@ -173,3 +173,153 @@ func TestEnableProjectionGuard_NonNatsKVAdapter_Errors(t *testing.T) {
 		t.Fatalf("expected an error for a non-NATS-KV adapter")
 	}
 }
+
+// ── ApplyGuard: the rule-bound guard requirement, re-appliable off the
+// activation path (an INTO-only hot reload builds a fresh adapter). ──────────
+
+func TestApplyGuard_AuthPlaneRule_GuardsFreshAdapter(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+
+	if err := projection.ApplyGuard(adpt, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !adpt.Guarded() {
+		t.Fatalf("an auth-plane rule must guard every adapter built for it")
+	}
+}
+
+func TestApplyGuard_TombstoneEmptyBehaviorRule_GuardsFreshAdapter(t *testing.T) {
+	r := installRule(t, "my-tasks", string(projection.EmptyDelete))
+	adpt := newUnguardedAdapter(t)
+
+	if err := projection.ApplyGuard(adpt, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !adpt.Guarded() {
+		t.Fatalf("an empty-behavior=delete rule must guard every adapter built for it")
+	}
+}
+
+func TestApplyGuard_UnguardedRule_LeavesAdapterOpen(t *testing.T) {
+	r := installRule(t, "my-tasks", string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+
+	if err := projection.ApplyGuard(adpt, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if adpt.Guarded() {
+		t.Fatalf("a rule that requires no guard must not silently enable one")
+	}
+}
+
+func TestApplyGuard_NotActorAggregate_NoOp(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	r.ProjectionKind = "" // a plain lens has no projection plan and no guard
+	adpt := newUnguardedAdapter(t)
+
+	if err := projection.ApplyGuard(adpt, r); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if adpt.Guarded() {
+		t.Fatalf("a plain lens must not be guarded by the actor-aggregate predicate")
+	}
+}
+
+func TestApplyGuard_GuardRequiredButAdapterCannotEnforce_Errors(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+
+	if err := projection.ApplyGuard(nonKVAdapter{}, r); err == nil {
+		t.Fatalf("a guard-required rule on a target that cannot enforce it must error, not downgrade silently")
+	}
+}
+
+// ── The requirement outlives the adapter instance: an INTO-only hot reload
+// must not swap a guarded lens onto an unguarded replacement. ───────────────
+
+func TestInstallActorAggregate_AuthPlane_HotReloadRefusesUnguardedAdapter(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if !projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()) {
+		t.Fatalf("expected the auth-plane lens to install")
+	}
+
+	// A freshly built adapter reaching the swap directly: it starts open,
+	// because the guard is a flag something sets on that instance.
+	replacement := newUnguardedAdapter(t)
+	if err := p.HotReloadInto(replacement); err == nil {
+		t.Fatalf("a guarded lens must refuse an unguarded replacement adapter")
+	}
+}
+
+func TestInstallActorAggregate_AuthPlane_HotReloadAcceptsGuardedAdapter(t *testing.T) {
+	r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if !projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()) {
+		t.Fatalf("expected the auth-plane lens to install")
+	}
+
+	// The build path a replacement arrives through: the rule's guard
+	// requirement applied to the freshly built adapter.
+	replacement := newUnguardedAdapter(t)
+	if err := projection.ApplyGuard(replacement, r); err != nil {
+		t.Fatalf("ApplyGuard: %v", err)
+	}
+	if err := p.HotReloadInto(replacement); err != nil {
+		t.Fatalf("a guarded replacement must be accepted: %v", err)
+	}
+	if !replacement.Guarded() {
+		t.Fatalf("the live adapter after a hot reload must still enforce the guard")
+	}
+}
+
+func TestInstallActorAggregate_Unguarded_HotReloadAcceptsAnyAdapter(t *testing.T) {
+	r := installRule(t, "my-tasks", string(projection.EmptySkip))
+	adpt := newUnguardedAdapter(t)
+	p := newTestPipeline(t, adpt)
+
+	if !projection.InstallActorAggregate(p, adpt, r, func(string) uint64 { return 0 }, nil, nil, discardLogger()) {
+		t.Fatalf("expected the unguarded lens to install")
+	}
+
+	if err := p.HotReloadInto(newUnguardedAdapter(t)); err != nil {
+		t.Fatalf("a lens that requires no guard must hot-reload freely: %v", err)
+	}
+}
+
+func TestRequiresGuard_AnswersFromTheRuleAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rule   func() *lens.Rule
+		expect bool
+	}{
+		{"auth-plane bucket", func() *lens.Rule {
+			return installRule(t, projection.AuthPlaneBucket, string(projection.EmptySkip))
+		}, true},
+		{"tombstone empty behavior", func() *lens.Rule {
+			return installRule(t, "my-tasks", string(projection.EmptyDelete))
+		}, true},
+		{"neither", func() *lens.Rule {
+			return installRule(t, "my-tasks", string(projection.EmptySkip))
+		}, false},
+		{"not an actor-aggregate", func() *lens.Rule {
+			r := installRule(t, projection.AuthPlaneBucket, string(projection.EmptyDelete))
+			r.ProjectionKind = ""
+			return r
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := projection.RequiresGuard(tc.rule())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.expect {
+				t.Fatalf("RequiresGuard = %v, want %v", got, tc.expect)
+			}
+		})
+	}
+}
