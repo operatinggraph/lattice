@@ -107,13 +107,14 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top picks needing no new design: the
-> **actor-aggregate backfill** row (★★ M — its prefilter blocker cleared `7e6030aa`), the
-> **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit), the
-> **rebuild-progress signal** (★★ S–M), the **`Reproject` phantom-`Wrote`** row (★★ S), then the two
-> ★ Processor sensitive-predicate rows. The **cap-read size bound** and the **appsession**
-> production-IdP row need the Designer first. Every `✅ ratified` row is done or driver-blocked; the
-> rest are Whetstone's or parking-lot. The Designer needs to restock. A stale callout starves the
+> 🎯 **Build-ready now.** Top picks needing no new design: the **`GrantWriterAdapter`
+> phantom-`Wrote`** row (★★ S, now two consumers), the **actor-aggregate backfill** row
+> (★★ M — its prefilter blocker cleared `7e6030aa`), the **unbounded declared-read count**
+> (★★ S–M, carries a Contract #2 §2.4 edit), the **rebuild-progress signal** (★★ S–M), the three
+> Refractor hot-reload rows this fire filed (★★ S–M each), then the two ★ Processor
+> sensitive-predicate rows. The **cap-read size bound** and the **appsession** production-IdP row
+> need the Designer first. Every `✅ ratified` row is done or driver-blocked; the rest are
+> Whetstone's or parking-lot. The Designer needs to restock. A stale callout starves the
 > lane — whoever ships next renames this.
 
 ### Security & trust boundary
@@ -126,8 +127,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
 | **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor. Only auth-plane lenses get the convergence sweep; every other actorAggregate has no healer. | ★★ | M | 📋 ready · blockers cleared · [scope](../../implementation-artifacts/lens-projection-liveness-design.md) §12.1 · severity finding moot; add a key-shape install gate |
-| **[Refractor] An INTO-only hot reload drops the auth-plane projection guard** | `HotReloadInto` rebuilds the adapter via `buildAdapter`, which returns an **unguarded** `NatsKVAdapter`; `EnableProjectionGuard` runs only from `InstallActorAggregate` and is never re-applied. After an into-only lens edit, `capabilityRoles`/`capabilityEphemeral`/`capabilityServiceAccess` write `capability-kv` with no §6.2 ordering guard — reopening the revoke→resurrect window. | ★★★ | S–M | 📋 ready · consumer: the auth plane after any into-only lens edit |
-| **[Refractor] `GrantWriterAdapter` carries the phantom-`Wrote` shape** | Its SQL guard is UPDATE-conditioned (`rls.go:295-329`), so a present-row write at token 0 no-ops and returns nil, which `Reproject` books as a heal. It implements neither `RowReader` nor a guardedness signal, so the KV-family refusal cannot see it. Same defect class as `eae71b82`, on the read-grant table. | ★★ | S | 📋 ready · consumer: `cap-read.*` grant reconciliation |
+| **[Refractor] `buildAdapter`/`updateCB` are closures in `main()`, so no test binds them** | The lens-activation and INTO-only hot-reload wiring lives in unexported closures inside `cmd/refractor`'s `main()`; deleting the `ApplyGuard` call or a hot-reload refusal leaves `go test ./...` green. Extract to package-level functions with injected deps. | ★★ | S–M | 📋 ready · consumer: every future edit to the lens activation/reload path |
+| **[Refractor] An INTO-only hot-reload refusal is invisible outside a log line** | A refused reload (secureColumns, target/bucket, unguarded replacement) logs and returns: health stays `active`, no `RecordError`/`SetPaused`, and the operator's edit silently no-ops while the lens runs the old spec. Each redelivery re-enters `buildAdapter`, which can leave an unused auto-created bucket behind. | ★★ | S | 📋 ready · consumer: an operator editing a guarded lens · [why](../../implementation-artifacts/lens-projection-liveness-design.md) |
+| **[Refractor] An INTO-only reload does not re-install the `Output` descriptor** | `output` is a separate aspect from INTO, so editing it alone classifies `IntoOnly` — which rebuilds the adapter but never re-runs `SetEnvelopeFn`/`SetActorDeleteKey`/`SetSweepPlan`. The live envelope keeps the activated empty-behavior while the rebuilt adapter is guarded off the new one. Refuse the reload on an `Output` change, as `secureColumns` already does. | ★★ | S | 📋 ready · consumer: any actorAggregate lens whose empty-behavior is edited |
+| **[Refractor] `GrantWriterAdapter` carries the phantom-`Wrote` shape** | Its SQL guard is UPDATE-conditioned (`rls.go:295-329`), so a present-row write at token 0 no-ops and returns nil, which `Reproject` books as a heal. It implements neither `RowReader` nor a guardedness signal, so the KV-family refusal cannot see it. Same defect class as `eae71b82`, on the read-grant table. | ★★ | S | 📋 ready · consumers: `cap-read.*` grant reconciliation + the hot-reload guard check (`8400efd7`) |
 | **[Refractor] The sweep's coverage walk reads once per row-less anchor examined** | `anchorLive` is a Core-KV read per *examined* row-less anchor, but only a *selected* one counts against the budget — so a large tombstone population is walked and read every tick while selecting nothing, against a design cost model of "one bounded batch of cypher evaluations a minute". | ★ | S | 📋 ready · consumer: any cell with many tombstoned anchors · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §11.1 |
 | **[Refractor] A long-running rebuild has no progress signal** | A rebuild suppresses the sweep, so `CapabilitySweepStalled` reports it — but only as elapsed time, and cannot tell a rebuild that is draining from one wedged forever (`watchRebuildCompletion` retries an erroring `OutstandingForConsumer` indefinitely). Hence its deliberate no-escalation carve-out. A rebuild-progress signal (outstanding count, monotonic) would let the stall detector escalate a wedged rebuild. | ★★ | S–M | 📋 ready · consumer: operators, via the `sweep-stalled` warning that cannot escalate |
 | **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). The hand-chosen `ReadGrantDomain` split is the only lever today. | ★★ | M | 📋 ready · needs design · the freeze is now detected (`CapabilityRepairFailing`) |
@@ -196,6 +199,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `8400efd7` · [refractor] the projection-write guard belongs to the lens, not to one adapter instance — rule-derived + re-applied on every build; guarded lens pinned to its target surface
+
 - 2026-07-25 · `82f52fc4` · [refractor] a reconciliation write the guard drops is not a heal — absent-row seq-0 upsert refused where the guard binds; unguarded targets still create
 
 - 2026-07-25 · `7e6030aa` · [refractor] the sweep's prefilter directions are hints that earn their share, not assumptions about the lens — both hints rotate + earn their budget; unstarves the only orphan detector
@@ -226,15 +231,5 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-24 · `473929e3` · [rbac,clinic,wellness,service] revive a tombstoned grant instead of failing — grant_link/revive at 6 sites so a RevokeRole'd identity + re-bound provider can be re-granted; pkg versions bumped
 - 2026-07-24 · `68ffc584` · [lint,edge-manifest] dual-enumeration S1 done — `lint-lens-anchors` CI gate (every non-self Personal-lens anchor kind needs a producer branch) + provider-world coverage; testkit now spans all 3 personas
 - 2026-07-24 · `385c26a7` · [edge-manifest,test] read-grant/lens dual-enumeration coverage proof (Stage-1 testkit) — asserts every non-self anchor a Personal lens projects is granted, no vacuous pass; resident+staff personas
-- 2026-07-24 · `56841e13` · [leaseconvergence,CI] fixed `TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath`'s non-unique landlord-name RevisionConflict + widened `test-lease-convergence`'s `-run` filter so CI actually runs it
-- 2026-07-24 · `283dd1a9` · [appsession] Kit gained its production verify-only (`_JWT_PUBLIC_KEY`/`_ISSUER`) branch + `revocationChecker` param — clinic W1 Inc 1 adoption; closes the production-verifier gap (Facet passes nil, unchanged)
-- 2026-07-24 · `a2e71712` · [appsession,facet] Facet's session block extracted to a shared `internal/appsession` kit — the five-FE sign-in seam (persona-worlds P2); closes the platform-seams item
-- 2026-07-23 · `a16b7589` · [gateway,identity-domain] whoami hats — `/v1/actor` reports roles[]+anchors[] via the new `identityAnchors` lens (persona-worlds P1; first Phase-0-brief fire)
-- 2026-07-22 · `1ab88603` · [bootstrap] `VerifyKernel`/`InspectKernel` (the `make verify-kernel` gate logic) gain embedded-NATS defect-injection tests; package 71.2%→82.9%
-- 2026-07-22 · `737e687e` · [bootstrap] `DecideReseed` extracted from `cmd/bootstrap`'s untested probe-then-reopen branch into `internal/bootstrap`, covered by 4 embedded-NATS tests
-- 2026-07-22 · `907d0d34` · [weaver] fresh-episode/reclaim error-branch coverage — `fireEpisode` stale-mark reclaim + dispatch/effect-bump + `reconcileConsumers` Add/Remove faults; package 86.5%→87.9%
-- 2026-07-22 · `6e1c7557` · [gateway] `GATEWAY_CORS_ORIGINS` dev default gains `127.0.0.1` twins for all four vertical apps (only :7810 had both) — live-verified via CORS preflight, closes the silent-write-block
-- 2026-07-22 · `6b68fde4` · [processor,bootstrap,pkgmgr] tombstone body-preservation Fire 1 — emitter sweep drops the isDeleted/data husk, schema relaxed, parser warns (not silently drops) a tombstone-with-document; Fire 2 (warn→reject) next
-- 2026-07-22 · `74883406` · [refractor,edge] Personal Lens retraction R2 — Edge-client keyset consumption (both engines) + hydrate dead-lens prune; unblocks the verticals staff-worlds claim beat
 
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

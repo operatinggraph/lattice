@@ -1,6 +1,16 @@
 # Done log archive — lattice (older shipped items, newest first)
 
 
+- 2026-07-24 · `56841e13` · [leaseconvergence,CI] fixed `TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath`'s non-unique landlord-name RevisionConflict + widened `test-lease-convergence`'s `-run` filter so CI actually runs it
+- 2026-07-24 · `283dd1a9` · [appsession] Kit gained its production verify-only (`_JWT_PUBLIC_KEY`/`_ISSUER`) branch + `revocationChecker` param — clinic W1 Inc 1 adoption; closes the production-verifier gap (Facet passes nil, unchanged)
+- 2026-07-24 · `a2e71712` · [appsession,facet] Facet's session block extracted to a shared `internal/appsession` kit — the five-FE sign-in seam (persona-worlds P2); closes the platform-seams item
+- 2026-07-23 · `a16b7589` · [gateway,identity-domain] whoami hats — `/v1/actor` reports roles[]+anchors[] via the new `identityAnchors` lens (persona-worlds P1; first Phase-0-brief fire)
+- 2026-07-22 · `1ab88603` · [bootstrap] `VerifyKernel`/`InspectKernel` (the `make verify-kernel` gate logic) gain embedded-NATS defect-injection tests; package 71.2%→82.9%
+- 2026-07-22 · `737e687e` · [bootstrap] `DecideReseed` extracted from `cmd/bootstrap`'s untested probe-then-reopen branch into `internal/bootstrap`, covered by 4 embedded-NATS tests
+- 2026-07-22 · `907d0d34` · [weaver] fresh-episode/reclaim error-branch coverage — `fireEpisode` stale-mark reclaim + dispatch/effect-bump + `reconcileConsumers` Add/Remove faults; package 86.5%→87.9%
+- 2026-07-22 · `6e1c7557` · [gateway] `GATEWAY_CORS_ORIGINS` dev default gains `127.0.0.1` twins for all four vertical apps (only :7810 had both) — live-verified via CORS preflight, closes the silent-write-block
+- 2026-07-22 · `6b68fde4` · [processor,bootstrap,pkgmgr] tombstone body-preservation Fire 1 — emitter sweep drops the isDeleted/data husk, schema relaxed, parser warns (not silently drops) a tombstone-with-document; Fire 2 (warn→reject) next
+- 2026-07-22 · `74883406` · [refractor,edge] Personal Lens retraction R2 — Edge-client keyset consumption (both engines) + hydrate dead-lens prune; unblocks the verticals staff-worlds claim beat
 - 2026-07-22 · `c2abdfbe` · [refractor] `Pipeline.Run` seeds `lastAppliedSeq` from the durable's persisted ack floor at startup — closes the reconciliation-token residual, quiet-stream restarts no longer stay inert
 - 2026-07-22 · `baf3cb30` · [refractor,rbac-domain] `capabilityRoles` emptyBehavior:delete now fires on last-role revocation — RealnessFiltered generalized for mixed map/scalar list columns; rbac-domain 0.3.0→0.3.1
 - 2026-07-22 · `5c5cb236` · [refractor] `personal.hydrate` fans out to every registered Personal Lens, not just the last-registered one — fixes a role-queued task never reaching a rehydrating device
