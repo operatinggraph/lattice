@@ -1167,6 +1167,26 @@ came back clean, and independently **refuted** the "silent compile-error fallbac
 Refractor registers only the `full` engine and `dispatchSpec` logs-and-drops a bad spec, so a broken walk
 would yield zero rows for the whole lens and a loud error — never a quiet partial projection.
 
+*Live verification (running stack, `bin/loftspace-app` + `bin/loupe` rebuilt from `main` and cycled).* Both
+mint routes now 401 rather than minting; anonymous is refused at every `/api/*` route AND at the SPA shell,
+while `/login` and `/api/whoami` stay reachable; sign-in yields a session whose subject the Gateway sees as
+the actor on the refreshed bearer; a landlord reads 1 unit and a non-landlord reads 0 through the same
+endpoint; logout returns the boundary to 401. In-browser: `/` bounces to the LoftSpace login page, and the
+signed-in surface renders with no applicant picker and no landlord toggle.
+
+*One gap live verification exposed, filed:* the `manages` walk is correct and tested, and the 0.8.0 package
+installed cleanly — but **adding a walk to an actorAggregate lens does not backfill rows already stored**.
+`identityAnchors` refreshes an actor only when a CDC event next touches it, and the ops that would touch it
+no-op when state already matches (`AssignUnitOwner` emits no mutation for an existing link). The
+`reproject`/`rebuild` control verbs exist and `identityAnchors` does register a Reprojector, but both require
+an asserted control-plane actor, so there is no operator-reachable backfill. Consequence on the running demo
+stack: a seeded landlord still projects `residesIn`/`worksAt`/`identifiedBy` only, so the Landlord tab stays
+hidden for them until something unrelated touches that identity. The FE gate itself was verified against the
+live binary by injecting a `manages` anchor in-page — toggle, mode bar and New-applicant all unhide, and
+`isLandlord()` flips — so what remains is projection freshness, not gate logic. Not worked around by
+mutating demo ownership state: the remove-and-re-assign that would have forced a reprojection was correctly
+gated as a live write and left undone.
+
 *Honest residuals, filed as rows in the same commit:* the production (IdP) posture cannot open a session at
 all — `setCookie` runs only under a non-nil `Signer`, so with an external IdP nothing can issue the cookie;
 it fails closed (401 everywhere), but the documented posture is unreachable, and the per-request
