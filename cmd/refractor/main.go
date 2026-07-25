@@ -64,14 +64,34 @@ type pipelineEntry struct {
 	reporter      *health.Reporter
 	canonicalName string // keyed under lensLatency in heartbeats.
 	authPlane     bool   // projects the capability-kv authorization surface (projection.IsAuthPlane).
-	// guarded reports whether the RUNNING pipeline's lens requires the §6.2
-	// projection-write guard, and target/bucket are the surface it writes.
-	// A guarded lens is pinned to that surface: the guard orders writes against
-	// what is stored there, so moving the target would strand every key the
-	// lens already wrote with no way to retract it.
-	guarded bool
-	target  string
-	bucket  string
+	// guarded reports whether the adapter the RUNNING pipeline was activated
+	// with enforces the §6.2 projection-write guard, and the fields under it
+	// are the surface the lens writes as its spec declares it. A guarded lens
+	// is pinned to that surface: the guard orders writes against what is stored
+	// there, so moving the target would strand every key the lens already wrote
+	// with no way to retract it. (A grant lens is the one shape whose declared
+	// table is not the table it writes — the grant writer always addresses
+	// actor_read_grants — so pinning it there only ever refuses a cosmetic
+	// edit.)
+	guarded     bool
+	target      string
+	bucket      string
+	table       string
+	dsn         string
+	grantSource string
+	// protected marks the RLS-locked read-model posture, which is what forces
+	// the §6.2 guard on a Postgres adapter. Retiring it on a running lens would
+	// drop that guard with nothing underneath to refuse the swap.
+	protected bool
+	// grantTable reports whether the RUNNING pipeline projects the shared
+	// actor_read_grants table — the lens's identity, and not something an
+	// adapter swap can change (the rows it already wrote would become
+	// unaddressable).
+	grantTable bool
+	// output is the §6.13 Output descriptor the RUNNING pipeline's envelope,
+	// delete key and sweep plan were installed from. An INTO-only update
+	// re-runs none of that installation, so an edit here is refused.
+	output *lens.OutputDescriptorSpec
 	// secureColumns is the Secure-Lens column set the RUNNING pipeline's
 	// decryptor was built from. Hot-reload guards compare an incoming spec
 	// against this — not against the last-seen spec — so a refused update
@@ -508,22 +528,8 @@ func main() {
 		}
 	}
 
-	// buildAdapter opens the rule's target and binds the rule's §6.2 guard
-	// requirement to it. The guard is a property of the RULE, so it belongs to
-	// every adapter built for that rule, whichever target the rule names and
-	// whichever path is building it — activation, or the replacement an
-	// INTO-only hot reload swaps in. A rule that requires the guard on a target
-	// that cannot enforce it fails to build, which keeps the lens off rather
-	// than running it open.
-	buildAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
-		adpt, err := buildTargetAdapter(r)
-		if err != nil {
-			return nil, err
-		}
-		if err := projection.ApplyGuard(adpt, r); err != nil {
-			return nil, err
-		}
-		return adpt, nil
+	buildRuleAdapter := func(r *lens.Rule) (adapter.Adapter, error) {
+		return buildAdapter(r, buildTargetAdapter)
 	}
 
 	// Share a single full.Engine across all full-engine lenses — the engine
@@ -551,7 +557,7 @@ func main() {
 			return
 		}
 
-		adpt, err := buildAdapter(r)
+		adpt, err := buildRuleAdapter(r)
 		if err != nil {
 			logger.Error("build adapter", "lensId", r.ID, "err", err)
 			return
@@ -785,21 +791,10 @@ func main() {
 		lensCtx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 
-		guardRequired, _ := projection.RequiresGuard(r)
+		entry := newPipelineEntry(r, adpt, p, reporter, cancel, done)
 
 		mu.Lock()
-		registry[r.ID] = &pipelineEntry{
-			cancel:        cancel,
-			done:          done,
-			pipeline:      p,
-			reporter:      reporter,
-			canonicalName: r.CanonicalName,
-			authPlane:     projection.IsAuthPlane(r),
-			guarded:       guardRequired,
-			target:        r.Into.Target,
-			bucket:        r.Into.Bucket,
-			secureColumns: r.Into.SecureColumns,
-		}
+		registry[r.ID] = entry
 		mu.Unlock()
 
 		wg.Add(1)
@@ -834,115 +829,19 @@ func main() {
 		logger.Info("lens pipeline started", "lensId", r.ID, "target", r.Into.Target, "table", r.Into.Table, "bucket", r.Into.Bucket)
 	}
 
-	updateCB := func(old, newLens *lens.Rule, kind lens.UpdateKind) {
-		switch kind {
-		case lens.IntoOnly:
-			mu.Lock()
-			entry, ok := registry[newLens.ID]
-			mu.Unlock()
-			if !ok {
-				logger.Warn("update on unknown lens", "lensId", newLens.ID)
-				return
-			}
-			// A live pipeline's secure decryptor is fixed at activation (installing
-			// one mid-run would race the handler); changing a lens's secureColumns
-			// requires a lens re-create, so refuse the hot-reload loudly rather
-			// than swap the adapter and leave the decrypt set stale. The baseline
-			// is the RUNNING pipeline's activated set (entry.secureColumns), not
-			// the last-seen spec — a refused update must not poison later
-			// comparisons. A secure lens also refuses table/DSN swaps: hot-reload
-			// has no verify-and-pause, so the new target's RLS posture would be
-			// unprobed while the rows carry decrypted PII.
-			if !secureColumnsEqual(entry.secureColumns, newLens.Into.SecureColumns) {
-				logger.Error("lens INTO update changes secureColumns — not hot-reloadable; delete and re-create the lens",
-					"lensId", newLens.ID)
-				return
-			}
-			if len(entry.secureColumns) > 0 &&
-				(old.Into.Table != newLens.Into.Table || old.Into.DSN != newLens.Into.DSN) {
-				logger.Error("secure lens INTO update changes table/dsn — not hot-reloadable (no RLS re-verify on swap); delete and re-create the lens",
-					"lensId", newLens.ID)
-				return
-			}
-			// A guarded lens is pinned to the surface it was activated against.
-			// The §6.2 guard orders each write against what is already stored
-			// at the target, so moving the target strands every key the lens
-			// wrote there — unretractable, since the lens no longer addresses
-			// them — and a replacement target's own ordering is a different
-			// mechanism, not a continuation of this one. The baseline is the
-			// RUNNING pipeline's surface, not the last-seen spec, so a refused
-			// update cannot poison it.
-			if entry.guarded &&
-				(entry.target != newLens.Into.Target || entry.bucket != newLens.Into.Bucket) {
-				logger.Error("guarded lens INTO update changes target/bucket — not hot-reloadable (the guard binds to the surface the lens already wrote); delete and re-create the lens",
-					"lensId", newLens.ID, "target", entry.target, "bucket", entry.bucket)
-				return
-			}
-			newAdpt, err := buildAdapter(newLens)
-			if err != nil {
-				logger.Error("build new adapter", "lensId", newLens.ID, "err", err)
-				return
-			}
-			if err := entry.pipeline.HotReloadInto(newAdpt); err != nil {
-				logger.Error("hot-reload adapter", "lensId", newLens.ID, "err", err)
-				return
-			}
-			entry.reporter.SetRuleSequence(newLens.Sequence)
-			entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
-			logger.Info("lens INTO hot-reloaded", "lensId", newLens.ID)
-		case lens.MatchChange:
-			mu.Lock()
-			entry, ok := registry[newLens.ID]
-			mu.Unlock()
-			if !ok {
-				logger.Warn("MATCH update on unknown lens", "lensId", newLens.ID)
-				return
-			}
-			// ClassifyUpdate keys on the Match string alone, so a single update
-			// changing the cypher AND secureColumns lands here — the running
-			// decryptor's column set must still be the activated one, and refused
-			// updates compare against it (never against a refused spec).
-			if !secureColumnsEqual(entry.secureColumns, newLens.Into.SecureColumns) {
-				logger.Error("lens MATCH update changes secureColumns — not hot-reloadable; delete and re-create the lens",
-					"lensId", newLens.ID)
-				return
-			}
-			// CoreKVSource has already compiled the new rule; reuse it.
-			if newLens.CompiledRule == nil {
-				logger.Error("MATCH update missing CompiledRule",
-					"lensId", newLens.ID)
-				return
-			}
-			if cr, ok := newLens.CompiledRule.(*full.CompiledRule); ok {
-				// A Personal Lens is exempt from threading Into.Key verbatim
-				// ("__actor" is envelope-injected and never a RETURN alias),
-				// but it still needs its BUSINESS key columns — the activation
-				// path sets exactly these in InstallPersonalLens. Leaving them
-				// unset drops the executor to its first-RETURN-item fallback,
-				// so a multi-key lens emits a keys map without its business
-				// keys and the adapter rejects every write, forever.
-				keyCols, threaded := hotReloadKeyColumns(newLens)
-				if threaded {
-					cr.KeyColumns = keyCols
-					if err := cr.ValidateKeyColumns(); err != nil {
-						logger.Error("full engine key-column validation (MATCH update)",
-							"lensId", newLens.ID, "err", err)
-						return
-					}
-					// The new cypher must still RETURN every alias the running
-					// decryptor consumes.
-					if err := cr.ValidateReturnAliases(secureAliasNames(entry.secureColumns)...); err != nil {
-						logger.Error("secure-column RETURN-alias validation (MATCH update)",
-							"lensId", newLens.ID, "err", err)
-						return
-					}
-				}
-			}
-			entry.pipeline.UseFullEngine(fullEngine, newLens.CompiledRule)
-			logger.Info("lens MATCH hot-reloaded", "lensId", newLens.ID)
-			entry.reporter.SetRuleSequence(newLens.Sequence)
-			entry.reporter.SetRuleEngine(newLens.ResolvedEngine)
-		}
+	lookupEntry := func(lensID string) (*pipelineEntry, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		entry, ok := registry[lensID]
+		return entry, ok
+	}
+
+	rl := &reloader{
+		ctx:          ctx,
+		logger:       logger,
+		lookup:       lookupEntry,
+		buildAdapter: buildRuleAdapter,
+		fullEngine:   fullEngine,
 	}
 
 	// Wait for adjacency bootstrap before activating any lens.
@@ -964,7 +863,7 @@ func main() {
 			startPipeline(r)
 		}
 	})
-	src.SetUpdateCallback(updateCB)
+	src.SetUpdateCallback(rl.update)
 	controlSvc.SetRuleGetter(src)
 	if err := src.Start(ctx); err != nil {
 		logger.Error("start core kv lens source", "err", err)

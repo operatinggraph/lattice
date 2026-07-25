@@ -1,0 +1,736 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"testing"
+	"time"
+
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
+	"github.com/operatinggraph/lattice/internal/refractor/health"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
+	"github.com/operatinggraph/lattice/internal/substrate"
+)
+
+// authPlaneRule is an actor-aggregate lens projecting the capability-kv
+// authorization surface — the shape whose adapter must carry the §6.2 guard.
+func authPlaneRule(t *testing.T) *lens.Rule {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(`
+MATCH (identity:identity {key: $actorKey})
+OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
+RETURN identity.key AS actorKey, collect(task.key) AS tasks
+`)
+	require.NoError(t, err)
+	return &lens.Rule{
+		ID:             "lens-reload-test",
+		CanonicalName:  "reloadTest",
+		ProjectionKind: projection.ActorAggregateKind,
+		ResolvedEngine: ruleengine.EngineFull,
+		CompiledRule:   cr,
+		Into:           lens.IntoConfig{Target: "nats_kv", Bucket: "capability-kv", Key: lens.KeyField{"key"}},
+		Output: &lens.OutputDescriptorSpec{
+			AnchorType:       "identity",
+			OutputKeyPattern: "cap.{actorSuffix}",
+			BodyColumns:      []string{"tasks"},
+			EmptyBehavior:    "delete",
+			Freshness:        "auto",
+		},
+	}
+}
+
+func newKVAdapter(t *testing.T) *adapter.NatsKVAdapter {
+	t.Helper()
+	a, err := adapter.New(nil, []string{"key"}, adapter.DeleteModeHard)
+	require.NoError(t, err)
+	return a
+}
+
+// ---------------------------------------------------------------------------
+// buildAdapter — the guard belongs to every adapter built for the rule
+// ---------------------------------------------------------------------------
+
+func TestBuildAdapter_AuthPlaneRule_BindsTheGuard(t *testing.T) {
+	r := authPlaneRule(t)
+	adpt, err := buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) {
+		return newKVAdapter(t), nil
+	})
+	require.NoError(t, err)
+	assert.True(t, adapterIsGuarded(adpt),
+		"an auth-plane rule's adapter must carry the §6.2 projection-write guard")
+}
+
+func TestBuildAdapter_PlainRule_LeavesTheAdapterOpen(t *testing.T) {
+	r := authPlaneRule(t)
+	// Neither driver of the guard: an ordinary read-model bucket, and an empty
+	// behavior that writes a document rather than a §6.2 tombstone.
+	r.Into.Bucket = "weaver-targets"
+	r.Output.EmptyBehavior = "emptyDoc"
+	adpt, err := buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) {
+		return newKVAdapter(t), nil
+	})
+	require.NoError(t, err)
+	assert.False(t, adapterIsGuarded(adpt), "a plain lens is not guarded")
+}
+
+func TestBuildAdapter_GuardRequiredButTargetCannotEnforce_FailsClosed(t *testing.T) {
+	r := authPlaneRule(t)
+	// A Postgres adapter cannot carry the ordering token, so a rule that
+	// requires it must fail to build rather than run the lens open.
+	_, err := buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) {
+		return unguardableAdapter{}, nil
+	})
+	require.Error(t, err)
+}
+
+func TestBuildAdapter_TargetError_Propagates(t *testing.T) {
+	sentinel := errors.New("target unavailable")
+	_, err := buildAdapter(authPlaneRule(t), func(*lens.Rule) (adapter.Adapter, error) {
+		return nil, sentinel
+	})
+	assert.ErrorIs(t, err, sentinel)
+}
+
+// unguardableAdapter satisfies adapter.Adapter but is deliberately not a
+// *adapter.NatsKVAdapter, so the guard cannot be enabled on it.
+type unguardableAdapter struct{}
+
+func (unguardableAdapter) Upsert(context.Context, map[string]any, map[string]any, uint64) error {
+	return nil
+}
+func (unguardableAdapter) Delete(context.Context, map[string]any, uint64) error { return nil }
+func (unguardableAdapter) Probe(context.Context) error                          { return nil }
+func (unguardableAdapter) Close() error                                         { return nil }
+
+// ---------------------------------------------------------------------------
+// hotReloadRefusal — every change an adapter swap cannot carry
+// ---------------------------------------------------------------------------
+
+// runningEntry is the baseline a lens was activated with: a guarded NATS-KV
+// auth-plane lens.
+func runningEntry() *pipelineEntry {
+	return &pipelineEntry{
+		guarded: true,
+		target:  "nats_kv",
+		bucket:  "capability-kv",
+		output: &lens.OutputDescriptorSpec{
+			AnchorType:       "identity",
+			OutputKeyPattern: "cap.{actorSuffix}",
+			BodyColumns:      []string{"tasks"},
+			EmptyBehavior:    "delete",
+			Freshness:        "auto",
+		},
+	}
+}
+
+// runningGrantEntry is a grant lens: Postgres, sharing actor_read_grants,
+// confined to its own rows by grant_source. Its adapter's guard is structural,
+// so `guarded` is true even though it is not an actor-aggregate.
+func runningGrantEntry() *pipelineEntry {
+	return &pipelineEntry{
+		guarded:     true,
+		target:      "postgres",
+		table:       "actor_read_grants",
+		grantSource: "loftspace.residence",
+		grantTable:  true,
+	}
+}
+
+func grantRule() *lens.Rule {
+	return &lens.Rule{
+		ID: "lens-reload-test",
+		Into: lens.IntoConfig{
+			Target:      "postgres",
+			Table:       "actor_read_grants",
+			GrantSource: "loftspace.residence",
+			GrantTable:  true,
+		},
+	}
+}
+
+func TestHotReloadRefusal_AcceptsAnIntoOnlyEdit(t *testing.T) {
+	entry := runningEntry()
+	newLens := authPlaneRule(t)
+	newLens.Into.Key = lens.KeyField{"key", "actorKey"}
+	assert.Empty(t, hotReloadRefusal(entry, newLens),
+		"an INTO edit the swap CAN carry must be accepted")
+}
+
+func TestHotReloadRefusal_SecureColumnsChange(t *testing.T) {
+	entry := runningEntry()
+	newLens := authPlaneRule(t)
+	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "secureColumns")
+}
+
+func secureEntry() *pipelineEntry {
+	cols := []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+	return &pipelineEntry{
+		guarded:       true,
+		target:        "postgres",
+		table:         "patients",
+		dsn:           "postgres://one",
+		secureColumns: cols,
+	}
+}
+
+func secureRule() *lens.Rule {
+	return &lens.Rule{
+		ID: "lens-reload-test",
+		Into: lens.IntoConfig{
+			Target:        "postgres",
+			Table:         "patients",
+			DSN:           "postgres://one",
+			SecureColumns: []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}},
+		},
+	}
+}
+
+func TestHotReloadRefusal_SecureLensTargetChange(t *testing.T) {
+	newLens := secureRule()
+	newLens.Into.Table = "patients_v2"
+	assert.Contains(t, hotReloadRefusal(secureEntry(), newLens), "table/dsn")
+}
+
+// A secure lens's DSN is the one surface field with no other pin behind it: the
+// guarded-surface check does not read it, so if this compared against anything
+// but the RUNNING pipeline's value, a refused DSN edit followed by any second
+// edit would ride in — and the swap has no verify-and-pause, so the new
+// database's RLS posture would go unprobed while the rows carry decrypted PII.
+func TestHotReloadRefusal_SecureLensDSNChange(t *testing.T) {
+	newLens := secureRule()
+	newLens.Into.DSN = "postgres://two"
+	assert.Contains(t, hotReloadRefusal(secureEntry(), newLens), "table/dsn")
+}
+
+// The refused edit must not become the baseline for the next one. The source
+// records every revision it sees, applied or not, so only the entry can answer
+// "what is this pipeline actually running".
+func TestHotReloadRefusal_ARefusedEditIsNotTheNextBaseline(t *testing.T) {
+	entry := secureEntry()
+
+	first := secureRule()
+	first.Into.DSN = "postgres://two"
+	require.NotEmpty(t, hotReloadRefusal(entry, first), "precondition: the DSN move is refused")
+
+	// A second edit carrying the refused DSN plus an unrelated change.
+	second := secureRule()
+	second.Into.DSN = "postgres://two"
+	second.Into.QueryTimeout = 5
+	assert.Contains(t, hotReloadRefusal(entry, second), "table/dsn",
+		"the DSN the pipeline never adopted must still be refused")
+}
+
+// An Output edit reaches the INTO-only path with the Match clause untouched —
+// `output` is its own aspect. The swap rebuilds the adapter and re-runs none of
+// the envelope / delete-key / sweep-plan installation, so it must be refused.
+func TestHotReloadRefusal_OutputDescriptorChange(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*lens.OutputDescriptorSpec)
+	}{
+		{"emptyBehavior", func(o *lens.OutputDescriptorSpec) { o.EmptyBehavior = "softDelete" }},
+		{"anchorType", func(o *lens.OutputDescriptorSpec) { o.AnchorType = "provider" }},
+		{"outputKeyPattern", func(o *lens.OutputDescriptorSpec) { o.OutputKeyPattern = "cap.other.{actorSuffix}" }},
+		{"bodyColumns", func(o *lens.OutputDescriptorSpec) { o.BodyColumns = []string{"tasks", "grants"} }},
+		{"realnessFilter", func(o *lens.OutputDescriptorSpec) { o.RealnessFilter = "taskKey" }},
+		{"keyColumn", func(o *lens.OutputDescriptorSpec) { o.KeyColumn = "entityId" }},
+		{"actorField", func(o *lens.OutputDescriptorSpec) { o.ActorField = "assignee" }},
+		{"lanes", func(o *lens.OutputDescriptorSpec) { o.Lanes = []string{"write"} }},
+		{"staticEmptyColumns", func(o *lens.OutputDescriptorSpec) { o.StaticEmptyColumns = []string{"ephemeralGrants"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := runningEntry()
+			newLens := authPlaneRule(t)
+			tc.mutate(newLens.Output)
+			assert.Contains(t, hotReloadRefusal(entry, newLens), "Output descriptor")
+		})
+	}
+}
+
+func TestHotReloadRefusal_OutputDropped(t *testing.T) {
+	entry := runningEntry()
+	newLens := authPlaneRule(t)
+	newLens.Output = nil
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "Output descriptor")
+}
+
+// The row this closes: flipping a lens OFF the shared grant table strands every
+// row it wrote — no producer addresses that grant_source afterwards, so diff
+// retraction can never revoke them, and they stay live in the table every
+// protected read consults.
+func TestHotReloadRefusal_GrantTableFlippedOff(t *testing.T) {
+	entry := runningGrantEntry()
+	newLens := grantRule()
+	newLens.Into.GrantTable = false
+	newLens.Into.Table = "residence_read_model"
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "grantTable")
+}
+
+func TestHotReloadRefusal_GrantTableFlippedOn(t *testing.T) {
+	entry := &pipelineEntry{guarded: true, target: "postgres", table: "residence_read_model"}
+	newLens := grantRule()
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "grantTable")
+}
+
+// grant_source is part of a grant lens's write surface: it is what confines the
+// lens's writes and its retraction enumeration to its own rows in a table it
+// shares with five other producers.
+func TestHotReloadRefusal_GrantSourceChange(t *testing.T) {
+	entry := runningGrantEntry()
+	newLens := grantRule()
+	newLens.Into.GrantSource = "loftspace.tenancy"
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "write surface")
+}
+
+// bucket is empty for every Postgres target, so a pin that reads only
+// target+bucket is vacuous for exactly the grant family.
+func TestHotReloadRefusal_GuardedPostgresTableChange(t *testing.T) {
+	entry := runningGrantEntry()
+	newLens := grantRule()
+	newLens.Into.Table = "actor_read_grants_v2"
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "write surface")
+}
+
+func TestHotReloadRefusal_GuardedBucketChange(t *testing.T) {
+	entry := runningEntry()
+	newLens := authPlaneRule(t)
+	newLens.Into.Bucket = "weaver-targets"
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "write surface")
+}
+
+func TestHotReloadRefusal_UnguardedLensMayMoveItsTarget(t *testing.T) {
+	entry := runningEntry()
+	entry.guarded = false
+	entry.bucket = "weaver-targets"
+	newLens := authPlaneRule(t)
+	newLens.Into.Bucket = "other-targets"
+	newLens.Output = entry.output
+	assert.Empty(t, hotReloadRefusal(entry, newLens),
+		"an unguarded lens strands nothing it cannot re-derive")
+}
+
+// The baseline is the RUNNING pipeline's activated value, never the last-seen
+// spec: a refused update must not move it, or a second edit compares against
+// something that was never live.
+func TestHotReloadRefusal_ComparesAgainstTheRunningEntryNotTheOldSpec(t *testing.T) {
+	entry := runningEntry()
+	// `old` already carries the refused edit; the entry still carries what is live.
+	old := authPlaneRule(t)
+	old.Into.Bucket = "weaver-targets"
+	newLens := authPlaneRule(t)
+	newLens.Into.Bucket = "weaver-targets"
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "write surface",
+		"a refused update must not become the baseline for the next one")
+}
+
+// ---------------------------------------------------------------------------
+// reloader.update — a refused reload is visible where an operator looks
+// ---------------------------------------------------------------------------
+
+func startHealthKV(t *testing.T) *substrate.KV {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping NATS integration test in short mode")
+	}
+	opts := &natsserver.Options{
+		JetStream: true,
+		StoreDir:  jsstore.Dir(t),
+		NoLog:     true,
+		NoSigs:    true,
+		Port:      natsserver.RANDOM_PORT,
+	}
+	s, err := natsserver.NewServer(opts)
+	require.NoError(t, err)
+	go s.Start()
+	require.True(t, s.ReadyForConnections(5*time.Second))
+
+	nc, err := nats.Connect(s.ClientURL())
+	require.NoError(t, err)
+	t.Cleanup(func() { nc.Close(); s.Shutdown() })
+
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	_, err = js.CreateKeyValue(context.Background(), jetstream.KeyValueConfig{Bucket: "HEALTH"})
+	require.NoError(t, err)
+	kv, err := conn.OpenKV(context.Background(), "HEALTH")
+	require.NoError(t, err)
+	return kv
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(discardWriter{}, nil))
+}
+
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestReloaderUpdate_RefusalRecordsAnErrorOnHealthAndDoesNotBuild(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-reload-test")
+
+	p, err := pipeline.New("lens-reload-test", "nats_kv", "CORE", nil, nil, newKVAdapter(t), nil)
+	require.NoError(t, err)
+
+	entry := runningEntry()
+	entry.reporter = reporter
+	entry.pipeline = p
+
+	built := 0
+	rl := &reloader{
+		ctx:    context.Background(),
+		logger: discardLogger(),
+		lookup: func(string) (*pipelineEntry, bool) { return entry, true },
+		buildAdapter: func(*lens.Rule) (adapter.Adapter, error) {
+			built++
+			return newKVAdapter(t), nil
+		},
+		fullEngine: full.New(),
+	}
+
+	newLens := authPlaneRule(t)
+	newLens.Output.EmptyBehavior = "softDelete"
+	rl.update(authPlaneRule(t), newLens, lens.IntoOnly)
+
+	assert.Zero(t, built,
+		"a refused reload must decide before opening its target — building leaves an auto-created bucket behind on every redelivery")
+
+	status, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), status.ErrorCount, "a refused reload must not leave health unbroken")
+	require.NotNil(t, status.LastError)
+	assert.Contains(t, *status.LastError, "Output descriptor",
+		"the operator is told the same reason in health as in the log")
+}
+
+func TestReloaderUpdate_AcceptedReloadSwapsTheAdapterAndReportsNoError(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-reload-test")
+
+	p, err := pipeline.New("lens-reload-test", "nats_kv", "CORE", nil, nil, newKVAdapter(t), nil)
+	require.NoError(t, err)
+
+	entry := runningEntry()
+	entry.reporter = reporter
+	entry.pipeline = p
+
+	built := 0
+	rl := &reloader{
+		ctx:    context.Background(),
+		logger: discardLogger(),
+		lookup: func(string) (*pipelineEntry, bool) { return entry, true },
+		buildAdapter: func(r *lens.Rule) (adapter.Adapter, error) {
+			built++
+			return buildAdapter(r, func(*lens.Rule) (adapter.Adapter, error) { return newKVAdapter(t), nil })
+		},
+		fullEngine: full.New(),
+	}
+
+	newLens := authPlaneRule(t)
+	newLens.Sequence = 42
+	rl.update(authPlaneRule(t), newLens, lens.IntoOnly)
+
+	assert.Equal(t, 1, built, "an accepted reload builds the replacement adapter")
+	status, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, status.ErrorCount)
+	assert.Equal(t, uint64(42), reporter.ActiveSequence(),
+		"an accepted reload advances the reported rule sequence")
+}
+
+func TestReloaderUpdate_UnknownLensIsIgnored(t *testing.T) {
+	rl := &reloader{
+		ctx:    context.Background(),
+		logger: discardLogger(),
+		lookup: func(string) (*pipelineEntry, bool) { return nil, false },
+		buildAdapter: func(*lens.Rule) (adapter.Adapter, error) {
+			t.Fatal("must not build an adapter for an unregistered lens")
+			return nil, nil
+		},
+		fullEngine: full.New(),
+	}
+	rl.update(authPlaneRule(t), authPlaneRule(t), lens.IntoOnly)
+}
+
+func TestReloaderUpdate_MatchChangeSecureColumnsRefusalIsRecorded(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-reload-test")
+
+	entry := runningEntry()
+	entry.reporter = reporter
+
+	rl := &reloader{
+		ctx:        context.Background(),
+		logger:     discardLogger(),
+		lookup:     func(string) (*pipelineEntry, bool) { return entry, true },
+		fullEngine: full.New(),
+	}
+
+	newLens := authPlaneRule(t)
+	newLens.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+	rl.update(authPlaneRule(t), newLens, lens.MatchChange)
+
+	status, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), status.ErrorCount)
+	require.NotNil(t, status.LastError)
+	assert.Contains(t, *status.LastError, "secureColumns")
+}
+
+// ---------------------------------------------------------------------------
+// newPipelineEntry — the activated baseline
+// ---------------------------------------------------------------------------
+
+// structurallyGuardedAdapter mirrors the grant writer: its guard is a property
+// of the SQL it always issues, so it reports guarded with no flag to set.
+type structurallyGuardedAdapter struct{ unguardableAdapter }
+
+func (structurallyGuardedAdapter) Guarded() bool { return true }
+
+// A grant lens is not an actor-aggregate, so the rule-level predicate answers
+// "unguarded" for it — while its adapter's guard is unconditional. The entry
+// must follow the adapter, or the surface pin stays disarmed for the one family
+// that shares a table.
+func TestNewPipelineEntry_GuardedFollowsTheAdapterNotTheRulePredicate(t *testing.T) {
+	r := grantRule()
+	requiresGuard, err := projection.RequiresGuard(r)
+	require.NoError(t, err)
+	require.False(t, requiresGuard, "precondition: the rule predicate does not see the grant family")
+
+	entry := newPipelineEntry(r, structurallyGuardedAdapter{}, nil, nil, nil, nil)
+	assert.True(t, entry.guarded, "the activated adapter's guard is what the entry records")
+
+	// And the pin it arms refuses the edit that would strand the lens's rows.
+	moved := grantRule()
+	moved.Into.GrantSource = "loftspace.tenancy"
+	assert.Contains(t, hotReloadRefusal(entry, moved), "write surface")
+}
+
+func TestNewPipelineEntry_SnapshotsTheWholeSurface(t *testing.T) {
+	entry := newPipelineEntry(grantRule(), unguardableAdapter{}, nil, nil, nil, nil)
+	assert.False(t, entry.guarded)
+	assert.Equal(t, "postgres", entry.target)
+	assert.Equal(t, "actor_read_grants", entry.table)
+	assert.Equal(t, "loftspace.residence", entry.grantSource)
+	assert.True(t, entry.grantTable)
+}
+
+// A reorder of columns the envelope writes into a map is not a change. Refusing
+// it would wedge a lens on a cosmetic re-authoring, with delete-and-re-create
+// the only way out.
+func TestOutputDescriptorsEqual_BodyColumnOrderIsNotContent(t *testing.T) {
+	entry := runningEntry()
+	entry.output.BodyColumns = []string{"tasks", "grants"}
+	newLens := authPlaneRule(t)
+	newLens.Output.BodyColumns = []string{"grants", "tasks"}
+	assert.Empty(t, hotReloadRefusal(entry, newLens))
+}
+
+// Lanes IS emitted verbatim as the document's `lanes` array, so its order is
+// content and a reorder is a real edit.
+func TestOutputDescriptorsEqual_LaneOrderIsContent(t *testing.T) {
+	entry := runningEntry()
+	entry.output.Lanes = []string{"default", "urgent"}
+	newLens := authPlaneRule(t)
+	newLens.Output.Lanes = []string{"urgent", "default"}
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "Output descriptor")
+}
+
+func TestOutputDescriptorsEqual_ColumnSetStillComparesMultiplicity(t *testing.T) {
+	assert.False(t, sameColumnSet([]string{"a", "a", "b"}, []string{"a", "b", "b"}))
+	assert.True(t, sameColumnSet([]string{"a", "a", "b"}, []string{"b", "a", "a"}))
+	assert.True(t, sameColumnSet(nil, []string{}))
+}
+
+// An unguarded lens strands nothing it cannot re-derive, so the widened pin
+// must stay off for it — the whole pin, not just the fields it used to cover.
+func TestHotReloadRefusal_UnguardedLensMayMoveEveryPinnedField(t *testing.T) {
+	entry := runningGrantEntry()
+	entry.guarded = false
+	newLens := grantRule()
+	newLens.Into.Table = "somewhere_else"
+	newLens.Into.GrantSource = "another.source"
+	assert.Empty(t, hotReloadRefusal(entry, newLens))
+}
+
+// A MATCH change re-installs the envelope exactly as little as an INTO-only one
+// does, so it cannot be the way around the pins. Without this, an operator
+// refused on an Output edit can apply it by touching the cypher in the same
+// version.
+func TestReloaderUpdate_MatchChangeCannotSmuggleAnOutputEdit(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-reload-test")
+
+	p, err := pipeline.New("lens-reload-test", "nats_kv", "CORE", nil, nil, newKVAdapter(t), nil)
+	require.NoError(t, err)
+
+	entry := runningEntry()
+	entry.reporter = reporter
+	entry.pipeline = p
+
+	rl := &reloader{
+		ctx:        context.Background(),
+		logger:     discardLogger(),
+		lookup:     func(string) (*pipelineEntry, bool) { return entry, true },
+		fullEngine: full.New(),
+	}
+
+	newLens := authPlaneRule(t)
+	newLens.Output.EmptyBehavior = "softDelete"
+	newLens.Sequence = 99
+	rl.update(authPlaneRule(t), newLens, lens.MatchChange)
+
+	assert.NotEqual(t, uint64(99), reporter.ActiveSequence(),
+		"a refused MATCH update must not swap the compiled rule")
+	status, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, status.LastError)
+	assert.Contains(t, *status.LastError, "Output descriptor")
+}
+
+// The same bypass on the identity pin: a grant lens flipped off the shared
+// table in the same version as a cypher edit.
+func TestReloaderUpdate_MatchChangeCannotSmuggleAGrantTableFlip(t *testing.T) {
+	kv := startHealthKV(t)
+	reporter := health.New(kv, "lens-reload-test")
+
+	entry := runningGrantEntry()
+	entry.reporter = reporter
+
+	rl := &reloader{
+		ctx:        context.Background(),
+		logger:     discardLogger(),
+		lookup:     func(string) (*pipelineEntry, bool) { return entry, true },
+		fullEngine: full.New(),
+	}
+
+	newLens := grantRule()
+	newLens.Into.GrantTable = false
+	rl.update(grantRule(), newLens, lens.MatchChange)
+
+	status, err := reporter.GetStatus(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, status.LastError)
+	assert.Contains(t, *status.LastError, "grantTable")
+}
+
+// ---------------------------------------------------------------------------
+// The guard sources, all four of them
+// ---------------------------------------------------------------------------
+
+// protectedEntry is an RLS-locked business read model: Postgres, guarded
+// because NewProtectedAdapter forces the guard on its inner adapter, and NOT an
+// actor-aggregate — so nothing ever calls RequireGuardedAdapter for it and
+// HotReloadInto has no requirement to refuse against.
+func protectedEntry() *pipelineEntry {
+	return &pipelineEntry{
+		guarded:   true,
+		target:    "postgres",
+		table:     "read_landlord_units",
+		dsn:       "postgres://one",
+		protected: true,
+	}
+}
+
+func protectedRule() *lens.Rule {
+	return &lens.Rule{
+		ID: "lens-reload-test",
+		Into: lens.IntoConfig{
+			Target:    "postgres",
+			Table:     "read_landlord_units",
+			DSN:       "postgres://one",
+			Protected: true,
+		},
+	}
+}
+
+// Retiring `protected` swaps the ProtectedAdapter for a bare PostgresAdapter,
+// which drops the monotonic projection_seq predicate — reopening the stale-
+// replay resurrection window on the very read model that carries read-path
+// authorization. No pipeline-level requirement is armed for this family, so
+// this refusal is the only thing standing there.
+func TestHotReloadRefusal_ProtectedRetired(t *testing.T) {
+	newLens := protectedRule()
+	newLens.Into.Protected = false
+	newLens.Into.Public = true
+	assert.Contains(t, hotReloadRefusal(protectedEntry(), newLens), "protected")
+}
+
+func TestHotReloadRefusal_ProtectedAdopted(t *testing.T) {
+	entry := protectedEntry()
+	entry.protected = false
+	entry.guarded = false
+	assert.Contains(t, hotReloadRefusal(entry, protectedRule()), "protected")
+}
+
+// dsn is part of a guarded lens's surface even when the lens is not a secure
+// one — the rows it wrote live in that database and nothing else addresses them.
+func TestHotReloadRefusal_GuardedDSNChange(t *testing.T) {
+	newLens := protectedRule()
+	newLens.Into.DSN = "postgres://two"
+	assert.Contains(t, hotReloadRefusal(protectedEntry(), newLens), "write surface")
+}
+
+// Every source of the §6.2 guard must be pinned by something, or a lens can be
+// edited from guarded to unguarded while it runs. The four sources are the
+// auth-plane bucket, the Output tombstone empty-behavior, grantTable, and
+// protected.
+func TestHotReloadRefusal_NoGuardSourceIsUnpinned(t *testing.T) {
+	t.Run("auth-plane bucket", func(t *testing.T) {
+		newLens := authPlaneRule(t)
+		newLens.Into.Bucket = "weaver-targets"
+		assert.NotEmpty(t, hotReloadRefusal(runningEntry(), newLens))
+	})
+	t.Run("tombstone empty behavior", func(t *testing.T) {
+		newLens := authPlaneRule(t)
+		newLens.Output.EmptyBehavior = "emptyDoc"
+		assert.NotEmpty(t, hotReloadRefusal(runningEntry(), newLens))
+	})
+	t.Run("grantTable", func(t *testing.T) {
+		newLens := grantRule()
+		newLens.Into.GrantTable = false
+		assert.NotEmpty(t, hotReloadRefusal(runningGrantEntry(), newLens))
+	})
+	t.Run("protected", func(t *testing.T) {
+		newLens := protectedRule()
+		newLens.Into.Protected = false
+		assert.NotEmpty(t, hotReloadRefusal(protectedEntry(), newLens))
+	})
+}
+
+// Spelling out a default that parsing would have supplied anyway is not an edit.
+func TestOutputDescriptorsEqual_ActorFieldDefaultIsNotAnEdit(t *testing.T) {
+	entry := runningEntry()
+	entry.output.ActorField = ""
+	newLens := authPlaneRule(t)
+	newLens.Output.ActorField = "actor"
+	assert.Empty(t, hotReloadRefusal(entry, newLens))
+
+	newLens.Output.ActorField = "assignee"
+	assert.Contains(t, hotReloadRefusal(entry, newLens), "Output descriptor")
+}
+
+// A refusal must name a remedy an operator can actually carry out. A
+// package-installed lens is re-authored by an upgrade, not by hand, so
+// "delete and re-create" alone is not reachable advice.
+func TestHotReloadRefusal_NamesAReachableRemedy(t *testing.T) {
+	newLens := authPlaneRule(t)
+	newLens.Output.EmptyBehavior = "softDelete"
+	assert.Contains(t, hotReloadRefusal(runningEntry(), newLens), "restart Refractor")
+}
