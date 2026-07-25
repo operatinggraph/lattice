@@ -749,12 +749,12 @@ up-cafe:
 	go build -o bin/cafe-app ./cmd/cafe-app
 	@echo "==> Killing any prior cafe-app process..."
 	-pkill -f "bin/cafe-app" 2>/dev/null || true
-	@echo "==> Starting cafe-app in background (dev-auth staff token minter)..."
+	@echo "==> Starting cafe-app in background (sign-in-first: dev-auth session posture, sign in at /login)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_CAFE_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
 		CAFE_APP_DEV_AUTH=1 \
 		./bin/cafe-app >cafe-app.log 2>&1 </dev/null &
 	@sleep 1
-	@echo "==> Café ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · café app: http://127.0.0.1:7801"
+	@echo "==> Café ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · café app: http://127.0.0.1:7801 (sign in at /login)"
 
 ## provision-clinic-role — Create the clinic-app's Postgres read role: a
 ## NON-superuser, SELECT-only role (D1.5), mirroring provision-loftspace-role

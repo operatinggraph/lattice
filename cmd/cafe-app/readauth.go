@@ -1,156 +1,115 @@
 package main
 
 import (
-	"crypto/rsa"
+	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-
-	"github.com/operatinggraph/lattice/internal/gateway/auth"
-	"github.com/operatinggraph/lattice/internal/substrate"
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
 
-// cafe-app has no protected read boundary (every café lens is plain NATS-KV,
-// P5) — the auth concern is minting Bearer tokens the Gateway's write path
-// verifies (real-actor-write-auth-e2e-design.md §3.1's shared-dev-IdP
-// posture, mirroring loftspace-app/clinic-app/wellness-app's own
-// handleStaffDevToken). Charge stays grantsTo:[operator] scope:any (a single
-// staff token covers it), but OpenTab/Settle additionally grant `consumer`
-// scope=self (packages/cafe-domain/permissions.go), so a resident acting as
-// themselves mints a token for their own identity via handleDevToken.
+// cafe-app has no protected Postgres read boundary (every café lens is plain
+// NATS-KV, P5) — the read boundary here is SESSION-scoped instead
+// (persona-worlds-design.md Fire W4 §3): a resident may see only rows for
+// leases whose bookerKey is their own signed-in identity, and a `worksAt`
+// staffer sees the house, including the front-desk staff surface. Every read
+// handler resolves the caller through authenticateRead or resolveSubjectHats,
+// mirroring cmd/clinic-app's own authenticateRead read boundary.
 
-const devTokenTTL = 30 * time.Minute
+const actorFetchTimeout = 10 * time.Second
 
-// devSigner mints short-lived JWTs for the demo posture. It is nil unless
-// CAFE_APP_DEV_AUTH is enabled. It signs with the shared dev key, so the
-// resulting token verifies at the Gateway (and any other vertical app
-// running the same shared-dev-IdP posture).
-type devSigner struct {
-	priv *rsa.PrivateKey
-	kid  string
-	ttl  time.Duration
-	now  func() time.Time
+// authenticateRead returns the bare identity the session middleware already
+// resolved from this request's verified cookie. Defense in depth: the
+// middleware refuses to install an empty identity, but a blank principal is
+// refused here too rather than depending on that alone.
+func (s *server) authenticateRead(r *http.Request) (string, error) {
+	subject, ok := appsession.Identity(r.Context())
+	if !ok || strings.TrimSpace(subject) == "" {
+		return "", fmt.Errorf("no signed-in identity (sign in at %s)", appsession.LoginPagePath)
+	}
+	return subject, nil
 }
 
-// mint returns a signed RS256 token whose `sub` is the bare identity id.
-func (d *devSigner) mint(subject string) (string, time.Time, error) {
-	now := d.now()
-	exp := now.Add(d.ttl)
-	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
-		Subject:   subject,
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(exp),
-	})
-	tok.Header["kid"] = d.kid
-	signed, err := tok.SignedString(d.priv)
+// subjectHats is the caller's read-boundary role, resolved from the
+// signed-in session: isStaff marks a `worksAt` anchor (sees the house,
+// including the front-desk staff surface); otherwise the caller is a
+// resident, scoped to their own lease's rows.
+type subjectHats struct {
+	identityID string
+	isStaff    bool
+}
+
+// resolveSubjectHats authenticates the caller and asks the Gateway's own
+// external /v1/actor door which anchors the session's token carries — the
+// same call the kit's own whoami makes for the FE (internal/appsession's
+// unexported fetchActorHats), re-issued here because this Go handler, not the
+// browser, is the one deciding what a read may return. Fails CLOSED: any
+// error resolving the identity, the session's raw token, or the Gateway call
+// is refused outright — never defaulting to the unfiltered "staff" answer.
+func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
+	identityID, err := s.authenticateRead(r)
 	if err != nil {
-		return "", time.Time{}, err
+		return subjectHats{}, err
 	}
-	return signed, exp, nil
-}
-
-// setupDevSigner builds the staff dev-token minter from the environment. It
-// returns (nil, nil) when CAFE_APP_DEV_AUTH is not set.
-func setupDevSigner(logger *slog.Logger, loopback bool) (*devSigner, error) {
-	if !isTruthy(os.Getenv("CAFE_APP_DEV_AUTH")) {
-		return nil, nil
+	token := s.session.CookieToken(r)
+	if token == "" {
+		return subjectHats{}, fmt.Errorf("no session token to resolve a role from (sign in at %s)", appsession.LoginPagePath)
 	}
-	// Defense in depth: the dev minter must never be reachable off-host.
-	if !loopback {
-		return nil, fmt.Errorf("CAFE_APP_DEV_AUTH is only permitted on a loopback bind (the in-process minter trusts the fixed admin actor)")
-	}
-	priv, err := auth.LoadDevSigningKey(os.Getenv("CAFE_APP_DEV_PRIVATE_KEY_PATH"))
+	anchors, err := s.fetchActorAnchors(r.Context(), token)
 	if err != nil {
-		return nil, fmt.Errorf("dev-auth: load shared dev signing key: %w", err)
+		return subjectHats{}, fmt.Errorf("resolve session role from the Gateway: %w", err)
 	}
-	logger.Warn("DEV-AUTH ENABLED: minting demo staff JWTs in-process (NOT for production)")
-	return &devSigner{priv: priv, kid: auth.DevKeyID, ttl: devTokenTTL, now: time.Now}, nil
+	staff := false
+	for _, a := range anchors {
+		// The key must be present, not just the relation. identityAnchors
+		// stamps `relation` as a literal constant on every collected entry,
+		// so an identity with NO workplace still yields a {key:null,
+		// relation:"worksAt"} entry from the unmatched OPTIONAL MATCH
+		// (packages/identity-domain/lenses.go:168). That entry is dropped
+		// upstream by the lens's RealnessFilter, but a relation-only test
+		// here would make this app's entire staff boundary depend on a
+		// filter declared in a different package; requiring the key is what
+		// makes the boundary self-contained.
+		if a.Relation == "worksAt" && strings.TrimSpace(a.Key) != "" {
+			staff = true
+			break
+		}
+	}
+	return subjectHats{identityID: identityID, isStaff: staff}, nil
 }
 
-// handleStaffDevToken implements POST /api/staff/dev-token (no body) — mints
-// for a FIXED subject (this app's own admin actor), mirroring
-// loftspace-app/clinic-app's handleStaffDevToken. Available only when
-// dev-auth is enabled.
-func (s *server) handleStaffDevToken(w http.ResponseWriter, r *http.Request) {
-	if s.devSigner == nil {
-		s.writeError(w, http.StatusNotFound, "dev-token minting is disabled (CAFE_APP_DEV_AUTH not set)")
-		return
-	}
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
-	if s.adminActor == "" {
-		s.writeError(w, http.StatusBadGateway, "admin actor not loaded (bootstrap file missing or unreadable)")
-		return
-	}
-	_, subject, ok := substrate.ParseVertexKey(s.adminActor)
-	if !ok {
-		s.writeError(w, http.StatusInternalServerError, "admin actor key is malformed")
-		return
-	}
-	token, exp, err := s.devSigner.mint(subject)
+// actorAnchorsResponse decodes the Gateway's GET /v1/actor body far enough to
+// read the anchors array; the response also carries actorId/roles, which
+// this read boundary does not need.
+type actorAnchorsResponse struct {
+	Anchors []appsession.ActorAnchor `json:"anchors"`
+}
+
+// fetchActorAnchors asks the Gateway which residence/workplace anchors
+// token's actor carries.
+func (s *server) fetchActorAnchors(ctx context.Context, token string) ([]appsession.ActorAnchor, error) {
+	ctx, cancel := context.WithTimeout(ctx, actorFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayURL+"/v1/actor", nil)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
-		return
+		return nil, err
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{
-		"token":     token,
-		"expiresAt": exp.UTC().Format(time.RFC3339),
-	})
-}
-
-// handleDevToken implements POST /api/dev-token {subject} → {token, expiresAt} —
-// the demo-only self-service login stand-in, mirroring cmd/wellness-app's
-// handleDevToken. subject is the bare identity id (no "vtx.identity." prefix)
-// of the resident's OWN identity — OpenTab/Settle's consumer scope=self grant
-// requires authContext.target to name that identity, and cafe-domain's own
-// Starlark script separately confirms it is the tab's lease's applicant
-// (packages/cafe-domain/ddls.go). Available only when dev-auth is enabled.
-func (s *server) handleDevToken(w http.ResponseWriter, r *http.Request) {
-	if s.devSigner == nil {
-		s.writeError(w, http.StatusNotFound, "dev-token minting is disabled (CAFE_APP_DEV_AUTH not set)")
-		return
-	}
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
-	var req struct {
-		Subject string `json:"subject"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
-	}
-	subject := strings.TrimSpace(req.Subject)
-	if subject == "" {
-		s.writeError(w, http.StatusBadRequest, "subject (the bare identity id) is required")
-		return
-	}
-	token, exp, err := s.devSigner.mint(subject)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
-		return
+		return nil, err
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{
-		"token":     token,
-		"expiresAt": exp.UTC().Format(time.RFC3339),
-	})
-}
-
-// isTruthy reports whether an env value enables a flag (1/true/yes, any case).
-func isTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway /v1/actor: HTTP %d", resp.StatusCode)
 	}
-	return false
+	var body actorAnchorsResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Anchors, nil
 }

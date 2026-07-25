@@ -44,10 +44,21 @@ func computeFrontDeskBookings(keys []string, get kvGetter) []bookingRow {
 // front-desk package's frontDeskBookings lens (P5). A stack without
 // front-desk installed simply has no such bucket; that reads back as "no
 // rows," not an error, so the front-desk view still renders (just without
-// class badges) rather than failing the whole page.
+// class badges) rather than failing the whole page. Front Desk is a
+// STAFF-ONLY surface (persona-worlds-design.md Fire W4 §3): a resident is
+// refused rather than served an empty or partial grid.
 func (s *server) handleFrontDeskBookings(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hats.isStaff {
+		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
 		return
 	}
 	ctx, cancel := s.reqContext(r)
@@ -99,10 +110,19 @@ func computeFrontDeskLeaseDetails(keys []string, get kvGetter) []leaseDetailRow 
 // served from the front-desk package's frontDeskLeaseDetails lens (P5). A
 // stack without front-desk installed simply has no such bucket; that reads
 // back as "no rows," not an error, same best-effort posture as
-// handleFrontDeskBookings.
+// handleFrontDeskBookings. Staff-only, same as handleFrontDeskBookings.
 func (s *server) handleFrontDeskLeaseDetails(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hats.isStaff {
+		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
 		return
 	}
 	ctx, cancel := s.reqContext(r)
@@ -155,10 +175,19 @@ func computeFrontDeskVisits(keys []string, get kvGetter) []visitRow {
 // from the front-desk package's frontDeskVisits lens (P5). A stack without
 // front-desk (or clinic-domain) installed simply has no such bucket; that
 // reads back as "no rows," not an error, same best-effort posture as
-// handleFrontDeskBookings.
+// handleFrontDeskBookings. Staff-only, same as handleFrontDeskBookings.
 func (s *server) handleFrontDeskVisits(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hats.isStaff {
+		s.writeError(w, http.StatusForbidden, "front desk is a staff-only view")
 		return
 	}
 	ctx, cancel := s.reqContext(r)

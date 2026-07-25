@@ -10,17 +10,15 @@
 <header class="topbar">
   <div class="brand">Café <span class="brand-sub">house tabs</span></div>
   <nav class="tabs" role="tablist">
-    <button class="tab active" data-view="pos" role="tab" aria-selected="true">POS</button>
-    <button class="tab" data-view="frontdesk" role="tab" aria-selected="false">Front Desk</button>
-    <button class="tab" data-view="resident" role="tab" aria-selected="false">Resident</button>
+    <button class="tab active" data-view="pos" id="tab-pos" role="tab" aria-selected="true">POS</button>
+    <button class="tab" data-view="frontdesk" id="tab-frontdesk" role="tab" aria-selected="false">Front Desk</button>
+    <button class="tab" data-view="resident" id="tab-resident" role="tab" aria-selected="false">Resident</button>
   </nav>
 </header>
 
 <div id="me-bar" class="me-bar">
-  <span id="me-status" class="me-status">Not signed in</span>
-  <select id="me-resident"></select>
-  <button id="me-signin" class="ghost">Sign in as resident</button>
-  <button id="me-signout" class="ghost" hidden>Sign out</button>
+  <span id="me-status" class="me-status"></span>
+  <button id="sign-out" class="ghost" hidden>Sign out</button>
 </div>
 
 <main>

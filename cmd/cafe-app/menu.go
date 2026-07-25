@@ -51,10 +51,15 @@ func computeMenu(keys []string, get kvGetter) []menuItemRow {
 
 // handleMenu implements GET /api/menu — the self-order catalog the Resident
 // view's item picker renders, served from the cafe-domain menuCatalog lens
-// (P5).
+// (P5). A public catalog: any signed-in session may read it, staff and
+// resident alike — no per-subject filtering applies.
 func (s *server) handleMenu(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	if _, err := s.authenticateRead(r); err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 	ctx, cancel := s.reqContext(r)

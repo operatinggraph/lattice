@@ -1,6 +1,16 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+)
+
+// discardLogger is the shared silent logger every test server construction
+// below uses (mirrors cmd/clinic-app/readauth_test.go's own discardLogger).
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // fakeKV builds a keys slice + kvGetter over an in-memory map, the seam every
 // computeXxx pure function is unit-tested over (mirrors

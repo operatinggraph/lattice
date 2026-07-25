@@ -43,10 +43,17 @@ func computeLeases(keys []string, get kvGetter) []leaseRow {
 }
 
 // handleLeases implements GET /api/leases — every lease the POS/front-desk
-// pickers offer, served from the cafeLeaseAccounts lens (P5).
+// pickers offer, served from the cafeLeaseAccounts lens (P5). A `worksAt`
+// staffer sees every lease; a resident sees only the lease(s) they applied
+// for (persona-worlds-design.md Fire W4 §3).
 func (s *server) handleLeases(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 	ctx, cancel := s.reqContext(r)
@@ -60,5 +67,20 @@ func (s *server) handleLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := computeLeases(keys, s.kvGetter(ctx, bucket))
+
+	if !hats.isStaff {
+		own, err := s.residentOwnLeases(ctx, hats.identityID)
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway, "resolve resident's own leases: "+err.Error())
+			return
+		}
+		filtered := make([]leaseRow, 0, len(rows))
+		for _, row := range rows {
+			if own[row.LeaseAppKey] {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"leases": rows})
 }

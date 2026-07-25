@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -19,20 +21,24 @@ var webFS embed.FS
 // NATS was unreachable at startup; every handler checks requireConn first and
 // returns a JSON error rather than dereferencing a nil connection.
 type server struct {
-	conn        *substrate.Conn
-	adminActor  string
-	logger      *slog.Logger
-	natsTimeout time.Duration
+	conn            *substrate.Conn
+	bootstrapLoaded bool
+	logger          *slog.Logger
+	natsTimeout     time.Duration
 
-	// devSigner mints the Bearer tokens the FE presents to the Gateway; nil
-	// unless CAFE_APP_DEV_AUTH is enabled. It mints the fixed staff token
-	// (handleStaffDevToken, covers Charge + the operator-scope OpenTab/
-	// Settle path) and, per-resident, a token for a signed-in resident's own
-	// identity (handleDevToken, OpenTab/Settle's consumer scope=self path).
-	devSigner *devSigner
+	// authn is the session cookie's verifier, held here so the health probe
+	// can report whether an auth posture is configured at all; nil ⇒ every
+	// session-gated request 401s (fail closed).
+	authn *auth.Authenticator
+
+	// session serves the login/logout/whoami/refresh surface and resolves
+	// every request to a signed-in identity (internal/appsession).
+	session *appsession.Manager
 
 	// gatewayURL is the Gateway's externally-reachable base URL, served to
-	// the FE via GET /api/config so it can submit writes browser-direct.
+	// the FE via GET /api/config so it can submit writes browser-direct, and
+	// used server-side by resolveSubjectHats to ask the Gateway's own
+	// external /v1/actor door which anchors the signed-in session carries.
 	gatewayURL string
 }
 
@@ -43,19 +49,25 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 		// programmer error, not a runtime condition.
 		panic("cafe-app: embed web sub-fs: " + err.Error())
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	// The kit's own routes (login/logout/whoami/refresh) and every /api/*
+	// handler live on the INNER mux, wrapped in RequireSession — /login
+	// itself must be reachable with no session, which registering it on the
+	// session-gated mux would break.
+	inner := http.NewServeMux()
+	inner.Handle("/", http.FileServer(http.FS(sub)))
 
-	mux.HandleFunc("/api/leases", s.handleLeases)
-	mux.HandleFunc("/api/tabs", s.handleTabs)
-	mux.HandleFunc("/api/frontdesk-bookings", s.handleFrontDeskBookings)
-	mux.HandleFunc("/api/frontdesk-lease-details", s.handleFrontDeskLeaseDetails)
-	mux.HandleFunc("/api/frontdesk-visits", s.handleFrontDeskVisits)
-	mux.HandleFunc("/api/ledger", s.handleLedger)
-	mux.HandleFunc("/api/residents", s.handleResidents)
-	mux.HandleFunc("/api/menu", s.handleMenu)
-	mux.HandleFunc("/api/staff/dev-token", s.handleStaffDevToken)
-	mux.HandleFunc("/api/dev-token", s.handleDevToken)
-	mux.HandleFunc("/api/config", s.handleConfig)
+	inner.HandleFunc("/api/leases", s.handleLeases)
+	inner.HandleFunc("/api/tabs", s.handleTabs)
+	inner.HandleFunc("/api/frontdesk-bookings", s.handleFrontDeskBookings)
+	inner.HandleFunc("/api/frontdesk-lease-details", s.handleFrontDeskLeaseDetails)
+	inner.HandleFunc("/api/frontdesk-visits", s.handleFrontDeskVisits)
+	inner.HandleFunc("/api/ledger", s.handleLedger)
+	inner.HandleFunc("/api/residents", s.handleResidents)
+	inner.HandleFunc("/api/menu", s.handleMenu)
+	inner.HandleFunc("/api/config", s.handleConfig)
+
+	s.session.RegisterRoutes(inner)
+	mux.Handle("/", s.session.RequireSession(inner))
 }
 
 // handleConfig implements GET /api/config: the FE's one bit of runtime

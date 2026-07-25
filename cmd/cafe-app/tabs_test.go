@@ -49,3 +49,28 @@ func TestComputeTabs_FiltersPrefixLeaseAndDerivesPosted(t *testing.T) {
 		t.Errorf("pending (missing_account) settled tab must report Posted=false, got %+v", forB)
 	}
 }
+
+// A row naming a tab but no lease is skipped. The lease is what the
+// resident's own-rows filter and the front-desk card's identity both key on,
+// so a partially-converged row would otherwise render as a blank-identity tab
+// in the staff house list.
+func TestComputeTabs_SkipsRowWithNoLeaseAppKey(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafeTabSettlement.good": map[string]any{
+			"tabKey": "vtx.tab.good", "leaseAppKey": "vtx.leaseapp.a",
+			"totalCents": 100.0, "status": "open", "openedAt": "2026-07-07T10:00:00Z",
+		},
+		"cafeTabSettlement.noLease": map[string]any{
+			"tabKey": "vtx.tab.noLease", "totalCents": 200.0,
+			"status": "open", "openedAt": "2026-07-07T11:00:00Z",
+		},
+	})
+
+	rows := computeTabs(keys, get, "")
+	if len(rows) != 1 {
+		t.Fatalf("want only the row carrying both keys, got %d (%+v)", len(rows), rows)
+	}
+	if rows[0].TabKey != "vtx.tab.good" {
+		t.Errorf("kept the wrong row: %+v", rows[0])
+	}
+}

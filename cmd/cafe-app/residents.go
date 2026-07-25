@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
 // leaseApplicationKeyPrefix is the OutputKeyPattern prefix of the
@@ -27,10 +30,11 @@ type leaseApplicationProjection struct {
 	LandlordApproved bool   `json:"landlordApproved"`
 }
 
-// residentRow is the resident/lease picker row the Me bar and Resident view
-// render — the "who" dimension the POS/Front Desk lease picker (leases.go)
-// has no notion of, since cafeLeaseAccounts is keyed by lease, not identity,
-// and only carries a row once a tab has ever settled.
+// residentRow is the resident/lease roster row the Resident view and the
+// staff-only Front Desk render — the "who" dimension the POS/Front Desk
+// lease picker (leases.go) has no notion of, since cafeLeaseAccounts is keyed
+// by lease, not identity, and only carries a row once a tab has ever
+// settled.
 type residentRow struct {
 	LeaseAppKey string `json:"leaseAppKey"`
 	BookerKey   string `json:"bookerKey"`
@@ -67,12 +71,18 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 	return rows
 }
 
-// handleResidents implements GET /api/residents — every lease applicant the
-// Me bar's sign-in picker offers, served from the shared
-// leaseApplicationComplete convergence lens (P5).
+// handleResidents implements GET /api/residents — the lease-applicant
+// roster, served from the shared leaseApplicationComplete convergence lens
+// (P5). A `worksAt` staffer sees every applicant; a resident sees only their
+// own row(s) (persona-worlds-design.md Fire W4 §3).
 func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 	ctx, cancel := s.reqContext(r)
@@ -85,5 +95,35 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := computeResidents(keys, s.kvGetter(ctx, weaverTargetsBucket))
+	if !hats.isStaff {
+		own := auth.IdentityKeyPrefix + hats.identityID
+		filtered := make([]residentRow, 0, len(rows))
+		for _, row := range rows {
+			if row.BookerKey == own {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"residents": rows})
+}
+
+// residentOwnLeases returns the set of lease keys identityID (a bare
+// identity NanoID) applied for — the leaseApplicationComplete rows whose
+// applicant is this identity — used to scope every resident-visible
+// endpoint to leases they hold (persona-worlds-design.md Fire W4 §3).
+func (s *server) residentOwnLeases(ctx context.Context, identityID string) (map[string]bool, error) {
+	keys, err := s.conn.KVListKeys(ctx, weaverTargetsBucket)
+	if err != nil {
+		return nil, err
+	}
+	rows := computeResidents(keys, s.kvGetter(ctx, weaverTargetsBucket))
+	own := auth.IdentityKeyPrefix + identityID
+	leases := map[string]bool{}
+	for _, row := range rows {
+		if row.BookerKey == own {
+			leases[row.LeaseAppKey] = true
+		}
+	}
+	return leases, nil
 }

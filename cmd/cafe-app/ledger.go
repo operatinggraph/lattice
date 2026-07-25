@@ -99,10 +99,17 @@ func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string
 
 // handleLedger implements GET /api/ledger?leaseAppKey= — the resident
 // house-tab's posted charge history, served from the cafeLedgerHistory +
-// cafeLeaseAccounts lenses (P5).
+// cafeLeaseAccounts lenses (P5). A `worksAt` staffer may read any lease's
+// ledger; a resident may only name a lease they hold
+// (persona-worlds-design.md Fire W4 §3).
 func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
+		return
+	}
+	hats, err := s.resolveSubjectHats(r)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 	leaseAppKey := strings.TrimSpace(r.URL.Query().Get("leaseAppKey"))
@@ -113,6 +120,18 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := s.reqContext(r)
 	defer cancel()
+
+	if !hats.isStaff {
+		own, err := s.residentOwnLeases(ctx, hats.identityID)
+		if err != nil {
+			s.writeError(w, http.StatusBadGateway, "resolve resident's own leases: "+err.Error())
+			return
+		}
+		if !own[leaseAppKey] {
+			s.writeError(w, http.StatusForbidden, "that lease is not yours")
+			return
+		}
+	}
 
 	acctBucket := cafeledger.LeaseAccountsBucket
 	acctKeys, err := conn.KVListKeys(ctx, acctBucket)

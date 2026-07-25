@@ -2,16 +2,11 @@ package main
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/healthkv"
 )
-
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func hasIssue(issues []healthkv.Issue, code string) bool {
 	for _, iss := range issues {
@@ -22,49 +17,49 @@ func hasIssue(issues []healthkv.Issue, code string) bool {
 	return false
 }
 
-func TestHealthProbe_AdminActorUnconfigured(t *testing.T) {
-	s := &server{logger: discardLogger()} // adminActor unset, conn nil
+func TestHealthProbe_BootstrapUnloaded(t *testing.T) {
+	s := &server{logger: discardLogger()} // bootstrapLoaded false (zero value), conn nil
 	snap := s.healthProbe(context.Background())
 	if snap.Status != healthkv.StatusUnhealthy {
 		t.Fatalf("status = %v, want unhealthy", snap.Status)
 	}
-	if !hasIssue(snap.Issues, "AdminActorUnconfigured") {
-		t.Errorf("issues = %+v, want AdminActorUnconfigured", snap.Issues)
+	if !hasIssue(snap.Issues, "BootstrapUnloaded") {
+		t.Errorf("issues = %+v, want BootstrapUnloaded", snap.Issues)
 	}
 	if !hasIssue(snap.Issues, "NatsUnreachable") {
 		t.Errorf("issues = %+v, want NatsUnreachable (conn is nil)", snap.Issues)
 	}
 }
 
-func TestHealthProbe_NoStaffTokenMinterIsDegradedNotUnhealthy(t *testing.T) {
+func TestHealthProbe_NoAuthPostureIsDegradedNotUnhealthy(t *testing.T) {
 	s := &server{
-		logger:     discardLogger(),
-		adminActor: "vtx.identity.abc.actor",
-		devSigner:  nil,
+		logger:          discardLogger(),
+		bootstrapLoaded: true,
+		authn:           nil,
 	}
 	snap := s.healthProbe(context.Background())
 	found := false
 	for _, iss := range snap.Issues {
-		if iss.Code == "NoStaffTokenMinter" {
+		if iss.Code == "NoAuthPosture" {
 			found = true
 			if iss.Severity != "warning" {
-				t.Errorf("NoStaffTokenMinter severity = %q, want warning", iss.Severity)
+				t.Errorf("NoAuthPosture severity = %q, want warning", iss.Severity)
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("issues = %+v, want NoStaffTokenMinter", snap.Issues)
+		t.Fatalf("issues = %+v, want NoAuthPosture", snap.Issues)
 	}
 }
 
-func TestHealthProbe_AdminActorAndTokenMinterConfigured_OnlyNatsUnreachable(t *testing.T) {
+func TestHealthProbe_BootstrapAndAuthConfigured_OnlyNatsUnreachable(t *testing.T) {
 	// conn == nil is unavoidable without a live NATS dial in this unit test;
 	// every other dependency is configured, so NatsUnreachable should be the
 	// ONLY issue reported.
 	s := &server{
-		logger:     discardLogger(),
-		adminActor: "vtx.identity.abc.actor",
-		devSigner:  &devSigner{},
+		logger:          discardLogger(),
+		bootstrapLoaded: true,
+		authn:           &auth.Authenticator{},
 	}
 	snap := s.healthProbe(context.Background())
 	if len(snap.Issues) != 1 || snap.Issues[0].Code != "NatsUnreachable" {
