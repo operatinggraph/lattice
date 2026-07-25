@@ -78,6 +78,21 @@ func ContextFromThread(thread *starlarklib.Thread, fallback context.Context) con
 	return fallback
 }
 
+// discardPrint is the sandbox's implementation of Starlark's `print`, and it
+// deliberately has no output channel: it accepts the call (a script using
+// `print` still runs to completion) and drops the rendered text.
+//
+// Starlark's print renders every argument — `print(state)` writes out whole
+// documents, not a label — and go.starlark.net falls back to
+// fmt.Fprintln(os.Stderr, msg) when a Thread supplies no implementation. Those
+// values are the caller's data: for a Processor DDL script they include
+// documents hydration has already decrypted, so rendering them lands sensitive
+// plaintext in the host process's log — an egress no guard can see, because it
+// happens while the script runs, ahead of every commit-time check, and a
+// rejected commit does not un-log it. So a script gets no host output at all,
+// the same posture as its always-disabled `load`.
+func discardPrint(*starlarklib.Thread, string) {}
+
 // Execute compiles source with globals as both the predeclared-name set
 // (resolve time) and the initial global bindings (Init time), looks up
 // entrypoint among the names Init defines, and calls it with args.
@@ -104,7 +119,7 @@ func Execute(ctx context.Context, source, entrypoint string, args starlarklib.Tu
 		defer cancel()
 	}
 
-	thread := &starlarklib.Thread{Name: "starlarksandbox"}
+	thread := &starlarklib.Thread{Name: "starlarksandbox", Print: discardPrint}
 	thread.SetLocal(ctxLocalKey, execCtx)
 	if budget.MaxSteps > 0 {
 		thread.SetMaxExecutionSteps(uint64(budget.MaxSteps))
@@ -188,7 +203,7 @@ func Validate(source, entrypoint string, nParams int, globals starlarklib.String
 		defer cancel()
 	}
 
-	thread := &starlarklib.Thread{Name: "starlarksandbox-validate"}
+	thread := &starlarklib.Thread{Name: "starlarksandbox-validate", Print: discardPrint}
 	thread.SetLocal(ctxLocalKey, ctx)
 	if budget.MaxSteps > 0 {
 		thread.SetMaxExecutionSteps(uint64(budget.MaxSteps))

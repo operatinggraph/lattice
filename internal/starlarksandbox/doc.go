@@ -15,5 +15,8 @@
 // starlark.StringDict entries passed to Execute — the sandbox neither
 // knows nor enforces what a caller-supplied builtin does; it only
 // guarantees that a name NOT present in the globals it is given cannot be
-// referenced, and that `load(...)` always fails.
+// referenced, that `load(...)` always fails, and that a script has no
+// output channel to the host process — `print` runs and is discarded, so
+// script values (which may be decrypted sensitive plaintext) never reach
+// the host's stderr or logs. See discardPrint.
 package starlarksandbox
