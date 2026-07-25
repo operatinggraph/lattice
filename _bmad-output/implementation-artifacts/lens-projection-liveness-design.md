@@ -254,3 +254,76 @@ column rides the Loupe lane's F5; Fire 4 stays an Andrew-gated option.
 ## 9. Summary for the board
 
 A purely-additive, no-contract-change, no-fork observability design that closes a live-observed correctness-visibility gap: every lens (not just auth-plane) gets a projection-liveness signal — a `lastProjectedAt` freshness clock + a generalized lag→issue→status-degrade backstop reusing the shipped capability-lens machinery — so a silently-stalled clinic/loftspace read model degrades the Refractor heartbeat and surfaces in Loupe. Prerequisite for the deferred closed-loop Weaver auditor (#96) / FR54. 3 fires (+1 optional, Andrew-gated). Awaiting Andrew's ratification + the one §5.3 judgment call (ship `LensProjectionStalled` off vs. on).
+
+---
+
+## 10. Fire 5 — the business-lens CONVERGENCE SWEEP (build note / fire brief)
+
+Fires 1+2 gave a business lens a liveness *signal*. It still has no **healer**: a stale or missing
+`actorAggregate` row converges only when a future CDC event happens to touch that actor. This fire
+closes that, and reports what the healer finds.
+
+**Scope sentence (verbatim, from the board row).** *"Adding a walk to an actorAggregate lens reprojects
+nothing already stored — rows refresh only when a CDC event next touches that actor. Only auth-plane
+lenses get the convergence sweep; every other actorAggregate has no healer."* Consumers:
+`identityAnchors` (whoami hats) + `myTasks`.
+
+**Grounded mechanism (verified `file:line`, not assumed).**
+
+- The sweep is already **fully generic** — `SweepPlan` needs only `AnchorType` / `BuildKey` /
+  `AnchorFromKey`, all three read off the `OutputDescriptor` every actorAggregate lens compiles
+  (`internal/refractor/projection/driver.go:181`). Nothing in `Sweeper` knows about the auth plane.
+- The **only** thing withholding it from a business lens is the `if authPlane` gate at
+  `projection/driver.go:180`.
+- The sweep is a genuine content healer, not just a key-presence check: direction 3 of
+  `Sweeper.candidates` (`pipeline/sweep.go:586`) is a bounded round-robin **deep verify** that
+  re-executes the projection — "the only detector for a row that is present but stale". That is
+  precisely the after-a-walk-was-added case the row names.
+- A **MATCH change** hot-reloads the compiled rule (`cmd/refractor/main.go:881` `UseFullEngine`) but
+  triggers **no** rebuild, though `lens.MatchChange` is documented as "a full rebuild is required"
+  (`lens/update.go:11`). Auth-plane lenses survive this because the deep verify converges them over
+  the following passes; business lenses have nothing.
+- `survey`'s KeyLister requirement (`pipeline/sweep.go:468`) is satisfied by **both** shipped
+  adapters (`adapter/natskv.go:18`, `adapter/postgres.go:17`), so generalizing does not strand a target.
+
+**Decisions taken here as Winston (impl-level, recorded not parked).**
+
+1. **Generalize the sweep; do not auto-rebuild on MatchChange.** A rebuild is a full stream replay and
+   is deliberately operator-initiated + async; firing one on every lens edit is a replay storm. The
+   round-robin deep verify is the already-designed, bounded convergence mechanism — use it.
+2. **Gate the install on the adapter being a `KeyLister`,** rather than letting a non-lister adapter
+   fault the sweep on every tick forever. Auth-plane adapters always qualify, so the auth plane sees
+   **zero behavior change** — the new gate is strictly a widening.
+3. **Mirror, don't merge, the health path.** `CapabilityLensProvider` stays canonical for auth-plane
+   lenses (§5.1). The business-lens sweep verdicts surface through the sibling `LensProvider` under
+   general-lens issue names.
+
+**Touch-list.**
+
+- `internal/refractor/projection/driver.go:180` — widen the `SweepPlan` install.
+- `internal/refractor/pipeline/sweep.go:468` — the "every auth-plane target is NATS-KV" comment is no
+  longer the reason the branch is unreachable; re-state it truthfully.
+- `internal/refractor/health/lattice_heartbeater.go` — `LensLivenessStatus` gains `Unreadable` + the
+  sweep verdict fields; `evalLenses` raises the new issues.
+- `cmd/refractor/main.go:375` — `LensProvider` stops `continue`-ing past an unreadable lens and reads
+  the sweeper, mirroring `CapabilityLensProvider` (`main.go:328`, `main.go:345`).
+
+**Increment order + green checks.**
+
+- **Inc 1 — the healer.** Widen the install gate. Green: `go test ./internal/refractor/...`.
+- **Inc 2 — report it.** `Unreadable` + sweep verdicts on the general path. Green: heartbeater unit
+  tests mirroring `caplens_divergence_test.go` / `caplens_repair_failure_test.go`.
+
+**Folded in (same code, filed row).** *"[Refractor] A business lens whose liveness is unreadable is
+dropped, not reported"* — `LensProvider` skipping an errored `GetStatus`/`Pending`
+(`cmd/refractor/main.go:389,393`) is the same four lines Inc 2 rewrites. Shipping it separately would
+edit the same function twice.
+
+**Non-goals (this fire).**
+
+- No `LensProjectionSweepStalled` — the staleness-clock mirror of `CapabilitySweepStalled`. The
+  auth-plane version carries substantial escalation machinery; the business-lens sweep ships with its
+  divergence + repair verdicts observable and its **liveness clock unreported**. Filed as a row, with
+  its consumer named, in the same commit as the ✅ flip.
+- No rebuild-on-MatchChange (decision 1). No change to `CapabilityLensProvider` or any auth-plane
+  threshold. No contract change.
