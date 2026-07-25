@@ -127,6 +127,13 @@ func originRequest(method, host, origin, fetchSite, fetchMode string) *http.Requ
 	}
 	if fetchMode != "" {
 		r.Header.Set("Sec-Fetch-Mode", fetchMode)
+		// `navigate` alone does not mean top-level — it is sent for a nested
+		// navigation too. Every caller passing it here means the ordinary
+		// link/bookmark case, so the destination that makes it top-level rides
+		// along; the nested shapes get their own test.
+		if fetchMode == "navigate" {
+			r.Header.Set("Sec-Fetch-Dest", "document")
+		}
 	}
 	return r
 }
@@ -271,13 +278,107 @@ func TestCrossOriginBlocked_LoopbackAcceptsTheRootedForm(t *testing.T) {
 	}
 }
 
-// TestCrossOriginBlocked_SchemeIsPinnedToTheConnection: the app is served over
-// plain http, so an https Origin naming the same host:port is not its own page.
-func TestCrossOriginBlocked_SchemeIsPinnedToTheConnection(t *testing.T) {
+// TestCrossOriginBlocked_BothSchemeFormsOfHostAccepted pins the deployment shape
+// a connection-derived scheme would break: a TLS-terminating proxy in front of a
+// non-loopback bind, preserving Host, with no PublicOrigin declared. The
+// browser's Origin says https while the proxied hop arrives as plain http, so
+// pinning the scheme to r.TLS would 403 every write — including login — with no
+// boot-time signal.
+func TestCrossOriginBlocked_BothSchemeFormsOfHostAccepted(t *testing.T) {
+	m := newTestManager(t, func(c *Config) { c.BindHost = "app.internal" })
+	for _, origin := range []string{"http://app.internal", "https://app.internal"} {
+		rec := httptest.NewRecorder()
+		r := originRequest(http.MethodPost, "app.internal", origin, "", "")
+		require.False(t, m.CrossOriginBlocked(rec, r), "origin=%s", origin)
+	}
+
+	// The hardening the branch actually rests on is untouched: a host that is
+	// neither loopback nor the configured bind host is refused in either form,
+	// even though Origin and Host agree by construction (DNS rebinding).
+	for _, origin := range []string{"http://evil.example", "https://evil.example"} {
+		rec := httptest.NewRecorder()
+		r := originRequest(http.MethodPost, "evil.example", origin, "", "")
+		require.True(t, m.CrossOriginBlocked(rec, r), "origin=%s", origin)
+	}
+}
+
+// TestCrossOriginBlocked_NestedNavigationRefused is the clickjacking vector that
+// reading Sec-Fetch-Mode alone admits: `navigate` covers a nested navigation, so
+// an <iframe src> on a co-hosted app's page is same-site, carries this app's
+// session cookie (SameSite=Strict is port-agnostic), authenticates, and renders
+// the signed-in app inside a hostile frame.
+func TestCrossOriginBlocked_NestedNavigationRefused(t *testing.T) {
 	m := newTestManager(t, nil)
+	for _, dest := range []string{"iframe", "frame", "object", "embed"} {
+		rec := httptest.NewRecorder()
+		r := originRequest(http.MethodGet, "127.0.0.1:7788", "", "same-site", "navigate")
+		r.Header.Set("Sec-Fetch-Dest", dest)
+		require.True(t, m.CrossOriginBlocked(rec, r), "Sec-Fetch-Dest=%s", dest)
+	}
+
+	// A navigation that cannot prove it is top-level is refused too.
 	rec := httptest.NewRecorder()
-	r := originRequest(http.MethodPost, "127.0.0.1:7788", "https://127.0.0.1:7788", "", "")
+	r := originRequest(http.MethodGet, "127.0.0.1:7788", "", "same-site", "navigate")
+	r.Header.Del("Sec-Fetch-Dest")
 	require.True(t, m.CrossOriginBlocked(rec, r))
+}
+
+// TestCrossOriginBlocked_FetchMetadataHeaderShape pins that the gate keys on the
+// header KEY's presence, not on a non-empty value: a GET carries no Origin, so
+// an empty Sec-Fetch-Site falling through to the Origin check would pass
+// unconditionally.
+func TestCrossOriginBlocked_FetchMetadataHeaderShape(t *testing.T) {
+	m := newTestManager(t, nil)
+
+	// Present but empty.
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/thing", nil)
+	r.Host = "127.0.0.1:7788"
+	r.Header["Sec-Fetch-Site"] = []string{""}
+	require.True(t, m.CrossOriginBlocked(rec, r))
+
+	// Repeated — Header.Get would silently take the admitting first value.
+	rec = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodGet, "/api/thing", nil)
+	r.Host = "127.0.0.1:7788"
+	r.Header["Sec-Fetch-Site"] = []string{"same-origin", "cross-site"}
+	require.True(t, m.CrossOriginBlocked(rec, r))
+
+	// An unknown or future token fails closed.
+	rec = httptest.NewRecorder()
+	r = originRequest(http.MethodGet, "127.0.0.1:7788", "", "same-party", "cors")
+	require.True(t, m.CrossOriginBlocked(rec, r))
+}
+
+// TestOriginGate_UsableWithoutAManager is the point of the extraction: an app
+// with its own auth model (the Loupe console) gets the identical decision
+// without constructing a session Manager it would never register.
+func TestOriginGate_UsableWithoutAManager(t *testing.T) {
+	declared, err := ParsePublicOrigin("APP_PUBLIC_ORIGIN", "https://app.demo.example")
+	require.NoError(t, err)
+	gate := OriginGate{PublicOrigin: declared, BindHost: "127.0.0.1"}
+
+	// Refused, with a reason the caller renders in its own error shape.
+	reason, blocked := gate.Blocked(originRequest(http.MethodPost, "127.0.0.1:7788", "http://evil.example", "", ""))
+	require.True(t, blocked)
+	require.Contains(t, reason, "evil.example")
+
+	// Admitted: the app's own page, and the declared public origin.
+	for _, r := range []*http.Request{
+		originRequest(http.MethodPost, "127.0.0.1:7788", "http://127.0.0.1:7788", "same-origin", "cors"),
+		originRequest(http.MethodPost, "127.0.0.1:7788", "https://app.demo.example", "same-origin", "cors"),
+	} {
+		reason, blocked := gate.Blocked(r)
+		require.False(t, blocked)
+		require.Empty(t, reason)
+	}
+
+	// The Manager wrapper renders the same decision as the kit's 403.
+	m := newTestManager(t, func(c *Config) { c.PublicOrigin = declared })
+	rec := httptest.NewRecorder()
+	require.True(t, m.CrossOriginBlocked(rec, originRequest(http.MethodPost, "127.0.0.1:7788", "http://evil.example", "", "")))
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "cross-origin request blocked")
 }
 
 func TestCrossOriginBlocked_NullOriginFailsClosed(t *testing.T) {

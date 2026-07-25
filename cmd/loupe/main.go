@@ -64,6 +64,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -165,7 +166,7 @@ func run(logger *slog.Logger) error {
 	// The public-origin posture (publicorigin.go): the origin gate, the session
 	// cookie's Secure flag, and the limiter's peer keying all key off this one
 	// declaration, and unset leaves each exactly as it was.
-	pubOrigin, err := parsePublicOrigin(os.Getenv("LOUPE_PUBLIC_ORIGIN"))
+	pubOrigin, err := appsession.ParsePublicOrigin("LOUPE_PUBLIC_ORIGIN", os.Getenv("LOUPE_PUBLIC_ORIGIN"))
 	if err != nil {
 		return err
 	}
@@ -208,7 +209,7 @@ func run(logger *slog.Logger) error {
 	// servers are running with LATTICE_CONTROL_JWT_* configured.
 	operatorActorToken := os.Getenv("LOUPE_OPERATOR_ACTOR_TOKEN")
 
-	authn, signer, err := setupOperatorAuth(logger, isLoopbackHost(bindHost))
+	authn, signer, err := setupOperatorAuth(logger, appsession.IsLoopbackHost(bindHost))
 	if err != nil {
 		return err
 	}
@@ -300,27 +301,11 @@ func warnIfNonLoopback(logger *slog.Logger, addr string) {
 		logger.Warn("could not parse LOUPE_ADDR host; ensure it binds a loopback address", "addr", addr, "error", err)
 		return
 	}
-	if isLoopbackHost(host) {
+	if appsession.IsLoopbackHost(host) {
 		return
 	}
 	logger.Warn("Loupe is binding to a non-local address; a real operator IdP (LOUPE_JWT_PUBLIC_KEY) is required — LOUPE_DEV_AUTH refuses to enable off loopback",
 		"addr", addr)
-}
-
-// isLoopbackHost reports whether host is a loopback bind. An empty host (the
-// bare ":7777" form) means all interfaces and is NOT loopback. A hostname that
-// is not a literal IP is treated as non-loopback unless it is "localhost".
-func isLoopbackHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
 }
 
 func envOrDefault(key, def string) string {

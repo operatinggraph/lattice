@@ -7,42 +7,6 @@ import (
 	"testing"
 )
 
-// TestIsLoopbackHost pins the load-bearing exposure check of an auth-less admin
-// tool: only a genuine loopback bind may be treated as safe. A mis-classification
-// that reports a wide or public bind as loopback would silently expose admin
-// control + op-submission to the network with no warning.
-func TestIsLoopbackHost(t *testing.T) {
-	tests := []struct {
-		host string
-		want bool
-	}{
-		// Loopback literals — safe.
-		{"127.0.0.1", true},
-		{"127.0.0.5", true}, // the whole 127/8 block is loopback
-		{"::1", true},
-		{"localhost", true},
-		{"LocalHost", true}, // hostname match is case-insensitive
-		{"LOCALHOST", true},
-		// Empty host = the bare ":7777" form = all interfaces = NOT loopback.
-		{"", false},
-		// Wide / public binds — never loopback.
-		{"0.0.0.0", false},
-		{"::", false},
-		{"192.168.1.10", false},
-		{"10.0.0.1", false},
-		{"8.8.8.8", false},
-		{"2001:db8::1", false},
-		// A non-literal hostname (other than localhost) is not trusted as loopback.
-		{"example.com", false},
-		{"localhost.evil.com", false},
-	}
-	for _, tc := range tests {
-		if got := isLoopbackHost(tc.host); got != tc.want {
-			t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
-		}
-	}
-}
-
 // TestWarnIfNonLoopback pins the startup exposure warning: a non-loopback or
 // unparseable LOUPE_ADDR must emit a loud WARN so an auth-less network-wide
 // admin bind is never silent; a loopback bind must stay quiet.

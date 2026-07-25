@@ -77,6 +77,9 @@ func TestRegisterRoutes_TheAppsOwnPageAndPlainNavigationStillWork(t *testing.T) 
 	r.Host = "127.0.0.1:7799"
 	r.Header.Set("Sec-Fetch-Site", "cross-site")
 	r.Header.Set("Sec-Fetch-Mode", "navigate")
+	// A real top-level navigation carries all of Site/Mode/Dest; `navigate`
+	// alone is also what a framed load sends, and the gate refuses those.
+	r.Header.Set("Sec-Fetch-Dest", "document")
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, r)
 	if rec.Code != http.StatusOK {

@@ -7,79 +7,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
-
-func TestParsePublicOrigin_Accepts(t *testing.T) {
-	cases := []struct {
-		raw      string
-		hostname string
-		port     string
-	}{
-		{"https://loupe.demo.example", "loupe.demo.example", "443"},
-		{"https://loupe.demo.example/", "loupe.demo.example", "443"},
-		{"https://loupe.demo.example:8443", "loupe.demo.example", "8443"},
-		{"  https://LOUPE.Demo.Example  ", "loupe.demo.example", "443"},
-		{"HTTPS://loupe.demo.example", "loupe.demo.example", "443"},
-	}
-	for _, tc := range cases {
-		p, err := parsePublicOrigin(tc.raw)
-		if err != nil {
-			t.Errorf("parsePublicOrigin(%q) errored: %v", tc.raw, err)
-			continue
-		}
-		if p == nil {
-			t.Errorf("parsePublicOrigin(%q) = nil, want a declaration", tc.raw)
-			continue
-		}
-		if p.hostname != tc.hostname || p.port != tc.port {
-			t.Errorf("parsePublicOrigin(%q) = %s:%s, want %s:%s", tc.raw, p.hostname, p.port, tc.hostname, tc.port)
-		}
-	}
-}
-
-// TestParsePublicOrigin_Unset pins that the default posture is undeclared —
-// this is what makes every other behavior in this file a no-op by default.
-func TestParsePublicOrigin_Unset(t *testing.T) {
-	for _, raw := range []string{"", "   "} {
-		p, err := parsePublicOrigin(raw)
-		if err != nil || p != nil {
-			t.Errorf("parsePublicOrigin(%q) = (%v, %v), want (nil, nil)", raw, p, err)
-		}
-	}
-}
-
-// TestParsePublicOrigin_RefusesMalformed pins the fail-closed parse: a typo
-// must stop the process, never read as "undeclared" and silently take the
-// origin gate and the Secure cookie down with it.
-func TestParsePublicOrigin_RefusesMalformed(t *testing.T) {
-	for _, raw := range []string{
-		"http://loupe.demo.example",       // plain HTTP cannot carry a Secure cookie
-		"loupe.demo.example",              // no scheme
-		"https://",                        // no host
-		"https://loupe.demo.example/path", // path
-		"https://loupe.demo.example/?a=1", // query
-		"https://loupe.demo.example/#frag",
-		"https://user:pw@loupe.demo.example",
-		"https://loupe.demo.example:notaport",
-		"wss://loupe.demo.example",
-		"yes",
-		// url.Parse only checks a port is digits. An out-of-range one would
-		// boot a declaration no browser Origin can ever equal — a permanent
-		// 403 on every login, with no boot-time signal.
-		"https://loupe.demo.example:0",
-		"https://loupe.demo.example:99999",
-	} {
-		if p, err := parsePublicOrigin(raw); err == nil {
-			t.Errorf("parsePublicOrigin(%q) = (%v, nil); a malformed origin must fail closed", raw, p)
-		}
-	}
-}
 
 // TestCrossOriginGate_PublicOriginBranch is the gate matrix: the declared
 // origin is accepted through the proxy (where Host is the internal bind and
 // would never agree), and everything else still fails closed.
 func TestCrossOriginGate_PublicOriginBranch(t *testing.T) {
-	declared, err := parsePublicOrigin("https://loupe.demo.example")
+	declared, err := appsession.ParsePublicOrigin("LOUPE_PUBLIC_ORIGIN", "https://loupe.demo.example")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -158,76 +94,6 @@ func TestCrossOriginGate_PublicOriginBranch(t *testing.T) {
 	}
 }
 
-// TestPublicOrigin_HostNormalization pins that a trailing FQDN dot addresses
-// the same site on both sides. Treating the two forms as different origins
-// would 403 every login — exactly the failure this posture exists to remove —
-// with no boot-time signal that anything was wrong.
-func TestPublicOrigin_HostNormalization(t *testing.T) {
-	rooted, err := parsePublicOrigin("https://loupe.demo.example.")
-	if err != nil {
-		t.Fatalf("a trailing-dot declaration was refused: %v", err)
-	}
-	bare, err := parsePublicOrigin("https://loupe.demo.example")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if rooted.hostname != bare.hostname {
-		t.Fatalf("trailing dot not normalized: %q vs %q", rooted.hostname, bare.hostname)
-	}
-	for _, o := range []string{"https://loupe.demo.example", "https://loupe.demo.example."} {
-		if !rooted.matches(o) || !bare.matches(o) {
-			t.Errorf("origin %q did not match across the dot forms", o)
-		}
-	}
-}
-
-// TestPublicOrigin_MatchesIsNotLaxerThanParse pins that the wire side enforces
-// the same rules as the config side. Browsers do not emit these shapes, but an
-// asymmetry where the comparison is looser than the declaration is the kind of
-// gap a later refactor turns into a real hole.
-func TestPublicOrigin_MatchesIsNotLaxerThanParse(t *testing.T) {
-	p, err := parsePublicOrigin("https://loupe.demo.example")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	for _, origin := range []string{
-		"https://evil.com@loupe.demo.example",
-		"https://loupe.demo.example/path",
-		"https://loupe.demo.example?x=1",
-		"https://loupe.demo.example#@evil.com",
-		"http://loupe.demo.example",
-		"https://loupe.demo.example:0",
-		// Unicode simple-case folding maps U+017F to "s"; a host comparison
-		// must not be broader than the identity it asserts.
-		"https://ſmart.example",
-		"null",
-		"",
-	} {
-		if p.matches(origin) {
-			t.Errorf("matches(%q) = true; the wire side must be no laxer than the parser", origin)
-		}
-	}
-}
-
-// TestPublicOrigin_IPv6RoundTrip pins that an IPv6 declaration both matches and
-// renders back as a parseable origin — the log line is what an operator reads
-// while debugging a 403, so it must not print an unbracketed host.
-func TestPublicOrigin_IPv6RoundTrip(t *testing.T) {
-	p, err := parsePublicOrigin("https://[::1]:8443")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if !p.matches("https://[::1]:8443") {
-		t.Error("an IPv6 origin did not match its own declaration")
-	}
-	if got := p.String(); got != "https://[::1]:8443" {
-		t.Errorf("String() = %q, want the bracketed form back", got)
-	}
-	if _, _, err := originComponents(p.String()); err != nil {
-		t.Errorf("String() produced an unparseable origin: %v", err)
-	}
-}
-
 // TestCrossOriginGate_UndeclaredUnchanged pins that with no declaration the
 // gate is byte-for-byte its old self — a public-looking Origin is refused.
 func TestCrossOriginGate_UndeclaredUnchanged(t *testing.T) {
@@ -244,13 +110,13 @@ func TestCrossOriginGate_UndeclaredUnchanged(t *testing.T) {
 // bind WITH a declared origin is the one that used to fail open: a Secure-less
 // session cookie on a public HTTPS site.
 func TestCookieSecure_Matrix(t *testing.T) {
-	declared, err := parsePublicOrigin("https://loupe.demo.example")
+	declared, err := appsession.ParsePublicOrigin("LOUPE_PUBLIC_ORIGIN", "https://loupe.demo.example")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	cases := []struct {
 		name     string
-		origin   *publicOrigin
+		origin   *appsession.PublicOrigin
 		bindHost string
 		want     bool
 	}{

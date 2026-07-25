@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
 
 // The credential-exchange rate limiter (loupe-f20-demo-operator-ux.md §6.5).
@@ -209,7 +211,7 @@ func credentialPeerKey(r *http.Request, originDeclared bool) string {
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if originDeclared && isLoopbackHost(host) {
+	if originDeclared && appsession.IsLoopbackHost(host) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			if last := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(last) != nil {
