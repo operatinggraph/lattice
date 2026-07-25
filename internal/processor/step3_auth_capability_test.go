@@ -1130,3 +1130,88 @@ func TestCapabilityAuthorizer_ConsoleOperatorPkgLifecycleGrant_UrgentAndSystemLa
 		}
 	}
 }
+
+// dualScopeDoc holds ONE operationType twice, at both scopes — the shape a
+// dual-hat human always has. The Gateway grants `consumer` to every actor it
+// authenticates, so any staff member also carrying a role-derived scope=any
+// grant projects both rows into the same PlatformPermissions array. `order`
+// picks which row lands first, because nothing sorts that array: it is built
+// by a `collect(DISTINCT …)` over the actor's holdsRole edges, so the order is
+// whichever role was bound first.
+func dualScopeDoc(projectedAt time.Time, selfFirst bool) *CapabilityDoc {
+	self := PlatformPermission{OperationType: "DualScopeOp", Scope: "self"}
+	any := PlatformPermission{OperationType: "DualScopeOp", Scope: "any"}
+	perms := []PlatformPermission{any, self}
+	if selfFirst {
+		perms = []PlatformPermission{self, any}
+	}
+	return &CapabilityDoc{
+		Key:                    capTestActorCap,
+		Actor:                  capTestActorKey,
+		Version:                "1.0",
+		ProjectedAt:            projectedAt.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{capTestActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions:    perms,
+		ServiceAccess:          []ServiceAccessEntry{},
+		EphemeralGrants:        []EphemeralGrant{},
+		Roles:                  []string{"vtx.role.staff", "vtx.role.consumer"},
+	}
+}
+
+// TestCapabilityAuthorizer_DualScope_AnySurvivesSelfRow: a standing scope=any
+// grant must authorize a call that carries no authContext, whichever order the
+// rows project in. A scan that DECIDED on the first matching row would deny
+// this actor its standing grant purely because the scope=self row happened to
+// be projected first — making authorization depend on holdsRole write order.
+func TestCapabilityAuthorizer_DualScope_AnySurvivesSelfRow(t *testing.T) {
+	for _, selfFirst := range []bool{false, true} {
+		now := time.Now().UTC()
+		a, _, _ := newCapAuthForTest(t, dualScopeDoc(now, selfFirst), now)
+		env := envFor("DualScopeOp", capTestActorKey, nil)
+		dec, err := a.Authorize(context.Background(), env)
+		if err != nil {
+			t.Fatalf("selfFirst=%v: Authorize: %v", selfFirst, err)
+		}
+		if !dec.Authorized {
+			t.Fatalf("selfFirst=%v: standing scope=any grant denied (%s: %s) — a scope=self row "+
+				"for the same op must not shadow it", selfFirst, dec.Code, dec.Reason)
+		}
+		if dec.Resolved == nil || dec.Resolved.PlatformPermission == nil ||
+			dec.Resolved.PlatformPermission.Scope != "any" {
+			t.Fatalf("selfFirst=%v: resolved on %+v, want the scope=any row", selfFirst, dec.Resolved)
+		}
+	}
+}
+
+// TestCapabilityAuthorizer_DualScope_SelfStillResolvesWithTarget: the same doc,
+// acting as self, still resolves on the scope=self row — which is what sets
+// AuthTargetValidated for the ownership guards downstream. Without this the fix
+// above could pass by simply preferring `any` unconditionally.
+func TestCapabilityAuthorizer_DualScope_SelfStillResolvesWithTarget(t *testing.T) {
+	now := time.Now().UTC()
+	a, _, _ := newCapAuthForTest(t, dualScopeDoc(now, true), now)
+	env := envFor("DualScopeOp", capTestActorKey, &AuthContext{Target: capTestActorKey})
+	dec, err := a.Authorize(context.Background(), env)
+	if err != nil || !dec.Authorized {
+		t.Fatalf("expected allow; got err=%v dec=%+v", err, dec)
+	}
+	if dec.Resolved.PlatformPermission.Scope != "self" {
+		t.Fatalf("resolved on scope=%q, want self — the ownership guards key on the "+
+			"AuthTargetValidated bit that only the self row sets",
+			dec.Resolved.PlatformPermission.Scope)
+	}
+}
+
+// TestCapabilityAuthorizer_DualScope_DenialDiagnosticPreserved: an actor with a
+// single scope=self row and no target still gets that row's own diagnostic, not
+// a flattened "no matching platformPermission".
+func TestCapabilityAuthorizer_DualScope_DenialDiagnosticPreserved(t *testing.T) {
+	now := time.Now().UTC()
+	a, _, _ := newCapAuthForTest(t, freshDoc(now), now)
+	env := envFor("ClaimIdentity", capTestActorKey, nil)
+	dec, _ := a.Authorize(context.Background(), env)
+	if dec.Code != ErrCodeAuthContextMismatch {
+		t.Fatalf("expected the scope=self row's own AuthContextMismatch; got %s (%s)", dec.Code, dec.Reason)
+	}
+}

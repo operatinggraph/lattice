@@ -576,13 +576,22 @@ func (s *server) pkgContext(r *http.Request) (ctx context.Context, cancel contex
 	return context.WithTimeout(r.Context(), pkgApplyTimeout)
 }
 
-// kernelRoleIDs maps kernel-seeded role canonical names to their NanoIDs for
-// the installer's grant resolution (same sourcing as cmd/lattice-pkg's
-// roleIDsFromBootstrap: the kernel seeds only the operator role; every other
-// role is package-declared and minted deterministically at install time).
+// kernelRoleIDs maps role canonical names to their NanoIDs for the installer's
+// grant resolution, matching cmd/lattice-pkg's roleIDsFromBootstrap: the kernel
+// seeds `operator`, and identity-domain's roles are minted deterministically
+// from the package name, so they resolve without reading anything.
+//
+// The identity-domain names are NOT optional garnish — the installer hard-fails
+// any GrantsTo entry that does not resolve to a NanoID, on the upgrade path as
+// well as a fresh install, so a package granting `consumer` (every vertical
+// with a self-service op) is un-installable through Loupe without them.
 func kernelRoleIDs() map[string]string {
 	if bootstrap.RoleOperatorID == "" {
 		return nil
 	}
-	return map[string]string{"operator": bootstrap.RoleOperatorID}
+	ids := map[string]string{"operator": bootstrap.RoleOperatorID}
+	for _, name := range []string{"consumer", "frontOfHouse", "backOfHouse", "provider", "identityProvisioner"} {
+		ids[name] = pkgmgr.RoleID("identity-domain", name)
+	}
+	return ids
 }

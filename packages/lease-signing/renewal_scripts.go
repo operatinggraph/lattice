@@ -146,6 +146,71 @@ def add_months(rfc3339_instant, months):
 RENEWAL_WINDOW_HOURS = __RENEWAL_WINDOW_HOURS__
 HOURS_PER_MONTH = 730
 
+RENEWAL_WALK_PAGE_LIMIT = 10
+
+def renewal_unit(renewal_key):
+    # The unit a renewal cycle is FOR, walked entirely across the graph's own
+    # links -- renewal -renews-> leaseapp -appliesToUnit-> unit -- so no payload
+    # field decides which landlord authorizes the write. Both hops are
+    # single-valued by construction (OpenRenewal writes exactly one renews link
+    # in the same batch as the vertex; appliesToUnit is required at
+    # CreateLeaseApplication), so neither is a keyspace scan. Returns None when
+    # the chain is broken, which the caller treats as a denial.
+    #
+    # read-posture: (e) relation=renews epoch=none -- one link per renewal.
+    rpage, _ = kv.Links(renewal_key, "renews", "out", None, RENEWAL_WALK_PAGE_LIMIT)
+    app_key = None
+    for lk in rpage:
+        if not lk.isDeleted:
+            app_key = lk.targetVertex
+    if app_key == None:
+        return None
+    # read-posture: (e) relation=appliesToUnit epoch=none -- one link per
+    # leaseapp, off the enumeration above (data-derived key).
+    upage, _ = kv.Links(app_key, "appliesToUnit", "out", None, RENEWAL_WALK_PAGE_LIMIT)
+    unit = None
+    for lk in upage:
+        if not lk.isDeleted:
+            unit = lk.targetVertex
+    return unit
+
+def require_manages(unit_key, what):
+    # The landlord ownership probe. The renewal legs are the landlord's own --
+    # set terms, re-verify the guarantor, decline the cycle -- and a signed-in
+    # landlord authorizes via a scope=self grant, so what confines them is their
+    # management link to the unit under the cycle. (leaseAppDDLScript carries the
+    # same helper: each DDL script is its own Starlark module, the per-script-
+    # helper posture every DDL in this package follows.)
+    #
+    # It binds the platform-VALIDATED self path and only that path (the same
+    # shape leaseAppDDLScript's copy carries, and for the same two reasons): a
+    # scope=any operator is authorized without the target being inspected at
+    # all, so confining it here would narrow an unconfined actor; and these ops
+    # ARE task-minted (the §10.8 playbook assigns them to row.landlord), where
+    # the validated target is the RENEWAL rather than an identity -- the
+    # equality with op.actor excludes that path and leaves it to the task grant
+    # that already scoped it.
+    #
+    # authcontext-target: (ownership) the target is used only as op.actor's own
+    # key, on a path the platform already proved equal to the actor, and the
+    # authority it buys is then proven by the manages LINK read below.
+    if not op.authTargetValidated or op.authContextTarget != op.actor:
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    if unit_key == None:
+        fail("AuthDenied: no unit resolves for this renewal, so no management link can authorize it; " + what)
+    _, unit_id = parts_of(unit_key, "unit", "unit")
+    # read-posture: (e) per-candidate follow-up read off the appliesToUnit
+    # enumeration in renewal_unit (data-derived key -- the unit is not knowable
+    # until the renewal's own links resolve, so it cannot be pre-declared).
+    lnk = kv.Read("lnk.identity." + actor_id + ".manages.unit." + unit_id)
+    if lnk == None or lnk.isDeleted:
+        # The unit key is deliberately NOT named: the caller reached here with a
+        # resource key it already holds, and echoing the unit that resource
+        # belongs to would turn a denial into a lookup for a resource it does
+        # not own.
+        fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
+
 def renewal_window_min_months():
     months = RENEWAL_WINDOW_HOURS // HOURS_PER_MONTH
     if RENEWAL_WINDOW_HOURS % HOURS_PER_MONTH != 0:
@@ -200,6 +265,10 @@ def execute(state, op):
         # signature rides the operator model — no in-chain revision path).
         renewal_key = required_string(p, "renewalKey")
         parts_of(renewal_key, "renewalKey", "renewal")
+        # workplace-exempt: (ownership-bound) the ownership probe answers FIRST,
+        # ahead of the liveness check: a caller who manages nothing must not be
+        # able to use this op to learn whether a renewal key exists.
+        require_manages(renewal_unit(renewal_key), "cannot set terms on renewal " + renewal_key)
         renewal_vtx = state[renewal_key] if renewal_key in state else None
         if renewal_vtx == None or (hasattr(renewal_vtx, "isDeleted") and renewal_vtx.isDeleted):
             fail("UnknownRenewal: " + renewal_key)
@@ -243,6 +312,12 @@ def execute(state, op):
         # there is no guarantor to verify.
         renewal_key = required_string(p, "renewalKey")
         _, renewal_id = parts_of(renewal_key, "renewalKey", "renewal")
+        # workplace-exempt: (ownership-bound) the ownership probe answers FIRST --
+        # ahead of the liveness check, the payload-matching probes below, and the
+        # applicant's .profile -- so a caller who does not manage the unit learns
+        # neither that this renewal exists nor which leaseapp or applicant it is
+        # for.
+        require_manages(renewal_unit(renewal_key), "cannot verify the guarantor on renewal " + renewal_key)
         if not vertex_alive(state, renewal_key):
             fail("UnknownRenewal: " + renewal_key)
 
@@ -372,6 +447,9 @@ def execute(state, op):
         # Landlord terminal decline. Rejects once signed; otherwise flips
         # status=cancelled (+ optional reason). Terminal in v1 (no revive op).
         renewal_key = required_string(p, "renewalKey")
+        # workplace-exempt: (ownership-bound) the ownership probe answers FIRST,
+        # ahead of the liveness check, so a denial reveals no renewal's existence.
+        require_manages(renewal_unit(renewal_key), "cannot cancel renewal " + renewal_key)
         renewal_vtx = state[renewal_key] if renewal_key in state else None
         if renewal_vtx == None or (hasattr(renewal_vtx, "isDeleted") and renewal_vtx.isDeleted):
             fail("UnknownRenewal: " + renewal_key)

@@ -130,6 +130,7 @@ const COMPLETIONS = {
     }),
   },
   VerifyGuarantor: {
+    landlordLeg: true,
     title: "Verify tenant's guarantor",
     klass: "renewal",
     targetField: "renewalKey",
@@ -142,6 +143,7 @@ const COMPLETIONS = {
     }),
   },
   SetRenewalTerms: {
+    landlordLeg: true,
     title: "Set renewal terms",
     klass: "renewal",
     targetField: "renewalKey",
@@ -153,6 +155,7 @@ const COMPLETIONS = {
     extraReads: (target) => ({ optionalReads: [target + ".renewalSignature"] }),
   },
   CancelRenewal: {
+    landlordLeg: true,
     title: "Decline this renewal",
     klass: "renewal",
     targetField: "renewalKey",
@@ -170,6 +173,15 @@ function renewsLinkKey(renewalKey, leaseAppKey) {
 }
 function applicationForLinkKey(leaseAppKey, applicantKey) {
   return "lnk.leaseapp." + shortKey(leaseAppKey) + ".applicationFor.identity." + shortKey(applicantKey);
+}
+
+// manageLinkKey reconstructs the signed-in landlord's management link to a unit
+// — the key SetListingStatus's ownership probe reads — as a one-element list
+// ready to concat into a declaration. A session that manages nothing gets [],
+// so an applicant declares nothing extra.
+function manageLinkKey(unitKey) {
+  if (!isLandlord() || !state.applicant) return [];
+  return ["lnk.identity." + shortKey(state.applicant) + ".manages.unit." + shortKey(unitKey)];
 }
 
 const $ = (sel) => document.querySelector(sel);
@@ -816,6 +828,21 @@ function renderSignedInAs() {
 // degrades to "offer nothing extra", never to a capability the graph would deny.
 function isLandlord() {
   return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "manages");
+}
+
+// landlordSubmit is the opts a landlord-hat write carries: acting as themselves,
+// which is what their scope=self grant authorizes and what each op's `manages`
+// ownership guard binds to the unit under the write. A session with no `manages`
+// anchor sends nothing and rides whatever standing grant it holds.
+//
+// Sending it is safe even for a session that ALSO holds a standing scope=any
+// grant, and that is a server-side property, not a claim about this predicate:
+// step 3 authorizes a scope=any caller without inspecting the target at all, so
+// the ownership guards — which key on the platform's own authTargetValidated bit
+// — stay inert for an operator or front-desk actor. Staff read portfolio-wide
+// through the wildcard anchor, and this never narrows their writes to match.
+function landlordSubmit() {
+  return isLandlord() ? { authContext: { target: state.applicant } } : undefined;
 }
 
 // applyHatGating hides the landlord surface from a session that holds no
@@ -2156,7 +2183,7 @@ async function submitComplete(ev) {
       reads,
       optionalReads,
       payload,
-    });
+    }, desc.landlordLeg ? landlordSubmit() : undefined);
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not complete — " + msg, "err");
@@ -3494,7 +3521,7 @@ async function decideApplication(a, decision) {
       reads,
       optionalReads,
       payload,
-    });
+    }, landlordSubmit());
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Decision rejected — " + msg, "err");
@@ -3570,8 +3597,13 @@ async function setListingStatus(u, status) {
       operationType: "SetListingStatus",
       class: "loftspaceListing",
       reads: [u.unitKey, u.unitKey + ".listing"],
+      // The management link is the landlord path's ownership probe and its
+      // ABSENCE is the denial, so it is declared optional — a required
+      // declaration would turn every unauthorized call into a hydration miss
+      // before the guard could answer.
+      optionalReads: manageLinkKey(u.unitKey),
       payload: { unit: u.unitKey, status },
-    });
+    }, landlordSubmit());
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not change status — " + msg, "err");

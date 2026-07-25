@@ -105,6 +105,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
+			OperationType: "DecideLeaseApplication",
+			Scope:         "self",
+			Note:          "Grants a landlord the right to decide an application on a unit they MANAGE (the acting identity is signed in as itself; the script walks the application's own appliesToUnit link to the unit and requires the acting identity's manages link).",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
 			OperationType: "SetApplicantProfile",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit SetApplicantProfile (the applicant records their qualification profile via the trusted-tool app — income / employment / references / co-applicant / guarantor; same operator model as SignLease).",
@@ -129,10 +135,22 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "SetRenewalTerms",
+			Scope:         "self",
+			Note:          "Grants a landlord the right to set the terms of a renewal cycle on a unit they MANAGE (the script walks renewal→renews→leaseapp→appliesToUnit to the unit and requires the acting identity's manages link).",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
 			OperationType: "VerifyGuarantor",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit VerifyGuarantor; the landlord performs it via the §10.7 ephemeral task grant (same operator model as SignLease).",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "VerifyGuarantor",
+			Scope:         "self",
+			Note:          "Grants a landlord the right to re-verify the guarantor on a renewal cycle for a unit they MANAGE (the script walks renewal→renews→leaseapp→appliesToUnit to the unit and requires the acting identity's manages link BEFORE any applicant profile is read).",
+			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: "SignRenewal",
@@ -145,6 +163,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit CancelRenewal — the landlord's task-LESS terminal decline (no assignTask leg; a direct operator/trusted-tool action, same posture as WithdrawLeaseApplication).",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "CancelRenewal",
+			Scope:         "self",
+			Note:          "Grants a landlord the right to decline a renewal cycle on a unit they MANAGE (the script walks renewal→renews→leaseapp→appliesToUnit to the unit and requires the acting identity's manages link).",
+			GrantsTo:      []string{"consumer"},
 		},
 	}
 }

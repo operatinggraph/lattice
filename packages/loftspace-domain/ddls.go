@@ -313,6 +313,38 @@ def unit_parts(key):
         fail("InvalidArgument: unit: empty id segment; required vtx.unit.<NanoID>; got " + key)
     return parts[2]
 
+def require_manages(unit_key, what):
+    # The landlord ownership probe: a signed-in landlord authorizes a listing
+    # transition via a scope=self grant, and what confines them is their
+    # management link to the unit they are transitioning.
+    #
+    # It binds the platform-VALIDATED self path and only that path. The
+    # convergence directOp that drives a unit to leased runs as Weaver's service
+    # actor and carries no authContext at all; an operator on the standing
+    # scope=any path is authorized without the target being inspected, so
+    # neither reaches the probe even if a client sends a target.
+    #
+    # authcontext-target: (ownership) the target is used only as op.actor's own
+    # key, on a path the platform already proved equal to the actor, and the
+    # authority it buys is then proven by the manages LINK read below.
+    if not op.authTargetValidated or op.authContextTarget != op.actor:
+        return
+    actor_parts = op.actor.split(".")
+    if len(actor_parts) != 3 or actor_parts[0] != "vtx" or actor_parts[1] != "identity":
+        fail("AuthDenied: " + op.actor + " is not an identity, so it holds no management link; " + what)
+    unit_id = unit_parts(unit_key)
+    # read-posture: (d) declared optionalReads at SetListingStatus dispatch on
+    # the landlord path. optionalReads, not reads: absence IS the denial this
+    # probe exists to produce, so hydrating it as required would turn every
+    # unauthorized call into a HydrationMiss before the guard could answer.
+    lnk = kv.Read("lnk.identity." + actor_parts[2] + ".manages.unit." + unit_id)
+    if lnk == None or lnk.isDeleted:
+        # The unit key is deliberately NOT named: the caller reached here with a
+        # resource key it already holds, and echoing the unit that resource
+        # belongs to would turn a denial into a lookup for a resource it does
+        # not own.
+        fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
+
 def class_of(state, key):
     if key not in state:
         return None
@@ -397,6 +429,10 @@ def execute(state, op):
         # hydrated via ContextHint.Reads=[unit] (the playbook routes row.unitKey).
         unit = required_string(p, "unit")
         unit_parts(unit)
+        # workplace-exempt: (ownership-bound) the ownership probe answers before
+        # require_live_unit, so a caller who manages nothing cannot use this op
+        # to learn whether a unit exists.
+        require_manages(unit, "cannot transition the listing on " + unit)
         require_live_unit(state, unit)
         status = required_status(p)
 

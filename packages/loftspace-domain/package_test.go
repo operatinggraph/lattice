@@ -116,28 +116,51 @@ func TestPackage_DDLs(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins every op granted to operator (scope any) and
-// nothing else, and the location-domain dependency.
+// TestPackage_Permissions pins the exact (op, scope) → roles matrix and nothing
+// else, and the location-domain dependency. The scope=self row is what makes
+// the landlord path reachable, and the ABSENCE of one on AssignUnitOwner /
+// RemoveUnitOwner is load-bearing: those ops confer management, so a
+// self-scoped grant on either would let any signed-in identity make itself the
+// landlord of any unit.
 func TestPackage_Permissions(t *testing.T) {
-	wantPerms := map[string]bool{"SetListing": false, "SetUnitAddress": false, "SetListingStatus": false, "AssignUnitOwner": false, "RemoveUnitOwner": false}
+	type grant struct {
+		op    string
+		scope string
+	}
+	wantPerms := map[grant][]string{
+		{"SetListing", "any"}:        {"operator"},
+		{"SetUnitAddress", "any"}:    {"operator"},
+		{"SetListingStatus", "any"}:  {"operator"},
+		{"AssignUnitOwner", "any"}:   {"operator"},
+		{"RemoveUnitOwner", "any"}:   {"operator"},
+		{"SetListingStatus", "self"}: {"consumer"},
+	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
 		t.Fatalf("expected %d permissions, got %d", len(wantPerms), got)
 	}
+	seen := map[grant]bool{}
 	for _, perm := range Package.Permissions {
-		if _, ok := wantPerms[perm.OperationType]; !ok {
-			t.Fatalf("unexpected permission for %q", perm.OperationType)
+		g := grant{perm.OperationType, perm.Scope}
+		want, ok := wantPerms[g]
+		if !ok {
+			t.Fatalf("unexpected permission %q scope %q", perm.OperationType, perm.Scope)
 		}
-		wantPerms[perm.OperationType] = true
-		if perm.Scope != "any" {
-			t.Fatalf("%s scope = %q, want any", perm.OperationType, perm.Scope)
+		if seen[g] {
+			t.Fatalf("duplicate permission %q scope %q", perm.OperationType, perm.Scope)
 		}
-		if len(perm.GrantsTo) != 1 || perm.GrantsTo[0] != "operator" {
-			t.Fatalf("%s grantsTo = %v, want [operator]", perm.OperationType, perm.GrantsTo)
+		seen[g] = true
+		if len(perm.GrantsTo) != len(want) {
+			t.Fatalf("%s/%s grantsTo = %v, want %v", perm.OperationType, perm.Scope, perm.GrantsTo, want)
+		}
+		for i, role := range want {
+			if perm.GrantsTo[i] != role {
+				t.Fatalf("%s/%s grantsTo = %v, want %v", perm.OperationType, perm.Scope, perm.GrantsTo, want)
+			}
 		}
 	}
-	for op, seen := range wantPerms {
-		if !seen {
-			t.Fatalf("missing permission for op %q", op)
+	for g := range wantPerms {
+		if !seen[g] {
+			t.Fatalf("missing permission for op %q scope %q", g.op, g.scope)
 		}
 	}
 

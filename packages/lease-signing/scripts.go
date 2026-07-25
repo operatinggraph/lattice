@@ -297,6 +297,66 @@ def require_workplace(location_keys, what):
     fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
          str(location_keys) + "; " + what)
 
+LEASEAPP_UNIT_PAGE_LIMIT = 10
+
+def leaseapp_unit(app_key):
+    # The unit a lease application applies to, from the application's OWN link
+    # -- never a payload field, so a caller cannot forge which unit's landlord
+    # (or workplace) authorizes the write. Returns None when the application
+    # names no live unit, which every caller treats as a denial.
+    #
+    # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp carries
+    # exactly one appliesToUnit link (required at CreateLeaseApplication), so
+    # this is never a keyspace scan.
+    page, _ = kv.Links(app_key, "appliesToUnit", "out", None, LEASEAPP_UNIT_PAGE_LIMIT)
+    unit = None
+    for lk in page:
+        if not lk.isDeleted:
+            unit = lk.targetVertex
+    return unit
+
+def require_manages(unit_key, what):
+    # The landlord ownership probe -- the scope=self counterpart to
+    # require_workplace above, binding the path that guard deliberately cannot
+    # see. A signed-in landlord holds no worksAt link and authorizes via a
+    # scope=self grant, so what confines them is their own management link to
+    # the unit under the write.
+    #
+    # It binds the platform-VALIDATED self path and only that path, which is why
+    # it keys on authTargetValidated rather than on the raw target's presence.
+    # Two callers would otherwise be caught wrongly:
+    #   - a scope=any holder (operator) whose client happens to send its own key
+    #     -- step 3 authorizes it on the standing grant WITHOUT inspecting the
+    #     target, so narrowing it here would confine an unconfined actor to
+    #     whatever it happens to manage, while its READ surface stays
+    #     portfolio-wide through the staff wildcard anchor;
+    #   - a task grant, which also validates a target -- but the target of the
+    #     §10.8 renewal tasks is the RENEWAL, not an identity, so the equality
+    #     with op.actor excludes it and the task's own scoping stands.
+    # A scope=self caller cannot escape it: step 3 denies scope=self outright
+    # when the target is absent and denies it when target != actor, so reaching
+    # this op on that grant means both conditions already hold.
+    #
+    # authcontext-target: (ownership) the target is used only as op.actor's own
+    # key, on a path the platform already proved equal to the actor, and the
+    # authority it buys is then proven by the manages LINK read below.
+    if not op.authTargetValidated or op.authContextTarget != op.actor:
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    if unit_key == None:
+        fail("AuthDenied: no unit resolves for this write, so no management link can authorize it; " + what)
+    _, unit_id = parts_of(unit_key, "unit", "unit")
+    # read-posture: (e) per-candidate follow-up read off the appliesToUnit
+    # enumeration above (data-derived key -- the unit is not knowable until the
+    # application's own link resolves, so it cannot be pre-declared).
+    lnk = kv.Read("lnk.identity." + actor_id + ".manages.unit." + unit_id)
+    if lnk == None or lnk.isDeleted:
+        # The unit key is deliberately NOT named: the caller reached here with a
+        # resource key it already holds, and echoing the unit that resource
+        # belongs to would turn a denial into a lookup for a resource it does
+        # not own.
+        fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
+
 DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
 def is_leap_year(year):
@@ -501,32 +561,43 @@ def execute(state, op):
         # leases); declined is a terminal disposition (declined OR'd in the lens).
         app_key = required_string(p, "leaseAppKey")
         _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
+
+        # Confinement, before anything is validated or revealed: whichever path
+        # authorized this write, it is bound to the application's OWN unit. Staff
+        # on the standing path must worksAt a location covering it; a landlord on
+        # the self path must manage it. The unit comes from the application's own
+        # appliesToUnit link -- the payload 'unit' field below is verified against
+        # that same link, but it is only read on the approve branch, and a
+        # confinement gate must bind a DECLINE just as tightly.
+        #
+        # The walk is unconditional because BOTH guards below consume it, and
+        # each binds the path the other cannot see -- so there is no caller for
+        # whom it is dead weight except an operator, who pays one bounded link
+        # enumeration. It cannot raise on a reachable input either: app_key is
+        # already parsed above, and the only key-shape parse of what it returns
+        # lives past require_manages's self-action early return.
+        decide_unit = leaseapp_unit(app_key)
+        # workplace-exempt: (ownership-bound) this IS the ownership proof -- it
+        # requires the acting landlord to manage the unit the application's own
+        # link names, so the validated scope=self path never reaches the write
+        # unconfined. It answers ahead of the liveness check below so a caller
+        # who manages nothing cannot use a denial to learn that an application
+        # exists.
+        require_manages(decide_unit, "cannot decide application " + app_key)
         if not vertex_alive(state, app_key):
             fail("UnknownLeaseApplication: " + app_key)
-
-        # Workplace confinement, before anything is validated or revealed: a
-        # non-operator actor may only decide applications for units inside the
-        # location it worksAt. The unit comes from the application's OWN
-        # appliesToUnit link -- the payload 'unit' field below is verified
-        # against that same link, but it is only read on the approve branch, and
-        # a confinement gate must bind a DECLINE just as tightly.
-        # workplace-exempt: (no-validated-path) DecideLeaseApplication is
-        # granted scope=any to operator + frontOfHouse only (permissions.go) and
-        # no task mints it today. It DOES carry an op-meta, so a CreateTask
-        # forOperation it would make a validated target reachable -- add a
-        # resource bind here before minting any such task.
-        # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp
-        # carries exactly one appliesToUnit link (required at
-        # CreateLeaseApplication), so this is never a keyspace scan.
+        # workplace-exempt: (ownership-bound) require_manages above binds the
+        # scope=self path to this same unit. NOTE the OTHER validated path:
+        # workplace_exempt() keys on op.authTargetValidated, which a TASK grant
+        # also sets -- and require_manages returns early there, because a task's
+        # target is the task's resource, not the acting identity. This op carries
+        # an op-meta, so a CreateTask forOperation it would reach the write with
+        # BOTH confinements off. No playbook mints one today; add a resource bind
+        # here before any does.
         if not workplace_exempt():
-            unit_page, _ = kv.Links(app_key, "appliesToUnit", "out")
-            decide_unit = None
-            for lk in unit_page:
-                if not lk.isDeleted:
-                    decide_unit = lk.targetVertex
-            # workplace-exempt: (no-validated-path) same discharge as the
-            # workplace_exempt() pre-gate above -- re-stated because the
-            # enumeration between them puts it out of annotation range.
+            # workplace-exempt: (ownership-bound) same discharge as the pre-gate
+            # above -- re-stated because the intervening statement puts it out of
+            # annotation range.
             require_workplace([decide_unit], "cannot decide application " + app_key)
 
         decision = required_string(p, "decision")

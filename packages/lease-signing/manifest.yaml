@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.24.4
+version: 0.25.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -108,6 +108,9 @@ declares:
     - operationType: DecideLeaseApplication
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: DecideLeaseApplication
+      scope: self
+      grantsTo: [consumer]
     - operationType: SetApplicantProfile
       scope: any
       grantsTo: [operator]
@@ -120,15 +123,24 @@ declares:
     - operationType: SetRenewalTerms
       scope: any
       grantsTo: [operator]
+    - operationType: SetRenewalTerms
+      scope: self
+      grantsTo: [consumer]
     - operationType: VerifyGuarantor
       scope: any
       grantsTo: [operator]
+    - operationType: VerifyGuarantor
+      scope: self
+      grantsTo: [consumer]
     - operationType: SignRenewal
       scope: any
       grantsTo: [operator]
     - operationType: CancelRenewal
       scope: any
       grantsTo: [operator]
+    - operationType: CancelRenewal
+      scope: self
+      grantsTo: [consumer]
   weaverTargets:
     - targetId: leaseApplicationComplete
       lensRef: leaseApplicationComplete

@@ -93,7 +93,7 @@ func setupLoftspaceEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	ctx, conn := testutil.SetupPackageTestEnv(t) // installs rbac+identity+hygiene
 	stop := testutil.RunMetaInstallPipeline(t, ctx, conn)
 	inst := pkgmgr.NewInstaller(conn, bootstrap.BootstrapIdentityKey)
-	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID}
+	inst.RoleIDs = testutil.StandardRoleIDs()
 	if _, err := inst.Install(ctx, locationdomain.Package); err != nil {
 		stop()
 		t.Fatalf("install location-domain: %v", err)

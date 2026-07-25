@@ -488,7 +488,25 @@ func (a *CapabilityAuthorizer) platformLaneGate(env *OperationEnvelope, doc *Cap
 	}
 }
 
+// matchPlatformPermission authorizes against the actor's standing grants. An
+// actor's PlatformPermissions are the UNION of every role it holds, so one
+// operationType legitimately appears more than once at different scopes — a
+// dual-hat human holds, say, `consumer` scope=self and `frontOfHouse`
+// scope=any for the same op. A row whose precondition is unmet therefore does
+// not decide the operation: the scan continues, and a denial is returned only
+// once every matching row has failed. Deciding on the first matching row would
+// let projection order — the order the actor's holdsRole edges were written —
+// determine whether a standing grant is honored at all.
+//
+// The FIRST denial encountered is the one reported, so an actor holding a
+// single row gets exactly the diagnostic that row produces.
 func (a *CapabilityAuthorizer) matchPlatformPermission(env *OperationEnvelope, doc *CapabilityDoc, resolved *ResolvedPermission) Decision {
+	var firstDenial *Decision
+	deny := func(d Decision) {
+		if firstDenial == nil {
+			firstDenial = &d
+		}
+	}
 	for i := range doc.PlatformPermissions {
 		p := &doc.PlatformPermissions[i]
 		if p.OperationType != env.OperationType {
@@ -497,7 +515,8 @@ func (a *CapabilityAuthorizer) matchPlatformPermission(env *OperationEnvelope, d
 		switch p.Scope {
 		case "any":
 			if dec := a.platformLaneGate(env, doc, p); dec != nil {
-				return *dec
+				deny(*dec)
+				continue
 			}
 			resolved.Path = "platform"
 			resolved.PlatformPermission = p
@@ -511,21 +530,24 @@ func (a *CapabilityAuthorizer) matchPlatformPermission(env *OperationEnvelope, d
 			if target == "" {
 				// `self` scope requires a target so we can equate it with
 				// the actor. Treat absent target as a context mismatch.
-				return Decision{
+				deny(Decision{
 					Authorized: false,
 					Code:       ErrCodeAuthContextMismatch,
 					Reason:     "platform scope=self requires authContext.target",
-				}
+				})
+				continue
 			}
 			if target != env.Actor {
-				return Decision{
+				deny(Decision{
 					Authorized: false,
 					Code:       ErrCodeAuthDenied,
 					Reason:     "platform scope=self: target != actor",
-				}
+				})
+				continue
 			}
 			if dec := a.platformLaneGate(env, doc, p); dec != nil {
-				return *dec
+				deny(*dec)
+				continue
 			}
 			resolved.Path = "platform"
 			resolved.PlatformPermission = p
@@ -533,25 +555,28 @@ func (a *CapabilityAuthorizer) matchPlatformPermission(env *OperationEnvelope, d
 		case "specific":
 			// Phase 1 platform-path doesn't carry the specific-target
 			// list. Decision #11: surface as AuthContextMismatch.
-			return Decision{
+			deny(Decision{
 				Authorized: false,
 				Code:       ErrCodeAuthContextMismatch,
 				Reason:     "platform scope=specific not implemented for platform path in Phase 1",
-			}
+			})
 		case "owned":
 			// Phase 2 (Contract #6 §6.7).
-			return Decision{
+			deny(Decision{
 				Authorized: false,
 				Code:       ErrCodeAuthDenied,
 				Reason:     "OwnershipScopeNotImplemented",
-			}
+			})
 		default:
-			return Decision{
+			deny(Decision{
 				Authorized: false,
 				Code:       ErrCodeAuthDenied,
 				Reason:     "unknown platformPermission.scope: " + p.Scope,
-			}
+			})
 		}
+	}
+	if firstDenial != nil {
+		return *firstDenial
 	}
 	return Decision{
 		Authorized: false,
