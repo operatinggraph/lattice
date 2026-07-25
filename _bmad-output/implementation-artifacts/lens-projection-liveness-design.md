@@ -834,3 +834,106 @@ worse than one that is honestly absent. The durable fix belongs with the three o
 — `entry.guarded` should read the built adapter rather than `RequiresGuard`, and the refusal set
 should cover an identity-changing `grantTable`/`grantSource` edit the way it covers `secureColumns`.
 **Consumer: an operator editing a grant lens's INTO.** Filed.
+
+## 14. Fire 9 — the INTO-only reload decides in the open, and says so (build note / fire brief)
+
+### 14.1 Scope — four coupled rows, one fire
+
+The board carries four hot-reload rows the callout groups as one coupled fire. Their scope sentences,
+verbatim:
+
+1. **`buildAdapter`/`updateCB` are closures in `main()`, so no test binds them.** "The lens-activation and
+   INTO-only hot-reload wiring lives in unexported closures inside `cmd/refractor`'s `main()`; deleting the
+   `ApplyGuard` call or a hot-reload refusal leaves `go test ./...` green. Extract to package-level functions
+   with injected deps."
+2. **An INTO-only hot-reload refusal is invisible outside a log line.** "A refused reload (secureColumns,
+   target/bucket, unguarded replacement) logs and returns: health stays `active`, no `RecordError`/`SetPaused`,
+   and the operator's edit silently no-ops while the lens runs the old spec. Each redelivery re-enters
+   `buildAdapter`, which can leave an unused auto-created bucket behind."
+3. **An INTO-only reload does not re-install the `Output` descriptor.** "`output` is a separate aspect from
+   INTO, so editing it alone classifies `IntoOnly` — which rebuilds the adapter but never re-runs
+   `SetEnvelopeFn`/`SetActorDeleteKey`/`SetSweepPlan`. The live envelope keeps the activated empty-behavior
+   while the rebuilt adapter is guarded off the new one. Refuse the reload on an `Output` change, as
+   `secureColumns` already does."
+4. **An INTO edit can strand a grant lens's live grants.** "`HotReloadInto`'s refusal is armed only from inside
+   itself for this family (`InstallActorAggregate` never runs for a grant lens), and the target/bucket pin
+   misses a `grantTable: true → false` edit — so the first such swap is accepted and every row the lens wrote
+   is left unretractable. Over-grant; pre-existing." (§13.4 Residual 2 names the same remedy: *`entry.guarded`
+   should read the built adapter rather than `RequiresGuard`, and the refusal set should cover an
+   identity-changing `grantTable`/`grantSource` edit the way it covers `secureColumns`*.)
+
+**Scope-diff gate.** Rows 2–4 each name a *decision* the INTO-only path makes (refuse or accept; report or
+stay silent). Row 1 names the *reason none of those decisions is testable*: they live in a closure. So row 1
+is not adjacent work — it is the same mechanism, and building 2–4 without it would add three untested
+security decisions to an untestable function. The fire narrows nothing and substitutes nothing: each row's
+remedy is built as its author stated it. **Non-goals:** the `MatchChange` branch's own refusals (unchanged
+except for the shared reporting helper), `RequiresGuard`'s definition, `GrantWriterAdapter`'s deliberate
+absence of `Truncater` (§13.4), and the diverged-`actor_read_grants` repair path (its own filed row).
+
+### 14.2 Verified touch-list
+
+| Site | What is there now |
+|---|---|
+| `cmd/refractor/main.go:60-80` | `pipelineEntry` — carries `guarded`, `target`, `bucket`, `secureColumns` as the RUNNING pipeline's baseline. |
+| `cmd/refractor/main.go:518-527` | `buildAdapter` closure — `buildTargetAdapter` then `projection.ApplyGuard`. Captures only `buildTargetAdapter`. |
+| `cmd/refractor/main.go:788` | `guardRequired, _ := projection.RequiresGuard(r)` — the activation-time source of `entry.guarded`. |
+| `cmd/refractor/main.go:791-802` | the registry write that snapshots the baseline. |
+| `cmd/refractor/main.go:837-946` | `updateCB` closure — the `IntoOnly` refusals (856, 861, 875), the build (881), `HotReloadInto` (886), and the `MatchChange` branch. Captures `logger`, `mu`, `registry`, `buildAdapter`, `fullEngine`. |
+| `internal/refractor/pipeline/pipeline.go:471-492` | `HotReloadInto` — nil check, then the `requireGuardedAdapter && !guarded` refusal, then the arming latch. |
+| `internal/refractor/projection/driver.go:147-206` | `InstallActorAggregate` — the only place `SetEnvelopeFn`/`SetActorDeleteKey`/`SetSweepPlan`/`RequireGuardedAdapter` run. Never re-run on reload; never runs at all for a grant lens. |
+| `internal/refractor/projection/driver.go:240` | `RequiresGuard` returns false at its first line for a non-actor-aggregate lens — i.e. for every grant lens. |
+| `internal/refractor/lens/schema.go:63-116` | `IntoConfig` — the surface fields: `Target`, `Bucket`, `Table`, `DSN`, `GrantTable`, `GrantSource`. |
+| `cmd/refractor/main_test.go` | 204 lines, four tests, all over pure helpers (`isOperationRoleIndexLens`, `threadsKeyColumns`, `hotReloadKeyColumns`). No test reaches activation or reload. |
+
+**Precedents to mirror:** `secureColumnsEqual` (`main.go:1110`) for the comparison helper's shape;
+`entry.secureColumns` for "the baseline is the RUNNING pipeline's activated value, never the last-seen spec,
+so a refused update cannot poison it"; `health.Reporter.RecordError` (`reporter.go:217`) for the operator
+signal, as `evaluate.go:301` already uses it for a defect the pipeline detects itself.
+
+### 14.3 Build order
+
+**Inc 1 — make the decision a value, and the decision-maker a function (row 1).** `buildAdapter` becomes a
+package-level `buildAdapter(r *lens.Rule, buildTarget targetBuilder)`; the update callback becomes a
+package-level `reloader` struct (logger, ctx, registry lookup, `buildAdapter`, `fullEngine`) with an `update`
+method, and `main()` passes `rl.update`. The refusal decision is lifted out whole into a **pure** function
+`hotReloadRefusal(entry *pipelineEntry, old, newLens *lens.Rule) string` — empty string accepts, a non-empty
+string *is* the operator-facing reason. Pure over the entry snapshot plus the two rules, so every refusal
+below is one table row in a unit test, and deleting one reddens the build.
+
+**Inc 2 — the refusal set covers what a reload cannot carry (rows 3, 4).** Added to `hotReloadRefusal`:
+an **`Output` descriptor change** (row 3 — `IntoOnly` rebuilds the adapter but re-runs none of the
+`InstallActorAggregate` wiring, so the live envelope and the rebuilt adapter would disagree about
+empty-behavior and the guard predicate), and a **`grantTable` change in either direction** (row 4 — flipping a
+lens on or off the shared grant table changes its identity, not its INTO config, and a swap cannot retract
+what the old identity already wrote). The guarded-surface pin is widened from `target`/`bucket` to include
+`table` and `grantSource`: `bucket` is empty for every Postgres target, so the existing pin was vacuous for
+exactly the family row 4 is about.
+
+**Inc 3 — `entry.guarded` reports the adapter that was built, not a predicate that excludes the family
+(row 4).** At activation, `guarded` is read from the built adapter's `adapter.SeqGuarded` report — the same
+question `HotReloadInto` asks — instead of `projection.RequiresGuard`, which answers `false` for every grant
+lens by construction (§13.2). This is what arms the surface pin for the grant family on its *first* edit
+rather than only after an unrelated earlier swap happened to latch it.
+
+**Inc 4 — a refused reload is visible where an operator looks (row 2).** Every refusal, and every failure of
+the build or the swap that follows, calls `entry.reporter.RecordError` with the same reason string it logs, so
+health carries `lastError` + a rising `errorCount` instead of an unbroken `active`. The refusals run *before*
+`buildAdapter`, so a refused reload no longer re-enters target construction on each redelivery — which is what
+was leaving an auto-created bucket behind. The one refusal that still follows a build is `HotReloadInto`'s
+own; with Inc 2+3 it is a backstop rather than a live path, and it reports too.
+
+**Green checks:** `go build ./...` · `make vet` · `golangci-lint run ./...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `go test ./cmd/refractor/... ./internal/refractor/...` ·
+full `go test ./...` (the entry-baseline change is read by the activation path every lens takes).
+
+### 14.4 In-scope gotchas
+
+- **The baseline must stay the RUNNING pipeline's.** Every new comparison reads `entry.*`, never `old.*` — the
+  existing comment at `main.go:850` exists because a refused update that updates the baseline wedges the lens.
+  `old` is used only where the running value is genuinely not snapshotted (the secure-lens table/DSN pin).
+- **A refusal is not a pause.** `SetPaused` would stop the lens from projecting its *current, correct* spec;
+  the lens is running the right thing, the operator's *edit* is what did not land. `RecordError` states that
+  without taking the projection down.
+- **`Output` is a pointer** (`*lens.OutputDescriptorSpec`) with slice fields — the comparison handles nil on
+  either side and compares slices elementwise, mirroring `secureColumnsEqual`'s order-sensitive posture (the
+  descriptor is authored, not computed).
