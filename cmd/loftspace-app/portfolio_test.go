@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
@@ -12,47 +11,36 @@ import (
 // auth/pool paths and the pure aggregation logic, mirroring
 // landlord_applications_test.go.
 
-func TestHandlePortfolioPulse_NoAuthConfigured_401(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
-	rec := httptest.NewRecorder()
-	s.handlePortfolioPulse(rec, httptest.NewRequest(http.MethodGet, "/api/portfolio-pulse", nil))
+func TestHandlePortfolioPulse_NoAuthPosture_401(t *testing.T) {
+	s := noPostureServer(t)
+	rec := sessionGET(s, s.handlePortfolioPulse, "/api/portfolio-pulse", nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }
 
-func TestHandlePortfolioPulse_NoToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	s.handlePortfolioPulse(rec, httptest.NewRequest(http.MethodGet, "/api/portfolio-pulse", nil))
+func TestHandlePortfolioPulse_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handlePortfolioPulse, "/api/portfolio-pulse", nil)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
+		t.Fatalf("status = %d, want 401 (no session cookie)", rec.Code)
 	}
 }
 
-func TestHandlePortfolioPulse_ForgedToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/portfolio-pulse", nil)
-	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
-	s.handlePortfolioPulse(rec, r)
+func TestHandlePortfolioPulse_ForgedCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.valid.jwt"}
+	rec := sessionGET(s, s.handlePortfolioPulse, "/api/portfolio-pulse", forged)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
+		t.Fatalf("status = %d, want 401 (forged cookie)", rec.Code)
 	}
 }
 
-// A verified actor with no read-model pool gets a clean 502, never a
+// A signed-in actor with no read-model pool gets a clean 502, never a
 // nil-pointer panic (mirrors the landlord-applications reader).
-func TestHandlePortfolioPulse_ValidToken_PoolUnconfigured_502(t *testing.T) {
-	s := devAuthServer(t) // authn set, pgPool nil
-	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/portfolio-pulse", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	s.handlePortfolioPulse(rec, r)
+func TestHandlePortfolioPulse_ValidSession_PoolUnconfigured_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t, nil) // session set, pgPool nil
+	rec := sessionGET(s, s.handlePortfolioPulse, "/api/portfolio-pulse", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
 	}

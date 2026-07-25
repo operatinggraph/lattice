@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -267,49 +266,38 @@ func TestFilterUnitsToManaged(t *testing.T) {
 // landlord_applications_rls_test.go; TestFilterUnitsToManaged above covers the
 // new composition (managed-set → response filter) at the unit level.
 
-func TestHandleUnitApplications_NoAuthConfigured_401(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
-	rec := httptest.NewRecorder()
-	s.handleUnitApplications(rec, httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil))
+func TestHandleUnitApplications_NoAuthPosture_401(t *testing.T) {
+	s := noPostureServer(t)
+	rec := sessionGET(s, s.handleUnitApplications, "/api/unit-applications", nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }
 
-func TestHandleUnitApplications_NoToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	s.handleUnitApplications(rec, httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil))
+func TestHandleUnitApplications_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handleUnitApplications, "/api/unit-applications", nil)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
+		t.Fatalf("status = %d, want 401 (no session cookie)", rec.Code)
 	}
 }
 
-func TestHandleUnitApplications_ForgedToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil)
-	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
-	s.handleUnitApplications(rec, r)
+func TestHandleUnitApplications_ForgedCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.valid.jwt"}
+	rec := sessionGET(s, s.handleUnitApplications, "/api/unit-applications", forged)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
+		t.Fatalf("status = %d, want 401 (forged cookie)", rec.Code)
 	}
 }
 
-// TestHandleUnitApplications_ValidToken_PoolUnconfigured_502: a verified actor
-// with no read-model pool gets a clean 502 (the RLS-scoping source is
+// TestHandleUnitApplications_ValidSession_PoolUnconfigured_502: a signed-in
+// actor with no read-model pool gets a clean 502 (the RLS-scoping source is
 // unavailable), never a nil-pointer panic and never a default-open fall
 // through to the unscoped read.
-func TestHandleUnitApplications_ValidToken_PoolUnconfigured_502(t *testing.T) {
-	s := devAuthServer(t) // authn set, pgPool nil
-	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/unit-applications", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	s.handleUnitApplications(rec, r)
+func TestHandleUnitApplications_ValidSession_PoolUnconfigured_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t, nil) // session set, pgPool nil
+	rec := sessionGET(s, s.handleUnitApplications, "/api/unit-applications", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
 	}

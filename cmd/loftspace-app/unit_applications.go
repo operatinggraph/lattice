@@ -259,23 +259,17 @@ func (s *server) handleUnitApplications(w http.ResponseWriter, r *http.Request) 
 	// Applicant names come from the PROTECTED applicantRosterRead Postgres
 	// model — the only roster surface (the identity name is a sensitive aspect
 	// the Secure Lens decrypts into that RLS-protected table alone). The read
-	// runs as the app's OWN admin actor (the WildcardAnchor holder), not the
-	// signed-in landlord: name resolution for display is the trusted-tool
-	// server's job, while the response stays scoped to the caller's managed
-	// units via the RLS-authoritative filter below. Names are display
-	// decoration on this surface, so a missing admin actor degrades to bare
-	// keys (logged) rather than failing the console; a QUERY failure against
-	// a configured pool is a real infra fault and surfaces as 502.
-	var identities []identityView
-	if adminID, ok := s.adminActorID(); ok {
-		identities, err = rosterIdentities(ctx, s.pgPool, adminID)
-		if err != nil {
-			s.logger.Error("read protected loftspace identities", "error", err)
-			s.writeError(w, http.StatusBadGateway, "could not read the protected identities model")
-			return
-		}
-	} else {
-		s.logger.Warn("admin actor not loaded (BOOTSTRAP_JSON_PATH); applicant names degrade to bare keys")
+	// runs as the SIGNED-IN caller, never an app-held admin credential standing
+	// in for them (persona-worlds-design.md §6.3): RLS decides which names this
+	// session may resolve, exactly as it decides which units it manages. Names
+	// are display decoration on this surface, so a session RLS grants no roster
+	// rows renders the bare keys the FE already falls back to; a QUERY failure
+	// against a configured pool is a real infra fault and surfaces as 502.
+	identities, err := rosterIdentities(ctx, s.pgPool, actor.Subject)
+	if err != nil {
+		s.logger.Error("read protected loftspace identities", "error", err)
+		s.writeError(w, http.StatusBadGateway, "could not read the protected identities model")
+		return
 	}
 
 	apps := computeApplications(appKeys, appGet, "")

@@ -19,10 +19,10 @@ type identityView struct {
 // (unit_applications.go, lease_document.go). That model is the ONLY roster
 // surface: the identity name is a sensitive aspect that the Refractor Secure
 // Lens decrypts into this RLS-protected table alone (Contract #3 §3.10), so
-// server-side name resolution reads it as the app's own admin actor — the
-// WildcardAnchor holder — rather than from any unprotected bucket. A row with
-// an empty key or name is skipped; queryIdentities already returns rows
-// name-sorted for a stable picker.
+// server-side name resolution reads it as the SIGNED-IN caller rather than from
+// any unprotected bucket — RLS decides which names that session may resolve. A
+// row with an empty key or name is skipped; queryIdentities already returns
+// rows name-sorted for a stable order.
 func rosterIdentities(ctx context.Context, pool pgxBeginner, actorID string) ([]identityView, error) {
 	rows, err := queryIdentities(ctx, pool, actorID)
 	if err != nil {

@@ -1,15 +1,20 @@
 "use strict";
 
-// LoftSpace applicant app — Browse & Apply (Increment A). Vanilla JS, no build
-// step. The Go server does all NATS I/O for reads (/api/listings +
-// /api/staff/identities); writes go browser-direct to the Gateway's
-// POST /v1/operations via submitOp() (real-actor-write-auth-e2e-design.md §3.1).
+// LoftSpace — the applicant and landlord surfaces over a running Lattice
+// deployment. Vanilla JS, no build step. Sign-in-first: a person signs in at
+// /login and the resulting session decides everything — the Go server serves
+// reads scoped by that session's RLS principal, and writes go browser-direct to
+// the Gateway's POST /v1/operations under the same session's token
+// (real-actor-write-auth-e2e-design.md §3.1). Which surfaces are offered follows
+// the hats whoami reports (applyHatGating), never a mode the browser asserts.
 
-const APPLICANT_KEY = "loftspace.applicant";
-const MODE_KEY = "loftspace.mode";
 const state = {
   listings: [], applications: [], tasks: [], renewals: [], docs: [], identities: [], units: [], credentials: [],
-  applicant: null, current: null, currentTask: null, view: "browse", highlight: null,
+  // applicant is the signed-in identity's key (loadWhoami) — not a choice.
+  // identityId is its bare NanoID; anchors are the whoami hat hints the landlord
+  // surface is gated on; canSignOut distinguishes a real cookie session.
+  applicant: null, identityId: null, anchors: [], canSignOut: false,
+  current: null, currentTask: null, view: "browse", highlight: null,
   mode: "applicant",
   docScope: null,
   // sessionUploads maps an oid uploaded THIS session to the link it was created
@@ -194,19 +199,14 @@ async function api(path, opts) {
   return body;
 }
 
-// ---- Read-boundary token (D1.3 Fire 3) ----
-// The My Applications list is served from the PROTECTED Postgres read model as an
-// authenticated actor: RLS returns only the signed-in applicant's rows, so the
-// request must carry a verified JWT (there is no client-side applicant filter to
-// forge). In the trusted-tool DEMO posture the app mints a short-lived token for
-// the applicant's DEVICE identity (see "Claim ceremony" below) via POST
-// /api/dev-token (the explicit stand-in for the deferred Gateway/IdP login); a
-// production deployment wires a real IdP and the FE would present that token
-// instead. Both this app's read boundary and the Gateway's write path resolve a
-// device token to its claimed business identity via the same credential-bindings
-// seam (readauth.go's credBindings / gateway.go's resolveActor), so one token
-// works for both. The token is cached per subject until shortly before expiry.
-let readTokenCache = { subject: null, token: null, exp: 0 };
+// ---- Session (the one signed-in identity) ----
+//
+// Every request this app makes runs as the identity the session cookie names:
+// the app's own protected endpoints read it straight off the cookie, and the
+// Gateway-direct write path presents the same session's token. There is no
+// second actor to pick, and nothing the browser can name to become someone
+// else — an applicant, a landlord and a staffer differ only in which identity
+// signed in and what the grant table says that identity may do.
 
 // bareId extracts the bare identity NanoID (the RLS principal / JWT subject) from
 // a full vtx.identity.<id> key.
@@ -215,78 +215,169 @@ function bareId(fullKey) {
   return i >= 0 ? fullKey.slice(i + 1) : fullKey || "";
 }
 
-async function readToken() {
-  if (!state.applicant) return null;
-  const subject = await ensureClaimedDevice(state.applicant);
-  const now = Date.now();
-  if (readTokenCache.subject === subject && readTokenCache.token && now < readTokenCache.exp - 60000) {
-    return readTokenCache.token;
+// isAuthLapse reports whether a failed request failed because the caller has
+// no valid session, as opposed to any other error.
+function isAuthLapse(e) {
+  return /HTTP 401|authentication required|login required/i.test((e && e.message) || "");
+}
+
+// onSessionLapsed hands the browser back to the login page. Once only: several
+// panels load in parallel and would otherwise each fire their own navigation.
+let sessionLapseHandled = false;
+function onSessionLapsed() {
+  if (sessionLapseHandled) return;
+  sessionLapseHandled = true;
+  // Drop the cached bearer with the session it belonged to: the JWT is
+  // stateless and outlives the cookie, so leaving it in memory keeps a usable
+  // write credential around after the session it came from is over.
+  writeTokenCache = { token: null, exp: 0 };
+  location.replace("/login");
+}
+
+// appGet reads one of this app's own protected endpoints. The session cookie
+// is HttpOnly and rides a same-origin request automatically, so there is no
+// Authorization header to build and nothing cached to invalidate; a 401 means
+// the session itself is over, and the only answer is to sign in again.
+async function appGet(path) {
+  try {
+    return await api(path, { credentials: "same-origin" });
+  } catch (e) {
+    if (isAuthLapse(e)) onSessionLapsed();
+    throw e;
   }
-  const res = await fetch("/api/dev-token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ subject }),
+}
+
+// appPost sends a body to one of this app's own protected endpoints (the object
+// byte-plane upload), bouncing to the login page on a lapsed session exactly as
+// appGet does — the session cookie rides a same-origin request automatically.
+async function appPost(path, body) {
+  try {
+    return await api(path, { method: "POST", credentials: "same-origin", body });
+  } catch (e) {
+    if (isAuthLapse(e)) onSessionLapsed();
+    throw e;
+  }
+}
+
+// sessionWriteToken is the raw bearer the Gateway-direct write path needs. The
+// cookie cannot serve it — an Authorization header takes the literal value and
+// the cookie is unreadable from script — so POST /api/session/refresh hands the
+// token back (while re-setting the cookie) for exactly this. Cached until
+// shortly before its stated expiry; pass force to re-fetch after the Gateway
+// rejects the cached one.
+let writeTokenCache = { token: null, exp: 0 };
+
+async function sessionWriteToken(force) {
+  const now = Date.now();
+  if (!force && writeTokenCache.token && now < writeTokenCache.exp - 60000) {
+    return writeTokenCache.token;
+  }
+  const res = await fetch("/api/session/refresh", { method: "POST", credentials: "same-origin" });
+  if (res.status === 401) {
+    writeTokenCache = { token: null, exp: 0 };
+    onSessionLapsed();
+    throw new Error("your session has ended — sign in again");
+  }
+  if (!res.ok) {
+    throw new Error("could not renew the session (HTTP " + res.status + ")");
+  }
+  const body = await res.json();
+  writeTokenCache = { token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
+  return body.token;
+}
+
+// ---- Session keepalive (sliding renewal) ----
+//
+// The session cookie and its paired write token both age out at the kit's
+// session TTL. A browse-only session that never submits a write would otherwise
+// hard-lapse mid-read; a periodic renewal slides it forward while the tab is in
+// use. Each renewal is a forced sessionWriteToken(), which POSTs
+// /api/session/refresh — re-setting the cookie AND refreshing the cached write
+// token in one round trip, so a subsequent write is instant too. Renewal is
+// gated on recent activity so an abandoned tab still lapses on the server's own
+// schedule rather than staying signed in for as long as the tab exists.
+const KEEPALIVE_INTERVAL_MS = 20 * 60 * 1000; // inside the session TTL, with margin
+const KEEPALIVE_IDLE_MS = 30 * 60 * 1000; // one TTL of no interaction ends the slide
+let lastActivityAt = Date.now();
+let lastKeepaliveAt = 0;
+
+function noteActivity() {
+  lastActivityAt = Date.now();
+}
+
+async function keepaliveTick() {
+  if (Date.now() - lastActivityAt > KEEPALIVE_IDLE_MS) return; // idle: let it lapse
+  lastKeepaliveAt = Date.now();
+  // A forced refresh slides the cookie + write token. A network hiccup is ridden
+  // out (keep the current session); a 401 bounces to /login via sessionWriteToken
+  // itself (onSessionLapsed), and the thrown error is swallowed here.
+  try {
+    await sessionWriteToken(true);
+  } catch (_) {
+    /* transient — keep the current session; the next interaction re-checks */
+  }
+}
+
+// startSessionKeepalive wires the renewal cadence: a bounded interval plus the
+// activity + tab-visibility signals that gate it. Called once, only for a real
+// cookie session (canSignOut) — there is nothing to slide otherwise.
+function startSessionKeepalive() {
+  setInterval(keepaliveTick, KEEPALIVE_INTERVAL_MS);
+  for (const name of ["pointerdown", "keydown"]) {
+    document.addEventListener(name, noteActivity, { passive: true });
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    // Refocusing the tab is itself activity, so note it BEFORE the gate reads the
+    // clock — a tab left hidden and returned to is a user who came back, not left.
+    noteActivity();
+    if (Date.now() - lastKeepaliveAt > KEEPALIVE_INTERVAL_MS) keepaliveTick();
   });
-  if (!res.ok) {
-    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
-  }
-  const body = await res.json();
-  readTokenCache = { subject, token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
-  return body.token;
 }
 
-// authedGet fetches a protected endpoint with the read-boundary Bearer token. On
-// a 401 (e.g. the app restarted with a fresh ephemeral dev-auth key, invalidating
-// a cached token) it clears the cache and retries once with a freshly minted token.
-async function authedGet(path) {
-  let token = await readToken();
-  if (!token) throw new Error("select an applicant identity to sign in");
-  try {
-    return await api(path, { headers: { Authorization: "Bearer " + token } });
-  } catch (e) {
-    if (!/HTTP 401|authentication required/i.test(e.message)) throw e;
-    readTokenCache = { subject: null, token: null, exp: 0 };
-    token = await readToken();
-    if (!token) throw e;
-    return api(path, { headers: { Authorization: "Bearer " + token } });
+// whoamiRetryBackoffsMs bounds loadWhoami's retry: a transient failure at first
+// paint must not permanently render a real cookie session as anonymous.
+const whoamiRetryBackoffsMs = [200, 500, 1200];
+
+// loadWhoami records who is signed in — the single actor every read and write
+// runs as — plus the hats the grant topology gives them, and offers sign-out
+// only for a real cookie session. A boot-env fallback identity is authenticated
+// by no cookie, so there is nothing for a sign-out to end. A network hiccup is
+// retried before concluding anonymous, so a stumble at first paint does not
+// strand a signed-in landlord rendered as a plain applicant.
+async function loadWhoami() {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const body = await api("/api/whoami", { credentials: "same-origin" });
+      state.identityId = (body && body.loggedIn && body.identityId) || null;
+      state.applicant = state.identityId ? "vtx.identity." + state.identityId : null;
+      state.canSignOut = !!(body && body.canSignOut);
+      // Anchors are the signed-in session's hat hints; a body reporting
+      // loggedIn:false has no hats to grant, whatever else it carries.
+      state.anchors = (state.identityId && Array.isArray(body.anchors) && body.anchors) || [];
+      applyHatGating();
+      return;
+    } catch (_) {
+      if (attempt >= whoamiRetryBackoffsMs.length) {
+        state.identityId = null;
+        state.applicant = null;
+        state.canSignOut = false;
+        state.anchors = [];
+        applyHatGating();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
+    }
   }
 }
 
-// staffReadToken (D1.5, the staff wildcard increment) mints/caches a demo
-// token for the system-wide STAFF view via POST /api/staff/dev-token — unlike
-// readToken it carries no subject: the server mints for its own fixed admin
-// actor, so the FE never needs to know (or be trusted to name) which identity
-// holds the wildcard grant. Used to bootstrap the applicant-identity picker
-// itself, which must work before any applicant has been selected.
-let staffTokenCache = { token: null, exp: 0 };
-
-async function staffReadToken() {
-  const now = Date.now();
-  if (staffTokenCache.token && now < staffTokenCache.exp - 60000) {
-    return staffTokenCache.token;
-  }
-  const res = await fetch("/api/staff/dev-token", { method: "POST" });
-  if (!res.ok) {
-    throw new Error("sign-in required — the read boundary has no demo token minter (deferred Gateway login)");
-  }
-  const body = await res.json();
-  staffTokenCache = { token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
-  return body.token;
-}
-
-// authedGetAsStaff fetches a protected endpoint with the staff Bearer token,
-// retrying once on a 401 with a freshly minted token — the system-wide
-// sibling of authedGet.
-async function authedGetAsStaff(path) {
-  let token = await staffReadToken();
-  try {
-    return await api(path, { headers: { Authorization: "Bearer " + token } });
-  } catch (e) {
-    if (!/HTTP 401|authentication required/i.test(e.message)) throw e;
-    staffTokenCache = { token: null, exp: 0 };
-    token = await staffReadToken();
-    return api(path, { headers: { Authorization: "Bearer " + token } });
-  }
+function signOut() {
+  // Signing out ends the write credential too — clearing the cookie server-side
+  // does not invalidate an already-issued stateless JWT.
+  writeTokenCache = { token: null, exp: 0 };
+  fetch("/api/logout", { method: "POST", credentials: "same-origin" })
+    .catch(() => {})
+    .finally(() => location.replace("/login"));
 }
 
 // ---- Write path: browser-direct through the Gateway (real-actor-write-auth-e2e Phase 1 item 5) ----
@@ -298,7 +389,7 @@ async function authedGetAsStaff(path) {
 let gatewayURLCache = null;
 async function gatewayURL() {
   if (gatewayURLCache) return gatewayURLCache;
-  const body = await api("/api/config");
+  const body = await appGet("/api/config");
   gatewayURLCache = body.gatewayUrl;
   return gatewayURLCache;
 }
@@ -324,220 +415,58 @@ function isTransientAuthLag(reply) {
 // (scripts/verify-real-actor-write-auth.go) uses for the same class of race.
 const retryBackoffsMs = [200, 400, 800, 1600];
 
-// submitOp posts an operation to the Gateway as the given actor kind:
-// "staff" — this app's own admin/operator actor, the trusted-tool posture the
-// landlord / staff writes still use (see permissions.go). "applicant" — the
-// signed-in applicant's DEVICE identity (readToken() resolves state.applicant
-// through the claim ceremony below), used for the applicant self-service ops
-// that carry a real consumer scope=self grant: CreateLeaseApplication,
-// SetApplicantProfile, and WithdrawLeaseApplication (persona-worlds §7.2). The Gateway
-// resolves the device token to the applicant's business identity via the
-// credential-bindings seam, so payload.applicant/authContext.target still name
-// the business identity (state.applicant), not the device identity. Because
-// that seam is the same async projection ensureClaimedDevice's ClaimIdentity
-// retry already accounts for, an "applicant" submit racing right behind a
-// fresh claim gets the same bounded retry (see isTransientAuthLag) — "staff"
-// never races this (a long-lived, already-resolved actor), so it submits once.
-// opts may carry {authContext} for the scope=self path. Returns the same
-// {status, error, primaryKey} shape api() already returns, so callers branch
-// on reply.status unchanged.
-async function submitOp(actorKind, body, opts) {
-  const [base, token] = await Promise.all([
-    gatewayURL(),
-    actorKind === "applicant" ? readToken() : staffReadToken(),
-  ]);
+// submitOp posts an operation to the Gateway as the ONE actor this browser has:
+// the signed-in session identity. There is no actor to choose — the Gateway
+// stamps the verified subject from the presented token, so what a submit is
+// allowed to do is decided by that identity's grants, never by the caller.
+// opts may carry {authContext} for a scope=self grant's target. Returns the
+// same {status, error, primaryKey} shape api() already returns, so callers
+// branch on reply.status unchanged.
+//
+// The bounded isTransientAuthLag retry covers the capability-projection race a
+// first-touch actor hits: the Gateway's provisionActorIfNeeded commits a fresh
+// actor's consumer-role grant to Core KV synchronously, but the
+// CapabilityAuthorizer reads it through an asynchronously-projected Capability
+// Lens, so the very next submit can arrive ahead of that projection.
+async function submitOp(body, opts) {
+  const [base, token] = await Promise.all([gatewayURL(), sessionWriteToken()]);
   const finalBody = opts && opts.authContext ? { ...body, authContext: opts.authContext } : body;
-  const post = () =>
+  const post = (bearer) =>
     api(base + "/v1/operations", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + bearer },
       body: JSON.stringify(finalBody),
     });
-  if (actorKind !== "applicant") return post();
+  // A Gateway 401 means the cached token aged out between the expiry check and
+  // this request; one forced renewal settles it, and a second 401 is a session
+  // that is genuinely over (sessionWriteToken hands off to /login).
+  const submit = async () => {
+    try {
+      return await post(token);
+    } catch (e) {
+      if (!isAuthLapse(e)) throw e;
+      return post(await sessionWriteToken(true));
+    }
+  };
 
   let reply;
   for (let attempt = 0; ; attempt++) {
-    reply = await post();
+    reply = await submit();
     if (!isTransientAuthLag(reply) || attempt >= retryBackoffsMs.length) break;
     await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
   }
   return reply;
 }
 
-// ---- Claim ceremony (gateway-claim-flow-identity-provisioning-design.md
-// §11.1 Scenario A / §11.1a) ----
-//
-// The picker's "signed-in applicant" is the business identity U
-// (CreateUnclaimedIdentity's result) — but nothing may ever authenticate AS U
-// directly: U starts with no role, and ProvisionConsumerIdentity refuses to
-// touch a vertex some other op already created. Every actual request must
-// authenticate as a separate DEVICE identity A that (1) auto-provisions with
-// the consumer role on its first Gateway touch, then (2) calls ClaimIdentity
-// to bind A -> U, which is what grants U the consumer role and is what lets
-// the Gateway's/readauth.go's credential-bindings resolution turn a request
-// authenticated as A into env.Actor = U. Skipping this (the old shortcut —
-// minting a token for U's own key) left U permanently role-less: every write
-// 403'd with AuthDenied.
-const APPLICANT_AUTH_KEY = "loftspace.applicantAuth"; // localStorage: {U-bareId: A-bareId}
-
-function loadApplicantAuthMap() {
-  try {
-    return JSON.parse(localStorage.getItem(APPLICANT_AUTH_KEY) || "{}");
-  } catch (_) {
-    return {};
-  }
-}
-
-function saveApplicantAuthEntry(uBareId, aBareId) {
-  const m = loadApplicantAuthMap();
-  m[uBareId] = aBareId;
-  localStorage.setItem(APPLICANT_AUTH_KEY, JSON.stringify(m));
-}
-
-// pendingClaimSecrets holds a freshly client-minted (not yet claimed) secret
-// for an applicant created THIS session (submitNewApplicant) — in-memory
-// only, mirroring §11.1a: "the client retains the plaintext; it is the single
-// copy." An applicant picked from the roster with no pending secret AND
-// state=unclaimed (a prior session, or one created before this ceremony was
-// wired up) falls back to staff-gated RotateClaimKey (R4) to re-issue one. An
-// already-claimed identity never reaches RotateClaimKey — see
-// runClaimCeremony's direct-mint short-circuit below.
-const pendingClaimSecrets = {};
-
-// identityState looks up an identity's current state ("unclaimed" | "claimed"
-// | …) from the loaded roster — loadIdentities' protected read already
-// carries it (staff_identities.go's protectedIdentityRow.State). Null when
-// the roster hasn't loaded yet or the key isn't in it.
-function identityState(uKey) {
-  const m = state.identities.find((i) => i.identityKey === uKey);
-  return m ? m.state : null;
-}
-
-// mintDeviceToken mints a fresh, uncached dev-token for an arbitrary bare
-// subject — the one-off device-identity (A) calls the claim ceremony makes,
-// distinct from readToken()'s per-applicant cache.
-async function mintDeviceToken(subject) {
-  const res = await fetch("/api/dev-token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ subject }),
-  });
-  if (!res.ok) throw new Error("mint device token: HTTP " + res.status);
-  const body = await res.json();
-  return body.token;
-}
-
-// postOpAsSubject submits an operation to the Gateway authenticated as a raw
-// bare-id subject — used only by the claim ceremony, which must authenticate
-// as the fresh device identity A itself (the Gateway's raw-credential
-// carve-out for ClaimIdentity), not through the applicant/staff token caches.
-async function postOpAsSubject(subject, body) {
-  const [base, token] = await Promise.all([gatewayURL(), mintDeviceToken(subject)]);
-  return api(base + "/v1/operations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify(body),
-  });
-}
-
-// claimCeremonyInFlight de-dupes concurrent ensureClaimedDevice callers for
-// the same applicant (e.g. setApplicant's back-to-back loadLandlord() +
-// loadRenewals(), each independently reaching readToken()) onto the SAME
-// promise — without this, two concurrent first-touches for one never-claimed
-// uKey each mint their own device identity and race ClaimIdentity; the loser
-// fails with a confusing error on what should be a normal first sign-in
-// (the underlying identity is never corrupted — the Processor's state check
-// rejects the second claim cleanly — but the UX is bad and it wastes an
-// orphaned device identity).
-const claimCeremonyInFlight = {};
-
-// ensureClaimedDevice runs the claim ceremony for applicant uKey the first
-// time it's needed and returns the bare id every subsequent token for uKey
-// mints against — normally a fresh device identity (A), or uKey's own bare
-// id directly when uKey is already claimed (runClaimCeremony's short-circuit).
-// Idempotent per uKey via the persisted applicantAuth map (both across calls
-// and across reloads).
-async function ensureClaimedDevice(uKey) {
-  const uBareId = bareId(uKey);
-  const map = loadApplicantAuthMap();
-  if (map[uBareId]) return map[uBareId];
-  if (claimCeremonyInFlight[uBareId]) return claimCeremonyInFlight[uBareId];
-  const promise = runClaimCeremony(uKey, uBareId).finally(() => {
-    delete claimCeremonyInFlight[uBareId];
-  });
-  claimCeremonyInFlight[uBareId] = promise;
-  return promise;
-}
-
-async function runClaimCeremony(uKey, uBareId) {
-  let secret = pendingClaimSecrets[uKey];
-  if (!secret && identityState(uKey) === "claimed") {
-    // Already claimed — by this browser in a prior session, by a different
-    // browser, or pre-seeded outside this app entirely. ClaimIdentity grants
-    // consumer directly to the identity itself, not to a device (packages/
-    // identity-domain's ClaimIdentity script), so there is nothing left to
-    // claim: sign in the same way cafe-app/clinic-app/wellness-app's Me bar
-    // signs in an already-claimed resident — mint a token straight off the
-    // identity's own bare id, no RotateClaimKey/ClaimIdentity round trip.
-    saveApplicantAuthEntry(uBareId, uBareId);
-    return uBareId;
-  }
-  if (!secret) {
-    secret = mintClaimSecret();
-    const newHash = await sha256Hex(secret);
-    const rotateReply = await submitOp("staff", {
-      operationType: "RotateClaimKey",
-      class: "identity",
-      payload: { identityKey: uKey, claimKeyHash: newHash },
-      reads: [uKey, uKey + ".state", uKey + ".claimKey"],
-    });
-    if (rotateReply && rotateReply.status === "rejected") {
-      const msg = rotateReply.error ? `${rotateReply.error.code}: ${rotateReply.error.message}` : "rejected";
-      throw new Error("could not prepare sign-in for this applicant — " + msg);
-    }
-  }
-
-  const aBareId = await sha256NanoID(uBareId + ":device:" + mintClaimSecret());
-  const aKey = "vtx.identity." + aBareId;
-  const claimOp = {
-    operationType: "ClaimIdentity",
-    class: "identity",
-    reads: [uKey, uKey + ".state", uKey + ".claimKey"],
-    payload: { targetIdentityKey: uKey, claimKey: secret },
-    authContext: { target: aKey },
-  };
-
-  // A's ProvisionConsumerIdentity pre-flight (the Gateway's provisionActorIfNeeded,
-  // run inline just above by the fetch this postOpAsSubject makes) commits A's
-  // consumer-role grant to Core KV synchronously, but the CapabilityAuthorizer
-  // reads it via an asynchronously-projected Capability Lens — so THIS very next
-  // call, submitted milliseconds later under the same brand-new actor, can race
-  // ahead of that projection (isTransientAuthLag; see submitOp's comment).
-  let claimReply;
-  for (let attempt = 0; ; attempt++) {
-    claimReply = await postOpAsSubject(aBareId, claimOp);
-    if (!isTransientAuthLag(claimReply) || attempt >= retryBackoffsMs.length) break;
-    await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
-  }
-  if (claimReply && claimReply.status === "rejected") {
-    const msg = claimReply.error ? `${claimReply.error.code}: ${claimReply.error.message}` : "rejected";
-    throw new Error("could not sign in this applicant — " + msg);
-  }
-  delete pendingClaimSecrets[uKey];
-  saveApplicantAuthEntry(uBareId, aBareId);
-  return aBareId;
-}
-
 // ---- Account settings (manage sign-in methods, multi-credential-identity-
 // linking-design.md §3/§8) ----
 //
-// Lists the credentials bound to the signed-in applicant (GET /api/credentials,
+// Lists the credentials bound to the signed-in identity (GET /api/credentials,
 // the identityCredentialsRead Secure Lens — packages/identity-domain/lenses.go),
-// links a new one, and removes one. Link mirrors the claim ceremony above
-// exactly (arm a secret, then immediately "complete" it as a freshly minted
-// device) — this demo has no literal second browser, so the ceremony's own
-// two-step shape (arm as U, prove as the new raw credential) stands in for a
-// real second device without any shortcut around the actual ops.
+// links a new one, and removes one. Linking is a two-step ceremony (arm a
+// secret, then prove it as a brand-new credential); this demo has no literal
+// second browser, so the two steps run back to back rather than shortcutting
+// around the actual ops.
 
 async function loadAccount() {
   const list = $("#account-credentials");
@@ -545,13 +474,13 @@ async function loadAccount() {
   if (!state.applicant) {
     list.innerHTML = "";
     empty.hidden = false;
-    empty.textContent = "Select an applicant identity above to manage its sign-in methods.";
+    empty.textContent = "Sign in to manage your sign-in methods.";
     $("#account-summary").textContent = "";
     return;
   }
   $("#account-summary").textContent = "loading…";
   try {
-    const data = await authedGet("/api/credentials");
+    const data = await appGet("/api/credentials");
     state.credentials = data.credentials || [];
   } catch (e) {
     list.innerHTML = "";
@@ -575,7 +504,7 @@ function renderAccount() {
     return;
   }
   empty.hidden = true;
-  const currentDevice = loadApplicantAuthMap()[bareId(state.applicant)];
+  const currentDevice = state.identityId;
   for (const c of creds) list.append(renderCredentialCard(c, creds.length, currentDevice));
   const n = creds.length;
   $("#account-summary").textContent = `${n} sign-in method${n === 1 ? "" : "s"}`;
@@ -598,7 +527,7 @@ function renderCredentialCard(c, totalCount, currentDevice) {
   if (bareId(c.actorKey) === currentDevice) {
     const badge = document.createElement("span");
     badge.className = "badge complete";
-    badge.textContent = "this device";
+    badge.textContent = "this sign-in";
     actions.append(badge);
   }
   const removeBtn = document.createElement("button");
@@ -626,7 +555,6 @@ async function unlinkCredential(c) {
   const uKey = state.applicant;
   try {
     const reply = await submitOp(
-      "applicant",
       {
         operationType: "UnlinkCredential",
         class: "identity",
@@ -649,10 +577,14 @@ async function unlinkCredential(c) {
 }
 
 // linkNewCredential runs the InitiateCredentialLink/CompleteCredentialLink pair
-// (multi-credential-identity-linking-design.md §3.2) back to back: arm a fresh
-// link secret as U (the signed-in applicant), then immediately prove it as a
-// brand-new device identity A2 — the same client-minted-secret idiom
-// runClaimCeremony uses for the first credential, extended to an Nth one.
+// (multi-credential-identity-linking-design.md §3.2) in two steps: arm a fresh
+// link secret as the signed-in identity, then have the SERVER prove it as a
+// brand-new credential. The second step cannot run here — proving a link means
+// authenticating as a credential this browser does not hold, and this app mints
+// tokens for nobody but the person signing in (persona-worlds-design.md §6.1) —
+// so POST /api/credentials/link/complete runs that half server-side
+// (credentials_link.go), taking only the secret and reading the identity to
+// link from the session.
 async function linkNewCredential() {
   const uKey = state.applicant;
   if (!uKey) return;
@@ -660,7 +592,6 @@ async function linkNewCredential() {
     const secret = mintClaimSecret();
     const hash = await sha256Hex(secret);
     const initiateReply = await submitOp(
-      "applicant",
       {
         operationType: "InitiateCredentialLink",
         class: "identity",
@@ -675,30 +606,16 @@ async function linkNewCredential() {
       return;
     }
 
-    const a2BareId = await sha256NanoID(bareId(uKey) + ":device:" + mintClaimSecret());
-    const a2Key = "vtx.identity." + a2BareId;
-    const completeOp = {
-      operationType: "CompleteCredentialLink",
-      class: "identity",
-      reads: [uKey, uKey + ".state"],
-      optionalReads: [uKey + ".linkKey", uKey + ".credentialBinding", "vtx.credentialindex." + (await sha256NanoID(a2Key))],
-      payload: { targetIdentityKey: uKey, linkKey: secret },
-      authContext: { target: a2Key },
-    };
-    let completeReply;
-    for (let attempt = 0; ; attempt++) {
-      completeReply = await postOpAsSubject(a2BareId, completeOp);
-      if (!isTransientAuthLag(completeReply) || attempt >= retryBackoffsMs.length) break;
-      await new Promise((resolve) => setTimeout(resolve, retryBackoffsMs[attempt]));
-    }
-    if (completeReply && completeReply.status === "rejected") {
-      const msg = completeReply.error ? `${completeReply.error.code}: ${completeReply.error.message}` : "rejected";
-      toast("Could not link a new method — " + msg, "err");
-      return;
-    }
+    await api("/api/credentials/link/complete", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linkKey: secret }),
+    });
     toast("New sign-in method linked.", "ok");
     setTimeout(loadAccount, 600);
   } catch (e) {
+    if (isAuthLapse(e)) onSessionLapsed();
     toast("Could not link a new method: " + e.message, "err");
   }
 }
@@ -709,7 +626,7 @@ async function linkNewCredential() {
 // — exactly the forgery surface Fire 2b closes. Bytes still go through this app
 // (POST /api/objects — the $O byte-plane helper, never a forgery vector, inert
 // until anchored), but the anchor op is submitted here, browser-direct through
-// the Gateway via submitOp("staff", ...), the same path SignLease already uses.
+// the Gateway via submitOp(...), the same path SignLease already uses.
 // operator already holds AttachObject/DetachObject scope:any (objects-base
 // permissions.go) — no new grant needed.
 
@@ -774,7 +691,7 @@ async function attachObject(file, targetKey, linkName, sensitiveOpts) {
     fd.append("sensitive", "true");
     fd.append("governingIdentity", sensitiveOpts.governingIdentity);
   }
-  const uploaded = await api("/api/objects", { method: "POST", body: fd });
+  const uploaded = await appPost("/api/objects", fd);
   const { oid, digest, storeName, size, contentType, sensitive, governingIdentity, encryption } = uploaded;
   const payload = { digest, size, contentType, storeName, targetKey, linkName };
   if (file.name) payload.filename = file.name;
@@ -784,7 +701,7 @@ async function attachObject(file, targetKey, linkName, sensitiveOpts) {
     payload.encryption = encryption;
   }
   const requestId = await deriveNanoID(ATTACH_REQ_NAMESPACE, [digest, targetKey, linkName].join("\x00"));
-  const reply = await submitOp("staff", {
+  const reply = await submitOp({
     requestId,
     operationType: "AttachObject",
     class: "object",
@@ -804,7 +721,7 @@ async function attachObject(file, targetKey, linkName, sensitiveOpts) {
 async function detachObject(oid, targetKey, linkName) {
   const linkKey = objectLinkKey(oid, targetKey, linkName);
   const objKey = "vtx.object." + oid;
-  return submitOp("staff", {
+  return submitOp({
     operationType: "DetachObject",
     class: "object",
     reads: [linkKey, objKey],
@@ -812,30 +729,21 @@ async function detachObject(oid, targetKey, linkName) {
   });
 }
 
-// openDocument fetches a D1.5-protected object's bytes with the Bearer token
-// (a plain <a href> navigation can't attach one) and opens them as a blob URL
-// in a new tab. The blob URL is revoked after a delay long enough for the new
-// tab to load the content, so it doesn't leak for the life of the page.
-// sensitive requests the decrypt-capable read (?decrypt=true) — a sensitive
-// document's default GET is ciphertext by construction (object-store-crypto-
-// shred-design.md §3.4/§9 Fire 4 Increment 2); viewing it as a document
-// requires the opt-in plaintext read.
+// openDocument fetches a D1.5-protected object's bytes over the session cookie
+// (a plain <a href> navigation would carry it too, but the response has to be
+// read as a blob to reach a new tab) and opens them as a blob URL. The blob URL
+// is revoked after a delay long enough for the new tab to load the content, so
+// it doesn't leak for the life of the page. sensitive requests the
+// decrypt-capable read (?decrypt=true) — a sensitive document's default GET is
+// ciphertext by construction (object-store-crypto-shred-design.md §3.4/§9 Fire 4
+// Increment 2); viewing it as a document requires the opt-in plaintext read.
 async function openDocument(oid, sensitive) {
-  let token;
-  try {
-    token = await readToken();
-  } catch (e) {
-    toast("Could not open document: " + e.message, "err");
-    return;
-  }
-  if (!token) {
-    toast("select an applicant identity to sign in", "err");
-    return;
-  }
   const fetchURL = "/api/objects/" + encodeURIComponent(oid) + (sensitive ? "?decrypt=true" : "");
-  const res = await fetch(fetchURL, {
-    headers: { Authorization: "Bearer " + token },
-  });
+  const res = await fetch(fetchURL, { credentials: "same-origin" });
+  if (res.status === 401) {
+    onSessionLapsed();
+    return;
+  }
   if (!res.ok) {
     toast("Could not open document: HTTP " + res.status, "err");
     return;
@@ -862,14 +770,13 @@ function toast(msg, kind, extra) {
   toast._timer = setTimeout(() => (t.hidden = true), 6000);
 }
 
-// ---- Applicant identity (the trusted-tool switcher) ----
+// ---- Who is signed in, and which hats they hold ----
 //
-// The applicant picks who they are from a human-readable roster, read from the
-// PROTECTED applicantRosterRead Postgres model (D1.5) via authedGetAsStaff — the
-// picker used to read the unprotected /api/identities, letting ANY caller dump
-// every identity's full name with no authentication at all (a system-wide
-// membership-disclosure leak). The selected key is persisted in localStorage so
-// a refresh keeps context.
+// There is no "pick who you are" any more: the signed-in identity IS the
+// applicant, and it comes from the session (loadWhoami). The roster read that
+// used to populate a picker stays, RLS-scoped to the caller, purely to resolve
+// keys to human names on the surfaces that show other people (the landlord
+// console's applicants) — a session RLS grants no roster rows just renders keys.
 
 // nameFor resolves an identity key to its human name from the loaded roster,
 // falling back to the short key when the roster has not loaded (or the key is an
@@ -879,75 +786,67 @@ function nameFor(key) {
   return m && m.name ? m.name : shortKey(key);
 }
 
-function restoreApplicant() {
-  const saved = (localStorage.getItem(APPLICANT_KEY) || "").trim();
-  state.applicant = saved || null;
-}
-
-// loadIdentities reads the protected, RLS-scoped applicant roster (D1.5, the
-// staff wildcard increment) and rebuilds the top-right picker. authedGetAsStaff
-// mints its own fixed-subject token, so this still works before an applicant
-// has been selected. Non-fatal on error — the picker just shows the empty hint.
+// loadIdentities reads the protected, RLS-scoped applicant roster (D1.5) as the
+// signed-in caller. Non-fatal on error — names simply degrade to keys.
 async function loadIdentities() {
   try {
-    const data = await authedGetAsStaff("/api/staff/identities");
+    const data = await appGet("/api/staff/identities");
     state.identities = data.identities || [];
   } catch (_) {
     state.identities = [];
   }
-  populateApplicantSelect();
+  renderSignedInAs();
 }
 
-// populateApplicantSelect rebuilds the #applicant <select>: a placeholder + one
-// option per named identity (label = name, value = identityKey), selecting the
-// persisted applicant when it is in the roster.
-function populateApplicantSelect() {
-  const sel = $("#applicant");
-  sel.innerHTML = "";
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = state.identities.length
-    ? "Select your identity…"
-    : "No identities — create one via Loupe/CLI";
-  sel.append(placeholder);
-  for (const id of state.identities) {
-    const o = document.createElement("option");
-    o.value = id.identityKey;
-    o.textContent = id.name;
-    sel.append(o);
-  }
-  const values = state.identities.map((i) => i.identityKey);
-  sel.value = state.applicant && values.includes(state.applicant) ? state.applicant : "";
+// renderSignedInAs shows who the session belongs to, resolved to a name once the
+// roster lands.
+function renderSignedInAs() {
+  const who = $("#signed-in-as");
+  if (!who) return;
+  who.textContent = state.applicant ? nameFor(state.applicant) : "";
+  const btn = $("#sign-out");
+  if (btn) btn.hidden = !state.canSignOut;
 }
 
-function setApplicant(value) {
-  const v = (value || "").trim();
-  state.applicant = v || null;
-  state.highlight = null; // a highlight belongs to the applicant who just applied
-  if (v) localStorage.setItem(APPLICANT_KEY, v);
-  else localStorage.removeItem(APPLICANT_KEY);
-  renderListings(); // re-enable/disable Apply for the new applicant
-  if (state.view === "apps") loadApplications(); // re-scope the tracker to the new applicant
-  if (state.view === "tasks") loadTasks(); // re-scope the inbox to the new applicant
-  if (state.view === "renewals") loadRenewals(); // re-scope the renewal cycles to the new applicant
-  if (state.view === "docs") loadDocsView(); // re-scope the documents to the new applicant
-  if (state.view === "account") loadAccount(); // re-scope sign-in methods to the new applicant
-  if (state.mode === "landlord") {
-    loadLandlord(); // re-scope the operator console to the new sign-in
-    loadRenewals();
-  }
+// isLandlord marks a session that manages at least one unit. The signal is the
+// whoami `manages` anchor — the same link landlordLeaseApplicationsRead bakes
+// into each row's authz_anchors, so the tab appears exactly when the console
+// behind it would have rows to show. Gating is UX curation: every op the console
+// offers is still enforced by its GrantsTo and RLS, so a stale or empty whoami
+// degrades to "offer nothing extra", never to a capability the graph would deny.
+function isLandlord() {
+  return Array.isArray(state.anchors) && state.anchors.some((a) => a && a.relation === "manages");
+}
+
+// applyHatGating hides the landlord surface from a session that holds no
+// `manages` anchor and bounces the view back to the applicant world if the
+// landlord mode just became disallowed. Idempotent; re-run whenever whoami
+// resolves.
+function applyHatGating() {
+  const landlord = isLandlord();
+  const toggle = $("#mode-landlord");
+  if (toggle) toggle.hidden = !landlord;
+  const modeBar = document.querySelector(".mode-toggle");
+  if (modeBar) modeBar.hidden = !landlord;
+  const np = $("#new-applicant");
+  if (np) np.hidden = !landlord;
+  if (!landlord && state.mode === "landlord") state.mode = "applicant";
+  renderSignedInAs();
+  applyMode();
 }
 
 // ---- New applicant modal ----
 //
 // CreateUnclaimedIdentity (identity-domain) requires a name + at least one contact
 // (email/phone) + a claimKeyHash = sha256-hex of a client-minted secret (Lattice
-// never holds the plaintext). This trusted-tool app mints a random secret, hashes
-// it in-browser (crypto.subtle — 127.0.0.1 is a secure context), and submits only
-// the hash. The plaintext secret is kept in-memory (pendingClaimSecrets) so
-// submitNewApplicant can immediately run the claim ceremony (ensureClaimedDevice)
-// on the new identity before it becomes the active applicant — without that step
-// the applicant would be created but role-less, and every write would 403.
+// never holds the plaintext). The app mints a random secret, hashes it in-browser
+// (crypto.subtle — 127.0.0.1 is a secure context), and submits only the hash.
+//
+// The new identity is NOT claimed into this browser: the person it belongs to
+// claims it themselves when they sign in, which is what binds a credential to
+// it and grants it the consumer role. So the plaintext secret is shown once,
+// here, and never stored — it is the single copy (§11.1a), and whoever creates
+// the applicant hands it to them.
 
 function openNewApplicant() {
   $("#applicant-form").reset();
@@ -959,6 +858,23 @@ function closeNewApplicant() {
   $("#applicant-overlay").hidden = true;
 }
 
+// showClaimSecret surfaces a newly created applicant's claim key in its own
+// dismissable dialog. Lattice stores only the hash, so this render is the single
+// copy in existence: whoever created the applicant hands it to them, and they
+// present it when they first sign in. It deliberately does NOT use the shared
+// toast — a toast auto-hides and every later toast() clears the element, either
+// of which would destroy the only way into that account.
+function showClaimSecret(identityKey, secret) {
+  $("#claim-who").textContent = shortKey(identityKey);
+  $("#claim-secret").value = secret;
+  $("#claim-overlay").hidden = false;
+}
+
+function closeClaimSecret() {
+  $("#claim-secret").value = "";
+  $("#claim-overlay").hidden = true;
+}
+
 // sha256Hex returns the lowercase hex sha256 of a string — the shape
 // CreateUnclaimedIdentity stores for claimKeyHash.
 async function sha256Hex(s) {
@@ -966,11 +882,10 @@ async function sha256Hex(s) {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// mintClaimSecret returns a random claim-secret plaintext. It is hashed and only the
-// hash is sent; the plaintext never enters Lattice. Used both for a real
-// CreateUnclaimedIdentity claimKeyHash and, elsewhere, as raw entropy for deriving
-// a device identity's NanoID (ensureClaimedDevice) — a fresh unpredictable value,
-// not a secret that has to survive that second use.
+// mintClaimSecret returns a random claim-secret plaintext. It is hashed and only
+// the hash is sent; the plaintext never enters Lattice — it is what proves, once,
+// that its holder may claim the identity (a new applicant's claim key) or link a
+// further sign-in method to their own.
 function mintClaimSecret() {
   const a = new Uint8Array(32);
   crypto.getRandomValues(a);
@@ -1065,34 +980,18 @@ async function submitNewApplicant(ev) {
     if (email) payload.email = email;
     if (phone) payload.phone = phone;
     const optionalReads = await identityIndexProbeKeys(payload);
-    const reply = await submitOp("staff", { operationType: "CreateUnclaimedIdentity", class: "identity", payload, optionalReads });
+    const reply = await submitOp({ operationType: "CreateUnclaimedIdentity", class: "identity", payload, optionalReads });
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Could not create applicant — " + msg, "err");
       return;
     }
     const key = reply && reply.primaryKey ? reply.primaryKey : "";
-    if (key) {
-      // Run the real claim ceremony now, while the plaintext secret still
-      // exists (§11.1a — Lattice never stores it): without this the applicant
-      // is created but role-less, and every subsequent write 403s.
-      pendingClaimSecrets[key] = claimSecret;
-      try {
-        await ensureClaimedDevice(key);
-      } catch (e) {
-        toast("Applicant created, but sign-in setup failed — " + e.message, "err");
-      }
-    }
     closeNewApplicant();
-    toast("Applicant created.", "ok", key);
-    // Make the new applicant active (the roster lens may take a moment to project;
-    // select now + reload so the switcher shows it once projected).
-    if (key) {
-      state.applicant = key;
-      localStorage.setItem(APPLICANT_KEY, key);
-    }
+    // The claim secret is the single copy and is never stored — surface it now
+    // or it is gone, and the new applicant can never sign in.
+    showClaimSecret(key, claimSecret);
     await loadIdentities();
-    renderListings(); // re-enable Apply for the now-selected applicant
   } catch (e) {
     toast("Could not create applicant: " + e.message, "err");
   } finally {
@@ -1125,21 +1024,15 @@ function showView(view) {
 
 // ---- Mode (Applicant / Landlord) ----
 //
-// The two sides of the marketplace share one trusted-tool app. Applicant mode is
-// the default (Browse / My Applications / Tasks / Documents over the per-applicant
-// identity); Landlord mode swaps to a my-units view over the by-unit aggregate. The
-// chosen mode persists across reloads.
-
-const MODES = ["applicant", "landlord"];
-
-function restoreMode() {
-  const saved = (localStorage.getItem(MODE_KEY) || "").trim();
-  state.mode = MODES.includes(saved) ? saved : "applicant";
-}
+// The two sides of the marketplace share one app, and one signed-in identity can
+// hold both hats. Applicant mode is the default (Browse / My Applications /
+// Tasks / Documents, all scoped to that identity); Landlord mode swaps to a
+// my-units view over the by-unit aggregate, and is offered only to a session
+// carrying a `manages` anchor (applyHatGating). Mode is a view choice within the
+// hats the session already holds — never a claim about who is acting.
 
 function setMode(mode) {
-  state.mode = MODES.includes(mode) ? mode : "applicant";
-  localStorage.setItem(MODE_KEY, state.mode);
+  state.mode = mode === "landlord" && isLandlord() ? "landlord" : "applicant";
   applyMode();
 }
 
@@ -1150,11 +1043,6 @@ function applyMode() {
   $("#mode-landlord").classList.toggle("active", landlord);
   $("#mode-landlord").setAttribute("aria-selected", String(landlord));
   $("#applicant-tabs").hidden = landlord;
-  // The identity picker stays visible in landlord mode too (D1.5): the operator
-  // console now reads as this identity, RLS-scoped to the units it manages, so
-  // there is no "trusted, no sign-in" posture left to hide it for.
-  $("#applicant-who").hidden = false;
-  $("label[for='applicant']").textContent = landlord ? "Signed in as" : "Applicant";
   $("#brand-sub").textContent = landlord ? "manage your units" : "apply to lease";
   $("#view-landlord").hidden = !landlord;
   if (landlord) {
@@ -1174,7 +1062,7 @@ async function loadListings() {
   const empty = $("#empty");
   $("#summary").textContent = "loading…";
   try {
-    const data = await api("/api/listings?status=" + encodeURIComponent(status));
+    const data = await appGet("/api/listings?status=" + encodeURIComponent(status));
     state.listings = data.listings || [];
   } catch (e) {
     grid.innerHTML = "";
@@ -1199,7 +1087,7 @@ async function loadListingPhotos() {
   await Promise.allSettled(
     want.map(async (unitKey) => {
       try {
-        const data = await api("/api/objects?owner=" + encodeURIComponent(unitKey));
+        const data = await appGet("/api/objects?owner=" + encodeURIComponent(unitKey));
         state.unitPhotos[unitKey] = (data.documents || []).map((d) => ({ oid: d.oid, contentType: d.contentType }));
       } catch (e) {
         state.unitPhotos[unitKey] = []; // negative-cache so we don't loop on a dead unit
@@ -1361,7 +1249,7 @@ function renderCard(row) {
   apply.textContent = "Apply";
   const leasable = row.status === "available";
   apply.disabled = !leasable || !state.applicant;
-  apply.title = !state.applicant ? "Select an applicant first" : !leasable ? "Not available" : "";
+  apply.title = !state.applicant ? "Sign in to apply" : !leasable ? "Not available" : "";
   apply.addEventListener("click", () => openApply(row));
   actions.append(badge, apply);
 
@@ -1376,7 +1264,7 @@ function renderCard(row) {
 
 function openApply(row) {
   if (!state.applicant) {
-    toast("Select an applicant first.", "err");
+    toast("Sign in to apply.", "err");
     return;
   }
   state.current = row;
@@ -1435,7 +1323,6 @@ async function submitApply(ev) {
     // link (script-read-posture-design.md §13, class-d) — absent is the common
     // first-apply case; the script decides revive-vs-create from the read.
     const reply = await submitOp(
-      "applicant",
       {
         operationType: "CreateLeaseApplication",
         class: "leaseapp",
@@ -1484,13 +1371,13 @@ async function loadApplications() {
     grid.innerHTML = "";
     state.applications = [];
     empty.hidden = false;
-    empty.textContent = "Select an applicant identity above to see their applications.";
+    empty.textContent = "Sign in to see your applications.";
     $("#apps-summary").textContent = "";
     return;
   }
   $("#apps-summary").textContent = "loading…";
   try {
-    const data = await authedGet("/api/applications");
+    const data = await appGet("/api/applications");
     state.applications = data.applications || [];
     state.appsScope = data.scope || "";
   } catch (e) {
@@ -1985,7 +1872,6 @@ async function submitProfile(ev, row) {
     // application AS THEMSELVES, with authContext.target == the applicant, so
     // the scope=self step-3 check and the in-script owner guard both hold.
     const reply = await submitOp(
-      "applicant",
       {
         operationType: "SetApplicantProfile",
         class: "leaseapp",
@@ -2039,7 +1925,6 @@ async function withdrawApplication(row) {
     // duplicate-application guard link WithdrawLeaseApplication frees (class-d)
     // — absent when never guarded.
     const reply = await submitOp(
-      "applicant",
       {
         operationType: "WithdrawLeaseApplication",
         class: "leaseapp",
@@ -2079,13 +1964,13 @@ async function loadTasks() {
     grid.innerHTML = "";
     state.tasks = [];
     empty.hidden = false;
-    empty.textContent = "Select an applicant identity above to see their tasks.";
+    empty.textContent = "Sign in to see your tasks.";
     $("#tasks-summary").textContent = "";
     return;
   }
   $("#tasks-summary").textContent = "loading…";
   try {
-    const data = await authedGet("/api/tasks");
+    const data = await appGet("/api/tasks");
     state.tasks = data.tasks || [];
   } catch (e) {
     grid.innerHTML = "";
@@ -2265,7 +2150,7 @@ async function submitComplete(ev) {
   const submit = $("#complete-submit");
   submit.disabled = true;
   try {
-    const reply = await submitOp("staff", {
+    const reply = await submitOp({
       operationType: task.operationName,
       class: desc.klass,
       reads,
@@ -2277,8 +2162,8 @@ async function submitComplete(ev) {
       toast("Could not complete — " + msg, "err");
       return;
     }
-    // The bound op closed the gap; now retire the task. This app submits as the
-    // trusted admin actor (a standing permission), NOT via the task's ephemeral
+    // The bound op closed the gap; now retire the task. This app submits under
+    // the signed-in identity's own standing grant, NOT via the task's ephemeral
     // grant, so the Processor's task-path auto-complete (Contract #10 §10.7) does
     // not fire — we close the task ourselves through the contract's retained
     // out-of-band CompleteTask path. A benign rejection (the task already closed,
@@ -2309,7 +2194,7 @@ async function submitComplete(ev) {
 async function completeTask(taskKey) {
   if (!taskKey) return;
   try {
-    const reply = await submitOp("staff", {
+    const reply = await submitOp({
       operationType: "CompleteTask",
       class: "task",
       reads: [taskKey],
@@ -2328,18 +2213,16 @@ async function completeTask(taskKey) {
 // Read from the PROTECTED, DUAL-ANCHORED read_renewals model (design §4.5):
 // one query, /api/renewals, serves BOTH audiences — a signed-in tenant sees
 // their own renewal cycles, a signed-in landlord sees the cycles for units
-// they manage, RLS decides which. Which role the current sign-in plays is
-// read off state.mode (this trusted-tool app labels a sign-in "Applicant" or
-// "Landlord" up front, same as every other view here) rather than guessed per
-// row, since a real deployment's landlord and tenant are always distinct
-// people signing in through the role they picked.
+// they manage, RLS decides which. Which of the two the rows are rendered as is
+// read off state.mode — the hat the session is currently looking through — not
+// guessed per row.
 
 async function loadRenewalsQuiet() {
   if (!state.applicant) {
     state.renewals = [];
     return state.renewals;
   }
-  const data = await authedGet("/api/renewals");
+  const data = await appGet("/api/renewals");
   state.renewals = data.renewals || [];
   return state.renewals;
 }
@@ -2355,7 +2238,7 @@ async function loadRenewals() {
     empty.hidden = false;
     empty.textContent = landlord
       ? "Sign in above to see the renewal cycles for units you manage."
-      : "Select an applicant identity above to see your renewal cycles.";
+      : "Sign in to see your renewal cycles.";
     if (summary) summary.textContent = "";
     return;
   }
@@ -2497,7 +2380,7 @@ function openRenewalAction(row, operationName) {
 // a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
 // here would make account-opening impossible rather than idempotent.
 async function openLedgerAccount(leaseAppKey) {
-  const reply = await submitOp("staff", {
+  const reply = await submitOp({
     operationType: "CreateAccount",
     class: "account",
     reads: [leaseAppKey],
@@ -2510,7 +2393,7 @@ async function openLedgerAccount(leaseAppKey) {
   // the loser's guard-aspect create-only write — re-fetch the ledger, which
   // resolves the account key via the leaseAccounts lens regardless of which
   // side won.
-  const data = await api("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey));
+  const data = await appGet("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey));
   if (data.accountKey) return data.accountKey;
   const msg = reply && reply.error ? `${reply.error.code}: ${reply.error.message}` : "";
   throw new Error(msg || "could not open the ledger account");
@@ -2557,7 +2440,7 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
   body.textContent = "Loading…";
   let data;
   try {
-    data = await api("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey));
+    data = await appGet("/api/ledger?leaseAppKey=" + encodeURIComponent(leaseAppKey));
   } catch (e) {
     body.textContent = "Could not load ledger: " + e.message;
     return;
@@ -2689,14 +2572,14 @@ async function loadDocsView() {
     state.docs = [];
     $("#doc-scope").innerHTML = "";
     empty.hidden = false;
-    empty.textContent = "Select an applicant identity above to manage their documents.";
+    empty.textContent = "Sign in to manage your documents.";
     $("#docs-summary").textContent = "";
     return;
   }
   // Refresh applications so the scope selector lists the applicant's current
   // applications; a failure is non-fatal (the identity scope still works).
   try {
-    const data = await authedGet("/api/applications");
+    const data = await appGet("/api/applications");
     state.applications = data.applications || [];
   } catch (_) {
     /* keep whatever applications we already had */
@@ -2779,9 +2662,9 @@ async function loadDocuments() {
     .join("&");
   try {
     // Documents-tab owners are always identity/leaseapp keys (never a unit), so
-    // this list is D1.5-protected server-side — authedGet, mirroring
+    // this list is D1.5-protected server-side — appGet, mirroring
     // loadLandlordRLS/handleApplications.
-    const data = await authedGet("/api/objects?" + query);
+    const data = await appGet("/api/objects?" + query);
     state.docs = data.documents || [];
   } catch (e) {
     grid.innerHTML = "";
@@ -2872,7 +2755,7 @@ function renderDocCard(d) {
 async function submitUpload(ev) {
   ev.preventDefault();
   if (!state.applicant) {
-    toast("Select an applicant first.", "err");
+    toast("Sign in to upload a document.", "err");
     return;
   }
   const scope = state.docScope;
@@ -3000,13 +2883,13 @@ async function loadLandlord() {
   if (!state.applicant) {
     grid.innerHTML = "";
     empty.hidden = false;
-    empty.textContent = "Select your identity above to sign in and see the units you manage.";
+    empty.textContent = "Sign in to see the units you manage.";
     $("#units-summary").textContent = "";
     return;
   }
   $("#units-summary").textContent = "loading…";
   try {
-    const data = await authedGet("/api/unit-applications");
+    const data = await appGet("/api/unit-applications");
     state.units = data.units || [];
   } catch (e) {
     grid.innerHTML = "";
@@ -3038,7 +2921,7 @@ async function loadPortfolioPulse() {
     return;
   }
   try {
-    const data = await authedGet("/api/portfolio-pulse");
+    const data = await appGet("/api/portfolio-pulse");
     if (!data.totalUnits) {
       el.hidden = false;
       el.textContent = "📊 Portfolio pulse: no managed units yet.";
@@ -3080,7 +2963,7 @@ async function loadLandlordRLS() {
     return;
   }
   try {
-    const data = await authedGet("/api/landlord/applications");
+    const data = await appGet("/api/landlord/applications");
     const units = data.units || [];
     const apps = data.applicationCount || 0;
     el.hidden = false;
@@ -3264,7 +3147,7 @@ async function runUnifiedSearch(q) {
   results.hidden = false;
   summary.textContent = "Searching…";
   try {
-    const data = await authedGet("/api/search?q=" + encodeURIComponent(q));
+    const data = await appGet("/api/search?q=" + encodeURIComponent(q));
     // A slower-arriving response for a since-cleared/changed box would clobber
     // the current view; drop it if the input has since moved on.
     if ($("#unified-search").value.trim() !== q) return;
@@ -3605,7 +3488,7 @@ async function decideApplication(a, decision) {
   const optionalReads = [a.leaseAppKey + ".decision"];
   if (decision === "approved") optionalReads.push(a.leaseAppKey + ".signature", a.leaseAppKey + ".tenancy");
   try {
-    const reply = await submitOp("staff", {
+    const reply = await submitOp({
       operationType: "DecideLeaseApplication",
       class: "leaseapp",
       reads,
@@ -3683,7 +3566,7 @@ function closePostListing() {
 // reloads after a beat so the new disposition shows once reprojected.
 async function setListingStatus(u, status) {
   try {
-    const reply = await submitOp("staff", {
+    const reply = await submitOp({
       operationType: "SetListingStatus",
       class: "loftspaceListing",
       reads: [u.unitKey, u.unitKey + ".listing"],
@@ -3704,7 +3587,7 @@ async function setListingStatus(u, status) {
 // opOrThrow submits an op and throws on a rejection or transport error, so the
 // post-a-listing chain stops at the first failure with a message naming the step.
 async function opOrThrow(body, what) {
-  const reply = await submitOp("staff", body);
+  const reply = await submitOp(body);
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
     throw new Error(`Could not ${what} — ${msg}`);
@@ -3926,7 +3809,7 @@ async function reloadManagePhotos() {
   grid.innerHTML = "loading…";
   let photos = [];
   try {
-    const data = await api("/api/objects?owner=" + encodeURIComponent(unitKey));
+    const data = await appGet("/api/objects?owner=" + encodeURIComponent(unitKey));
     photos = (data.documents || []).filter((d) => isImage(d.contentType));
   } catch (e) {
     grid.innerHTML = "";
@@ -4009,12 +3892,22 @@ async function submitAddPhotos() {
 
 // ---- wire up ----
 
-async function init() {
-  restoreApplicant();
-  restoreMode();
-  const identitiesLoaded = loadIdentities();
-  $("#applicant").addEventListener("change", (e) => setApplicant(e.target.value));
+function init() {
+  // Listeners are wired SYNCHRONOUSLY, before any network work: every tab and
+  // control paints immediately, so gating them behind a round trip would leave
+  // a fully-rendered surface silently swallowing clicks until it resolved. Only
+  // the work that genuinely needs to know who is signed in — the hat gating and
+  // the panel loads it drives — waits on whoami.
+  $("#sign-out").addEventListener("click", signOut);
   $("#new-applicant").addEventListener("click", openNewApplicant);
+  $("#claim-done").addEventListener("click", closeClaimSecret);
+  $("#claim-copy").addEventListener("click", () => {
+    const field = $("#claim-secret");
+    field.select();
+    // Clipboard access can be denied; the key stays selected either way, so the
+    // operator can always copy it by hand.
+    if (navigator.clipboard) navigator.clipboard.writeText(field.value).catch(() => {});
+  });
   $("#applicant-cancel").addEventListener("click", closeNewApplicant);
   $("#applicant-overlay").addEventListener("click", (e) => {
     if (e.target === $("#applicant-overlay")) closeNewApplicant();
@@ -4095,12 +3988,13 @@ async function init() {
   });
 
   loadListings();
-  // applyMode() (landlord path) reaches identityState()/ensureClaimedDevice,
-  // which needs state.identities populated — await the roster fetch kicked
-  // off above so a restored landlord mode never races it into a doomed
-  // RotateClaimKey on an already-claimed identity.
-  await identitiesLoaded;
-  applyMode();
+  // loadWhoami gates the surface and paints the first view; loadIdentities then
+  // resolves keys to names and repaints the who-bar itself, so nothing here
+  // re-runs the gating (which would re-fire the landlord panel's loads).
+  loadWhoami().then(() => {
+    if (state.canSignOut) startSessionKeepalive();
+    return loadIdentities();
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);

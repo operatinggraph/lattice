@@ -146,6 +146,62 @@ func TestIdentityAnchors_ProviderBindingAnchor(t *testing.T) {
 	require.Nil(t, anchorWith(anchors, "worksAt"))
 }
 
+// TestIdentityAnchors_ManagesAnchor is the landlord hat's gate: an identity that
+// manages a unit projects a relation-stamped `manages` anchor carrying the unit
+// and the building containing it, and an identity that manages nothing projects
+// none — which is what makes the LoftSpace landlord surface appear for exactly
+// the sessions whose landlord console has rows.
+func TestIdentityAnchors_ManagesAnchor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startAnchorsKVs(t)
+	landlordID := "Wm4tZpQ7bkRvXn2sdJy8"
+	unitID := "Qa9vBnE3twLkPz6mrUdC"
+	buildingID := "Ry7hKdVn4pTxZm2cbQwe"
+	landlordKey := putAnchorsVertex(t, coreKV, "identity", landlordID, nil)
+	unitKey := putAnchorsVertex(t, coreKV, "unit", unitID, map[string]any{
+		"presentation": map[string]any{"data": map[string]any{"name": "Unit 4B"}},
+	})
+	buildingKey := putAnchorsVertex(t, coreKV, "location", buildingID, map[string]any{
+		"presentation": map[string]any{"data": map[string]any{"name": "The Loft"}},
+	})
+	// identity manages unit (loftspace-domain/ownership.go), unit containedIn building.
+	putAnchorsEdge(t, adjKV, "manages", "identity", landlordID, "unit", unitID)
+	putAnchorsEdge(t, adjKV, "containedIn", "unit", unitID, "location", buildingID)
+
+	anchors := execAnchors(t, landlordKey, adjKV, coreKV)
+	got := anchorWith(anchors, "manages")
+	require.NotNil(t, got, "manages anchor missing: %#v", anchors)
+	require.Equal(t, unitKey, got["key"])
+	require.Equal(t, "Unit 4B", got["name"])
+	require.Equal(t, buildingKey, got["container"])
+	require.Equal(t, "The Loft", got["containerName"])
+	// A landlord who only manages carries no residence or workplace.
+	require.Nil(t, anchorWith(anchors, "residesIn"))
+	require.Nil(t, anchorWith(anchors, "worksAt"))
+}
+
+// TestIdentityAnchors_NoManagesForNonLandlord is the negative half: without a
+// manages link the anchor must be absent, not a degenerate entry — otherwise
+// every signed-in applicant would be offered the landlord console.
+func TestIdentityAnchors_NoManagesForNonLandlord(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	adjKV, coreKV := startAnchorsKVs(t)
+	identityID := "Td3xWq8mzcVbNr5kfPhJ"
+	unitID := "Bs6nLpX2yqwEtZ9dvKmR"
+	identityKey := putAnchorsVertex(t, coreKV, "identity", identityID, nil)
+	putAnchorsVertex(t, coreKV, "unit", unitID, nil)
+	// The unit exists and the identity resides in it — but manages nothing.
+	putAnchorsEdge(t, adjKV, "residesIn", "identity", identityID, "unit", unitID)
+
+	anchors := execAnchors(t, identityKey, adjKV, coreKV)
+	require.NotNil(t, anchorWith(anchors, "residesIn"), "residesIn anchor missing: %#v", anchors)
+	require.Nil(t, anchorWith(anchors, "manages"))
+}
+
 // TestIdentityAnchors_PatientBindingIsDistinctByKey proves the untyped walk is
 // faithful (a patient is identifiedBy-bound too) and that the bound-entity key
 // is what a domain-aware caller keys the hat off — a patient's anchor carries a

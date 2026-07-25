@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
@@ -24,10 +24,10 @@ var webFS embed.FS
 // NATS was unreachable at startup; every handler checks requireConn first and
 // returns a JSON error rather than dereferencing a nil connection.
 type server struct {
-	conn        *substrate.Conn
-	adminActor  string
-	logger      *slog.Logger
-	natsTimeout time.Duration
+	conn            *substrate.Conn
+	bootstrapLoaded bool
+	logger          *slog.Logger
+	natsTimeout     time.Duration
 	// uploadCap bounds a single document upload (OBJECTS_MAX_UPLOAD_BYTES); the
 	// substrate ObjectPut enforces it as the authoritative per-blob limit.
 	uploadCap int64
@@ -39,18 +39,21 @@ type server struct {
 
 	// The read boundary (D1.3 Fire 3). pgPool is the protected lease-applications
 	// read-model pool; nil when LOFTSPACE_APP_PG_DSN is unset → protected reads
-	// return a clean 502 rather than panicking. authn verifies the read actor's
-	// JWT; nil when no auth posture is configured → protected reads 401 (fail
-	// closed). devSigner mints demo tokens; nil unless LOFTSPACE_APP_DEV_AUTH.
-	pgPool    *pgxpool.Pool
-	authn     *auth.Authenticator
-	devSigner *devSigner
+	// return a clean 502 rather than panicking. authn is the session cookie's
+	// verifier, held here so the health probe can report whether an auth
+	// posture is configured at all; nil ⇒ every session-gated request 401s
+	// (fail closed).
+	pgPool *pgxpool.Pool
+	authn  *auth.Authenticator
 
-	// credBindings is the shared credential→identity resolution seam
-	// authenticateRead consults (real-actor-write-auth-e2e-design.md §5);
-	// nil when the credential-bindings bucket is unavailable — every actor
-	// then reads as itself, exactly as before this seam existed.
-	credBindings credentialBindingResolver
+	// session serves the login/logout/whoami/refresh surface and resolves every
+	// request to a signed-in identity (internal/appsession). signer is that
+	// surface's demo-posture minter, held here for the one ceremony that needs a
+	// credential OTHER than the signed-in one: completing a credential link
+	// (credentials_link.go). Nil in the production verify-only posture, where
+	// that ceremony reports 404.
+	session *appsession.Manager
+	signer  *appsession.Signer
 }
 
 // pgxBeginner is the subset of *pgxpool.Pool the protected read uses — a single
@@ -66,25 +69,28 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 		// programmer error, not a runtime condition.
 		panic("loftspace-app: embed web sub-fs: " + err.Error())
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	inner := http.NewServeMux()
+	inner.Handle("/", http.FileServer(http.FS(sub)))
 
-	mux.HandleFunc("/api/listings", s.handleListings)
-	mux.HandleFunc("/api/staff/identities", s.handleStaffIdentities)
-	mux.HandleFunc("/api/applications", s.handleApplications)
-	mux.HandleFunc("/api/credentials", s.handleCredentials)
-	mux.HandleFunc("/api/unit-applications", s.handleUnitApplications)
-	mux.HandleFunc("/api/landlord/applications", s.handleLandlordApplications)
-	mux.HandleFunc("/api/portfolio-pulse", s.handlePortfolioPulse)
-	mux.HandleFunc("/api/renewals", s.handleRenewals)
-	mux.HandleFunc("/api/search", s.handleSearch)
-	mux.HandleFunc("/api/tasks", s.handleTasks)
-	mux.HandleFunc("/api/objects", s.handleObjects)
-	mux.HandleFunc("/api/objects/", s.handleObjects)
-	mux.HandleFunc("/api/lease-document", s.handleLeaseDocument)
-	mux.HandleFunc("/api/ledger", s.handleLedger)
-	mux.HandleFunc("/api/dev-token", s.handleDevToken)
-	mux.HandleFunc("/api/staff/dev-token", s.handleStaffDevToken)
-	mux.HandleFunc("/api/config", s.handleConfig)
+	inner.HandleFunc("/api/listings", s.handleListings)
+	inner.HandleFunc("/api/staff/identities", s.handleStaffIdentities)
+	inner.HandleFunc("/api/applications", s.handleApplications)
+	inner.HandleFunc("/api/credentials", s.handleCredentials)
+	inner.HandleFunc("/api/credentials/link/complete", s.handleCompleteCredentialLink)
+	inner.HandleFunc("/api/unit-applications", s.handleUnitApplications)
+	inner.HandleFunc("/api/landlord/applications", s.handleLandlordApplications)
+	inner.HandleFunc("/api/portfolio-pulse", s.handlePortfolioPulse)
+	inner.HandleFunc("/api/renewals", s.handleRenewals)
+	inner.HandleFunc("/api/search", s.handleSearch)
+	inner.HandleFunc("/api/tasks", s.handleTasks)
+	inner.HandleFunc("/api/objects", s.handleObjects)
+	inner.HandleFunc("/api/objects/", s.handleObjects)
+	inner.HandleFunc("/api/lease-document", s.handleLeaseDocument)
+	inner.HandleFunc("/api/ledger", s.handleLedger)
+	inner.HandleFunc("/api/config", s.handleConfig)
+
+	s.session.RegisterRoutes(inner)
+	mux.Handle("/", s.session.RequireSession(inner))
 }
 
 // handleConfig implements GET /api/config: the FE's one bit of runtime
@@ -127,23 +133,4 @@ func (s *server) requireConn(w http.ResponseWriter) (*substrate.Conn, bool) {
 // derived from the incoming request's context so a client disconnect cancels.
 func (s *server) reqContext(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), s.natsTimeout)
-}
-
-// adminActorID returns the bare NanoID of the app's admin actor — the RLS
-// session identity (lattice.actor_id) for server-side protected reads the app
-// makes on its own behalf (the WildcardAnchor-holding root-equivalent
-// identity, the same subject handleStaffDevToken mints for). ok is false when
-// the bootstrap file was never loaded or the key is malformed.
-func (s *server) adminActorID() (string, bool) {
-	if s.adminActor == "" {
-		return "", false
-	}
-	_, subject, ok := substrate.ParseVertexKey(s.adminActor)
-	return subject, ok
-}
-
-// requireBody reads up to 1 MiB of the request body, the cap for the small JSON
-// request bodies this app accepts.
-func requireBody(r *http.Request) ([]byte, error) {
-	return io.ReadAll(io.LimitReader(r.Body, 1<<20))
 }

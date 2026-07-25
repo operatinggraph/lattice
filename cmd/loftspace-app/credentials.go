@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/operatinggraph/lattice/internal/appsession"
 )
 
 // credentialEntry is one bound credential the account-settings page can
@@ -93,6 +95,15 @@ func (s *server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.authenticateRead(r)
 	if err != nil {
 		s.writeError(w, http.StatusUnauthorized, "authentication required: "+err.Error())
+		return
+	}
+	// credentialBinding is a SENSITIVE aspect (Contract #3 §3.10), so this
+	// surface serves only a caller who PROVED which identity they are. A
+	// boot-env fallback identity proves nothing — it hands the process's
+	// identity to anyone who connects — and RLS cannot tell that the caller is
+	// not that identity, only that the row belongs to it.
+	if !appsession.ViaCookie(r.Context()) {
+		s.writeError(w, http.StatusForbidden, "sign in to manage sign-in methods")
 		return
 	}
 	if s.pgPool == nil {

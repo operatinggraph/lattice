@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
@@ -183,34 +182,15 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 	})
 
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout, pgPool: reader, authn: authn, devSigner: signer}
-
-	mint := func(sub string) string {
-		t.Helper()
-		tok, _, err := signer.mint(sub)
-		if err != nil {
-			t.Fatalf("mint %s: %v", sub, err)
-		}
-		return tok
-	}
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
 
 	type unitGroup struct {
 		UnitKey      string                 `json:"unitKey"`
 		Applications []protectedLandlordRow `json:"applications"`
 	}
-	get := func(t *testing.T, authz, query string) (int, []unitGroup, int) {
+	get := func(t *testing.T, c *http.Cookie, query string) (int, []unitGroup, int) {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/landlord/applications"+query, nil)
-		if authz != "" {
-			r.Header.Set("Authorization", authz)
-		}
-		s.handleLandlordApplications(rec, r)
+		rec := sessionGET(s, s.handleLandlordApplications, "/api/landlord/applications"+query, c)
 		var resp struct {
 			Units            []unitGroup `json:"units"`
 			ApplicationCount int         `json:"applicationCount"`
@@ -229,7 +209,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	}
 
 	t.Run("Larry sees only his units (unit-L + the co-managed unit-CO)", func(t *testing.T) {
-		code, units, appCount := get(t, "Bearer "+mint(subLarry), "")
+		code, units, appCount := get(t, cookieFor(subLarry), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -249,7 +229,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("secure contact columns serve to the managing landlord, null-safe", func(t *testing.T) {
-		code, units, _ := get(t, "Bearer "+mint(subLarry), "")
+		code, units, _ := get(t, cookieFor(subLarry), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -290,7 +270,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("Linda sees only her units (unit-N + the co-managed unit-CO)", func(t *testing.T) {
-		code, units, appCount := get(t, "Bearer "+mint(subLinda), "")
+		code, units, appCount := get(t, cookieFor(subLinda), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -315,7 +295,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 		      VALUES ($1, $1, 'cap-read', 1, false)`, subAlice)
 		defer exec("DELETE FROM actor_read_grants WHERE actor_id = $1", subAlice)
-		code, units, appCount := get(t, "Bearer "+mint(subAlice), "")
+		code, units, appCount := get(t, cookieFor(subAlice), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -326,7 +306,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 
 	t.Run("a forged scope query param cannot widen", func(t *testing.T) {
 		// RLS keys off the verified session var, not any param — Larry stays scoped.
-		code, units, _ := get(t, "Bearer "+mint(subLarry), "?landlord=vtx.identity."+subLinda)
+		code, units, _ := get(t, cookieFor(subLarry), "?landlord=vtx.identity."+subLinda)
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -336,13 +316,14 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("unauthenticated is 401", func(t *testing.T) {
-		if code, _, _ := get(t, "", ""); code != http.StatusUnauthorized {
+		if code, _, _ := get(t, nil, ""); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})
 
-	t.Run("forged token is 401", func(t *testing.T) {
-		if code, _, _ := get(t, "Bearer not.a.jwt", ""); code != http.StatusUnauthorized {
+	t.Run("forged cookie is 401", func(t *testing.T) {
+		forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.jwt"}
+		if code, _, _ := get(t, forged, ""); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})
@@ -350,7 +331,7 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	t.Run("revoked grant hides the landlord's units", func(t *testing.T) {
 		exec("UPDATE actor_read_grants SET is_deleted = true WHERE actor_id = $1", subLarry)
 		defer exec("UPDATE actor_read_grants SET is_deleted = false WHERE actor_id = $1", subLarry)
-		code, units, appCount := get(t, "Bearer "+mint(subLarry), "")
+		code, units, appCount := get(t, cookieFor(subLarry), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -361,11 +342,11 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 
 	t.Run("pooling safety: requests do not leak the actor var across the pool", func(t *testing.T) {
 		for i := 0; i < 5; i++ {
-			_, _, larryCount := get(t, "Bearer "+mint(subLarry), "")
+			_, _, larryCount := get(t, cookieFor(subLarry), "")
 			if larryCount != 2 {
 				t.Fatalf("iter %d: Larry leaked/lost rows, appCount=%d", i, larryCount)
 			}
-			_, _, lindaCount := get(t, "Bearer "+mint(subLinda), "")
+			_, _, lindaCount := get(t, cookieFor(subLinda), "")
 			if lindaCount != 2 {
 				t.Fatalf("iter %d: Linda leaked/lost rows, appCount=%d", i, lindaCount)
 			}

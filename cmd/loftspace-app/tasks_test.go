@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -52,48 +51,37 @@ func TestTasksFromRow_EmptyOpenTasks(t *testing.T) {
 	}
 }
 
-func TestHandleTasks_NoAuthConfigured_401(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
-	rec := httptest.NewRecorder()
-	s.handleTasks(rec, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+func TestHandleTasks_NoAuthPosture_401(t *testing.T) {
+	s := noPostureServer(t)
+	rec := sessionGET(s, s.handleTasks, "/api/tasks", nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }
 
-func TestHandleTasks_NoToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	s.handleTasks(rec, httptest.NewRequest(http.MethodGet, "/api/tasks", nil))
+func TestHandleTasks_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handleTasks, "/api/tasks", nil)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
+		t.Fatalf("status = %d, want 401 (no session cookie)", rec.Code)
 	}
 }
 
-func TestHandleTasks_ForgedToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
-	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
-	s.handleTasks(rec, r)
+func TestHandleTasks_ForgedCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.valid.jwt"}
+	rec := sessionGET(s, s.handleTasks, "/api/tasks", forged)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
+		t.Fatalf("status = %d, want 401 (forged cookie)", rec.Code)
 	}
 }
 
-// TestHandleTasks_ValidToken_NoConn_502: a verified actor with no NATS connection
-// gets a clean 502, never a nil-pointer panic (mirrors handleApplications' pgPool
-// nil-check for the KV-backed my-tasks read model).
-func TestHandleTasks_ValidToken_NoConn_502(t *testing.T) {
-	s := devAuthServer(t) // authn set, conn nil
-	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	s.handleTasks(rec, r)
+// TestHandleTasks_ValidSession_NoConn_502: a signed-in actor with no NATS
+// connection gets a clean 502, never a nil-pointer panic (mirrors
+// handleApplications' pgPool nil-check for the KV-backed my-tasks read model).
+func TestHandleTasks_ValidSession_NoConn_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t, nil) // session set, conn nil
+	rec := sessionGET(s, s.handleTasks, "/api/tasks", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (no NATS conn)", rec.Code)
 	}

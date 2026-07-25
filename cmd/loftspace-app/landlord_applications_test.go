@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -11,47 +10,36 @@ import (
 // enforcement itself is the gated POSTGRES_TEST_DSN proof in
 // landlord_applications_rls_test.go.
 
-func TestHandleLandlordApplications_NoAuthConfigured_401(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
-	rec := httptest.NewRecorder()
-	s.handleLandlordApplications(rec, httptest.NewRequest(http.MethodGet, "/api/landlord/applications", nil))
+func TestHandleLandlordApplications_NoAuthPosture_401(t *testing.T) {
+	s := noPostureServer(t)
+	rec := sessionGET(s, s.handleLandlordApplications, "/api/landlord/applications", nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 }
 
-func TestHandleLandlordApplications_NoToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	s.handleLandlordApplications(rec, httptest.NewRequest(http.MethodGet, "/api/landlord/applications", nil))
+func TestHandleLandlordApplications_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handleLandlordApplications, "/api/landlord/applications", nil)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
+		t.Fatalf("status = %d, want 401 (no session cookie)", rec.Code)
 	}
 }
 
-func TestHandleLandlordApplications_ForgedToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/landlord/applications", nil)
-	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
-	s.handleLandlordApplications(rec, r)
+func TestHandleLandlordApplications_ForgedCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.valid.jwt"}
+	rec := sessionGET(s, s.handleLandlordApplications, "/api/landlord/applications", forged)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
+		t.Fatalf("status = %d, want 401 (forged cookie)", rec.Code)
 	}
 }
 
-// A verified actor with no read-model pool gets a clean 502, never a nil-pointer
-// panic (mirrors the applicant reader).
-func TestHandleLandlordApplications_ValidToken_PoolUnconfigured_502(t *testing.T) {
-	s := devAuthServer(t) // authn set, pgPool nil
-	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/landlord/applications", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	s.handleLandlordApplications(rec, r)
+// A signed-in actor with no read-model pool gets a clean 502, never a
+// nil-pointer panic (mirrors the applicant reader).
+func TestHandleLandlordApplications_ValidSession_PoolUnconfigured_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t, nil) // session set, pgPool nil
+	rec := sessionGET(s, s.handleLandlordApplications, "/api/landlord/applications", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
 	}

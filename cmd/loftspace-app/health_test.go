@@ -17,14 +17,14 @@ func hasIssue(issues []healthkv.Issue, code string) bool {
 	return false
 }
 
-func TestHealthProbe_AdminActorUnconfigured(t *testing.T) {
-	s := &server{logger: discardLogger()} // adminActor unset, conn nil
+func TestHealthProbe_BootstrapUnloaded(t *testing.T) {
+	s := &server{logger: discardLogger()} // bootstrapLoaded false, conn nil
 	snap := s.healthProbe(context.Background())
 	if snap.Status != healthkv.StatusUnhealthy {
 		t.Fatalf("status = %v, want unhealthy", snap.Status)
 	}
-	if !hasIssue(snap.Issues, "AdminActorUnconfigured") {
-		t.Errorf("issues = %+v, want AdminActorUnconfigured", snap.Issues)
+	if !hasIssue(snap.Issues, "BootstrapUnloaded") {
+		t.Errorf("issues = %+v, want BootstrapUnloaded", snap.Issues)
 	}
 	if !hasIssue(snap.Issues, "NatsUnreachable") {
 		t.Errorf("issues = %+v, want NatsUnreachable (conn is nil)", snap.Issues)
@@ -33,9 +33,9 @@ func TestHealthProbe_AdminActorUnconfigured(t *testing.T) {
 
 func TestHealthProbe_NoAuthPostureIsDegradedNotUnhealthy(t *testing.T) {
 	s := &server{
-		logger:     discardLogger(),
-		adminActor: "vtx.identity.abc.actor",
-		authn:      nil,
+		logger:          discardLogger(),
+		bootstrapLoaded: true,
+		authn:           nil,
 	}
 	// conn is still nil here, which is itself an error-severity issue — so
 	// isolate the auth-posture check by asserting its warning severity
@@ -56,7 +56,7 @@ func TestHealthProbe_NoAuthPostureIsDegradedNotUnhealthy(t *testing.T) {
 }
 
 func TestHealthProbe_PgPoolNilSkipsReadModelCheck(t *testing.T) {
-	s := &server{logger: discardLogger(), adminActor: "vtx.identity.abc.actor", pgPool: nil}
+	s := &server{logger: discardLogger(), bootstrapLoaded: true, pgPool: nil}
 	snap := s.healthProbe(context.Background())
 	if hasIssue(snap.Issues, "ReadModelUnreachable") {
 		t.Errorf("issues = %+v, ReadModelUnreachable should not fire when pgPool is nil (unconfigured, not unreachable)", snap.Issues)
@@ -68,9 +68,9 @@ func TestHealthProbe_AllDepsHealthyModuloConn(t *testing.T) {
 	// every other dependency is configured, so NatsUnreachable should be the
 	// ONLY issue reported.
 	s := &server{
-		logger:     discardLogger(),
-		adminActor: "vtx.identity.abc.actor",
-		authn:      &auth.Authenticator{},
+		logger:          discardLogger(),
+		bootstrapLoaded: true,
+		authn:           &auth.Authenticator{},
 	}
 	snap := s.healthProbe(context.Background())
 	if len(snap.Issues) != 1 || snap.Issues[0].Code != "NatsUnreachable" {

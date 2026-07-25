@@ -1,20 +1,15 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
-
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
@@ -33,90 +28,166 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestBearerToken(t *testing.T) {
-	cases := []struct {
-		header string
-		want   string
-	}{
-		{"Bearer abc.def.ghi", "abc.def.ghi"},
-		{"bearer abc.def.ghi", "abc.def.ghi"}, // case-insensitive scheme
-		{"Bearer   spaced  ", "spaced"},
-		{"Basic abc", ""},
-		{"abc.def.ghi", ""},
-		{"", ""},
-		{"Bearer ", ""}, // scheme only, no token
-	}
-	for _, c := range cases {
-		r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
-		if c.header != "" {
-			r.Header.Set("Authorization", c.header)
-		}
-		if got := bearerToken(r); got != c.want {
-			t.Errorf("bearerToken(%q) = %q, want %q", c.header, got, c.want)
-		}
-	}
-}
-
-func TestIsTruthy(t *testing.T) {
-	for _, v := range []string{"1", "true", "TRUE", "yes", "on", " On "} {
-		if !isTruthy(v) {
-			t.Errorf("isTruthy(%q) = false, want true", v)
-		}
-	}
-	for _, v := range []string{"", "0", "false", "no", "off", "x"} {
-		if isTruthy(v) {
-			t.Errorf("isTruthy(%q) = true, want false", v)
-		}
-	}
-}
-
-// TestSetupReadAuth_DevPosture proves the demo posture wires a verifier whose
-// trust matches the minter — a token the signer mints verifies, and its subject
-// round-trips to the RLS principal.
-func TestSetupReadAuth_DevPosture(t *testing.T) {
+// devSessionServer builds a server whose session surface is the real
+// appsession kit in the demo posture (the shared dev key), and returns the
+// helper that mints a session cookie for a bare identity id. Tests drive their
+// requests through the manager's own middleware, so an absent, forged, or
+// expired cookie is judged by exactly the code that guards the endpoint in
+// production.
+func devSessionServer(t *testing.T, mutate func(*server)) (*server, func(subject string) *http.Cookie) {
+	t.Helper()
 	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
+	signer, err := appsession.NewDevSigner(discardLogger(), envPrefix, true)
 	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
+		t.Fatalf("NewDevSigner: %v", err)
 	}
-	if authn == nil || signer == nil {
-		t.Fatalf("dev posture must return non-nil authn (%v) and signer (%v)", authn, signer)
-	}
-
-	const sub = "Hj4kPmRtw9nbCxz5vQ2y"
-	tok, _, err := signer.mint(sub)
+	authn, refreshAuthn, err := appsession.NewAuthenticators(discardLogger(), envPrefix, signer, nil)
 	if err != nil {
-		t.Fatalf("mint: %v", err)
+		t.Fatalf("NewAuthenticators: %v", err)
 	}
-	actor, err := authn.Authenticate(t.Context(), tok)
+	session, err := appsession.New(appsession.Config{
+		AppName:   appName,
+		EnvPrefix: envPrefix,
+		Logger:    discardLogger(),
+		// Never dialled: these tests mint cookies directly instead of driving
+		// POST /api/dev-login, whose Gateway round trip is the kit's own
+		// covered surface.
+		GatewayURL:   "http://gateway.invalid",
+		Signer:       signer,
+		Authn:        authn,
+		RefreshAuthn: refreshAuthn,
+		Loopback:     true,
+		LoginPage:    []byte("<html>login</html>"),
+	})
 	if err != nil {
-		t.Fatalf("authenticate minted token: %v", err)
+		t.Fatalf("appsession.New: %v", err)
 	}
-	if actor.Subject != sub {
-		t.Errorf("subject = %q, want %q", actor.Subject, sub)
+	s := &server{logger: discardLogger(), authn: authn, session: session, natsTimeout: testTimeout}
+	if mutate != nil {
+		mutate(s)
 	}
-	if actor.ActorID != "vtx.identity."+sub {
-		t.Errorf("actorID = %q, want vtx.identity.%s", actor.ActorID, sub)
+	return s, func(subject string) *http.Cookie {
+		t.Helper()
+		tok, exp, err := signer.Mint(subject)
+		if err != nil {
+			t.Fatalf("mint %s: %v", subject, err)
+		}
+		return &http.Cookie{Name: session.CookieName(), Value: tok, Expires: exp}
 	}
 }
 
-// TestSetupReadAuth_DevPosture_SharedKeyInteroperates proves the actual point
-// of the shared-dev-IdP interim (real-actor-write-auth-e2e-design.md §3.2):
-// a token minted here validates against an independently-built verifier that
-// trusts nothing but the shared dev key — standing in for the Gateway's own
-// trust set — and a token shaped like what `gateway dev-token` mints (no
-// iss/aud claims, kid auth.DevKeyID, signed with the same private key)
-// validates at this app's read boundary. One shared key, either direction.
-func TestSetupReadAuth_DevPosture_SharedKeyInteroperates(t *testing.T) {
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
+// noPostureServer builds a server whose session manager has no verifier at all
+// — the unprovisioned deployment, where every session-gated request must fail
+// closed.
+func noPostureServer(t *testing.T) *server {
+	t.Helper()
+	session, err := appsession.New(appsession.Config{
+		AppName:   appName,
+		EnvPrefix: envPrefix,
+		Logger:    discardLogger(),
+		Loopback:  true,
+		LoginPage: []byte("<html>login</html>"),
+	})
 	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
+		t.Fatalf("appsession.New: %v", err)
 	}
+	return &server{logger: discardLogger(), session: session, natsTimeout: testTimeout}
+}
 
-	const sub = "Hj4kPmRtw9nbCxz5vQ2y"
+// sessionGET drives one GET through the real session middleware onto h.
+func sessionGET(s *server, h http.HandlerFunc, path string, c *http.Cookie) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	if c != nil {
+		r.AddCookie(c)
+	}
+	rec := httptest.NewRecorder()
+	s.session.RequireSession(h).ServeHTTP(rec, r)
+	return rec
+}
 
-	// This app's minted token verifies against a Gateway-shaped trust set.
+// TestAuthenticateRead_SessionIdentityIsTheRLSPrincipal: the identity the
+// session resolved becomes the actor a protected read runs as, in both the
+// bare-subject and full-key shapes the RLS call sites consume.
+func TestAuthenticateRead_SessionIdentityIsTheRLSPrincipal(t *testing.T) {
+	const id = "Hj4kPmRtw9nbCxz5vQ2y"
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout}
+	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
+	actor, err := s.authenticateRead(r.WithContext(appsession.WithSession(r.Context(), id, true)))
+	if err != nil {
+		t.Fatalf("authenticateRead: %v", err)
+	}
+	if actor.Subject != id {
+		t.Errorf("subject = %q, want %q", actor.Subject, id)
+	}
+	if actor.ActorID != auth.IdentityKeyPrefix+id {
+		t.Errorf("actorID = %q, want %s%s", actor.ActorID, auth.IdentityKeyPrefix, id)
+	}
+}
+
+// TestAuthenticateRead_NoSession_Errors: no resolved identity ⇒ no principal
+// to key RLS on, so the read is refused rather than running as nobody.
+func TestAuthenticateRead_NoSession_Errors(t *testing.T) {
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout}
+	if _, err := s.authenticateRead(httptest.NewRequest(http.MethodGet, "/api/applications", nil)); err == nil {
+		t.Fatal("expected an error with no session on the request")
+	}
+}
+
+// TestAuthenticateRead_BlankIdentity_Errors is the defence in depth: a blank
+// principal must never reach set_config('lattice.actor_id', …).
+func TestAuthenticateRead_BlankIdentity_Errors(t *testing.T) {
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout}
+	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
+	r = r.WithContext(appsession.WithSession(r.Context(), "   ", true))
+	if _, err := s.authenticateRead(r); err == nil {
+		t.Fatal("expected an error for a blank session identity")
+	}
+}
+
+func TestHandleApplications_NoAuthPosture_401(t *testing.T) {
+	s := noPostureServer(t)
+	rec := sessionGET(s, s.handleApplications, "/api/applications", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleApplications_NoCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	rec := sessionGET(s, s.handleApplications, "/api/applications", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (no session cookie)", rec.Code)
+	}
+}
+
+func TestHandleApplications_ForgedCookie_401(t *testing.T) {
+	s, _ := devSessionServer(t, nil)
+	forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.valid.jwt"}
+	rec := sessionGET(s, s.handleApplications, "/api/applications", forged)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (forged cookie)", rec.Code)
+	}
+}
+
+// TestHandleApplications_ValidSession_PoolUnconfigured_502: a signed-in actor
+// with no read-model pool gets a clean 502, never a nil-pointer panic.
+func TestHandleApplications_ValidSession_PoolUnconfigured_502(t *testing.T) {
+	s, cookieFor := devSessionServer(t, nil) // session set, pgPool nil
+	rec := sessionGET(s, s.handleApplications, "/api/applications", cookieFor("Hj4kPmRtw9nbCxz5vQ2y"))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
+	}
+}
+
+// TestSessionCookieInteroperatesWithTheSharedDevKey proves the actual point of
+// the shared-dev-IdP interim (real-actor-write-auth-e2e-design.md §3.2): the
+// token this app's session cookie carries verifies against an independently
+// built verifier that trusts nothing but the shared dev key — standing in for
+// the Gateway's own trust set. One shared key, so the browser-direct FE
+// (writes → Gateway, reads → app) acts as a single actor.
+func TestSessionCookieInteroperatesWithTheSharedDevKey(t *testing.T) {
+	_, cookieFor := devSessionServer(t, nil)
+
 	gatewayKeys, gatewaySpecs, err := auth.LoadTrustedKeys(auth.KeySourceConfig{
 		DevMode:    true,
 		DevKeyPath: os.Getenv("LOFTSPACE_APP_DEV_PUBLIC_KEY_PATH"),
@@ -128,315 +199,14 @@ func TestSetupReadAuth_DevPosture_SharedKeyInteroperates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
-	tok, _, err := signer.mint(sub)
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	if _, err := gatewayVerifier.Verify(tok); err != nil {
-		t.Errorf("app-minted token rejected by a Gateway-shaped verifier: %v", err)
-	}
 
-	// A `gateway dev-token`-shaped token (no iss/aud, same shared key)
-	// verifies at this app's read boundary.
-	privKey, err := auth.LoadDevSigningKey(os.Getenv("LOFTSPACE_APP_DEV_PRIVATE_KEY_PATH"))
+	const sub = "Hj4kPmRtw9nbCxz5vQ2y"
+	actor, err := gatewayVerifier.Verify(cookieFor(sub).Value)
 	if err != nil {
-		t.Fatalf("LoadDevSigningKey: %v", err)
-	}
-	gatewayTok := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.RegisteredClaims{
-		Subject:   sub,
-		IssuedAt:  jwt.NewNumericDate(time.Now()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
-	})
-	gatewayTok.Header["kid"] = auth.DevKeyID
-	signed, err := gatewayTok.SignedString(privKey)
-	if err != nil {
-		t.Fatalf("sign gateway-shaped token: %v", err)
-	}
-	actor, err := authn.Authenticate(t.Context(), signed)
-	if err != nil {
-		t.Fatalf("app read boundary rejected a gateway-shaped token: %v", err)
+		t.Fatalf("session token rejected by a Gateway-shaped verifier: %v", err)
 	}
 	if actor.Subject != sub {
 		t.Errorf("subject = %q, want %q", actor.Subject, sub)
-	}
-}
-
-// TestSetupReadAuth_NoPosture: neither env set ⇒ no authenticator (fail closed).
-func TestSetupReadAuth_NoPosture(t *testing.T) {
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "")
-	t.Setenv("LOFTSPACE_APP_JWT_PUBLIC_KEY", "")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	if authn != nil || signer != nil {
-		t.Fatalf("no posture must return nil authn/signer, got authn=%v signer=%v", authn, signer)
-	}
-}
-
-// TestSetupReadAuth_BadPublicKey: a configured but unparseable key is a hard
-// misconfiguration, not a silent deny-all.
-func TestSetupReadAuth_BadPublicKey(t *testing.T) {
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "")
-	t.Setenv("LOFTSPACE_APP_JWT_PUBLIC_KEY", "not a pem")
-	if _, _, err := setupReadAuth(discardLogger(), true, nil); err == nil {
-		t.Fatal("expected an error for an unparseable public key")
-	}
-}
-
-// fakeRevocationChecker is a fixed-answer auth.RevocationChecker.
-type fakeRevocationChecker struct {
-	revoked bool
-	err     error
-}
-
-func (f fakeRevocationChecker) IsRevoked(context.Context, string) (bool, error) {
-	return f.revoked, f.err
-}
-
-// TestSetupReadAuth_RevocationChecker_Wired proves setupReadAuth threads the
-// revocation checker it's given into the Authenticator it builds (§12.1) — a
-// revoked actor's otherwise-valid token is denied, not just verified.
-func TestSetupReadAuth_RevocationChecker_Wired(t *testing.T) {
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, fakeRevocationChecker{revoked: true})
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	tok, _, err := signer.mint("Hj4kPmRtw9nbCxz5vQ2y")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	if _, err := authn.Authenticate(t.Context(), tok); !errors.Is(err, auth.ErrTokenRevoked) {
-		t.Fatalf("Authenticate = %v, want ErrTokenRevoked", err)
-	}
-}
-
-// devAuthServer builds a server with the demo auth posture for handler tests.
-func devAuthServer(t *testing.T) *server {
-	t.Helper()
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	return &server{logger: discardLogger(), authn: authn, devSigner: signer, natsTimeout: testTimeout}
-}
-
-// fakeCredentialResolver is a fixed-answer credentialBindingResolver: bound
-// resolves rawActorID to identityKey; unbound reports bound=false; a
-// non-nil err always wins. Mirrors internal/gateway's own test fake.
-type fakeCredentialResolver struct {
-	identityKey string
-	bound       bool
-	err         error
-}
-
-func (f fakeCredentialResolver) Resolve(context.Context, string) (string, bool, error) {
-	return f.identityKey, f.bound, f.err
-}
-
-// TestAuthenticateRead_CredentialBinding_ResolvesToClaimedIdentity proves a
-// bound credential actor reads as the claimed business identity, not the raw
-// credential — the read-boundary half of the shared seam
-// (real-actor-write-auth-e2e-design.md §5).
-func TestAuthenticateRead_CredentialBinding_ResolvesToClaimedIdentity(t *testing.T) {
-	s := devAuthServer(t)
-	s.credBindings = fakeCredentialResolver{identityKey: "vtx.identity.Bz9wLqXmPr4tKvNhYc3d", bound: true}
-	tok, _, err := s.devSigner.mint("Rk3mNpQwZx8bFhTj2Ycd")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	actor, err := s.authenticateRead(r)
-	if err != nil {
-		t.Fatalf("authenticateRead: %v", err)
-	}
-	if actor.Subject != "Bz9wLqXmPr4tKvNhYc3d" {
-		t.Errorf("subject = %q, want the resolved business identity", actor.Subject)
-	}
-}
-
-// TestAuthenticateRead_CredentialBinding_Unbound_ActsAsRawActor proves an
-// unclaimed credential (no binding yet) reads as itself — the documented
-// deny-safe fallback, also covering the CDC-lag window.
-func TestAuthenticateRead_CredentialBinding_Unbound_ActsAsRawActor(t *testing.T) {
-	s := devAuthServer(t)
-	s.credBindings = fakeCredentialResolver{bound: false}
-	tok, _, err := s.devSigner.mint("Rk3mNpQwZx8bFhTj2Ycd")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	actor, err := s.authenticateRead(r)
-	if err != nil {
-		t.Fatalf("authenticateRead: %v", err)
-	}
-	if actor.Subject != "Rk3mNpQwZx8bFhTj2Ycd" {
-		t.Errorf("subject = %q, want the raw credential actor unchanged", actor.Subject)
-	}
-}
-
-// TestAuthenticateRead_CredentialBinding_ResolveError_FallsBackToRawActor
-// proves a resolver failure (e.g. KV unreachable) fails OPEN to the raw
-// credential rather than denying the read — mirrors the Gateway's
-// resolveActor: acting as the raw credential never grants more than the
-// actor is entitled to.
-func TestAuthenticateRead_CredentialBinding_ResolveError_FallsBackToRawActor(t *testing.T) {
-	s := devAuthServer(t)
-	s.credBindings = fakeCredentialResolver{err: errors.New("kv unreachable")}
-	tok, _, err := s.devSigner.mint("Rk3mNpQwZx8bFhTj2Ycd")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	actor, err := s.authenticateRead(r)
-	if err != nil {
-		t.Fatalf("authenticateRead: %v", err)
-	}
-	if actor.Subject != "Rk3mNpQwZx8bFhTj2Ycd" {
-		t.Errorf("subject = %q, want the raw credential actor unchanged (fail open)", actor.Subject)
-	}
-}
-
-func TestHandleApplications_NoAuthConfigured_401(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // authn nil
-	rec := httptest.NewRecorder()
-	s.handleApplications(rec, httptest.NewRequest(http.MethodGet, "/api/applications", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-}
-
-func TestHandleApplications_NoToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	s.handleApplications(rec, httptest.NewRequest(http.MethodGet, "/api/applications", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (no bearer)", rec.Code)
-	}
-}
-
-func TestHandleApplications_ForgedToken_401(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
-	r.Header.Set("Authorization", "Bearer not.a.valid.jwt")
-	s.handleApplications(rec, r)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (forged token)", rec.Code)
-	}
-}
-
-// TestHandleApplications_ValidToken_PoolUnconfigured_502: a verified actor with no
-// read-model pool gets a clean 502, never a nil-pointer panic.
-func TestHandleApplications_ValidToken_PoolUnconfigured_502(t *testing.T) {
-	s := devAuthServer(t) // authn set, pgPool nil
-	tok, _, err := s.devSigner.mint("Hj4kPmRtw9nbCxz5vQ2y")
-	if err != nil {
-		t.Fatalf("mint: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/api/applications", nil)
-	r.Header.Set("Authorization", "Bearer "+tok)
-	s.handleApplications(rec, r)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (pool unconfigured)", rec.Code)
-	}
-}
-
-func TestHandleDevToken_Disabled_404(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // devSigner nil
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/dev-token", strings.NewReader(`{"subject":"x"}`))
-	s.handleDevToken(rec, r)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (dev-token disabled)", rec.Code)
-	}
-}
-
-func TestHandleDevToken_Mint_RoundTrips(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/dev-token", strings.NewReader(`{"subject":"Hj4kPmRtw9nbCxz5vQ2y"}`))
-	s.handleDevToken(rec, r)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expiresAt"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Token == "" || resp.ExpiresAt == "" {
-		t.Fatalf("empty token/expiresAt: %+v", resp)
-	}
-	actor, err := s.authn.Authenticate(t.Context(), resp.Token)
-	if err != nil {
-		t.Fatalf("authenticate minted token: %v", err)
-	}
-	if actor.Subject != "Hj4kPmRtw9nbCxz5vQ2y" {
-		t.Errorf("subject = %q", actor.Subject)
-	}
-}
-
-func TestHandleDevToken_EmptySubject_400(t *testing.T) {
-	s := devAuthServer(t)
-	rec := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/dev-token", strings.NewReader(`{"subject":"  "}`))
-	s.handleDevToken(rec, r)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-func TestHandleStaffDevToken_Disabled_404(t *testing.T) {
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout} // devSigner nil
-	rec := httptest.NewRecorder()
-	s.handleStaffDevToken(rec, httptest.NewRequest(http.MethodPost, "/api/staff/dev-token", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (staff dev-token disabled)", rec.Code)
-	}
-}
-
-func TestHandleStaffDevToken_NoAdminActor_502(t *testing.T) {
-	s := devAuthServer(t) // devSigner set, adminActor empty
-	rec := httptest.NewRecorder()
-	s.handleStaffDevToken(rec, httptest.NewRequest(http.MethodPost, "/api/staff/dev-token", nil))
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (no admin actor)", rec.Code)
-	}
-}
-
-func TestHandleStaffDevToken_Mint_RoundTrips(t *testing.T) {
-	s := devAuthServer(t)
-	s.adminActor = "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y"
-	rec := httptest.NewRecorder()
-	s.handleStaffDevToken(rec, httptest.NewRequest(http.MethodPost, "/api/staff/dev-token", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Token     string `json:"token"`
-		ExpiresAt string `json:"expiresAt"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Token == "" || resp.ExpiresAt == "" {
-		t.Fatalf("empty token/expiresAt: %+v", resp)
-	}
-	actor, err := s.authn.Authenticate(t.Context(), resp.Token)
-	if err != nil {
-		t.Fatalf("authenticate minted token: %v", err)
-	}
-	if actor.Subject != "Hj4kPmRtw9nbCxz5vQ2y" {
-		t.Errorf("subject = %q, want the bare admin-actor NanoID", actor.Subject)
 	}
 }
 

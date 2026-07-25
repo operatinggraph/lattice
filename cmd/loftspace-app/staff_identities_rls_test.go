@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
@@ -93,30 +92,11 @@ func TestStaffIdentitiesReadBoundary_WildcardSeesEverything(t *testing.T) {
 	reader := poolInSchema(t, dsn, rlsTestRole)
 	defer reader.Close()
 
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout, pgPool: reader, authn: authn, devSigner: signer}
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
 
-	mint := func(sub string) string {
+	get := func(t *testing.T, c *http.Cookie) (int, []protectedIdentityRow) {
 		t.Helper()
-		tok, _, err := signer.mint(sub)
-		if err != nil {
-			t.Fatalf("mint %s: %v", sub, err)
-		}
-		return tok
-	}
-
-	get := func(t *testing.T, authz string) (int, []protectedIdentityRow) {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/staff/identities", nil)
-		if authz != "" {
-			r.Header.Set("Authorization", authz)
-		}
-		s.handleStaffIdentities(rec, r)
+		rec := sessionGET(s, s.handleStaffIdentities, "/api/staff/identities", c)
 		var resp struct {
 			Identities []protectedIdentityRow `json:"identities"`
 		}
@@ -125,7 +105,7 @@ func TestStaffIdentitiesReadBoundary_WildcardSeesEverything(t *testing.T) {
 	}
 
 	t.Run("staff sees every NAMED identity via the wildcard grant", func(t *testing.T) {
-		code, rows := get(t, "Bearer "+mint(subStaff))
+		code, rows := get(t, cookieFor(subStaff))
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -140,7 +120,7 @@ func TestStaffIdentitiesReadBoundary_WildcardSeesEverything(t *testing.T) {
 	})
 
 	t.Run("an ordinary identity (self-grant only, no wildcard) sees nothing — no self-anchor exists on the roster", func(t *testing.T) {
-		code, rows := get(t, "Bearer "+mint(subAlice))
+		code, rows := get(t, cookieFor(subAlice))
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -150,7 +130,7 @@ func TestStaffIdentitiesReadBoundary_WildcardSeesEverything(t *testing.T) {
 	})
 
 	t.Run("unauthenticated is 401", func(t *testing.T) {
-		if code, _ := get(t, ""); code != http.StatusUnauthorized {
+		if code, _ := get(t, nil); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})
@@ -158,7 +138,7 @@ func TestStaffIdentitiesReadBoundary_WildcardSeesEverything(t *testing.T) {
 	t.Run("revoked wildcard grant hides everything again", func(t *testing.T) {
 		exec("UPDATE actor_read_grants SET is_deleted = true WHERE actor_id = $1 AND anchor_id = '*'", subStaff)
 		defer exec("UPDATE actor_read_grants SET is_deleted = false WHERE actor_id = $1 AND anchor_id = '*'", subStaff)
-		code, rows := get(t, "Bearer "+mint(subStaff))
+		code, rows := get(t, cookieFor(subStaff))
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}

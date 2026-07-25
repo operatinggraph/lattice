@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -215,31 +214,12 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 	})
 
-	// The authenticated app: dev posture (an ephemeral key the verifier trusts).
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout, pgPool: reader, authn: authn, devSigner: signer}
+	// The authenticated app: the demo session posture over the shared dev key.
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
 
-	mint := func(sub string) string {
+	get := func(t *testing.T, c *http.Cookie, query string) (int, []protectedApplicationRow) {
 		t.Helper()
-		tok, _, err := signer.mint(sub)
-		if err != nil {
-			t.Fatalf("mint %s: %v", sub, err)
-		}
-		return tok
-	}
-
-	get := func(t *testing.T, authz, query string) (int, []protectedApplicationRow) {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/applications"+query, nil)
-		if authz != "" {
-			r.Header.Set("Authorization", authz)
-		}
-		s.handleApplications(rec, r)
+		rec := sessionGET(s, s.handleApplications, "/api/applications"+query, c)
 		var resp struct {
 			Applications []protectedApplicationRow `json:"applications"`
 		}
@@ -248,7 +228,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	}
 
 	t.Run("A sees only A", func(t *testing.T) {
-		code, rows := get(t, "Bearer "+mint(subAlice), "")
+		code, rows := get(t, cookieFor(subAlice), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -270,7 +250,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("B sees only B", func(t *testing.T) {
-		code, rows := get(t, "Bearer "+mint(subBob), "")
+		code, rows := get(t, cookieFor(subBob), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -282,7 +262,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	t.Run("?applicant=B while authed as A is defeated", func(t *testing.T) {
 		// The forgeable client filter is gone; RLS keys off the verified session
 		// var, so the query param does nothing — A still sees only A.
-		code, rows := get(t, "Bearer "+mint(subAlice), "?applicant=vtx.identity."+subBob)
+		code, rows := get(t, cookieFor(subAlice), "?applicant=vtx.identity."+subBob)
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -292,13 +272,14 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("unauthenticated is 401", func(t *testing.T) {
-		if code, _ := get(t, "", ""); code != http.StatusUnauthorized {
+		if code, _ := get(t, nil, ""); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})
 
-	t.Run("forged token is 401", func(t *testing.T) {
-		if code, _ := get(t, "Bearer not.a.jwt", ""); code != http.StatusUnauthorized {
+	t.Run("forged cookie is 401", func(t *testing.T) {
+		forged := &http.Cookie{Name: s.session.CookieName(), Value: "not.a.jwt"}
+		if code, _ := get(t, forged, ""); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})
@@ -308,7 +289,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		// sees nothing — the RLS path honors revocation.
 		exec("UPDATE actor_read_grants SET is_deleted = true WHERE actor_id = $1", subAlice)
 		defer exec("UPDATE actor_read_grants SET is_deleted = false WHERE actor_id = $1", subAlice)
-		code, rows := get(t, "Bearer "+mint(subAlice), "")
+		code, rows := get(t, cookieFor(subAlice), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -323,11 +304,11 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		// Each request authenticates independently, so the only way B's request
 		// returns A's row is a leaked session var — assert it never does.
 		for i := 0; i < 5; i++ {
-			_, rowsA := get(t, "Bearer "+mint(subAlice), "")
+			_, rowsA := get(t, cookieFor(subAlice), "")
 			if len(rowsA) != 1 || rowsA[0].EntityKey != "vtx.leaseapp.app-A" {
 				t.Fatalf("iter %d: A leaked %+v", i, rowsA)
 			}
-			_, rowsB := get(t, "Bearer "+mint(subBob), "")
+			_, rowsB := get(t, cookieFor(subBob), "")
 			if len(rowsB) != 1 || rowsB[0].EntityKey != "vtx.leaseapp.app-B" {
 				t.Fatalf("iter %d: B leaked %+v", i, rowsB)
 			}
@@ -340,20 +321,15 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	// which is fine for every pointer-absent path below — the handler only
 	// touches NATS once a pointer exists (the byte-streaming happy path is the
 	// live e2e's concern).
-	getDoc := func(t *testing.T, authz, leaseAppKey string) (int, string) {
+	getDoc := func(t *testing.T, c *http.Cookie, leaseAppKey string) (int, string) {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/lease-document?leaseAppKey="+leaseAppKey, nil)
-		if authz != "" {
-			req.Header.Set("Authorization", authz)
-		}
-		s.handleLeaseDocumentGet(rec, req)
+		rec := sessionGET(s, s.handleLeaseDocumentGet, "/api/lease-document?leaseAppKey="+leaseAppKey, c)
 		return rec.Code, rec.Body.String()
 	}
 
 	t.Run("lease-document: signed but not yet anchored is 404 being-generated", func(t *testing.T) {
 		// app-A is signed with NO doc pointers — the convergence window.
-		code, body := getDoc(t, "Bearer "+mint(subAlice), "vtx.leaseapp.app-A")
+		code, body := getDoc(t, cookieFor(subAlice), "vtx.leaseapp.app-A")
 		if code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404 (document converging), body=%s", code, body)
 		}
@@ -363,7 +339,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("lease-document: A requesting B's key is 404, not leaked", func(t *testing.T) {
-		code, body := getDoc(t, "Bearer "+mint(subAlice), "vtx.leaseapp.app-B")
+		code, body := getDoc(t, cookieFor(subAlice), "vtx.leaseapp.app-B")
 		if code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404 (RLS-hidden, indistinguishable from absent)", code)
 		}
@@ -373,7 +349,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("lease-document: B's application is unsigned, 404", func(t *testing.T) {
-		code, body := getDoc(t, "Bearer "+mint(subBob), "vtx.leaseapp.app-B")
+		code, body := getDoc(t, cookieFor(subBob), "vtx.leaseapp.app-B")
 		if code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404 (no document for an unsigned application)", code)
 		}
@@ -383,7 +359,7 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("lease-document: unauthenticated is 401", func(t *testing.T) {
-		if code, _ := getDoc(t, "", "vtx.leaseapp.app-A"); code != http.StatusUnauthorized {
+		if code, _ := getDoc(t, nil, "vtx.leaseapp.app-A"); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})

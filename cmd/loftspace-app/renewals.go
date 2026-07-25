@@ -104,7 +104,7 @@ func queryRenewals(ctx context.Context, pool pgxBeginner, actorID string) ([]ren
 // renewal cycles (as tenant OR managing landlord), read from the PROTECTED
 // read_renewals model. The FE tells the two audiences apart client-side by
 // comparing each row's tenant/landlord key to the caller's own identity (the
-// dev-token subject) — RLS has already ensured every row returned belongs to
+// session subject) — RLS has already ensured every row returned belongs to
 // one of those two roles for this actor; there is no third case.
 func (s *server) handleRenewals(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.authenticateRead(r)

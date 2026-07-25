@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 )
 
@@ -92,20 +93,15 @@ func TestObjectsD1_5_LeaseappEntitlement_RLS(t *testing.T) {
 	reader := poolInSchema(t, dsn, rlsTestRole)
 	defer reader.Close()
 
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout, pgPool: reader, authn: authn, devSigner: signer}
+	s := &server{logger: discardLogger(), natsTimeout: testTimeout, pgPool: reader}
 
-	mint := func(sub string) string {
-		t.Helper()
-		tok, _, err := signer.mint(sub)
-		if err != nil {
-			t.Fatalf("mint %s: %v", sub, err)
-		}
-		return tok
+	// asA returns a request whose context already carries a resolved session
+	// for subAlice — exactly what s.session.RequireSession installs before a
+	// real handler runs, since resolveAllowedObjectOwners/authorizeObjectGet
+	// are exercised directly here rather than through the full mux.
+	asA := func(path string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		return r.WithContext(appsession.WithSession(r.Context(), subAlice, true))
 	}
 
 	t.Run("A is entitled to A's leaseapp, not B's", func(t *testing.T) {
@@ -118,9 +114,7 @@ func TestObjectsD1_5_LeaseappEntitlement_RLS(t *testing.T) {
 	})
 
 	t.Run("resolveAllowedObjectOwners: A requesting her own leaseapp is allowed", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/api/objects?owner=vtx.leaseapp.app-A", nil)
-		r.Header.Set("Authorization", "Bearer "+mint(subAlice))
-		allowed, status, msg := s.resolveAllowedObjectOwners(ctx, r, []string{"vtx.leaseapp.app-A"})
+		allowed, status, msg := s.resolveAllowedObjectOwners(ctx, asA("/api/objects?owner=vtx.leaseapp.app-A"), []string{"vtx.leaseapp.app-A"})
 		if status != 0 {
 			t.Fatalf("status = %d (%s), want 0", status, msg)
 		}
@@ -130,9 +124,7 @@ func TestObjectsD1_5_LeaseappEntitlement_RLS(t *testing.T) {
 	})
 
 	t.Run("resolveAllowedObjectOwners: A requesting B's leaseapp is silently dropped, not leaked", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/api/objects?owner=vtx.leaseapp.app-B", nil)
-		r.Header.Set("Authorization", "Bearer "+mint(subAlice))
-		allowed, status, _ := s.resolveAllowedObjectOwners(ctx, r, []string{"vtx.leaseapp.app-B"})
+		allowed, status, _ := s.resolveAllowedObjectOwners(ctx, asA("/api/objects?owner=vtx.leaseapp.app-B"), []string{"vtx.leaseapp.app-B"})
 		if status != 0 {
 			t.Fatalf("status = %d, want 0 (drop, not error)", status)
 		}
@@ -142,18 +134,14 @@ func TestObjectsD1_5_LeaseappEntitlement_RLS(t *testing.T) {
 	})
 
 	t.Run("authorizeObjectGet: A can view an object owned by her own leaseapp", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/api/objects/oid1", nil)
-		r.Header.Set("Authorization", "Bearer "+mint(subAlice))
-		ok, status, _ := s.authorizeObjectGet(ctx, r, []string{"vtx.leaseapp.app-A"})
+		ok, status, _ := s.authorizeObjectGet(ctx, asA("/api/objects/oid1"), []string{"vtx.leaseapp.app-A"})
 		if !ok || status != 0 {
 			t.Fatalf("ok=%v status=%d, want ok=true status=0", ok, status)
 		}
 	})
 
 	t.Run("authorizeObjectGet: A cannot view an object owned only by B's leaseapp", func(t *testing.T) {
-		r := httptest.NewRequest(http.MethodGet, "/api/objects/oid2", nil)
-		r.Header.Set("Authorization", "Bearer "+mint(subAlice))
-		ok, status, _ := s.authorizeObjectGet(ctx, r, []string{"vtx.leaseapp.app-B"})
+		ok, status, _ := s.authorizeObjectGet(ctx, asA("/api/objects/oid2"), []string{"vtx.leaseapp.app-B"})
 		if ok || status != http.StatusNotFound {
 			t.Fatalf("ok=%v status=%d, want ok=false status=404 (indistinguishable from absent)", ok, status)
 		}

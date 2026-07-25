@@ -32,7 +32,7 @@ import (
 // (object-store-crypto-shred-design.md §9 Fire 4 Increment 2). Mirrors
 // cmd/loupe/objects_crypto_e2e_test.go's sensitiveObjectFixture, substituting
 // the lens-projected read model for Loupe's direct Core-KV read.
-func sensitiveObjectFixture(t *testing.T) (srv *server, hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn, mint func(sub string) string) {
+func sensitiveObjectFixture(t *testing.T) (srv *server, hs *httptest.Server, backend *vault.LocalBackend, conn *substrate.Conn, cookieFor func(subject string) *http.Cookie) {
 	t.Helper()
 	opts := &natsserver.Options{Host: "127.0.0.1", Port: -1, JetStream: true, StoreDir: jsstore.Dir(t)}
 	ns := natstest.RunServer(opts)
@@ -68,27 +68,16 @@ func sensitiveObjectFixture(t *testing.T) (srv *server, hs *httptest.Server, bac
 		t.Fatalf("start vault listener: %v", err)
 	}
 
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-
-	srv = &server{conn: conn, logger: discardLogger(), natsTimeout: testTimeout, uploadCap: defaultUploadCap, authn: authn, devSigner: signer}
+	srv, cookieFor = devSessionServer(t, func(s *server) {
+		s.conn = conn
+		s.uploadCap = defaultUploadCap
+	})
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
 	hs = httptest.NewServer(mux)
 	t.Cleanup(hs.Close)
 
-	mint = func(sub string) string {
-		t.Helper()
-		tok, _, err := signer.mint(sub)
-		if err != nil {
-			t.Fatalf("mint %s: %v", sub, err)
-		}
-		return tok
-	}
-	return srv, hs, backend, conn, mint
+	return srv, hs, backend, conn, cookieFor
 }
 
 // seedPiiKeyEnvelope writes governingIdentity's piiKeyEnvelope lens row
@@ -147,7 +136,7 @@ func seedObjectAttachmentRow(t *testing.T, ctx context.Context, conn *substrate.
 
 // multipartUpload builds a POST /api/objects multipart body, optionally
 // marking it sensitive, and returns the decoded JSON response.
-func multipartUpload(t *testing.T, hs *httptest.Server, token string, content []byte, targetKey, linkName string, sensitive bool, governingIdentity string) (*http.Response, map[string]any) {
+func multipartUpload(t *testing.T, hs *httptest.Server, cookie *http.Cookie, content []byte, targetKey, linkName string, sensitive bool, governingIdentity string) (*http.Response, map[string]any) {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -173,8 +162,8 @@ func multipartUpload(t *testing.T, hs *httptest.Server, token string, content []
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if cookie != nil {
+		req.AddCookie(cookie)
 	}
 	res, err := hs.Client().Do(req)
 	if err != nil {
@@ -194,23 +183,26 @@ func multipartUpload(t *testing.T, hs *httptest.Server, token string, content []
 // an authenticated applicant and wrapping arbitrary bytes under someone
 // else's governingIdentity.
 func TestHandleObjectUpload_Sensitive_RequiresSelfIdentity(t *testing.T) {
-	_, hs, _, _, mint := sensitiveObjectFixture(t)
+	_, hs, _, _, cookieFor := sensitiveObjectFixture(t)
 	alice := "rHByTRQJyGuy9kFodCBF"
 	victim := "vtx.identity.PQipBmNwsvkcQeoT37Az"
 
-	res, body := multipartUpload(t, hs, mint(alice), []byte("hello"), "vtx.identity."+alice, "idDocument", true, victim)
+	res, body := multipartUpload(t, hs, cookieFor(alice), []byte("hello"), "vtx.identity."+alice, "idDocument", true, victim)
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (governingIdentity must be caller's own identity); body=%v", res.StatusCode, body)
 	}
 }
 
 // TestHandleObjectUpload_Sensitive_RequiresAuth proves an unauthenticated
-// caller cannot upload a sensitive document at all (unlike the ordinary
-// byte-plane path, which needs no auth — the crypto path always requires
-// knowing WHO the caller is to enforce the self-identity guard above).
+// caller cannot upload at all. The refusal now comes from the session
+// middleware, which gates EVERY route including the ordinary byte-plane path —
+// so this pins the wiring, not the crypto path's own guard. What keeps a
+// SIGNED-IN caller from sealing a document under someone else's identity is
+// _RequiresSelfIdentity above (403), which is the discriminating pair for that
+// guard.
 func TestHandleObjectUpload_Sensitive_RequiresAuth(t *testing.T) {
 	_, hs, _, _, _ := sensitiveObjectFixture(t)
-	res, body := multipartUpload(t, hs, "", []byte("hello"), "vtx.identity.alice", "idDocument", true, "vtx.identity.alice")
+	res, body := multipartUpload(t, hs, nil, []byte("hello"), "vtx.identity.alice", "idDocument", true, "vtx.identity.alice")
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body=%v", res.StatusCode, body)
 	}
@@ -222,13 +214,13 @@ func TestHandleObjectUpload_Sensitive_RequiresAuth(t *testing.T) {
 // carries a complete encryption envelope + the identity-salted oid the
 // browser needs to submit AttachObject itself.
 func TestHandleObjectUpload_Sensitive_SealsAndReturnsEnvelope(t *testing.T) {
-	_, hs, backend, conn, mint := sensitiveObjectFixture(t)
+	_, hs, backend, conn, cookieFor := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	applicant := "vtx.identity.3LvdXTKPzXGFaGY6YpS3"
 	seedPiiKeyEnvelope(t, ctx, conn, backend, applicant)
 
 	plaintext := []byte("this is a scanned ID document, definitely PII")
-	res, body := multipartUpload(t, hs, mint("3LvdXTKPzXGFaGY6YpS3"), plaintext, applicant, "idDocument", true, applicant)
+	res, body := multipartUpload(t, hs, cookieFor("3LvdXTKPzXGFaGY6YpS3"), plaintext, applicant, "idDocument", true, applicant)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%v", res.StatusCode, body)
 	}
@@ -265,7 +257,7 @@ func TestHandleObjectUpload_Sensitive_SealsAndReturnsEnvelope(t *testing.T) {
 // the plaintext — proven end-to-end through the real HTTP handler + the
 // existing D1.5 owner-entitlement gate.
 func TestHandleObjectGet_Sensitive_DefaultServesCiphertext(t *testing.T) {
-	_, hs, backend, conn, mint := sensitiveObjectFixture(t)
+	_, hs, backend, conn, cookieFor := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	applicant := "vtx.identity.CxfkHaFmU5rq87ZnNwEC"
 	env := seedPiiKeyEnvelope(t, ctx, conn, backend, applicant)
@@ -275,7 +267,7 @@ func TestHandleObjectGet_Sensitive_DefaultServesCiphertext(t *testing.T) {
 	seedObjectAttachmentRow(t, ctx, conn, oid, storeName, "application/pdf", int64(len(ciphertext)), applicant, true, digest, applicant, enc)
 
 	req, _ := http.NewRequest(http.MethodGet, hs.URL+"/api/objects/"+oid, nil)
-	req.Header.Set("Authorization", "Bearer "+mint("CxfkHaFmU5rq87ZnNwEC"))
+	req.AddCookie(cookieFor("CxfkHaFmU5rq87ZnNwEC"))
 	res, err := hs.Client().Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -296,7 +288,7 @@ func TestHandleObjectGet_Sensitive_DefaultServesCiphertext(t *testing.T) {
 // TestHandleObjectGet_Sensitive_DecryptTrue_RoundTrip proves ?decrypt=true
 // round-trips to the exact original plaintext for the owning applicant.
 func TestHandleObjectGet_Sensitive_DecryptTrue_RoundTrip(t *testing.T) {
-	_, hs, backend, conn, mint := sensitiveObjectFixture(t)
+	_, hs, backend, conn, cookieFor := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	applicant := "vtx.identity.tQ1UF6Q7GaTfr5ZLZYPt"
 	env := seedPiiKeyEnvelope(t, ctx, conn, backend, applicant)
@@ -306,7 +298,7 @@ func TestHandleObjectGet_Sensitive_DecryptTrue_RoundTrip(t *testing.T) {
 	seedObjectAttachmentRow(t, ctx, conn, oid, storeName, "image/jpeg", int64(len(plaintext)), applicant, true, digest, applicant, enc)
 
 	req, _ := http.NewRequest(http.MethodGet, hs.URL+"/api/objects/"+oid+"?decrypt=true", nil)
-	req.Header.Set("Authorization", "Bearer "+mint("tQ1UF6Q7GaTfr5ZLZYPt"))
+	req.AddCookie(cookieFor("tQ1UF6Q7GaTfr5ZLZYPt"))
 	res, err := hs.Client().Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -326,7 +318,7 @@ func TestHandleObjectGet_Sensitive_DecryptTrue_RoundTrip(t *testing.T) {
 // the decrypt branch — a stranger cannot decrypt someone else's ID document
 // just by guessing the oid.
 func TestHandleObjectGet_Sensitive_DecryptTrue_WrongUserDenied(t *testing.T) {
-	_, hs, backend, conn, mint := sensitiveObjectFixture(t)
+	_, hs, backend, conn, cookieFor := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	applicant := "vtx.identity.TvusEprLkxRLfaTrvmQu"
 	env := seedPiiKeyEnvelope(t, ctx, conn, backend, applicant)
@@ -336,7 +328,7 @@ func TestHandleObjectGet_Sensitive_DecryptTrue_WrongUserDenied(t *testing.T) {
 	seedObjectAttachmentRow(t, ctx, conn, oid, storeName, "image/jpeg", int64(len(plaintext)), applicant, true, digest, applicant, enc)
 
 	req, _ := http.NewRequest(http.MethodGet, hs.URL+"/api/objects/"+oid+"?decrypt=true", nil)
-	req.Header.Set("Authorization", "Bearer "+mint("hb8sfKSJRymkSyod9obZ"))
+	req.AddCookie(cookieFor("hb8sfKSJRymkSyod9obZ"))
 	res, err := hs.Client().Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -352,7 +344,7 @@ func TestHandleObjectGet_Sensitive_DecryptTrue_WrongUserDenied(t *testing.T) {
 // path fail permanently, while the default (ciphertext) path is unaffected —
 // no blob-specific shred logic; it falls out of Fire 1's DEK-wrapping.
 func TestHandleObjectGet_Sensitive_ShreddedIdentity_PermanentlyUndecryptable(t *testing.T) {
-	_, hs, backend, conn, mint := sensitiveObjectFixture(t)
+	_, hs, backend, conn, cookieFor := sensitiveObjectFixture(t)
 	ctx := context.Background()
 	applicant := "vtx.identity.W511DQ4C3WbTEPn8wWPs"
 	env := seedPiiKeyEnvelope(t, ctx, conn, backend, applicant)
@@ -365,11 +357,11 @@ func TestHandleObjectGet_Sensitive_ShreddedIdentity_PermanentlyUndecryptable(t *
 		t.Fatalf("shred key: %v", err)
 	}
 
-	token := mint("W511DQ4C3WbTEPn8wWPs")
+	cookie := cookieFor("W511DQ4C3WbTEPn8wWPs")
 
 	t.Run("decrypt=true now fails", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, hs.URL+"/api/objects/"+oid+"?decrypt=true", nil)
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.AddCookie(cookie)
 		res, err := hs.Client().Do(req)
 		if err != nil {
 			t.Fatalf("get: %v", err)
@@ -382,7 +374,7 @@ func TestHandleObjectGet_Sensitive_ShreddedIdentity_PermanentlyUndecryptable(t *
 
 	t.Run("default ciphertext path is unaffected", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, hs.URL+"/api/objects/"+oid, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.AddCookie(cookie)
 		res, err := hs.Client().Do(req)
 		if err != nil {
 			t.Fatalf("get: %v", err)

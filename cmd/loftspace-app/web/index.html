@@ -11,12 +11,12 @@
     <div class="brand">LoftSpace <span id="brand-sub" class="brand-sub">apply to lease</span></div>
     <div class="mode-toggle" role="tablist" aria-label="Mode">
       <button id="mode-applicant" class="mode active" role="tab" aria-selected="true" type="button">Applicant</button>
-      <button id="mode-landlord" class="mode" role="tab" aria-selected="false" type="button">Landlord</button>
+      <button id="mode-landlord" class="mode" role="tab" aria-selected="false" type="button" hidden>Landlord</button>
     </div>
     <div class="who" id="applicant-who">
-      <label for="applicant">Applicant</label>
-      <select id="applicant" aria-label="Choose your applicant identity"></select>
-      <button id="new-applicant" class="ghost" type="button">＋ New applicant</button>
+      <button id="new-applicant" class="ghost" type="button" hidden>＋ New applicant</button>
+      <span id="signed-in-as" class="summary" aria-live="polite"></span>
+      <button id="sign-out" class="ghost" type="button" hidden>Sign out</button>
     </div>
   </header>
 
@@ -253,6 +253,26 @@
           <button type="submit" id="applicant-submit">Create applicant</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Claim-key handover (shown once after an applicant is created) -->
+  <div id="claim-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="claim-title">
+      <h2 id="claim-title">Give them this claim key</h2>
+      <div class="apply-unit">Lattice stores only its hash, so this is the single copy. Without it the new applicant can never sign in.</div>
+      <div class="field">
+        <label>Applicant</label>
+        <div id="claim-who" class="readonly"></div>
+      </div>
+      <div class="field">
+        <label for="claim-secret">Claim key</label>
+        <input type="text" id="claim-secret" readonly />
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="claim-copy" class="ghost">Copy</button>
+        <button type="button" id="claim-done">Done</button>
+      </div>
     </div>
   </div>
 

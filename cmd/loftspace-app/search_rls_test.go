@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
@@ -130,37 +129,18 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	reader := poolInSchema(t, dsn, rlsTestRole)
 	defer reader.Close()
 
-	t.Setenv("LOFTSPACE_APP_DEV_AUTH", "1")
-	authn, signer, err := setupReadAuth(discardLogger(), true, nil)
-	if err != nil {
-		t.Fatalf("setupReadAuth: %v", err)
-	}
-	s := &server{logger: discardLogger(), natsTimeout: testTimeout, pgPool: reader, authn: authn, devSigner: signer}
+	s, cookieFor := devSessionServer(t, func(s *server) { s.pgPool = reader })
 
-	mint := func(sub string) string {
+	search := func(t *testing.T, c *http.Cookie, q string) (int, searchResult) {
 		t.Helper()
-		tok, _, err := signer.mint(sub)
-		if err != nil {
-			t.Fatalf("mint %s: %v", sub, err)
-		}
-		return tok
-	}
-
-	search := func(t *testing.T, authz, q string) (int, searchResult) {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/search?q="+q, nil)
-		if authz != "" {
-			r.Header.Set("Authorization", authz)
-		}
-		s.handleSearch(rec, r)
+		rec := sessionGET(s, s.handleSearch, "/api/search?q="+q, c)
 		var resp searchResult
 		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 		return rec.Code, resp
 	}
 
 	t.Run("staff (wildcard) finds a person by roster name across every landlord's units", func(t *testing.T) {
-		code, res := search(t, "Bearer "+mint(subStaff), "Alice")
+		code, res := search(t, cookieFor(subStaff), "Alice")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -173,7 +153,7 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("Larry finds his own applicant Alice by name with NO roster grant (landlord-scoped applicant_name match)", func(t *testing.T) {
-		code, res := search(t, "Bearer "+mint(subLarry), "Alice")
+		code, res := search(t, cookieFor(subLarry), "Alice")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -183,7 +163,7 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("Larry searching Bob's name (Linda's applicant) finds nothing", func(t *testing.T) {
-		code, res := search(t, "Bearer "+mint(subLarry), "Bob")
+		code, res := search(t, cookieFor(subLarry), "Bob")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -193,14 +173,14 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("Larry finds his own unit by address, not Linda's", func(t *testing.T) {
-		code, res := search(t, "Bearer "+mint(subLarry), "Main")
+		code, res := search(t, cookieFor(subLarry), "Main")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
 		if len(res.Units) != 1 || res.Units[0].UnitKey != "vtx.unit.unit-L" {
 			t.Fatalf("expected unit-L, got %+v", res.Units)
 		}
-		code, res = search(t, "Bearer "+mint(subLarry), "Shelbyville")
+		code, res = search(t, cookieFor(subLarry), "Shelbyville")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -210,7 +190,7 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("a non-landlord, non-staff actor finds nothing", func(t *testing.T) {
-		code, res := search(t, "Bearer "+mint(subAlice), "Alice")
+		code, res := search(t, cookieFor(subAlice), "Alice")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -220,7 +200,7 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("blank query returns empty without a DB round trip error", func(t *testing.T) {
-		code, res := search(t, "Bearer "+mint(subStaff), "")
+		code, res := search(t, cookieFor(subStaff), "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -230,7 +210,7 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	})
 
 	t.Run("unauthenticated is 401", func(t *testing.T) {
-		if code, _ := search(t, "", "Alice"); code != http.StatusUnauthorized {
+		if code, _ := search(t, nil, "Alice"); code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", code)
 		}
 	})

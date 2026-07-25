@@ -5,22 +5,19 @@ import (
 	"net/http"
 )
 
-// The applicant-identity-picker read boundary (D1.5): handleStaffIdentities
-// serves the picker from the PROTECTED applicantRosterRead Postgres model as
-// a JWT-authenticated actor — mirroring cmd/clinic-app's handleStaffPatients /
-// clinicPatientsRead. That model is the ONLY roster surface: the identity
-// name is a sensitive aspect the Refractor Secure Lens decrypts into this
-// RLS-protected table alone (Contract #3 §3.10), so an unauthenticated
-// full-name roster (a system-wide membership disclosure) cannot exist.
+// The applicant-roster read boundary (D1.5): handleStaffIdentities serves the
+// roster from the PROTECTED applicantRosterRead Postgres model as the SIGNED-IN
+// actor — mirroring cmd/clinic-app's handleStaffPatients / clinicPatientsRead.
+// That model is the ONLY roster surface: the identity name is a sensitive aspect
+// the Refractor Secure Lens decrypts into this RLS-protected table alone
+// (Contract #3 §3.10), so an unauthenticated full-name roster (a system-wide
+// membership disclosure) cannot exist.
 //
 // Like the clinic patient roster there is no per-identity self-anchor to carve
 // out — "the whole roster" has no single-row owner — so every row projects an
 // EMPTY authz_anchors set: only an actor holding the reserved WildcardAnchor
-// grant ever matches. The picker still works before any applicant has
-// selected who they are: the app mints its own fixed-subject staff token
-// (s.adminActor, the same root-equivalent identity the app already connects
-// to NATS as via handleStaffDevToken), so the client never needs a prior
-// login to bootstrap identity selection.
+// grant ever matches. A session without it therefore reads an empty roster, and
+// the surfaces that decorate keys with names fall back to the keys.
 
 // protectedIdentityRow is one row of the applicantRosterRead protected
 // Postgres read model, as scanned from the RLS-scoped read. NAME + STATE

@@ -8,18 +8,18 @@ import (
 )
 
 // healthProbe re-checks loftspace-app's own dependencies each tick — the
-// admin actor, NATS, the protected read-model pool, and the read-auth
+// bootstrap file, NATS, the protected read-model pool, and the session-auth
 // posture — so a heartbeat can never merely echo a boot-time snapshot
 // (a static "always healthy" heartbeat would have hidden the 2026-07-01
 // bootstrap-version failure this probe exists to surface).
 func (s *server) healthProbe(ctx context.Context) healthkv.Snapshot {
 	var issues []healthkv.Issue
 
-	if s.adminActor == "" {
+	if !s.bootstrapLoaded {
 		issues = append(issues, healthkv.Issue{
-			Code:     "AdminActorUnconfigured",
+			Code:     "BootstrapUnloaded",
 			Severity: "error",
-			Message:  "bootstrap.json not loaded (version mismatch?); apply/sign will 400",
+			Message:  "bootstrap.json not loaded (version mismatch?); platform-derived bucket names are unavailable",
 		})
 	}
 	if s.conn == nil || !s.conn.NATS().IsConnected() {
@@ -45,7 +45,7 @@ func (s *server) healthProbe(ctx context.Context) healthkv.Snapshot {
 		issues = append(issues, healthkv.Issue{
 			Code:     "NoAuthPosture",
 			Severity: "warning",
-			Message:  "no read-auth posture configured; protected reads (/api/applications) will 401",
+			Message:  "no session-auth posture configured; every /api/* request will 401",
 		})
 	}
 
