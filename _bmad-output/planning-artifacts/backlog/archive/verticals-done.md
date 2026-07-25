@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-19 · `c662dc54` · ~~F3 anchors~~ — **this SHA never reached main** (dangling, on no branch); the work was reconstructed in `5c797e03` + `415e18f3`. Left as a marker: a Done-log SHA is not proof the code landed
 - 2026-07-19 · `58d165ee` · Facet staff worlds F2 — `permission forOperation meta` + role-derived catalog/queue sibling lenses + staff read-grant slice; frontOfHouse Personal-Lens control grant (staff device synced nothing without it)
 - 2026-07-19 · `cc50f86a` · Facet staff worlds F1 — `worksAt` staff spine + staff op set widened onto the shipped `frontOfHouse`; showcase staff persona; live-verified narrower-than-root
 - 2026-07-19 · `753637ca` · Descriptor dispatch declares its optional reads — `Dispatch.OptionalReads` + a `:id` bare-id modifier for link keys; café OpenTab/Settle now fully Facet-drivable, open→settle→reopen proven from the declarations

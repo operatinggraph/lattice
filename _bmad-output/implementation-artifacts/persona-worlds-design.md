@@ -1353,6 +1353,40 @@ the standing path); no `AssignUnitOwner` actor binding (its own filed row); no n
 or FE change; no `LOFTSPACE_APP_DEMO_PERSONAS` wiring (the demo box fences **Facet** only, `demo-up.sh:86` —
 LoftSpace is not in persona posture there, so no deploy config rides on this).
 
+**As-built — Inc 4 SHIPPED (2026-07-25, `4aad350b`).** The plain-landlord cell exists. Nora Vance holds
+`consumer` and nothing else, manages Unit 4, and that unit carries a listing, an address, and a signed
+undecided application from a walk-in applicant. Seed-only: no package, permission, script, lens or FE change,
+so no version bump (`lint-package-version` confirms no `packages/` content changed).
+
+*One addition beyond the brief's touch-list, in scope.* The brief planned a unit + application; the build also
+seeds a **listing**, because `SetListingStatus` — named in the scope sentence — rejects a unit with no listing
+to transition, so the cell was not exercisable without one. Caught by live verification, not by the scouts.
+
+*Live-verified against the running stack, both directions.* The discriminating pair uses the fact that the
+ownership probe answers **before** `require_live_unit` and before the listing read: the landlord's
+`SetListingStatus` is **accepted and committed** on Unit 4, and **AuthDenied by `require_manages`** on Unit 3
+(the staff persona's unit). The denial also proves the grant half — a persona lacking `consumer` would have
+been denied at step 3 with `NoCapabilityEntry`/`OperationNotPermitted` and never reached the script's own
+probe, so reaching the probe *is* the evidence the scope=self row matched. `/api/landlord/applications` returns
+`scope: rls` with exactly one unit and one application, and a rerun of the seed recovers the same identity
+rather than minting a second.
+
+*A first positive attempt was inconclusive and was redone.* Declaring `.listing` in `reads` killed the op at
+step-4 hydration (`HydrationMiss`) before the script ran, which proves nothing about authorization; moving it
+to `optionalReads` let the script run and fail `NoListing`, which does. Recorded because the two rejections
+look equally like "it didn't work" and only one of them is evidence.
+
+*Residual, filed as a row in the same docs commit:* the same first-touch limitation means the **bound
+provider / serviceprovider / instructor** personas hold their entity role alone and no `consumer`, so they too
+can reach no `consumer` scope=self grant — consumer named as the W1/W3/W4 self-service surfaces. Not filed,
+deliberately: the two Inc 3 residuals (op-meta `authContext`, `AssignUnitOwner` actor binding) already have
+their own rows and are untouched by this increment.
+
+**Scope-diff gate: PASS** — every touch traces to seeding the persona cell that makes Inc 3's five grants
+reachable. The listing is the one addition, and it is required by an op the scope sentence names rather than an
+adjacent mechanism substituted for it. The staff persona, its Unit 3 beat, and every existing grant, guard and
+role assignment are untouched.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
