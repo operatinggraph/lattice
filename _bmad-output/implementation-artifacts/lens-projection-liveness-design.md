@@ -368,3 +368,98 @@ review — it is not a tail to bolt onto this one.
 - The business-lens sweep **verdict reporting** (`LensCoverageDivergence` / `LensRepairFailing`) was
   built and reverted with Inc 1 — it is dead reporting until a business lens actually has a sweeper,
   so it belongs to the direction-1 fire above, not here.
+
+---
+
+## 11. Fire 6 — direction 1 becomes sound for a filtering lens (build note / fire brief)
+
+The fire §10.1 named as "the honest next increment". It is a **security-plane** change: it edits the
+auth-plane sweep's own selection algorithm.
+
+**Scope sentence (verbatim, from the board row).** *"Direction 1 counts a live anchor with no target
+key as divergence — true only for a total-coverage lens. For a filtering lens (`emptyBehavior:
+delete`) that is the normal state, so the same sorted-first anchors fill the batch every tick (no
+cursor), direction 2 never runs and the deep verify is throttled 5×. Latent on `capabilityEphemeral`."*
+
+**Two grounding corrections to §10.1 (verified, and they change the shape).**
+
+1. **`EmptyBehavior` is not the discriminator — every shipped actorAggregate lens is `delete`.** All
+   19 of them, the three auth-plane ones (`capabilityRoles`, `capabilityServiceAccess`,
+   `capabilityEphemeral`) included (`projection/output.go:11-25` for the constants; the corpus
+   confirmed across `packages/*/lenses.go`). §10.1's proposed rule — "a lens whose `EmptyBehavior` is
+   `delete` must not treat absence as divergence" — would therefore disable direction 1 for **every**
+   lens including the total-coverage auth-plane ones, deleting the detector the sweep was built for.
+   The discriminator has to come from somewhere else.
+2. **The defect is LIVE on the auth plane, not latent.** `capabilityEphemeral` anchors on `identity`
+   and matches only an identity holding a live task grant (`packages/orchestration-base/lenses.go:280`
+   — `task.data.expiresAt > $now`), so *most identities legitimately have no row*. Its plan is
+   installed today (`capability-kv` ⇒ `IsAuthPlane`), so on any cell with ~20 live identities lacking a
+   task grant, direction 1 already fills the whole prefilter every tick. The board's "latent" is wrong.
+
+**The sharpest consequence, which §10.1 understated — direction 2 is the ONLY orphan detector.**
+Direction 3 walks `anchors` (`sweep.go:605`); an orphan target key's anchor is by definition *not* in
+`anchors`, so the deep verify can never reach one. With direction 1 monopolizing the shared
+`prefilterCap`, direction 2 `break`s on its first key (`sweep.go:580`) and an orphaned
+`cap.ephemeral.<actor>` row — a stale ephemeral **grant** whose identity vertex is gone — is never
+retracted. That is a fail-open on the auth plane, live today.
+
+**A fourth defect, found during grounding and not previously filed.** Direction 1 builds the
+`expected` key-map *inside* its own budget-limited loop (`sweep.go:553-566`), so when it breaks on a
+full budget, `expected` is **incomplete**. Direction 2 then treats every target key whose anchor sorted
+after the break point as an orphan. Today that is masked — direction 2's very first `add` fails on the
+same full budget — but it is a live trap: the moment direction 2 is given a reserved quota (which
+fixing the above requires), it would spend that quota re-projecting perfectly healthy actors. Building
+`expected` must be separated from selecting candidates.
+
+**Decisions taken here as Winston (impl-level, recorded not parked).**
+
+1. **Direction 1's budget is *earned by its hit rate*, not granted by a lens classification.** Its
+   premise ("no row ⇒ divergent") is a hypothesis the sweep already tests every tick: `Reproject`
+   reports `Wrote`. So direction 1 keeps the full prefilter share while its candidates heal something,
+   and drops to a floor after a pass in which it selected candidates and **none** wrote. One pass of
+   evidence, re-evaluated every pass, restored instantly by a single productive candidate. This needs
+   no DDL field, no contract change, and no lens taxonomy — and it is *correct in both regimes*,
+   unlike any fixed cap: a mass first-projection loss on a total-coverage lens still gets the full
+   share (every candidate writes), while `capabilityEphemeral`'s steady state decays to the floor.
+   A fixed small cap was rejected precisely because it would slow real auth-plane mass recovery ~5×.
+2. **Direction 2's reservation is sized by the orphans that actually exist** (`min(batch/5,
+   orphanCount)`, computed with no I/O from `targets - expected`). So a lens with no orphans hands
+   direction 1 exactly the budget it has today — the reservation costs nothing when unneeded, and
+   there is no across-the-board regression to direction 1's share.
+3. **Direction 1's cursor is in-memory, not persisted.** Direction 3's cursor is persisted because it
+   is the *completeness* guarantee. Direction 1 is a priority hint; a restart re-walking it from the
+   start is bounded and self-correcting, and keeping it out of `SetSweepProgress` avoids a Health-KV
+   schema change in a security-plane fire.
+4. **Direction 2's candidate order becomes deterministic** (sorted) instead of Go map order, so a
+   capped tick picks the same orphans rather than a random subset. No cursor: a retracted orphan
+   leaves the set, so the set drains; a failing one is yielded by the existing per-actor backoff.
+
+**The invariant this fire must not break.** On a total-coverage, converged auth-plane lens
+(`capabilityRoles`, `capabilityServiceAccess`) the selection must be **byte-for-byte what it is
+today**: direction 1 selects nothing, so it never gathers unproductive evidence and never floors;
+orphanCount is 0 so direction 2 reserves nothing; the deep verify gets the full batch. The change is
+strictly a widening for the lens shapes that are broken today.
+
+**Touch-list (verified `file:line`).**
+
+- `internal/refractor/pipeline/sweep.go:502-618` — `candidates` restructured: complete `expected` map
+  first, then quota computation, then the three cursored/capped directions.
+- `internal/refractor/pipeline/sweep.go:122-135` — `Sweeper` gains the direction-1 cursor + the
+  productivity flag; `sweep.go:105-121` doc comment re-stated (it asserts the prefilter catches "the
+  definite cases", which is what this fire qualifies).
+- `internal/refractor/pipeline/sweep.go:250-305` — `pass` attributes writes back to direction 1 so
+  the hit rate is measured; an errored reproject is *no evidence*, not negative evidence.
+- `internal/refractor/pipeline/sweep_test.go` — new cases beside the existing ones.
+- `docs/components/refractor.md` — the sweep's selection description.
+
+**Increment order + green checks.**
+
+- **Inc 1 — separate `expected` from selection + give direction 2 its sized reservation + direction 1
+  its cursor.** Green: `go test ./internal/refractor/...`.
+- **Inc 2 — the earned budget.** Green: new unit tests proving the floor engages on an all-miss pass,
+  releases on a hit, and never engages on a converged total-coverage lens.
+
+**Non-goals (this fire).** No widening of the sweep to business lenses (that is the still-blocked row,
+and §10.1's other two findings — the `severity: error` escalation contradicting the business-lens
+invariant, and 14 lenses each enumerating the shared `weaver-targets` bucket — remain **its** scope,
+not this one). No change to thresholds, health issue names, the Health-KV schema, or any contract.
