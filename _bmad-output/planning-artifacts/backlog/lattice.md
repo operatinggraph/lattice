@@ -189,6 +189,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `fbf46f9a` · [scripts] verify-package-loftspace-domain asserts each (op, scope) grant — one id per operationType let map iteration hide `SetListingStatus`'s second (landlord scope=self) vertex, red-or-green at random
 - 2026-07-25 · `8e61174f` · [appsession,demo] a request must prove it came from the app's own origin — Fetch-Metadata + Origin gate at the RequireSession choke point, `_PUBLIC_ORIGIN` + demo wiring, kit component page
 - 2026-07-25 · `2fff6e40` · [starlarksandbox] a script gets no host output channel — `print` discarded, so `print(state)` no longer renders decrypted plaintext to the Processor's stderr
 - 2026-07-25 · `ae05f60a` · [processor] the external-egress guard fires on what the script CONSUMED, not on what hydration decrypted — closes the sensitive-class oracle; whole-set exposure records, `state` attrs default-deny

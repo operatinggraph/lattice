@@ -63,11 +63,19 @@ sleep 1
 # browser's own Origin on every write and puts Secure on the session cookie.
 # Absent, Facet still starts and serves reads, but every write 403s — so say so
 # loudly rather than leaving a silent half-working demo.
+# A proxied box with no marker is a hard stop, not a warning: Caddy being active
+# says this box IS served publicly, so bringing Facet up undeclared would publish
+# a demo whose pages render and whose every write — sign-in included — 403s, with
+# nothing in the UI to say why. Refusing here is louder than a visitor finding out.
 facet_public_origin=""
 if [[ -f "$REPO_ROOT/demo-host" ]]; then
 	facet_public_origin="https://$(cat "$REPO_ROOT/demo-host")"
+elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet caddy; then
+	echo "demo-up: caddy is serving this box but there is no demo-host marker, so Facet cannot be told its public origin" >&2
+	echo "demo-up: run 'deploy/demo/demo-bootstrap.sh <host> [loupe-host]' — a pull alone does not write the marker" >&2
+	exit 1
 else
-	echo "demo-up: no demo-host marker — re-run demo-bootstrap.sh; until then every write through the public URL is refused" >&2
+	echo "demo-up: no demo-host marker and no local proxy — starting Facet for loopback access only" >&2
 fi
 FACET_STORE_DIR=./facet-store \
 	FACET_PUBLIC_ORIGIN="$facet_public_origin" \
