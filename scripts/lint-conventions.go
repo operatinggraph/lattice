@@ -52,7 +52,9 @@
 //     platform + verticals sweeps closed the debt list). Every script
 //     `kv.Read(` / `kv.Links(` call site in a
 //     packages/ non-test file must carry a `# read-posture: (a|c|d|e|f)`
-//     Starlark annotation on the call line or within the preceding lines:
+//     Starlark annotation on the call line or in the comment block directly
+//     above it (annotationSpans — a declaration binds to the statement it
+//     introduces and that statement's block, never to a later sibling):
 //     (a) required read declared in contextHint.reads by the dispatcher (the
 //     key's absence is a correctness error — annotate the site's own
 //     dispatcher(s) rather than leaving it silently debt-classed once
@@ -91,22 +93,23 @@
 //     (resource-bind) the validated target is bound to the resource the op acts
 //     on (`op.authTargetValidated and op.authContextTarget == <resourceKey>`) —
 //     the annotated line must itself carry `op.authTargetValidated`;
-//     (selector) a non-security branch selector, no confinement rides on it;
-//     (legacy-self-exempt) an exemption keyed on `== op.actor`, admitted only in
-//     the files authCtxTargetLegacyFiles names.
-//     There is deliberately NO shape for an exemption keyed on target presence:
-//     the correct spelling of an exemption is `op.authTargetValidated`, the
-//     platform bit that is true only when step 3 CHECKED the target. Every shape
-//     needs a trailing `<why>` — declaring is cheap, forgetting fails closed.
-//     Two residuals both gates share with the `# read-posture:` convention they
-//     mirror, stated so nobody reads more into a green run than is there. (1) An
-//     annotation covers the following `readPostureWindow` lines, so a reference
-//     inserted INTO an already-annotated block inherits that block's
-//     declaration. (2) The gate is fail-closed against FORGETTING to declare,
-//     not against MIS-declaring: only (resource-bind) and (legacy-self-exempt)
-//     carry a structural check, so a wrong (selector) or (ownership) passes. The
+//     (selector) a non-security branch selector, no confinement rides on it.
+//     There is deliberately NO shape for an exemption, keyed on the target's
+//     presence OR on its equality with `op.actor`: a scope=any caller chooses
+//     both, so neither proves the platform checked anything. The correct
+//     spelling of an exemption is `op.authTargetValidated`, the platform bit
+//     that is true only when step 3 CHECKED the target. Every shape needs a
+//     trailing `<why>` — declaring is cheap, forgetting fails closed.
+//     What a green run does NOT claim, shared with the `# read-posture:`
+//     convention these mirror: the gates are fail-closed against FORGETTING to
+//     declare, not against MIS-declaring — only (resource-bind) carries a
+//     structural check, so a wrong (selector) or (ownership) passes. The
 //     author's `<why>` is what a reviewer reads; the gate only guarantees one
-//     was written.
+//     was written. A declaration reaches only the statement it introduces and
+//     that statement's own block (annotationSpans), so it can never spread to a
+//     sibling its author never saw — but a reference inserted INSIDE the
+//     annotated guard still inherits it, which is the declaration's own scope
+//     and the one place inheritance is intended.
 //   - Workplace-exemption discharge (BLOCKING; same design §3.4.1). A validated
 //     target proves the target was CHECKED, not that it IS the resource the op
 //     writes — `workplace_exempt()` returning true on a grant scoped to resource
@@ -176,7 +179,7 @@ var (
 	// call must carry on its line or within the preceding window.
 	kvCall        = regexp.MustCompile(`kv\.(Read|Links)\(`)
 	kvLinksCall   = regexp.MustCompile(`kv\.Links\(`)
-	readPosture   = regexp.MustCompile(`#\s*read-posture:\s*\(([acdef])\)`)
+	readPosture   = regexp.MustCompile(`#\s*read-posture:\s*\(([acdef])\)(.*)$`)
 	scriptMutates = regexp.MustCompile(`"op":\s*"(create|update|tombstone)"|make_(vtx|link|aspect|update)`)
 	// lensAdapterPostgres anchors a pkgmgr.LensSpec composite literal's Adapter
 	// field declaring "postgres" (Contract #6 §6.14: a postgres business read
@@ -222,27 +225,16 @@ var workplaceExemptShapes = map[string]bool{
 }
 
 // authCtxTargetShapes are the declarations a packages/ script may make about an
-// `op.authContextTarget` reference. An EXEMPTION is deliberately absent: the
-// correct spelling of one is `op.authTargetValidated`.
+// `op.authContextTarget` reference. An EXEMPTION is deliberately absent, in
+// either spelling: neither the target's presence nor its equality with
+// `op.actor` proves the platform checked it, and a scope=any caller chooses
+// both. The correct spelling of an exemption is `op.authTargetValidated`, and
+// every confinement guard in the corpus now uses it.
 var authCtxTargetShapes = map[string]bool{
-	"ownership":          true,
-	"payload-bind":       true,
-	"resource-bind":      true,
-	"selector":           true,
-	"legacy-self-exempt": true,
-}
-
-// authCtxTargetLegacyFiles are the files whose confinement exemption still keys
-// on `op.authContextTarget == op.actor` rather than the platform's
-// `op.authTargetValidated` bit. The two predicates do NOT agree on every path —
-// a scope=any caller naming its own actor key satisfies the equality and is
-// exempted where the platform bit would confine it — so migrating them is a
-// behavior change scoped as its own item
-// (authcontext-target-validated-primitive-design.md §6), not a cleanup. The
-// (legacy-self-exempt) shape is confined to this list so the next author cannot
-// reach for it: a new guard has no legacy to declare.
-var authCtxTargetLegacyFiles = map[string]bool{
-	"packages/clinic-domain/ddls.go": true,
+	"ownership":     true,
+	"payload-bind":  true,
+	"resource-bind": true,
+	"selector":      true,
 }
 
 // loadOrGenerateExemptFile is the one test file that legitimately keeps the
@@ -252,9 +244,88 @@ var authCtxTargetLegacyFiles = map[string]bool{
 // an import cycle there.
 const loadOrGenerateExemptFile = "internal/pkgmgr/installer_test.go"
 
-// readPostureWindow is how many lines above a kv.Read/kv.Links call the
-// `# read-posture:` annotation may sit (the call's own comment block).
-const readPostureWindow = 8
+// annotation is one classification comment: the raw line it sits on (sub-field
+// checks like `relation=` / `epoch=` read that line, not the annotated
+// statement), the shape or class it declares, and the author's trailing `<why>`.
+type annotation struct {
+	text  string
+	shape string
+	why   string
+}
+
+// annotationSpans resolves, for one annotation kind, which lines each
+// classification comment in the file covers.
+//
+// An annotation binds to ONE statement: the line it trails, or — when it sits on
+// its own comment line — the first code line beneath it, reachable across
+// further comment lines only. A blank line ends a comment block, so an
+// annotation separated from the code by one covers nothing and every reference
+// below it fails closed. Coverage is that statement plus the statement's own
+// indentation block: each following line indented deeper than it (blank lines
+// carried along), closed by the first line at or left of its indentation.
+//
+// Binding to the statement is what makes the declaration mean what its author
+// wrote. A fixed N-line window instead let any reference in the following N
+// lines inherit a neighbouring declaration, so a reference inserted after an
+// annotated guard silently acquired a claim nobody made about it — the one shape
+// a default-deny gate must not admit. A new sibling statement is now undeclared,
+// and undeclared is denied.
+//
+// Later annotations overwrite earlier ones wherever both cover a line, so a
+// nested reference resolves to its nearest enclosing declaration.
+func annotationSpans(lines []string, re *regexp.Regexp) map[int]annotation {
+	out := map[int]annotation{}
+	for i, line := range lines {
+		m := re.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		a := annotation{text: line, shape: m[1]}
+		if len(m) > 2 {
+			a.why = m[2]
+		}
+		anchor := i
+		if isCommentLine(line) {
+			anchor = -1
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "" {
+					break
+				}
+				if isCommentLine(lines[j]) {
+					continue
+				}
+				anchor = j
+				break
+			}
+			if anchor < 0 {
+				continue
+			}
+		}
+		indent := indentWidth(lines[anchor])
+		out[anchor+1] = a
+		for j := anchor + 1; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) != "" && indentWidth(lines[j]) <= indent {
+				break
+			}
+			out[j+1] = a
+		}
+	}
+	return out
+}
+
+// isCommentLine reports whether a line is only a comment — Starlark `#` or Go
+// `//`, the two forms these embedded scripts carry.
+func isCommentLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//")
+}
+
+// indentWidth counts a line's leading whitespace characters (a tab counts as
+// one, matching exemptionHelpers) — consistent within a file, which is all the
+// block walk compares.
+func indentWidth(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
 
 // platformCmds are the platform / admin / debug-inspector binaries that
 // legitimately touch Core KV — the platform components ARE the system, and P5
@@ -440,12 +511,17 @@ func scanSource(path string, data []byte) []finding {
 	// The file's own validated-target exemption helpers, derived from the
 	// script text rather than a hardcoded name list (see exemptionHelpers).
 	var exemptHelpers map[string]bool
+	// Which annotation, if any, covers each line — one map per annotation kind,
+	// each resolved against the annotated statement's own block
+	// (see annotationSpans).
+	var postureAt, authCtxAt, workplaceAt map[int]annotation
 	if postureScoped {
 		exemptHelpers = exemptionHelpers(data)
+		lines := strings.Split(string(data), "\n")
+		postureAt = annotationSpans(lines, readPosture)
+		authCtxAt = annotationSpans(lines, authCtxTargetShape)
+		workplaceAt = annotationSpans(lines, workplaceExemptShape)
 	}
-	// window holds the last readPostureWindow raw lines, for locating a
-	// `# read-posture:` annotation in the call's own comment block.
-	var window []string
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	ln := 0
@@ -468,13 +544,9 @@ func scanSource(path string, data []byte) []finding {
 			out = append(out, finding{file: path, line: ln, msg: "per-test bootstrap.LoadOrGenerate — re-populates internal/bootstrap's globals per test, which races under t.Parallel(); use testutil.EnsurePrimordials(t) instead (bootstrap-primordial-globals-race-design.md §4)"})
 		}
 		if postureScoped {
-			out = append(out, checkReadPosture(path, ln, line, window, fileMutates)...)
-			out = append(out, checkAuthContextTarget(path, ln, line, window)...)
-			out = append(out, checkWorkplaceExempt(path, ln, line, window, exemptHelpers)...)
-		}
-		window = append(window, line)
-		if len(window) > readPostureWindow {
-			window = window[1:]
+			out = append(out, checkReadPosture(path, ln, line, postureAt[ln], fileMutates)...)
+			out = append(out, checkAuthContextTarget(path, ln, line, authCtxAt[ln])...)
+			out = append(out, checkWorkplaceExempt(path, ln, line, workplaceAt[ln], exemptHelpers)...)
 		}
 	}
 	return out
@@ -580,31 +652,17 @@ func checkLensProtectedByDefault(path, src string) []finding {
 
 // checkReadPosture classifies one script kv.Read/kv.Links call line against
 // the Contract #2 §2.5 read posture (all findings BLOCKING — warn:false).
-// window is the preceding raw lines; the annotation may sit there or on the
-// call line itself. Comment lines (Go `//` or Starlark `#`) are skipped —
-// prose ABOUT kv.Read is not a call.
-func checkReadPosture(path string, ln int, line string, window []string, fileMutates bool) []finding {
-	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+// declared is the `# read-posture:` annotation covering this line, resolved by
+// annotationSpans. Comment lines (Go `//` or Starlark `#`) are skipped — prose
+// ABOUT kv.Read is not a call.
+func checkReadPosture(path string, ln int, line string, declared annotation, fileMutates bool) []finding {
+	if isCommentLine(line) {
 		return nil
 	}
 	if !kvCall.MatchString(line) {
 		return nil
 	}
-	// Locate the nearest annotation: the call line first, then the window
-	// bottom-up (the closest preceding comment wins).
-	var class string
-	var annotated string
-	if m := readPosture.FindStringSubmatch(line); m != nil {
-		class, annotated = m[1], line
-	} else {
-		for i := len(window) - 1; i >= 0; i-- {
-			if m := readPosture.FindStringSubmatch(window[i]); m != nil {
-				class, annotated = m[1], window[i]
-				break
-			}
-		}
-	}
+	class, annotated := declared.shape, declared.text
 	isLinks := kvLinksCall.MatchString(line)
 	if class == "" {
 		call := "kv.Read"
@@ -636,12 +694,11 @@ func checkReadPosture(path string, ln int, line string, window []string, fileMut
 // checkAuthContextTarget default-denies one script reference to
 // `op.authContextTarget` unless the author declared its shape
 // (authcontext-target-validated-primitive-design.md §5.5; all findings
-// BLOCKING). window is the preceding raw lines; the annotation may sit there or
-// on the reference line itself. Comment lines are skipped — prose ABOUT the
+// BLOCKING). declared is the `# authcontext-target:` annotation covering this
+// line, resolved by annotationSpans. Comment lines are skipped — prose ABOUT the
 // field is not a use of it.
-func checkAuthContextTarget(path string, ln int, line string, window []string) []finding {
-	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+func checkAuthContextTarget(path string, ln int, line string, declared annotation) []finding {
+	if isCommentLine(line) {
 		return nil
 	}
 	if !authCtxTargetRef.MatchString(line) {
@@ -656,17 +713,7 @@ func checkAuthContextTarget(path string, ln int, line string, window []string) [
 		"resource the op acts on — the same line must carry op.authTargetValidated), or " +
 		"`# authcontext-target: (selector) <why>` (a non-security branch selector)."
 
-	var shape, why string
-	if m := authCtxTargetShape.FindStringSubmatch(line); m != nil {
-		shape, why = m[1], m[2]
-	} else {
-		for i := len(window) - 1; i >= 0; i-- {
-			if m := authCtxTargetShape.FindStringSubmatch(window[i]); m != nil {
-				shape, why = m[1], m[2]
-				break
-			}
-		}
-	}
+	shape, why := declared.shape, declared.why
 	if shape == "" {
 		return []finding{{file: path, line: ln, warn: false,
 			msg: "authcontext-target: undeclared op.authContextTarget reference — authContext.target is " +
@@ -691,27 +738,8 @@ func checkAuthContextTarget(path string, ln int, line string, window []string) [
 					"op.authTargetValidated on the same line — binding an UNVALIDATED target to the " +
 					"acted-on resource proves nothing about who may act on it (design §3.4.1)"})
 		}
-	case "legacy-self-exempt":
-		if !authCtxTargetLegacyFiles[repoRelPackagePath(path)] {
-			out = append(out, finding{file: path, line: ln, warn: false,
-				msg: "authcontext-target: (legacy-self-exempt) is admitted only in the files " +
-					"authCtxTargetLegacyFiles names — a new guard has no legacy to declare. " + remedy})
-		}
 	}
 	return out
-}
-
-// repoRelPackagePath normalizes a path to its repo-relative `packages/…` form.
-// The hook (`--hook`) is handed an ABSOLUTE path by the editor while CI passes
-// `git ls-files` output, and a lookup keyed on the repo-relative spelling
-// otherwise misses under the hook — turning a correctly-declared site into a
-// blocking finding that pushes an editing agent to "fix" code that is right.
-func repoRelPackagePath(path string) string {
-	slash := filepath.ToSlash(path)
-	if i := strings.LastIndex(slash, "/packages/"); i >= 0 {
-		return slash[i+1:]
-	}
-	return slash
 }
 
 // exemptionHelpers derives the file's validated-target exemption helpers from
@@ -785,11 +813,10 @@ func exemptionHelpers(data []byte) map[string]bool {
 // primitive-design.md §3.4.1; all findings BLOCKING). Such a helper returns
 // true for a VALIDATED target — which proves the target was checked, NOT that
 // it is the resource the op writes. Where nothing closes that gap, a caller
-// holding a legitimate grant for one resource can act on another.
-func checkWorkplaceExempt(path string, ln int, line string, window []string, helpers map[string]bool) []finding {
-	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") ||
-		starlarkDef.MatchString(line) {
+// holding a legitimate grant for one resource can act on another. declared is
+// the `# workplace-exempt:` annotation covering this line (annotationSpans).
+func checkWorkplaceExempt(path string, ln int, line string, declared annotation, helpers map[string]bool) []finding {
+	if isCommentLine(line) || starlarkDef.MatchString(line) {
 		return nil
 	}
 	var called string
@@ -812,17 +839,7 @@ func checkWorkplaceExempt(path string, ln int, line string, window []string, hel
 		"<resourceKey> comparison binds it), or `# workplace-exempt: (per-call-site) <why>` (this " +
 		"call is inside another exemption helper, so the discharge belongs to ITS call sites)."
 
-	var shape, why string
-	if m := workplaceExemptShape.FindStringSubmatch(line); m != nil {
-		shape, why = m[1], m[2]
-	} else {
-		for i := len(window) - 1; i >= 0; i-- {
-			if m := workplaceExemptShape.FindStringSubmatch(window[i]); m != nil {
-				shape, why = m[1], m[2]
-				break
-			}
-		}
-	}
+	shape, why := declared.shape, declared.why
 	if shape == "" {
 		return []finding{{file: path, line: ln, warn: false,
 			msg: "workplace-exempt: undeclared " + called + "() call — a validated target proves the " +
@@ -876,16 +893,54 @@ func selfTest() []string {
 		{"declared selector passes", fixture,
 			"\t# authcontext-target: (selector) picks the amount source\n" +
 				"\tis_self = op.authContextTarget != \"\"\n", ""},
-		{"a declaration covers the following lines' derived reads", fixture,
+		{"a declaration covers its own statement's block", fixture,
 			"\t# authcontext-target: (ownership) target must own the resource\n" +
 				"\tif op.authContextTarget != \"\":\n" +
-				"\t\t_, tid = parts_of(op.authContextTarget, \"authContextTarget\", \"identity\")\n", ""},
-		{"a declaration does NOT reach past the annotation window", fixture,
+				"\t\t_, tid = parts_of(op.authContextTarget, \"authContextTarget\", \"identity\")\n" +
+				"\t\tif op.authContextTarget != actor_identity:\n" +
+				"\t\t\tfail(\"x\")\n", ""},
+		{"a declaration does NOT reach the NEXT sibling statement", fixture,
 			"\t# authcontext-target: (ownership) target must own the resource\n" +
 				"\tif op.authContextTarget != \"\":\n" +
-				"\t\ta = 1\n\t\tb = 2\n\t\tc = 3\n\t\td = 4\n\t\te = 5\n\t\tf = 6\n\t\tg = 7\n\t\th = 8\n" +
+				"\t\t_, tid = parts_of(op.authContextTarget, \"authContextTarget\", \"identity\")\n" +
+				"\tother = op.authContextTarget\n",
+			"undeclared op.authContextTarget reference"},
+		{"a declaration does NOT reach a following sibling with no block between", fixture,
+			"\t# authcontext-target: (selector) picks the amount source\n" +
+				"\tis_self = op.actor\n" +
+				"\tother = op.authContextTarget\n",
+			"undeclared op.authContextTarget reference"},
+		{"an annotation separated from the code by a blank line covers nothing", fixture,
+			"\t# authcontext-target: (ownership) target must own the resource\n" +
+				"\n" +
 				"\tif op.authContextTarget != \"\":\n",
 			"undeclared op.authContextTarget reference"},
+		{"a blank line INSIDE the annotated block does not close it", fixture,
+			"\t# authcontext-target: (ownership) target must own the resource\n" +
+				"\tif op.authContextTarget != \"\":\n" +
+				"\t\ta = 1\n" +
+				"\n" +
+				"\t\t_, tid = parts_of(op.authContextTarget, \"authContextTarget\", \"identity\")\n", ""},
+		{"a nested declaration wins over the enclosing one", fixture,
+			"\t# authcontext-target: (selector) outer branch selector\n" +
+				"\tif op.authContextTarget != \"\":\n" +
+				"\t\t# authcontext-target: (resource-bind) names this work order\n" +
+				"\t\tbound = op.authContextTarget == wkey\n",
+			"must pair the comparison with op.authTargetValidated"},
+		{"a trailing declaration covers its own block but not its sibling", fixture,
+			"\tif op.authContextTarget != \"\":  # authcontext-target: (ownership) owns it\n" +
+				"\t\t_, tid = parts_of(op.authContextTarget, \"authContextTarget\", \"identity\")\n" +
+				"\tother = op.authContextTarget\n",
+			"undeclared op.authContextTarget reference"},
+		{"a read-posture declaration binds to its own call", fixture,
+			"\tkey = hub + \".slot\"\n" +
+				"\t# read-posture: (d) declared optionalReads by the dispatcher\n" +
+				"\texisting = kv.Read(key)\n", ""},
+		{"a read-posture declaration does NOT reach the next sibling read", fixture,
+			"\t# read-posture: (d) declared optionalReads by the dispatcher\n" +
+				"\tdoc = kv.Read(key)\n" +
+				"\taspect = kv.Read(key + \".tenancy\")\n",
+			"unclassified kv.Read"},
 		{"declaration without a why is denied", fixture,
 			"\t# authcontext-target: (ownership)\n\tif op.authContextTarget != \"\":\n",
 			"declaration must state its `<why>`"},
@@ -899,16 +954,14 @@ func selfTest() []string {
 		{"resource-bind paired with the validated bit passes", fixture,
 			"\t# authcontext-target: (resource-bind) names this work order\n" +
 				"\tbound = op.authTargetValidated and op.authContextTarget == wkey\n", ""},
-		{"legacy-self-exempt outside the named files is denied", fixture,
-			"\t# authcontext-target: (legacy-self-exempt) my guard is old too\n" +
+		{"a self-equality exemption has no shape to declare, anywhere", fixture,
+			"\t# authcontext-target: (legacy-self-exempt) backstopped by identifiedBy\n" +
 				"\tif op.authContextTarget == op.actor:\n",
-			"admitted only in the files authCtxTargetLegacyFiles names"},
-		{"legacy-self-exempt inside a named file passes", "packages/clinic-domain/ddls.go",
+			"unknown shape (legacy-self-exempt)"},
+		{"the same holds in the file that once carried the legacy guard", "packages/clinic-domain/ddls.go",
 			"\t# authcontext-target: (legacy-self-exempt) backstopped by identifiedBy\n" +
-				"\tif op.authContextTarget == op.actor:\n", ""},
-		{"legacy-self-exempt passes under an ABSOLUTE path too", "/abs/checkout/packages/clinic-domain/ddls.go",
-			"\t# authcontext-target: (legacy-self-exempt) backstopped by identifiedBy\n" +
-				"\tif op.authContextTarget == op.actor:\n", ""},
+				"\tif op.authContextTarget == op.actor:\n",
+			"unknown shape (legacy-self-exempt)"},
 		{"prose about the field is not a use of it", fixture,
 			"\t# a caller could forge op.authContextTarget != \"\" here\n" +
 				"\t// op.authContextTarget is forwarded verbatim\n", ""},
@@ -930,7 +983,7 @@ func selfTest() []string {
 				"def site_gate():\n" +
 				"\tif workplace_exempt():  # workplace-exempt: (per-call-site) site_gate's callers discharge it\n" +
 				"\t\treturn\n" +
-				"def handler():\n\ta = 1\n\tb = 2\n\tc = 3\n\td = 4\n\te = 5\n\tf = 6\n\tg = 7\n" +
+				"def handler():\n" +
 				"\tif not site_gate():\n\t\tfail(\"x\")\n",
 			"undeclared site_gate() call"},
 		{"declared no-validated-path passes", fixture,
@@ -957,7 +1010,8 @@ func selfTest() []string {
 		var got []string
 		for _, fd := range scanSource(tc.path, []byte(tc.src)) {
 			if !strings.HasPrefix(fd.msg, "authcontext-target:") &&
-				!strings.HasPrefix(fd.msg, "workplace-exempt:") {
+				!strings.HasPrefix(fd.msg, "workplace-exempt:") &&
+				!strings.HasPrefix(fd.msg, "read-posture:") {
 				continue
 			}
 			hits++

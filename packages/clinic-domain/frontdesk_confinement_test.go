@@ -45,6 +45,10 @@ const (
 	fdProviderBID = "CLFDPRVDRBHJKMNPQRST"
 	fdPatientID   = "CLFDPATNTHJKMNPQRSTV"
 	fdVictimID    = "CLFDVCTMHJKMNPQRSTVW"
+	// fdOwnPatientID is a patient the front-desk actor DOES own (identifiedBy
+	// its own identity), so the ownership probe cannot be what rejects a
+	// booking for them — only workplace confinement can.
+	fdOwnPatientID = "CLFDMYPATNTHJKMNPQRS"
 
 	fdBuildingAKey = "vtx.building." + fdBuildingAID
 	fdBuildingBKey = "vtx.building." + fdBuildingBID
@@ -55,6 +59,9 @@ const (
 	// forged-authContext attack names to try to skip workplace confinement.
 	fdVictimKey        = "vtx.identity." + fdVictimID
 	fdPatientIDLinkKey = "lnk.patient." + fdPatientID + ".identifiedBy.identity." + fdVictimID
+
+	fdOwnPatientKey       = "vtx.patient." + fdOwnPatientID
+	fdOwnPatientIDLinkKey = "lnk.patient." + fdOwnPatientID + ".identifiedBy.identity." + fdActorID
 )
 
 // fdCapDoc grants the front-desk actor the same scope=any book/register surface
@@ -108,6 +115,13 @@ func seedFrontDeskTopology(t *testing.T, ctx context.Context, conn *substrate.Co
 	// self-book exemption.
 	clSeedVertex(t, ctx, conn, fdVictimKey, "identity", false)
 	clSeedLink(t, ctx, conn, fdPatientIDLinkKey, fdPatientKey, fdVictimKey, "identifiedBy", "identifiedBy")
+
+	// A second patient the front-desk actor genuinely owns. Booking for THIS
+	// patient satisfies the identifiedBy probe, so a rejection can only come
+	// from workplace confinement — the discrimination the forged-target vector
+	// needs to pass for the right reason.
+	clSeedVertex(t, ctx, conn, fdOwnPatientKey, "patient", false)
+	clSeedLink(t, ctx, conn, fdOwnPatientIDLinkKey, fdOwnPatientKey, fdActorKey, "identifiedBy", "identifiedBy")
 }
 
 // submitCreateApptAs books an appointment as an arbitrary actor on the standing
@@ -136,9 +150,9 @@ func submitCreateApptAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 // whether a scope=any staff caller can forge the consumer self-book exemption to
 // skip workplace confinement.
 func submitCreateApptWithTargetAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
-	cp *processor.CommitPath, cons jetstream.Consumer, label, providerKey, actorKey, target, starts, ends string, optionalReads []string) processor.MessageOutcome {
+	cp *processor.CommitPath, cons jetstream.Consumer, label, patientKey, providerKey, actorKey, target, starts, ends string, optionalReads []string) processor.MessageOutcome {
 	t.Helper()
-	payload := `{"patient":"` + fdPatientKey + `","provider":"` + providerKey +
+	payload := `{"patient":"` + patientKey + `","provider":"` + providerKey +
 		`","startsAt":"` + starts + `","endsAt":"` + ends + `","reason":"forged-target probe"}`
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -148,7 +162,7 @@ func submitCreateApptWithTargetAs(t *testing.T, ctx context.Context, conn *subst
 		SubmittedAt:   clSubmittedAnchor,
 		Class:         "appointment",
 		Payload:       json.RawMessage(payload),
-		ContextHint:   &processor.ContextHint{Reads: []string{fdPatientKey, providerKey}, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Reads: []string{patientKey, providerKey}, OptionalReads: optionalReads},
 		AuthContext:   &processor.AuthContext{Target: target},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -199,14 +213,16 @@ func TestFrontDesk_ConfinedToWorkplace(t *testing.T) {
 // adversarial review surfaced: step 3 authorizes a scope=any grant WITHOUT
 // inspecting authContext.target, and the Gateway forwards the client's
 // authContext verbatim — so a front-desk actor holding CreateAppointment
-// scope=any could attach an arbitrary target and, if workplace_exempt() keyed off
-// "target present", skip the workplace guard and book cross-building. Both forgery
-// shapes must be rejected:
+// scope=any can attach any target it likes. The exemption keys on
+// op.authTargetValidated, which step 3 sets only where it CHECKED the target, so
+// no target a scope=any caller chooses reaches the exemption. Three shapes:
 //
 //	(a) target = the patient's real linked identity (!= actor) — must NOT exempt.
-//	(b) target = the caller's own actor — exempts, but the op's identifiedBy check
-//	    then binds the patient to the caller's identity, so booking a patient the
-//	    caller does not own still fails.
+//	(b) target = the caller's own actor, booking a patient it genuinely OWNS —
+//	    the equality a self-exemption would have honoured, with the ownership
+//	    probe satisfied, so ONLY workplace confinement can reject it.
+//	(c) target = the caller's own actor, booking a patient it does NOT own —
+//	    rejected whichever guard fires first.
 func TestFrontDesk_ForgedTargetCannotSkipConfinement(t *testing.T) {
 	ctx, conn := setupClinicEnv(t)
 	testutil.SeedCapDoc(t, ctx, conn, fdCapDoc())
@@ -214,21 +230,37 @@ func TestFrontDesk_ForgedTargetCannotSkipConfinement(t *testing.T) {
 	seedFrontDeskTopology(t, ctx, conn)
 
 	// (a) target = the patient's linked identity, provider at building B (NOT the
-	// front desk's workplace). Under the fixed guard the forged target != actor, so
-	// the workplace check is NOT skipped and confinement rejects the cross-building
-	// booking. (Under the pre-fix "target != ''" guard this was Accepted.)
+	// front desk's workplace). The forged target was never validated, so the
+	// workplace check is not skipped and confinement rejects the cross-building
+	// booking.
 	if got := submitCreateApptWithTargetAs(t, ctx, conn, cp, cons, "fdfrga00000000001",
-		fdProviderBKey, fdActorKey, fdVictimKey, "2026-07-01T15:00:00Z", "2026-07-01T15:30:00Z",
+		fdPatientKey, fdProviderBKey, fdActorKey, fdVictimKey, "2026-07-01T15:00:00Z", "2026-07-01T15:30:00Z",
 		[]string{fdPatientIDLinkKey}); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk CreateAppointment cross-building with a forged authContext.target = %v, want Rejected — forging the consumer exemption must not skip workplace confinement", got)
 	}
 
-	// (b) target = the caller's OWN actor identity: workplace_exempt() is satisfied
-	// (target == actor), but the patient is identifiedBy the victim, not the caller,
-	// so the op's own identifiedBy check rejects the booking of a patient the caller
-	// does not own.
+	// (b) The vector a `target == op.actor` exemption admitted: the caller names
+	// its own actor key AND books a patient it genuinely owns, so the identifiedBy
+	// probe passes and cannot be what rejects. The booking is cross-building, and
+	// a scope=any grant leaves op.authTargetValidated false, so workplace
+	// confinement is the only thing left to reject it — and must.
 	if got := submitCreateApptWithTargetAs(t, ctx, conn, cp, cons, "fdfrgb00000000002",
-		fdProviderBKey, fdActorKey, fdActorKey, "2026-07-01T16:00:00Z", "2026-07-01T16:30:00Z",
+		fdOwnPatientKey, fdProviderBKey, fdActorKey, fdActorKey, "2026-07-01T16:00:00Z", "2026-07-01T16:30:00Z",
+		[]string{fdOwnPatientIDLinkKey}); got != processor.OutcomeRejected {
+		t.Fatalf("front-desk CreateAppointment cross-building for a patient it OWNS, target = own actor = %v, want Rejected — a caller-chosen target must not reach the self-service exemption", got)
+	}
+
+	// The same booking at the caller's OWN building is Accepted, so (b)'s rejection
+	// is the workplace guard and not some unrelated gate on this patient or slot.
+	if got := submitCreateApptWithTargetAs(t, ctx, conn, cp, cons, "fdfrgc00000000003",
+		fdOwnPatientKey, fdProviderAKey, fdActorKey, fdActorKey, "2026-07-01T16:00:00Z", "2026-07-01T16:30:00Z",
+		[]string{fdOwnPatientIDLinkKey}); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk CreateAppointment at its OWN building for a patient it owns = %v, want Accepted — (b) must fail on confinement, not on the patient", got)
+	}
+
+	// (c) target = own actor for a patient the caller does not own: rejected.
+	if got := submitCreateApptWithTargetAs(t, ctx, conn, cp, cons, "fdfrgd00000000004",
+		fdPatientKey, fdProviderAKey, fdActorKey, fdActorKey, "2026-07-01T17:00:00Z", "2026-07-01T17:30:00Z",
 		nil); got != processor.OutcomeRejected {
 		t.Fatalf("front-desk CreateAppointment with target = own actor for a patient it does not own = %v, want Rejected", got)
 	}

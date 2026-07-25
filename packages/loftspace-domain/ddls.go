@@ -404,10 +404,10 @@ def execute(state, op):
         # declares reads=[unit] only, so the aspect is NOT in state. A status
         # transition needs a listing to transition: a unit with none is rejected
         # (NoListing) rather than minting a bare {status}-only listing.
+        listing_key = unit + ".listing"
         # read-posture: (a) declared reads at SetListingStatus dispatch (both
         # the FE + the leaseApplicationComplete directOp declare unit.listing;
         # script-read-posture-design.md §13 hard case 4).
-        listing_key = unit + ".listing"
         existing = kv.Read(listing_key)
         if existing == None or existing.isDeleted:
             fail("NoListing: unit " + unit + " has no listing to transition")

@@ -1670,24 +1670,18 @@ def workplace_exempt():
     # this; require_workplace re-checks it anyway, so a site that forgets the
     # gate is still CORRECT, only slower.
     #
-    # The self-service exemption keys on authContextTarget == op.actor, NOT on
-    # authContextTarget != "": step 3 authorizes a scope=ANY grant WITHOUT
-    # inspecting authContext.target (step3_auth_capability.go: the "any" case
-    # returns Authorized immediately), and the Gateway forwards the client's
-    # authContext verbatim -- so a staff caller holding a scope=any grant can
-    # attach ANY target it likes. Gating on mere presence would let that caller
-    # forge the consumer exemption and skip workplace confinement entirely. The
-    # genuine scope=self path always carries target == actor (step 3 REQUIRES it
-    # for scope=self: "platform scope=self: target != actor" is a hard denial),
-    # so equality admits exactly that path and nothing a scope=any actor can
-    # manufacture. A scope=any caller that sets target == its own actor gains
-    # nothing: the op's own identifiedBy check then binds the patient to the
-    # caller's identity, i.e. the legitimate self-book, never an arbitrary one.
-    # authcontext-target: (legacy-self-exempt) equality admits the scope=self
-    # path and is backstopped at every call site by an identifiedBy ownership
-    # probe; migrating to op.authTargetValidated is a behavior change, not a
-    # cleanup (authcontext-target-validated-primitive-design.md §6).
-    return op.authContextTarget == op.actor or actor_holds_operator(op.actor)
+    # The self-service exemption keys on op.authTargetValidated -- the platform
+    # bit that is true only where step 3 CHECKED authContext.target, which for
+    # this package's ops means the consumer's scope=self grant (step 3 denies
+    # scope=self unless target == actor). Nothing a caller sends can set it.
+    # A caller-visible predicate cannot stand in for it: step 3 authorizes a
+    # scope=ANY grant WITHOUT inspecting authContext.target
+    # (step3_auth_capability.go: the "any" case returns Authorized immediately)
+    # and the Gateway forwards the client's authContext verbatim, so a staff
+    # caller holding scope=any can attach any target it likes -- including its
+    # own actor key, which satisfies an equality test and skips workplace
+    # confinement entirely.
+    return op.authTargetValidated or actor_holds_operator(op.actor)
 
 def require_workplace(location_keys, what):
     # Binds the STANDING path only -- operator and staff role grants. A scope=self
@@ -1697,15 +1691,9 @@ def require_workplace(location_keys, what):
     # self-service write. The two guards are complementary, not alternatives --
     # each binds the path the other cannot see.
     #
-    # The self-service exemption keys on authContextTarget == op.actor, NOT on
-    # authContextTarget != "" (mirrors workplace_exempt -- the cheap pre-gate that
-    # this function deliberately re-checks). Step 3 authorizes a scope=ANY grant
-    # WITHOUT inspecting authContext.target, and the Gateway forwards the client's
-    # authContext verbatim, so a staff caller holding a scope=any grant can attach
-    # ANY target. Exempting on mere presence would let that caller forge the
-    # consumer exemption and skip confinement entirely; the genuine scope=self path
-    # always carries target == actor (step 3 REQUIRES it), so equality admits
-    # exactly that path and nothing a scope=any actor can manufacture.
+    # The self-service exemption keys on op.authTargetValidated, mirroring
+    # workplace_exempt -- the cheap pre-gate this function deliberately
+    # re-checks, so a call site that skips it is still correct, only slower.
     #
     # location_keys is a LIST of candidate locations, and covering ANY ONE of
     # them authorizes the write: a target can legitimately sit at several places
@@ -1713,9 +1701,7 @@ def require_workplace(location_keys, what):
     # are equally entitled to it. An empty list -- a target whose location
     # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
     # unwired topology fails closed rather than falling open.
-    # authcontext-target: (legacy-self-exempt) mirrors workplace_exempt above,
-    # which this function deliberately re-checks.
-    if op.authContextTarget == op.actor:
+    if op.authTargetValidated:
         return
     if actor_holds_operator(op.actor):
         return
@@ -1981,6 +1967,7 @@ def slot_cellcode(cell_start):
     return cell_start.replace("-", "").replace(":", "").lower()
 
 def claim_cell(hub, cellcode, cls, conflict_code, who):
+    key = hub + ".slot" + cellcode
     # kv.Read here is LAZY (§2.5 idiom, same as enforce_hours/enforce_time_off) — it
     # only decides which mutation verb to emit (create / CAS-revive / reject); it is
     # NOT itself the safety property. The safety property is the atomic batch's
@@ -1991,7 +1978,6 @@ def claim_cell(hub, cellcode, cls, conflict_code, who):
     # winner's live cell and fails closed.
     # read-posture: (d) declared in contextHint.optionalReads by CreateAppointment /
     # RescheduleAppointment's dispatcher (cmd/clinic-app/web/app.js slotClaimKeys)
-    key = hub + ".slot" + cellcode
     existing = kv.Read(key)
     if existing != None and not existing.isDeleted:
         fail(conflict_code + ": " + who + " " + hub + " slot " + cellcode + " is already booked")
@@ -2068,8 +2054,8 @@ def execute(state, op):
         # SetAppointmentStatus apply, resolved here off the PAYLOAD provider
         # (validated alive + class=provider just above) since no appointment exists
         # yet. No-op for operator (workplace_exempt) and for the consumer self-book
-        # path (authContextTarget set), which the identifiedBy probe below binds
-        # instead. No bound-provider branch: a provider role holds no
+        # path (scope=self, so op.authTargetValidated holds), which the identifiedBy
+        # probe below binds instead. No bound-provider branch: a provider role holds no
         # CreateAppointment grant (providers accept/reschedule their own
         # appointments, never originate them), so the third binder cannot apply here.
         # workplace-exempt: (ownership-bound) the identifiedBy probe below
@@ -2182,6 +2168,9 @@ def execute(state, op):
             # a hard failure — mirrors wellness-domain's ddls.go).
             lease_doc = kv.Read(lease_key)
             lease_alive = lease_doc != None and not lease_doc.isDeleted
+            # read-posture: (d) declared optionalReads by CreateAppointment's
+            # dispatcher alongside the leaseapp itself — the first-approve signal
+            # is absent on a pending/declined application, which falls through.
             tenancy_doc = kv.Read(lease_key + ".tenancy")
             tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted
             # Unlike wellness's CreateBooking (whose booker IS an identity,
@@ -2456,10 +2445,10 @@ def execute(state, op):
         # single-op semantics (it closes the single-op invalid transition; concurrent
         # transitions race exactly as the upsert already did). Re-opening a terminal
         # appointment is a future explicit op, not a status flip.
+        cur_val = None
         # read-posture: (d) declared in contextHint.optionalReads by
         # SetAppointmentStatus's dispatcher (cmd/clinic-app/web/app.js) — absence is
         # the legit first-set case (no status yet)
-        cur_val = None
         cur_status = kv.Read(appt_key + ".status")
         if cur_status != None and not cur_status.isDeleted:
             cur_val = cur_status.data.get("value")

@@ -188,9 +188,9 @@ def execute(state, op):
         # Deterministic per-(landlord, unit) management link. Read it ON DEMAND
         # (kv.Read) — it may not exist yet, so it's a declared optionalReads,
         # never a required reads (which would HydrationMiss on a fresh pair).
+        link_key = "lnk.identity." + landlord_id + ".manages.unit." + unit_id
         # read-posture: (d) declared optionalReads at AssignUnitOwner dispatch
         # (create/revive idempotency branch).
-        link_key = "lnk.identity." + landlord_id + ".manages.unit." + unit_id
         existing = kv.Read(link_key)
         if existing != None and not existing.isDeleted:
             # Already managed (idempotent at-least-once re-dispatch): emit nothing.
@@ -216,9 +216,9 @@ def execute(state, op):
         unit = required_string(p, "unit")
         unit_id = vertex_parts(unit, "unit", "unit")
 
+        link_key = "lnk.identity." + landlord_id + ".manages.unit." + unit_id
         # read-posture: (d) declared optionalReads at RemoveUnitOwner dispatch
         # (revoke idempotency branch).
-        link_key = "lnk.identity." + landlord_id + ".manages.unit." + unit_id
         existing = kv.Read(link_key)
         if existing == None or existing.isDeleted:
             # Nothing to revoke (idempotent): clean no-op, empty response.

@@ -796,13 +796,13 @@ def execute(state, op):
         # against the rent then-current; a later rent change is reflected on
         # the next SetApplicantProfile. The applicant AND the guarantor
         # income-to-rent checks both derive from it.
+        rent = None
         # read-posture: (d) declared optionalReads at SetApplicantProfile
         # dispatch — unlike a true (c) config read, unit.listing is a
         # per-request payload-derivable key (script-read-posture-design.md §13
         # hard case 4: DecideLeaseApplication/SetListingStatus read the SAME
         # key required; this call's absence-tolerance is its own semantics,
         # not a reason to treat the key itself as undeclarable config).
-        rent = None
         listing = kv.Read(unit + ".listing")
         if listing != None and not listing.isDeleted:
             r = listing.data.get("rentAmount")

@@ -461,13 +461,13 @@ def sites_for_provider(provider):
     # (a series whose withProvider link is absent), which yields []. ALL sites
     # are returned: staff at any one of a provider's buildings are equally
     # entitled to that provider's series.
+    if provider == None:
+        return []
     # read-posture: (e) relation=practicesAt epoch=none (a site assigned
     # concurrently with this write can only WIDEN the confining set, never narrow
     # it, so the confined branch stays the safe one) — a per-candidate follow-up
     # enumeration off the provider (data-derived hub); a provider practises at a
     # handful of sites at most.
-    if provider == None:
-        return []
     spage, _ = kv.Links(provider, "practicesAt", "out")
     sites = []
     for lk in spage:
@@ -540,13 +540,13 @@ def execute(state, op):
         # paused is mutable and .series' doc already documents "pause + start a
         # new series" as the intended cadence-change workflow, so a paused prior
         # series must NOT block a fresh one).
+        guard_name = "activeVisitSeriesWith" + provider_id
+        guard_key = patient_key + "." + guard_name
         # read-posture: (d) declared optionalReads by StartVisitSeries's
         # dispatcher (deterministic per patient+provider dedup key; mirrors
         # clinic-domain's claim_cell — kv.Read only decides which mutation verb
         # to emit, CreateOnly/expectedRevision at commit is the actual safety
         # property against a concurrent double-start/double-revive).
-        guard_name = "activeVisitSeriesWith" + provider_id
-        guard_key = patient_key + "." + guard_name
         guard = kv.Read(guard_key)
         guard_revision = None
         if guard != None and not guard.isDeleted:
@@ -556,6 +556,9 @@ def execute(state, op):
             # data-derived seriesKey (at most one guard per patient+provider, so
             # this is never a keyspace scan).
             prior_series = kv.Read(prior_series_key + ".series")
+            # read-posture: (e) the second per-candidate follow-up read off the
+            # same guard-derived seriesKey — paused is mutable, so "active" is
+            # re-derived from it rather than denormalized onto the guard.
             prior_paused = kv.Read(prior_series_key + ".paused")
             prior_is_paused = prior_paused != None and not prior_paused.isDeleted and prior_paused.data.get("value") == True
             # A prior series whose .series aspect can't be read (should never

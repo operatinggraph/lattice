@@ -289,9 +289,9 @@ def execute(state, op):
             fail("UnknownProvider: " + provider + " is absent or tombstoned")
         require_live_building(state, building)
 
+        link_key = "lnk.provider." + provider_id + ".practicesAt.building." + building_id
         # read-posture: (d) declared optionalReads at AssignProviderSite dispatch
         # (create/revive idempotency branch).
-        link_key = "lnk.provider." + provider_id + ".practicesAt.building." + building_id
         existing = kv.Read(link_key)
         if existing != None and not existing.isDeleted:
             return {"mutations": [], "events": [], "response": {}}
@@ -310,9 +310,9 @@ def execute(state, op):
         building = required_string(p, "building")
         building_id = vertex_parts(building, "building", "building")
 
+        link_key = "lnk.provider." + provider_id + ".practicesAt.building." + building_id
         # read-posture: (d) declared optionalReads at RemoveProviderSite dispatch
         # (revoke idempotency branch).
-        link_key = "lnk.provider." + provider_id + ".practicesAt.building." + building_id
         existing = kv.Read(link_key)
         if existing == None or existing.isDeleted:
             return {"mutations": [], "events": [], "response": {}}
