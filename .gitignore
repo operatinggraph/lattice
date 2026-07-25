@@ -68,6 +68,7 @@ loupe-operator.json
 .wrangler/
 
 # Hosted-demo box state written by deploy/demo scripts (per-world, per-box).
+demo-host
 demo-loupe-host
 loupe-demo-operator.json
 loupe-demo-operator.pending.json

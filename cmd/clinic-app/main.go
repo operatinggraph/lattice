@@ -41,6 +41,10 @@
 //	                     (optionally _JWT_KID, _JWT_AUDIENCE). Nothing is minted here.
 //	CLINIC_APP_DEMO_PERSONAS  JSON list fencing sign-in to a curated set of seeded
 //	                     identities (the hosted-demo posture).
+//	CLINIC_APP_PUBLIC_ORIGIN  the exact external https origin a proxied deployment is served
+//	                     at (e.g. https://clinic.demo.example). Admits that origin at the
+//	                     cross-origin write gate and forces the session cookie's Secure
+//	                     flag; unset is the loopback posture.
 //	CLINIC_APP_INSTANCE  Health-KV instance id (default: auto-generated clinic-<NanoID>).
 //	CLINIC_APP_HEARTBEAT_EVERY  Health-KV heartbeat cadence (default: 10s).
 //	CLINIC_APP_GATEWAY_URL  the Gateway's base URL the FE submits writes to, browser-direct
@@ -173,7 +177,12 @@ func run(logger *slog.Logger) error {
 	}
 
 	gatewayURL := envOrDefault("CLINIC_APP_GATEWAY_URL", defaultGatewayURL)
-	loopback := appsession.IsLoopbackHost(appsession.HostOf(addr))
+	bindHost := appsession.HostOf(addr)
+	loopback := appsession.IsLoopbackHost(bindHost)
+	publicOrigin, err := appsession.ParsePublicOrigin(envPrefix+"_PUBLIC_ORIGIN", os.Getenv(envPrefix+"_PUBLIC_ORIGIN"))
+	if err != nil {
+		return err
+	}
 	signer, err := appsession.NewDevSigner(logger, envPrefix, loopback)
 	if err != nil {
 		return err
@@ -209,6 +218,8 @@ func run(logger *slog.Logger) error {
 		Authn:        authn,
 		RefreshAuthn: refreshAuthn,
 		Loopback:     loopback,
+		BindHost:     bindHost,
+		PublicOrigin: publicOrigin,
 		Personas:     personas,
 		LoginPage:    loginPage,
 	})

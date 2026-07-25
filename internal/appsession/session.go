@@ -3,7 +3,8 @@
 // endpoint fenced to a persona list, an HttpOnly session cookie carrying the
 // same JWT the Gateway already verifies on every write, a sliding-session
 // refresh endpoint, logout, and the middleware that resolves each request to
-// a signed-in identity.
+// a signed-in identity behind a cross-origin gate (origin.go) that only this
+// app's own pages get through with a state-changing request.
 //
 // The kit owns the CAPABILITY of signing in; each app owns the UX around it
 // (its own login page bytes, its own extra exempt paths, its own post-logout
@@ -81,6 +82,16 @@ type Config struct {
 	// Loopback gates the cookie's Secure flag: a loopback bind is served
 	// over plain http, where a Secure cookie would never be sent back.
 	Loopback bool
+	// BindHost is the host the app listens on (appsession.HostOf of its listen
+	// address), which the cross-origin gate accepts as an origin the app is
+	// legitimately served from — the non-loopback bind opt-in. Empty means
+	// only loopback and PublicOrigin qualify.
+	BindHost string
+	// PublicOrigin is the external origin a proxied deployment declares
+	// (<EnvPrefix>_PUBLIC_ORIGIN, parsed by ParsePublicOrigin). It both admits
+	// that origin at the cross-origin gate and forces the cookie's Secure flag;
+	// nil is the undeclared loopback posture. See origin.go.
+	PublicOrigin *PublicOrigin
 	// FallbackIdentityID, when set, is the single-user boot identity a
 	// request with NO cookie at all resolves to — the posture an app runs in
 	// before anyone logs in. A cookie that is present but does not verify
@@ -122,6 +133,24 @@ func New(cfg Config) (*Manager, error) {
 	}
 	if cfg.Signer != nil && strings.TrimSpace(cfg.GatewayURL) == "" {
 		return nil, errors.New("appsession: GatewayURL is required when a Signer is configured")
+	}
+	// A declared public origin means the app is served to the internet through a
+	// proxy, and a Signer is the in-process minter that hands out a session for
+	// ANY caller-named subject (handleDevLogin). Together and unfenced they
+	// publish every identity in the graph to every visitor. The bind-address
+	// check that otherwise keeps the minter local (NewDevSigner) cannot see
+	// this shape at all: the bind IS loopback — the proxy is what makes it
+	// public. So the fence is required here, which is the posture the hosted
+	// demo already runs.
+	if cfg.PublicOrigin != nil && cfg.Signer != nil && len(cfg.Personas) == 0 {
+		prefix := strings.TrimSpace(cfg.EnvPrefix)
+		if prefix == "" {
+			prefix = "<PREFIX>"
+		}
+		return nil, fmt.Errorf("appsession: %s_PUBLIC_ORIGIN with %s_DEV_AUTH requires %s_DEMO_PERSONAS: "+
+			"dev auth mints a session for any identity a caller names, so a publicly-served app may only "+
+			"sign in the listed demo personas; use %s_JWT_PUBLIC_KEY for a real public deployment",
+			prefix, prefix, prefix, prefix)
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -248,6 +277,12 @@ func (m *Manager) resolve(r *http.Request) (info, bool) {
 // no identity to act for.
 func (m *Manager) RequireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ahead of the exemption check, so the session endpoints themselves are
+		// covered: they change state (issue, renew and clear the cookie) and
+		// are merely exempt from NEEDING one.
+		if m.CrossOriginBlocked(w, r) {
+			return
+		}
 		if m.IsAuthExempt(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
@@ -308,6 +343,18 @@ func (m *Manager) handleLoginOptions(w http.ResponseWriter, r *http.Request) {
 	m.writeJSON(w, http.StatusOK, map[string]any{"personas": personas})
 }
 
+// cookieSecure computes the session cookie's Secure flag: set whenever a public
+// origin is declared (https by construction, ParsePublicOrigin) or the bind is
+// not loopback.
+//
+// The declaration term is the load-bearing one. Derived from the bind alone this
+// fails OPEN in exactly the deployment shape the declaration exists for: a
+// loopback bind behind a TLS-terminating proxy reads as "not public", so the
+// session cookie ships without Secure over a public HTTPS site.
+func (m *Manager) cookieSecure() bool {
+	return m.cfg.PublicOrigin != nil || !m.cfg.Loopback
+}
+
 func (m *Manager) setCookie(w http.ResponseWriter, token string, exp time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     m.cookieName,
@@ -315,7 +362,7 @@ func (m *Manager) setCookie(w http.ResponseWriter, token string, exp time.Time) 
 		Path:     "/",
 		Expires:  exp,
 		HttpOnly: true,
-		Secure:   !m.cfg.Loopback,
+		Secure:   m.cookieSecure(),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -327,7 +374,7 @@ func (m *Manager) clearCookie(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   !m.cfg.Loopback,
+		Secure:   m.cookieSecure(),
 		SameSite: http.SameSiteStrictMode,
 	})
 }

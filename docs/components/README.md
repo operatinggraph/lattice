@@ -68,6 +68,10 @@ choices live HERE. Per-package capability definitions live under
 - [Gateway](./gateway.md) — the edge trust boundary: verifies an external actor's IdP-signed JWT,
   stamps the verified identity onto every operation, and bounds each actor's read view to the
   sub-graph its ReBAC links permit — closing actor impersonation at the edge.
+- [appsession](./appsession.md) — the shared browser-session kit every front-end binary signs users in
+  with: the two auth postures (in-process demo minter vs. verify-only IdP), the HttpOnly session cookie
+  carrying the JWT the Gateway already verifies, and the cross-origin gate that keeps a co-hosted
+  sibling app's page from spending someone's session.
 - [Vault](./vault.md) — per-identity key custody + crypto-shredding: encrypt-on-write / decrypt-on-read
   for sensitive aspects, and the irreversible `ShredKey` right-to-be-forgotten primitive. A library
   embedded in the Processor + Refractor, not a standalone binary.

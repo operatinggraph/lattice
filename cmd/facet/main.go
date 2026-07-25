@@ -37,6 +37,10 @@
 //	                   sign-in personas (deploy/demo): the login page offers
 //	                   exactly these as one-tap cards, /api/dev-login refuses
 //	                   every other subject, and /api/claim is disabled
+//	FACET_PUBLIC_ORIGIN  the exact external https origin a proxied deployment is served
+//	                   at (e.g. https://facet.demo.example). Admits that origin at the
+//	                   cross-origin write gate and forces the session cookie's Secure
+//	                   flag; unset is the loopback posture
 //	FACET_DEV_PRIVATE_KEY_PATH  overrides the shared dev signing key path (optional)
 //	FACET_DEV_PUBLIC_KEY_PATH   overrides the shared dev trust key path (optional)
 //	FACET_PG_DSN       OPTIONAL Postgres DSN for the identityCredentialsRead
@@ -133,7 +137,12 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("create store dir %q: %w", storeDir, err)
 	}
 
-	loopback := appsession.IsLoopbackHost(appsession.HostOf(httpAddr))
+	bindHost := appsession.HostOf(httpAddr)
+	loopback := appsession.IsLoopbackHost(bindHost)
+	publicOrigin, err := appsession.ParsePublicOrigin(envPrefix+"_PUBLIC_ORIGIN", os.Getenv(envPrefix+"_PUBLIC_ORIGIN"))
+	if err != nil {
+		return err
+	}
 	signer, err := appsession.NewDevSigner(logger, envPrefix, loopback)
 	if err != nil {
 		return err
@@ -219,6 +228,8 @@ func run(logger *slog.Logger) error {
 		Authn:              authn,
 		RefreshAuthn:       refreshAuthn,
 		Loopback:           loopback,
+		BindHost:           bindHost,
+		PublicOrigin:       publicOrigin,
 		FallbackIdentityID: bootIdentityID,
 		Personas:           personas,
 		LoginPage:          loginPage,

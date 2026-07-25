@@ -86,6 +86,42 @@ func TestRegisterRoutes_LoginSurfaceIsReachableAnonymously(t *testing.T) {
 	}
 }
 
+// TestRegisterRoutes_CrossOriginWriteIsRefusedEvenWithACookie: the app is bound
+// to a localhost port alongside its sibling apps, which makes their pages
+// same-SITE to it — the session cookie is exactly what such a page's POST would
+// ride in on. The cross-origin gate is wiring too (RequireSession, ahead of the
+// exemptions), so a valid cookie must not save the request.
+func TestRegisterRoutes_CrossOriginWriteIsRefusedEvenWithACookie(t *testing.T) {
+	mux, cookieFor := realMux(t)
+	const subject = "Hj4kPmRtw9nbCxz5vQ2y"
+
+	for _, path := range []string{"/api/unit-applications", "/api/objects", appsession.DevLoginPath, appsession.LogoutPath} {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		r.Host = "127.0.0.1:7788"
+		r.Header.Set("Origin", "http://127.0.0.1:7799")
+		r.Header.Set("Sec-Fetch-Site", "same-site")
+		r.AddCookie(cookieFor(subject))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s from a sibling localhost port = %d, want 403", path, rec.Code)
+		}
+	}
+
+	// The app's own page must still get through, or the gate has taken the app
+	// down instead of hardening it.
+	r := httptest.NewRequest(http.MethodPost, "/api/unit-applications", strings.NewReader("{}"))
+	r.Host = "127.0.0.1:7788"
+	r.Header.Set("Origin", "http://127.0.0.1:7788")
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	r.AddCookie(cookieFor(subject))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("POST /api/unit-applications from the app's own origin = 403; body=%s", rec.Body.String())
+	}
+}
+
 // TestRegisterRoutes_SessionReachesTheHandler proves the gate opens for a real
 // cookie — without this the 401s above could come from a mux that refuses
 // everything.

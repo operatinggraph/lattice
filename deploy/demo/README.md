@@ -24,7 +24,10 @@ nightly systemd timer tears the ephemeral stack down and reseeds it, rotating th
 - `demo-reset.sh` — the nightly reset: stop apps, `docker compose down` (the dev stack is ephemeral
   by design — no volumes — so this IS the wipe), then `demo-up.sh` again.
 - `Caddyfile` — TLS + reverse proxy to Facet, SSE-safe (`flush_interval -1`). Reads `{$DEMO_HOST}`;
-  the bootstrap installs it to `/etc/caddy/Caddyfile` with the host substituted.
+  the bootstrap installs it to `/etc/caddy/Caddyfile` with the host substituted, and writes the host
+  to `demo-host` so `demo-up.sh` can pass Facet `FACET_PUBLIC_ORIGIN`. That declaration is required
+  behind TLS termination: Facet's bind is loopback while the browser's Origin names the public host,
+  so without it every write — sign-in included — is refused, and the session cookie loses `Secure`.
 - `env.demo` — compose `.env` template binding every published container port to `127.0.0.1`.
 - `systemd/` — `lattice-demo.service` (runs `demo-up.sh` at boot), `lattice-demo-reset.service` +
   `lattice-demo-reset.timer` (nightly 09:10 UTC reset).

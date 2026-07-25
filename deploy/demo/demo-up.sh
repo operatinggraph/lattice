@@ -58,7 +58,19 @@ PROVISION_TIMEOUT_SECONDS="${PROVISION_TIMEOUT_SECONDS:-90}" \
 echo "==> Restarting facet in demo-persona posture..."
 pkill -f "bin/facet" 2>/dev/null || true
 sleep 1
+# The public origin Caddy serves Facet at, written by demo-bootstrap.sh. Facet
+# binds loopback behind TLS termination, so this declaration is what admits the
+# browser's own Origin on every write and puts Secure on the session cookie.
+# Absent, Facet still starts and serves reads, but every write 403s — so say so
+# loudly rather than leaving a silent half-working demo.
+facet_public_origin=""
+if [[ -f "$REPO_ROOT/demo-host" ]]; then
+	facet_public_origin="https://$(cat "$REPO_ROOT/demo-host")"
+else
+	echo "demo-up: no demo-host marker — re-run demo-bootstrap.sh; until then every write through the public URL is refused" >&2
+fi
 FACET_STORE_DIR=./facet-store \
+	FACET_PUBLIC_ORIGIN="$facet_public_origin" \
 	NATS_URL="${NATS_URL:-nats://localhost:4222}" \
 	EDGE_GATEWAY_URL="${EDGE_GATEWAY_URL:-http://localhost:8080}" \
 	FACET_DEV_AUTH=1 \

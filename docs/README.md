@@ -43,6 +43,7 @@ Per-component pages. Updated in the same commit as code changes. Drift between p
 | [components/bridge.md](./components/bridge.md) | Bridge — idempotent external I/O egress: `events.external.>` consumer, adapter registry, result-op submission |
 | [components/scheduling.md](./components/scheduling.md) | Platform message scheduling — the `core-schedules` stream, `@at` scheduled messages, replace-on-reschedule semantics |
 | [components/service-actors.md](./components/service-actors.md) | Internal service actors — the Loom / Weaver / Bridge primordial identities and how root-equivalent capability is established |
+| [components/appsession.md](./components/appsession.md) | appsession — the shared front-end browser-session kit: demo vs. verify-only auth postures, the session cookie, the cross-origin (CSRF) gate, `_PUBLIC_ORIGIN` for proxied deployments |
 
 ---
 

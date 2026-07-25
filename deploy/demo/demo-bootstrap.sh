@@ -45,6 +45,13 @@ cp "$HERE/env.demo" "$REPO_ROOT/.env"
 
 echo "==> Installing Caddyfile for ${DEMO_HOST}..."
 sed "s/{\$DEMO_HOST}/${DEMO_HOST}/" "$HERE/Caddyfile" >/etc/caddy/Caddyfile
+# demo-up.sh reads this to hand Facet FACET_PUBLIC_ORIGIN. Behind TLS
+# termination the browser's Origin names this host while Facet's bind stays
+# loopback, and the app cannot tell the two apart from the request — so the
+# origin is declared, and without the declaration every write (sign-in included)
+# is refused. The nightly reset re-runs demo-up.sh from this checkout, so the
+# marker must live on disk rather than in one invocation's environment.
+printf '%s\n' "$DEMO_HOST" >"$REPO_ROOT/demo-host"
 # The optional second host serves the read-only demo Loupe (F20). Its marker
 # file is what demo-up.sh keys the whole Loupe-demo path off; removing the
 # argument removes the marker, the vhost and (on the next demo-up) the process.
