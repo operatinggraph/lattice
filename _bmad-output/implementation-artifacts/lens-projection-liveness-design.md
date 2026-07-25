@@ -996,3 +996,130 @@ the old spec until it restarts. The refusal message names the real remedy, and t
 update the pipeline can re-activate through rather than refuse) is a new mechanism, not an extension
 of this one. **Consumer: a package author upgrading an actor-aggregate lens's `Output`.** Filed as a
 row.
+
+---
+
+## 15. Fire 10 — the healer is enrolled by what it can prove it owns (build note / fire brief)
+
+The row §10.1 blocked and §11.1 unblocked. Fire 5 tried to enrol business lenses and reverted; Fire 6
+made the prefilter sound for a filtering lens. What is left is enrolment itself plus §10.1's other two
+findings.
+
+**Scope sentence (verbatim, from the board row).** *"Adding a walk to an actorAggregate lens reprojects
+nothing already stored — rows refresh only when a CDC event next touches that actor. Only auth-plane
+lenses get the convergence sweep; every other actorAggregate has no healer."* Consumers:
+`identityAnchors` (whoami hats) + `myTasks`, and the 12 convergence lenses on `weaver-targets`.
+
+**Grounded mechanism (verified `file:line`).**
+
+- The install gate is still the single `if authPlane` at `projection/driver.go:180`; everything the
+  `SweepPlan` needs (`AnchorType` / `BuildKey` / `AnchorFromKey`) is read off the `OutputDescriptor`
+  every actorAggregate lens compiles.
+- **Every actorAggregate lens is already guarded.** `RequiresGuard` is
+  `AuthPlane || RequiresGuardedTombstone()` (`projection/plan.go:82`), and all 19 shipped
+  actorAggregate lenses carry `emptyBehavior: delete` ⇒ `ActionDelete` ⇒ true
+  (`projection/empty.go:47`). So a business sweep's reprojections run under the same §6.2 ordering
+  token as the auth plane's — enrolment adds no unguarded-write race. It also means every enrollable
+  lens is NATS-KV backed (`EnableProjectionGuard` refuses anything else, `driver.go:259`).
+- **The target listing is not lens-scoped, and that is what makes enrolment expensive.**
+  `KeyLister.ListKeys` takes no prefix (`adapter/adapter.go:41`); `NatsKVAdapter.ListKeys` calls
+  `a.kv.ListKeys` over the whole bucket (`adapter/natskv.go:310`). 12 of the enrollable lenses target
+  the one shared `weaver-targets` bucket, so each would enumerate all of it every tick — §10.1's
+  second finding, restated with the mechanism.
+- **Ownership today rests entirely on `AnchorFromKey`**, applied after the listing
+  (`pipeline/sweep.go:661-678`): a sibling's key fails the literal prefix/suffix match or the
+  `ParseVertexKey` + `AnchorType` check and is dropped. Pinned by
+  `TestSweepCandidates_ForeignKeysInASharedBucketAreNotClaimed` (`pipeline/sweep_test.go:172`). It is
+  *syntactic*, not identity-based: two lenses sharing a bucket, a literal prefix **and** an anchor
+  type would each claim the other's rows.
+- **The precedent for a shared target is a scoped listing, not a post-hoc filter.**
+  `GrantWriterAdapter.ListKeys` enumerates only rows carrying the lens's declared `grant_source`, and
+  a lens that declares none is **refused a listing** rather than given an unscoped one — because
+  DiffRetraction over an unscoped listing "would revoke every OTHER package's grants"
+  (`adapter/read_path_adapters.go:21-26,132-140`).
+- **The verdicts have nowhere to land on the business path.** `LensLivenessStatus`
+  (`health/lattice_heartbeater.go:194`) carries no sweep fields and `LensProvider`
+  (`cmd/refractor/main.go:403`) never reads `entry.pipeline.Sweeper()` — only `CapabilityLensProvider`
+  does (`main.go:349`). Widening enrolment alone gives a healer whose failures are invisible.
+- **§10.1's `severity: error` finding is moot as scoped.** The escalation lives in
+  `evalCapabilityLenses`; the business path is a deliberate sibling whose issues are `warning`-only
+  (`lattice_heartbeater.go:986-989`, `docs/components/refractor.md:717`). Business sweep verdicts are
+  new issue codes on that path, not a reuse of the cap ones — so nothing inherits the escalation.
+
+**Decisions taken here as Winston (impl-level, recorded not parked).**
+
+1. **Enrolment is gated on the lens proving it owns its keys — a prefix-scoped listing, not a
+   post-hoc filter.** A new optional `adapter.PrefixKeyLister` lets the sweep enumerate only keys
+   under the lens's own key-pattern prefix; the install gate refuses a `SweepPlan` when the adapter
+   cannot scope, or when the pattern yields no literal prefix terminating on a "." segment boundary
+   (an unanchored `{actorSuffix}`-leading pattern scopes to nothing). This mirrors
+   `GrantWriterAdapter`'s refusal rather than inventing a posture, closes §10.1's cost finding at its
+   source, and is what the board row means by "add a key-shape install gate". `AnchorFromKey` stays as
+   the second gate — `cap.` is legitimately a prefix of `cap.roles.`, so scoping is a cost mechanism
+   and ownership still needs the parse.
+2. **The auth plane's selection must not move, and the shape makes that provable.** `AnchorFromKey`
+   `CutPrefix`es the same literal the listing now filters on, so prefix-scoping can only remove keys
+   the ownership filter already rejected: `targets` shrinks, `orphans` is identical, every direction's
+   input is identical. Byte-for-byte, by construction rather than by test alone — and pinned by a test
+   anyway.
+3. **A business sweep runs on a slower clock than the auth plane.** `SweepPlan.Interval` already
+   exists per plan (`sweep.go:43`); business lenses get 5 minutes against the auth plane's 60 seconds.
+   Rationale is the invariant this fire is already honoring on the health side: a stale business read
+   model is a vertical's outage, an unhealed cap doc is an authorization failure. It also keeps the
+   aggregate steady-state cost at auth-plane parity — 14 lenses × 25 reprojections / 5 min ≈ the 3
+   auth-plane lenses × 25 / min the cell already pays — instead of a 5× jump.
+4. **Business sweep verdicts are `warning`-only, always.** No streak escalates a business lens to
+   `error`/`unhealthy` (`docs/components/refractor.md:717`). The streaks still exist, because the
+   message wants them ("divergent for 4 passes"), but severity is constant.
+
+**Verified touch-list.**
+
+- `internal/refractor/adapter/adapter.go:41` — `PrefixKeyLister` beside `KeyLister`.
+- `internal/refractor/adapter/natskv.go:310` — implement it over `a.kv.ListKeysPrefix`
+  (`substrate/kvhandle.go:71`), sharing the existing keyOrder-mapping body.
+- `internal/refractor/pipeline/sweep.go:44` — `SweepPlan.KeyPrefix`; `sweep.go:563` — survey demands a
+  `PrefixKeyLister` and scopes the listing.
+- `internal/refractor/projection/output.go:218` — expose the pattern's literal prefix
+  (`AnchorFromKey`'s own `prefix` computation, factored out) so the plan and the gate share one
+  derivation.
+- `internal/refractor/projection/driver.go:180` — the gate: key-shape + adapter capability, not
+  `authPlane`; business plans get the slower interval.
+- `internal/refractor/health/lattice_heartbeater.go:194,991` — sweep fields on `LensLivenessStatus`;
+  `evalLenses` raises `LensCoverageDivergence` / `LensRepairFailing` / `LensSweepStalled` at
+  `warning`.
+- `cmd/refractor/main.go:403` — `LensProvider` reads `entry.pipeline.Sweeper()`, mirroring
+  `main.go:349`.
+- `docs/components/refractor.md` + the Health-KV schema doc — the new issue codes and the two-clock
+  model.
+
+**Increment order + green checks.**
+
+- **Inc 1 — own what you list.** `PrefixKeyLister` + scoped survey + the key-shape gate, auth plane
+  only (enrolment unchanged). Green: `go test ./internal/refractor/...`, with a new test proving a
+  foreign key is absent from `targets` and that selection is unchanged.
+- **Inc 2 — enrol.** Widen the install gate; business interval. Green: same, plus a test that a
+  business actorAggregate lens gets a plan and a pattern-less one does not.
+- **Inc 3 — report it.** Sweep verdicts on the business path at `warning`. Green: new health tests
+  mirroring `caplens_divergence_test.go` / `caplens_repair_failure_test.go` / the stall suite.
+
+**In-scope gotchas.**
+
+- `KVListKeysPrefix` appends `>` to the prefix (`substrate/kv.go:234`), so the prefix must end on a
+  segment boundary — that is exactly what the key-shape gate enforces, not an incidental detail.
+- Tombstones stay listed (both listings are unfiltered); the prefilter's existing liveness handling is
+  unchanged and must stay unchanged.
+- `Sweeper()` is read before the reporter on the cap path deliberately (a live repair failure must
+  survive an unreadable health entry) — mirror that order, don't "tidy" it.
+
+**Adjacent find, filed now (not built here).** `applyDiffRetraction` (`pipeline/evaluate.go:614`)
+derives a `Delete` for **every** key the plain `KeyLister` returns that the fresh projection no longer
+produces, with no ownership filter at all. Every DiffRetraction lens shipped today has either a
+dedicated target (`duplicate-candidates`, `ClinicProviderSitesBucket`, `read_landlord_units`,
+`read_landlord_lease_applications`) or a source-scoped `GrantWriterAdapter`, so there is no live
+victim — but nothing *gates* it: a future lens opting into DiffRetraction against a shared bucket would
+retract its siblings' rows on its first event. The activation guard (`pipeline/pipeline.go:324`) checks
+only that the adapter is *a* `KeyLister`. Filed as a row.
+
+**Non-goals (this fire).** No rebuild-on-MatchChange. No change to auth-plane thresholds, issue names,
+or escalation. No contract change. Not the phantom-heal residual, not the `anchorLive` walk cost, not
+the shared-bucket rebuild truncate — each is its own filed row.
