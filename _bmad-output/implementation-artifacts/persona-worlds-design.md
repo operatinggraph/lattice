@@ -210,8 +210,11 @@ The three questions and their surfaces:
 
 1. **Who am I / which hats?** `GET /v1/actor` (F2) grows `roles[]` (from `cap.roles.<actor>`, which already
    carries them — `capabilitykv/doc.go:30-76`) and `anchors[]` (relation-stamped bindings: `residesIn`,
-   `worksAt`, `identifiedBy`-inverse), matching what `manifest.me` shows Facet. This is the *only* new
-   app-facing query surface; it is what lets a vertical render hats without joining the SYNC plane.
+   `worksAt`, `manages`, `identifiedBy`-inverse), matching what `manifest.me` shows Facet. This is the *only*
+   new app-facing query surface; it is what lets a vertical render hats without joining the SYNC plane.
+   *(The set is open: a hat whose binding is a distinct relation joins by adding its walk to
+   `identityAnchorsSpec`. `manages` — the landlord hat — was added by W2 Inc 2; the walk is purely additive,
+   since every consumer selects by `relation` rather than position.)*
 2. **What may I do?** Already answered per-identity by the two catalog lenses; provider ops join by declaring
    grants (§3.3). The deferred task-`forOperation` catalog path stays deferred (unchanged consumer).
 3. **What may I see?** Already answered by reachability + read grants; provider slices join per §3.3.
@@ -1118,8 +1121,59 @@ already carries the `isTransientAuthLag` retry — it must survive the collapse,
 covers is replaced by, not removed with, the login-time binding resolve.
 
 **7 · Non-goals (Inc 2):** no landlord/staff **grant** rows or Starlark guards (Inc 3, §2 above); no §6.4
-op-set parity script; no `lint-conventions` parity-gate flip (§8(e), after W1–W4); no new lens or DDL content;
-no package version bump; no sibling-app adoption (W3/W4); no contract text.
+op-set parity script; no `lint-conventions` parity-gate flip (§8(e), after W1–W4); no sibling-app adoption
+(W3/W4); no contract text.
+
+**8 · Two in-fire enablers (grounded mid-build; the brief's first draft had ruled both out as non-goals and
+was wrong to).** Neither widens the item — each is the thing that makes a mandated deletion non-regressive:
+- **`manages` joins the whoami anchor set** (`identity-domain/lenses.go`'s `identityAnchorsSpec`, 0.7.0→0.8.0).
+  §4.1 named three relation-stamped bindings; `manages` was not among them, so gating the landlord surface on
+  a `manages` anchor — the obvious mirror of clinic's `worksAt` gate — would have been **dead on arrival**, the
+  tab hidden for every session forever. One more `OPTIONAL MATCH` + container walk in an existing lens, purely
+  additive to `anchors[]` (clinic keys on `worksAt`/`identifiedBy`, Facet reads its own `edgeIdentitySpec`), and
+  it is the same link `landlordLeaseApplicationsRead` already bakes into each row's `authz_anchors` — so the tab
+  appears exactly when the console behind it has rows. Two discriminating tests (positive: unit + containing
+  building resolved; negative: a resident who manages nothing gets no anchor).
+- **`POST /api/credentials/link/complete`** (`credentials_link.go`, mirroring `cmd/facet/claim.go` verbatim).
+  Completing a credential link means authenticating as a credential the browser does not hold — the one thing
+  the any-subject mint was legitimately used for. Deleting that mint without this would have silently dropped a
+  shipped capability (the Account tab's "Link another sign-in method"). The ceremony runs server-side: the app
+  mints a throwaway device credential of its own choosing, and the identity being linked to is read from the
+  **session**, never the request body, so a caller cannot link a credential onto someone else's account.
+The new-applicant flow needed no such enabler: under sign-in-first, creating an identity no longer means
+claiming it into *this* browser, so the auto-claim is dropped and the claim key is surfaced once instead — a
+correction, not a regression.
+
+**As-built — Inc 2 SHIPPED (2026-07-24, `13c01922`).** LoftSpace is sign-in-first. Both mints are gone, and
+deleting them closed a real escalation on every loopback dev box: `AssignUnitOwner` is scope=any/`operator`
+and its script does not check `payload.landlord` against `op.actor`, so any browser reaching `:7788` could
+mint the root-equivalent actor and make itself landlord of any unit. `cmd/loftspace-app` now holds no
+`BootstrapIdentityKey` reference at all — §6's parity gate can flip blocking for this app.
+
+*Review (3 adversarial lenses; opus on the auth plane).* The auth lens **confirmed** claims §6.2 and §6.3 —
+all twelve read call sites key on the session subject, no residual subject-naming surface, link forgery
+refuted, `ContextHint` byte-identical to the shipped precedent — and found two HIGH gaps that were **the
+absence of tests, not of behavior**: the new ceremony shipped untested, and *nothing* asserted that
+`registerRoutes` puts routes behind `RequireSession` (protection had moved from per-handler to wiring, and
+every ported negative test wraps only its own handler, so a route registered outside the guard would fail no
+test). Both are now covered and both new suites were **mutation-verified** — a route moved to the outer mux
+and a caller-supplied `targetIdentityKey` each make them fail. It also caught the `ViaCookie` guard missing on
+both credential surfaces, dormant only because this app sets no `FallbackIdentityID` — confinement resting on
+an optional precondition, the exact pattern this codebase has been bitten by before. The FE lens caught
+`init()` gating every listener behind a whoami round trip (a painted surface silently swallowing clicks, a
+divergence from clinic's own ordering) and the claim secret being rendered into the shared auto-hiding toast,
+where any later toast would destroy the single existing copy of a key with no recovery path. The lens review
+came back clean, and independently **refuted** the "silent compile-error fallback" worry the brief raised:
+Refractor registers only the `full` engine and `dispatchSpec` logs-and-drops a bad spec, so a broken walk
+would yield zero rows for the whole lens and a loud error — never a quiet partial projection.
+
+*Honest residuals, filed as rows in the same commit:* the production (IdP) posture cannot open a session at
+all — `setCookie` runs only under a non-nil `Signer`, so with an external IdP nothing can issue the cookie;
+it fails closed (401 everywhere), but the documented posture is unreachable, and the per-request
+credential→identity resolution `authenticateRead` used to do now happens only at dev-login. And the kit's
+cookie sessions carry no CSRF defense beyond `SameSite=Strict`; cookies are domain- not port-scoped, so the
+sibling localhost apps are same-site. Both are `internal/appsession` properties inherited from P2 — they
+affect Facet and clinic identically, and neither is introduced here.
 
 **Scope-diff gate: PASS** — every touch traces to "sign-in-first; pickers + both mints deleted; RLS tests keep
 passing with session subjects". Two narrowings recorded (landlord write-grant migration → Inc 3, matching
