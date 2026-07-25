@@ -1751,6 +1751,72 @@ staff *writes* are workplace-confined by a `locatedAt`→`containedIn` walk. It 
 opens, a strict improvement on the unauthenticated dump it replaces, and identical in shape to café's shipped
 hat — so the row is broadened to cross-vertical rather than duplicated.
 
+### Fire W5 (Facet hats + landing) fire brief (build note, 2026-07-25)
+
+**1 · Scope sentence (verbatim, §7.5 + §4).** "Facet — provider hat + hat-grouped landing (§4); demo-persona
+cards gain the provider + multi-hat personas; seed-showcase adds Dr. Amara Osei (clinic provider), Kai the
+laundry operator (serviceprovider), and makes one existing persona the §3.4 multi-hat human." §4 renderer
+completion: "read `presentation.group` + `viaRole`/`resolvedVia` to group Home/nav by hat; add bound-provider
+types to the `{me.<type>}` selfAnchor resolution so provider-targeted ops resolve." *Green (§8):* the §3.4
+one-login-three-worlds demo, live-verified.
+
+**2 · Scope-diff gate — two of the four named clauses ALREADY SHIPPED in W0; this fire is the remainder.**
+Ground-checked live, not assumed:
+- *seed-showcase personas* — **done.** Osei `seedOseiProvider()` (`scripts/seed-showcase.go:810-827`), Kai
+  `seedKaiServiceProvider()` (`:884-905`), Sam the multi-hat human `seedSamMultiHat()` (`:1016-1039`:
+  consumer+`residesIn` kept, +`frontOfHouse`/`worksAt`, +instructor `identifiedBy`/`teachesAt`/`ledBy`).
+  `FACET_PROVIDER_NANOID`/`FACET_LAUNDRY_NANOID` printed both branches (`:244,254,400,401`).
+- *bound-provider types in `{me.<type>}` resolution* — **done.** `edgeIdentitySpec.selfAnchors` stamps
+  `provider`/`instructor`/`serviceprovider` (`packages/edge-manifest/lenses.go:445-449`) and
+  `resolveTargetKey` already falls through to `selfAnchorKey(want)` (`cmd/facet/web/app.js:1526`). Re-verified
+  rather than rebuilt — the false-bounce this gate exists to catch is the *inverse* (rebuilding shipped work).
+- **REMAINING, and this fire's whole scope:** the hat-grouped landing + the persona cards.
+
+**3 · The defect the remainder closes (verified, file:line).** A bound provider's binding is **displayable
+nowhere and actionable nowhere**. `edgeIdentitySpec` projects the three `identifiedBy` bindings into
+`selfAnchors` only — `{type, key}`, no name, no relation (`lenses.go:445-449`) — while `anchors[]` carries
+only `residesIn` + `worksAt` (`:443-444`). So `splitAnchors` (`app.js:89-95`) sees nothing, and Dr. Osei's
+Home renders the empty-residence branch (`renderHome`, `:536-559`) and her Me screen shows Places "None"
+(`renderMe`, `:1084-1096`). Her ops fare no better: ops render only from service detail (filtered
+`viaServices`, `:666`) or entity detail (filtered `dispatchTargetType === entityType`, `:777`), and
+`SetProviderHours` (`clinic-domain/opmetas.go:138-159`, `TargetType: "provider"`) is attached to neither — it
+**renders on no surface she can reach**, exactly the residue W0 named. `viaRole`/`viaRoleName` are projected
+(`lenses.go:705-706`) and read by **zero** FE lines.
+
+**4 · Touch-list + increment order.**
+1. **Lens** `packages/edge-manifest/lenses.go` `edgeIdentitySpec` — `anchors` gains the three `identifiedBy`
+   bindings stamped `relation: 'identifiedBy'` + `type` + name from each entity's `.profile`
+   (provider `fullName`; instructor/serviceprovider `displayName` — confirmed
+   `clinic-domain/ddls.go:315`, `wellness-domain/ddls.go:1660`, `service-domain/ddls.go:629`). Precedent to
+   mirror: the existing 5-way `collect(...) + …` concat on the same lens's `selfAnchors` line — proven, not a
+   new engine capability. Version 0.10.0 → 0.11.0 (`package.go:20`).
+2. **FE lockstep (must ship with 1).** `splitAnchors` buckets `relation !== "worksAt"` into *homes*, so the new
+   anchors would land in "My places" unless it becomes a three-way hat split in the same change. → `hatGroups(m)`
+   (home / work / services) driving Home + Me.
+3. **FE hat detail** — a services-hat chip opens a modal listing the ops that resolve against **that binding's
+   key**, mirroring `openServiceDetail`/`openEntityDetail` (chip → modal → `opButton`) with `viaRoleName` as the
+   grouping heading. This is what gives `SetProviderHours` a surface at all.
+4. **Persona cards** — `deploy/demo/demo-up.sh:31-44` lists three hardcoded personas; add Osei + Kai and label
+   Sam as the multi-hat human. The two NanoIDs are already printed by the seed and read by nobody.
+
+**5 · Runnable green checks.** `node --check` + the `*.test.mjs` suite (`descriptor_autofill`, `staff_world`,
+`dispatch_target`, `display_label` all touch the changed helpers) · `go test ./packages/edge-manifest/...` ·
+`STRICT=1 go run ./scripts/lint-conventions.go` · `make verify-package-edge-manifest` (lens DDL touched) ·
+live: reinstall edge-manifest → dev-login Osei on :7810 → her Home shows a **My services** hat → its detail
+offers `SetProviderHours` → Sam's login shows **three** hats.
+
+**6 · Gotchas.** Degenerate `{key: null}` collect entries are the expected OPTIONAL MATCH shape and drop
+client-side (`app.js:1287`) — the new anchors must tolerate the same. An anchor with no `relation` is legacy
+and still means residence (`app.js:87-88` comment) — the three-way split must keep that floor, not invert it.
+NanoID alphabet (no `l/I/O/0`) if any id is minted. `anchorLabel` (`:104-110`) already falls through
+name → containerName → `prettify(key)`, so a nameless binding degrades to a typed label, never a bare NanoID.
+
+**7 · Non-goals (this fire).** No narrowing of `openEntityDetail`'s cross-hat op attachment — it attaches any
+op whose `dispatchTargetType` matches the row's `entityType` (`app.js:777`), so a multi-hat human sees another
+hat's op on a shared type and it **fails closed in-script**. Correcting it needs a provenance stamp
+`manifest.ent` rows do not carry; UX-only, filed as its own row rather than freelanced here. No attendance ops
+(W3 Inc 2's row); no `cmd/<app>` FE changes; no contract edits; no new engine capability.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
