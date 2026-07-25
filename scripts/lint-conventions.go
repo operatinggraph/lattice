@@ -72,6 +72,53 @@
 //     lazy read, the read posture's only debt class. Same posture as
 //     TestPackage_NoScans, extended from "no raw scans" to "declare (or
 //     classify) your declarable reads".
+//   - authContext.target shape declaration (BLOCKING;
+//     authcontext-target-validated-primitive-design.md §5.5/§8). `authContext.target`
+//     is forwarded verbatim from the client and step 3 authorizes a scope=any
+//     grant WITHOUT inspecting it, so it is an unchecked hint on every path the
+//     platform did not validate. A guard that EXEMPTS on target presence
+//     (`op.authContextTarget != ""`) is therefore forgeable by any scope=any
+//     holder — and that is the shape an author writes by default. The gate does
+//     not try to classify a site: it default-DENIES every `op.authContextTarget`
+//     reference in a packages/ non-test file and requires the author to declare
+//     which safe shape it is, mirroring the `# read-posture:` convention:
+//     (ownership) the value derives an identity whose ownership of the acted-on
+//     resource is then proven by a graph link — a forged target only forces a
+//     stricter proof;
+//     (payload-bind) the value must equal a payload field naming the subject of
+//     a CREATE, where no owning link exists to probe yet — a forged target only
+//     narrows what the caller may create;
+//     (resource-bind) the validated target is bound to the resource the op acts
+//     on (`op.authTargetValidated and op.authContextTarget == <resourceKey>`) —
+//     the annotated line must itself carry `op.authTargetValidated`;
+//     (selector) a non-security branch selector, no confinement rides on it;
+//     (legacy-self-exempt) an exemption keyed on `== op.actor`, admitted only in
+//     the files authCtxTargetLegacyFiles names.
+//     There is deliberately NO shape for an exemption keyed on target presence:
+//     the correct spelling of an exemption is `op.authTargetValidated`, the
+//     platform bit that is true only when step 3 CHECKED the target. Every shape
+//     needs a trailing `<why>` — declaring is cheap, forgetting fails closed.
+//     Two residuals both gates share with the `# read-posture:` convention they
+//     mirror, stated so nobody reads more into a green run than is there. (1) An
+//     annotation covers the following `readPostureWindow` lines, so a reference
+//     inserted INTO an already-annotated block inherits that block's
+//     declaration. (2) The gate is fail-closed against FORGETTING to declare,
+//     not against MIS-declaring: only (resource-bind) and (legacy-self-exempt)
+//     carry a structural check, so a wrong (selector) or (ownership) passes. The
+//     author's `<why>` is what a reviewer reads; the gate only guarantees one
+//     was written.
+//   - Workplace-exemption discharge (BLOCKING; same design §3.4.1). A validated
+//     target proves the target was CHECKED, not that it IS the resource the op
+//     writes — `workplace_exempt()` returning true on a grant scoped to resource
+//     A does not stop the caller pairing it with a payload naming resource B.
+//     Every CALL to a package's workplace_exempt() helper must therefore declare
+//     what closes that gap: `# workplace-exempt: (no-validated-path) <why>` (the
+//     op grants no scope=self and mints no task, so only an operator ever
+//     reaches the exemption — an operational fact the annotation forces the
+//     author to re-check, since a task minted for the op later invalidates it),
+//     (ownership-bound) (a downstream ownership proof requires the target to own
+//     the resource), or (resource-bind) (an explicit
+//     `op.authContextTarget == <resourceKey>` comparison).
 //   - Protected-by-default gate (Contract #6 §6.14). A non-test pkgmgr.LensSpec
 //     composite literal declaring `Adapter: "postgres"` must also declare one of
 //     Protected, Public, or GrantTable — a postgres business read model is
@@ -141,7 +188,62 @@ var (
 	// per-test-populate hazard bootstrap-primordial-globals-race-design.md §4
 	// closes via testutil.EnsurePrimordials).
 	loadOrGenerateCall = regexp.MustCompile(`bootstrap\.LoadOrGenerate\(`)
+	// authContext.target shape declaration (authcontext-target-validated-
+	// primitive-design.md §5.5). authCtxTargetRef anchors any script reference
+	// to the forwarded, unvalidated field; authCtxTargetShape is the annotation
+	// the reference must carry, capturing the shape and its trailing `<why>`.
+	authCtxTargetRef   = regexp.MustCompile(`\bop\.authContextTarget\b`)
+	authCtxTargetShape = regexp.MustCompile(`#\s*authcontext-target:\s*\(([a-z-]+)\)(.*)$`)
+	// authTargetValidatedRef is the platform bit a (resource-bind) declaration
+	// must pair the comparison with — the whole point of that shape is that the
+	// target was CHECKED and then bound to the acted-on resource.
+	authTargetValidatedRef = regexp.MustCompile(`\bop\.authTargetValidated\b`)
+	// A Starlark `def <name>(` line, and a call to one. The exemption-helper set
+	// is DERIVED per file rather than listed: a helper whose body consults the
+	// validated bit (or the raw target) IS a validated-target exemption, whatever
+	// it is named, so a new package inventing its own `staff_exempt()` is covered
+	// on the same terms as the shipped `workplace_exempt` / `require_workplace` /
+	// `enforce_workplace` trio. A hardcoded name list would have been exactly the
+	// fingers-crossed state this gate exists to end.
+	starlarkDef          = regexp.MustCompile(`^(\s*)def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+	workplaceExemptShape = regexp.MustCompile(`#\s*workplace-exempt:\s*\(([a-z-]+)\)(.*)$`)
 )
+
+// workplaceExemptShapes are the ways a call site may discharge §3.4.1: the op
+// admits no legitimately-validated target at all, a downstream ownership proof
+// binds the target to the resource, an explicit comparison does, or — for a
+// helper that itself calls another exemption helper — the discharge belongs to
+// each of ITS call sites in turn.
+var workplaceExemptShapes = map[string]bool{
+	"no-validated-path": true,
+	"ownership-bound":   true,
+	"resource-bind":     true,
+	"per-call-site":     true,
+}
+
+// authCtxTargetShapes are the declarations a packages/ script may make about an
+// `op.authContextTarget` reference. An EXEMPTION is deliberately absent: the
+// correct spelling of one is `op.authTargetValidated`.
+var authCtxTargetShapes = map[string]bool{
+	"ownership":          true,
+	"payload-bind":       true,
+	"resource-bind":      true,
+	"selector":           true,
+	"legacy-self-exempt": true,
+}
+
+// authCtxTargetLegacyFiles are the files whose confinement exemption still keys
+// on `op.authContextTarget == op.actor` rather than the platform's
+// `op.authTargetValidated` bit. The two predicates do NOT agree on every path —
+// a scope=any caller naming its own actor key satisfies the equality and is
+// exempted where the platform bit would confine it — so migrating them is a
+// behavior change scoped as its own item
+// (authcontext-target-validated-primitive-design.md §6), not a cleanup. The
+// (legacy-self-exempt) shape is confined to this list so the next author cannot
+// reach for it: a new guard has no legacy to declare.
+var authCtxTargetLegacyFiles = map[string]bool{
+	"packages/clinic-domain/ddls.go": true,
+}
 
 // loadOrGenerateExemptFile is the one test file that legitimately keeps the
 // direct bootstrap.LoadOrGenerate call: internal/pkgmgr/installer_test.go is
@@ -198,6 +300,14 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--hook" {
 		runHook()
 		return
+	}
+
+	if failures := selfTest(); len(failures) > 0 {
+		for _, f := range failures {
+			fmt.Fprintln(os.Stderr, "lint-conventions self-test: "+f)
+		}
+		fmt.Fprintf(os.Stderr, "lint-conventions: %d self-test failure(s) — the gate does not behave as documented\n", len(failures))
+		os.Exit(2)
 	}
 
 	strict := os.Getenv("STRICT") == "1"
@@ -307,6 +417,10 @@ func scanFile(path string) []finding {
 	if err != nil {
 		return nil
 	}
+	return scanSource(path, data)
+}
+
+func scanSource(path string, data []byte) []finding {
 	var out []finding
 	app := verticalAppCmd(path)
 	isTest := strings.HasSuffix(path, "_test.go")
@@ -323,6 +437,12 @@ func scanFile(path string) []finding {
 		!strings.HasPrefix(slash, "internal/bootstrap/") &&
 		!strings.HasPrefix(slash, "internal/testutil/") &&
 		slash != loadOrGenerateExemptFile
+	// The file's own validated-target exemption helpers, derived from the
+	// script text rather than a hardcoded name list (see exemptionHelpers).
+	var exemptHelpers map[string]bool
+	if postureScoped {
+		exemptHelpers = exemptionHelpers(data)
+	}
 	// window holds the last readPostureWindow raw lines, for locating a
 	// `# read-posture:` annotation in the call's own comment block.
 	var window []string
@@ -349,6 +469,8 @@ func scanFile(path string) []finding {
 		}
 		if postureScoped {
 			out = append(out, checkReadPosture(path, ln, line, window, fileMutates)...)
+			out = append(out, checkAuthContextTarget(path, ln, line, window)...)
+			out = append(out, checkWorkplaceExempt(path, ln, line, window, exemptHelpers)...)
 		}
 		window = append(window, line)
 		if len(window) > readPostureWindow {
@@ -509,6 +631,367 @@ func checkReadPosture(path string, ln int, line string, window []string, fileMut
 		}
 	}
 	return out
+}
+
+// checkAuthContextTarget default-denies one script reference to
+// `op.authContextTarget` unless the author declared its shape
+// (authcontext-target-validated-primitive-design.md §5.5; all findings
+// BLOCKING). window is the preceding raw lines; the annotation may sit there or
+// on the reference line itself. Comment lines are skipped — prose ABOUT the
+// field is not a use of it.
+func checkAuthContextTarget(path string, ln int, line string, window []string) []finding {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+		return nil
+	}
+	if !authCtxTargetRef.MatchString(line) {
+		return nil
+	}
+	const remedy = "The correct spelling of a confinement EXEMPTION is `op.authTargetValidated` — " +
+		"the platform bit that is true only when step 3 CHECKED the target (scope=self proved " +
+		"target == actor; a task grant proved its scopedTo == authContext.target). Otherwise declare " +
+		"the shape on the line or in its comment block: `# authcontext-target: (ownership) <why>` " +
+		"(the value derives an identity whose ownership of the acted-on resource is then proven by a " +
+		"graph link), `# authcontext-target: (resource-bind) <why>` (a validated target bound to the " +
+		"resource the op acts on — the same line must carry op.authTargetValidated), or " +
+		"`# authcontext-target: (selector) <why>` (a non-security branch selector)."
+
+	var shape, why string
+	if m := authCtxTargetShape.FindStringSubmatch(line); m != nil {
+		shape, why = m[1], m[2]
+	} else {
+		for i := len(window) - 1; i >= 0; i-- {
+			if m := authCtxTargetShape.FindStringSubmatch(window[i]); m != nil {
+				shape, why = m[1], m[2]
+				break
+			}
+		}
+	}
+	if shape == "" {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "authcontext-target: undeclared op.authContextTarget reference — authContext.target is " +
+				"forwarded verbatim from the client and step 3 authorizes a scope=any grant WITHOUT " +
+				"inspecting it, so exempting on its presence is forgeable. " + remedy}}
+	}
+	if !authCtxTargetShapes[shape] {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "authcontext-target: unknown shape (" + shape + "). " + remedy}}
+	}
+	var out []finding
+	if strings.TrimSpace(why) == "" {
+		out = append(out, finding{file: path, line: ln, warn: false,
+			msg: "authcontext-target: a (" + shape + ") declaration must state its `<why>` — what binds " +
+				"this reference, in the author's own words"})
+	}
+	switch shape {
+	case "resource-bind":
+		if !authTargetValidatedRef.MatchString(line) {
+			out = append(out, finding{file: path, line: ln, warn: false,
+				msg: "authcontext-target: a (resource-bind) declaration must pair the comparison with " +
+					"op.authTargetValidated on the same line — binding an UNVALIDATED target to the " +
+					"acted-on resource proves nothing about who may act on it (design §3.4.1)"})
+		}
+	case "legacy-self-exempt":
+		if !authCtxTargetLegacyFiles[repoRelPackagePath(path)] {
+			out = append(out, finding{file: path, line: ln, warn: false,
+				msg: "authcontext-target: (legacy-self-exempt) is admitted only in the files " +
+					"authCtxTargetLegacyFiles names — a new guard has no legacy to declare. " + remedy})
+		}
+	}
+	return out
+}
+
+// repoRelPackagePath normalizes a path to its repo-relative `packages/…` form.
+// The hook (`--hook`) is handed an ABSOLUTE path by the editor while CI passes
+// `git ls-files` output, and a lookup keyed on the repo-relative spelling
+// otherwise misses under the hook — turning a correctly-declared site into a
+// blocking finding that pushes an editing agent to "fix" code that is right.
+func repoRelPackagePath(path string) string {
+	slash := filepath.ToSlash(path)
+	if i := strings.LastIndex(slash, "/packages/"); i >= 0 {
+		return slash[i+1:]
+	}
+	return slash
+}
+
+// exemptionHelpers derives the file's validated-target exemption helpers from
+// the script text: a Starlark `def` whose body consults `op.authTargetValidated`
+// or `op.authContextTarget` short-circuits confinement on a caller-influenced
+// value, and so does a def that calls one of those (iterated to a fixpoint).
+// Deriving the set beats naming it — `workplace_exempt` is a convention, not a
+// mechanism, and a new package's own `staff_exempt()` must be gated on the same
+// terms rather than escaping because nobody remembered to add it to a list.
+func exemptionHelpers(data []byte) map[string]bool {
+	type def struct {
+		name   string
+		indent int
+		body   []string
+	}
+	var defs []def
+	var cur *def
+	for _, line := range strings.Split(string(data), "\n") {
+		if m := starlarkDef.FindStringSubmatch(line); m != nil {
+			defs = append(defs, def{name: m[2], indent: len(m[1])})
+			cur = &defs[len(defs)-1]
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if len(line)-len(strings.TrimLeft(line, " \t")) <= cur.indent {
+			cur = nil
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		cur.body = append(cur.body, line)
+	}
+	out := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, d := range defs {
+			if out[d.name] {
+				continue
+			}
+			for _, line := range d.body {
+				hit := authTargetValidatedRef.MatchString(line) || authCtxTargetRef.MatchString(line)
+				if !hit {
+					for name := range out {
+						if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*\(`).MatchString(line) {
+							hit = true
+							break
+						}
+					}
+				}
+				if hit {
+					out[d.name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// checkWorkplaceExempt default-denies one call to one of the file's own
+// validated-target exemption helpers unless the author declared what binds the
+// exempted target to the acted-on resource (authcontext-target-validated-
+// primitive-design.md §3.4.1; all findings BLOCKING). Such a helper returns
+// true for a VALIDATED target — which proves the target was checked, NOT that
+// it is the resource the op writes. Where nothing closes that gap, a caller
+// holding a legitimate grant for one resource can act on another.
+func checkWorkplaceExempt(path string, ln int, line string, window []string, helpers map[string]bool) []finding {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") ||
+		starlarkDef.MatchString(line) {
+		return nil
+	}
+	var called string
+	for name := range helpers {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*\(`).MatchString(line) {
+			called = name
+			break
+		}
+	}
+	if called == "" {
+		return nil
+	}
+	const remedy = "Declare what discharges it on the line or in its comment block: " +
+		"`# workplace-exempt: (no-validated-path) <why>` (the op grants no scope=self and mints no " +
+		"task, so op.authTargetValidated is never legitimately true and only an operator can reach " +
+		"the exemption — name the grant shape you checked, since a task minted for this op later " +
+		"invalidates the claim), `# workplace-exempt: (ownership-bound) <why>` (a downstream " +
+		"ownership proof requires the target to own the acted-on resource), " +
+		"`# workplace-exempt: (resource-bind) <why>` (an explicit op.authContextTarget == " +
+		"<resourceKey> comparison binds it), or `# workplace-exempt: (per-call-site) <why>` (this " +
+		"call is inside another exemption helper, so the discharge belongs to ITS call sites)."
+
+	var shape, why string
+	if m := workplaceExemptShape.FindStringSubmatch(line); m != nil {
+		shape, why = m[1], m[2]
+	} else {
+		for i := len(window) - 1; i >= 0; i-- {
+			if m := workplaceExemptShape.FindStringSubmatch(window[i]); m != nil {
+				shape, why = m[1], m[2]
+				break
+			}
+		}
+	}
+	if shape == "" {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "workplace-exempt: undeclared " + called + "() call — a validated target proves the " +
+				"target was CHECKED, not that it is the resource this op acts on. " + remedy}}
+	}
+	if !workplaceExemptShapes[shape] {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "workplace-exempt: unknown shape (" + shape + "). " + remedy}}
+	}
+	if strings.TrimSpace(why) == "" {
+		return []finding{{file: path, line: ln, warn: false,
+			msg: "workplace-exempt: a (" + shape + ") declaration must state its `<why>` — what binds " +
+				"the exempted target to this op's resource, in the author's own words"}}
+	}
+	return nil
+}
+
+// selfTest exercises the authcontext-target gate against fixtures and returns
+// one message per behaviour that did not hold. It runs on every non-hook
+// invocation (so CI's STRICT run covers it) and is deliberately in-memory: the
+// gate's whole value is that it REDS on a reintroduced bare exemption, and a
+// gate whose deny path silently stopped working reads exactly like a clean
+// codebase. Cheap enough that gating it behind a flag would only invite
+// skipping it.
+func selfTest() []string {
+	const fixture = "packages/self-test/ddls.go"
+	// Every fixture names the exact finding it expects (`want`), so a case
+	// cannot pass by tripping a DIFFERENT rule's finding than the one it is
+	// there to pin — the classic wrong-reason green.
+	const helperDef = "def workplace_exempt():\n\treturn op.authTargetValidated\n"
+	cases := []struct {
+		name string
+		path string
+		src  string
+		want string // substring of the expected finding; "" = expect none
+	}{
+		{"bare presence exemption is denied", fixture,
+			"\treturn op.authContextTarget != \"\" or actor_holds_operator(op.actor)\n",
+			"undeclared op.authContextTarget reference"},
+		{"bare equality exemption is denied", fixture,
+			"\tif op.authContextTarget == op.actor:\n",
+			"undeclared op.authContextTarget reference"},
+		{"declared ownership passes", fixture,
+			"\t# authcontext-target: (ownership) target must own the resource\n" +
+				"\tif op.authContextTarget != \"\":\n", ""},
+		{"an on-the-line declaration passes", fixture,
+			"\tif op.authContextTarget != \"\":  # authcontext-target: (ownership) owns it\n", ""},
+		{"declared payload-bind passes", fixture,
+			"\t# authcontext-target: (payload-bind) must equal payload.applicant\n" +
+				"\tif op.authContextTarget != \"\" and op.authContextTarget != applicant:\n", ""},
+		{"declared selector passes", fixture,
+			"\t# authcontext-target: (selector) picks the amount source\n" +
+				"\tis_self = op.authContextTarget != \"\"\n", ""},
+		{"a declaration covers the following lines' derived reads", fixture,
+			"\t# authcontext-target: (ownership) target must own the resource\n" +
+				"\tif op.authContextTarget != \"\":\n" +
+				"\t\t_, tid = parts_of(op.authContextTarget, \"authContextTarget\", \"identity\")\n", ""},
+		{"a declaration does NOT reach past the annotation window", fixture,
+			"\t# authcontext-target: (ownership) target must own the resource\n" +
+				"\tif op.authContextTarget != \"\":\n" +
+				"\t\ta = 1\n\t\tb = 2\n\t\tc = 3\n\t\td = 4\n\t\te = 5\n\t\tf = 6\n\t\tg = 7\n\t\th = 8\n" +
+				"\tif op.authContextTarget != \"\":\n",
+			"undeclared op.authContextTarget reference"},
+		{"declaration without a why is denied", fixture,
+			"\t# authcontext-target: (ownership)\n\tif op.authContextTarget != \"\":\n",
+			"declaration must state its `<why>`"},
+		{"unknown shape is denied", fixture,
+			"\t# authcontext-target: (exempt) staff are trusted\n" +
+				"\tif op.authContextTarget != \"\":\n", "unknown shape (exempt)"},
+		{"resource-bind without the validated bit is denied", fixture,
+			"\t# authcontext-target: (resource-bind) names this work order\n" +
+				"\tbound = op.authContextTarget == wkey\n",
+			"must pair the comparison with op.authTargetValidated"},
+		{"resource-bind paired with the validated bit passes", fixture,
+			"\t# authcontext-target: (resource-bind) names this work order\n" +
+				"\tbound = op.authTargetValidated and op.authContextTarget == wkey\n", ""},
+		{"legacy-self-exempt outside the named files is denied", fixture,
+			"\t# authcontext-target: (legacy-self-exempt) my guard is old too\n" +
+				"\tif op.authContextTarget == op.actor:\n",
+			"admitted only in the files authCtxTargetLegacyFiles names"},
+		{"legacy-self-exempt inside a named file passes", "packages/clinic-domain/ddls.go",
+			"\t# authcontext-target: (legacy-self-exempt) backstopped by identifiedBy\n" +
+				"\tif op.authContextTarget == op.actor:\n", ""},
+		{"legacy-self-exempt passes under an ABSOLUTE path too", "/abs/checkout/packages/clinic-domain/ddls.go",
+			"\t# authcontext-target: (legacy-self-exempt) backstopped by identifiedBy\n" +
+				"\tif op.authContextTarget == op.actor:\n", ""},
+		{"prose about the field is not a use of it", fixture,
+			"\t# a caller could forge op.authContextTarget != \"\" here\n" +
+				"\t// op.authContextTarget is forwarded verbatim\n", ""},
+		{"the gate is scoped to packages/", "internal/gateway/gateway.go",
+			"\tac.Target = op.authContextTarget\n", ""},
+		{"the gate skips package test files", "packages/self-test/ddls_test.go",
+			"\tif op.authContextTarget != \"\":\n", ""},
+		{"undeclared exemption-helper call is denied", fixture,
+			helperDef + "\tif not workplace_exempt():\n",
+			"undeclared workplace_exempt() call"},
+		{"the helper def is not a call", fixture, helperDef, ""},
+		{"a helper that consults NEITHER field is not an exemption", fixture,
+			"def enforce_workplace(locs):\n\tfail(\"no\")\n\tenforce_workplace([])\n", ""},
+		{"a differently-named helper is gated all the same", fixture,
+			"def staff_exempt():\n\treturn op.authTargetValidated\n\tif not staff_exempt():\n",
+			"undeclared staff_exempt() call"},
+		{"a helper that CALLS an exemption helper is one too", fixture,
+			helperDef +
+				"def site_gate():\n" +
+				"\tif workplace_exempt():  # workplace-exempt: (per-call-site) site_gate's callers discharge it\n" +
+				"\t\treturn\n" +
+				"def handler():\n\ta = 1\n\tb = 2\n\tc = 3\n\td = 4\n\te = 5\n\tf = 6\n\tg = 7\n" +
+				"\tif not site_gate():\n\t\tfail(\"x\")\n",
+			"undeclared site_gate() call"},
+		{"declared no-validated-path passes", fixture,
+			helperDef + "\t# workplace-exempt: (no-validated-path) scope=any only, no task mints it\n" +
+				"\tif not workplace_exempt():\n", ""},
+		{"declared ownership-bound passes", fixture,
+			helperDef + "\t# workplace-exempt: (ownership-bound) the probe below binds the target\n" +
+				"\tif not workplace_exempt():\n", ""},
+		{"declared workplace resource-bind passes", fixture,
+			helperDef + "\t# workplace-exempt: (resource-bind) target names this work order\n" +
+				"\tif not workplace_exempt():\n", ""},
+		{"an on-the-line workplace declaration passes", fixture,
+			helperDef + "\tif not workplace_exempt():  # workplace-exempt: (no-validated-path) staff-only op\n", ""},
+		{"workplace-exempt declaration without a why is denied", fixture,
+			helperDef + "\t# workplace-exempt: (ownership-bound)\n\tif not workplace_exempt():\n",
+			"declaration must state its `<why>`"},
+		{"unknown workplace-exempt shape is denied", fixture,
+			helperDef + "\t# workplace-exempt: (trusted) staff are fine\n\tif not workplace_exempt():\n",
+			"unknown shape (trusted)"},
+	}
+	var failures []string
+	for _, tc := range cases {
+		var hits, warned int
+		var got []string
+		for _, fd := range scanSource(tc.path, []byte(tc.src)) {
+			if !strings.HasPrefix(fd.msg, "authcontext-target:") &&
+				!strings.HasPrefix(fd.msg, "workplace-exempt:") {
+				continue
+			}
+			hits++
+			got = append(got, fd.msg)
+			if fd.warn {
+				warned++
+			}
+		}
+		switch {
+		case tc.want == "" && hits > 0:
+			failures = append(failures, fmt.Sprintf("%s: expected no finding, got %d: %s", tc.name, hits, got[0]))
+		case tc.want != "" && hits == 0:
+			failures = append(failures, tc.name+": expected a finding, got none")
+		case tc.want != "":
+			var matched bool
+			for _, m := range got {
+				if strings.Contains(m, tc.want) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				failures = append(failures, fmt.Sprintf("%s: no finding contained %q; got %q", tc.name, tc.want, got[0]))
+			}
+			// The design ratified these gates as BLOCKING from day one, not
+			// warn-first: a warn is counted separately and never fails --strict,
+			// so a silent flip to warn:true would disarm the gate while every
+			// other assertion here still passed.
+			if warned > 0 {
+				failures = append(failures, tc.name+": finding is advisory (warn), but this gate is BLOCKING")
+			}
+		}
+	}
+	return failures
 }
 
 func trackedGoFiles() []string {

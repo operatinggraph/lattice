@@ -1095,6 +1095,9 @@ def execute(state, op):
         # Staff-standing confinement: the location comes from the studio's OWN
         # locatedAt link, never the payload. A studio wired to no location is
         # operator-only by construction (an empty candidate list denies).
+        # workplace-exempt: (no-validated-path) CreateSession is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no task
+        # mints it, so nothing but the operator escape reaches the exemption.
         if not workplace_exempt():
             require_workplace(studio_locations(studio), "cannot create a session at studio " + studio)
 
@@ -1340,6 +1343,9 @@ def execute(state, op):
         # script closes the gap with a direct field compare — no extra kv.Read.
         # Empty for the standing operator grant (scope=any never sets
         # authContext), so this check is a no-op there.
+        # authcontext-target: (payload-bind) the target must equal payload.booker;
+        # on a CREATE there is no bookedBy link to probe yet, so a forged target
+        # only narrows who the caller may book for.
         if op.authContextTarget != "" and op.authContextTarget != booker:
             fail("AuthDenied: a consumer may only book a class for themselves")
 
@@ -1454,6 +1460,8 @@ def execute(state, op):
         # guard, over the bookedBy link instead of identifiedBy. Empty for the
         # standing operator grant (scope=any never sets authContext), so this
         # check is a no-op there.
+        # authcontext-target: (ownership) the target must be this booking's
+        # own bookedBy identity, so a forged one only fails closed.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             booked_by_lnk = "lnk.booking." + book_id + ".bookedBy.identity." + target_identity_id

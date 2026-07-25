@@ -579,6 +579,8 @@ def execute(state, op):
         # Staff-standing confinement: a non-operator staff actor may only open a
         # tab against a lease whose unit sits inside its workplace. No-op on the
         # resident-self path, which the applicationFor probe below binds instead.
+        # workplace-exempt: (ownership-bound) the applicationFor probe below
+        # requires the target to be this lease's own applicant.
         if not workplace_exempt():
             require_workplace([leaseapp_unit(lease_key)], "cannot open a tab for lease " + lease_key)
 
@@ -592,6 +594,8 @@ def execute(state, op):
         # clinic-domain's CreateAppointment uses). Empty for the standing
         # operator grant (scope=any never sets authContext), so this check is
         # a no-op there — operator keeps opening tabs on behalf of any lease.
+        # authcontext-target: (ownership) the target must be the lease's own
+        # applicant (applicationFor), so a forged one only fails closed.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             application_for_lnk = "lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id
@@ -663,6 +667,8 @@ def execute(state, op):
         # a target is pushed onto the STRICTER branch (catalog price, plus the
         # ownership proof below), and workplace confinement still binds them
         # independently.
+        # authcontext-target: (selector) picks the amount SOURCE (catalog vs
+        # caller), and the stricter branch is the one presence selects.
         is_self = op.authContextTarget != ""
         if is_self:
             # Self-order: the menuItem catalog bounds the amount — a
@@ -678,6 +684,8 @@ def execute(state, op):
         # Staff-standing confinement: the lease comes from the tab's OWN .status
         # aspect (never the payload), so the workplace it resolves to cannot be
         # forged. Earliest point the location is derivable.
+        # workplace-exempt: (ownership-bound) the applicationFor probe below
+        # requires the target to be the applicant on this tab's own lease.
         if not workplace_exempt():
             require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
                               "cannot charge tab " + tab_key)
@@ -685,6 +693,8 @@ def execute(state, op):
         # Resident-self ownership: same closure as Settle above — the lease
         # is recovered from the tab's OWN .status aspect, never from caller-
         # supplied payload.
+        # authcontext-target: (ownership) the target must be the applicant on
+        # the tab's own lease, so a forged one only fails closed.
         if is_self:
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             lease_key = existing.data.get("leaseAppKey")
@@ -728,6 +738,9 @@ def execute(state, op):
 
         # Staff-standing confinement: the lease comes from the tab's OWN
         # .status aspect (never the payload), same derivation as Charge/Settle.
+        # workplace-exempt: (no-validated-path) VoidCharge is granted scope=any
+        # to operator + frontOfHouse only (permissions.go) and no task mints it,
+        # so nothing but the operator escape reaches the exemption.
         if not workplace_exempt():
             require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
                               "cannot void a charge on tab " + tab_key)
@@ -762,6 +775,8 @@ def execute(state, op):
 
         # Staff-standing confinement: same derivation as Charge — the lease comes
         # from the tab's own .status aspect, so the workplace cannot be forged.
+        # workplace-exempt: (ownership-bound) the applicationFor probe below
+        # requires the target to be the applicant on this tab's own lease.
         if not workplace_exempt():
             require_workplace([leaseapp_unit(lease_key)], "cannot settle tab " + tab_key)
 
@@ -771,6 +786,8 @@ def execute(state, op):
         # never from caller-supplied payload — a caller declaring the wrong
         # leaseAppKey simply won't have the right composite key pre-hydrated,
         # so the read below returns None and this fails closed regardless.
+        # authcontext-target: (ownership) the target must be the applicant on
+        # the tab's own lease, so a forged one only fails closed.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             lease_id = lease_key.split(".")[2]

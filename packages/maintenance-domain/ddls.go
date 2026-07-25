@@ -417,6 +417,11 @@ def execute(state, op):
         # is written as the locatedAt link in this same batch), so naming a
         # place the caller does not worksAt-cover only DENIES the write; it
         # cannot reach anything the caller was not already entitled to.
+        # workplace-exempt: (no-validated-path) ReportIssue is granted scope=any
+        # to operator + both staff roles only (permissions.go) and no task mints
+        # it today. It DOES carry an op-meta, so a CreateTask forOperation it
+        # would make a validated target reachable -- add a resource bind here
+        # before minting any such task.
         if not workplace_exempt():
             require_workplace([loc], "ReportIssue at " + loc)
 
@@ -479,6 +484,8 @@ def execute(state, op):
         # staff, so enforce_workplace (not require_workplace, whose own
         # validated-target exemption would re-open exactly this hole) runs the
         # worksAt walk.
+        # authcontext-target: (resource-bind) the VALIDATED target must name
+        # the work order this op resolves.
         resource_bound = op.authTargetValidated and op.authContextTarget == wkey
         if not (resource_bound or actor_holds_operator(op.actor)):
             loc = workorder_location(wkey)

@@ -385,6 +385,9 @@ def execute(state, op):
         # sets authContext), so this check is a no-op there — operator keeps
         # submitting CreateLeaseApplication on behalf of any applicant, exactly
         # as its own grant (unconstrained by scope) already allows.
+        # authcontext-target: (payload-bind) the target must equal
+        # payload.applicant; on a CREATE there is no owning link to probe yet,
+        # so a forged target only narrows what the caller may create.
         if op.authContextTarget != "" and op.authContextTarget != applicant:
             fail("AuthDenied: an applicant may only create an application for themselves")
 
@@ -507,6 +510,11 @@ def execute(state, op):
         # appliesToUnit link -- the payload 'unit' field below is verified
         # against that same link, but it is only read on the approve branch, and
         # a confinement gate must bind a DECLINE just as tightly.
+        # workplace-exempt: (no-validated-path) DecideLeaseApplication is
+        # granted scope=any to operator + frontOfHouse only (permissions.go) and
+        # no task mints it today. It DOES carry an op-meta, so a CreateTask
+        # forOperation it would make a validated target reachable -- add a
+        # resource bind here before minting any such task.
         # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp
         # carries exactly one appliesToUnit link (required at
         # CreateLeaseApplication), so this is never a keyspace scan.
@@ -516,6 +524,9 @@ def execute(state, op):
             for lk in unit_page:
                 if not lk.isDeleted:
                     decide_unit = lk.targetVertex
+            # workplace-exempt: (no-validated-path) same discharge as the
+            # workplace_exempt() pre-gate above -- re-stated because the
+            # enumeration between them puts it out of annotation range.
             require_workplace([decide_unit], "cannot decide application " + app_key)
 
         decision = required_string(p, "decision")
@@ -671,6 +682,8 @@ def execute(state, op):
         # their own application. The operator path (no authContext, scope=any —
         # the trusted-tool / orchestrator) stays unconstrained, mirroring
         # CreateLeaseApplication's applicant-self guard.
+        # authcontext-target: (ownership) the target must be this application's
+        # verified applicationFor endpoint, so a forged one only fails closed.
         if op.authContextTarget != "" and op.authContextTarget != applicant:
             fail("AuthDenied: an applicant may only withdraw their own application")
 
@@ -720,6 +733,8 @@ def execute(state, op):
         # link keyed on the actor's own id (no payload applicant field to forge).
         # The operator path (no authContext, scope=any — the trusted-tool)
         # stays unconstrained, mirroring CreateLeaseApplication's self guard.
+        # authcontext-target: (ownership) the target must be this application's
+        # applicationFor endpoint, so a forged one only fails closed.
         if op.authContextTarget != "":
             _, self_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             self_app_lnk = "lnk.leaseapp." + app_id + ".applicationFor.identity." + self_id

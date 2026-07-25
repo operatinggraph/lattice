@@ -56,6 +56,10 @@ const (
 	frontDeskActorID  = "JfrntDskHJKMNPQRSTUV"
 	frontDeskActorKey = "vtx.identity." + frontDeskActorID
 	frontDeskCapKey   = "cap.identity." + frontDeskActorID
+	// The task path reads a DISJOINT entry (Contract #6 §6.6): FR56 ephemeral
+	// grants live in `cap.ephemeral.<actor>`, never in the `cap.<actor>` doc,
+	// which carries roles/permissions/service access only.
+	frontDeskEphemeralCapKey = "cap.ephemeral.identity." + frontDeskActorID
 )
 
 // frontOfHouseRoleKey is identity-domain's own frontOfHouse role, resolved
@@ -170,6 +174,32 @@ func frontDeskCapDoc() *processor.CapabilityDoc {
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
 		Roles:           []string{frontOfHouseRoleKey},
+	}
+}
+
+// frontDeskTaskGrantDoc is what orchestration-base's capabilityEphemeral lens
+// projects for an onboarding userTask scopedTo one identity: the ONE grant that
+// lets the front-desk actor record that identity's PII regardless of its
+// claimed state, expiring with the task. Seeded per-test (the task key and the
+// subject vary), not from setupTestEnv.
+func frontDeskTaskGrantDoc(taskKey, subjectKey string) *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    frontDeskEphemeralCapKey,
+		Actor:                  frontDeskActorKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{frontDeskActorKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions:    []processor.PlatformPermission{},
+		ServiceAccess:          []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{{
+			Source:        taskKey,
+			TaskKey:       taskKey,
+			OperationType: "RecordIdentityPII",
+			Target:        subjectKey,
+			ExpiresAt:     now.Add(24 * time.Hour).Format(time.RFC3339Nano),
+		}},
 	}
 }
 

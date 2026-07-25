@@ -1683,6 +1683,10 @@ def workplace_exempt():
     # manufacture. A scope=any caller that sets target == its own actor gains
     # nothing: the op's own identifiedBy check then binds the patient to the
     # caller's identity, i.e. the legitimate self-book, never an arbitrary one.
+    # authcontext-target: (legacy-self-exempt) equality admits the scope=self
+    # path and is backstopped at every call site by an identifiedBy ownership
+    # probe; migrating to op.authTargetValidated is a behavior change, not a
+    # cleanup (authcontext-target-validated-primitive-design.md §6).
     return op.authContextTarget == op.actor or actor_holds_operator(op.actor)
 
 def require_workplace(location_keys, what):
@@ -1709,6 +1713,8 @@ def require_workplace(location_keys, what):
     # are equally entitled to it. An empty list -- a target whose location
     # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
     # unwired topology fails closed rather than falling open.
+    # authcontext-target: (legacy-self-exempt) mirrors workplace_exempt above,
+    # which this function deliberately re-checks.
     if op.authContextTarget == op.actor:
         return
     if actor_holds_operator(op.actor):
@@ -2066,6 +2072,8 @@ def execute(state, op):
         # instead. No bound-provider branch: a provider role holds no
         # CreateAppointment grant (providers accept/reschedule their own
         # appointments, never originate them), so the third binder cannot apply here.
+        # workplace-exempt: (ownership-bound) the identifiedBy probe below
+        # requires the target to be this patient's own linked identity.
         if not workplace_exempt():
             require_workplace(sites_for_provider(provider), "cannot book an appointment with provider " + provider)
 
@@ -2081,6 +2089,8 @@ def execute(state, op):
         # never sets authContext), so this check is a no-op there — operator
         # keeps booking on behalf of any patient, exactly as its own grant
         # (unconstrained by scope) allows.
+        # authcontext-target: (ownership) the target must be this patient's own
+        # identifiedBy identity, so a forged one only fails closed.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             identified_by_lnk = "lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id
@@ -2253,6 +2263,8 @@ def execute(state, op):
         # (identifiedBy-bound to THIS appointment's own withProvider provider)
         # is a THIRD standing binder, alongside workplace: a provider need not
         # also worksAt a building to reschedule their own appointment.
+        # workplace-exempt: (ownership-bound) the identifiedBy probe below
+        # requires the target to be this appointment's patient's identity.
         if not workplace_exempt():
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
@@ -2278,6 +2290,8 @@ def execute(state, op):
         # proves authContext.target == actor, never that the target identity IS
         # this appointment's patient. Empty for the standing operator grant
         # (scope=any never sets authContext), so this is a no-op for staff.
+        # authcontext-target: (ownership) the target must be this appointment's
+        # patient's identifiedBy identity, so a forged one only fails closed.
         if op.authContextTarget != "":
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             identified_by_lnk = "lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id
@@ -2382,6 +2396,8 @@ def execute(state, op):
         # alone -- a non-terminal status write (confirmed / checkedIn) is just as
         # much a write into someone else's building. The bound provider is a
         # THIRD standing binder alongside workplace, mirroring RescheduleAppointment.
+        # workplace-exempt: (ownership-bound) the identifiedBy probe below
+        # requires the target to be this appointment's patient's identity.
         if not workplace_exempt():
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
@@ -2397,6 +2413,8 @@ def execute(state, op):
         # bound, before the terminal/idempotent branching below so a self-scoped
         # caller must prove ownership even on an idempotent re-cancel (empty for
         # the standing operator grant — scope=any never sets authContext).
+        # authcontext-target: (ownership) the target must be this appointment's
+        # patient's identifiedBy identity, so a forged one only fails closed.
         if op.authContextTarget != "":
             if status != "cancelled":
                 fail("AuthDenied: a patient may only cancel their own appointment (status must be cancelled)")

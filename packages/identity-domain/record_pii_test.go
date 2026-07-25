@@ -368,13 +368,19 @@ func TestRecordPII_StaffRejectedOnClaimedIdentity(t *testing.T) {
 }
 
 // TestRecordPII_TaskScopedNotConfinedToUnclaimed — the §3.2 confinement binds
-// the STANDING path only (exactly F4's require_workplace), not a task/self-
-// scoped submission: lease-signing's onboarding userTask assigns
-// RecordIdentityPII to the applicant identity itself (assignee == subject,
-// internal/loom/engine.go's §10.5 invariant), which by the time the applicant
-// performs it may already be claimed. A non-operator actor submitting with
-// AuthContext.Target set succeeds on a claimed identity — where the same
-// actor submitting the STANDING way (no AuthContext) would be denied.
+// the STANDING path only (exactly F4's require_workplace), not a task-scoped
+// submission: lease-signing's onboarding userTask assigns RecordIdentityPII to
+// the applicant identity itself (assignee == subject, internal/loom/engine.go's
+// §10.5 invariant), which by the time the applicant performs it may already be
+// claimed. The exemption keys on op.authTargetValidated — step 3 having CHECKED
+// the target — not on the caller having put one on the wire, so the vector runs
+// the REAL task path: an ephemeralGrant scopedTo the identity in the actor's
+// `cap.ephemeral.<actor>` entry, submitted with {Task, Target} matching it.
+//
+// The forgery is the paired negative: the same actor, the same claimed
+// identity, a target of its own choosing and no task — which resolves as the
+// standing scope=any grant step 3 never validates a target for, and is
+// therefore confined to unclaimed identities like any other standing call.
 func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupTestEnv(t)
@@ -383,7 +389,11 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 	claimedKey := "vtx.identity." + testutil.GenReqID("PIITaskScoped")
 	seedDirectIdentity(t, ctx, conn, claimedKey, "claimed", "")
 
-	reads := recordPIIReads(claimedKey)
+	taskKey := "vtx.task." + testutil.GenReqID("PIIOnboardTask")
+	testutil.SeedCapDoc(t, ctx, conn, frontDeskTaskGrantDoc(taskKey, claimedKey))
+
+	// The positive: the real onboarding task grant. Asserted FIRST, so a
+	// rejection below is the confinement guard talking and not a broken path.
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("PIITaskScopedOp"),
 		Lane:          processor.LaneDefault,
@@ -392,8 +402,8 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 		SubmittedAt:   "2026-07-22T11:00:00Z",
 		Class:         "identity",
 		Payload:       json.RawMessage(`{"identityKey":"` + claimedKey + `","ssn":"123-45-6789","dob":"1990-01-15"}`),
-		AuthContext:   &processor.AuthContext{Target: claimedKey},
-		ContextHint:   reads,
+		AuthContext:   &processor.AuthContext{Task: taskKey, Target: claimedKey},
+		ContextHint:   recordPIIReads(claimedKey),
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -402,6 +412,97 @@ func TestRecordPII_TaskScopedNotConfinedToUnclaimed(t *testing.T) {
 	if got, _ := ssn["value"].(string); got != "123456789" {
 		t.Fatalf("ssn aspect value = %q, want normalized 123456789", got)
 	}
+
+	// Unforged control on the SAME auth path the forgery below uses: the
+	// standing scope=any grant, carrying a target, on an UNCLAIMED identity —
+	// which the confinement does not reach. This is what proves a rejection
+	// below is the confinement guard talking rather than a step-3 denial.
+	openKey := "vtx.identity." + testutil.GenReqID("PIIStandingOpen")
+	seedDirectIdentity(t, ctx, conn, openKey, "unclaimed", "")
+	control := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIStandingOpenOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + openKey + `","ssn":"555-44-3333","dob":"1979-06-11"}`),
+		AuthContext:   &processor.AuthContext{Target: openKey},
+		ContextHint:   recordPIIReads(openKey),
+	}
+	testutil.PublishOp(t, conn, control)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// THE FORGERY: a second claimed identity the actor holds no grant over, and
+	// a target it simply declares. Step 3 authorizes this on the standing
+	// scope=any RecordIdentityPII permission WITHOUT looking at the target, so
+	// the target is an unchecked hint — and must not exempt anything.
+	forgedKey := "vtx.identity." + testutil.GenReqID("PIIForgedTarget")
+	seedDirectIdentity(t, ctx, conn, forgedKey, "claimed", "")
+	forged := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIForgedTargetOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:01Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + forgedKey + `","ssn":"987-65-4321","dob":"1985-03-02"}`),
+		AuthContext:   &processor.AuthContext{Target: forgedKey},
+		ContextHint:   recordPIIReads(forgedKey),
+	}
+	testutil.PublishOp(t, conn, forged)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	if kvExists(t, ctx, conn, forgedKey+".ssn") {
+		t.Errorf("ssn aspect written for a forged authContext.target — target presence must not " +
+			"exempt a standing scope=any caller from the unclaimed-only confinement")
+	}
+	if kvExists(t, ctx, conn, forgedKey+".dob") {
+		t.Errorf("dob aspect written for a forged authContext.target")
+	}
+
+	// THE SUBSTITUTION: the grant and the authContext agree — step 3 validates
+	// the target and hands the script authTargetValidated == true — but the
+	// PAYLOAD names someone else. Nothing in the platform binds the grant's
+	// scopedTo to payload.identityKey, so only the script's own resource bind
+	// stops an applicant with a legitimate onboarding grant over their own
+	// identity from writing PII onto anyone else's.
+	subst := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIIPayloadSubstOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:02Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + forgedKey + `","ssn":"987-65-4321","dob":"1985-03-02"}`),
+		AuthContext:   &processor.AuthContext{Task: taskKey, Target: claimedKey},
+		ContextHint:   recordPIIReads(forgedKey),
+	}
+	testutil.PublishOp(t, conn, subst)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+
+	if kvExists(t, ctx, conn, forgedKey+".ssn") {
+		t.Errorf("ssn aspect written onto an identity the validated grant does not name — " +
+			"a validated target must be BOUND to the identity the op writes")
+	}
+
+	// Re-pointing the authContext at the payload's identity does not help
+	// either: the grant validates only the target it names, so step 3 finds no
+	// matching ephemeralGrant and the op never reaches the script at all. The
+	// exemption cannot be borrowed from one subject to another.
+	substituted := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("PIISubstitutedOp"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RecordIdentityPII",
+		Actor:         frontDeskActorKey,
+		SubmittedAt:   "2026-07-22T11:00:02Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + forgedKey + `","ssn":"987-65-4321","dob":"1985-03-02"}`),
+		AuthContext:   &processor.AuthContext{Task: taskKey, Target: forgedKey},
+		ContextHint:   recordPIIReads(forgedKey),
+	}
+	testutil.PublishOp(t, conn, substituted)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
 // TestRecordPII_OperatorAllowedOnClaimedIdentity — root is exempt from the
