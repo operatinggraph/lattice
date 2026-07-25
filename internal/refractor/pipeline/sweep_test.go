@@ -131,7 +131,7 @@ func TestSweepCandidates_AnchorWithNoTargetKeyIsDivergent(t *testing.T) {
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{sweepActorA, sweepActorB}, anchors)
 
-	got := p.Sweeper().candidates(context.Background(), anchors, targets)
+	got := p.Sweeper().candidates(context.Background(), anchors, targets).actors
 	// B is the definite divergence (the observed first-projection loss) and
 	// must be picked first, ahead of the round-robin walk.
 	require.Equal(t, sweepActorB, got[0])
@@ -148,7 +148,7 @@ func TestSweepCandidates_TombstonedAnchorIsNotADivergence(t *testing.T) {
 
 	anchors, targets, err := p.Sweeper().survey(context.Background())
 	require.NoError(t, err)
-	got := p.Sweeper().candidates(context.Background(), anchors, targets)
+	got := p.Sweeper().candidates(context.Background(), anchors, targets).actors
 	require.Equal(t, []string{sweepActorB}, got,
 		"the batch must go to the live unprojected anchor, not the tombstoned one")
 }
@@ -165,7 +165,7 @@ func TestSweepCandidates_OrphanTargetKeyIsDivergent(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, anchors)
 
-	got := p.Sweeper().candidates(context.Background(), anchors, targets)
+	got := p.Sweeper().candidates(context.Background(), anchors, targets).actors
 	require.Equal(t, []string{sweepActorC}, got)
 }
 
@@ -182,7 +182,8 @@ func TestSweepCandidates_ForeignKeysInASharedBucketAreNotClaimed(t *testing.T) {
 
 	anchors, targets, err := p.Sweeper().survey(context.Background())
 	require.NoError(t, err)
-	require.Empty(t, p.Sweeper().candidates(context.Background(), anchors, targets))
+	gotEmpty := p.Sweeper().candidates(context.Background(), anchors, targets).actors
+	require.Empty(t, gotEmpty)
 }
 
 func TestSweepCandidates_CursorWalksAndResumes(t *testing.T) {
@@ -207,14 +208,14 @@ func TestSweepCandidates_CursorWalksAndResumes(t *testing.T) {
 
 	seen := make([]string, 0, 3)
 	for range all {
-		got := sw.candidates(context.Background(), anchors, targets)
+		got := sw.candidates(context.Background(), anchors, targets).actors
 		require.Len(t, got, 1)
 		seen = append(seen, got[0])
 	}
 	require.ElementsMatch(t, all, seen, "three bounded ticks must cover every anchor exactly once")
 
 	// A fourth tick wraps rather than stalling at the end of the list.
-	got := sw.candidates(context.Background(), anchors, targets)
+	got := sw.candidates(context.Background(), anchors, targets).actors
 	require.Equal(t, anchors[0], got[0])
 }
 
@@ -242,7 +243,7 @@ func TestSweepCandidates_DeepVerifyKeepsAReservedSliceOfEveryBatch(t *testing.T)
 	require.NoError(t, err)
 	require.Len(t, surveyed, len(anchors))
 
-	got := sw.candidates(context.Background(), surveyed, targets)
+	got := sw.candidates(context.Background(), surveyed, targets).actors
 	require.LessOrEqual(t, len(got), 10)
 	require.NotEmpty(t, sw.Status().Cursor,
 		"the deep verify must still reach its reserved slots and advance the cursor")
@@ -265,7 +266,7 @@ func TestSweepCandidates_CursorSurvivesAnchorRemoval(t *testing.T) {
 	sw.mu.Unlock()
 
 	anchors := []string{sweepActorA, sweepActorC} // B has been deleted
-	got := sw.candidates(context.Background(), anchors, map[string]struct{}{})
+	got := sw.candidates(context.Background(), anchors, map[string]struct{}{}).actors
 	require.Equal(t, []string{sweepActorC}, got)
 }
 
@@ -520,15 +521,341 @@ func TestSweepCandidates_ABackedOffActorYieldsItsSlot(t *testing.T) {
 
 	// Both anchors are divergent (neither has a target key) and the batch
 	// holds one, so the first sorted anchor takes it.
-	require.Equal(t, []string{sweepActorA}, sw.candidates(ctx, anchors, targets))
+	gotFirst := sw.candidates(ctx, anchors, targets).actors
+	require.Equal(t, []string{sweepActorA}, gotFirst)
 
 	sw.mu.Lock()
 	sw.passNo = 7
+	// Rewind the coverage walk so it starts at A again. Without this the
+	// rotation would reach B on its own and the assertion below would pass
+	// whether or not backing off actually yields the slot.
+	sw.coverage.cursor = ""
 	sw.mu.Unlock()
 	sw.noteActorFailure(sweepActorA, errUnwritableTarget, 7)
 	sw.noteActorFailure(sweepActorA, errUnwritableTarget, 7)
 
-	require.Equal(t, []string{sweepActorB}, sw.candidates(ctx, anchors, targets),
+	gotAfterBackoff := sw.candidates(ctx, anchors, targets).actors
+	require.Equal(t, []string{sweepActorB}, gotAfterBackoff,
 		"the backed-off actor's slot must go to the next divergent actor")
 	require.Equal(t, 1, len(sw.failing), "yielding the slot does not retire the failure")
+}
+
+// writeProjectableAnchor seeds a live identity anchor whose body carries the
+// commit provenance the universal Core KV envelope records (Contract #1 §1.3),
+// so Reproject can derive a deterministic projectedAt and actually reach a
+// verdict on it instead of faulting.
+func writeProjectableAnchor(t *testing.T, p *Pipeline, actorKey string) {
+	t.Helper()
+	body := map[string]any{
+		"key":            actorKey,
+		"class":          "identity",
+		"data":           map[string]any{},
+		"createdAt":      "2026-07-25T00:00:00Z",
+		"lastModifiedAt": "2026-07-25T00:00:00Z",
+	}
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+	_, err = p.coreKV.Put(context.Background(), actorKey, data)
+	require.NoError(t, err)
+}
+
+// rowlessAnchors seeds n live identity anchors with no target row and returns
+// them in sorted order. The Contract #1 NanoID alphabet excludes I, l, O and 0,
+// so the varying segment is drawn from a fixed safe run.
+func rowlessAnchors(t *testing.T, p *Pipeline, n int) []string {
+	t.Helper()
+	const idChars = "abcdefghijkmnpqrstu"
+	require.LessOrEqual(t, n, len(idChars))
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		actor := "vtx.identity.Tstv" + string(idChars[i]) + "aaaaaaaaaaaaaaa"
+		writeProjectableAnchor(t, p, actor)
+		out = append(out, actor)
+	}
+	return out
+}
+
+
+// hintMissesForTest reads a prefilter hint's standing record under the
+// sweeper's own lock.
+func (s *Sweeper) hintMissesForTest(which string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if which == "orphan" {
+		return s.orphan.misses
+	}
+	return s.coverage.misses
+}
+
+// floorHint drives a hint to its floor the way a pass would, and pins passNo
+// off the re-test cadence so the floor is actually in force.
+func floorHint(t *testing.T, sw *Sweeper, which string, h *hintState) {
+	t.Helper()
+	sw.mu.Lock()
+	sw.passNo = 1
+	sw.mu.Unlock()
+	for i := 0; i < hintMissesBeforeFloor; i++ {
+		sw.noteHintOutcome(which, h, 4, 0)
+	}
+	require.Equal(t, hintMissesBeforeFloor, sw.hintMissesForTest(which))
+}
+
+// seedOrphanKeys points the adapter at n target keys whose anchors do not
+// exist, so every one of them is an orphan, and returns their actor keys sorted.
+func seedOrphanKeys(t *testing.T, adpt *listingAdapter, n int) []string {
+	t.Helper()
+	const idChars = "abcdefghijkmnpqrstu"
+	require.LessOrEqual(t, n, len(idChars))
+	actors := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		actor := "vtx.identity.Tsto" + string(idChars[i]) + "aaaaaaaaaaaaaaa"
+		adpt.keys = append(adpt.keys, sweepBuildKey(actor))
+		actors = append(actors, actor)
+	}
+	return actors
+}
+
+func TestSweepCandidates_TheOrphanHintKeepsItsSlotsUnderASaturatedCoverageWalk(t *testing.T) {
+	// The orphan hint is the only detector for a row whose anchor is gone: the
+	// deep verify walks anchors, and an orphan's anchor is by definition not
+	// among them. So a coverage walk that saturates the prefilter — the steady
+	// state of any lens whose match filters — must not be able to starve it.
+	//
+	// The covered anchor sorts after the coverage walk's budget cut-off, so this
+	// also proves the expected-key map is built over EVERY anchor: a map
+	// truncated by that budget would hand this healthy actor to the orphan hint
+	// to re-project.
+	const orphanActor = "vtx.identity.Tstwzaaaaaaaaaaaaaaa"
+	coveredActor := "vtx.identity.Tstvzaaaaaaaaaaaaaaa"
+	adpt := &listingAdapter{keys: []string{
+		sweepBuildKey(coveredActor),
+		sweepBuildKey(orphanActor),
+	}}
+	p := newSweepPipeline(t, adpt, 5)
+	rowless := rowlessAnchors(t, p, 10)
+	writeProjectableAnchor(t, p, coveredActor)
+	sw := p.Sweeper()
+
+	anchors, targets, err := sw.survey(context.Background())
+	require.NoError(t, err)
+	require.Len(t, anchors, len(rowless)+1)
+	require.Equal(t, coveredActor, anchors[len(anchors)-1],
+		"the covered anchor must sort last, beyond the coverage walk's budget")
+
+	sel := sw.candidates(context.Background(), anchors, targets)
+	require.Contains(t, sel.actors, orphanActor,
+		"a saturated coverage walk must not starve the only orphan detector")
+	require.Contains(t, sel.fromOrphan, orphanActor)
+	require.NotContains(t, sel.actors, coveredActor,
+		"an anchor that has a row is not an orphan, however late it sorts")
+}
+
+func TestSweepCandidates_TheCoverageWalkRotatesInsteadOfRepickingTheSameHead(t *testing.T) {
+	// Without a cursor of its own the coverage walk re-examines the same
+	// sorted-first anchors every tick forever, so on a filtering lens the rest of
+	// the anchor space is never reached at all.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 2)
+	rowless := rowlessAnchors(t, p, 5)
+	sw := p.Sweeper()
+
+	anchors, targets, err := sw.survey(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, rowless, anchors)
+
+	picked := make([]string, 0, len(rowless))
+	for range rowless {
+		sel := sw.candidates(context.Background(), anchors, targets)
+		require.Len(t, sel.fromCoverage, 1,
+			"a batch of two leaves the coverage walk one slot after the deep reserve")
+		for actor := range sel.fromCoverage {
+			picked = append(picked, actor)
+		}
+	}
+	require.ElementsMatch(t, rowless, picked,
+		"five bounded ticks must reach every row-less anchor exactly once")
+}
+
+func TestSweepCandidates_TheOrphanHintRotatesSoAnAlreadyRetractedKeyCannotHoldASlot(t *testing.T) {
+	// An auth-plane target is guarded, so retracting a row writes a soft
+	// tombstone that stays a live NATS-KV key and keeps appearing in the target
+	// listing. A retracted orphan therefore never leaves the hint's set, and a
+	// hint that always walked its sorted head would re-verify the same
+	// already-retracted keys every tick while a genuinely stale row further down
+	// the order was never reached at all.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 1)
+	orphans := seedOrphanKeys(t, adpt, 5)
+	sw := p.Sweeper()
+
+	anchors, targets, err := sw.survey(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, anchors, "no anchor exists, so every listed key is an orphan")
+
+	picked := make([]string, 0, len(orphans))
+	for range orphans {
+		sel := sw.candidates(context.Background(), anchors, targets)
+		require.Len(t, sel.fromOrphan, 1)
+		for actor := range sel.fromOrphan {
+			picked = append(picked, actor)
+		}
+	}
+	require.ElementsMatch(t, orphans, picked,
+		"five bounded ticks must reach every orphan exactly once")
+}
+
+func TestSweepCandidates_AnUnproductiveCoverageWalkYieldsTheBatchToTheDeepVerify(t *testing.T) {
+	// The coverage walk's premise — an anchor with no row is divergent — is a
+	// hypothesis, not a property of the lens. Once passes have tested it and
+	// found every candidate already correct, spending most of the batch
+	// re-projecting row-less anchors buys nothing, while the deep verify (the only
+	// detector for a present-but-stale row) runs at a fifth of its budget.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	rowless := rowlessAnchors(t, p, 19)
+	sw := p.Sweeper()
+
+	anchors, targets, err := sw.survey(context.Background())
+	require.NoError(t, err)
+	require.Len(t, anchors, len(rowless))
+
+	sel := sw.candidates(context.Background(), anchors, targets)
+	require.Len(t, sel.actors, 10)
+	require.Len(t, sel.fromCoverage, 8,
+		"until the premise is tested the walk holds the whole prefilter")
+
+	floorHint(t, sw, "coverage", &sw.coverage)
+
+	sel = sw.candidates(context.Background(), anchors, targets)
+	require.Len(t, sel.actors, 10, "the batch is still spent in full")
+	require.Len(t, sel.fromCoverage, 2,
+		"the walk keeps only its reserved floor once its premise has failed")
+
+	// One healed candidate clears the record outright: a lens that covers its
+	// anchors and then loses a batch of rows is back to full share on the pass
+	// after the one that discovers the loss.
+	sw.noteHintOutcome("coverage", &sw.coverage, 2, 1)
+	sel = sw.candidates(context.Background(), anchors, targets)
+	require.Len(t, sel.fromCoverage, 8)
+}
+
+func TestSweepCandidates_AnUnproductiveOrphanHintYieldsItsSlotsToo(t *testing.T) {
+	// A standing set of already-retracted tombstone orphans re-projects to
+	// nothing forever. Left unchecked it would monopolise the prefilter exactly
+	// as the coverage walk could — the same defect, one direction over.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	orphans := seedOrphanKeys(t, adpt, 19)
+	sw := p.Sweeper()
+
+	anchors, targets, err := sw.survey(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, anchors)
+
+	sel := sw.candidates(context.Background(), anchors, targets)
+	require.Len(t, sel.fromOrphan, 10,
+		"with no anchors to walk the deep verify reserves nothing, so the orphan "+
+			"hint may spend the whole batch")
+	require.Len(t, orphans, 19)
+
+	floorHint(t, sw, "orphan", &sw.orphan)
+
+	sel = sw.candidates(context.Background(), anchors, targets)
+	require.Len(t, sel.fromOrphan, 2,
+		"once its retractions stop writing, the hint keeps only its floor")
+}
+
+func TestSweepHintOutcome_AnErroringOrEmptyPassIsNotEvidence(t *testing.T) {
+	// An erroring lens must not be mistaken for one whose premise is false, and a
+	// pass that selected nothing through a hint says nothing either way. A single
+	// unproductive pass is also not enough: both key listings are bounded feeds
+	// that can come back short, and a row landing mid-pass reads as missing and
+	// then as correct.
+	sw := newSweepPipeline(t, &listingAdapter{}, 10).Sweeper()
+
+	sw.noteHintOutcome("coverage", &sw.coverage, 0, 0)
+	require.Zero(t, sw.hintMissesForTest("coverage"))
+
+	sw.noteHintOutcome("coverage", &sw.coverage, 3, 0)
+	require.Equal(t, 1, sw.hintMissesForTest("coverage"))
+	require.False(t, sw.coverage.floored(1),
+		"one unproductive pass is a transient, not a verdict")
+
+	sw.noteHintOutcome("coverage", &sw.coverage, 3, 0)
+	require.True(t, sw.coverage.floored(1))
+
+	sw.noteHintOutcome("coverage", &sw.coverage, 0, 0)
+	require.True(t, sw.coverage.floored(1),
+		"no evidence leaves the standing record alone; it does not clear it")
+
+	require.False(t, sw.coverage.floored(hintRetestPasses),
+		"the full share comes back periodically, so a verdict formed from a "+
+			"transient cannot hold for the life of the process")
+
+	sw.noteHintOutcome("coverage", &sw.coverage, 2, 1)
+	require.Zero(t, sw.hintMissesForTest("coverage"))
+}
+
+func TestSweepCandidates_EveryAnchorHasItsRowSoTheDeepVerifyTakesTheWholeBatch(t *testing.T) {
+	// The invariant this must not break. Every anchor carrying a row is the
+	// converged shape of a lens that projects one per anchor, and there the
+	// selection is exactly what it always was: the coverage walk selects nothing,
+	// so it gathers no evidence and never floors; the orphan hint reserves
+	// nothing because there is nothing to retract; the deep verify gets the whole
+	// batch.
+	p := newSweepPipeline(t, &listingAdapter{}, 10)
+	anchorList := rowlessAnchors(t, p, 19)
+	adpt, ok := p.adpt.(*listingAdapter)
+	require.True(t, ok)
+	for _, a := range anchorList {
+		adpt.keys = append(adpt.keys, sweepBuildKey(a))
+	}
+	sw := p.Sweeper()
+
+	anchors, targets, err := sw.survey(context.Background())
+	require.NoError(t, err)
+
+	sel := sw.candidates(context.Background(), anchors, targets)
+	require.Empty(t, sel.fromCoverage, "every anchor has its row; nothing is missing")
+	require.Empty(t, sel.fromOrphan, "and no row outlives its anchor")
+	require.Equal(t, anchorList[:10], sel.actors,
+		"the deep verify takes the whole batch, in cursor order")
+}
+
+func TestSweepPass_AFilteringLensLearnsItsCoverageWalkIsUnproductive(t *testing.T) {
+	// End to end through real passes: every row-less anchor re-projects to
+	// nothing, so the passes write nothing, and the sweep records that this
+	// lens's absent rows are correct rather than divergent. This is the only
+	// coverage of the wiring from Reproject's verdict back into the hint.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	// A filtering lens IS a rule whose match filters: these anchors hold no
+	// role, so the rule binds nothing and each one correctly projects no row.
+	eng := full.New()
+	cr, err := eng.Parse(
+		"MATCH (i:identity {key: $actorKey})-[:holdsRole]->(r:role) " +
+			"RETURN i.key AS actorKey, collect(r.key) AS roles")
+	require.NoError(t, err)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull)
+	fullCR.KeyColumns = []string{"actorKey"}
+	require.NoError(t, fullCR.ValidateKeyColumns())
+	p.fullEngine, p.fullCR = eng, fullCR
+
+	rowlessAnchors(t, p, 19)
+	p.recordAppliedSeq(910)
+	sw := p.Sweeper()
+
+	for i := 0; i < hintMissesBeforeFloor; i++ {
+		sw.pass(context.Background())
+	}
+
+	require.Empty(t, adpt.upserts)
+	require.Empty(t, adpt.deletes)
+	require.Zero(t, sw.Status().Reconciled)
+	require.Zero(t, sw.Status().FailingActors,
+		"the reprojections must have SUCCEEDED and written nothing — an error "+
+			"path would leave no evidence and pass this test vacuously")
+	require.Equal(t, hintMissesBeforeFloor, sw.hintMissesForTest("coverage"),
+		"a pass whose every coverage candidate was already correct is the evidence")
 }

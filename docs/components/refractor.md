@@ -544,14 +544,55 @@ capability-projection-reconciliation-design.md §3.2). Every other lens kind is 
 structurally — the driver simply never installs a `SweepPlan` for it.
 
 - A **coverage prefilter** compares two key listings, the lens's anchor-type vertices in
-  Core KV against the target's live keys, and catches both definite directions: an anchor
-  with no target key (the lost first projection) and a target key whose anchor is gone (an
+  Core KV against the target's live keys, and points at both directions: an anchor with no
+  target key (the lost first projection) and a target key whose anchor is gone (an
   over-grant). A tombstoned anchor legitimately has no key and is excluded, or the
   accumulated tombstone set would starve the walk below.
 - A **bounded round-robin deep verify** (default 25 anchors per 60s tick, both
   overridable) re-executes the projection from a persisted cursor. This is the only
   detector for a row that is present but *stale* — the over-grant the prefilter cannot
   see, since a revoked actor keeps both its vertex and its key.
+- **Neither prefilter direction is a decisive divergence, so both are priority hints that
+  earn their share of the batch.**
+  - "An anchor has no row" is definite only for a lens that projects one row per anchor. For
+    a lens whose match *filters* it is the steady state — true on the auth plane itself,
+    where an identity holding no unexpired task grant correctly has no
+    `capabilityEphemeral` row and one holding no role correctly has no `capabilityRoles` row.
+  - "A target key has no live anchor" is not proof of a row to retract either. Core KV
+    deletes are logical, so a **departed identity keeps its vertex key** and stays in the
+    anchor listing; its stale row is therefore *not* an orphan, and the deep verify is what
+    detects that over-grant. The orphan hint's real triggers are a physically purged anchor,
+    a row written for an anchor that never existed, and a transiently short anchor listing.
+- **Each hint rotates from its own cursor, and a reserved share alone is not enough.** A hint
+  whose candidate set stays populated forever must also *reach every member of it*, or an
+  individual divergence starves while the direction's slot count looks perfectly healthy.
+  This bites hardest on the orphan hint: an auth-plane target is always guarded, so
+  retracting a row writes a **soft tombstone** that remains a live NATS-KV key and keeps
+  appearing in the target listing while reading as absent. A retracted orphan therefore never
+  leaves the set, and a hint that always walked its sorted head would re-verify the same
+  already-retracted keys every tick while a genuinely stale row further down the order was
+  never reached. Neither hint cursor is persisted (the deep verify's is — it carries the
+  completeness guarantee), so the rotation is **restart-scoped**: a cell that redeploys faster
+  than a full rotation re-walks from the head.
+- **A hint that heals nothing is capped at its floor.** After
+  `hintMissesBeforeFloor` *consecutive* passes in which a hint selected candidates and none of
+  them wrote, it keeps only a reserved floor and the slots pass to the other directions. Two
+  passes rather than one because a single unproductive pass is a transient: either key listing
+  can come back short, and a row landing mid-pass reads as missing and then as correct. A pass
+  whose candidates *errored* is no evidence in either direction, so an erroring lens is never
+  mistaken for one whose premise is false; one write clears the record outright; and the full
+  share is restored every `hintRetestPasses` regardless, so a record formed from a transient
+  cannot hold for the life of the process. Each transition is logged, since a demoted detector
+  is otherwise invisible.
+- **Each direction holds a reserved share the others cannot consume**, because two of them are
+  the *only* detector for what they see: the deep verify for a present-but-stale row, and the
+  orphan hint for a row whose anchor is gone (the deep verify walks anchors, and an orphan's
+  anchor is by definition not among them). A direction that can be starved indefinitely is a
+  detector that can be silently switched off. Each share is sized to the work that exists, so
+  a direction with nothing to do hands its slots on: a lens with no orphans leaves the
+  coverage hint the whole prefilter, and a listing with no anchors leaves the orphan hint the
+  whole batch. Below three slots a batch cannot seat three directions at all — the default is
+  25 and nothing in production overrides it.
 - Repair reuses the `reproject` verb's path exactly (§3.1), so reconciliation has one
   write path and one ordering token: the pipeline's last-applied stream sequence, captured
   before evaluation, which always loses to a later real CDC event under the §6.2 guard.

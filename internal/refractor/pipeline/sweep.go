@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -109,12 +110,31 @@ type actorFailure struct {
 //
 // Two detectors compose. The coverage prefilter is two key listings — the
 // lens's anchor-type vertices from Core KV and the target's live keys — and
-// catches the definite cases in both directions: an anchor with no target key
-// (the observed first-projection loss) and a target key whose anchor is gone
-// (an over-grant). The round-robin deep verify then walks all anchors a bounded
-// batch at a time, re-executing the projection; that is what catches a row
-// which is present but stale — the over-grant direction the prefilter cannot
-// see, since a revoked actor keeps both its vertex and its key.
+// points at both directions: an anchor with no target key (the observed
+// first-projection loss) and a target key whose anchor is gone (an over-grant).
+// The round-robin deep verify then walks all anchors a bounded batch at a time,
+// re-executing the projection; that is what catches a row which is present but
+// stale — the over-grant direction the prefilter cannot see, since a revoked
+// actor keeps both its vertex and its key.
+//
+// Neither prefilter direction is a decisive divergence, so both are PRIORITY
+// HINTS whose share of the batch is earned from whether their candidates
+// actually heal anything (see candidates and hintState), never an assumption
+// about the lens:
+//
+//   - An anchor with no row is definite only for a lens that projects a row per
+//     anchor. For a lens whose match filters — the common shape, and true on the
+//     auth plane itself, where an identity holding no unexpired task grant
+//     correctly has no capabilityEphemeral row and one holding no role correctly
+//     has no capabilityRoles row — it is the steady state.
+//   - A target key with no live anchor is not proof of a row to retract either.
+//     Core KV deletes are logical, so a departed identity KEEPS its vertex key
+//     and stays in the anchor listing; its stale row is therefore not an orphan,
+//     and the deep verify is what detects that over-grant. This direction's real
+//     triggers are a physically purged anchor, a row written for an anchor that
+//     never existed, and a transiently short anchor listing — and because a
+//     guarded retraction leaves a soft tombstone that stays listed, a key it has
+//     already retracted keeps presenting as an orphan.
 //
 // A converged pass writes nothing: Reproject's skip-if-identical drops the
 // write when the recomputed body equals the stored one, so a healthy bucket
@@ -132,6 +152,63 @@ type Sweeper struct {
 	// tick counter the per-actor backoff schedules against.
 	failing map[string]*actorFailure
 	passNo  uint64
+	// coverage and orphan are the two prefilter hints' rotation + earned-share
+	// state (see hintState and candidates).
+	coverage hintState
+	orphan   hintState
+}
+
+// hintState is one prefilter hint's rotation position and its standing record
+// of whether its premise holds for this lens.
+//
+// Both hints propose candidates from a set that can legitimately stay populated
+// forever, so neither may spend every tick on the same head of its list:
+//
+//   - The coverage hint's set is the row-less anchors. For a lens whose match
+//     filters, that set is the steady state.
+//   - The orphan hint's set is the target keys with no live anchor. An auth-plane
+//     target is always guarded, so retracting a row writes a SOFT tombstone that
+//     stays a live NATS-KV key and keeps appearing in the target listing while
+//     reading as absent. A retracted orphan therefore does NOT leave the set — it
+//     becomes a permanent, zero-value occupant of the hint's budget.
+//
+// cursor rotates the walk across ticks so every member of the set is reached in
+// bounded time. Neither cursor is persisted: the deep verify's cursor is the
+// lens's completeness guarantee, while these only order hints. A restart
+// re-walks from the head, so on a cell that redeploys faster than a full
+// rotation the rotation never completes and the hint degrades to its head —
+// bounded and never wrong, but the benefit is restart-scoped.
+//
+// misses counts consecutive passes in which the hint selected candidates and
+// none of them wrote. Reaching hintMissesBeforeFloor caps the hint at the same
+// reserved floor the other directions hold, so it stops spending the batch on
+// re-projections that heal nothing; one write clears it outright.
+type hintState struct {
+	cursor string
+	misses int
+}
+
+// hintMissesBeforeFloor is how many consecutive unproductive passes demote a
+// hint to its floor. It is two rather than one because a single pass can be
+// unproductive for reasons that say nothing about the lens: either key listing
+// can come back short, and a row that lands between the target listing and the
+// reprojection reads as missing and then as correct.
+//
+// hintRetestPasses periodically restores the full share regardless of the
+// standing record, so a verdict formed from a transient cannot hold for the life
+// of the process — on a converged lens the hint selects nothing, gathers no
+// evidence, and would otherwise never get the chance to clear itself.
+const (
+	hintMissesBeforeFloor = 2
+	hintRetestPasses      = 8
+)
+
+// floored reports whether this hint currently keeps only its reserved floor.
+func (h hintState) floored(passNo uint64) bool {
+	if h.misses < hintMissesBeforeFloor {
+		return false
+	}
+	return passNo%hintRetestPasses != 0
 }
 
 // newSweeper builds the sweeper for an installed plan, applying the defaults.
@@ -270,9 +347,13 @@ func (s *Sweeper) pass(ctx context.Context) {
 	}
 	s.reapDepartedFailures(anchors, targets)
 
-	candidates := s.candidates(ctx, anchors, targets)
+	sel := s.candidates(ctx, anchors, targets)
 	healed := 0
-	for _, actor := range candidates {
+	// Each prefilter hint's premise is a hypothesis, and Reproject's verdict on
+	// its candidates is the experiment that tests it.
+	coverageTried, coverageHits := 0, 0
+	orphanTried, orphanHits := 0, 0
+	for _, actor := range sel.actors {
 		res, rerr := s.p.Reproject(ctx, actor)
 		if errors.Is(rerr, ErrNoOrderingToken) {
 			// The pipeline has applied nothing this process, so every write
@@ -293,6 +374,18 @@ func (s *Sweeper) pass(ctx context.Context) {
 			continue
 		}
 		s.clearActorFailure(actor)
+		if _, viaCoverage := sel.fromCoverage[actor]; viaCoverage {
+			coverageTried++
+			if res.Wrote {
+				coverageHits++
+			}
+		}
+		if _, viaOrphan := sel.fromOrphan[actor]; viaOrphan {
+			orphanTried++
+			if res.Wrote {
+				orphanHits++
+			}
+		}
 		if res.Wrote {
 			healed++
 			slog.Info("pipeline: sweep: healed a divergent projection",
@@ -300,6 +393,8 @@ func (s *Sweeper) pass(ctx context.Context) {
 				"projectionSeq", res.ProjectionSeq)
 		}
 	}
+	s.noteHintOutcome("coverage", &s.coverage, coverageTried, coverageHits)
+	s.noteHintOutcome("orphan", &s.orphan, orphanTried, orphanHits)
 
 	s.record(ctx, healed, nil)
 }
@@ -487,11 +582,29 @@ func (s *Sweeper) survey(ctx context.Context) (anchors []string, targets map[str
 	return anchors, targets, nil
 }
 
-// candidates picks this tick's bounded actor set: the prefilter's definite
-// divergences first (they are known-wrong right now), then the round-robin deep
-// verify continuing from the persisted cursor. The result is deduplicated and
-// capped at the batch size, and the cursor advances only over the anchors the
-// deep pass actually reached.
+// candidates picks this tick's bounded actor set: the two prefilter hints, then
+// the round-robin deep verify continuing from the persisted cursor. The result
+// is deduplicated and capped at the batch size.
+//
+// Each direction holds a reserved share the others cannot consume, because two
+// of them are the ONLY detector for what they see: the deep verify for a row
+// that is present but stale, and the orphan hint for a row whose anchor is gone
+// (the deep verify walks anchors, and an orphan's anchor is by definition not
+// among them). A direction that could be starved indefinitely is a detector that
+// can be silently switched off.
+//
+// A reserved share is necessary but NOT sufficient: a hint whose set stays
+// populated forever must also reach every member of it, or an individual
+// divergence starves while the direction's slot count looks healthy. That is
+// what each hint's cursor is for (hintState) — a hint that always walked its
+// sorted head would retract the same already-retracted tombstones every tick
+// while a genuinely stale row further down the order was never reached.
+//
+// Each share is sized to the work that exists, so a direction with nothing to do
+// hands its slots on: a lens with no orphans leaves the coverage hint the whole
+// prefilter, and a listing with no anchors leaves the orphan hint the whole
+// batch. Below three slots a batch cannot seat three directions at all; the
+// default is 25 and nothing in production overrides it.
 //
 // The prefilter only SELECTS; it never decides. Every candidate is answered by
 // Reproject, which re-derives the row from live Core KV — so a key listing that
@@ -499,27 +612,21 @@ func (s *Sweeper) survey(ctx context.Context) (anchors []string, targets map[str
 // re-verification at worst, never a wrong write. Retracting an "orphan" straight
 // from the listing instead of through Reproject would trade that property for a
 // mass over-revocation on the auth plane the first time a listing truncated.
-func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[string]struct{}) []string {
-	// The deep verify keeps a reserved slice of every batch. Without it, any
-	// prefilter candidate that recurs indefinitely — an actor whose heal keeps
-	// erroring, a soft-delete target key that stays listed after retraction —
-	// would refill the batch each tick and starve the round-robin walk forever,
-	// silently disabling the only detector for a stale-but-present row.
-	deepQuota := s.batch / 5
-	if deepQuota < 1 {
-		deepQuota = 1
-	}
-	prefilterCap := s.batch - deepQuota
-	if prefilterCap < 1 {
-		// A batch of one cannot honor both reservations; the definite
-		// divergence wins the slot, since it is known-wrong right now.
-		prefilterCap = 1
+func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[string]struct{}) selection {
+	quota := s.batch / 5
+	if quota < 1 {
+		quota = 1
 	}
 
 	s.mu.Lock()
 	passNo := s.passNo
+	coverage, orphanHint := s.coverage, s.orphan
 	s.mu.Unlock()
+	coverageFloored := coverage.floored(passNo)
+	orphanFloored := orphanHint.floored(passNo)
 
+	fromCoverage := make(map[string]struct{}, s.batch)
+	fromOrphan := make(map[string]struct{}, s.batch)
 	out := make([]string, 0, s.batch)
 	seen := make(map[string]struct{}, s.batch)
 	addUpTo := func(actor string, limit int) bool {
@@ -541,72 +648,137 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 		out = append(out, actor)
 		return true
 	}
-	add := func(actor string) bool { return addUpTo(actor, prefilterCap) }
 
-	// Direction 1 — an anchor with no target key. This is the observed
-	// first-projection loss. A tombstoned anchor has the same signature
-	// legitimately: its row was retracted when the tombstone projected, so it
-	// keeps a listed vertex key and no target key forever. Without the liveness
-	// check the accumulated tombstone set would refill the batch on every tick
-	// and permanently starve the deep verify below, so the check runs here —
-	// one Core KV read per candidate rather than one per anchor.
+	// The expected-key map is built over EVERY anchor, before and independently
+	// of any budget. It is what tells the orphan direction which target keys
+	// have a live anchor behind them, so a map truncated by a selection budget
+	// would hand that direction healthy actors to re-project as orphans.
 	expected := make(map[string]string, len(anchors))
 	for _, actor := range anchors {
-		key := s.plan.BuildKey(actor)
-		expected[key] = actor
-		if _, present := targets[key]; present {
-			continue
-		}
-		if !s.anchorLive(ctx, actor) {
-			continue
-		}
-		if !add(actor) {
-			break
-		}
+		expected[s.plan.BuildKey(actor)] = actor
 	}
 
-	// Direction 2 — a target key whose anchor is gone from Core KV entirely: a
-	// row that should have been retracted. Keys this lens does not own are
-	// rejected by AnchorFromKey, so a shared bucket's sibling rows are never
-	// touched.
+	// The orphan hint's candidate set — a target key with no live anchor behind
+	// it. Keys this lens does not own are rejected by AnchorFromKey, so a shared
+	// bucket's sibling rows are never touched. Resolving it up front costs no
+	// I/O and is what lets its share be sized to the work that exists. It is
+	// sorted so the cursor can resume in it, and deduplicated so a lens with
+	// several keys per anchor sizes the share by actors to reproject rather than
+	// by keys.
+	orphans := make([]string, 0)
 	for key := range targets {
 		if _, isExpected := expected[key]; isExpected {
 			continue
 		}
-		actor, owned := s.plan.AnchorFromKey(key)
-		if !owned {
-			continue
+		if actor, owned := s.plan.AnchorFromKey(key); owned {
+			orphans = append(orphans, actor)
 		}
-		if !add(actor) {
-			break
+	}
+	sort.Strings(orphans)
+	orphans = slices.Compact(orphans)
+
+	// The deep verify has no work with nothing to walk, and the orphan hint none
+	// with nothing to retract; an idle reservation would just shrink the batch.
+	deepQuota := quota
+	if len(anchors) == 0 {
+		deepQuota = 0
+	}
+	orphanQuota := quota
+	if orphanQuota > len(orphans) {
+		orphanQuota = len(orphans)
+	}
+
+	coverageCap := s.batch - deepQuota - orphanQuota
+	if coverageFloored && coverageCap > quota {
+		coverageCap = quota
+	}
+	if coverageCap < 1 {
+		coverageCap = 1
+	}
+
+	// Direction 1 — an anchor with no target key, walked from its own cursor. A
+	// tombstoned anchor has the same signature legitimately: its row was
+	// retracted when the tombstone projected, so it keeps a listed vertex key
+	// and no target key forever. The liveness check runs here rather than over
+	// every anchor — one Core KV read per candidate examined, not one per
+	// anchor.
+	if len(anchors) > 0 {
+		start := resumeAt(anchors, coverage.cursor)
+		last := coverage.cursor
+		for i := 0; i < len(anchors); i++ {
+			if len(out) >= coverageCap {
+				break
+			}
+			actor := anchors[(start+i)%len(anchors)]
+			key := s.plan.BuildKey(actor)
+			if _, present := targets[key]; present {
+				last = actor
+				continue
+			}
+			if !s.anchorLive(ctx, actor) {
+				last = actor
+				continue
+			}
+			before := len(out)
+			addUpTo(actor, coverageCap)
+			if len(out) > before {
+				// Only an actor that actually took a slot is evidence: a
+				// backed-off one is never re-projected, so it can neither
+				// confirm nor refute the hint's premise.
+				fromCoverage[actor] = struct{}{}
+			}
+			last = actor
 		}
+		s.mu.Lock()
+		s.coverage.cursor = last
+		s.mu.Unlock()
+	}
+
+	// Direction 2 — the orphans, walked from their own cursor so an
+	// already-retracted tombstone that keeps presenting as an orphan cannot hold
+	// a slot against the rest of the set. Its allowance is whatever the coverage
+	// hint left, less the deep verify's reservation.
+	if len(orphans) > 0 {
+		allowance := s.batch - deepQuota - len(out)
+		if orphanFloored && allowance > quota {
+			allowance = quota
+		}
+		orphanCap := len(out) + allowance
+		start := resumeAt(orphans, orphanHint.cursor)
+		last := orphanHint.cursor
+		for i := 0; i < len(orphans); i++ {
+			if len(out) >= orphanCap {
+				break
+			}
+			actor := orphans[(start+i)%len(orphans)]
+			before := len(out)
+			addUpTo(actor, orphanCap)
+			if len(out) > before {
+				fromOrphan[actor] = struct{}{}
+			}
+			last = actor
+		}
+		s.mu.Lock()
+		s.orphan.cursor = last
+		s.mu.Unlock()
 	}
 
 	// Direction 3 — the bounded round-robin deep verify. Re-executing the
 	// projection is the only detector for a row that is present but stale, the
 	// over-grant case neither prefilter direction can see.
 	if len(anchors) == 0 {
-		return out
+		return selection{actors: out, fromCoverage: fromCoverage, fromOrphan: fromOrphan}
 	}
-	start := 0
 	s.mu.Lock()
 	cursor := s.status.Cursor
 	s.mu.Unlock()
-	if cursor != "" {
-		start = sort.SearchStrings(anchors, cursor)
-		if start < len(anchors) && anchors[start] == cursor {
-			start++
-		}
-		if start >= len(anchors) {
-			start = 0
-		}
-	}
+	start := resumeAt(anchors, cursor)
 	last := cursor
 	for i := 0; i < len(anchors) && len(out) < s.batch; i++ {
 		actor := anchors[(start+i)%len(anchors)]
 		last = actor
-		// The full batch, not the prefilter's share: this is the reserved
-		// remainder the walk is guaranteed.
+		// The full batch, not a hint's share: this is the reserved remainder the
+		// walk is guaranteed.
 		if !addUpTo(actor, s.batch) {
 			break
 		}
@@ -614,7 +786,69 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 	s.mu.Lock()
 	s.status.Cursor = last
 	s.mu.Unlock()
-	return out
+	return selection{actors: out, fromCoverage: fromCoverage, fromOrphan: fromOrphan}
+}
+
+// selection is one tick's candidate set plus which prefilter hint proposed each
+// actor, so the pass can test each hint's premise against what Reproject found.
+// The two hint sets are disjoint by construction: an orphan's key is absent from
+// the expected map, which is exactly what makes it not an anchor.
+type selection struct {
+	actors       []string
+	fromCoverage map[string]struct{}
+	fromOrphan   map[string]struct{}
+}
+
+// resumeAt is where a cursored walk over a sorted key list continues: the first
+// entry after the cursor, wrapping to the start when the cursor has fallen off
+// the end (the entry it named may have left the list, which is why it is a
+// binary search for the position rather than a lookup of the key).
+func resumeAt(sorted []string, cursor string) int {
+	if cursor == "" {
+		return 0
+	}
+	start := sort.SearchStrings(sorted, cursor)
+	if start < len(sorted) && sorted[start] == cursor {
+		start++
+	}
+	if start >= len(sorted) {
+		return 0
+	}
+	return start
+}
+
+// noteHintOutcome folds one pass's evidence about a prefilter hint's premise.
+// tried counts the hint's candidates that Reproject actually answered, and hits
+// how many of those wrote.
+//
+// A pass that selected nothing through the hint, or whose candidates all
+// errored, is NO evidence: it leaves the standing record alone rather than
+// counting against the hint, so an erroring lens is never mistaken for one whose
+// premise is false. A single write clears the record outright, so a lens that
+// covers its anchors and then loses a batch of rows is back to the full share on
+// the pass after the one that discovers the loss.
+func (s *Sweeper) noteHintOutcome(name string, h *hintState, tried, hits int) {
+	if tried <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if hits > 0 {
+		if h.misses >= hintMissesBeforeFloor {
+			slog.Info("pipeline: sweep: prefilter hint healed again; restoring its full share",
+				"ruleId", s.p.ruleID, "hint", name)
+		}
+		h.misses = 0
+		return
+	}
+	h.misses++
+	if h.misses == hintMissesBeforeFloor {
+		// The demotion is the sweep quietly changing how it spends its batch, so
+		// it is said out loud once: an operator chasing why a detector is slow
+		// otherwise has no way to see that it is running at its floor.
+		slog.Info("pipeline: sweep: prefilter hint healed nothing; capping it at its reserved floor",
+			"ruleId", s.p.ruleID, "hint", name, "passes", h.misses)
+	}
 }
 
 // anchorLive reports whether an anchor vertex is present and not tombstoned.
