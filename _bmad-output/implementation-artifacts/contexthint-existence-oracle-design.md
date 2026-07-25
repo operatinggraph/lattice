@@ -59,8 +59,14 @@ the operation touches that key, through any of its three dependence paths:
 | Path | Site | Behavior |
 |---|---|---|
 | `kv.Read(K)` | `starlark_kv.go` cache-first branch | fault |
-| `state[K]`, `K in state`, `state.get(K)` | `stateMapValue.Get` | fault |
-| a mutation whose `key` is `K` | `StarlarkRunner.Run`, post-`parseScriptResult` | fault |
+| `state[K]`, `K in state` | `stateMapValue.Get` | fault |
+| `state.get(K)` | `stateMapValue.Attr` — re-bound; a dict's own `get` closes over the dict, so delegating it would answer `None` | fault |
+| a mutation whose key is `K`, or an aspect / link key carrying `K` as its vertex (§2.2) | `StarlarkRunner.Run`, post-`parseScriptResult` | fault |
+| enumeration — `for k in state`, `state.keys()/items()/values()` | `Iterate` / `Attr` delegate untouched | **no fault** (§2.4) |
+
+**The test is whether the operation NAMES the key.** Every faulting path above names `K`
+(`state.get(K)` names it; a link key contains its endpoints). That is what makes the fault a
+dependence test rather than a report of the key's existence.
 
 If the operation touches the key, **the outcome is byte-identical to today** — same error code, same
 `details.missingKey`, same rejection. If it does not touch the key, the declaration was surplus: it could
@@ -76,7 +82,8 @@ the path `c4b45b33` just hardened so the guard answers before any payload-matchi
 oracle therefore collapses into the script-guard surface, which is defended, rather than sitting a step
 in front of it, which is not.
 
-Declaring a key the script never names buys nothing: both branches succeed.
+Declaring a key the script never names buys nothing: both branches succeed — with the one exception
+§2.5 records, which lives in the egress guard rather than in hydration.
 
 ### 2.2 Why the write side must be covered too
 
@@ -89,6 +96,43 @@ mutation naming a `RequiredAbsent` key is dependence, and faults.
 
 This check is not itself an oracle, by the §2.1 argument: reaching it requires the script to mutate the
 probed key, which requires payload control through the guards.
+
+### 2.4 Why enumeration must NOT fault
+
+Enumerating `state` is tempting to treat as a dependence on its membership — the script scans a set
+that is short by exactly the absent key. **Faulting there re-opens the oracle**, and more cheaply than
+the original: the fault would fire because *some* declared read was absent, with no relation to what
+the scan was looking for, so accept-vs-reject again answers "does `K` exist?" — this time without the
+attacker ever naming `K` in the payload, which is the whole basis of §2.1. Every operation whose script
+enumerates would carry the leak (`ReassignTask`, via orchestration-base's `find_assigned_link`), and
+picking a deterministic key to report would even make it a batch oracle over N probes at once.
+
+The correctness worry it appears to answer does not survive contact: a prefix scan that finds nothing
+gets the *truthful* answer, because the key really is not there — and handling that is the script's own
+job, exactly as with any guard. `find_assigned_link` returns `None` and its caller fails closed with
+`UnknownAssignedLink`. `kv.Links`, the other sanctioned enumeration (§2.5.1 class (e)), likewise does
+not fault on a required-absent key; making `state` enumeration fault would have put the two paths in
+disagreement.
+
+So enumeration delegates untouched, and `keys()`/`items()`/`values()` sit on the same side as
+`Iterate` — while `get`, which names a key, sits with `Get`.
+
+### 2.5 Known residual — the sensitive-decrypt egress guard
+
+One distinguisher survives this change, in a different mechanism. Step 4 decrypts every **present**
+declared key and flips `sensitiveReadTracker.plaintextRead`; step 6's
+`validateExternalEgressGuard` then rejects an operation that emits an `external.*` event having read
+sensitive plaintext. So for an actor holding a grant on an external-egress-emitting op, a surplus
+`reads:[K]` where `K` is a sensitive-classed aspect still splits: `K` present → decrypt → `DDLViolation`;
+`K` absent → commits. The script never names `K`.
+
+This is narrower than the closed leak — it needs an external-egress op and answers only "exists AND is
+sensitive-classed" — but it is the same shape. It is **not** fixed here because the fix belongs to that
+guard, not to hydration: the tracker must flip on what the *script consumed* rather than on what step 4
+pre-fetched, which changes the egress guard's semantics for every operation and needs its own review
+against the sensitive-param-egress design. Filed as its own row. (A declared key that exists but fails
+to parse or decrypt is a third outcome — `ErrCodeInternalError` — reachable only for an existing key;
+same family, same row.)
 
 ### 2.3 What is deliberately unchanged
 
@@ -139,17 +183,29 @@ lazy fallthrough is what stops a required-absent key from silently degrading int
 2. `kv.Read` + `stateMapValue.Get` fault on a `RequiredAbsent` key.
 3. `StarlarkRunner.Run` raises the deferred `*HydrationError` (both exit paths) and rejects a mutation
    naming a `RequiredAbsent` key.
-4. Tests (§5) + comment truth-up at the four sites that document the old pre-script fatality
-   (`starlark_kv.go:40-44`, `step4_hydrate.go:28`, `script_context.go`, `opwire.go:53`).
+4. Tests (§5) + comment truth-up at the sites documenting hydration-time fatality
+   (`starlark_kv.go`, `step4_hydrate.go`, `script_context.go`, `opwire.go:53`,
+   `docs/components/processor.md` §pipeline + §kv.Read, `weaver/strategist.go`). The ~20 `packages/`
+   sites asserting the same are out of scope (§6) and filed as their own row.
 
 ## 5. Security proof obligations
 
 The negative vectors must each be verified non-vacuous by reverting the mechanism they pin.
 
 - **Oracle closed (the point).** Two ops identical but for a surplus declared read of a key that exists
-  vs. one that does not — outcomes must be *indistinguishable*, and both must be `accepted`.
+  vs. one that does not — outcomes must be *indistinguishable*, and both must be `accepted`. Must
+  include an **enumerating** script: a scan touches `state` without naming a key, so it is where a
+  membership-wide fault would reinstate the leak while every name-a-key vector stayed green (§2.4).
 - **Fail-closed preserved, per path.** A script that reads its declared-absent key via `kv.Read`, via
-  `state[K]`, and via `K in state` — each still rejects with `HydrationMiss` + the right `missingKey`.
+  `state[K]`, via `K in state`, and via `state.get(K)` — each still rejects with `HydrationMiss` + the
+  right `missingKey`.
+- **Enumeration does not fault.** `for k in state` and `keys()`/`items()`/`values()` commit when the
+  absent key is unnamed (§2.4).
+- **Derived-key writes.** An aspect of, or a link into, a required-absent vertex faults (§2.2).
+- **`create` faults too.** `reads` asserts absence is a correctness error; read-before-create belongs
+  in `optionalReads`.
+- **Disjoint maps.** A key duplicated within one list, probing present once and absent once, must not
+  end up in both `Hydrated` and `RequiredAbsent`; present wins.
 - **Write side.** A script emitting an update/tombstone on a declared-absent key rejects with
   `HydrationMiss`, and does **not** reach the commit unconditioned.
 - **`egressReads` parity.** Same deferral, same fault — the existing

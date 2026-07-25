@@ -107,17 +107,20 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** The ★★★ `contextHint.reads` existence oracle is in flight (🏗️). Next by
-> importance, all needing no new design: the two **appsession** rows (★★ M each — the production IdP
-> posture blocks any non-loopback deploy, and CSRF bites as soon as two FEs are co-hosted), then
-> `actor-aggregate backfill` (★★ S–M, named live consumer) and `lint-package-standard` (★★ M). Every
-> other `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot. The
-> Designer still needs to restock. A stale callout starves the lane — whoever ships next renames this.
+> 🎯 **Build-ready now.** Top picks, all needing no new design: the **sensitive-read tracker** row
+> (★★ M — the named residual of the just-closed existence oracle), the two **appsession** rows (★★ M
+> each — the production IdP posture blocks any non-loopback deploy, and CSRF bites as soon as two FEs
+> are co-hosted), then `actor-aggregate backfill` (★★ S–M, named live consumer) and
+> `lint-package-standard` (★★ M). Every `✅ ratified` row is done or driver-blocked; the rest are
+> Whetstone's or parking-lot. The Designer still needs to restock. A stale callout starves the lane —
+> whoever ships next renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **`contextHint.reads` is a pre-script Core-KV existence oracle** | contextHint is client-supplied and step 3 never inspects it, so a declared-but-absent read faults `HydrationMiss` before any script runs: any actor with any op grant probes ANY key's existence, one round trip each. | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/contexthint-existence-oracle-design.md) · next: defer the miss to first use |
+| **[Processor] Sensitive-read tracker flips at hydration, not at consumption** | Step 4 flips `plaintextRead` when it decrypts a present declared key, and step 6's egress guard rejects an `external.*` emitter that read plaintext — so a surplus declared read of a sensitive-classed key still splits accept from `DDLViolation`. Fix: key the tracker on what the script consumed. | ★★ | M | 📋 ready · [design §2.5](../../implementation-artifacts/contexthint-existence-oracle-design.md) · consumer: any external-egress-emitting op grant |
+| **[Processor] Declared-read count is unbounded at the envelope** | `ParseEnvelope` caps neither `reads`/`optionalReads`/`egressReads` length nor total. A declared read no longer short-circuits hydration, so an envelope naming N absent keys costs N sequential Core-KV GETs and then commits. Needs an envelope-level bound (Contract #2 §2.4 validation). | ★★ | S–M | 📋 ready · consumer: any actor holding any op grant |
+| **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
 | **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the obvious re-assert ops no-op when state already matches. `reproject`/`rebuild` need an asserted control-plane actor, so no operator-reachable backfill. Consumers: LoftSpace's landlord hat; 51 stale `cap-read.edgeManifest*` docs. | ★★ | S–M | 📋 ready · [live evidence](../../implementation-artifacts/read-grant-single-source-walk-design.md) §10 |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` configured nothing can issue the session cookie — the documented verify-only posture is unreachable. Fails closed (401 everywhere), and the per-request credential→identity resolve the old read boundary did now happens only at dev-login. Consumer: the first non-loopback deployment of any of the five FE binaries. | ★★ | M | 📋 ready |
@@ -186,6 +189,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `3a78c109` · [processor] a declared read faults where the operation NAMES the key, not at hydration — closes the pre-script Core-KV existence oracle; enumeration deliberately does not fault
 - 2026-07-24 · `10f01e71` · [lint,clinic-domain] a declaration binds to its own statement, not the next 8 lines (12 drifted sites fixed); clinic keys its exemption on `op.authTargetValidated`, `(legacy-self-exempt)` deleted
 - 2026-07-24 · `185a47ee` · [edge-manifest,test] the generated cap-read producer driven through the projection driver — an emptied slice retracts its key, a reachable actor keeps every real entry
 - 2026-07-24 · `bd3b76ba` · [pkgmgr,edge-manifest,lint] one `AnchorWalk` declaration compiles both read-grant enumerations — closes the dual-enumeration footgun (S2); 13 lenses migrated, 3 producers generated, gate flipped
@@ -219,6 +223,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-22 · `9af5aed5` · [loom] poll-until-created in the e2e harness (new `waitTaskCreated`) — closes the `taskCreated`-after-`waitTaskKey` relay race across 8 sites; `-race -count=5` clean
 - 2026-07-22 · confirm-only · [refractor] the two protected lenses (`landlordUnitsRead`/`landlordLeaseApplicationsRead`) confirmed clean live — 0 target rows vs a graph with 0 `manages` links: nothing to reconcile
 - 2026-07-21 · `7b74ce70` · [packages] demo-operator inspect-only grant package (F20.3) — console-operator minus every write: `demoOperator` role + read lens + 3 `ctrl.*.read` grants; the platform boundary for public Loupe exposure (Andrew-gated)
-- 2026-07-21 · `446b3549` · [weaver] revision-condition lane-1's mark delete so a lane-1/sweep race on one `__effect` close credits it once, not twice — a double-credit could mask a real LensEffectMismatch; -race regression test
-- 2026-07-21 · `6b86e9e4` · [bootstrap] the `up` target keeps a stale bootstrap file on an empty Core KV (recreated stack — binary re-seeds at stable NanoIDs), discards only on a real mismatch — new `CoreKVEmpty` / `probe-empty` discriminator
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*
