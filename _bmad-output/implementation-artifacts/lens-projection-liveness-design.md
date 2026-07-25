@@ -620,3 +620,49 @@ ordering guard dropped — the `seq==0` → `ErrNoOrderingToken` guard fires onl
 **Non-goals (this fire).** No enrolment of business lenses (the row stays open, with its scope
 resized by the corrections above). No change to `guardedWrite`'s seq-0 policy, to any threshold,
 health issue name, the Health-KV schema, or any contract. No new reporting.
+
+### 12.1 Build outcome — SHIPPED, with this brief's own decision 2 withdrawn at review
+
+The refusal shipped. **Decision 2 — conditioning it on a new `adapter.SeqGuarded` interface — did
+not**: the 3-layer adversarial pass (security-refutation · edge-case · acceptance) had two reviewers
+independently converge on the same refutation, and the premise it rested on is simply false.
+
+**The premise was false.** §12 decision 2 justified the conditioning as "load-bearing for enrolment
+… the 14 business actorAggregate lenses write through **unguarded** adapters." They do not.
+`projection/driver.go:188` computes `guarded := authPlane || desc.RequiresGuardedTombstone()`, and
+`projection/empty.go:47` makes that true for `delete` **and** `softDelete` — while `emptyBehavior` is
+mandatory (`output.go:97`) and **every** actorAggregate lens in the tree declares `delete`. So every
+lens enrolment would reach is already guarded, and `tokenRequired` was identical to a plain
+`seq == 0` for every pipeline that can reach `Reproject`. The conditioning unblocked nothing.
+
+**And it opened a fail-open the unconditional form did not have.** Wrapping breaks optional
+interfaces: `GrantWriterAdapter` (`adapter/read_path_adapters.go:27-140`) is seq-guarded in SQL
+(`rls.go:295-329`) but spells no `Guarded()`, so the refusal would silently vanish for it — and in
+the INTO-only hot-reload state (`cmd/refractor/main.go:836-843` rebuilds an **unguarded**
+`NatsKVAdapter` and `EnableProjectionGuard` is never re-applied) an auth-plane lens reports
+`Guarded() == false`, turning a previously fail-safe refusal into a token-less write landing in
+`capability-kv`. A conditional fail-safe was strictly worse than the unconditional one it replaced.
+
+**A second refutation reshaped where the refusal lives.** §12 moved it *out* of the `canRead` block,
+on the claim that a token-less write "cannot land whether the row is present or absent". That is
+true of the KV guard only. `PostgresAdapter`'s guard conditions only its `ON CONFLICT DO UPDATE`
+branch (`adapter/postgres.go:125-237`), so an **absent**-row plain `INSERT` does land at token zero —
+and `ProtectedAdapter` is `Guarded()`-true while implementing no `RowReader`, so the moved refusal
+would have blocked a Protected/RLS actor-aggregate lens's cold first projection, reachable through
+the `reproject` control RPC (`control/service.go:810-830`). Shipped instead: the refusal stays
+**inside** the `canRead` block — entered only by the own-row-reading NATS-KV family, which is exactly
+the guard shape that drops a token-less write outright — and the SQL family is deliberately left to
+write. The net production diff is one token: `present && seq == 0` becomes `seq == 0`.
+
+**Verified by mutation, not by reading.** With the fix reverted to `present && seq == 0` the new
+regression test fails ("expected error … got nil"); the security reviewer independently reproduced
+the same result against `main` via `go test -overlay`, and confirmed the case is genuinely an
+upsert-shaped result over an absent row rather than the missing-actor delete branch in disguise.
+
+**Filed as rows, not fixed here** (both pre-existing, both out of this fire's scope): the INTO-only
+hot-reload dropping the auth-plane projection guard, and `GrantWriterAdapter` carrying the same
+phantom-`Wrote` shape this fire closed for the KV family. A third observation is recorded but not
+filed: because the refusal now also fires for an absent row, a brand-new auth-plane lens activating
+over a populated graph at `seq == 0` abandons sweep passes until its consumer acks, which
+`FailedStreak` escalates. It is bounded by the ack-floor seed and is honest reporting rather than a
+phantom, so it is behavior this fire accepts.

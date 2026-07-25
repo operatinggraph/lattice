@@ -215,10 +215,10 @@ token is the pipeline's **last-applied stream sequence, captured before re-evalu
   one. Stamping reconciliation at `MaxInt64` would permanently freeze the key against all future
   CDC — the exact inversion of intent. The contract edit says so explicitly so no future fire
   borrows the wrong precedent.
-- Guarded-create of an absent key with this token is safe: if the key is absent, the doc is
-  either genuinely missing (the bug — create heals it) or hard-deleted-never-existed; a
+- Guarded-create of an absent key with a **nonzero** token is safe: if the key is absent, the doc
+  is either genuinely missing (the bug — create heals it) or hard-deleted-never-existed; a
   concurrent real event's CAS create simply wins the loop (`guardCASMaxAttempts` path, already
-  tested).
+  tested). At token **zero** the guard never reaches that branch at all — see below.
 - **The token is per-PROCESS and starts at zero** (found live, Fire 1b): `lastAppliedSeq` is
   in-process state, so a freshly started pipeline holds no token until its consumer acks its
   first message. A reconciliation write over an *existing* row at token 0 loses to that row's
@@ -228,9 +228,14 @@ token is the pipeline's **last-applied stream sequence, captured before re-evalu
   would overwrite or retract an existing row **requires a nonzero token** and is refused
   (`ErrNoOrderingToken`) otherwise; the sweep abandons the pass, since the condition is
   per-pipeline and clears as soon as the consumer acks anything (it acks every Core KV event,
-  ack-and-skip included). Creating an **absent** row at token 0 stays allowed — the guard's
-  absent-key branch takes Create, and that is the lost-first-projection case, which must keep
-  healing from a cold pipeline. **The residual is fixed:** `Pipeline.Run` seeds `lastAppliedSeq`
+  ack-and-skip included). **Creating an absent row at token 0 is refused on the same terms**, and
+  for a reason this section originally got wrong: `guardedWrite` returns nil *before* it looks for
+  a stored watermark whenever `incomingSeq == 0` (`adapter/natskv.go:197`), deliberately, so that
+  a token-less write can neither create a clobberable seq-0 key nor no-op a real update. The
+  absent-key Create branch is therefore never reached at token 0, and letting the write proceed
+  bought no heal — only a `Wrote=true` for a write that never happened. The lost-first-projection
+  case still heals, from the first applied event onward, via the ack-floor seed below.
+  **The residual is fixed:** `Pipeline.Run` seeds `lastAppliedSeq`
   from the durable consumer's persisted ack floor (`ConsumerSupervisor.AckFloorForConsumer`,
   `jetstream.ConsumerInfo.AckFloor.Stream`) immediately after the supervised consumer registers,
   before any new event arrives — a restarted pipeline on a durable with prior ack history holds a
