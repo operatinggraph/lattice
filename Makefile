@@ -202,6 +202,22 @@ up: assert-main-checkout
 		echo "==> Lattice ready."; \
 	fi
 
+## cycle-refractor — Rebuild bin/refractor from the current tree and relaunch it
+## against the STILL-RUNNING stack. This is not a teardown: NATS, Postgres, and
+## every other engine keep running, so it is safe on a stack you did not start.
+## Use it after any change that reaches internal/refractor or cmd/refractor —
+## a merge leaves the running binary stale, and a stale binary is a perfectly
+## healthy-looking process. Env matches the launch in `up` (that is the authority
+## for how this component runs); logs continue to refractor.log.
+cycle-refractor: assert-main-checkout
+	@echo "==> Killing the running refractor..."
+	-pkill -x refractor 2>/dev/null || true
+	@echo "==> Rebuilding bin/refractor..."
+	go build -o bin/refractor ./cmd/refractor
+	@echo "==> Starting refractor in background..."
+	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
+	  sleep 2; pgrep -x refractor >/dev/null && echo "==> refractor running (PID $$(pgrep -x refractor))" || { echo "!! refractor failed to start — see refractor.log"; exit 1; }
+
 ## down — Tear down all containers and remove the per-graph dev JSON artifacts
 ## (lattice.bootstrap.json + loupe-operator.json). Both name random NanoIDs seeded
 ## into the now-destroyed graph, so a stale copy dangles a fresh bootstrap (empty
