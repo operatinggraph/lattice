@@ -369,3 +369,43 @@ func TestEdgeIdentity_BoundProviderProfileNameProjects(t *testing.T) {
 	require.Equal(t, "Dr. Amara Osei", byRel["identifiedBy"][0]["name"])
 	require.Equal(t, "provider", byRel["identifiedBy"][0]["type"])
 }
+
+// TestEdgeIdentity_MultiHatTopologyYieldsOneAnchorPerRelation pins the anchors
+// column against a cartesian blow-up. Every OPTIONAL MATCH in this lens
+// multiplies the row set the collects run over — three roles, two led sessions
+// and a lease application between them fan one identity out to a dozen rows —
+// and the only thing collapsing that back down is `collect(DISTINCT ...)` over
+// identical maps. If DISTINCT ever stops deduping map values, a person's home
+// renders as several identical chips, which is the kind of defect that reads
+// as a data problem and is really an engine one.
+func TestEdgeIdentity_MultiHatTopologyYieldsOneAnchorPerRelation(t *testing.T) {
+	f := newEmFixture(t)
+	for name, typ := range map[string]string{
+		"sam": "identity", "bldgA": "building", "unitB2": "unit", "studio": "studio",
+		"sessMon": "session", "sessThu": "session", "samInstructor": "instructor", "app1": "leaseapp",
+	} {
+		f.vtx(t, name, typ)
+	}
+	for _, r := range []string{"roleConsumer", "roleFrontOfHouse", "roleProvider"} {
+		f.vtx(t, r, "role")
+		f.edge(t, "holdsRole", "sam", r)
+	}
+	f.aspect(t, "bldgA", "presentation", "locationPresentation", map[string]any{"name": "Riverside Building"})
+	f.aspect(t, "unitB2", "presentation", "locationPresentation", map[string]any{"name": "Unit 2"})
+	f.aspect(t, "samInstructor", "profile", "instructorProfile", map[string]any{"displayName": "Sam Okafor"})
+
+	f.edge(t, "residesIn", "sam", "unitB2")
+	f.edge(t, "containedIn", "unitB2", "bldgA")
+	f.edge(t, "worksAt", "sam", "bldgA")
+	f.edge(t, "identifiedBy", "samInstructor", "sam")
+	f.edge(t, "teachesAt", "samInstructor", "studio")
+	f.edge(t, "ledBy", "sessMon", "samInstructor")
+	f.edge(t, "ledBy", "sessThu", "samInstructor")
+	f.edge(t, "applicationFor", "app1", "sam")
+
+	byRel := emAnchorsByRelation(t, f.project(t, emComposedSpec(t, "edgeIdentity"), f.key("sam")))
+	require.Len(t, byRel["residesIn"], 1, "one home, however many roles and classes hang off the identity")
+	require.Len(t, byRel["worksAt"], 1, "one workplace")
+	require.Len(t, byRel["identifiedBy"], 1, "one binding")
+	require.Equal(t, "Sam Okafor", byRel["identifiedBy"][0]["name"])
+}
