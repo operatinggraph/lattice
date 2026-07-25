@@ -148,13 +148,17 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				continue
 			}
 			// The KV guard drops a token-less write outright, BEFORE it looks
-			// for a stored watermark, so an absent row is no more writable
-			// than a present one — both come back nil having written nothing.
-			// This block is entered only by an adapter that reads its own rows
-			// back, which is that same NATS-KV family; a SQL-guarded target
-			// conditions only its UPDATE branch, so its absent-row insert does
-			// land at token zero and is deliberately left to write.
-			if seq == 0 {
+			// for a stored watermark, so under it an absent row is no more
+			// writable than a present one — both come back nil having written
+			// nothing. Two conditions narrow this to exactly that guard. The
+			// block is entered only by an adapter that reads its own rows back
+			// (the NATS-KV family), which excludes a SQL-guarded target: that
+			// one conditions only its UPDATE branch, so its absent-row insert
+			// really does land at token zero. And the adapter must actually
+			// have the guard enabled — an unguarded target ignores the token
+			// entirely, so refusing would decline a create that would have
+			// succeeded, which is the lost-first-projection heal.
+			if guard, guarded := adpt.(adapter.SeqGuarded); seq == 0 && guarded && guard.Guarded() {
 				return Reprojection{}, ErrNoOrderingToken
 			}
 		}

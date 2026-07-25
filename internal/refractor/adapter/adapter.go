@@ -42,6 +42,19 @@ type KeyLister interface {
 	ListKeys(ctx context.Context) ([]map[string]any, error)
 }
 
+// SeqGuarded is an optional interface reporting whether an adapter's writes are
+// ordered by the projectionSeq token (Contract #6 §6.2). It exists for the one
+// caller that must decide BEFORE writing — reconciliation, which reports back
+// whether it healed anything. NatsKVAdapter's guard drops a token-less write
+// outright and returns nil, so without this a reconciler cannot tell that
+// silence apart from a write that landed.
+//
+// An adapter that does not implement it, or reports false, ignores
+// projectionSeq: its writes are last-writer-wins and always land.
+type SeqGuarded interface {
+	Guarded() bool
+}
+
 // RowReader is an optional interface for adapters that support reading back
 // one row by its composite key. Implemented by NatsKVAdapter for the
 // Chronicler's event→row runtime (internal/chronicler): a single lifecycle

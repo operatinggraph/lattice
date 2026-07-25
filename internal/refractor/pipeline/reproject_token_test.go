@@ -80,6 +80,24 @@ func TestReproject_RefusesToCreateAnAbsentRowWithoutAnOrderingToken(t *testing.T
 	require.Empty(t, adpt.deletes)
 }
 
+func TestReproject_AnUnguardedTargetStillCreatesAnAbsentRowWithoutAToken(t *testing.T) {
+	// An unguarded target ignores projectionSeq, so a token-less create LANDS.
+	// Refusing it would decline the lost-first-projection heal — the case
+	// per-actor reconciliation exists for, exercised end to end by
+	// TestRefractor_Reproject_HealsLostProjection_E2E, whose pipeline is built
+	// on a plain adapter.New with no projection guard.
+	adpt := &listingAdapter{recordingAdapter: recordingAdapter{unguarded: true}}
+	p := newSweepPipeline(t, adpt, 10)
+	installProjectingRule(t, p)
+	writeProjectableAnchor(t, p, sweepActorA)
+
+	res, err := p.Reproject(context.Background(), sweepActorA)
+	require.NoError(t, err)
+	require.True(t, res.Wrote, "an unguarded write lands, so it is a real heal")
+	require.Len(t, adpt.upserts, 1)
+	require.Zero(t, adpt.upserts[0].seq)
+}
+
 func TestSweepPass_AbandonsThePassWhenTheTokenIsUnusable(t *testing.T) {
 	// The refusal is per-pipeline, so the sweep must stop the pass rather than
 	// grind through the batch logging one refusal per actor.

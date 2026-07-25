@@ -15,10 +15,13 @@ import (
 // canned stored row, so a test can assert both the write decision and the
 // ordering token without a live target store.
 type recordingAdapter struct {
-	stored    map[string]any
-	present   bool
-	getErr    error
-	writeErr  error
+	stored   map[string]any
+	present  bool
+	getErr   error
+	writeErr error
+	// unguarded makes the adapter ignore the ordering token, the way a target
+	// with no projection guard does. The zero value is guarded.
+	unguarded bool
 	upserts   []recordedWrite
 	deletes   []recordedWrite
 	getCalled int
@@ -42,6 +45,7 @@ func (a *recordingAdapter) Delete(_ context.Context, keys map[string]any, seq ui
 
 func (a *recordingAdapter) Probe(context.Context) error { return nil }
 func (a *recordingAdapter) Close() error                { return nil }
+func (a *recordingAdapter) Guarded() bool               { return !a.unguarded }
 
 func (a *recordingAdapter) GetRow(context.Context, map[string]any) (map[string]any, bool, error) {
 	a.getCalled++
