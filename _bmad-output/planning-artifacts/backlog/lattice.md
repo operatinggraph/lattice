@@ -48,6 +48,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
+| **[Refractor] Shared-bucket rebuild truncate wipes sibling lenses** | Guarded rebuild forces truncate (`pipeline.go:577`) and `NatsKVAdapter.Truncate` purges the whole bucket, so rebuilding ONE lens wipes every sibling's keys in the shared `capability` bucket — auth outage until sweeps heal (~25 actors/min). Fix: prefix-scoped truncate (keys the lens's `AnchorFromKey` claims). | ★★ | S–M | 📋 ready · seq: subsumed by [cap-read design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §4.5 Fire 1 if ratified |
 
 ### Survey log (round-robin rotation)
 
@@ -67,6 +68,7 @@ feature backlog; Loupe moved to its own lane, [loupe.md](loupe.md)). Survey the 
 - 2026-07-19 object-store-manager (67.5%/91.4% cov, clean lint, no TODOs; filed doc-drift fix + cascade error-branch coverage).
 - 2026-07-19 Bootstrap (69.3% cov, clean lint, no TODOs; filed stale-bootstrap-json-no-freshness-probe (★★, the documented Known-gap) + seed-idempotency-branch-coverage).
 - 2026-07-19 Core (processor 81.8%/substrate 76.2% cov, clean lint, no TODOs; filed consumer-supervisor-accessors-untested + outbox-consumer-undercovered + processor.md UninstallPackage doc-drift).
+- 2026-07-25 Refractor (pre-scoped, out of rotation) — filed shared-bucket rebuild-truncate hazard from the cap-read design's adversarial review; next unchanged.
 - **Next:** Weaver.
 
 ## Arch-review intake — platform hardening & doc/contract truth
