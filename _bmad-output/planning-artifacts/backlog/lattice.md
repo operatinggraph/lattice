@@ -107,17 +107,19 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now — two ★★★ ratified 2026-07-24, both clean picks.** (1) `Forgeable
-> authContext.target`: Fire 1 (primitive + four-package migration) closes the security row, Fire 2
-> (identity-domain tighten + the mandatory `authcontext-target` lint gate) follows. (2) `Read-grant
-> dual-enumeration S2`: one L fire, ends the dual-authored reachability walk. Beyond them every
+> 🎯 **Build-ready now.** (1) `Read-grant dual-enumeration S2` (★★★, ratified 2026-07-24): one L fire,
+> ends the dual-authored reachability walk — the clean top pick. (2) `Forgeable authContext.target` is
+> mid-flight: Fire 1 shipped, **Fire 2** (identity-domain tighten + the mandatory `authcontext-target`
+> lint gate) is a scoped XS–S follow-on. Beyond them every
 > `✅ ratified` row is done or driver-blocked and the open `📋 ready` rows are Whetstone's (embedded-NATS
 > flakes) or parking-lot. A stale callout starves the lane — whoever ships the next pick renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Forgeable `authContext.target` defeats scope=any self/workplace guards** | Guards keying a self-exemption on `authContextTarget != ""` are forgeable by any scope=any holder; cafe/wellness/maintenance/lease-signing share it, clinic fixed in W1 Inc 2a. A blanket platform blank was tried + REVERTED (breaks identity onboarding's legitimate scope=any+non-actor target) — the fix is per-op semantic, not one platform change. | ★★★ | M–L | ✅ ratified (2026-07-24) · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) · 2 fires |
+| **Forgeable `authContext.target` defeats scope=any self/workplace guards** | A confinement exemption keyed on `authContextTarget != ""` is forgeable by any scope=any holder. Fixed by a validated-target primitive the guards adopt, not a platform blank (that was tried + reverted — it breaks identity onboarding). | ★★★ | M–L | 🏗️ [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §11 · next: Fire 2 identity-domain + lint gate |
+| **Validated-target exemption without a resource bind** | 4 confined ops exempt on a bare `workplace_exempt()` with no resource bind and no ownership probe (cafe `VoidCharge`, wellness `CreateSession`, lease-signing `DecideLeaseApplication`, maintenance `ReportIssue`). Safe only because no task grants those ops — an operational fact, not structural. Consumer: the first task minted for any of them. | ★★ | S | 📋 ready · fold into Fire 2's lint vocabulary · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §3.4.1 |
+| **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 
@@ -182,6 +184,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-24 · `fe8378c0` · [processor,packages] `op.authTargetValidated` closes the forgeable-`authContext.target` confinement bypass — primitive + 4-package guard migration (Fire 1 of 2)
 - 2026-07-24 · `acdcfc7c` · [controlauth,test] flush the responder SUB before the echo helpers return — kills the `no responders available` unit-1 flake (client raced the responder's subscription); deterministic, 20x -p4 clean
 - 2026-07-24 · `657861dd` · [gateway] `/v1/actor` answers its own CORS preflight — `handleWhoami` sets Vary/allow-listed headers + OPTIONS→204 before the GET-guard (mirrors `handleOperationStatus`); completes the whoami-hats browser surface
 - 2026-07-24 · `6aa4959c` · [refractor,test] manifest.me self-anchored reprojection proven sound — e2e (existing personal row grows on a 2nd holdsRole link, D1 self-gate active); filed "ordering-token" freeze mechanism disproven, no server bug
@@ -215,6 +218,4 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-20 · `a44651f` · [bootstrap] Core KV, not `lattice.bootstrap.json`, decides whether to seed — a recreated bucket behind a committed file re-seeds at the file's stable NanoIDs, reopening the two-phase window first
 - 2026-07-20 · `dcfe4af` · [gateway] heartbeat armed with the §5.6 interval-derived TTL — the last bare-`KVPut` emitter no longer leaks a `health.gateway.<instance>` key per restart; fixture bucket mirrors bootstrap
 - 2026-07-20 · `5b58f66` · [weaver] `__effect` window counts attempts, not dispatches — a collapse-only reclaim books no unanswerable episode, and a sweep-won close is credited; both LensEffectMismatch false-alarm biases
-- 2026-07-19 · `3a5cd35` · [health] classifyKey classifies component heartbeats structurally — gateway/bridge/objmgr/chronicler/vault/4 vertical apps no longer read "unknown" forever, and their error issues can reach red
-- 2026-07-19 · `7e5f1e6` · [processor] step 8 preserves the stored document across update/tombstone — creation triplet carries over (unforgeable), a tombstone keeps its whole body; sensitive aspects gain the soft-delete decrypt guard
 - *(older entries rolled to [archive/lattice-done.md](archive/lattice-done.md); includes `94c8224` hello-lattice NFR-P3 flake fix)*

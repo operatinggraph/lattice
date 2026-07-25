@@ -2,6 +2,8 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-19 · `3a5cd35` · [health] classifyKey classifies component heartbeats structurally — gateway/bridge/objmgr/chronicler/vault/4 vertical apps no longer read "unknown" forever, and their error issues can reach red
+- 2026-07-19 · `7e5f1e6` · [processor] step 8 preserves the stored document across update/tombstone — creation triplet carries over (unforgeable), a tombstone keeps its whole body; sensitive aspects gain the soft-delete decrypt guard
 - 2026-07-19 · `e0ab660` · [refractor] ProtectedAdapter forwards ListKeys — the wrapper broke the KeyLister assertion, so landlordUnitsRead + landlordLeaseApplicationsRead silently never retracted; adapter-set invariant pinned
 - 2026-07-19 · `3d93697` · [pkgmgr] diffManifest revives a tombstoned key on re-add — deterministic entity keys made a dropped-then-re-added lens/role permanently uninstallable (create asserts rev 0 over subject history)
 - 2026-07-19 · `73557e8` · [refractor] grant-lens DiffRetraction scoped to its own `grant_source` (now a declared LensSpec field, enforced per write) + fail closed on a non-KeyLister adapter at activation

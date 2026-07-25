@@ -316,8 +316,13 @@ lands; it realizes value before any future dependency. Not scaffolding.
   remaining packages include one (maintenance) where `== op.actor` is *wrong*, which is why they were left
   and why the fix is a primitive, not a copy.
 - *Does this duplicate/contradict a shipped pattern?* No — it generalizes clinic's fix to its correct form.
-  clinic *may* later migrate onto the primitive for consistency (its `== op.actor` and `authTargetValidated`
-  agree on every clinic path), but that is optional cleanup, out of scope here.
+  clinic *may* later migrate onto the primitive for consistency, but that is out of scope here — and it is
+  a **tightening, not a no-op**: `== op.actor` is itself forgeable (a scope=any holder setting
+  `target = <their own actor key>` satisfies the equality and skips `require_workplace`), where
+  `authTargetValidated` would be false for that caller. clinic is not currently exposed by it — all three
+  call sites are backstopped by a mandatory `identifiedBy` ownership probe that confines the forger to
+  patients bound to their own identity, i.e. the legitimate self-book — but the two predicates do **not**
+  agree on every path, and a migration must be scoped as a behavior change rather than a cleanup.
 - *New state?* None persisted. The bool is derived from the step-3 decision the Processor already computes;
   it lives only for the op's execution.
 
@@ -445,3 +450,91 @@ gate mandatory. Ratification-session due diligence re-verified every load-bearin
 against code — `gateway.go` target forwarding, `step3_auth_capability.go:498/:505/:346`, the four still-
 unmigrated packages, clinic's shipped `== op.actor` fix, and maintenance `integration_test.go:289`'s
 `Target: workOrderKey` — all confirmed, no drift.
+
+---
+
+## 11. Fire 1 build note — SHIPPED
+
+Scope built, item-by-item against §8's Fire-1 list: the primitive (`authTargetValidated(rp)` in
+`operation_context.go`, the `json:"-"` envelope field, the single pre-retry-loop stamp in `commit_path.go`,
+`op.authTargetValidated` in `starlark_runner.go`), the four-package guard migration, the §3.4.1 maintenance
+resource bind, the cafe `Charge` selector comment, four package version bumps (+ their `manifest.yaml`
+twins, which the `TestPackage_ManifestMatchesDefinition` gate checks), and the additive Contract #2 §2.8
+paragraph. No frozen-contract invariant changed — the §2.8 addition documents a derived, non-input field,
+which §4 ratified as in-scope for this fire.
+
+**Three grounding corrections found during the build**, all folded into what shipped:
+
+1. **`require_workplace` cannot host the resource bind.** After the migration its first line is
+   `if op.authTargetValidated: return` — so `ResolveWorkOrder` calling it *after* failing the
+   `authContextTarget == wkey` check would be re-exempted by the very bit the check just rejected, and
+   §3.4.1's bind would be dead code. maintenance-domain therefore splits the helper: `require_workplace`
+   keeps the validated-target exemption and delegates to a new **`enforce_workplace`**, which is the
+   worksAt walk with only the operator escape. `ResolveWorkOrder` calls `enforce_workplace` directly.
+   The other three packages need no split (no resource-scoped task op) and keep the two-line rekey.
+
+2. **§3.1's formula is too weak on the task path — an empty grant target validates nothing.**
+   `matchEphemeralGrant`'s check is an *inequality skip* (`g.Target != ac.Target` ⇒ continue), so a grant
+   projected with an **empty** target matches an authContext that carries none: `"" != ""` is false. Under
+   a literal "`Path == "task"` ⇒ true" the caller gets `authTargetValidated == true` with
+   `authContextTarget == ""` — an exemption *weaker than the presence test it replaces*, turning a
+   pre-migration denial into an exemption. The shipped formula therefore requires the matched grant to
+   name a target: `rp.EphemeralGrant != nil && rp.EphemeralGrant.Target != ""`. (scope=self needs no such
+   clause — `matchPlatformPermission` denies an absent target outright before resolving.) Reachability is
+   latent rather than demonstrated — `CreateTask` requires `scopedTo` and writes it in the same atomic
+   batch — but `capabilityEphemeralSpec`'s `OPTIONAL MATCH (task)-[:scopedTo]->(tgt)` projects
+   `target: null` if that link or its target is tombstoned while the task is still unexpired, and
+   `EphemeralGrant.Target` unmarshals `null` to `""`. Found by the adversarial pass; pinned by a
+   matrix case, a nil-grant case, and an end-to-end vector through the real authorizer.
+
+3. **The exploitable op per package is the one WITHOUT an idiom-B ownership proof.** §2's table lists the
+   idiom-A-gated ops, but on the ops that also carry an ownership binding (cafe `OpenTab`/`Charge`/`Settle`,
+   wellness `CreateBooking`/`CancelBooking`, lease-signing `Create`/`Withdraw`/`SetApplicantProfile`) a
+   forged target is independently denied by that second guard — so a forgery vector there proves nothing
+   about the confinement fix. The genuinely exploitable ops are the staff-only ones: cafe **`VoidCharge`**,
+   wellness **`CreateSession`**, lease-signing **`DecideLeaseApplication`**, maintenance
+   **`ReportIssue`/`ResolveWorkOrder`**. The per-package vectors are written against those.
+
+**Non-vacuity proven, not assumed.** Every negative was run against a temporarily-reverted guard and
+observed to **fail** (`accepted`, i.e. the live bypass) before being run green against the fix — cafe
+`VoidCharge`, wellness `CreateSession`, lease-signing `DecideLeaseApplication`, and separately the §3.4.1
+bind (reverting just the bind makes the WO-A-grant-resolves-WO-B substitution succeed). Each negative is
+paired with a positive sibling asserted first.
+
+**Tests:** `internal/processor/auth_target_validated_test.go` (the full (Path, Scope) matrix incl.
+`specific`/`owned`/nil-permission/unknown-path fail-closed cases, the same matrix driven through the real
+`CapabilityAuthorizer`, wire-immunity both directions, and the Starlark exposure);
+`internal/bypass/capadv_forged_authcontext_target_test.go` (the outcome residual: wire-asserted bit dropped,
+fabricated target resolves platform/any, genuine scope=self control); and a forgery vector per package.
+Gates: `go build`, `make vet`, `golangci-lint` (0 issues), `lint-conventions`, `lint-lens-anchors`,
+`lint-package-version`, `make verify-kernel`, and the **full `go test ./...`** the §8 note requires.
+
+**Three-layer adversarial gate (security change ⇒ full depth) — findings folded in.** Independent
+bypass-hunt, regression-hunt, and test-quality passes ran against the built tree before admit.
+
+- *Bypass hunt* — **could not refute** the headline claim; found the empty-grant-target hole above
+  (fixed), and confirmed the field is unforgeable (one non-test write site repo-wide, neither
+  client-controlled struct carries it, no alternate codec, no stale-true retry/redelivery path) and that
+  `enforce_workplace` correctly lacks the escape. It also falsified §6's claim that clinic's
+  `== op.actor` and the primitive agree on every path — §6 is corrected above.
+- *Regression hunt* — **no false-deny** in any shipped path. It traced the maintenance task path
+  end-to-end and confirmed Facet fills `payload.workOrderKey` from the same `ctx.scopedTo` string it puts
+  in `authContext.target`, so the §3.4.1 bind holds for the real claimant.
+- *Test-quality hunt* — confirmed all six package vectors reject for the intended workplace `AuthDenied`
+  (verified by reading each `ScriptError`), then found three gaps, all fixed: the `internal/bypass`
+  residual was **vacuous** (it asserted only pre-existing resolution shape, so it survived a full revert
+  of the migration) and now drives the real `CapabilityAuthorizer` through the real commit path,
+  asserting the bit the executor observes; **no commit-path stamping test existed** at all, so the one
+  line wiring the primitive to every consumer was covered only incidentally from another package — now
+  covered colocated, including the "stable across an OCC retry" property; and the maintenance
+  **task-path positive did not isolate** (its work order sat at the tech's own building, so it passed on
+  the worksAt walk) — both work orders now sit outside the tech's workplace, making the validated-target
+  exemption the only thing that can admit it.
+
+Every one of those fixes was itself checked by reverting the mechanism under test and observing the new
+assertion go red.
+
+**Fire 2 remains** exactly as §8 specifies: identity-domain idiom C (§3.5, tighten +
+`TestRecordPII_TaskScopedNotConfinedToUnclaimed` rewritten onto the real task grant) and the **mandatory**
+blocking `authcontext-target` lint rule. Fire 1 deliberately leaves the surviving safe sites unannotated —
+annotating them is Fire 2 step 3, and the gate lands blocking with zero debt.
