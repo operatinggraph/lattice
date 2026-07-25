@@ -433,6 +433,8 @@ fixing the above requires), it would spend that quota re-projecting perfectly he
 4. **Direction 2's candidate order becomes deterministic** (sorted) instead of Go map order, so a
    capped tick picks the same orphans rather than a random subset. No cursor: a retracted orphan
    leaves the set, so the set drains; a failing one is yielded by the existing per-actor backoff.
+   — **WITHDRAWN at review; see §11.1.** The stated reason is false on the plane this fire is
+   scoped to, and acting on it would have introduced a fail-open.
 
 **The invariant this fire must not break.** On a total-coverage, converged auth-plane lens
 (`capabilityRoles`, `capabilityServiceAccess`) the selection must be **byte-for-byte what it is
@@ -463,3 +465,63 @@ strictly a widening for the lens shapes that are broken today.
 and §10.1's other two findings — the `severity: error` escalation contradicting the business-lens
 invariant, and 14 lenses each enumerating the shared `weaver-targets` bucket — remain **its** scope,
 not this one). No change to thresholds, health issue names, the Health-KV schema, or any contract.
+
+### 11.1 Build outcome — SHIPPED `7e6030aa`, with two of §11's own premises withdrawn at review
+
+The three named consequences plus the fourth defect §11 found during grounding all shipped. The
+3-layer adversarial review (security-refutation · edge-case · acceptance) confirmed each is
+regression-guarded by mutation, and confirmed the deliberately-preserved invariant: on a lens whose
+every anchor carries a row the selection is byte-for-byte unchanged. It also **refuted two things
+§11 itself asserted**, both of which changed the shipped shape.
+
+**§11 decision 4 was a fail-open, not an improvement.** It called for sorting the orphan set "so a
+capped tick picks the same orphans rather than a random subset," reasoning that the set drains
+because a retracted orphan leaves it. On the auth plane it does not. Every auth-plane target is
+guarded, so `Delete` writes a **soft tombstone** that stays a live NATS-KV key and keeps appearing
+in `ListKeys` while `GetRow` reports it absent — so a retracted orphan is re-selected and
+re-projected *forever*, a permanent zero-value occupant of the direction's budget. Go's randomised
+map iteration, which §11 treated as a defect to remove, was the **fairness mechanism**: it sampled
+a different window each tick, so every orphan was reached within a few ticks. Sorting it and
+walking the head would have made selection the same lexicographic prefix every tick. Quantified by
+the security review at production defaults: with ~100 accumulated tombstone orphans, a newly-lost
+grant row has **~20% chance of ever being retracted**, against ~5 ticks before. Shipped instead:
+**both** hints rotate from their own cursor, so ordering serves the cursor rather than replacing
+the fairness it removed.
+
+**§11's justification for the orphan reservation was also wrong, and the reservation is right
+anyway.** It claimed that direction is "the only thing that retracts a grant row belonging to a
+departed identity." Core KV deletes are logical, so a departed identity **keeps** its vertex key
+and stays in the anchor listing; its stale row is therefore not an orphan at all, and the deep
+verify is what detects that over-grant. The direction's real triggers are a physically purged
+anchor, a row written for an anchor that never existed, and a transiently short anchor listing. It
+*is* still the only detector for those (the deep verify walks anchors, and an orphan's anchor is by
+definition not among them), so the reservation stands on a corrected premise.
+
+**Also changed from §11 in response to review.** The earned-share record needs **hysteresis** — two
+consecutive unproductive passes, not one — because a single pass can be unproductive for reasons
+that say nothing about the lens (either listing can come back short; a row landing between the
+target listing and the reprojection reads as missing then correct), and because on a converged lens
+the hint then selects nothing, gathers no evidence, and would never get the chance to clear a
+verdict formed from that transient. A periodic full-share re-test closes the same permanence hole
+from the other side. Each demotion/restoration is logged: §11 specified no observability, and a
+detector silently running at its floor is exactly what an operator cannot diagnose. Reservations are
+sized to the work that exists, so an idle one no longer shrinks the batch.
+
+**Corrected framing.** §11 called `capabilityRoles`/`capabilityServiceAccess` total-coverage. They
+are not, quite: `capabilityRoles` carries `emptyBehavior: delete` + a realness filter *precisely*
+so an identity holding no role has no row. Total coverage is a deployment property (does every
+anchor hold a role?), never a lens property — which is the strongest argument for the shipped
+empirical design over any static lens taxonomy, including the `EmptyBehavior` discriminator §11
+already had to discard.
+
+**Filed residuals (rows in the Lattice lane, not deferred silently).** `Reproject` reports
+`Wrote=true` for an absent-row upsert the ordering-token guard silently dropped at `seq==0` — a
+phantom-heal that is also a false-positive channel for the new earned-share experiment (fails
+safe: it reads as *productive*, i.e. the pre-change baseline). The coverage walk's `anchorLive` cost
+is O(row-less anchors examined), not O(batch), so a large tombstone population is walked every
+tick. Neither is a regression and neither is in this fire's scope.
+
+**Still not done here** (unchanged from §11's non-goals): the sweep is **not** widened to business
+lenses. That row's remaining scope is §10.1's other two findings — the `severity: error` escalation
+contradicting the business-lens invariant, and 14 lenses each enumerating the shared
+`weaver-targets` bucket — plus enrolment itself. This fire removed its blocker.

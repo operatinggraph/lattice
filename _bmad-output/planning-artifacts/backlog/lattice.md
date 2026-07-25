@@ -108,12 +108,13 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
 > 🎯 **Build-ready now.** Top picks needing no new design: the
-> **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit),
-> the **sweep-prefilter soundness** row (★★ M — unblocks `actor-aggregate backfill`), the
-> **rebuild-progress signal** (★★ S–M), then the two ★ Processor sensitive-predicate rows. The
-> **cap-read size bound** and the **appsession** production-IdP row need the Designer first. Every
-> `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot. The Designer
-> needs to restock. A stale callout starves the lane — whoever ships next renames this.
+> **actor-aggregate backfill** row (★★ M — its prefilter blocker cleared `7e6030aa`), the
+> **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit), the
+> **rebuild-progress signal** (★★ S–M), the **`Reproject` phantom-`Wrote`** row (★★ S), then the two
+> ★ Processor sensitive-predicate rows. The **cap-read size bound** and the **appsession**
+> production-IdP row need the Designer first. Every `✅ ratified` row is done or driver-blocked; the
+> rest are Whetstone's or parking-lot. The Designer needs to restock. A stale callout starves the
+> lane — whoever ships next renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -124,8 +125,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Processor] Declared-read count is unbounded at the envelope** | `ParseEnvelope` caps neither `reads`/`optionalReads`/`egressReads` length nor total. A declared read no longer short-circuits hydration, so an envelope naming N absent keys costs N sequential Core-KV GETs and then commits. Needs an envelope-level bound (Contract #2 §2.4 validation). | ★★ | S–M | 📋 ready · consumer: any actor holding any op grant |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor. Only auth-plane lenses get the convergence sweep; every other actorAggregate has no healer. | ★★ | S–M | 🚧 blocked-on the sweep prefilter row below · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §10.1 |
-| **[Refractor] The sweep prefilter assumes every anchor has a row** | Direction 1 counts a live anchor with no target key as divergence — true only for a total-coverage lens. For a filtering lens (`emptyBehavior: delete`) that is the normal state, so the same sorted-first anchors fill the batch every tick (no cursor), direction 2 never runs and the deep verify is throttled 5×. Latent on `capabilityEphemeral`. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/lens-projection-liveness-design.md) §11 · next: Inc 1 expected-map + d2 reservation |
+| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor. Only auth-plane lenses get the convergence sweep; every other actorAggregate has no healer. | ★★ | M | 📋 ready · prefilter blocker cleared · [scope](../../implementation-artifacts/lens-projection-liveness-design.md) §10.1+§11.1 |
+| **[Refractor] `Reproject` claims `Wrote` for a write the ordering guard dropped** | The `seq==0` → `ErrNoOrderingToken` guard fires only when the row is *present*, so an absent-row upsert reaches `guardedWrite`, which returns nil without writing while `Reproject` reports `Wrote=true` — inflating `reconciled` and logging a heal that did not happen. | ★★ | S | 📋 ready · consumer: the sweep's earned-share hints · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §11.1 |
+| **[Refractor] The sweep's coverage walk reads once per row-less anchor examined** | `anchorLive` is a Core-KV read per *examined* row-less anchor, but only a *selected* one counts against the budget — so a large tombstone population is walked and read every tick while selecting nothing, against a design cost model of "one bounded batch of cypher evaluations a minute". | ★ | S | 📋 ready · consumer: any cell with many tombstoned anchors · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §11.1 |
 | **[Refractor] A long-running rebuild has no progress signal** | A rebuild suppresses the sweep, so `CapabilitySweepStalled` reports it — but only as elapsed time, and cannot tell a rebuild that is draining from one wedged forever (`watchRebuildCompletion` retries an erroring `OutstandingForConsumer` indefinitely). Hence its deliberate no-escalation carve-out. A rebuild-progress signal (outstanding count, monotonic) would let the stall detector escalate a wedged rebuild. | ★★ | S–M | 📋 ready · consumer: operators, via the `sweep-stalled` warning that cannot escalate |
 | **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). The hand-chosen `ReadGrantDomain` split is the only lever today. | ★★ | M | 📋 ready · needs design · the freeze is now detected (`CapabilityRepairFailing`) |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere). Also needs a per-path origin-gate exemption: a cross-site OIDC `form_post` callback 403s. | ★★ | M | 📋 ready · Designer first (IdP→cookie handoff = arch fork) · [kit](../../../docs/components/appsession.md) |
@@ -192,6 +194,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 ## Done log — lattice (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
+
+- 2026-07-25 · `7e6030aa` · [refractor] the sweep's prefilter directions are hints that earn their share, not assumptions about the lens — both hints rotate + earn their budget; unstarves the only orphan detector
 
 - 2026-07-25 · `a5210fb2` · [refractor] a business lens whose liveness cannot be read says so instead of vanishing — `LensProjectionUnreadable` + `projectionLag: null`, mirroring the auth-plane fix
 
