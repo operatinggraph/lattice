@@ -107,18 +107,18 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** (1) `Read-grant dual-enumeration S2` (★★★, ratified 2026-07-24): one L fire,
-> ends the dual-authored reachability walk — the clean top pick. (2) `Forgeable authContext.target` is
-> mid-flight: Fire 1 shipped, **Fire 2** (identity-domain tighten + the mandatory `authcontext-target`
-> lint gate) is a scoped XS–S follow-on. Beyond them every
-> `✅ ratified` row is done or driver-blocked and the open `📋 ready` rows are Whetstone's (embedded-NATS
-> flakes) or parking-lot. A stale callout starves the lane — whoever ships the next pick renames this.
+> 🎯 **Build-ready now.** `Read-grant dual-enumeration S2` (★★★, ratified 2026-07-24) is the clean top
+> pick: one L fire, ends the dual-authored reachability walk. Behind it the two residuals the
+> authContext.target item left (clinic `== op.actor` migration, annotation-window tightening) are ★★ S/S–M
+> and need no new design. Beyond those every `✅ ratified` row is done or driver-blocked and the open
+> `📋 ready` rows are Whetstone's (embedded-NATS flakes) or parking-lot. A stale callout starves the lane —
+> whoever ships the next pick renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Forgeable `authContext.target` defeats scope=any self/workplace guards** | A confinement exemption keyed on `authContextTarget != ""` is forgeable by any scope=any holder. Fixed by a validated-target primitive the guards adopt, not a platform blank (that was tried + reverted — it breaks identity onboarding). | ★★★ | M–L | 🏗️ [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §11 · next: Fire 2 identity-domain + lint gate |
-| **Validated-target exemption without a resource bind** | 4 confined ops exempt on a bare `workplace_exempt()` with no resource bind and no ownership probe (cafe `VoidCharge`, wellness `CreateSession`, lease-signing `DecideLeaseApplication`, maintenance `ReportIssue`). Safe only because no task grants those ops — an operational fact, not structural. Consumer: the first task minted for any of them. | ★★ | S | 📋 ready · fold into Fire 2's lint vocabulary · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §3.4.1 |
+| **clinic-domain's exemption still keys on `== op.actor`** | Its two `workplace_exempt`/`require_workplace` sites predate the `op.authTargetValidated` primitive and are declared `(legacy-self-exempt)`, admitted by name in `lint-conventions`. `== op.actor` is itself forgeable; harmless today only via each site's `identifiedBy` probe. Migrating is a behaviour change, not a cleanup. | ★★ | S | 📋 ready · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §6 |
+| **Annotation window lets a bare exemption ride a neighbour's declaration** | Both new gates (and the `# read-posture:` convention they mirror) honour an annotation for the following 8 lines, so a reference inserted INTO an annotated block inherits its declaration. Fail-closed against forgetting, not against mis-declaring. Fix binds coverage to the annotated statement's own indentation block. | ★★ | S–M | 📋 ready · [design](../../implementation-artifacts/authcontext-target-validated-primitive-design.md) §12 |
 | **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the obvious re-assert ops no-op when state already matches. `reproject`/`rebuild` exist but need an asserted control-plane actor, so no operator-reachable backfill. Consumer: LoftSpace's landlord hat — seeded landlords render with no Landlord tab until touched. | ★★ | S–M | 📋 ready |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` configured nothing can issue the session cookie — the documented verify-only posture is unreachable. Fails closed (401 everywhere), and the per-request credential→identity resolve the old read boundary did now happens only at dev-login. Consumer: the first non-loopback deployment of any of the five FE binaries. | ★★ | M | 📋 ready |
 | **[appsession] Cookie sessions carry no CSRF defense** | The kit's sessions rest on `SameSite=Strict` alone; cookies are domain- not port-scoped, so loupe :7777 / clinic :7799 / loftspace :7788 are same-site to one another and a `no-cors` POST from one carries another's cookie. No CSRF token, no Origin / `Sec-Fetch-Site` check on state-changing POSTs. Strictly better than the pre-kit no-auth posture; bites once any two of these are co-hosted or a real IdP lands. | ★★ | M | 📋 ready |
@@ -187,6 +187,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-24 · `390a6754` · [identity-domain,lint] validated-target exemptions are declared, not assumed — RecordIdentityPII rekeyed + §3.4.1 resource-bound; closes the forgeable-`authContext.target` item (Fire 2 of 2)
+- 2026-07-24 · `390a6754` · [lint] `authcontext-target` + `workplace-exempt` blocking gates (derived helper set, fixture self-test) — closes the validated-target-exemption-without-a-resource-bind item
 - 2026-07-24 · `fe8378c0` · [processor,packages] `op.authTargetValidated` closes the forgeable-`authContext.target` confinement bypass — primitive + 4-package guard migration (Fire 1 of 2)
 - 2026-07-24 · `acdcfc7c` · [controlauth,test] flush the responder SUB before the echo helpers return — kills the `no responders available` unit-1 flake (client raced the responder's subscription); deterministic, 20x -p4 clean
 - 2026-07-24 · `657861dd` · [gateway] `/v1/actor` answers its own CORS preflight — `handleWhoami` sets Vary/allow-listed headers + OPTIONS→204 before the GET-guard (mirrors `handleOperationStatus`); completes the whoami-hats browser surface
@@ -204,7 +206,6 @@ One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archiv
 - 2026-07-22 · `6e1c7557` · [gateway] `GATEWAY_CORS_ORIGINS` dev default gains `127.0.0.1` twins for all four vertical apps (only :7810 had both) — live-verified via CORS preflight, closes the silent-write-block
 - 2026-07-22 · `6b68fde4` · [processor,bootstrap,pkgmgr] tombstone body-preservation Fire 1 — emitter sweep drops the isDeleted/data husk, schema relaxed, parser warns (not silently drops) a tombstone-with-document; Fire 2 (warn→reject) next
 - 2026-07-22 · `74883406` · [refractor,edge] Personal Lens retraction R2 — Edge-client keyset consumption (both engines) + hydrate dead-lens prune; unblocks the verticals staff-worlds claim beat
-- 2026-07-22 · `5c6162cb` · [refractor] Personal Lens retraction R1 — per-actor keyset frames close the never-retracts gap; identity-tombstone redelivery-loop defect fixed structurally; R2 (Edge consumption) next
 
 - 2026-07-22 · `c2abdfbe` · [refractor] `Pipeline.Run` seeds `lastAppliedSeq` from the durable's persisted ack floor at startup — closes the reconciliation-token residual, quiet-stream restarts no longer stay inert
 - 2026-07-22 · `baf3cb30` · [refractor,rbac-domain] `capabilityRoles` emptyBehavior:delete now fires on last-role revocation — RealnessFiltered generalized for mixed map/scalar list columns; rbac-domain 0.3.0→0.3.1

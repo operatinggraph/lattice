@@ -1,6 +1,6 @@
 # `op.authTargetValidated` — a validated-target primitive that closes the forgeable-`authContext.target` bypass per-op
 
-**Status: ✅ Andrew-ratified (2026-07-24) — build-ready.** Supersedes the FALSIFIED + REVERTED platform-blank
+**Status: ✅ SHIPPED (both fires, 2026-07-24) — item closed; §11 + §12 are the as-built record.** Supersedes the FALSIFIED + REVERTED platform-blank
 approach in [`authcontext-target-forgery-platform-fix-design.md`](authcontext-target-forgery-platform-fix-design.md)
 (that doc's §Falsified stands as the record of why one blanket rule cannot work). This design keeps the
 vulnerability's per-op nature but pays down the shared root with **one small, additive platform primitive**
@@ -534,7 +534,63 @@ bypass-hunt, regression-hunt, and test-quality passes ran against the built tree
 Every one of those fixes was itself checked by reverting the mechanism under test and observing the new
 assertion go red.
 
-**Fire 2 remains** exactly as §8 specifies: identity-domain idiom C (§3.5, tighten +
-`TestRecordPII_TaskScopedNotConfinedToUnclaimed` rewritten onto the real task grant) and the **mandatory**
-blocking `authcontext-target` lint rule. Fire 1 deliberately leaves the surviving safe sites unannotated —
-annotating them is Fire 2 step 3, and the gate lands blocking with zero debt.
+---
+
+## 12. Fire 2 build note — SHIPPED (item closes)
+
+§8's Fire-2 list built as ratified: identity-domain idiom C rekeyed onto the primitive,
+`TestRecordPII_TaskScopedNotConfinedToUnclaimed` rewritten onto a real seeded `ephemeralGrant`, the
+mandatory blocking `authcontext-target` rule landed with zero debt, and every surviving safe site
+annotated. Four things the build settled beyond that list:
+
+1. **§3.5's rekey was not sufficient on its own — `RecordIdentityPII` needed the §3.4.1 resource bind
+   too.** The adversarial pass proved the op is the one migrated site with **neither** an idiom-B
+   ownership probe **nor** a bind: `identity_key` comes from `payload.identityKey` while the validated
+   target is the grant's `scopedTo`, and nothing joins them. lease-signing's onboarding pattern mints a
+   `RecordIdentityPII` userTask `scopedTo` the applicant's own identity, so the applicant — a *consumer*
+   holding no standing `RecordIdentityPII` grant — could pair that legitimate grant with a payload naming
+   any other claimed identity and write `.ssn`/`.dob` onto them. Pre-existing (the presence test was
+   defeated identically), but §3.4.1 says the migration must not merely preserve it. Shipped as
+   `resource_bound = op.authTargetValidated and op.authContextTarget == identity_key`, mirroring
+   maintenance `ResolveWorkOrder`. Pinned by a payload-substitution vector proven non-vacuous.
+
+2. **The gate's helper set is DERIVED, not listed.** Anchoring on the literal `workplace_exempt()` left
+   `require_workplace()` — which Fire 1 made an exemption in its own right (§11 correction 1) — ungated,
+   and let any package invent its own differently-named helper to escape. The linter instead reads each
+   file for `def`s whose body consults `op.authTargetValidated`/`op.authContextTarget` (to a fixpoint,
+   so a helper calling a helper counts) and gates calls to those. That immediately surfaced one genuinely
+   uncovered site: lease-signing `DecideLeaseApplication`'s inner `require_workplace`, whose pre-gate
+   annotation sat outside the window behind a `kv.Links` enumeration.
+
+3. **clinic is declared, not migrated, and not copyable.** §6 scoped clinic's `== op.actor` migration out
+   as a behaviour change, so the gate cannot simply deny its two sites — and a generic annotation would
+   have blessed the forgeable idiom for every future author. `(legacy-self-exempt)` is therefore admitted
+   **only** in the files `authCtxTargetLegacyFiles` names: declaring it means editing the linter, and a
+   new guard has no legacy to declare. The migration is filed as its own row.
+
+4. **A `(payload-bind)` shape exists because two sites were mis-declared without it.** lease-signing
+   `CreateLeaseApplication` and wellness `CreateBooking` compare the target to a payload field on a
+   CREATE, where no owning link exists yet to probe — sound, but not `(ownership)` as the gate defines
+   it. Left undistinguished, the next author copies `(ownership)` onto a site where the difference bites.
+
+**What the gates do NOT claim** (stated so a green run is not over-read, and shared with the
+`# read-posture:` convention they mirror): an annotation covers the following `readPostureWindow` lines,
+so a reference inserted *into* an annotated block inherits that block's declaration; and both gates are
+fail-closed against *forgetting* to declare, not against *mis-declaring* — only `(resource-bind)` and
+`(legacy-self-exempt)` carry a structural check. Tightening the window is filed as its own row.
+
+**Non-vacuity proven, not assumed.** Each negative was run against a temporarily-reverted mechanism and
+observed to **accept** before being run green against the fix — the forged standing target (the idiom-C
+bypass) and the payload substitution (the §3.4.1 bind) separately. The positive task-path vector is
+asserted first, and an unforged control on the *same* auth path as the forgery pins that a rejection is
+the confinement guard rather than a step-3 denial. A fixture self-test runs on every non-hook invocation
+(so CI's strict run covers it with no new wiring), names the exact finding each case expects so a case
+cannot pass by tripping a different rule, and pins that both gates are **blocking, not advisory** —
+the one property a silent `warn: true` flip would have disarmed while everything else stayed green.
+
+**Three-layer adversarial gate (security change ⇒ full depth).** Independent bypass and test-quality
+passes ran against the built tree before admit; every finding above except (4) came from them. The bypass
+pass additionally **could not** find a false-deny — no shipped client submits `RecordIdentityPII` with a
+target and no task/self grant — and could not break the primitive, the rekeyed forgery vector, or the
+gate on the shapes it does cover. Gates: `go build`, `make vet`, `golangci-lint` (0 issues), all four
+`lint-*` scripts, and the full `go test ./...`.
