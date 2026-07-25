@@ -1387,6 +1387,121 @@ reachable. The listing is the one addition, and it is required by an op the scop
 adjacent mechanism substituted for it. The staff persona, its Unit 3 beat, and every existing grant, guard and
 role assignment are untouched.
 
+### Fire W4 (café) fire brief (build note, 2026-07-25)
+
+**1 · Scope sentence (verbatim, §7.4):** *"Café — hats: resident (own tab, self open/settle), staff (POS,
+front-desk grid). **Supplier deferred** (named trigger: a replenishment/inventory op set exists for a supplier
+to act in). Stands up read auth for tab/ledger reads (today an unauthenticated clinic-wide dump)."* Plus the §7
+common obligations: adopt the kit, delete pickers/mints, whoami-driven hats, per-actor submits, grants audit.
+
+**2 · The premise verified live, and it is worse than "no login".** Scouted at `76df2769` against the running
+stack (:7801). Three separate facts, each checked by reading:
+- **A fixed admin actor.** `main.go:89` sets `adminActor = bootstrap.BootstrapIdentityKey`, and
+  `readauth.go:77-108`'s `POST /api/staff/dev-token` mints a Bearer token for it. Every staff write in the app
+  — OpenTab, Charge, Settle, CreditAccount — is submitted as the **bootstrap identity**. This is the §6(1)
+  fixed-admin mint verbatim.
+- **An any-subject mint.** `readauth.go:110-147`'s `POST /api/dev-token` mints a token for whatever `subject`
+  the request body names, with no check that the caller *is* that identity. The FE's "sign in as resident" is
+  `app.js:45-49` writing a NanoID to `localStorage["cafe.selfBookerKey"]` — UI state, not authentication. This
+  is the §6(1) any-subject impersonation mint verbatim.
+- **Every read is unauthenticated.** `readauth.go:19-26` states the app "has no protected read boundary".
+  Confirmed live: `/api/leases`, `/api/tabs`, `/api/residents`, `/api/menu` return **200 with no credential**,
+  dumping every lease key, every tab with its balance and settlement state, and every resident's identity key
+  to any client that can reach the port. Eight endpoints, zero auth calls.
+
+**3 · Fork resolved in-fire — the café read boundary is session-scoped, not Postgres/RLS.** Clinic and LoftSpace
+authenticate reads by handing the session subject to Postgres RLS; **café has no Postgres read model at all**
+(`readauth.go:19-26`; the `up-cafe` recipe comment says the same, which is why it has no `provision-*-role`
+step). Standing one up is not the answer here: S3 tiers the read boundary **by data, not habit**, and Path A is
+triggered by *person-identifying columns*. Every café lens projects opaque keys only — `leaseAppKey`,
+`bookerKey`, `accountKey`, cents, timestamps; no names anywhere — which is precisely the "bare keys only for
+the people the rows are about" shape S3 declares **admissible** on open NATS-KV. So the boundary this fire owes
+is the one §8 actually names — *"café/wellness read boundaries **authenticated**"* — not a read-model rewrite.
+Shipped shape: the whole mux behind `RequireSession` (clinic's `server.go:84` wiring), plus **server-side
+scoping keyed on the verified session subject** (§6(3)) — a resident sees only rows for leases whose
+`bookerKey` is their own identity; a `worksAt` staffer sees the house. The resident→lease fact needs no new
+primitive: the `leaseApplicationComplete` lens already maps `leaseAppKey → bookerKey` and the app already reads
+it (`residents.go:81`).
+
+**4 · Fork resolved in-fire — "Record Payment" loses its surface rather than gaining an unconfined grant.**
+The FE offers `CreditAccount` (`app.js:657-682`), which `cafe-ledger/permissions.go:28` grants to **`operator`
+only** — all three ledgers do, deliberately ("orchestrator-submitted... the trusted-tool app submits"). It
+works today *only because the app impersonates the bootstrap identity*, i.e. only because of the exact
+anti-pattern this design deletes. Post-flip it has no authorized hat, and §6(4) makes offering it a bug. Three
+options were weighed:
+- *Grant `frontOfHouse` scope=any* — **rejected.** It would ship an **unconfined financial authority** (credit
+  any account any amount, including one's own) into a package whose scripts have no workplace binder at all,
+  while café-*domain*'s own staff ops **are** workplace-confined (`ddls.go:430-462`). That is below café's
+  existing bar, and it is the same fraud-vector reasoning that already denies `VoidCharge` a self grant
+  (`permissions.go:31-37`).
+- *Grant it confined* — the architecturally right end state, but confinement requires walking
+  account→lease→unit→building, a read shape **no ledger package has any precedent for**. Per §2 that is new
+  mechanism, i.e. design work, not this fire's execution.
+- *Gate the surface on the `operator` role from whoami* — **not possible**, and the reason is worth recording:
+  `/v1/actor` forwards role **keys**, not canonical names (`rolesanchors` doc-comment; `fetchActorHats`
+  returns `doc.Roles`, which are `vtx.role.<NanoID>`). An FE cannot tell which key means `operator`. This is
+  the same constraint W2 Inc 3 hit when it could not write an FE-side role predicate.
+
+  **Shipped: remove the surface, file the row.** The op, its grant, and the ledger are **untouched** — an
+  operator still records payments through Loupe or the CLI. A capped row goes in the same docs commit naming
+  its consumer (the café front-desk payment flow) and the mechanism it waits on (a workplace-confined ledger
+  credit).
+
+**5 · Verified touch-list (read live @ `76df2769`).** `cmd/cafe-app/` — `main.go:84-91` (bootstrap loader +
+`adminActor`), `server.go:21-37` (the `adminActor`/`devSigner` fields), `server.go:39-59` (route table: the two
+mint routes die, `RegisterRoutes` + `RequireSession` arrive), `readauth.go:77-147` (both mint handlers die;
+the file collapses to clinic's ~50-line context-extraction shape, `readauth.go:42-52`), the eight read handlers
+in `leases.go` / `tabs.go` / `ledger.go` / `residents.go` / `menu.go` / `frontdesk.go`, `health.go:1-48`
+(drops the `adminActor` probe, gains the signer probe), `web/index.html:20-26` (the me-bar picker), `web/app.js`
+(753 lines: token caches → one cookie, picker → whoami hats), **new** `web/login.html` (mirror
+`cmd/clinic-app/web/login.html`). Makefile: `CAFE_APP_DEMO_PERSONAS` alongside `CAFE_APP_DEV_AUTH` in
+`up-cafe:745-757` + `refresh-cafe:1247-1272`. **No package, DDL, lens, script, grant or seed change** — the
+grants audit (§6 below) found café-domain already archetype-complete.
+
+**6 · The grants audit came back clean, which is the load-bearing finding.** Every café-domain op already
+carries the hat it needs: OpenTab / Charge / Settle hold **both** `{operator, frontOfHouse}` scope=any **and**
+`consumer` scope=self (`permissions.go:44-80`), and all three scope=self paths already prove ownership through
+the lease's `applicationFor→identity` link with the `== None or .isDeleted` tombstone probe
+(`ddls.go:599-608`, `:698-708`, `:791-800`), each declared in `contextHint.optionalReads`. `VoidCharge` is
+scope=any by design. Read posture is clean — no class-(b) debt. **So café needs no package change to become
+sign-in-first**, and the one gap the audit did find is §4's `CreditAccount`. That is why this fire is app-only.
+
+**7 · Increment order + green checks.** One increment, built in order so each step is independently runnable:
+(a) kit wiring in `main.go`/`server.go` + `login.html` → `/login` serves and `/api/whoami` answers; (b) delete
+both mints + `adminActor` → `go build` names every dead reference; (c) `RequireSession` over the mux → every
+read endpoint 401s uncredentialed; (d) subject-scoping in the read handlers → a resident's `/api/tabs` returns
+only their own; (e) FE picker → whoami hats, per-actor submits, Record Payment removed.
+*Gates:* `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`STRICT=1 go run ./scripts/lint-board.go`, `go test ./cmd/cafe-app/... ./internal/appsession/...`.
+*Live:* `refresh-cafe`, sign in as a seeded tenant, drive OpenTab→Charge→Settle as **that resident**, and
+confirm the discriminating pair — the resident's reads scope to their own lease, and an uncredentialed
+`/api/tabs` 401s where it returned 200 before.
+
+**8 · In-scope gotchas.** (i) The two mints are what `CAFE_APP_DEV_AUTH=1` gates; the flag **survives** the
+flip as the dev *sign-in* posture (clinic and loftspace both still set it post-flip — `Makefile:735`, `:673`),
+so do not delete the flag, only the any-subject semantics behind it. (ii) `RequireSession` must wrap an
+**inner** mux with the kit's routes registered on it, or `/login` itself needs a credential (clinic
+`server.go:66-84`). (iii) The three `frontdesk-*` endpoints read **cross-vertical** front-desk lenses — they
+are a staff surface and scope to the `worksAt` hat, not to a lease. (iv) A present-but-invalid cookie must fail
+**closed** (`session.go:247-269`); café has no `FallbackIdentityID` and must not acquire one — clinic
+deliberately omits it so an uncredentialed visitor is genuinely anonymous.
+
+**9 · Non-goals (W4).** No café supplier hat (§7.4 named-deferred, trigger unchanged: a replenishment/inventory
+op set). No Postgres read model for café (§3). No new role, grant, guard, lens, DDL or seed change (§6). No
+`CreditAccount` grant change (§4). No wellness work — W3 is its own fire. No change to the ledger idiom in
+loftspace-ledger / clinic-ledger.
+
+**Scope-diff gate (pre-build): PASS.** Item-by-item against §7.4 + the §7 common list, narrow-only: kit
+adoption, mint/picker deletion, whoami hats and per-actor submits each trace to a §7 common clause; the
+`RequireSession` + subject-scoping work is "stands up read auth for tab/ledger reads" and nothing more (§3
+argues it *down* from a Postgres rewrite, not up); the grants audit is a §7 common clause and returned clean,
+which is what makes this fire app-only. The one item not literally in the scope sentence — removing Record
+Payment — is forced by §6(4) given the audit's single gap, and is a **narrowing** of what the app offers, not
+an adjacent mechanism substituted for a named one. Supplier stays deferred with its trigger unchanged.
+Declared dependencies re-verified both ways: W4 depends on P1+P2 (both SHIPPED — `internal/appsession` exists
+and clinic/loftspace run on it) and **not** on W0's provider spine (café has no provider hat), so nothing
+sequences ahead of it.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
