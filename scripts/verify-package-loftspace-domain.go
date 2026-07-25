@@ -12,8 +12,9 @@
 //	1 address  aspect-type DDL (class=meta.ddl.aspectType) admitting SetUnitAddress.
 //	1 loftspaceOwnership DDL meta-vertex (class=meta.ddl.vertexType) admitting
 //	  AssignUnitOwner + RemoveUnitOwner, with its self-description aspects.
-//	5 permission vertices (SetListing, SetUnitAddress, SetListingStatus,
-//	  AssignUnitOwner, RemoveUnitOwner), scope any, granted to operator.
+//	6 permission vertices — one per (operationType, scope) pair: scope=any granted
+//	  to operator for all five ops, plus SetListingStatus scope=self granted to
+//	  consumer (the landlord path). See loftspaceOpGrants.
 //	1 package vertex + manifest aspect (name=loftspace-domain).
 //
 // Run via: go run ./scripts/verify-package-loftspace-domain.go
@@ -48,6 +49,31 @@ var (
 	loftspaceOwnershipOps = []string{"AssignUnitOwner", "RemoveUnitOwner"}
 	loftspaceExpectedOps  = append(append([]string{}, loftspaceListingOps...), loftspaceOwnershipOps...)
 )
+
+// permGrant is one expected (scope, grantee-role) pair for an operationType's
+// permission vertex. A permission's identity is its (operationType, scope) pair
+// (Contract #8 §8.1), so a widened grantee set lands on the SAME vertex through
+// a second grantedBy link, never a second vertex — the vertex count below is
+// therefore the number of DISTINCT scopes, not of grants.
+//
+// SetListingStatus is the one op with two: scope=any to operator, and scope=self
+// to consumer — the landlord path, where the script requires the acting
+// identity's `manages` link to the payload unit. The ownership ops deliberately
+// have no self grant: they are what CONFERS management, so a self-scoped grant
+// would let any signed-in identity make itself the landlord of any unit. These
+// pins assert exactly the declared pairs; no role is added implicitly.
+type permGrant struct {
+	scope   string
+	grantee string
+}
+
+var loftspaceOpGrants = map[string][]permGrant{
+	"SetListing":       {{"any", "operator"}},
+	"SetUnitAddress":   {{"any", "operator"}},
+	"SetListingStatus": {{"any", "operator"}, {"self", "consumer"}},
+	"AssignUnitOwner":  {{"any", "operator"}},
+	"RemoveUnitOwner":  {{"any", "operator"}},
+}
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
 // class, and the ops its permittedCommands must contain.
@@ -195,8 +221,38 @@ func main() {
 		}
 	}
 
-	// permission vertices + scope + grantedBy-operator links.
-	permIDByOp := map[string]string{}
+	// Discover role NanoIDs (operator from bootstrap; others — consumer, the
+	// landlord grantee — by scanning vtx.role.*.canonicalName).
+	operatorRoleID := bootstrap.RoleOperatorID
+	roleIDByCanonical := map[string]string{}
+	if operatorRoleID != "" {
+		roleIDByCanonical["operator"] = operatorRoleID
+	}
+	for key := range allKeys {
+		if !strings.HasPrefix(key, "vtx.role.") || !strings.HasSuffix(key, ".canonicalName") {
+			continue
+		}
+		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+		if err != nil {
+			continue
+		}
+		data, _ := env["data"].(map[string]any)
+		val, _ := data["value"].(string)
+		if val == "" {
+			continue
+		}
+		parts := strings.Split(key, ".")
+		if len(parts) != 4 {
+			continue
+		}
+		roleIDByCanonical[val] = parts[2]
+	}
+
+	// permission vertices + scope + grantedBy-role links. Collect ALL matching
+	// vertices per op: keying a single id by operationType picks whichever
+	// vertex Go's unstable map iteration visited last, so an op carrying two
+	// scopes (SetListingStatus) hid one of them at random per run.
+	permIDsByOp := map[string][]string{}
 	for key := range allKeys {
 		if !strings.HasPrefix(key, "vtx.permission.") {
 			continue
@@ -216,40 +272,67 @@ func main() {
 		opType, _ := data["operationType"].(string)
 		for _, expected := range loftspaceExpectedOps {
 			if opType == expected {
-				permIDByOp[opType] = parts[2]
+				permIDsByOp[opType] = append(permIDsByOp[opType], parts[2])
 				break
 			}
 		}
 	}
 
-	operatorRoleID := bootstrap.RoleOperatorID
 	for _, op := range loftspaceExpectedOps {
-		permID, found := permIDByOp[op]
-		if !found {
+		permIDs := permIDsByOp[op]
+		if len(permIDs) == 0 {
 			fail("vtx.permission.*[operationType="+op+"]", "not found in Core KV")
 			continue
 		}
-		permKey := "vtx.permission." + permID
-		ok(fmt.Sprintf("%s operationType=%s", permKey, op))
-
-		if env, err := pkgverify.GetEnvelope(ctx, coreKV, permKey); err == nil {
-			data, _ := env["data"].(map[string]any)
-			if scope, _ := data["scope"].(string); scope != "any" {
-				fail(permKey+" scope", fmt.Sprintf("got %q want any", scope))
-			} else {
-				ok(permKey + " scope=any")
-			}
+		grants := loftspaceOpGrants[op]
+		wantScopes := map[string]bool{}
+		for _, g := range grants {
+			wantScopes[g.scope] = true
 		}
+		if len(permIDs) != len(wantScopes) {
+			fail(fmt.Sprintf("vtx.permission.*[operationType=%s]", op),
+				fmt.Sprintf("found %d permission vertices, want %d distinct scope(s) (%v)", len(permIDs), len(wantScopes), grants))
+			continue
+		}
+		for _, grant := range grants {
+			// Match this grant to the permission vertex carrying its scope —
+			// each op's grants declare distinct scopes.
+			var matchedID string
+			for _, permID := range permIDs {
+				env, err := pkgverify.GetEnvelope(ctx, coreKV, "vtx.permission."+permID)
+				if err != nil {
+					continue
+				}
+				data, _ := env["data"].(map[string]any)
+				if scope, _ := data["scope"].(string); scope == grant.scope {
+					matchedID = permID
+					break
+				}
+			}
+			if matchedID == "" {
+				fail(fmt.Sprintf("vtx.permission.*[operationType=%s,scope=%s]", op, grant.scope),
+					"not found among discovered permission vertices")
+				continue
+			}
+			permKey := "vtx.permission." + matchedID
+			ok(fmt.Sprintf("%s operationType=%s scope=%s", permKey, op, grant.scope))
 
-		linkKey := "lnk.permission." + permID + ".grantedBy.role." + operatorRoleID
-		if _, exists := allKeys[linkKey]; !exists {
-			fail(linkKey, "grantedBy.operator link not found")
-		} else if lenv, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
-			fail(linkKey, fmt.Sprintf("cannot read: %v", err))
-		} else if isDeleted, _ := lenv["isDeleted"].(bool); isDeleted {
-			fail(linkKey, "link is tombstoned")
-		} else {
-			ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<operator> exists", permID))
+			granteeRoleID, roleFound := roleIDByCanonical[grant.grantee]
+			if !roleFound {
+				fail(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<%s>", matchedID, grant.grantee),
+					fmt.Sprintf("role %q NanoID not found; cannot verify grant link", grant.grantee))
+				continue
+			}
+			linkKey := "lnk.permission." + matchedID + ".grantedBy.role." + granteeRoleID
+			if _, exists := allKeys[linkKey]; !exists {
+				fail(linkKey, "grantedBy."+grant.grantee+" link not found")
+			} else if lenv, err := pkgverify.GetEnvelope(ctx, coreKV, linkKey); err != nil {
+				fail(linkKey, fmt.Sprintf("cannot read: %v", err))
+			} else if isDeleted, _ := lenv["isDeleted"].(bool); isDeleted {
+				fail(linkKey, "link is tombstoned")
+			} else {
+				ok(fmt.Sprintf("lnk.permission.%s.grantedBy.role.<%s> exists", matchedID, grant.grantee))
+			}
 		}
 	}
 
