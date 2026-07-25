@@ -1190,10 +1190,12 @@ gated as a live write and left undone.
 *Honest residuals, filed as rows in the same commit:* the production (IdP) posture cannot open a session at
 all — `setCookie` runs only under a non-nil `Signer`, so with an external IdP nothing can issue the cookie;
 it fails closed (401 everywhere), but the documented posture is unreachable, and the per-request
-credential→identity resolution `authenticateRead` used to do now happens only at dev-login. And the kit's
-cookie sessions carry no CSRF defense beyond `SameSite=Strict`; cookies are domain- not port-scoped, so the
-sibling localhost apps are same-site. Both are `internal/appsession` properties inherited from P2 — they
-affect Facet and clinic identically, and neither is introduced here.
+credential→identity resolution `authenticateRead` used to do now happens only at dev-login. **Still open, and
+now Designer-first**: the IdP→cookie handoff shape is an architectural fork, and it additionally needs a
+per-path exemption at the origin gate. The CSRF half — cookies are domain- not port-scoped, so the sibling
+localhost apps are same-site — is **CLOSED** by the `RequireSession` cross-origin gate (`8e61174f`;
+`docs/components/appsession.md`). Both were `internal/appsession` properties inherited from P2, affecting
+Facet and clinic identically; neither was introduced here.
 
 **Scope-diff gate: PASS** — every touch traces to "sign-in-first; pickers + both mints deleted; RLS tests keep
 passing with session subjects". Two narrowings recorded (landlord write-grant migration → Inc 3, matching

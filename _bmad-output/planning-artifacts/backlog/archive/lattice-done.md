@@ -2,6 +2,10 @@
 
 Rolled from `lattice.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-22 · `222f66a5` · [CI] `edge-browser-store` retries once on the `websocket url timeout reached` signature alone — a cold-start miss no longer reds the gate, every other failure still fails unretried
+- 2026-07-22 · `52fc791f` · [weaver] `resetConfidence` control verb + CLI drains a target's `__effect` confidence windows — the disable<reset<revoke ladder's middle rung; grants to control-authz + console-operator, never demo-operator
+- 2026-07-22 · `9af5aed5` · [loom] poll-until-created in the e2e harness (new `waitTaskCreated`) — closes the `taskCreated`-after-`waitTaskKey` relay race across 8 sites; `-race -count=5` clean
+- 2026-07-21 · `7b74ce70` · [packages] demo-operator inspect-only grant package (F20.3) — console-operator minus every write: `demoOperator` role + read lens + 3 `ctrl.*.read` grants; the platform boundary for public Loupe exposure (Andrew-gated)
 - 2026-07-21 · `446b3549` · [weaver] revision-condition lane-1's mark delete so a lane-1/sweep race on one `__effect` close credits it once, not twice — a double-credit could mask a real LensEffectMismatch; -race regression test
 - 2026-07-21 · `6b86e9e4` · [bootstrap] the `up` target keeps a stale bootstrap file on an empty Core KV (recreated stack — binary re-seeds at stable NanoIDs), discards only on a real mismatch — new `CoreKVEmpty` / `probe-empty` discriminator
 - 2026-07-20 · `a44651f` · [bootstrap] Core KV, not `lattice.bootstrap.json`, decides whether to seed — a recreated bucket behind a committed file re-seeds at the file's stable NanoIDs, reopening the two-phase window first

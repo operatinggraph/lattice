@@ -41,6 +41,7 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
+| **Loupe's cross-origin gate is the weaker fork of the shipped kit gate** | `cmd/loupe/server.go`'s `crossOriginBlocked` + `publicorigin.go` are a ~110-line fork of what now lives in `internal/appsession` (`origin.go`), and Loupe's copy is per-handler opt-in at 16 call sites — handler #17 is silently ungated. The kit's is a choke point and adds the Fetch-Metadata branch (so a cross-origin subresource GET is refused too). Adopt `appsession.CrossOriginBlocked`/`ParsePublicOrigin`, drop the fork. | ★ | S–M | 📋 ready · [kit](../../../docs/components/appsession.md) |
 | **Loupe package install can't resolve non-operator GrantsTo roles** | `cmd/loupe/pkg.go` `kernelRoleIDs()` resolves only `operator`, so installing/upgrading any package whose permissions grant `consumer`/`frontOfHouse`/`backOfHouse`/`provider` through Loupe's admin UI fails on GrantsTo resolution (pre-existing; CLI installs use `cmd/lattice-pkg`'s full roster). Mirror that roster or resolve via the roleindex. | ★★ | S | 📋 ready |
 
 ## Parked
