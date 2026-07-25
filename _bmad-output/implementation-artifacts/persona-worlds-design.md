@@ -1285,6 +1285,74 @@ to `consumer` — a landlord must not be able to assign themselves units (the es
 ops (operator-only standing path, operator is exempt anyway); no §6.4 op-set parity script; no `manages`-anchor
 backfill (its own filed row); no sibling-app adoption (W3/W4); no contract text.
 
+#### Fire W2 Inc 4 fire brief (build note, 2026-07-25)
+
+**1 · Scope sentence (verbatim, the filed row):** *"Both `manages`-holding personas are the frontOfHouse staff
+spine, which `seed-showcase.go` gives no consumer role by design — so their cap docs carry no scope=self row and
+the landlord hat still cannot SetRenewalTerms / VerifyGuarantor / CancelRenewal / SetListingStatus live."* Seed
+the persona cell that makes Inc 3's five grants reachable.
+
+**2 · The row's premise is right, its count is wrong — and the mechanism is one layer deeper.** Scouted live at
+`3feceaa7`: there is exactly **one** `manages` link in the whole seed, not two —
+`seed-showcase.go:1121` wires Dana Whitfield (the frontOfHouse staff persona) to Unit 3, and no other call site
+writes the relation. The row's "both `manages`-holding personas" overcounts; the correction rides this fire.
+
+The deeper fact is that this is **not** merely "the seed forgot to assign `consumer`". The Gateway auto-grants
+`consumer` to actors it authenticates (`gateway.go:628` → `ProvisionConsumerIdentity`), which is why every
+*Facet* consumer works — but that script is **first-touch only**: `existing = kv.Read(target_actor_key); if
+existing != None: return {"mutations": [], "events": []}` (`identity-domain/ddls.go:809-815`). A seeded persona
+is a pre-existing identity by construction, so the auto-provisioner is a clean no-op for it and **structurally
+cannot** backfill the role. Every seeded persona that is to act as a signed-in human must therefore be granted
+`consumer` **in the seed**, explicitly — `seedTenant` already does (`:477-479`); nothing else does.
+
+**3 · Why Dana cannot simply be given `consumer` (the option this fire rejected).** `seedStaff`'s own doc
+(`:549-554`) states the persona "deliberately gets NO residesIn link and NO consumer role, so its world is
+purely staff-derived" — it is the showcase's proof that a world composes from `worksAt` + `holdsRole` alone.
+That is intent, but the **hard** blocker is resolution: `ensureStaff` (`:523-532`) and `ensureMaintenanceTech`
+(`:442-451`) recover their persona with `findLinkedIdentity(…, "holdsRole", roleKey, consumerRoleKey)`, where
+the last argument **excludes** any candidate that also holds `consumer` — the discriminator that keeps Dana
+distinct from Sam (tenant2, who holds `frontOfHouse` **and** `consumer`, `seedSamMultiHat:995-1002`). Granting
+Dana `consumer` makes `ensureStaff` match nothing and mint a **duplicate Dana on every rerun**. Rejected.
+
+**4 · The build: seed the missing PLAIN-LANDLORD cell.** §7.2 already names `consumer` the signed-in-human
+role and the landlord a `consumer` + `manages` identity; Inc 3 §5 enumerated four cells and shipped guards for
+all of them, but the seed only ever populated the *front-desk landlord* (Dana: `frontOfHouse` + `manages`).
+The plain landlord — `consumer` + `manages`, no staff role — is the cell that exercises the five scope=self
+grants, and it is the one that does not exist. Add it, additively:
+- `ensureLandlord` — recover by scanning the `manages` link into its own unit (the same one-relation-over
+  recovery shape `recoverTenants`/`ensureStaff` use); else mint `CreateUnclaimedIdentity` → `AssignRole`
+  (`consumer`) → `AssignUnitOwner` → `UpdateIdentityState` claimed. Mirrors `seedTenant:468-480`.
+- A fourth unit + its own signed, undecided lease application, mirroring `seedStaffWorklistApplication:1108`
+  — without an application on a unit it manages, `DecideLeaseApplication`/`VerifyGuarantor` have no subject and
+  the cell is not actually exercisable. Dana keeps Unit 3 and her worklist beat untouched, so the two landlord
+  cells stay independent and neither empties the other's pane.
+- Both seed branches (the `alive(buildingKey)` already-loaded layering path and the from-scratch path), plus a
+  machine-readable `LOFTSPACE_LANDLORD_NANOID=` line mirroring `FACET_*_NANOID`.
+
+**5 · Verified touch-list (scouted live @ `3feceaa7`):** `scripts/seed-showcase.go` only — constants
+(`:105-157` unit/persona ids + `showcaseLocationNames`/`showcaseLocationOrder`), the already-loaded branch
+(`:214-218`), the from-scratch branch (`:266-274`), and the new functions alongside
+`seedStaffWorklistApplication:1108`. **No package, permission, script, lens, DDL, or FE change** — Inc 3 already
+shipped every grant and guard, `identityAnchors` already walks `manages` (`identity-domain/lenses.go:164`), and
+`app.js:817`'s `isLandlord` already gates on that anchor. No version bump (no package edit).
+
+**6 · Increment order + green checks:** one increment. `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, `go test ./scripts/... ./packages/loftspace-domain/...
+./packages/lease-signing/...`. Live: reseed against the running stack, `dev-login` as the new landlord's
+NanoID, drive `SetListingStatus` + `DecideLeaseApplication` as a plain consumer landlord.
+
+**7 · In-scope gotchas:** the seed's two branches must BOTH call the new function (the already-loaded path is
+how an existing dev stack gains the persona without a wipe) and every mutation must be liveness-guarded, since
+that path re-runs on every `make up`. `AssignUnitOwner` is operator-only and the seed submits under `adminKey`
+— correct and unchanged; the landlord must NOT be able to call it (Inc 3 §7, standing). The new unit needs a
+`SetUnitAddress` or the landlord console renders it bare, and it must join `showcaseLocationNames` +
+`showcaseLocationOrder` or `seedLocationPresentation` leaves it nameless.
+
+**8 · Non-goals (Inc 4):** no op-meta `authContext` change (its own filed row — Facet's renderer still lands on
+the standing path); no `AssignUnitOwner` actor binding (its own filed row); no new role; no grant, guard, lens
+or FE change; no `LOFTSPACE_APP_DEMO_PERSONAS` wiring (the demo box fences **Facet** only, `demo-up.sh:86` —
+LoftSpace is not in persona posture there, so no deploy config rides on this).
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
