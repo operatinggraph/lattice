@@ -266,3 +266,106 @@ func TestStaffReadGrants_CoverTheWorkOrderAnchors(t *testing.T) {
 	require.True(t, granted[f.ids["woBldg"]], "the building's own work order must be readable")
 	require.False(t, granted[f.ids["woOther"]], "another building's work order must NOT be granted")
 }
+
+// emMultiHatWorld builds persona-worlds-design.md §3.4's acceptance human: one
+// identity who lives in a unit, works a desk at a building, and teaches yoga —
+// three bindings by three different relations, which is the whole point.
+//
+//	unitB2  ←residesIn—  sam  —worksAt→  bldgA
+//	                     sam  ←identifiedBy—  instructor "Sam Okafor"
+func emMultiHatWorld(t *testing.T) *emFixture {
+	f := newEmFixture(t)
+	f.vtx(t, "sam", "identity")
+	f.vtx(t, "bldgA", "building")
+	f.vtx(t, "unitB2", "unit")
+	f.vtx(t, "samInstructor", "instructor")
+
+	f.aspect(t, "bldgA", "presentation", "locationPresentation", map[string]any{"name": "Riverside Building"})
+	f.aspect(t, "unitB2", "presentation", "locationPresentation", map[string]any{"name": "Unit 2"})
+	f.aspect(t, "samInstructor", "profile", "instructorProfile", map[string]any{"displayName": "Sam Okafor"})
+
+	f.edge(t, "residesIn", "sam", "unitB2")
+	f.edge(t, "worksAt", "sam", "bldgA")
+	f.edge(t, "identifiedBy", "samInstructor", "sam")
+	return f
+}
+
+// emAnchorsByRelation indexes a manifest.me row's anchors by their relation
+// stamp, dropping the degenerate {key:null} entries an OPTIONAL MATCH that
+// found nothing contributes — the same shape the renderer drops client-side.
+func emAnchorsByRelation(t *testing.T, rows []ruleengine.ProjectionResult) map[string][]map[string]any {
+	t.Helper()
+	require.Len(t, rows, 1, "edgeIdentity is anchored on the identity itself, so exactly one row")
+	raw, _ := rows[0].Values["anchors"].([]any)
+	out := map[string][]map[string]any{}
+	for _, a := range raw {
+		m, ok := a.(map[string]any)
+		if !ok {
+			continue
+		}
+		if k, _ := m["key"].(string); k == "" {
+			continue
+		}
+		rel, _ := m["relation"].(string)
+		out[rel] = append(out[rel], m)
+	}
+	return out
+}
+
+// TestEdgeIdentity_AnchorsCarryEveryHatWithItsRelation is the §3.4 green bar at
+// the lens layer: all three spines must reach the renderer as anchors, each
+// stamped with the relation that says WHICH world it is. `selfAnchors` carries
+// the same bindings typed and keyed for `{me.<type>}` dispatch but nameless and
+// relation-less, which is not enough to group a person's hats by provenance —
+// that is what these entries are for.
+func TestEdgeIdentity_AnchorsCarryEveryHatWithItsRelation(t *testing.T) {
+	f := emMultiHatWorld(t)
+	byRel := emAnchorsByRelation(t, f.project(t, emComposedSpec(t, "edgeIdentity"), f.key("sam")))
+
+	require.Len(t, byRel["residesIn"], 1, "the home hat")
+	require.Equal(t, "Unit 2", byRel["residesIn"][0]["name"])
+
+	require.Len(t, byRel["worksAt"], 1, "the work hat")
+	require.Equal(t, "Riverside Building", byRel["worksAt"][0]["name"])
+
+	require.Len(t, byRel["identifiedBy"], 1, "the services hat")
+	bound := byRel["identifiedBy"][0]
+	require.Equal(t, f.key("samInstructor"), bound["key"])
+	require.Equal(t, "Sam Okafor", bound["name"], "the instructor's name lives on .profile.displayName")
+	require.Equal(t, "instructor", bound["type"],
+		"the renderer resolves the hat's ops by TYPE, so the walk must stamp it rather than parse the key")
+}
+
+// TestEdgeIdentity_UnboundIdentityCarriesNoServicesHat is the scoping negative:
+// a resident with no provider binding must not acquire a services hat from the
+// three OPTIONAL MATCHes that found nothing.
+func TestEdgeIdentity_UnboundIdentityCarriesNoServicesHat(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "riley", "identity")
+	f.vtx(t, "unitA1", "unit")
+	f.aspect(t, "unitA1", "presentation", "locationPresentation", map[string]any{"name": "Unit 1"})
+	f.edge(t, "residesIn", "riley", "unitA1")
+
+	byRel := emAnchorsByRelation(t, f.project(t, emComposedSpec(t, "edgeIdentity"), f.key("riley")))
+	require.Len(t, byRel["residesIn"], 1)
+	require.Empty(t, byRel["identifiedBy"], "an unbound identity holds no provider hat")
+	require.Empty(t, byRel["worksAt"], "and no work hat")
+}
+
+// TestEdgeIdentity_BoundProviderProfileNameProjects pins the per-domain profile
+// field: a clinic provider's display name is `fullName`, not the `displayName`
+// the other two domains chose, so reading one field for all three would leave
+// the richest hat nameless.
+func TestEdgeIdentity_BoundProviderProfileNameProjects(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "osei", "identity")
+	f.vtx(t, "oseiProvider", "provider")
+	f.aspect(t, "oseiProvider", "profile", "providerProfile",
+		map[string]any{"fullName": "Dr. Amara Osei", "specialty": "Cardiology"})
+	f.edge(t, "identifiedBy", "oseiProvider", "osei")
+
+	byRel := emAnchorsByRelation(t, f.project(t, emComposedSpec(t, "edgeIdentity"), f.key("osei")))
+	require.Len(t, byRel["identifiedBy"], 1)
+	require.Equal(t, "Dr. Amara Osei", byRel["identifiedBy"][0]["name"])
+	require.Equal(t, "provider", byRel["identifiedBy"][0]["type"])
+}

@@ -1,12 +1,14 @@
 name: edge-manifest
-version: 0.10.0
+version: 0.11.0
 description: |
   The Facet edge app's world manifest: fourteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
   edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/
   edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue/
   edgeInstructorSessions) projecting identity (incl. the provider/instructor/
-  serviceprovider self-anchors, persona-worlds-design.md Fire W0), reachable
+  serviceprovider self-anchors for {me.<type>} dispatch, and the same bindings
+  relation-stamped and named in anchors so the renderer can group a person's
+  hats by provenance — persona-worlds-design.md Fires W0/W5), reachable
   services, the op descriptor vocabulary, open and queued tasks, the
   maintenance work orders at a staff actor's workplace, service instances,
   and browsable dispatch-target entities (wellness sessions via studio

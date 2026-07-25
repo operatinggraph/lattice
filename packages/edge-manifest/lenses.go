@@ -421,6 +421,19 @@ const (
 // the identity and is matched once for the `anchors` grouping already. A degenerate {key:null} entry when
 // the identity holds none of these bindings is the same expected shape
 // roles/anchors carry and is dropped client-side.
+//
+// `anchors` is the same bindings seen from the OTHER side: not "which vertex
+// does `{me.<type>}` resolve to" but "which world am I in, and by what
+// relation" — so every entry is `relation`-stamped and carries a display
+// name. The three `identifiedBy` bindings appear in both sets for that
+// reason, and it is not a duplication to collapse: `selfAnchors` is
+// dispatch plumbing keyed by type, `anchors` is the provenance the renderer
+// groups hats by (persona-worlds-design.md §3.4 — home / work / services).
+// The provider entities carry their display name on `.profile`, under the
+// field each domain declared for it (`fullName` for a clinic provider,
+// `displayName` for an instructor and a service provider); a binding whose
+// profile is absent resolves to a null name and degrades to the renderer's
+// typed floor rather than a bare NanoID.
 const edgeIdentitySpec = `
 MATCH (identity:identity {key: $actorKey})
 OPTIONAL MATCH (identity)-[:holdsRole]->(role:role)
@@ -441,7 +454,10 @@ RETURN
   (identity.state.data.value = "claimed") AS claimed,
   collect(DISTINCT {key: role.key, name: role.canonicalName.data.value}) AS roles,
   collect(DISTINCT {key: loc.key, name: loc.presentation.data.name, container: container.key, containerName: container.presentation.data.name, relation: 'residesIn'}) +
-  collect(DISTINCT {key: work.key, name: work.presentation.data.name, container: workContainer.key, containerName: workContainer.presentation.data.name, relation: 'worksAt'}) AS anchors,
+  collect(DISTINCT {key: work.key, name: work.presentation.data.name, container: workContainer.key, containerName: workContainer.presentation.data.name, relation: 'worksAt'}) +
+  collect(DISTINCT {key: prov.key, name: prov.profile.data.fullName, type: 'provider', relation: 'identifiedBy'}) +
+  collect(DISTINCT {key: instr.key, name: instr.profile.data.displayName, type: 'instructor', relation: 'identifiedBy'}) +
+  collect(DISTINCT {key: sp.key, name: sp.profile.data.displayName, type: 'serviceprovider', relation: 'identifiedBy'}) AS anchors,
   collect(DISTINCT {type: 'leaseapp', key: leaseapp.key}) +
   collect(DISTINCT {type: 'workplace', key: work.key}) +
   collect(DISTINCT {type: 'provider', key: prov.key}) +

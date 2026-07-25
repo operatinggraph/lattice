@@ -31,17 +31,23 @@ make seed-showcase 2>&1 | tee "$seed_log"
 tenant1="$(sed -n 's/^FACET_TENANT1_NANOID=//p' "$seed_log")"
 tenant2="$(sed -n 's/^FACET_TENANT2_NANOID=//p' "$seed_log")"
 staff="$(sed -n 's/^FACET_STAFF_NANOID=//p' "$seed_log")"
+provider="$(sed -n 's/^FACET_PROVIDER_NANOID=//p' "$seed_log")"
+laundry="$(sed -n 's/^FACET_LAUNDRY_NANOID=//p' "$seed_log")"
 rm -f "$seed_log"
-if [[ -z "$tenant1" || -z "$tenant2" || -z "$staff" ]]; then
-	echo "demo-up: seed-showcase did not print all three persona ids" >&2
+if [[ -z "$tenant1" || -z "$tenant2" || -z "$staff" || -z "$provider" || -z "$laundry" ]]; then
+	echo "demo-up: seed-showcase did not print all five persona ids" >&2
 	exit 1
 fi
 
-# Labels match scripts/seed-showcase.go's personas (Riley in unit1, Sam in
-# unit2, Dana the frontOfHouse staff — her world composes from worksAt +
-# holdsRole, the staff-worlds spine). The ids rotate with every fresh world,
-# so they are fed per-start rather than checked in anywhere.
-personas="$(printf '[{"id":"%s","label":"Riley Chen","sub":"Resident · Unit 1"},{"id":"%s","label":"Sam Okafor","sub":"Resident · Unit 2"},{"id":"%s","label":"Dana Whitfield","sub":"Staff · Front of house"}]' "$tenant1" "$tenant2" "$staff")"
+# Labels match scripts/seed-showcase.go's personas. The set is chosen to walk a
+# visitor through every human archetype the graph knows (persona-worlds §3.5):
+# Riley is a plain resident, Dana is staff (worksAt + holdsRole, the
+# staff-worlds spine), Osei and Kai are bound providers whose worlds hang off
+# an identifiedBy binding rather than a place, and Sam is the one human wearing
+# three hats at once — the acceptance scenario, so she is labelled as such
+# rather than as a second resident. The ids rotate with every fresh world, so
+# they are fed per-start rather than checked in anywhere.
+personas="$(printf '[{"id":"%s","label":"Riley Chen","sub":"Resident · Unit 1"},{"id":"%s","label":"Sam Okafor","sub":"Resident · Front desk · Instructor"},{"id":"%s","label":"Dana Whitfield","sub":"Staff · Front of house"},{"id":"%s","label":"Dr. Amara Osei","sub":"Clinician · Riverside clinic"},{"id":"%s","label":"Kai","sub":"Service provider · Laundry"}]' "$tenant1" "$tenant2" "$staff" "$provider" "$laundry")"
 
 # Hosted read-only Loupe (F20): provisioned + started only when the box
 # declares a public host for it (demo-bootstrap.sh's second argument). Bounded,

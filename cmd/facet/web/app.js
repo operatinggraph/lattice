@@ -45,6 +45,9 @@ const TYPE_LABELS = {
   studio: "Studio",
   menuitem: "Menu item",
   workorder: "Work order",
+  provider: "Clinician",
+  instructor: "Instructor",
+  serviceprovider: "Service provider",
 };
 function typeLabel(type) {
   return TYPE_LABELS[type] || (type ? titleCase(type) : "Item");
@@ -78,20 +81,60 @@ function anchorLabel(a) {
   return prettify(a.key);
 }
 
-// splitAnchors separates the two identity spines edgeIdentity projects. Both
+// splitAnchors separates the identity spines edgeIdentity projects. They all
 // arrive in one `anchors` array carrying a `relation` stamp ("residesIn" /
-// "worksAt") because the cypher engine has no UNION to give them separate
-// columns. They mean different things to a person — where you live vs. where
-// you work — so the UI never merges them into one undifferentiated "Places".
+// "worksAt" / "identifiedBy") because the cypher engine has no UNION to give
+// them separate columns. They mean different things to a person — where you
+// live, where you work, what you provide — so the UI never merges them into
+// one undifferentiated "Places". These are the hats of persona-worlds §3.4:
+// one human, one login, and as many of the three as they hold.
 //
 // An anchor with no relation is treated as a residence: rows projected before
 // the stamp existed carry none, and residence is what they were.
 function splitAnchors(m) {
   const all = ((m && m.anchors) || []).filter((a) => a && a.key);
   return {
-    homes: all.filter((a) => a.relation !== "worksAt"),
+    homes: all.filter((a) => a.relation !== "worksAt" && a.relation !== "identifiedBy"),
     workplaces: all.filter((a) => a.relation === "worksAt"),
+    bindings: all.filter((a) => a.relation === "identifiedBy"),
   };
+}
+
+// bindingLabel names a provider hat by what the person DOES there, not by the
+// bare record: "Instructor · Sam Okafor". The type carries the trade (a clinic
+// provider, a yoga instructor, a laundry operator are three vertex types
+// precisely so their worlds differ), and the profile name identifies which
+// one. A binding whose profile never resolved keeps the typed label alone
+// rather than degrading to a NanoID.
+function bindingLabel(a) {
+  const trade = typeLabel(a && a.type);
+  const name = a && a.name;
+  return name ? trade + " · " + name : trade;
+}
+
+// hatOps answers "what is this hat's own work" — the ops that ADMINISTER the
+// bound record, not merely the ops that point at one.
+//
+// `dispatchClass` is what separates the two, and the distinction is sharp:
+// SetProviderHours declares class "provider" because the provider record is
+// its subject, while CreateAppointment declares class "appointment" and merely
+// names a provider as the counterparty you book WITH. Both carry
+// targetType "provider", so a targetType-only filter would offer a clinician
+// "Book appointment" against herself — a wrong-hat card on the one surface
+// whose whole purpose is telling hats apart. The class term is the hat
+// membership test; the targetType + resolveTargetKey terms are the same
+// dispatch gate every other surface runs, so nothing renders here that could
+// not be submitted from here.
+//
+// This is a DISPATCH-level filter, not an authorization one: the capability
+// plane remains the only thing that decides what a hat may actually do, and an
+// op that survives this filter can still be refused in-script. Curation is UX.
+function hatOps(a) {
+  if (!a || !a.type) return [];
+  return ops().filter((o) =>
+    o.data.dispatchClass === a.type &&
+    o.data.dispatchTargetType === a.type &&
+    resolveTargetKey(o.data, { entityKey: a.key }) === a.key);
 }
 
 // chipRow renders a list of anchors as chips, or a caller-supplied empty note.
@@ -533,19 +576,47 @@ function loadWhoami() {
 
 // ----------------------------------------------------------------- Home
 
+// A provider hat renders as its own chip so it reads as a standing in the
+// person's world beside home and work. A binding is the only anchor kind that
+// can carry ops of its own — home and workplace anchors reach theirs through
+// the services and entity surfaces — so a binding chip opens a detail view
+// (persona-worlds §3.4).
+//
+// It opens one only when that hat actually has work: the three binding types
+// are declared symmetrically, but only the clinic `provider` has ops whose
+// dispatch class names it, so an instructor's and a service provider's chips
+// would open on "Nothing to do here yet." A chip that offers a tap and then
+// says nothing is worse than a chip that plainly states what you are.
+function bindingChipRow(bindings) {
+  return `<div class="chip-row">${bindings.map((a) => {
+    const label = esc(bindingLabel(a));
+    return hatOps(a).length
+      ? `<span class="chip" data-goto="hat" data-key="${esc(a.key)}" style="cursor:pointer">${label}</span>`
+      : `<span class="chip">${label}</span>`;
+  }).join("")}</div>`;
+}
+
 function renderHome() {
   const m = me() || {};
-  const { homes, workplaces } = splitAnchors(m);
+  const { homes, workplaces, bindings } = splitAnchors(m);
   const svcs = services();
   const tsks = tasks();
+  // The "no residence" note is for a person with no world at all, not for a
+  // bound provider who simply doesn't live here — telling Dr. Osei her
+  // residence is missing would be reporting the wrong absence.
+  const rootless = !homes.length && !workplaces.length && !bindings.length;
   $("view-home").innerHTML = `
-    ${homes.length || !workplaces.length ? `<section>
+    ${homes.length || rootless ? `<section>
       <h2 class="section-title">My places</h2>
       ${chipRow(homes, `<div class="empty">No residence linked yet.</div>`)}
     </section>` : ""}
     ${workplaces.length ? `<section>
       <h2 class="section-title">Where I work</h2>
       ${chipRow(workplaces, "")}
+    </section>` : ""}
+    ${bindings.length ? `<section>
+      <h2 class="section-title">What I provide</h2>
+      ${bindingChipRow(bindings)}
     </section>` : ""}
     <section>
       <h2 class="section-title">Services ${svcs.length > 4 ? `<a class="see-all" data-goto="services">See all &rarr;</a>` : ""}</h2>
@@ -675,6 +746,37 @@ function openServiceDetail(key) {
     ${myOps.length ? myOps.map((o) => opButton(o, { serviceKey: d.serviceKey })).join("") : `<div class="empty">Nothing to do here yet.</div>`}
     <h3 class="category-heading">My instances of this service</h3>
     ${myInstances.length ? myInstances.map(instanceRow).join("") : `<div class="empty">No orders yet.</div>`}
+  `);
+}
+
+// openHatDetail is the surface a provider hat's own ops render on — the
+// binding's counterpart to a service's detail and an entity's row, reached by
+// tapping the hat chip.
+//
+// Ops group under the role that grants them (viaRoleName): a person wearing
+// two hats is told which authority each action comes from, rather than being
+// handed one flat list whose entries silently belong to different worlds.
+function openHatDetail(key) {
+  const m = me() || {};
+  const anchor = splitAnchors(m).bindings.find((a) => a.key === key);
+  if (!anchor) return;
+  const byRole = new Map();
+  for (const o of hatOps(anchor)) {
+    const role = o.data.viaRoleName || o.data.viaRole;
+    const label = role ? titleCase(prettify(role)) : "Operations";
+    if (!byRole.has(label)) byRole.set(label, []);
+    byRole.get(label).push(o);
+  }
+  let opsHTML = "";
+  for (const [role, list] of byRole) {
+    opsHTML += `<h3 class="category-heading">${esc(role)}</h3>` +
+      list.map((o) => opButton(o, { entityKey: anchor.key })).join("");
+  }
+  showModal(`
+    <button class="close-x" data-close>&times;</button>
+    <h2>${esc(anchor.name || typeLabel(anchor.type))}</h2>
+    <p class="lead">${esc(typeLabel(anchor.type))}</p>
+    ${opsHTML || `<div class="empty">Nothing to do here yet.</div>`}
   `);
 }
 
@@ -1080,7 +1182,7 @@ function renderMe() {
     return;
   }
   const roles = (m.roles || []).filter((r) => r.key);
-  const { homes, workplaces } = splitAnchors(m);
+  const { homes, workplaces, bindings } = splitAnchors(m);
   $("view-me").innerHTML = `
     <div class="card" style="cursor:default">
       ${row.pending ? `<span class="pending-chip">Pending</span>` : ""}
@@ -1092,6 +1194,7 @@ function renderMe() {
     <h3 class="category-heading">Places</h3>
     ${chipRow(homes, '<div class="chip-row"><span class="subtitle">None</span></div>')}
     ${workplaces.length ? `<h3 class="category-heading">Workplaces</h3>${chipRow(workplaces, "")}` : ""}
+    ${bindings.length ? `<h3 class="category-heading">What I provide</h3>${bindingChipRow(bindings)}` : ""}
     ${m.claimed ? renderCredentialsSection() : renderClaimCard()}
   `;
   if (m.claimed && state.credentials === null && !credentialsLoading && !credentialsError) loadCredentials();
@@ -1670,6 +1773,7 @@ function onGlobalClick(e) {
     if (view === "service") { openServiceDetail(goto.dataset.key); return; }
     if (view === "task") { openTaskDetail(goto.dataset.key); return; }
     if (view === "entity") { openEntityDetail(goto.dataset.key); return; }
+    if (view === "hat") { openHatDetail(goto.dataset.key); return; }
     // A plain view jump can originate inside a modal (the degraded card's
     // "browse" link) — close it so the target view is actually visible.
     hideModal();
