@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
@@ -287,6 +288,77 @@ func PublishOp(t *testing.T, conn *substrate.Conn, env *processor.OperationEnvel
 		t.Fatalf("publish to %s: %v", subject, err)
 	}
 }
+
+// SubmitAndAwaitReply publishes env carrying a reply inbox, drives exactly one
+// message through cp, and returns the outcome together with the Processor's
+// reply. The reply is what makes a denial testable: MessageOutcome collapses
+// every rejection into "rejected", so an outcome-only assertion cannot tell an
+// authorization denial from a payload-validation error — which is precisely the
+// distinction a caller must not be able to observe on a resource they do not
+// own. Tests that assert WHY an op was rejected use this; the rest use
+// PublishOp + DriveOne.
+//
+// The subscription is established before the publish, so the reply cannot be
+// missed, and the receive is a bounded wait on a real message rather than a
+// sleep.
+func SubmitAndAwaitReply(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	env *processor.OperationEnvelope) (processor.MessageOutcome, *processor.OperationReply) {
+	t.Helper()
+	b, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	subject := "ops." + string(env.Lane)
+	if env.Lane == "" {
+		subject = "ops.default"
+	}
+
+	// nats.NewInbox rather than a subject derived from the requestId: core NATS
+	// fans a publish out to EVERY matching subscriber, so two calls that shared
+	// a subject would each receive the other's reply and assert against it. A
+	// requestId is caller-supplied and deterministic (GenReqID has no
+	// randomness), so a copied label would collide silently.
+	inbox := nats.NewInbox()
+	sub, err := conn.NATS().SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("subscribe %s: %v", inbox, err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	if err := conn.NATS().Flush(); err != nil {
+		t.Fatalf("flush subscription: %v", err)
+	}
+
+	msg := &nats.Msg{
+		Subject: subject,
+		Data:    b,
+		Header:  nats.Header{replyInboxHeader: []string{inbox}},
+	}
+	if _, err := conn.JetStream().PublishMsg(ctx, msg); err != nil {
+		t.Fatalf("publish to %s: %v", subject, err)
+	}
+
+	outcome := DriveOne(t, ctx, cp, cons, "")
+
+	replyMsg, err := sub.NextMsg(replyWait)
+	if err != nil {
+		t.Fatalf("no reply on %s within %s (outcome %q): %v", inbox, replyWait, outcome, err)
+	}
+	var reply processor.OperationReply
+	if err := json.Unmarshal(replyMsg.Data, &reply); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	return outcome, &reply
+}
+
+// replyInboxHeader is the header the Processor reads to find a caller's reply
+// subject when the op arrived over JetStream rather than request-reply.
+const replyInboxHeader = "Lattice-Reply-Inbox"
+
+// replyWait bounds the wait for a reply the Processor has already been driven
+// to produce — a ceiling that only trips on a real defect, not a timing
+// assumption.
+const replyWait = 30 * time.Second
 
 // SetupPackageTestEnv composes the standard test harness used by
 // package-level integration tests:

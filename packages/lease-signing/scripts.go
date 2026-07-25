@@ -649,11 +649,50 @@ def execute(state, op):
             fail("UnknownLeaseApplication: " + app_key)
 
         # The unit + applicant the application is for (the FE carries both on the
-        # row). Verify each is genuinely THIS application's endpoint via its
+        # row). Each is verified as genuinely THIS application's endpoint via its
         # deterministic leaseapp-anchored link (kv.Read) — mirroring clinic's
         # withProvider check — so a wrong / fabricated unit or applicant can't be
         # used to free a different pair's guard. The (applicant, unit) pair then
         # reconstructs the guard-link key deterministically.
+        #
+        # ORDER IS PART OF THE GUARD. Both verifications answer differently for a
+        # real endpoint than a wrong one, so each is a probe: run either ahead of
+        # the applicant binding and a consumer holding nothing but their own
+        # scope=self grant walks a stranger's application — naming candidate
+        # units until UnitMismatch stops (learning which unit it applies to),
+        # then candidate applicants until ApplicantMismatch stops (learning who
+        # applied). Both spaces are small and enumerable, so the probes are a
+        # directed search, not a guess. Binding the caller to the applicant they
+        # NAME costs no read at all, and the applicationFor read then proves that
+        # applicant is this application's — so by the time the unit probe runs,
+        # the caller has proven the application is their own and the probe tells
+        # them only what they already know.
+        applicant = required_string(p, "applicant")
+        _, applicant_id = parts_of(applicant, "applicant", "identity")
+
+        # Applicant-self (consumer's scope=self grant only): step 3 authorizes
+        # scope=self by checking authContext.target == actor (Contract #6), but
+        # never looks at the payload — a consumer could satisfy that check while
+        # naming a DIFFERENT identity as the applicant and free someone else's
+        # guard. Requiring authContextTarget == applicant binds the acting
+        # identity to the named endpoint, which the applicationFor read below
+        # then proves is this application's: a consumer withdraws only their own
+        # application. The operator path (no authContext, scope=any — the
+        # trusted-tool / orchestrator) stays unconstrained, mirroring
+        # CreateLeaseApplication's applicant-self guard.
+        # authcontext-target: (ownership) the target must be the applicant the
+        # payload names, verified below as this application's applicationFor
+        # endpoint, so a forged one only fails closed.
+        if op.authContextTarget != "" and op.authContextTarget != applicant:
+            fail("AuthDenied: an applicant may only withdraw their own application")
+
+        app_for_lnk = "lnk.leaseapp." + app_id + ".applicationFor.identity." + applicant_id
+        # read-posture: (a) declared reads at WithdrawLeaseApplication dispatch
+        # (validation link; absence — ApplicantMismatch — is a caller error).
+        alink = kv.Read(app_for_lnk)
+        if alink == None or alink.isDeleted:
+            fail("ApplicantMismatch: " + applicant + " is not the applicant of application " + app_key)
+
         unit = required_string(p, "unit")
         _, unit_id = parts_of(unit, "unit", "unit")
         applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + unit_id
@@ -662,30 +701,6 @@ def execute(state, op):
         ulink = kv.Read(applies_to_lnk)
         if ulink == None or ulink.isDeleted:
             fail("UnitMismatch: " + unit + " is not the unit application " + app_key + " applies to")
-
-        applicant = required_string(p, "applicant")
-        _, applicant_id = parts_of(applicant, "applicant", "identity")
-        app_for_lnk = "lnk.leaseapp." + app_id + ".applicationFor.identity." + applicant_id
-        # read-posture: (a) declared reads at WithdrawLeaseApplication dispatch
-        # (validation link; absence — ApplicantMismatch — is a caller error).
-        alink = kv.Read(app_for_lnk)
-        if alink == None or alink.isDeleted:
-            fail("ApplicantMismatch: " + applicant + " is not the applicant of application " + app_key)
-
-        # Applicant-self (consumer's scope=self grant only): step 3 authorizes
-        # scope=self by checking authContext.target == actor (Contract #6), but
-        # never looks at the payload — a consumer could satisfy that check while
-        # naming a DIFFERENT identity as the applicant and free someone else's
-        # guard. The applicant is already verified above as THIS application's
-        # applicationFor endpoint, so requiring authContextTarget == applicant
-        # binds the acting identity to that endpoint: a consumer withdraws only
-        # their own application. The operator path (no authContext, scope=any —
-        # the trusted-tool / orchestrator) stays unconstrained, mirroring
-        # CreateLeaseApplication's applicant-self guard.
-        # authcontext-target: (ownership) the target must be this application's
-        # verified applicationFor endpoint, so a forged one only fails closed.
-        if op.authContextTarget != "" and op.authContextTarget != applicant:
-            fail("AuthDenied: an applicant may only withdraw their own application")
 
         # Tombstone the application. The applicationFor / appliesToUnit links are
         # left in place (non-cascading tombstone, the clinic-domain precedent) — they

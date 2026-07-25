@@ -2280,26 +2280,36 @@ def execute(state, op):
         # the endpoint is real, once-validated (a wrong / fabricated endpoint would
         # otherwise recompute the wrong, e.g. empty, cell set and bypass the test).
         provider = required_string(p, "provider")
-        require_matching_provider(appt_id, provider)
-
         patient = required_string(p, "patient")
-        patient_id = require_matching_patient(appt_id, patient)
 
         # Patient-self (consumer's scope=self grant only): the same gap-closing
         # check CreateAppointment's script runs (ddls.go ~1573) — step 3 only
         # proves authContext.target == actor, never that the target identity IS
         # this appointment's patient. Empty for the standing operator grant
         # (scope=any never sets authContext), so this is a no-op for staff.
-        # authcontext-target: (ownership) the target must be this appointment's
-        # patient's identifiedBy identity, so a forged one only fails closed.
+        #
+        # It binds on the patient the PAYLOAD names, which the forPatient check
+        # below then proves is this appointment's — so ownership is established
+        # without either endpoint check having run. That order is the guard: both
+        # checks answer differently for a real endpoint than a wrong one, and a
+        # clinic's provider roster is publicly listed, so a self-scoped caller who
+        # could reach them on a stranger's appointment would learn which clinician
+        # that stranger sees. Behind the binding, both only ever answer about an
+        # appointment the caller already owns.
+        # authcontext-target: (ownership) the target must be the identifiedBy
+        # identity of the patient the payload names, so a forged one fails closed.
         if op.authContextTarget != "":
+            _, self_patient_id = parts_of(patient, "patient", "patient")
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
-            identified_by_lnk = "lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id
+            identified_by_lnk = "lnk.patient." + self_patient_id + ".identifiedBy.identity." + target_identity_id
             # read-posture: (d) declared in contextHint.optionalReads by the
             # self-service caller
             identified_by = kv.Read(identified_by_lnk)
             if identified_by == None or identified_by.isDeleted:
                 fail("AuthDenied: a patient may only reschedule their own appointment")
+
+        patient_id = require_matching_patient(appt_id, patient)
+        require_matching_provider(appt_id, provider)
 
         # New times: normalize to canonical whole-second UTC (parse-validates the
         # instants AND makes the convergence lens's lexical RFC3339 compares sound
@@ -2419,7 +2429,7 @@ def execute(state, op):
             if status != "cancelled":
                 fail("AuthDenied: a patient may only cancel their own appointment (status must be cancelled)")
             self_patient = required_string(p, "patient")
-            self_patient_id = require_matching_patient(appt_id, self_patient)
+            _, self_patient_id = parts_of(self_patient, "patient", "patient")
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
             identified_by_lnk = "lnk.patient." + self_patient_id + ".identifiedBy.identity." + target_identity_id
             # read-posture: (d) declared in contextHint.optionalReads by the
@@ -2427,6 +2437,12 @@ def execute(state, op):
             identified_by = kv.Read(identified_by_lnk)
             if identified_by == None or identified_by.isDeleted:
                 fail("AuthDenied: a patient may only cancel their own appointment")
+            # The binding proves the caller owns the patient they NAME; this
+            # proves that patient is this appointment's. Ordered after the
+            # binding because it answers differently for a real endpoint than a
+            # wrong one — ahead of it, a self-scoped caller could walk a stranger's
+            # appointment down to the patient it belongs to.
+            require_matching_patient(appt_id, self_patient)
 
         # Terminal-status lifecycle guard: cancelled / completed / noShow are FINAL.
         # Re-setting the SAME terminal value is idempotent (re-run-safe under

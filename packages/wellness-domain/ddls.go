@@ -1149,10 +1149,7 @@ def execute(state, op):
         if cls != "session":
             fail("WrongClass: sessionKey: " + sess_key + " has class " + str(cls) + ", required session")
 
-        studio = required_string(p, "studio")
-        require_matching_studio(sess_id, studio)
-
-        # Standing binder: operator passes unconditionally (unchanged); a
+        # Standing binder: operator passes unconditionally; a
         # bound instructor may additionally cancel only a class THEY lead —
         # the caller supplies the instructor param and BOTH the session's
         # ledBy link to it AND the caller's own identifiedBy binding to it
@@ -1165,16 +1162,31 @@ def execute(state, op):
                 fail("AuthDenied: " + op.actor + " may not cancel session " + sess_key + " (no instructor supplied)")
             _, instr_id = parts_of(instr_key, "instructor", "instructor")
             _, actor_id = parts_of(op.actor, "actor", "identity")
+            # The caller's own binding answers first. It is keyed on op.actor, so
+            # it can only ever say "am I this instructor?" — whereas the ledBy
+            # check below answers about the SESSION, and every bound instructor in
+            # the deployment holds this grant. Ahead of the binding, one
+            # instructor could walk a studio's published roster against a
+            # stranger's session and read off who leads it, by which of the two
+            # denials came back.
+            # read-posture: (d) declared optionalReads by TombstoneSession's dispatcher.
+            bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
+            if bound == None or bound.isDeleted:
+                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
             # read-posture: (d) declared optionalReads by TombstoneSession's
             # dispatcher for the instructor-standing path (absence is a
             # meaningful AuthDenied, not a correctness error).
             led_by = kv.Read("lnk.session." + sess_id + ".ledBy.instructor." + instr_id)
             if led_by == None or led_by.isDeleted:
                 fail("AuthDenied: " + instr_key + " does not lead session " + sess_key)
-            # read-posture: (d) declared optionalReads by TombstoneSession's dispatcher.
-            bound = kv.Read("lnk.instructor." + instr_id + ".identifiedBy.identity." + actor_id)
-            if bound == None or bound.isDeleted:
-                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to instructor " + instr_key)
+
+        # The session's studio, needed below to release its held cells. Verified
+        # as genuinely THIS session's studio, and ordered after the binder: the
+        # check answers differently for the real studio than any other, so ahead
+        # of the guard it would tell any caller holding a TombstoneSession grant
+        # where a class they have no part in is held.
+        studio = required_string(p, "studio")
+        require_matching_studio(sess_id, studio)
 
         # read-posture: (a) declared reads at TombstoneSession dispatch —
         # required for cell release.
@@ -1449,9 +1461,6 @@ def execute(state, op):
         if cls != "booking":
             fail("WrongClass: bookingKey: " + book_key + " has class " + str(cls) + ", required booking")
 
-        session = required_string(p, "session")
-        require_matching_session(book_id, session)
-
         # Consumer self-scope (scope=self grant only): step 3 authorizes via
         # authContext.target == actor (Contract #6), but the op's endpoint is
         # the BOOKING vertex, not an identity. The script closes the gap by
@@ -1460,6 +1469,12 @@ def execute(state, op):
         # guard, over the bookedBy link instead of identifiedBy. Empty for the
         # standing operator grant (scope=any never sets authContext), so this
         # check is a no-op there.
+        #
+        # It answers before the session check below, which needs only the
+        # booking key the caller already supplied. The session check answers
+        # differently for this booking's session than any other, and class
+        # schedules are public, so ahead of the binding it would tell a
+        # self-scoped caller which class a stranger attends.
         # authcontext-target: (ownership) the target must be this booking's
         # own bookedBy identity, so a forged one only fails closed.
         if op.authContextTarget != "":
@@ -1472,6 +1487,9 @@ def execute(state, op):
             booked_by = kv.Read(booked_by_lnk)
             if booked_by == None or booked_by.isDeleted:
                 fail("AuthDenied: a consumer may only cancel their own booking")
+
+        session = required_string(p, "session")
+        require_matching_session(book_id, session)
 
         # read-posture: (a) declared reads at CancelBooking dispatch.
         status = kv.Read(book_key + ".status")

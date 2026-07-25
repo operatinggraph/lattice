@@ -1776,6 +1776,123 @@ func TestClinic_RescheduleAppointmentConsumerNamesUnlinkedPatient_Rejected(t *te
 	}
 }
 
+// clSelfScopeReason submits op on the consumer scope=self path and returns the
+// script's own failure text. The rejection MESSAGE is the subject of these
+// vectors: the outcome collapses every denial into "rejected", while what a
+// prober actually reads is which error came back.
+func clSelfScopeReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, apptKey, payload string, optionalReads []string) string {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(payload),
+		// The endpoint links a prober names are declared OPTIONAL: a client that
+		// expects them to exist declares them in Reads, where a miss faults at
+		// hydration before the script runs — but the submitter writes its own
+		// contextHint, so declaring them optional makes absence a script-visible
+		// branch and the in-script order the only thing guarding the answer.
+		ContextHint: &processor.ContextHint{Reads: []string{apptKey}, OptionalReads: optionalReads},
+		AuthContext: &processor.AuthContext{Target: clConsumerKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+	}
+	if reply.Error == nil {
+		t.Fatalf("%s: rejected reply carries no error", label)
+	}
+	msg := reply.Error.Message
+	i := strings.Index(msg, "fail: ")
+	if i < 0 {
+		t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+	}
+	return msg[i+len("fail: "):]
+}
+
+// TestClinic_SelfScopeProbesRevealNothingAboutAnotherPatient: the endpoint
+// checks each answer differently for this appointment's real provider / patient
+// than for any other, so run either ahead of the identifiedBy binding and a
+// self-scoped consumer walks a stranger's appointment — a clinic's provider
+// roster is published, so the search space is small and the answer is which
+// clinician that stranger sees. Behind the binding, every probe on an
+// appointment the caller does not own answers the same way.
+func TestClinic_SelfScopeProbesRevealNothingAboutAnotherPatient(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "selfscope-probe")
+
+	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
+
+	// The prober's own patient (identifiedBy their identity) — naming any other
+	// patient is what the binding already rejects, so this is their only lever.
+	ownID := clSubmit(t, ctx, conn, cp, cons, "probeownpat01", "CreatePatient", "patient",
+		`{"fullName":"Probe Own Patient","identityKey":"`+clConsumerKey+`"}`,
+		[]string{clConsumerKey}, processor.OutcomeAccepted)
+	ownPatientKey := "vtx.patient." + ownID
+
+	victimPatientKey := createPatient(t, ctx, conn, cp, cons, "probevicpat01", "Probe Victim")
+	strangerPatientKey := createPatient(t, ctx, conn, cp, cons, "probestrpat01", "Probe Stranger")
+	realProviderKey := createProvider(t, ctx, conn, cp, cons, "probeprvA0001", "Dr. Real Provider", "Cardiology")
+	decoyProviderKey := createProvider(t, ctx, conn, cp, cons, "probeprvB0001", "Dr. Decoy Provider", "Dermatology")
+
+	apptID := clSubmit(t, ctx, conn, cp, cons, "probeappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+victimPatientKey+`","provider":"`+realProviderKey+`","startsAt":"2026-07-10T15:00:00Z","endsAt":"2026-07-10T15:30:00Z"}`,
+		[]string{victimPatientKey, realProviderKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	ownIdentifiedBy := []string{"lnk.patient." + ownID + ".identifiedBy.identity." + clConsumerID}
+
+	// RescheduleAppointment: guessing the appointment's real provider must be
+	// indistinguishable from guessing wrong.
+	reschedule := func(label, providerKey string) string {
+		return clSelfScopeReason(t, ctx, conn, cp, cons, label, "RescheduleAppointment", apptKey,
+			`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+ownPatientKey+
+				`","startsAt":"2026-07-12T16:00:00Z","endsAt":"2026-07-12T16:30:00Z"}`,
+			append([]string{
+				"lnk.appointment." + apptID + ".withProvider.provider." + providerKey[len("vtx.provider."):],
+				"lnk.appointment." + apptID + ".forPatient.patient." + ownID,
+			}, ownIdentifiedBy...))
+	}
+	real, decoy := reschedule("probersreal1", realProviderKey), reschedule("probersdcoy1", decoyProviderKey)
+	if real != decoy {
+		t.Errorf("the provider probe distinguishes this appointment's clinician from any other:\n  real provider  → %s\n  decoy provider → %s\n"+
+			"walking a published roster then names who a stranger is seeing", real, decoy)
+	}
+	// Pin what they agree ON: equality alone would also be satisfied by both
+	// probes dying at some earlier common error, which proves nothing.
+	if !strings.Contains(real, "WrongPatient") {
+		t.Errorf("probes should be answered by the appointment's own patient check, got %q", real)
+	}
+
+	// SetAppointmentStatus: naming the appointment's actual patient must be
+	// indistinguishable from naming an unrelated one.
+	cancel := func(label, patientKey string) string {
+		patientID := patientKey[len("vtx.patient."):]
+		return clSelfScopeReason(t, ctx, conn, cp, cons, label, "SetAppointmentStatus", apptKey,
+			`{"appointmentKey":"`+apptKey+`","status":"cancelled","patient":"`+patientKey+`","provider":"`+realProviderKey+`"}`,
+			[]string{
+				"lnk.appointment." + apptID + ".forPatient.patient." + patientID,
+				"lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID,
+			})
+	}
+	victim, stranger := cancel("probescvic01", victimPatientKey), cancel("probescstr01", strangerPatientKey)
+	if victim != stranger {
+		t.Errorf("the patient probe confirms who an appointment belongs to:\n  its actual patient → %s\n  an unrelated one   → %s", victim, stranger)
+	}
+	if !strings.Contains(victim, "AuthDenied") {
+		t.Errorf("probes should be answered by the ownership binding, got %q", victim)
+	}
+
+	sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
+	sd, _ := sched["data"].(map[string]any)
+	if sd["startsAt"] != "2026-07-10T15:00:00Z" {
+		t.Fatalf("probes must not move the appointment; startsAt = %v", sd["startsAt"])
+	}
+}
+
 // TestClinic_SetAppointmentStatusConsumerSelfScope_CancelAllowed exercises the
 // consumer scope=self grant for SetAppointmentStatus (permissions.go): a
 // patient linked (identifiedBy) to the caller's own identity cancels THEIR OWN

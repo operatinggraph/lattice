@@ -1372,6 +1372,116 @@ func TestWithdrawLeaseApplication(t *testing.T) {
 	withdraw(t, ctx, conn, cp, cons, "wdDouble001", first, unit, applicant, processor.OutcomeRejected)
 }
 
+// withdrawReason submits WithdrawLeaseApplication and returns the Processor's
+// rejection message. authActor empty selects the operator path (no
+// authContext); otherwise it is the consumer scope=self shape. The MESSAGE is
+// the point: an outcome alone cannot tell an authorization denial from a
+// payload-validation error, and that difference is exactly what a caller must
+// not be able to observe on someone else's application.
+func withdrawReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, unitKey, applicantKey, authActor string) string {
+	t.Helper()
+	_, appID, _ := substrate.ParseVertexKey(leaseAppKey)
+	_, unitID, _ := substrate.ParseVertexKey(unitKey)
+	_, applicantID, _ := substrate.ParseVertexKey(applicantKey)
+	actor := lsActorKey
+	if authActor != "" {
+		actor = authActor
+	}
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "WithdrawLeaseApplication",
+		Actor:         actor,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","unit":"` + unitKey + `","applicant":"` + applicantKey + `"}`),
+		// The two endpoint links are declared OPTIONAL here, which is what a
+		// prober's envelope looks like: a client that expects them to exist
+		// declares them in Reads and a miss fails at hydration, never reaching
+		// the script — but the submitter chooses its own contextHint, and
+		// declaring them optional makes absence a script-visible branch. So the
+		// in-script ordering is the only thing standing between a prober and the
+		// answer.
+		ContextHint: &processor.ContextHint{
+			Reads: []string{leaseAppKey},
+			OptionalReads: []string{
+				"lnk.leaseapp." + appID + ".appliesToUnit.unit." + unitID,
+				"lnk.leaseapp." + appID + ".applicationFor.identity." + applicantID,
+				guardLinkKey(applicantKey, unitKey),
+			},
+		},
+	}
+	if authActor != "" {
+		env.AuthContext = &processor.AuthContext{Target: authActor}
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+	}
+	if reply.Error == nil {
+		t.Fatalf("%s: rejected reply carries no error", label)
+	}
+	// The script's own failure text, past the per-op requestId the wrapper
+	// carries — two submissions of the same denial differ in that id alone, and
+	// comparing it would report every pair as distinguishable.
+	msg := reply.Error.Message
+	marker := "fail: "
+	i := strings.Index(msg, marker)
+	if i < 0 {
+		t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+	}
+	return msg[i+len(marker):]
+}
+
+// TestWithdrawLeaseApplication_ProbesTellAConsumerNothing: the two endpoint
+// verifications each answer differently for a real endpoint than a wrong one,
+// so whichever runs before the applicant binding is a probe a consumer can walk.
+// The unit space of a building is small and enumerable, so a consumer who could
+// reach the unit check on a stranger's application would learn which unit it is
+// for, and the applicant check would then name who applied. The binding costs no
+// read, so it answers first and both probes stay behind it.
+func TestWithdrawLeaseApplication_ProbesTellAConsumerNothing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "withdraw-probe")
+
+	victim := seedApplicant(t, ctx, conn, "BBWDPRVCTHJKMNPQRSTU")
+	attacker := seedApplicant(t, ctx, conn, "BBWDPRATKHJKMNPQRSTU")
+	unit := seedUnit(t, ctx, conn, "BBWDPRUNTHJKMNPQRSTU")
+	otherUnit := seedUnit(t, ctx, conn, "BBWDPRQTHHJKMNPQRSTU")
+	seedConsumerSelfCapDoc(t, ctx, conn, attacker)
+
+	app := applyToUnit(t, ctx, conn, cp, cons, "wdprCreate1", victim, unit, processor.OutcomeAccepted)
+	if app == "" {
+		t.Fatalf("application should commit")
+	}
+
+	// The attacker must name THEMSELVES as applicant — naming the victim is what
+	// the binding already rejects — so the only lever left is the unit. Guessing
+	// it right must be indistinguishable from guessing it wrong.
+	right := withdrawReason(t, ctx, conn, cp, cons, "wdprRight01", app, unit, attacker, attacker)
+	wrong := withdrawReason(t, ctx, conn, cp, cons, "wdprWrong01", app, otherUnit, attacker, attacker)
+	if right != wrong {
+		t.Fatalf("the unit probe distinguishes a correct guess from a wrong one:\n  correct unit → %s\n  wrong unit   → %s\n"+
+			"that difference walks a stranger's application down to the unit it is for", right, wrong)
+	}
+	if !strings.Contains(right, "ApplicantMismatch") {
+		t.Errorf("the applicant binding should be what answers a foreign consumer, got %q", right)
+	}
+	if d, _ := readDoc(t, ctx, conn, app)["isDeleted"].(bool); d {
+		t.Fatalf("a probe must not tombstone the application")
+	}
+
+	// The trusted operator path keeps its precise diagnostics — the guard closes
+	// a leak to untrusted callers, it does not blunt every error into one.
+	if got := withdrawReason(t, ctx, conn, cp, cons, "wdprOper001", app, otherUnit, victim, ""); !strings.Contains(got, "UnitMismatch") {
+		t.Errorf("operator wrong-unit withdraw = %q, want UnitMismatch", got)
+	}
+	if got := withdrawReason(t, ctx, conn, cp, cons, "wdprOper002", app, unit, attacker, ""); !strings.Contains(got, "ApplicantMismatch") {
+		t.Errorf("operator wrong-applicant withdraw = %q, want ApplicantMismatch", got)
+	}
+}
+
 // TestWithdrawLeaseApplication_ConsumerSelfScope exercises the consumer
 // scope=self grant (permissions.go) end to end: step 3 authorizes scope=self by
 // checking authContext.target == actor, but never inspects the payload, so a
@@ -1398,10 +1508,9 @@ func TestWithdrawLeaseApplication_ConsumerSelfScope(t *testing.T) {
 	}
 
 	// Attacker acts as themselves (authContext.target == attacker) but names the
-	// victim as the application's applicant. alink resolves (the victim IS the
-	// applicant), so the ApplicantMismatch check passes — only the new
-	// authContextTarget == applicant guard rejects it (AuthDenied). The
-	// application must NOT be tombstoned.
+	// victim as the application's applicant. The authContextTarget == applicant
+	// guard answers first and rejects it (AuthDenied), before any endpoint link
+	// is read. The application must NOT be tombstoned.
 	withdrawAsConsumer(t, ctx, conn, cp, cons, "wdcsForge01", app, unit, applicant, attacker, processor.OutcomeRejected)
 	if d, _ := readDoc(t, ctx, conn, app)["isDeleted"].(bool); d {
 		t.Fatalf("a foreign-consumer withdraw must NOT tombstone the application")

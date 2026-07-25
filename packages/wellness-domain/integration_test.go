@@ -848,6 +848,249 @@ func TestCancelBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 	}
 }
 
+// TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor: the studio
+// check answers differently for this session's own studio than for any other,
+// so ahead of the instructor binder it tells anyone holding a TombstoneSession
+// grant where a class they have no part in is held. Behind it, a caller who
+// cannot name the instructor they are bound to learns nothing either way.
+func TestTombstoneSession_StudioProbeRevealsNothingToANonInstructor(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "tombprobe")
+
+	// The operator mints the instructors this vector needs; the shared operator
+	// cap doc carries the studio/session ops but not instructor provisioning.
+	opDoc := domainCapDoc()
+	opDoc.PlatformPermissions = append(opDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateInstructor", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, opDoc)
+
+	// A non-operator holding the standing TombstoneSession grant a bound
+	// instructor holds — the capability plane cannot tell them apart, so the
+	// script's binder is the whole boundary.
+	const proberID = "BBWELLPRBNQNSTRCTHJK"
+	proberKey := "vtx.identity." + proberID
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + proberID,
+		Actor:                  proberKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{proberKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "TombstoneSession", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "provider")},
+	})
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdtprstudio000001", "Held Here")
+	decoyStudio := createStudio(t, ctx, conn, cp, cons, "wdtprstudio000002", "Not Here")
+
+	// The session is led by a real instructor, and a second instructor exists —
+	// the roster a prober would walk. The prober is bound to neither.
+	mkInstructor := func(label, name string) string {
+		reqID := testutil.GenReqID(label)
+		env := &processor.OperationEnvelope{
+			RequestID:     reqID,
+			Lane:          processor.LaneDefault,
+			OperationType: "CreateInstructor",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "instructor",
+			Payload:       json.RawMessage(`{"displayName":"` + name + `"}`),
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeAccepted {
+			t.Fatalf("CreateInstructor %s = %v, want Accepted: %+v", name, outcome, reply.Error)
+		}
+		return "vtx.instructor." + nanoIDFromRequestID(reqID)
+	}
+	leaderKey := mkInstructor("wdtprinstr000001", "Session Leader")
+	rosterPeerKey := mkInstructor("wdtprinstr000002", "Roster Peer")
+
+	sessReqID := testutil.GenReqID("wdtprsession00001")
+	sessionKey := "vtx.session." + nanoIDFromRequestID(sessReqID)
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     sessReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "session",
+		Payload: json.RawMessage(`{"studio":"` + studioKey + `","name":"Private Class","instructor":"` + leaderKey +
+			`","startsAt":"2026-07-09T09:00:00Z","endsAt":"2026-07-09T09:30:00Z","capacity":4}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{studioKey, leaderKey},
+			OptionalReads: wdSlotClaimKeys(t, studioKey, "2026-07-09T09:00:00Z", "2026-07-09T09:30:00Z"),
+		},
+	})
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession with instructor = %v, want Accepted", got)
+	}
+	sessionID := sessionKey[len("vtx.session."):]
+
+	probe := func(label, guessStudio string) string {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "TombstoneSession",
+			Actor:         proberKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "session",
+			Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + guessStudio + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{sessionKey, sessionKey + ".schedule"},
+				OptionalReads: []string{
+					"lnk.session." + sessionID + ".atStudio.studio." + guessStudio[len("vtx.studio."):],
+				},
+			},
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+		}
+		if reply.Error == nil {
+			t.Fatalf("%s: rejected reply carries no error", label)
+		}
+		msg := reply.Error.Message
+		i := strings.Index(msg, "fail: ")
+		if i < 0 {
+			t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+		}
+		return msg[i+len("fail: "):]
+	}
+
+	real, decoy := probe("wdtprreal0000001", studioKey), probe("wdtprdecoy000001", decoyStudio)
+	if real != decoy {
+		t.Errorf("the studio probe locates a class for a caller with no part in it:\n  its studio → %s\n  decoy      → %s", real, decoy)
+	}
+	if !strings.Contains(real, "no instructor supplied") {
+		t.Errorf("probes should be answered by the binder, got %q", real)
+	}
+
+	// The roster probe: supplying an instructor candidate, naming the session's
+	// actual leader must be indistinguishable from naming any other instructor —
+	// otherwise one bound instructor reads off who leads a stranger's class by
+	// walking the studio's published roster.
+	instructorProbe := func(label, candidate string) string {
+		candidateID := candidate[len("vtx.instructor."):]
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "TombstoneSession",
+			Actor:         proberKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "session",
+			Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `","instructor":"` + candidate + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{sessionKey, sessionKey + ".schedule"},
+				OptionalReads: []string{
+					"lnk.session." + sessionID + ".ledBy.instructor." + candidateID,
+					"lnk.instructor." + candidateID + ".identifiedBy.identity." + proberID,
+					"lnk.session." + sessionID + ".atStudio.studio." + studioKey[len("vtx.studio."):],
+				},
+			},
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+		}
+		if reply.Error == nil {
+			t.Fatalf("%s: rejected reply carries no error", label)
+		}
+		msg := reply.Error.Message
+		i := strings.Index(msg, "fail: ")
+		if i < 0 {
+			t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+		}
+		return msg[i+len("fail: "):]
+	}
+
+	// Compared with the candidate key redacted: a denial that echoes back the
+	// key the caller just supplied tells them nothing they did not already
+	// know, so what must match is the rest — WHICH check answered.
+	leader := strings.ReplaceAll(instructorProbe("wdtprleader00001", leaderKey), leaderKey, "<candidate>")
+	peer := strings.ReplaceAll(instructorProbe("wdtprpeer0000001", rosterPeerKey), rosterPeerKey, "<candidate>")
+	if leader != peer {
+		t.Errorf("the ledBy probe names who leads a stranger's class:\n  its leader  → %s\n  roster peer → %s", leader, peer)
+	}
+	if !strings.Contains(leader, "not identifiedBy-bound") {
+		t.Errorf("probes should be answered by the caller's own binding, got %q", leader)
+	}
+}
+
+// TestCancelBooking_ConsumerSelfScope_SessionProbeRevealsNothing: the session
+// check answers differently for this booking's own session than for any other,
+// and a studio's class schedule is public — so ahead of the bookedBy binding it
+// would tell a self-scoped consumer which class a stranger is attending, by
+// walking the schedule until the error changes. Behind the binding, every guess
+// on someone else's booking answers the same way.
+func TestCancelBooking_ConsumerSelfScope_SessionProbeRevealsNothing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "cancelselfprobe")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdprbstudio000001", "Probe Studio")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdprbsession00001", studioKey, "Attended Class", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+	decoyKey, _ := createSession(t, ctx, conn, cp, cons, "wdprbsession00002", studioKey, "Decoy Class", "2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", 1)
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	strangerKey := seedIdentity(t, ctx, conn, "BBWELLPRBSTRNGR1HJKM")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdprbbooking00001", sessionKey, strangerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("setup CreateBooking outcome = %v, want Accepted", outcome)
+	}
+	bookingID := bookingKey[len("vtx.booking."):]
+
+	probe := func(label, guessKey string) string {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "CancelBooking",
+			Actor:         domainConsumerKey,
+			SubmittedAt:   "2026-07-07T12:10:00Z",
+			Class:         "booking",
+			Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + guessKey + `"}`),
+			// The forSession link is declared optional, the shape a prober's own
+			// envelope takes: declared in Reads a miss faults at hydration before
+			// the script runs, so the submitter simply declares it optional and
+			// the in-script order becomes the only guard.
+			ContextHint: &processor.ContextHint{
+				Reads: []string{bookingKey, bookingKey + ".status"},
+				OptionalReads: []string{
+					"lnk.booking." + bookingID + ".forSession.session." + guessKey[len("vtx.session."):],
+					"lnk.booking." + bookingID + ".bookedBy.identity." + domainConsumerID,
+				},
+			},
+			AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+		}
+		if reply.Error == nil {
+			t.Fatalf("%s: rejected reply carries no error", label)
+		}
+		msg := reply.Error.Message
+		i := strings.Index(msg, "fail: ")
+		if i < 0 {
+			t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+		}
+		return msg[i+len("fail: "):]
+	}
+
+	real, decoy := probe("wdprbreal0000001", sessionKey), probe("wdprbdecoy000001", decoyKey)
+	if real != decoy {
+		t.Errorf("the session probe distinguishes the booked class from another:\n  booked class → %s\n  decoy class  → %s\n"+
+			"walking a public schedule then names which class a stranger attends", real, decoy)
+	}
+	// Equality alone would also hold if both probes died at a common earlier
+	// error, so pin the denial they must agree on.
+	if !strings.Contains(real, "AuthDenied") {
+		t.Errorf("probes should be answered by the bookedBy binding, got %q", real)
+	}
+}
+
 // TestCancelBooking_ConsumerSelfScope_RejectedForOthersBooking proves a
 // consumer satisfying step 3 (authContext.target == actor) but naming a
 // booking that is NOT their own (a different bookedBy identity) is rejected

@@ -1038,11 +1038,22 @@ def execute(state, op):
         # Standing binder (persona-worlds-design.md Fire W0): operator passes
         # unconditionally; otherwise the caller must be the identity bound to
         # the SPECIFIC serviceprovider that provides this instance's
-        # template -- the three-hop known-key chain instance->template
-        # (instanceOf), template->serviceprovider (providedBy),
-        # serviceprovider->identity (identifiedBy). Mirrors clinic-domain's
-        # actor_bound_to_provider, extended one hop for the template
-        # indirection a bare provider entity doesn't need.
+        # template -- the three-hop known-key chain, walked from the CALLER
+        # outward: serviceprovider->identity (identifiedBy), then
+        # template->serviceprovider (providedBy), then instance->template
+        # (instanceOf). Mirrors clinic-domain's actor_bound_to_provider,
+        # extended one hop for the template indirection a bare provider entity
+        # doesn't need.
+        #
+        # The direction is the guard. Both the template and the serviceprovider
+        # are caller-supplied candidates, and this grant is held by every bound
+        # serviceprovider in the deployment, so walking the chain inward -- from
+        # the instance toward the caller -- lets one provider name a stranger's
+        # instance and enumerate the published template catalog until the denial
+        # changes (learning which service the instance is), then enumerate
+        # serviceproviders until it changes again (learning who provides it),
+        # having proven nothing about themselves. Starting at the caller's own
+        # binding means every later answer is about a template they provide.
         if not actor_holds_operator(op.actor):
             template = optional_string(p, "template")
             serviceprovider = optional_string(p, "serviceprovider")
@@ -1054,17 +1065,17 @@ def execute(state, op):
             # read-posture: (d) declared optionalReads by RecordServiceOutcome's
             # dispatcher for the provider-standing path (absence is a
             # meaningful AuthDenied, not a correctness error).
-            instance_of = kv.Read("lnk.service." + inst_id + ".instanceOf.service." + tpl_id)
-            if instance_of == None or instance_of.isDeleted:
-                fail("AuthDenied: " + inst_key + " is not an instance of template " + template)
+            identified_by = kv.Read("lnk.serviceprovider." + sp_id + ".identifiedBy.identity." + actor_id)
+            if identified_by == None or identified_by.isDeleted:
+                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to serviceprovider " + serviceprovider)
             # read-posture: (d) declared optionalReads by RecordServiceOutcome's dispatcher.
             provided_by = kv.Read("lnk.service." + tpl_id + ".providedBy.serviceprovider." + sp_id)
             if provided_by == None or provided_by.isDeleted:
                 fail("AuthDenied: template " + template + " is not providedBy serviceprovider " + serviceprovider)
             # read-posture: (d) declared optionalReads by RecordServiceOutcome's dispatcher.
-            identified_by = kv.Read("lnk.serviceprovider." + sp_id + ".identifiedBy.identity." + actor_id)
-            if identified_by == None or identified_by.isDeleted:
-                fail("AuthDenied: " + op.actor + " is not identifiedBy-bound to serviceprovider " + serviceprovider)
+            instance_of = kv.Read("lnk.service." + inst_id + ".instanceOf.service." + tpl_id)
+            if instance_of == None or instance_of.isDeleted:
+                fail("AuthDenied: " + inst_key + " is not an instance of template " + template)
 
         # The outcome is recorded once, guarded on two load-bearing paths:
         #   - SEQUENTIAL second-record (the first has committed): the

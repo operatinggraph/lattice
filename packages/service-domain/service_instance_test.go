@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -1091,4 +1092,105 @@ func TestRetireServiceTemplate_AlreadyRetired_Rejected(t *testing.T) {
 
 	testutil.PublishOp(t, conn, mkEnv("2"))
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestRecordServiceOutcome_ProviderProbesLearnNothingAboutAnotherInstance: the
+// standing binder walks a three-hop chain whose first two hops are
+// caller-supplied candidates, and this grant is held by every bound
+// serviceprovider. Walked from the instance inward, each hop answers
+// distinguishably before the caller has proven anything about themselves — the
+// published template catalog names which service a stranger's instance is, then
+// the serviceprovider list names who provides it. Walked from the caller's own
+// binding outward, every answer is about a template they provide.
+func TestRecordServiceOutcome_ProviderProbesLearnNothingAboutAnotherInstance(t *testing.T) {
+	ctx, conn := setupServiceEnv(t)
+	cp, cons := newServicePipeline(t, ctx, conn, "probe-guard")
+
+	tplKey := createTemplate(t, ctx, conn, cp, cons, "backgroundCheck")
+	decoyTplKey := createTemplate(t, ctx, conn, cp, cons, "payment")
+
+	applicantKey := "vtx.identity.BBprobeapp1icntHJKMN"
+	seedVertex(t, ctx, conn, applicantKey, "identity", map[string]any{"state": "claimed"})
+
+	instReqID := testutil.GenReqID("probeInstance1")
+	instKey := "vtx.service." + nanoIDFromRequestID(instReqID)
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     instReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateServiceInstance",
+		Actor:         svcStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "service",
+		Payload:       json.RawMessage(`{"family":"backgroundCheck","template":"` + tplKey + `","providedTo":"` + applicantKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tplKey, applicantKey}},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	// A bound serviceprovider elsewhere in the deployment: holds the standing
+	// grant, holds no operator role, and is bound to none of this.
+	const proberID = "BBsvcprobeprvdrHJKMN"
+	proberKey := "vtx.identity." + proberID
+	spKey := "vtx.serviceprovider.BBsvcprobespHJKMNPQR"
+	seedVertex(t, ctx, conn, spKey, "serviceprovider", nil)
+	testutil.SeedCapDoc(t, ctx, conn, &processor.CapabilityDoc{
+		Key:                    "cap.identity." + proberID,
+		Actor:                  proberKey,
+		Version:                "1.0",
+		ProjectedAt:            time.Now().UTC().Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{proberKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "RecordServiceOutcome", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{"vtx.role." + pkgmgr.RoleID("identity-domain", "provider")},
+	})
+
+	probe := func(label, candidateTpl string) string {
+		tplID := candidateTpl[len("vtx.service."):]
+		spID := spKey[len("vtx.serviceprovider."):]
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "RecordServiceOutcome",
+			Actor:         proberKey,
+			SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+			Class:         "service",
+			Payload: json.RawMessage(`{"instanceKey":"` + instKey + `","status":"completed","completedAt":"2026-06-18T14:00:00Z"` +
+				`,"template":"` + candidateTpl + `","serviceprovider":"` + spKey + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{instKey},
+				OptionalReads: []string{
+					"lnk.service." + instKey[len("vtx.service."):] + ".instanceOf.service." + tplID,
+					"lnk.service." + tplID + ".providedBy.serviceprovider." + spID,
+					"lnk.serviceprovider." + spID + ".identifiedBy.identity." + proberID,
+				},
+			},
+		}
+		outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+		}
+		if reply.Error == nil {
+			t.Fatalf("%s: rejected reply carries no error", label)
+		}
+		msg := reply.Error.Message
+		i := strings.Index(msg, "fail: ")
+		if i < 0 {
+			t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+		}
+		return msg[i+len("fail: "):]
+	}
+
+	real, decoy := probe("probeRealTpl01", tplKey), probe("probeDecoyTpl1", decoyTplKey)
+	if real != decoy {
+		t.Errorf("the template probe identifies what a stranger's instance is:\n  its template → %s\n  decoy        → %s", real, decoy)
+	}
+	if !strings.Contains(real, "not identifiedBy-bound") {
+		t.Errorf("probes should be answered by the caller's own binding, got %q", real)
+	}
+	if keyExists(t, ctx, conn, instKey+".outcome") {
+		t.Fatalf("a denied probe must not record an outcome")
+	}
 }
