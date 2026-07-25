@@ -666,3 +666,32 @@ filed: because the refusal now also fires for an absent row, a brand-new auth-pl
 over a populated graph at `seq == 0` abandons sweep passes until its consumer acks, which
 `FailedStreak` escalates. It is bounded by the ack-floor seed and is honest reporting rather than a
 phantom, so it is behavior this fire accepts.
+
+### 12.2 Correction — the withdrawn conditioning was right, and CI is what proved it
+
+§12.1 recorded decision 2 as withdrawn at review. **That withdrawal was itself wrong**, and shipping
+it reddened `main` (`11f22210` → fixed forward by `82f52fc4`). Recorded here because the review
+reasoning was persuasive and still incorrect, which is the part worth keeping.
+
+The review's refutation was: every actorAggregate lens is guarded
+(`driver.go:188` `authPlane || RequiresGuardedTombstone()`, and all of them declare
+`emptyBehavior: delete`), so conditioning on guardedness can only ever cost safety and never buy a
+heal. The enumeration was accurate **for lenses installed through the driver**, and that is not the
+whole population. `TestRefractor_Reproject_HealsLostProjection_E2E:114` builds its pipeline on a
+plain `adapter.New(...)` with **no** `SetGuarded` — and it is precisely the test that reproduces the
+incident reconciliation exists for: a grant that reached Core KV while the lens consumer was never
+started, so `lastAppliedSeq` is zero and the row is absent. On an unguarded target that create
+lands. The unconditional refusal declined a real heal, and the auth-plane e2e caught it.
+
+**Shipped shape.** The refusal binds to the mechanism that drops the write, not to token-zero:
+the adapter must both read its own rows back (the NATS-KV family, whose guard returns nil *before*
+looking for a stored watermark) **and** report the guard enabled, through a new optional
+`adapter.SeqGuarded`. The first condition excludes the SQL family — which the review was right about,
+and which the fix keeps — and the second excludes an unguarded target. Both regression tests are
+kept: one proving the refusal under the guard, one proving the create still lands without it.
+
+**The process lesson, not the code one.** The local `go test ./...` that "passed" before the withdrawal
+shipped was `go test ./... | grep -E '^(FAIL|--- FAIL)' | head`, whose exit status comes from the last
+element of the pipe, never from `go test`. It reported success for a run that had already failed.
+A verification command whose exit code cannot observe the thing it verifies is not a gate — redirect
+to a file and check `$?`.
