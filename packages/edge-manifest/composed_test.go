@@ -29,6 +29,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/refractor/lens"
+	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
+	"github.com/operatinggraph/lattice/internal/refractor/projection"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 )
 
@@ -476,3 +479,61 @@ RETURN
   collect(DISTINCT {anchorType: 'session', anchorId: nanoIdFromKey(sess.key), via: ['identifiedBy', 'ledBy']})
   AS readableAnchors
 `
+
+// --- Migration assertion 3 (driver level): the emptied slice is DELETED ------
+
+// TestMigration_EmptySliceIsDeletedByTheDriver drives the generated producer's
+// row through the projection driver, which is the only place the realness filter
+// actually decides anything. Asserting the cypher grants nothing (above) does
+// not prove the KEY goes away — and "the emptied slice is deleted rather than
+// left as a placeholder-only document" is a claim about the driver, not the
+// cypher. A binding-less identity must yield ErrDeleteProjection keyed at its
+// own cap-read key; a reachable identity must yield a real envelope.
+func TestMigration_EmptySliceIsDeletedByTheDriver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	producer := emComposedLens(t, "edgeManifestStaffReadGrants")
+	desc, err := projection.ParseOutputDescriptor(&lens.OutputDescriptorSpec{
+		AnchorType:       producer.Output.AnchorType,
+		OutputKeyPattern: producer.Output.OutputKeyPattern,
+		BodyColumns:      producer.Output.BodyColumns,
+		EmptyBehavior:    producer.Output.EmptyBehavior,
+		RealnessFilter:   producer.Output.RealnessFilter,
+		Freshness:        producer.Output.Freshness,
+		Lanes:            producer.Output.Lanes,
+	})
+	require.NoError(t, err, "the generated Output descriptor must parse Refractor-side")
+	envelope := desc.EnvelopeFn("lens-def-key", func(string) uint64 { return 1 })
+	params := map[string]any{"projectedAt": "2026-07-24T00:00:00Z"}
+
+	t.Run("binding-less identity deletes its key", func(t *testing.T) {
+		f := newEmFixture(t)
+		f.vtx(t, "loner", "identity")
+		rows := f.project(t, producer.Spec, f.key("loner"))
+		require.Len(t, rows, 1, "the producer projects one row per actor, placeholders included")
+
+		_, keys, err := envelope(rows[0].Values, nil, params)
+		require.ErrorIs(t, err, pipeline.ErrDeleteProjection,
+			"a placeholder-only slice must retract the key, not persist an all-null document")
+		require.Equal(t, desc.BuildKey(f.key("loner")), keys["key"],
+			"the delete must be keyed at this actor's own cap-read key")
+	})
+
+	t.Run("reachable identity writes a real envelope", func(t *testing.T) {
+		f := emStaffWorldFull(t)
+		rows := f.project(t, producer.Spec, f.key("tech"))
+		require.Len(t, rows, 1)
+
+		out, _, err := envelope(rows[0].Values, nil, params)
+		require.NoError(t, err, "a reachable actor must not be retracted")
+		anchors, _ := out["readableAnchors"].([]any)
+		require.NotEmpty(t, anchors, "the realness filter must keep the real entries")
+		for _, a := range anchors {
+			m, ok := a.(map[string]any)
+			require.True(t, ok)
+			require.NotEmpty(t, m["anchorId"],
+				"the realness filter must have dropped every placeholder entry")
+		}
+	})
+}
