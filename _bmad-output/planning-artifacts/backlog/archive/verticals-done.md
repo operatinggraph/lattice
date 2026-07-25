@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-19 · `cc50f86a` · Facet staff worlds F1 — `worksAt` staff spine + staff op set widened onto the shipped `frontOfHouse`; showcase staff persona; live-verified narrower-than-root
 - 2026-07-19 · `753637ca` · Descriptor dispatch declares its optional reads — `Dispatch.OptionalReads` + a `:id` bare-id modifier for link keys; café OpenTab/Settle now fully Facet-drivable, open→settle→reopen proven from the declarations
 - 2026-07-19 · `212dd3f1` · Self-anchored op params are declared, not name-guessed — `edgeIdentity` projects typed `selfAnchors`; `{me.<type>}` joins the contextParams vocabulary; café OpenTab renders a fieldless form, live-proven in Core KV
 - 2026-07-19 · `c3ec584b` · `reinstall-package` same-version edits reach the Processor again — op requestId now folds a mutation digest, so only genuinely identical work dedups; unblocked the live proof of `51a418b5`
