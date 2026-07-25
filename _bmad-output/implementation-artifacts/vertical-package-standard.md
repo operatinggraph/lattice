@@ -7,8 +7,12 @@ pinned snapshot — verify scripts are 11 at HEAD, `backOfHouse` is four package
 as SHIPPED `6b1c667c`; S3/S8 scoped so the open-KV name ban targets *subject* persons and admits the
 deliberately-published provider directory). The §3 converge-vs-rewrite nomination is ratified as
 non-binding guidance — each fire's Phase-0 brief still decides. **A `lint-package-standard` gate over the
-mechanically-checkable subset (S1/S6/S7) is filed in the lattice lane** — normative text alone does not
-bind future authors; the gate is what does.
+mechanically-checkable subset (S1/S6/S7) is blocking in CI** (`scripts/lint-package-standard.go`) —
+normative text alone does not bind future authors; the gate is what does. It runs over
+`internal/pkgregistry`, so an unregistered package cannot escape it, and it admits two explicit escape
+hatches: an `[no-op-meta: <reason>]` permission Note for an op no human triggers (S1's own stated
+exemption), and a shrink-only debt baseline enumerating the gaps §3 is scheduled to close — an entry
+that stops violating fails the gate too, so the baseline cannot become a permanent amnesty.
 **Board row:** [verticals lane](../planning-artifacts/backlog/verticals.md) *Vertical Package Standard*.
 **Extends:** [persona-worlds-design.md](persona-worlds-design.md) (archetype ladder §3; W1–W4 build to this
 standard). **Contracts:** builds to #1/#2/#6; **Frozen-contract change: NONE.**

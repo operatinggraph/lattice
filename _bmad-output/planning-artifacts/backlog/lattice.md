@@ -107,7 +107,7 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top picks needing no new design: `lint-package-standard` (★★ M), the
+> 🎯 **Build-ready now.** Top picks needing no new design: the
 > **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit),
 > `actor-aggregate backfill` (★★ S–M, consumers now `identityAnchors` + `myTasks`), the
 > **rebuild-progress signal** + the **business-lens drop-on-unreadable** rows (★★/★, just filed),
@@ -172,7 +172,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 ### Refinements & ops
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **`lint-package-standard` gate (S1/S6/S7 subset)** | The ratified [Vertical Package Standard](../../implementation-artifacts/vertical-package-standard.md) is normative text with no enforcement — text alone doesn't bind the next author. Gate the mechanically-checkable rules: S1 full `OpMetaSpec` per user-facing op, S6 `lens_cypher_test.go` + structure pins, S7 `grantsTo` mirrored. Mirror `lint-lens-anchors`: packages/** scan, CI-wired, fail-closed + declared-exemption escape hatch. | ★★ | M | 📋 ready |
+| **Package-Standard conformance sweep (drain the S1/S6 debt baseline)** | The `lint-package-standard` gate holds the line; these are the 38 gaps it enumerates in `scripts/lint-package-standard.go` (shrink-only): 23 user-facing ops with no descriptor, 7 packages whose lenses no cypher test executes, 8 with no structure pins. Routing per [Standard §3](../../implementation-artifacts/vertical-package-standard.md). | ★★ | M–L | 📋 ready · consumers: descriptor-driven clients + the next package author |
 | **Embedded-NATS shard flakes under parallel load** | Two different embedded-NATS tests failed on CI runners on consecutive days (`TestLaneSpecs_PerLaneBacklogIsolation` unit-1; `TestPersonalLens_PL2_E2E_InterestSetFiltersThenAdmits` unit-2); both post-date the per-test-server parallelization. Local repro: `go test ./...` with NO `-p` cap reddens 3 other embedded-NATS tests that pass 3x in isolation and under CI's `-p 4`. Root-cause per the flake rule: tighten, never loosen. | ★★ | M | 📋 ready · owner: Whetstone |
 | **CI pipeline speed (continuous)** | Make CI faster without weakening any gate — owned continuously by the **Whetstone**. Matrix split done (serial → 4 parallel jobs); convergence + unit parallelized; unit itself now sharded across 2 runners. | ★★ | M (ongoing) | 🏗️ continuous (Whetstone) · aggregate-CPU ceiling confirmed 2x, isolating natsperm into its own step reconfirmed it (Done log) · next: propose paid larger runners to Andrew |
 | **Hard-delete mutation verb (true link/aspect keyspace reclaim)** | Mutation vocab is create/update/tombstone (soft PUTs); a tombstoned key persists + is still enumerated by `kv.Links`. A 4th `delete` verb (NATS `DEL`) lets dead links leave the keyspace, bounding `kv.Links` LIST cost. | ★ | M | 🗄️ shelved (Andrew 2026-07-02) · [design + hold banner](../../implementation-artifacts/hard-delete-mutation-verb-design.md) · demand dissolved by clinic write-path slot claims; §3 edits reverted; revive only on a real reclaim driver |
@@ -193,6 +193,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 ## Done log — lattice (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
+
+- 2026-07-25 · `94ce0950` · [lint,pkgmgr] the Vertical Package Standard is enforced by a gate, not by prose — `lint-package-standard` (S1/S6/S7) blocking in CI + shrink-only debt baseline; corpus single-sourced in `internal/pkgregistry`
 
 - 2026-07-25 · `831b0da9` · [refractor] a sweep that verifies nothing reports that, not the last pass's verdict — `CapabilitySweepStalled` (staleness clock + suppression cause) + `CapabilityLensUnreadable` (never dropped)
 
