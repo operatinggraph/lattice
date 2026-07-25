@@ -719,8 +719,10 @@ Run item-by-item against the row, narrow-only:
   `read_path_adapters.go:32-35` asserts `Adapter` + `KeyLister` only; there is no `Guarded()` method,
   so the `adapter.SeqGuarded` assertion fails for it. **This half is what the fire builds.**
 - **"…which `Reproject` books as a heal"** — **FALSIFIED, and the fire does not build against it.**
-  `Reproject` returns `ErrNotActorAggregate` (`reproject.go:102`) for any lens whose
-  `ProjectionKind != actorAggregate`, and **all seven** shipped `grantTable` lenses declare no
+  `Reproject` returns `ErrNotActorAggregate` at `reproject.go:89-90` for any lens with no
+  `envelopeFn` — installed only by `InstallActorAggregate` and the Personal-Lens installer, so never
+  for a grant lens. (The second `ErrNotActorAggregate` at `:102` is the Personal-Lens exclusion and
+  is not the one that fires here.) **All seven** shipped `grantTable` lenses declare no
   projection kind (enumerated over `internal/pkgregistry.All()`: `clinicPatientReadGrants`,
   `clinicProviderReadGrants`, `providerIdentityReadGrants`, `patientIdentityReadGrants`,
   `demoOperatorReadGrants`, `consoleOperatorReadGrants`, `staffReadGrants` — every one
@@ -786,3 +788,49 @@ warn-and-continue branch. That is strictly better than today (no force at all) b
 — a grant lens should truncate its own `grant_source`-scoped rows on rebuild. Filed with its
 consumer rather than improvised here, because truncating read grants is a transient total-denial
 window and wants its own review.
+
+### 13.4 Build outcome — SHIPPED `f630efc3`, with one signal fixed at review and two residuals filed
+
+The adversarial pass could not refute the change. It confirmed the guard is genuinely
+unconditional (one constructor, no flag, both statements `const`), that no consumer infers
+NATS-KV / `Truncater` / `RowReader` from guardedness, and — the highest-risk question — that the
+adjacency-watch writes now skipped were **not** load-bearing: every grant lens is a plain lens whose
+link and aspect events already reach `evalPlainLinkReprojection` / `evalPlainAspectReprojection`
+carrying the real stream sequence, and the plain link path rebuilds adjacency for both endpoints
+itself, so it is strictly stronger than the seq-0 path it replaces. Three things came back worth
+acting on.
+
+**Fixed in the shipped commit — the rebuild force-truncate announced a repair it then declined.**
+Reporting the guard made a grant-lens rebuild log *"guarded bucket forces truncate"* and then, two
+lines later, *"adapter does not implement Truncater; skipping"*. The data outcome was unchanged
+(nothing downstream of `Rebuild` reads `truncate` beyond the `Truncater` call), but the operator was
+told the watermarks had been cleared when the replay was still about to be rejected against them —
+and a rebuild is precisely what an operator reaches for when the table has diverged. The force is
+now conditioned on the target actually being truncatable, and the other branch states the real
+consequence. `GrantWriterAdapter`'s refusal to implement `Truncater` is correct and stays:
+`actor_read_grants` is shared, so one producer's rebuild must never TRUNCATE it.
+
+**Residual 1 — a diverged grant table has no repair path.** The skipped adj-watch writes were doing
+one thing nothing else does: bulk re-inserting rows *absent* from `actor_read_grants` while the
+lens's durable is already caught up. Combined with the rebuild that cannot truncate, an operator who
+restores or partially wipes the grant table out-of-band now has no mechanism that re-derives the
+missing rows — a `DiffRetraction` producer heals on its next CDC event, but the five non-diff
+producers wait for one that touches their labels. This is **fail-closed** (reads denied, never
+over-granted), and the removed heals were unordered seq-0 inserts that should not have been landing,
+so removing them is right; the gap they were incidentally covering is what needs an owner.
+**Consumer: an operator repairing `actor_read_grants` after a restore.** Filed.
+
+**Residual 2 — an INTO edit can strand a grant lens's live grants (pre-existing over-grant).**
+`HotReloadInto`'s refusal is armed by `requireGuardedAdapter`, which for a grant lens is set
+**only inside `HotReloadInto` itself**, after the refusal check — `InstallActorAggregate`, its only
+other caller, never runs for this family. So the *first* INTO edit flipping a lens off the grant
+table (`grantTable: true → false`) is accepted: `updateCB`'s target/bucket pin does not fire either,
+since `entry.guarded` reads `projection.RequiresGuard` (false here) and both `target` and `bucket`
+are unchanged by that edit. The swap succeeds and every row the lens already wrote is stranded live
+— no producer addresses that `grant_source`, so `DiffRetraction` can never revoke them. This is
+**not a regression** (pre-change the swap was *always* accepted; it is now sometimes refused), but a
+security control whose behavior depends on whether an unrelated earlier edit happened to arm it is
+worse than one that is honestly absent. The durable fix belongs with the three open hot-reload rows
+— `entry.guarded` should read the built adapter rather than `RequiresGuard`, and the refusal set
+should cover an identity-changing `grantTable`/`grantSource` edit the way it covers `secureColumns`.
+**Consumer: an operator editing a grant lens's INTO.** Filed.
