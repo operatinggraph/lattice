@@ -107,17 +107,17 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** No ratified-unbuilt design is left — the flywheel needs the Designer to
-> restock. The best ready picks all need no new design: the two **appsession** rows (★★ M each — the
-> production IdP posture is the one that blocks any non-loopback deploy, and CSRF bites as soon as two
-> FEs are co-hosted), then `actor-aggregate backfill` (★★ S–M, named live consumer) and
-> `lint-package-standard` (★★ M). Every other `✅ ratified` row is done or driver-blocked; the rest are
-> Whetstone's or parking-lot. A stale callout starves the lane — whoever ships the next pick renames this.
+> 🎯 **Build-ready now.** The ★★★ `contextHint.reads` existence oracle is in flight (🏗️). Next by
+> importance, all needing no new design: the two **appsession** rows (★★ M each — the production IdP
+> posture blocks any non-loopback deploy, and CSRF bites as soon as two FEs are co-hosted), then
+> `actor-aggregate backfill` (★★ S–M, named live consumer) and `lint-package-standard` (★★ M). Every
+> other `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot. The
+> Designer still needs to restock. A stale callout starves the lane — whoever ships next renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **`contextHint.reads` is a pre-script Core-KV existence oracle** | A declared-but-absent read faults `HydrationMiss` at step 4 and the reply returns `details.missingKey` (`step4_hydrate.go:170` → `commit_path.go:907` → `gateway.go:528`). The submitter writes its own contextHint and step-3 scope=self never inspects the resource, so any actor with any op grant probes ANY key's existence, one round trip each, without a script running. Fix precedent: `ClaimKeyInvalid` strips details (NFR-S6); check Contract #2 §2.4 first. | ★★★ | M | 📋 ready |
+| **`contextHint.reads` is a pre-script Core-KV existence oracle** | contextHint is client-supplied and step 3 never inspects it, so a declared-but-absent read faults `HydrationMiss` before any script runs: any actor with any op grant probes ANY key's existence, one round trip each. | ★★★ | M | 🏗️ building · [design](../../implementation-artifacts/contexthint-existence-oracle-design.md) · next: defer the miss to first use |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
 | **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the obvious re-assert ops no-op when state already matches. `reproject`/`rebuild` need an asserted control-plane actor, so no operator-reachable backfill. Consumers: LoftSpace's landlord hat; 51 stale `cap-read.edgeManifest*` docs. | ★★ | S–M | 📋 ready · [live evidence](../../implementation-artifacts/read-grant-single-source-walk-design.md) §10 |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` configured nothing can issue the session cookie — the documented verify-only posture is unreachable. Fails closed (401 everywhere), and the per-request credential→identity resolve the old read boundary did now happens only at dev-login. Consumer: the first non-loopback deployment of any of the five FE binaries. | ★★ | M | 📋 ready |
