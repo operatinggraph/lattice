@@ -1,6 +1,6 @@
 # `op.authTargetValidated` — a validated-target primitive that closes the forgeable-`authContext.target` bypass per-op
 
-**Status: ✅ SHIPPED (both fires, 2026-07-24) — item closed; §11 + §12 are the as-built record.** Supersedes the FALSIFIED + REVERTED platform-blank
+**Status: ✅ SHIPPED (both fires + both residuals, 2026-07-24) — item closed; §11 + §12 + §13 are the as-built record.** Supersedes the FALSIFIED + REVERTED platform-blank
 approach in [`authcontext-target-forgery-platform-fix-design.md`](authcontext-target-forgery-platform-fix-design.md)
 (that doc's §Falsified stands as the record of why one blanket rule cannot work). This design keeps the
 vulnerability's per-op nature but pays down the shared root with **one small, additive platform primitive**
@@ -573,11 +573,13 @@ annotated. Four things the build settled beyond that list:
    CREATE, where no owning link exists yet to probe — sound, but not `(ownership)` as the gate defines
    it. Left undistinguished, the next author copies `(ownership)` onto a site where the difference bites.
 
-**What the gates do NOT claim** (stated so a green run is not over-read, and shared with the
-`# read-posture:` convention they mirror): an annotation covers the following `readPostureWindow` lines,
-so a reference inserted *into* an annotated block inherits that block's declaration; and both gates are
-fail-closed against *forgetting* to declare, not against *mis-declaring* — only `(resource-bind)` and
-`(legacy-self-exempt)` carry a structural check. Tightening the window is filed as its own row.
+**What the gates do NOT claim** — *the annotation-window half of this paragraph is SUPERSEDED by §13,
+which closed it; read it as the Fire-2 record, not as current behaviour.* Stated so a green run is not
+over-read, and shared with the `# read-posture:` convention they mirror: an annotation covers the
+following `readPostureWindow` lines, so a reference inserted *into* an annotated block inherits that
+block's declaration; and both gates are fail-closed against *forgetting* to declare, not against
+*mis-declaring* — only `(resource-bind)` and `(legacy-self-exempt)` carry a structural check. Tightening
+the window is filed as its own row.
 
 **Non-vacuity proven, not assumed.** Each negative was run against a temporarily-reverted mechanism and
 observed to **accept** before being run green against the fix — the forged standing target (the idiom-C
@@ -594,3 +596,42 @@ pass additionally **could not** find a false-deny — no shipped client submits 
 target and no task/self grant — and could not break the primitive, the rekeyed forgery vector, or the
 gate on the shapes it does cover. Gates: `go build`, `make vet`, `golangci-lint` (0 issues), all four
 `lint-*` scripts, and the full `go test ./...`.
+
+## 13. The two residuals §12 filed — SHIPPED (2026-07-24)
+
+Both of §12's "what the gates do NOT claim" residuals are closed, in one fire.
+
+**The annotation window is gone.** All three annotation conventions — `# read-posture:`,
+`# authcontext-target:`, `# workplace-exempt:` — resolved a declaration by scanning the preceding 8 raw
+lines, so a declaration silently reached whatever sat below it. Coverage is now bound to the annotated
+**statement**: the line the annotation trails, or the first code line beneath its comment block (a blank
+line ends the block, so a detached annotation covers nothing), plus that statement's own indentation
+block. `annotationSpans` computes it once per file per kind, and a nested annotation wins over an
+enclosing one. What this does **not** claim: a reference inserted *inside* the annotated guard still
+inherits its declaration — that is the declaration's own scope, and the one place inheritance is meant.
+
+The tightening surfaced **12 sites whose declaration did not sit on its own call** — nine where a key
+assignment separated the annotation from its read, two where a second sibling read shared one
+declaration (clinic's `.tenancy` probe, clinic-reminders' `.paused` probe), one where an early-return
+guard did. Every one was a legitimately-declared read whose annotation had drifted; each is fixed by
+moving the declaration onto its own call or giving the second read its own, never by widening the rule.
+No class was changed.
+
+**clinic migrated, and `(legacy-self-exempt)` no longer exists.** §6 scoped clinic's `== op.actor`
+exemption as a behaviour change rather than a cleanup, and it is: `workplace_exempt()` /
+`require_workplace()` now key on `op.authTargetValidated`. The admitted set loses exactly one path — a
+scope=any staff caller naming *its own actor key* as `authContext.target`, which satisfied the equality
+and skipped workplace confinement. `TestFrontDesk_ForgedTargetCannotSkipConfinement` gained that vector
+in a form only confinement can reject (the caller books a patient it genuinely **owns**, so the
+`identifiedBy` probe passes), plus a same-building control proving the rejection is the workplace guard;
+run against the reverted guard it is **Accepted**, so the over-grant was real, not theoretical. Clinic
+mints no task for these ops, and the exemption stays backstopped at all three call sites by the
+`(ownership-bound)` `identifiedBy` probe, so the task path a future `CreateTask` could open is bound too.
+With no legacy left anywhere, the `(legacy-self-exempt)` shape and its file allow-list are **deleted** —
+a self-equality declaration is now an unknown shape in every file, including the one that carried it.
+
+**Live posture unchanged for every well-behaved caller.** `cmd/clinic-app` stamps `authContext.target`
+only on the consumer self-service path (`asSelf`); staff submits carry none. Both keep the outcome they
+had. Gates: `go build`, `make vet`, `golangci-lint` (0 issues), all four `lint-*` scripts, and the full
+`go test ./...`; clinic-domain 0.26.3→0.27.0, and the three comment-moved packages patch-bumped so the
+edits reach a running stack.
