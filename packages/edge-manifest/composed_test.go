@@ -23,6 +23,7 @@ package edgemanifest
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -536,4 +537,66 @@ func TestMigration_EmptySliceIsDeletedByTheDriver(t *testing.T) {
 				"the realness filter must have dropped every placeholder entry")
 		}
 	})
+}
+
+// TestMigration_GeneratedProducersEmitNoDuplicateAnchors pins the size property
+// the auth plane depends on. A generated producer is several INDEPENDENT
+// OPTIONAL MATCH branches off one actor, so the bindings its RETURN aggregates
+// over are the branches' CROSS PRODUCT; each branch's `collect(DISTINCT ...)`
+// is the only thing collapsing that back to what the branch actually reached.
+//
+// Without it a document's entry count is the PRODUCT of every branch's
+// cardinality rather than their sum — multiplicative in the number of walks a
+// domain declares, so it grows fastest for exactly the well-connected actors.
+// A `cap-read.<domain>.<actor>` document that outgrows NATS's max payload can
+// never be written again: its actor's grants freeze at whatever was last
+// storable, and no reprojection or convergence sweep can repair it.
+func TestMigration_GeneratedProducersEmitNoDuplicateAnchors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, c := range []struct {
+		producer string
+		world    func(*testing.T) *emFixture
+		actor    string
+	}{
+		{"edgeManifestReadGrants", emResidentWorld, "resident"},
+		{"edgeManifestStaffReadGrants", emStaffWorldFull, "tech"},
+		{"edgeManifestProviderReadGrants", emProviderWorld, "providerId"},
+	} {
+		t.Run(c.producer, func(t *testing.T) {
+			f := c.world(t)
+			rows := f.project(t, emComposedSpec(t, c.producer), f.key(c.actor))
+
+			// Identity is the WHOLE entry, `via` included. Two branches that
+			// both reach one anchor legitimately contribute an entry each,
+			// differing in the justifying path; dedup is per branch, and
+			// collapsing those would discard a justification (§6.14 makes the
+			// effective set a union and `via` audit-only).
+			seen := map[string]int{}
+			total := 0
+			for _, row := range rows {
+				anchors, _ := row.Values["readableAnchors"].([]any)
+				for _, a := range anchors {
+					m, ok := a.(map[string]any)
+					if !ok {
+						continue
+					}
+					if id, _ := m["anchorId"].(string); id == "" {
+						continue
+					}
+					total++
+					seen[fmt.Sprintf("%v|%v|%v", m["anchorType"], m["anchorId"], m["via"])]++
+				}
+			}
+			require.NotZero(t, total, "granted nothing — the no-duplicate claim would be vacuous")
+
+			for e, n := range seen {
+				require.Equal(t, 1, n,
+					"%s: entry %s emitted %d times — a branch's DISTINCT did not bind, so the "+
+						"document carries the cross product of the branches instead of their union",
+					c.producer, e, n)
+			}
+		})
+	}
 }

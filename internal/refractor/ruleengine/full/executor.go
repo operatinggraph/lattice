@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
@@ -719,8 +720,7 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 	type groupAcc struct {
 		key       string
 		row       binding
-		aggInputs [][]any               // per-item input values across the group
-		seen      []map[string]struct{} // per-item DISTINCT dedup sets
+		aggInputs [][]any // per-item input values across the group
 	}
 	groups := map[string]*groupAcc{}
 	var order []string
@@ -746,7 +746,6 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 				key:       k,
 				row:       binding{},
 				aggInputs: make([][]any, len(items)),
-				seen:      make([]map[string]struct{}, len(items)),
 			}
 			for i, v := range groupVals {
 				g.row[itemAlias(i)] = v
@@ -763,19 +762,7 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem) ([]
 			if err != nil {
 				return nil, err
 			}
-			for _, v := range vals {
-				if isAggregatorDistinct(it.Expr) {
-					if g.seen[i] == nil {
-						g.seen[i] = map[string]struct{}{}
-					}
-					sig := fmt.Sprintf("%v", normalizeForKey(v))
-					if _, ok := g.seen[i][sig]; ok {
-						continue
-					}
-					g.seen[i][sig] = struct{}{}
-				}
-				g.aggInputs[i] = append(g.aggInputs[i], v)
-			}
+			g.aggInputs[i] = append(g.aggInputs[i], vals...)
 		}
 	}
 
@@ -836,14 +823,23 @@ func containsAggregator(e Expr) bool {
 	return found
 }
 
-// isAggregatorDistinct reports whether the outermost aggregator on e uses DISTINCT.
-func isAggregatorDistinct(e Expr) bool {
-	// For BinaryOp like "collect(...) + collect(...)" the items are aggregated
-	// independently; the binary op is applied to the FINAL aggregated lists.
-	if fc, ok := e.(*FunctionCall); ok {
-		return fc.Distinct
+// dedupeInputs drops repeats from one aggregator's inputs, keeping the first
+// occurrence of each value so the result order stays the binding order.
+// Equality is normalizeForKey's canonical rendering — the same identity basis
+// the grouping key uses, so a map value (the shape every read-grant branch
+// collects) compares by content rather than by Go reference.
+func dedupeInputs(inputs []any) []any {
+	seen := make(map[string]struct{}, len(inputs))
+	out := make([]any, 0, len(inputs))
+	for _, v := range inputs {
+		sig := normalizeForKey(v)
+		if _, dup := seen[sig]; dup {
+			continue
+		}
+		seen[sig] = struct{}{}
+		out = append(out, v)
 	}
-	return false
+	return out
 }
 
 // evalAggregatorArgs collects the argument values for ONE row.
@@ -884,9 +880,22 @@ type composite struct {
 	right []any
 }
 
+// finalizeAggregator folds one aggregator's collected inputs to its value.
+//
+// DISTINCT binds HERE, on the aggregator call that carries it, rather than on
+// the RETURN item as a whole. An item is often a composition — `collect(...) +
+// collect(...)`, the shape every generated read-grant producer takes — where
+// each call carries its own DISTINCT and the item itself carries none. Reading
+// the flag off the item would silently drop every one of those, and because the
+// branches of such a query are independent OPTIONAL MATCHes whose bindings are
+// their cross product, each branch's list would then be inflated by the product
+// of all the others' cardinalities.
 func (ex *executor) finalizeAggregator(e Expr, inputs []any) (any, error) {
 	switch x := e.(type) {
 	case *FunctionCall:
+		if x.Distinct {
+			inputs = dedupeInputs(inputs)
+		}
 		if strings.EqualFold(x.Name, "collect") {
 			// Drop nulls (Cypher semantics).
 			out := make([]any, 0, len(inputs))
@@ -1586,48 +1595,85 @@ func numericOp(op string, l, r any) (any, error) {
 	return nil, fmt.Errorf("full engine: unsupported numeric op %q", op)
 }
 
-// normalizeForKey produces a stable string representation usable as a map
-// group key. Maps are JSON-encoded with sorted keys for determinism.
+// normalizeForKey produces a stable string representation of a value, used as
+// the identity basis for WITH/RETURN grouping and for DISTINCT deduplication.
+// It is purely in-memory — never persisted, never compared across processes —
+// so the encoding is free to change.
+//
+// The encoding is INJECTIVE: distinct values must never render alike. Two
+// values that collide are silently merged into one group, or one is dropped
+// from a DISTINCT list — data loss with no error anywhere. Free text reaches
+// here (a lens collects `presentation.data.name` into a map), so a rendering
+// that simply interleaved delimiters would let an authored name impersonate
+// structure: `{name: "a,key:b"}` must not render as `{name:a,key:b}` does.
+//
+// Every leaf therefore carries a TYPE TAG, and every variable-length token is
+// LENGTH-PREFIXED, which makes the rendering unambiguously parseable and hence
+// injective — a string can no longer forge a separator, and `1`, `1.0`, `"1"`
+// and `true` stay distinct from each other and from `"<nil>"`.
 func normalizeForKey(v any) string {
+	var b strings.Builder
+	writeNormalizedKey(&b, v)
+	return b.String()
+}
+
+// writeNormalizedKey appends v's injective rendering to b.
+func writeNormalizedKey(b *strings.Builder, v any) {
+	// token writes a length-prefixed, therefore self-delimiting, string.
+	token := func(tag byte, s string) {
+		b.WriteByte(tag)
+		b.WriteString(strconv.Itoa(len(s)))
+		b.WriteByte(':')
+		b.WriteString(s)
+	}
 	switch x := v.(type) {
 	case nil:
-		return "<nil>"
+		b.WriteByte('z')
+	case string:
+		token('s', x)
+	case bool:
+		if x {
+			b.WriteByte('T')
+		} else {
+			b.WriteByte('F')
+		}
 	case map[string]any:
 		keys := make([]string, 0, len(x))
 		for k := range x {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		var b strings.Builder
+		b.WriteByte('m')
+		b.WriteString(strconv.Itoa(len(keys)))
 		b.WriteByte('{')
-		for i, k := range keys {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(k)
-			b.WriteByte(':')
-			b.WriteString(normalizeForKey(x[k]))
+		for _, k := range keys {
+			token('k', k)
+			writeNormalizedKey(b, x[k])
 		}
 		b.WriteByte('}')
-		return b.String()
 	case []any:
-		var b strings.Builder
+		b.WriteByte('l')
+		b.WriteString(strconv.Itoa(len(x)))
 		b.WriteByte('[')
-		for i, el := range x {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(normalizeForKey(el))
+		for _, el := range x {
+			writeNormalizedKey(b, el)
 		}
 		b.WriteByte(']')
-		return b.String()
 	case *nodeRef:
 		if x == nil {
-			return "<nil>"
+			b.WriteByte('z')
+			return
 		}
-		return x.key
+		token('n', x.key)
+	case int64:
+		token('i', strconv.FormatInt(x, 10))
+	case float64:
+		token('f', strconv.FormatFloat(x, 'g', -1, 64))
+	default:
+		// Any other type the engine produces still renders, tagged by its Go
+		// type so two different types can never share a rendering.
+		token('x', fmt.Sprintf("%T=%v", v, v))
 	}
-	return fmt.Sprintf("%v", v)
 }
 
 // walkExprAll applies f to every expression node reachable from root.
