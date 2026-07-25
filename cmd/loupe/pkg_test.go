@@ -2,7 +2,6 @@ package main
 
 import (
 	"mime/multipart"
-	"os"
 	"strings"
 	"testing"
 
@@ -179,63 +178,5 @@ func TestApplyReplyShape(t *testing.T) {
 	}
 	if keys := got["createdKeys"].([]string); len(keys) != 2 {
 		t.Errorf("createdKeys = %v", keys)
-	}
-}
-
-func TestPackageRegistryMirrorsLatticePkg(t *testing.T) {
-	// Every package directory the repo ships (a packages/<dir>/manifest.yaml)
-	// must have a registry row — a gap means Loupe can list but not install a
-	// package lattice-pkg can. And each row's key must match its definition's
-	// name (the manifest lookup key).
-	for name := range packageRegistry {
-		if packageRegistry[name].Name != name {
-			t.Errorf("registry key %q maps to definition named %q", name, packageRegistry[name].Name)
-		}
-	}
-	dirs, err := os.ReadDir("../../packages")
-	if err != nil {
-		t.Fatalf("read packages dir: %v", err)
-	}
-	shipped := 0
-	for _, d := range dirs {
-		if !d.IsDir() {
-			continue
-		}
-		manifest, err := pkgmgr.ParseManifest("../../packages/" + d.Name() + "/manifest.yaml")
-		if err != nil {
-			continue // not a package dir (no parsable manifest)
-		}
-		shipped++
-		if _, ok := packageRegistry[manifest.Name]; !ok {
-			t.Errorf("packages/%s (manifest name %q) is missing from Loupe's registry — add the row here and in cmd/lattice-pkg", d.Name(), manifest.Name)
-		}
-	}
-	if shipped == 0 {
-		t.Fatal("no shipped package manifests found — the ../../packages scan is broken")
-	}
-}
-
-// TestEveryPackageCompilesItsReadGrantWalks runs the install-time compilation
-// every shipped package goes through, over the whole registry: read-grant walks
-// must compile (which is where the walk grammar and the "every non-self-anchored
-// Personal lens declares a Walk" invariant are enforced), and the on-disk
-// manifest must agree with the COMPOSED definition — generated cap-read
-// producers included, index-wise, so a manifest that lists them out of
-// ReadGrantDomains order fails here rather than at install.
-func TestEveryPackageCompilesItsReadGrantWalks(t *testing.T) {
-	for name := range packageRegistry {
-		def := packageRegistry[name]
-		t.Run(name, func(t *testing.T) {
-			if _, err := def.ExpandReadGrantWalks(); err != nil {
-				t.Fatalf("read-grant walks do not compile: %v", err)
-			}
-			manifest, err := pkgmgr.ParseManifest("../../packages/" + name + "/manifest.yaml")
-			if err != nil {
-				t.Skipf("no parsable manifest at packages/%s: %v", name, err)
-			}
-			if err := manifest.VerifyAgainstDefinition(def); err != nil {
-				t.Errorf("manifest drifts from the composed definition: %v", err)
-			}
-		})
 	}
 }

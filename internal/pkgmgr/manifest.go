@@ -158,6 +158,15 @@ func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
 			return fmt.Errorf("pkgmgr: Permission[%d] operationType mismatch: manifest=%q definition=%q",
 				i, pm.OperationType, d.Permissions[i].OperationType)
 		}
+		// A permission's identity is its (operationType, scope) pair
+		// (Contract #8 §8.1 permTag), so a manifest agreeing on the op but
+		// naming the other scope describes a DIFFERENT permission vertex than
+		// the one the install writes. An omitted manifest scope is the
+		// unstated default `any`, matching ParseManifest's own leniency.
+		if ms := pm.Scope; ms != "" && ms != d.Permissions[i].Scope {
+			return fmt.Errorf("pkgmgr: Permission[%d] (%s) scope mismatch: manifest=%q definition=%q",
+				i, pm.OperationType, ms, d.Permissions[i].Scope)
+		}
 		// Cross-check GrantsTo lists so a manifest that drifts from the Go
 		// Definition is caught before any Core KV write (the install uses
 		// the Definition's GrantsTo, not the manifest's).

@@ -26,72 +26,9 @@ import (
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
+	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/substrate"
-	augur "github.com/operatinggraph/lattice/packages/augur"
-	cafedomain "github.com/operatinggraph/lattice/packages/cafe-domain"
-	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
-	capabilityauthor "github.com/operatinggraph/lattice/packages/capability-author"
-	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
-	clinicledger "github.com/operatinggraph/lattice/packages/clinic-ledger"
-	clinicreminders "github.com/operatinggraph/lattice/packages/clinic-reminders"
-	consoleoperator "github.com/operatinggraph/lattice/packages/console-operator"
-	controlauthz "github.com/operatinggraph/lattice/packages/control-authz"
-	demooperator "github.com/operatinggraph/lattice/packages/demo-operator"
-	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
-	frontdesk "github.com/operatinggraph/lattice/packages/front-desk"
-	identitydomain "github.com/operatinggraph/lattice/packages/identity-domain"
-	identityhygiene "github.com/operatinggraph/lattice/packages/identity-hygiene"
-	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
-	locationdomain "github.com/operatinggraph/lattice/packages/location-domain"
-	loftspacedomain "github.com/operatinggraph/lattice/packages/loftspace-domain"
-	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
-	maintenancedomain "github.com/operatinggraph/lattice/packages/maintenance-domain"
-	objectsbase "github.com/operatinggraph/lattice/packages/objects-base"
-	onebill "github.com/operatinggraph/lattice/packages/one-bill"
-	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
-	privacybase "github.com/operatinggraph/lattice/packages/privacy-base"
-	privacyoperatorgrant "github.com/operatinggraph/lattice/packages/privacy-operator-grant"
-	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
-	semanticcontracts "github.com/operatinggraph/lattice/packages/semantic-contracts"
-	servicedomain "github.com/operatinggraph/lattice/packages/service-domain"
-	servicelocation "github.com/operatinggraph/lattice/packages/service-location"
-	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
-
-// packageRegistry maps a manifest name to its compiled Go Definition. Keep in
-// sync with cmd/lattice-pkg/main.go's packageRegistry — both binaries carry
-// the same static import map until package discovery exists.
-var packageRegistry = map[string]pkgmgr.Definition{
-	"rbac-domain":            rbacdomain.Package,
-	"identity-domain":        identitydomain.Package,
-	"identity-hygiene":       identityhygiene.Package,
-	"orchestration-base":     orchestrationbase.Package,
-	"service-domain":         servicedomain.Package,
-	"location-domain":        locationdomain.Package,
-	"loftspace-domain":       loftspacedomain.Package,
-	"clinic-domain":          clinicdomain.Package,
-	"clinic-ledger":          clinicledger.Package,
-	"clinic-reminders":       clinicreminders.Package,
-	"service-location":       servicelocation.Package,
-	"edge-manifest":          edgemanifest.Package,
-	"lease-signing":          leasesigning.Package,
-	"loftspace-ledger":       loftspaceledger.Package,
-	"cafe-ledger":            cafeledger.Package,
-	"cafe-domain":            cafedomain.Package,
-	"one-bill":               onebill.Package,
-	"front-desk":             frontdesk.Package,
-	"objects-base":           objectsbase.Package,
-	"augur":                  augur.Package,
-	"capability-author":      capabilityauthor.Package,
-	"privacy-base":           privacybase.Package,
-	"privacy-operator-grant": privacyoperatorgrant.Package,
-	"semantic-contracts":     semanticcontracts.Package,
-	"control-authz":          controlauthz.Package,
-	"console-operator":       consoleoperator.Package,
-	"demo-operator":          demooperator.Package,
-	"wellness-domain":        wellnessdomain.Package,
-	"maintenance-domain":     maintenancedomain.Package,
-}
 
 // pkgApplyTimeout bounds an install/upgrade/uninstall round-trip. The
 // Installer reads the whole core-kv key list plus submits a batch op with a
@@ -478,7 +415,7 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 		s.writeError(w, http.StatusBadRequest, "parse manifest: "+err.Error())
 		return
 	}
-	def, ok := packageRegistry[manifest.Name]
+	def, ok := pkgregistry.Lookup(manifest.Name)
 	if !ok {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf(
 			"package %q is not in Loupe's compiled registry — a new package needs a registry row (cmd/loupe/pkg.go + cmd/lattice-pkg) and a rebuild", manifest.Name))

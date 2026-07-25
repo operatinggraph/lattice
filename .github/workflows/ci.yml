@@ -113,6 +113,17 @@ jobs:
         # STRICT=1 fails the build on either violation.
         run: STRICT=1 go run ./scripts/lint-lens-anchors.go
 
+      - name: Vertical Package Standard gate (S1 descriptors / S6 floor / S7 manifest)
+        # A user-facing op with no descriptor is invisible to a
+        # descriptor-driven client; a lens no cypher test executes is only
+        # proven by an empty read model in production; a manifest that drifts
+        # from its Go Definition installs something other than what it claims.
+        # Escape hatches are explicit: an `[no-op-meta: ...]` permission Note,
+        # or the script's shrink-only debt baseline (a baselined entry that
+        # stops violating also fails, so the ledger cannot rot).
+        # STRICT=1 fails the build on any violation.
+        run: STRICT=1 go run ./scripts/lint-package-standard.go
+
       - name: Package version-bump gate (packages/ content edits bump the manifest)
         # A packages/ semantic change at an unchanged manifest version is
         # invisible to running stacks — plain install no-ops it. Diffs the

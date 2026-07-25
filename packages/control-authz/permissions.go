@@ -59,8 +59,9 @@ func personalLensPermissions(verbs ...string) []pkgmgr.PermissionSpec {
 		perms = append(perms, pkgmgr.PermissionSpec{
 			OperationType: "ctrl.refractor." + verb,
 			Scope:         "any",
-			Note:          "Authorizes control-operator, or any consumer / frontOfHouse / backOfHouse / provider identity acting on its own Personal Lens interest set (bound server-side, §3.4), to invoke the refractor control plane's " + verb + " op.",
-			GrantsTo:      []string{"control-operator", "consumer", "frontOfHouse", "backOfHouse", "provider"},
+			Note: "Authorizes control-operator, or any consumer / frontOfHouse / backOfHouse / provider identity acting on its own Personal Lens interest set (bound server-side, §3.4), to invoke the refractor control plane's " + verb + " op. " +
+				"[no-op-meta: control-plane verb the client's sync manager invokes on its own behalf — no human dispatches it, so there is no form for a descriptor to render.]",
+			GrantsTo: []string{"control-operator", "consumer", "frontOfHouse", "backOfHouse", "provider"},
 		})
 	}
 	return perms
