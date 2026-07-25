@@ -38,10 +38,11 @@ import (
 // "needs (re)creating".
 //
 // This unlocks the read-before-create idempotency pattern that `contextHint` and
-// `createIfAbsent` cannot express: a declared-but-absent contextHint key fails
-// hydration *fatally* (HydrationMiss) before the script runs, so it cannot say
-// "read this, tolerate absence." kv.Read tolerates absence (→ None), letting the
-// script decide mutations AND events coherently in one branch.
+// `createIfAbsent` cannot express: a key declared in `reads` is fail-closed, so
+// reading it when it is absent faults HydrationMiss rather than yielding None —
+// it cannot say "read this, tolerate absence." An undeclared kv.Read tolerates
+// absence (→ None), letting the script decide mutations AND events coherently in
+// one branch; `optionalReads` is the declared form of the same tolerance.
 //
 // DETERMINISM: this is the ONE non-pure builtin. nanoid/crypto/time/json are all
 // deterministic so a replayed (at-least-once) operation reproduces byte-identical
@@ -75,12 +76,25 @@ func kvModule(sc ScriptContext) *starlarkstruct.Struct {
 		}
 
 		// Cache-first (§2.5). A hydrated entry is, by construction, always a
-		// successful read: a contextHint.reads key that was absent in Core KV
-		// fails hydration (HydrationMiss) before execution begins, and an
-		// optionalReads key only lands here when it was present, so reaching
-		// the script with the key in sc.Hydrated guarantees it was present.
+		// successful read: an absent declared key lands in RequiredAbsent or
+		// KnownAbsent instead, never in sc.Hydrated, so reaching the script
+		// with the key in sc.Hydrated guarantees it was present.
 		if doc, ok := sc.Hydrated[key]; ok {
 			return vertexDocToStarlark(doc), nil
+		}
+		// Required-absent (§2.5 class (a)/(f)): the key was declared
+		// fail-closed in `reads`/`egressReads` and was NOT found at the step-4
+		// snapshot. This read is the operation depending on the key, so raise
+		// the HydrationMiss step 4 deferred. Recorded on the shared tracker so
+		// the runner can rebuild the *HydrationError* the caller sees — the
+		// returned error only has to abort the script.
+		//
+		// Checked BEFORE the lazy fallthrough below: without this a
+		// required-absent key would silently degrade into a live re-read and
+		// serve None, softening a read the operation declared it depends on.
+		if _, required := sc.RequiredAbsent[key]; required {
+			sc.DeferredMiss.fault(key)
+			return nil, errBuiltin("kv.Read: declared read is absent: " + key)
 		}
 		// Known-absent (§2.5 optionalReads): the key was declared
 		// absence-tolerant and was NOT found at the step-4 snapshot — serve

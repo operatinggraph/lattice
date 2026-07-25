@@ -22,6 +22,34 @@ type sensitiveReadTracker struct {
 	plaintextRead bool
 }
 
+// deferredMissTracker records the first declared-but-absent required read
+// (ScriptContext.RequiredAbsent) this execution actually touched, so the runner
+// can raise the HydrationMiss step 4 deferred. Shared by pointer across the
+// `kv` builtins and the `state` mapping for one execution.
+//
+// One-shot by design: the first touch aborts the script, so a later key can
+// only be reported by a mapping that swallowed the error, and reporting the
+// key the operation demonstrably reached first is the honest diagnostic.
+type deferredMissTracker struct {
+	key string
+}
+
+// fault records key as the deferred miss, keeping the first one seen.
+func (t *deferredMissTracker) fault(key string) {
+	if t == nil || t.key != "" {
+		return
+	}
+	t.key = key
+}
+
+// missed returns the recorded key, or "" when this execution touched none.
+func (t *deferredMissTracker) missed() string {
+	if t == nil {
+		return ""
+	}
+	return t.key
+}
+
 // decryptSensitiveDoc applies the Contract #3 §3.10 read-side disposition
 // when doc's class resolves to a sensitive DDL: shared by step 4's
 // contextHint.reads/optionalReads/egressReads hydration and the lazy

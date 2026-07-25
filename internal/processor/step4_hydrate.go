@@ -24,8 +24,9 @@ import (
 //  3. Load the script source (carried on the cache entry). Empty
 //     script → EmptyScript / NoScriptForClass depending on whether
 //     the underlying DDL declared a script aspect at all.
-//  4. Hydrate every key in envelope.contextHint.reads (known-key reads
-//     only; a missing key faults HydrationMiss) and every key in
+//  4. Hydrate every key in envelope.contextHint.reads (known-key reads only;
+//     a missing key is recorded *required-absent* and faults HydrationMiss
+//     where the operation first touches it) and every key in
 //     envelope.contextHint.optionalReads (absence-tolerant: a missing key
 //     is recorded known-absent, Contract #2 §2.5 class (d)).
 type HydratorImpl struct {
@@ -152,14 +153,43 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 
 	// 4. Hydrate contextHint.reads (fail-closed) + contextHint.optionalReads
 	// (absence-tolerant) + contextHint.egressReads (fail-closed, ref-if-
-	// sensitive) — Contract #2 §2.5 read posture. A `reads` key that is
-	// missing faults HydrationMiss; an `optionalReads` key that is missing is
-	// recorded *known-absent* so kv.Read serves None from the step-4 snapshot
-	// (the class-(d) read-before-create / dedup pattern) with no live GET; an
-	// `egressReads` key that is missing faults HydrationMiss identically to
-	// `reads` — a param template's target is by definition required.
+	// sensitive) — Contract #2 §2.5 read posture. An `optionalReads` key that
+	// is missing is recorded *known-absent* so kv.Read serves None from the
+	// step-4 snapshot (the class-(d) read-before-create / dedup pattern) with
+	// no live GET. A missing `reads` or `egressReads` key is recorded
+	// *required-absent*: still fail-closed, but the HydrationMiss is raised
+	// where the operation first touches the key rather than here.
+	//
+	// Recording rather than faulting is what keeps this loop from being an
+	// existence oracle. contextHint is client-supplied and step 3 authorizes
+	// without inspecting it, so a fault here would answer "does this key
+	// exist?" for any actor holding any operation grant, over any key, before a
+	// script runs. Touching the key requires naming it in the payload, which is
+	// the path the operation's own guards stand on.
 	hydrated := make(map[string]VertexDoc)
 	var knownAbsent map[string]struct{}
+	var requiredAbsent map[string]struct{}
+	// A key may appear twice in one list (nothing rejects that), and the two
+	// live GETs straddle any concurrent create or purge, so the same key can
+	// probe both present and absent within one hydration. These two keep the
+	// maps disjoint, with PRESENT winning: a hydrated doc is a real read the
+	// script can serve, whereas a stale absence would fault an operation whose
+	// key is sitting right there in the working set. The "" guard at each loop
+	// head is what keeps the empty string out of requiredAbsent — both the
+	// tracker and the mutation check use "" as their no-fault sentinel.
+	markRequiredAbsent := func(key string) {
+		if _, present := hydrated[key]; present {
+			return
+		}
+		if requiredAbsent == nil {
+			requiredAbsent = map[string]struct{}{}
+		}
+		requiredAbsent[key] = struct{}{}
+	}
+	markHydrated := func(key string, doc VertexDoc) {
+		hydrated[key] = doc
+		delete(requiredAbsent, key)
+	}
 	tracker := &sensitiveReadTracker{}
 	var egressKeys map[string]struct{}
 	if env.ContextHint != nil {
@@ -170,9 +200,8 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
 			if err != nil {
 				if errors.Is(err, substrate.ErrKeyNotFound) {
-					return HydratedState{}, &HydrationError{
-						Code: "HydrationMiss", MissingKey: key, OperationRequestID: rid,
-					}
+					markRequiredAbsent(key)
+					continue
 				}
 				return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
 			}
@@ -184,16 +213,22 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
 				return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
 			}
-			hydrated[key] = doc
+			markHydrated(key, doc)
 		}
 		for _, key := range env.ContextHint.OptionalReads {
 			if key == "" {
 				continue
 			}
 			// A key in both lists keeps the fail-closed `reads` semantics: it
-			// either hydrated above or already faulted, so it is never demoted
-			// to absence-tolerant by a duplicate optionalReads entry.
+			// either hydrated above or was recorded required-absent, so it is
+			// never demoted to absence-tolerant by a duplicate optionalReads
+			// entry — a demotion would let the weaker declaration decide, and
+			// `optionalReads` must never soften a read the op depends on
+			// (Contract #2 §2.5 authoring rule).
 			if _, ok := hydrated[key]; ok {
+				continue
+			}
+			if _, ok := requiredAbsent[key]; ok {
 				continue
 			}
 			// A duplicate optionalReads entry already probed absent: skip the
@@ -220,7 +255,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, false, tracker, rid); err != nil {
 				return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
 			}
-			hydrated[key] = doc
+			markHydrated(key, doc)
 		}
 		for _, key := range env.ContextHint.EgressReads {
 			if key == "" {
@@ -240,9 +275,8 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
 			if err != nil {
 				if errors.Is(err, substrate.ErrKeyNotFound) {
-					return HydratedState{}, &HydrationError{
-						Code: "HydrationMiss", MissingKey: key, OperationRequestID: rid,
-					}
+					markRequiredAbsent(key)
+					continue
 				}
 				return HydratedState{}, fmt.Errorf("step4: read %s: %w", key, err)
 			}
@@ -254,7 +288,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			if err := decryptSensitiveDoc(ctx, h.Conn, h.CoreBucket, h.DDLs, h.Vault, &doc, true, tracker, rid); err != nil {
 				return HydratedState{}, fmt.Errorf("step4: decrypt %s: %w", key, err)
 			}
-			hydrated[key] = doc
+			markHydrated(key, doc)
 		}
 	}
 
@@ -264,16 +298,19 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 		"ddlKey", ddlKey,
 		"contextHintCount", len(hydrated),
 		"knownAbsentCount", len(knownAbsent),
+		"requiredAbsentCount", len(requiredAbsent),
 	)
 
 	return HydratedState{
 		Context: ScriptContext{
-			Operation:    env,
-			Hydrated:     hydrated,
-			KnownAbsent:  knownAbsent,
-			DDLLookup:    map[string]MetaVertex{class: metaVtx},
-			ScriptSource: source,
-			ScriptClass:  class,
+			Operation:      env,
+			Hydrated:       hydrated,
+			KnownAbsent:    knownAbsent,
+			RequiredAbsent: requiredAbsent,
+			DeferredMiss:   &deferredMissTracker{},
+			DDLLookup:      map[string]MetaVertex{class: metaVtx},
+			ScriptSource:   source,
+			ScriptClass:    class,
 			// Back the script's lazy kv.Read() (§2.5) with a single-key reader
 			// over the same Conn + Core bucket used for hydration. A read of a
 			// key not pre-fetched via contextHint falls through to this.

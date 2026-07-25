@@ -129,7 +129,9 @@ func TestEgressReads_NonSensitiveKey_HydratesPlain(t *testing.T) {
 
 // TestEgressReads_MissingKey_HydrationMiss: egressReads is fail-closed exactly
 // like reads — an absent declared key faults HydrationMiss, never a silent
-// absence branch (a param template's target is by definition required).
+// absence branch (a param template's target is by definition required). Like
+// `reads`, the fault is raised where the operation touches the key, not at
+// step 4, so hydration itself is not an existence oracle.
 func TestEgressReads_MissingKey_HydrationMiss(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -139,13 +141,22 @@ func TestEgressReads_MissingKey_HydrationMiss(t *testing.T) {
 	env := newTestEnvelope(testNanoID1)
 	env.ContextHint = &ContextHint{EgressReads: []string{missingKey}}
 
-	_, err := h.Hydrate(ctx, env)
-	var hErr *HydrationError
-	if err == nil {
-		t.Fatalf("expected HydrationError, got nil")
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("hydrate must not fault on an untouched absent egressReads key: %v", err)
 	}
-	if !errors.As(err, &hErr) || hErr.Code != "HydrationMiss" || hErr.MissingKey != missingKey {
-		t.Fatalf("got %v, want HydrationMiss for %q", err, missingKey)
+	if _, required := state.Context.RequiredAbsent[missingKey]; !required {
+		t.Fatalf("egressReads miss must be recorded required-absent, got %v", state.Context.RequiredAbsent)
+	}
+
+	_, runErr := runKVScript(t, state.Context, `
+def execute(state, op):
+    v = kv.Read("`+missingKey+`")
+    return {"mutations": [], "events": [{"class": "read-returned", "data": {}}]}
+`)
+	var hErr *HydrationError
+	if !errors.As(runErr, &hErr) || hErr.Code != "HydrationMiss" || hErr.MissingKey != missingKey {
+		t.Fatalf("got %v, want HydrationMiss for %q", runErr, missingKey)
 	}
 }
 

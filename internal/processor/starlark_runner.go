@@ -7,11 +7,12 @@ import (
 	"strings"
 	"time"
 
-	starlarklib "go.starlark.net/starlark"
 	starlarkjson "go.starlark.net/lib/json"
+	starlarklib "go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 
 	"github.com/operatinggraph/lattice/internal/starlarksandbox"
+	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 // DefaultScriptWallBudget is the default wall-clock execution budget for a
@@ -61,7 +62,14 @@ func NewStarlarkRunner(wallBudget time.Duration, maxSteps int64) *StarlarkRunner
 func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResult, error) {
 	rid := sc.Operation.RequestID
 
-	stateVal := vertexMapToStarlarkWithHydrated(sc.Hydrated)
+	// Own the tracker rather than trusting the caller to have wired one: a nil
+	// tracker would silently downgrade a deferred HydrationMiss to whatever
+	// error carried it out of Starlark, which is the fail-open direction.
+	if sc.DeferredMiss == nil {
+		sc.DeferredMiss = &deferredMissTracker{}
+	}
+
+	stateVal := vertexMapToStarlarkWithHydrated(sc)
 	opVal := operationEnvelopeToStarlark(sc.Operation)
 
 	// Build globals.
@@ -101,11 +109,88 @@ func (r *StarlarkRunner) Run(ctx context.Context, sc ScriptContext) (ScriptResul
 		Wall:     r.WallBudget,
 		MaxSteps: r.MaxSteps,
 	})
+	// A required-absent declared read the script touched outranks whatever
+	// Starlark error carried it out: the caller must see the HydrationMiss step
+	// 4 deferred, not a ScriptError naming an internal abort message. Checked on
+	// the success path too — if a mapping ever swallowed the abort, the
+	// operation still fails closed rather than committing having skipped a read
+	// it declared its correctness depends on.
+	if key := sc.DeferredMiss.missed(); key != "" {
+		return ScriptResult{}, deferredHydrationMiss(key, rid)
+	}
 	if sErr != nil {
 		return ScriptResult{}, classifyScriptError(sErr, rid)
 	}
 
-	return parseScriptResult(out, rid)
+	result, err := parseScriptResult(out, rid)
+	if err != nil {
+		return ScriptResult{}, err
+	}
+	// The write side of the same dependence test. applyHydratedRevisions
+	// defaults an update/tombstone's expectedRevision from the step-4 snapshot
+	// and skips keys it never hydrated, leaving them UNCONDITIONED — so a
+	// mutation naming a required-absent key must fault here, or deferring the
+	// read would turn a rejection into an unconditioned write to a key that
+	// does not exist.
+	if key := firstRequiredAbsentMutation(result.Mutations, sc.RequiredAbsent); key != "" {
+		sc.DeferredMiss.fault(key)
+		return ScriptResult{}, deferredHydrationMiss(key, rid)
+	}
+	return result, nil
+}
+
+// deferredHydrationMiss builds the HydrationMiss for a declared read step 4
+// recorded as absent. It carries the same code and MissingKey a hydration-time
+// fault would, so an operation that depends on the key is rejected with the
+// full diagnostic.
+func deferredHydrationMiss(key, rid string) *HydrationError {
+	return &HydrationError{Code: "HydrationMiss", MissingKey: key, OperationRequestID: rid}
+}
+
+// firstRequiredAbsentMutation returns the first required-absent key a mutation
+// depends on, or "" when none does.
+//
+// A mutation depends on a required-absent key when it names it directly, and
+// also when it writes something the key's vertex must exist for: an ASPECT of a
+// required-absent vertex, or a LINK with a required-absent endpoint. Those two
+// carry their subject's vertex key inside their own key (Contract #1 §1.1), and
+// matching only the exact key would let an op write an aspect onto — or a link
+// into — a vertex it declared it would read and that is not there. Step 6
+// resolves an aspect's governing DDL through its parent vertex and falls back to
+// the permissive default when that vertex resolves to nothing, so nothing
+// downstream would catch it.
+func firstRequiredAbsentMutation(mutations []MutationOp, requiredAbsent map[string]struct{}) string {
+	if len(requiredAbsent) == 0 {
+		return ""
+	}
+	required := func(key string) bool {
+		_, ok := requiredAbsent[key]
+		return ok
+	}
+	for i := range mutations {
+		key := mutations[i].Key
+		if required(key) {
+			return key
+		}
+		switch substrate.ClassifyKey(key) {
+		case substrate.KindAspect:
+			if vk, _, _, _, ok := substrate.ParseAspectKey(key); ok && required(vk) {
+				return vk
+			}
+		case substrate.KindLink:
+			if t1, id1, _, t2, id2, ok := substrate.ParseLinkKey(key); ok {
+				source := substrate.VertexPrefix + "." + t1 + "." + id1
+				if required(source) {
+					return source
+				}
+				target := substrate.VertexPrefix + "." + t2 + "." + id2
+				if required(target) {
+					return target
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // classifyScriptError maps a starlarksandbox.SandboxError onto the
@@ -351,8 +436,16 @@ func starlarkDictToGoMap(d *starlarklib.Dict) map[string]interface{} {
 //
 //	Mapping   — via Get (supports `state[key]` and `key in state`)
 //	Iterable  — via Iterate (supports `for k in state`)
+//
+// requiredAbsent/deferredMiss carry the fail-closed declared reads that were
+// absent at the step-4 snapshot. A lookup of one is the operation depending on
+// the key, so it raises the HydrationMiss step 4 deferred instead of reporting
+// "not found" — `state[K]`, `K in state` and `state.get(K)` all route through
+// Get, so all three fail closed identically.
 type stateMapValue struct {
-	d *starlarklib.Dict
+	d              *starlarklib.Dict
+	requiredAbsent map[string]struct{}
+	deferredMiss   *deferredMissTracker
 }
 
 func (s *stateMapValue) String() string          { return s.d.String() }
@@ -363,10 +456,27 @@ func (s *stateMapValue) Hash() (uint32, error)   { return 0, fmt.Errorf("state i
 
 // Get implements starlarklib.Mapping — supports `state[key]` and `key in state`.
 func (s *stateMapValue) Get(k starlarklib.Value) (v starlarklib.Value, found bool, err error) {
+	if ks, ok := k.(starlarklib.String); ok {
+		if _, required := s.requiredAbsent[string(ks)]; required {
+			s.deferredMiss.fault(string(ks))
+			return nil, false, fmt.Errorf("state: declared read is absent: %s", string(ks))
+		}
+	}
 	return s.d.Get(k)
 }
 
 // Iterate implements starlarklib.Iterable — supports `for k in state`.
+//
+// Enumeration names no key, so it is not a dependence on any particular one and
+// does not fault: a required-absent key is simply not in the set, exactly as an
+// undeclared key would not be. Faulting here on the mere existence of a
+// required-absent key would not be a dependence test at all — it would reject
+// on "some declared read was absent", which is the caller-visible answer to
+// "does that key exist?" that deferring the miss exists to withhold.
+//
+// A prefix scan that finds nothing is therefore the script's own to handle, on
+// the same footing as any guard: `find_assigned_link` in orchestration-base
+// returns None and its caller fails closed (`UnknownAssignedLink`).
 func (s *stateMapValue) Iterate() starlarklib.Iterator {
 	return s.d.Iterate()
 }
@@ -377,20 +487,43 @@ func (s *stateMapValue) AttrNames() []string {
 	return s.d.AttrNames()
 }
 
-// Attr implements starlarklib.HasAttrs — delegates to the underlying dict.
-// All dict-native attrs flow through (no custom attributes are added).
+// Attr implements starlarklib.HasAttrs — delegates to the underlying dict for
+// every attr except `get`, which is re-bound so it agrees with Get.
+//
+// A dict's own bound `get` closes over the dict, not over this wrapper, so
+// delegating it would let `state.get(K)` answer None for a required-absent key:
+// that call NAMES K, so it is a dependence on K and must fail closed like
+// `state[K]`. The enumerators (`keys`/`items`/`values`) name nothing and
+// delegate untouched, on the same reasoning as Iterate.
 func (s *stateMapValue) Attr(name string) (starlarklib.Value, error) {
-	return s.d.Attr(name)
+	if name != "get" {
+		return s.d.Attr(name)
+	}
+	return starlarklib.NewBuiltin("get", func(_ *starlarklib.Thread, _ *starlarklib.Builtin, args starlarklib.Tuple, kwargs []starlarklib.Tuple) (starlarklib.Value, error) {
+		var key, fallback starlarklib.Value = nil, starlarklib.None
+		if err := starlarklib.UnpackPositionalArgs("get", args, kwargs, 1, &key, &fallback); err != nil {
+			return nil, err
+		}
+		v, found, err := s.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return fallback, nil
+		}
+		return v, nil
+	}), nil
 }
 
 // vertexMapToStarlarkWithHydrated builds the `state` global for a script.
-// Returns a *stateMapValue wrapping the key→VertexDoc dict.
-func vertexMapToStarlarkWithHydrated(m map[string]VertexDoc) *stateMapValue {
+// Returns a *stateMapValue wrapping the key→VertexDoc dict, carrying the
+// fail-closed declared reads that were absent at the step-4 snapshot.
+func vertexMapToStarlarkWithHydrated(sc ScriptContext) *stateMapValue {
 	d := new(starlarklib.Dict)
-	for k, v := range m {
+	for k, v := range sc.Hydrated {
 		_ = d.SetKey(starlarklib.String(k), vertexDocToStarlark(v))
 	}
-	return &stateMapValue{d: d}
+	return &stateMapValue{d: d, requiredAbsent: sc.RequiredAbsent, deferredMiss: sc.DeferredMiss}
 }
 
 // vertexDocToStarlark projects a single VertexDoc into the Starlark struct a

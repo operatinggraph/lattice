@@ -15,7 +15,9 @@ import (
 //   - Hydrated: vertex/aspect documents pre-fetched per `contextHint.reads`
 //     plus the present `contextHint.optionalReads` keys. Exposed as the
 //     `state` global dict (key -> struct). Absent optionalReads keys land in
-//     KnownAbsent instead (never in `state`; kv.Read serves them as None).
+//     KnownAbsent instead (never in `state`; kv.Read serves them as None), and
+//     absent `reads`/`egressReads` keys land in RequiredAbsent (never in
+//     `state`; touching one faults HydrationMiss).
 //   - DDLLookup: DDL meta-vertices keyed by canonicalName (e.g.,
 //     "identity"). Exposed as the `ddl` global dict. Populated from the
 //     DDL cache built at startup and refreshed on DDL mutations.
@@ -41,7 +43,25 @@ type ScriptContext struct {
 	// Hydrated, the script re-branches no-op). Keys absent from BOTH Hydrated
 	// and KnownAbsent were simply not declared — kv.Read falls through to the
 	// lazy KVReader as before. Nil when the envelope declared no optionalReads.
-	KnownAbsent  map[string]struct{}
+	KnownAbsent map[string]struct{}
+	// RequiredAbsent records the `contextHint.reads` / `contextHint.egressReads`
+	// keys that were NOT found in Core KV at step 4. These are the fail-closed
+	// declared reads (class (a)/(f)) — the opposite disposition from KnownAbsent:
+	// touching one faults HydrationMiss rather than reading as None.
+	//
+	// The fault is raised where the operation DEPENDS on the key — a kv.Read, a
+	// `state` membership access, or a mutation naming it — rather than during
+	// hydration. Step 4 runs before any authorization the key is subject to, so
+	// a fault there would answer "does this key exist?" for any actor holding
+	// any operation grant, over any key, without a script running. An operation
+	// that never touches the key cannot be affected by whether it exists, so its
+	// outcome must not depend on that; one that touches it fails closed.
+	RequiredAbsent map[string]struct{}
+	// DeferredMiss records the first RequiredAbsent key this execution touched,
+	// so the runner can raise the HydrationMiss that step 4 deferred. Shared
+	// pointer (like SensitiveReads) so the `kv` builtins and the `state` mapping
+	// report through the same channel. Never nil in production wiring.
+	DeferredMiss *deferredMissTracker
 	DDLLookup    map[string]MetaVertex
 	ScriptSource string
 	ScriptClass  string

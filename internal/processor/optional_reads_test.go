@@ -75,8 +75,10 @@ func TestHydrate_OptionalReads_AbsentIsKnownAbsent(t *testing.T) {
 }
 
 // TestHydrate_OptionalReads_ReadsStayFailClosed — the §2.5 authoring rule is
-// structural: a key in `reads` faults on absence even if a (redundant)
-// optionalReads entry also names it. optionalReads can never soften `reads`.
+// structural: a key in `reads` keeps the fail-closed disposition even if a
+// (redundant) optionalReads entry also names it. optionalReads can never soften
+// `reads` — demoted to known-absent the key would read as None instead of
+// faulting, letting the weaker declaration decide.
 func TestHydrate_OptionalReads_ReadsStayFailClosed(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
@@ -90,10 +92,29 @@ func TestHydrate_OptionalReads_ReadsStayFailClosed(t *testing.T) {
 		OptionalReads: []string{missing},
 	}
 
-	_, err := h.Hydrate(ctx, env)
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("hydrate must not fault on an untouched absent declared read: %v", err)
+	}
+	sc := state.Context
+	if _, required := sc.RequiredAbsent[missing]; !required {
+		t.Fatalf("a key in both lists must keep the fail-closed disposition, RequiredAbsent = %v", sc.RequiredAbsent)
+	}
+	if _, absent := sc.KnownAbsent[missing]; absent {
+		t.Fatalf("a `reads` key must never be demoted to known-absent by a duplicate optionalReads entry")
+	}
+
+	// The disposition is only real if reading it faults rather than yielding
+	// None — the demotion this test exists to forbid would be invisible at the
+	// map level alone.
+	_, runErr := runKVScript(t, sc, `
+def execute(state, op):
+    v = kv.Read("`+missing+`")
+    return {"mutations": [], "events": [{"class": "read-returned", "data": {}}]}
+`)
 	var hErr *HydrationError
-	if !errors.As(err, &hErr) || hErr.Code != "HydrationMiss" {
-		t.Fatalf("reads key duplicated in optionalReads must still HydrationMiss, got: %v", err)
+	if !errors.As(runErr, &hErr) || hErr.Code != "HydrationMiss" || hErr.MissingKey != missing {
+		t.Fatalf("reads key duplicated in optionalReads must still HydrationMiss on read, got: %v", runErr)
 	}
 }
 

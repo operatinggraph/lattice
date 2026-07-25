@@ -50,7 +50,8 @@ func (l Lane) valid() bool {
 // (envelope class, endpoint touch, not tombstoned) before acting on it.
 //
 // The read posture (Contract #2 §2.5 "Read posture"): `Reads` is fail-closed
-// (a missing key faults HydrationMiss — class (a)); `OptionalReads` is
+// (a missing key faults HydrationMiss at the first point the operation depends
+// on it — class (a)); `OptionalReads` is
 // absence-tolerant (a missing key is recorded known-absent and kv.Read serves
 // None from the step-4 snapshot — class (d), the read-before-create / dedup
 // pattern); `Enumerations` declares kv.Links link-enumerations (§2.5.1) as

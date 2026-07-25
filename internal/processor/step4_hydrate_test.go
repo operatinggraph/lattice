@@ -47,7 +47,13 @@ func TestHydrate_HappyPath_ContextHintAndDDL(t *testing.T) {
 	}
 }
 
-func TestHydrate_HydrationMiss_ContextHintKey(t *testing.T) {
+// TestHydrate_RequiredAbsent_RecordedNotFaulted pins the deferral at its
+// source: step 4 runs before any authorization the declared key is subject to,
+// so an absent `reads` key is RECORDED rather than faulted. Hydration must
+// succeed — a fault here would let any actor holding any operation grant test
+// the existence of any Core KV key. The fault belongs at first use
+// (TestRequiredAbsent_* in starlark_required_absent_test.go).
+func TestHydrate_RequiredAbsent_RecordedNotFaulted(t *testing.T) {
 	t.Parallel()
 	ctx, conn, _, _, _ := setupTestPipeline(t)
 	h := NewHydrator(conn, testCoreBucket, testLogger())
@@ -56,19 +62,28 @@ func TestHydrate_HydrationMiss_ContextHintKey(t *testing.T) {
 	missingKey := "vtx.identity.MissingMissingMissing"
 	env.ContextHint = &ContextHint{Reads: []string{missingKey}}
 
-	_, err := h.Hydrate(ctx, env)
-	if err == nil {
-		t.Fatalf("expected HydrationError, got nil")
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("hydrate must not fault on an untouched absent declared read: %v", err)
 	}
-	var hErr *HydrationError
-	if !errors.As(err, &hErr) {
-		t.Fatalf("expected *HydrationError, got %T: %v", err, err)
+	sc := state.Context
+	if _, ok := sc.RequiredAbsent[missingKey]; !ok {
+		t.Fatalf("RequiredAbsent = %v, want it to record %q", sc.RequiredAbsent, missingKey)
 	}
-	if hErr.Code != "HydrationMiss" {
-		t.Fatalf("Code = %q, want HydrationMiss", hErr.Code)
+	// Fail-closed, not absence-tolerant: it must NOT be demoted to the
+	// optionalReads disposition (which would read as None), and must never
+	// appear in `state`.
+	if _, ok := sc.KnownAbsent[missingKey]; ok {
+		t.Fatalf("a `reads` miss must not land in KnownAbsent (that is the optionalReads disposition)")
 	}
-	if hErr.MissingKey != missingKey {
-		t.Fatalf("MissingKey = %q, want %q", hErr.MissingKey, missingKey)
+	if _, ok := sc.Hydrated[missingKey]; ok {
+		t.Fatalf("an absent key must never be hydrated")
+	}
+	if sc.DeferredMiss == nil {
+		t.Fatalf("DeferredMiss tracker must be wired so the runner can raise the deferred fault")
+	}
+	if got := sc.DeferredMiss.missed(); got != "" {
+		t.Fatalf("nothing touched the key yet, so missed() = %q, want \"\"", got)
 	}
 }
 

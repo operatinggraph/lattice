@@ -44,7 +44,9 @@ func (e *ExecutorImpl) Execute(ctx context.Context, env *OperationEnvelope, stat
 
 	result, err := e.Runner.Run(ctx, sc)
 	if err != nil {
-		// Already typed as *ScriptError.
+		// Already typed — *ScriptError, or *HydrationError when the script
+		// touched a declared read step 4 recorded absent. classifyStepError
+		// discriminates both, so pass it through unwrapped.
 		return ScriptResult{}, err
 	}
 

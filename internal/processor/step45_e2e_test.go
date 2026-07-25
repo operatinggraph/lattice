@@ -25,13 +25,21 @@ func TestE2E_FullPipelineCleanExecution(t *testing.T) {
 }
 
 // TestE2E_HydrationMissTerminates publishes an envelope whose contextHint
-// references a missing key. Step 4 returns *HydrationError; the commit
-// path emits a HydrationFailed reply and terms the message.
+// references a missing key that the script READS. The read raises the deferred
+// *HydrationError; the commit path emits a HydrationFailed reply and terms the
+// message — the full-pipeline proof that a declared read the operation depends
+// on stays fail-closed.
 func TestE2E_HydrationMissTerminates(t *testing.T) {
 	t.Parallel()
 	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
+	missingKey := "vtx.identity.AAAAAAAAAAAAAAAAAAAA"
+	reading := []byte(`{"class":"meta.script","isDeleted":false,"data":{"source":"def execute(state, op):\n    v = kv.Read(\"` + missingKey + `\")\n    return {\"mutations\": [], \"events\": []}\n"}}`)
+	if _, err := conn.KVPut(ctx, testCoreBucket, "vtx.meta.identity.script", reading); err != nil {
+		t.Fatalf("seed reading script: %v", err)
+	}
+
 	env := newTestEnvelope(testNanoID1)
-	env.ContextHint = &ContextHint{Reads: []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}}
+	env.ContextHint = &ContextHint{Reads: []string{missingKey}}
 	publishEnvelope(t, conn, env)
 	driveOne(t, ctx, cp, cons, OutcomeRejected)
 
@@ -40,6 +48,28 @@ func TestE2E_HydrationMissTerminates(t *testing.T) {
 	}
 	if metrics.OpsCommitted.Load() != 0 {
 		t.Fatalf("OpsCommitted = %d, want 0 (hydration missed)", metrics.OpsCommitted.Load())
+	}
+}
+
+// TestE2E_UntouchedAbsentDeclaredReadCommits is the oracle-closed case through
+// the whole pipeline: the SAME absent declared read, with a script that never
+// touches the key, must COMMIT. A rejection here would tell any actor holding
+// any operation grant that the key does not exist, a step before the
+// operation's own guards run. Paired with the test above: the outcome tracks
+// whether the operation depends on the key, never whether it exists.
+func TestE2E_UntouchedAbsentDeclaredReadCommits(t *testing.T) {
+	t.Parallel()
+	ctx, conn, cp, cons, metrics := setupTestPipeline(t)
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{Reads: []string{"vtx.identity.AAAAAAAAAAAAAAAAAAAA"}}
+	publishEnvelope(t, conn, env)
+	driveOne(t, ctx, cp, cons, OutcomeAccepted)
+
+	if metrics.OpsCommitted.Load() != 1 {
+		t.Fatalf("OpsCommitted = %d, want 1 — a surplus declared read must not decide the operation", metrics.OpsCommitted.Load())
+	}
+	if metrics.OpsRejected.Load() != 0 {
+		t.Fatalf("OpsRejected = %d, want 0", metrics.OpsRejected.Load())
 	}
 }
 

@@ -206,8 +206,8 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 			// The task DDL validates all three link endpoints with vertex_alive
 			// (orchestration-base/ddls.go) — the caller MUST hydrate them. They are
 			// the BARE keys (assignee/forOperation/scopedTo); the DDL reads no
-			// `.state` aspect, so none is listed (a non-existent .state key would be
-			// a HydrationMiss). Cross-checked against the script by
+			// `.state` aspect, so none is listed — the declared set names exactly
+			// what the script reads. Cross-checked against the script by
 			// TestCreateTaskReads_MatchDDLScript.
 			reads: []string{assignee, forOperation, taskTarget},
 			// The two absence-tolerant kv.Read keys the CreateTask script
