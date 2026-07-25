@@ -319,11 +319,52 @@ dropped, not reported"* — `LensProvider` skipping an errored `GetStatus`/`Pend
 (`cmd/refractor/main.go:389,393`) is the same four lines Inc 2 rewrites. Shipping it separately would
 edit the same function twice.
 
+### 10.1 Build outcome — the generalization did NOT ship; the prefilter blocks it
+
+The `LensProjectionUnreadable` half shipped. **Inc 1 (widening the sweep to business lenses)
+was built, reviewed, and reverted** — a two-reviewer adversarial pass independently converged
+on a defect that invalidates this brief's central grounding claim.
+
+**The sweep is not, in fact, plane-agnostic. Its PREFILTER is not.** `Sweeper.candidates`
+direction 1 (`internal/refractor/pipeline/sweep.go:546-568`) treats *a live anchor with no
+target key* as a definite divergence. That is sound only for a **total-coverage** lens —
+every anchor has a row — which is an auth-plane property (every identity carries a cap doc).
+It is false for a **filtering** lens, which is what almost every business actorAggregate lens
+is: `unroutedTasks`' own doc says a direct-assigned task *"never matches at all, so it never
+gets a weaver-targets row"*. 14 of the 16 lenses this would enrol are that shape.
+
+The consequence, in steady state with nothing wrong:
+
+- `anchors` is `sort.Strings`-ordered and direction 1 has **no cursor**, so the same
+  lexicographically-first ~20 anchors fill the whole prefilter budget every tick, forever —
+  each costing a Core-KV read plus a full-engine cypher evaluation that can never heal
+  anything.
+- Direction 2 (orphan retraction) `break`s on its first key and **never executes** for that
+  lens class.
+- Direction 3 — the round-robin deep verify, the *only* stale-row detector and the entire
+  reason this fire wanted the sweep — is throttled to its reserved 5 slots instead of 25, so
+  a full re-verify takes 5× the designed budget over anchor types far larger than `identity`.
+
+So the generalization as scoped would have added cost and health noise while *not* delivering
+the healer the board row asks for. Two further confirmed findings rode along: the sweep's
+divergence/repair verdicts escalate to `severity: error` ⇒ instance-wide `unhealthy`, which
+contradicts the business-lens invariant stated in `docs/components/refractor.md` (a business
+lens degrades, never fails, the instance); and 14 of 16 lenses target the shared
+`weaver-targets` bucket, so each tick fully enumerates that bucket once per lens.
+
+**The honest next increment** is not "re-apply the widening" — it is **make direction 1 sound
+for a filtering lens** before anything is enrolled. The grounded shape: a lens whose
+`EmptyBehavior` is `delete` legitimately has anchors with no row, so for it direction 1 must
+not treat absence as divergence at all (the deep verify, which recomputes, is the correct and
+sufficient detector); and direction 1 needs its own cursor regardless so it cannot monopolize
+the batch. That change touches the **auth-plane** sweep's selection algorithm, so it is a
+security-plane increment in its own right and gets its own fire and its own adversarial
+review — it is not a tail to bolt onto this one.
+
 **Non-goals (this fire).**
 
-- No `LensProjectionSweepStalled` — the staleness-clock mirror of `CapabilitySweepStalled`. The
-  auth-plane version carries substantial escalation machinery; the business-lens sweep ships with its
-  divergence + repair verdicts observable and its **liveness clock unreported**. Filed as a row, with
-  its consumer named, in the same commit as the ✅ flip.
 - No rebuild-on-MatchChange (decision 1). No change to `CapabilityLensProvider` or any auth-plane
   threshold. No contract change.
+- The business-lens sweep **verdict reporting** (`LensCoverageDivergence` / `LensRepairFailing`) was
+  built and reverted with Inc 1 — it is dead reporting until a business lens actually has a sweeper,
+  so it belongs to the direction-1 fire above, not here.
