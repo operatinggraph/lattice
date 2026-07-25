@@ -41,8 +41,8 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **Loupe's cross-origin gate is the weaker fork of the shipped kit gate** | `cmd/loupe/server.go`'s `crossOriginBlocked` + `publicorigin.go` are a ~110-line fork of what now lives in `internal/appsession` (`origin.go`), and Loupe's copy is per-handler opt-in at 16 call sites — handler #17 is silently ungated. The kit's is a choke point and adds the Fetch-Metadata branch (so a cross-origin subresource GET is refused too). Adopt `appsession.CrossOriginBlocked`/`ParsePublicOrigin`, drop the fork. | ★ | S–M | 📋 ready · [kit](../../../docs/components/appsession.md) |
-| **Loupe package install can't resolve non-operator GrantsTo roles** | `cmd/loupe/pkg.go` `kernelRoleIDs()` resolves only `operator`, so installing/upgrading any package whose permissions grant `consumer`/`frontOfHouse`/`backOfHouse`/`provider` through Loupe's admin UI fails on GrantsTo resolution (pre-existing; CLI installs use `cmd/lattice-pkg`'s full roster). Mirror that roster or resolve via the roleindex. | ★★ | S | 📋 ready |
+| **Loupe's cross-origin gate is the weaker fork of the shipped kit gate** | Gate half SHIPPED (choke point + Fetch-Metadata). Residual is the fork itself: swap `publicorigin.go`'s `publicOrigin`/`originComponents`/`parsePublicOrigin`/`matches` (~110 lines) for `appsession.ParsePublicOrigin` + the exported type, and `main.go`'s `isLoopbackHost` for `appsession.IsLoopbackHost` — all exported, no kit change needed. Only `CrossOriginBlocked` itself is blocked (hangs off `*Manager`). | ★ | S | 📋 ready · in-lane, NOT blocked · [kit](../../../docs/components/appsession.md) |
+| **Loupe package install can't resolve non-operator GrantsTo roles** | `cmd/loupe/pkg.go` `kernelRoleIDs()` resolves only `operator`, so installing/upgrading any package whose permissions grant `consumer`/`frontOfHouse`/`backOfHouse`/`provider` through Loupe's admin UI fails on GrantsTo resolution. | ★★ | S | ✅ SHIPPED — fixed in passing by `4790992b` (Verticals lane); roster now mirrors `cmd/lattice-pkg` |
 
 ## Parked
 
@@ -77,6 +77,7 @@ needs a Sally UX pass → Winston adjudicates (Andrew-delegated for this program
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `256229a4` · [Loupe/maint] Cross-origin gate is one choke point (`requireOperator`) + the Fetch-Metadata branch; nested-navigation framing refused. 3-layer review fixed forward, live-verified, CI green
 - 2026-07-22 · `9359fce2` · [Loupe/F21] F21 CLOSED — Fire 3: retry timer self-heals demo Loupe after a slow reset drain, no more human-noticed 502s. 3-layer review fixed forward, live-verified, CI green
 - 2026-07-22 · `d48541a3` · [Loupe/F22] F22 CLOSED — Contents panel handles `nats_subject` targets honestly, points Personal targets to Edge Fleet. Lead self-review, live-verified, CI green
 - 2026-07-22 · `0690381e` · [Loupe/F20.4] F20 CLOSED — hosted read-only Loupe exposed on its own subdomain; per-reset operator provisioning; exposure checklist #1–#7 discharged live (Andrew's go)
