@@ -1811,6 +1811,26 @@ and still means residence (`app.js:87-88` comment) — the three-way split must 
 NanoID alphabet (no `l/I/O/0`) if any id is minted. `anchorLabel` (`:104-110`) already falls through
 name → containerName → `prettify(key)`, so a nameless binding degrades to a typed label, never a bare NanoID.
 
+**As-built — W5 SHIPPED (2026-07-25, `e5b5c375`).** The lens stamps the three `identifiedBy` bindings into
+`anchors` with their relation and each domain's declared profile name; `splitAnchors` became a three-way hat
+split feeding "My places / Where I work / What I provide" on Home and Me; a binding chip opens a detail view
+where that hat's ops render grouped by `viaRoleName`; the demo login offers all five personas.
+
+The review found the surface's membership test wrong as first built, and the correction is the fire's one
+design call worth recording. Filtering by `dispatchTargetType` alone offers a clinician **"Book appointment"
+against her own record**: `CreateAppointment` declares `targetType: "provider"` exactly as `SetProviderHours`
+does, and the clinic template permits it for every resident of the building, so binding any resident as a
+provider surfaces it. The discriminator is `dispatch.class` — `"provider"` when the record is the op's
+*subject*, `"appointment"` when it is the *counterparty* — which the manifest already projects. The filter is
+dispatch-level curation, explicitly **not** authorization: the capability plane still decides what a hat may
+do, per §6.4's "curation is UX; capability deltas are bugs".
+
+Two residuals, filed as rows in the same docs commit. (a) **Only the clinic `provider` hat has ops at all** —
+no op in `packages/` declares class or targetType `instructor`/`serviceprovider` (wellness targets a
+`session`, service-domain a `service` instance), so those two hats render inert chips rather than inviting a
+tap that says nothing. The three binding types were declared symmetrically and the op corpus is not, which is
+a package gap, not a renderer one. (b) `openEntityDetail`'s cross-hat attachment, below.
+
 **7 · Non-goals (this fire).** No narrowing of `openEntityDetail`'s cross-hat op attachment — it attaches any
 op whose `dispatchTargetType` matches the row's `entityType` (`app.js:777`), so a multi-hat human sees another
 hat's op on a shared type and it **fails closed in-script**. Correcting it needs a provenance stamp
