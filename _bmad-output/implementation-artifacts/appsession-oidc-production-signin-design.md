@@ -33,6 +33,10 @@ resolution). The backlog row's "needs a per-path origin-gate exemption (`form_po
 the code flow's callback is a cross-site top-level GET navigation (OIDC Core returns code responses via the
 **query string**), which `metadataAdmits` already admits — verified in code, with a test pinning that the
 gate still blocks a *scripted* cross-origin fetch of the same path. No gate change, no exemption surface.
+(The admitting condition gained a third term after this design was written: a cross-origin navigation must
+also carry `Sec-Fetch-Dest: document`, so a NESTED navigation — an iframe pointed at the callback — is
+refused. A real IdP redirect is top-level and carries it, so the conclusion is unchanged; a test simulating
+the callback must set the header, or it will assert a 403.)
 
 **Size: L** (the row estimated M; the honest size after the §10 adversarial pass is L — three fires).
 
@@ -68,7 +72,7 @@ JWKS with rotation — `cmd/gateway/main.go`, `auth.JWKSPoller`), Contract #11 f
 | FE write path = `POST /api/session/refresh` → raw token (cookie alone can't serve an `Authorization` header or NATS CONNECT) | `loftspace-app/web/app.js:274-299`, `facet/web/boot.mjs:148-158`, `facet/browserengine.go:145` |
 | **The dev posture's cookie carries the *resolved* identity because login RE-MINTS for `U`** | `session.go:437-458` (`:451` re-mint) |
 | **App read boundaries consume `appsession.Identity(ctx)` as already-resolved** — stated in their own comments | `cmd/loftspace-app/readauth.go:39-52` (+ clinic/cafe/wellness siblings) |
-| Origin gate admits a cross-origin **top-level GET navigation**; blocks everything else cross-origin | `origin.go:233-239`, `:266-289` |
+| Origin gate admits a cross-origin **top-level GET navigation** (`Sec-Fetch-Mode: navigate` **and** `Sec-Fetch-Dest: document`); blocks everything else cross-origin, nested navigations included | `origin.go` `metadataAdmits` / `OriginGate.Blocked` |
 | Session cookie is `SameSite=Strict` | `session.go:358-368` |
 | `Secure` is conditional on `PublicOrigin != nil \|\| !Loopback` | `session.go:354-356` |
 | Gateway trusts external IdPs: `GATEWAY_JWKS_URL`+`_ISSUER` (live rotation) or `GATEWAY_JWT_KEYS_DIR`+`_ISSUER`; **one optional `GATEWAY_JWT_AUDIENCE`** | `cmd/gateway/main.go:55-64,217` |
@@ -153,9 +157,10 @@ MaxAge 10m, value = JSON `{state, nonce, verifier, returnTo}`.
 
 ### 3.3 `GET /api/oidc/callback` — complete
 
-Auth-exempt fixed route. The origin gate **already admits it** (GET + `Sec-Fetch-Mode: navigate`; browsers
-attach no `Origin` to a GET navigation) — this design adds **no** gate exemption, and a test pins that the
-gate still blocks a scripted cross-origin fetch of the callback.
+Auth-exempt fixed route. The origin gate **already admits it** (GET + `Sec-Fetch-Mode: navigate` +
+`Sec-Fetch-Dest: document`, which a real top-level IdP redirect carries; browsers attach no `Origin` to a
+GET navigation) — this design adds **no** gate exemption, and a test pins that the gate still blocks a
+scripted cross-origin fetch of the callback. The `Dest` term is what refuses a framed callback.
 
 1. Read and **immediately expire** the flow cookie; missing/expired ⇒ 403 "sign-in flow not initiated".
 2. `state` equality (constant-time, single-use) against the cookie value; mismatch ⇒ 403. This is the
@@ -374,7 +379,8 @@ subject-continuity mismatch on refresh refused; `returnTo` open-redirect vectors
 `https://evil`, `\` forms) collapse to `/`; **`returnTo` XSS vectors (`"`, `'`, `</script>`, backtick,
 `${}`) render inert**; bounce response carries `no-store` + `no-referrer` + CSP and no token material;
 discovery `issuer` mismatch refused; JWKS **key rotation** mid-session verified through the poller; the
-origin gate still blocks a scripted cross-origin callback fetch while admitting the navigation shape.
+origin gate still blocks a scripted cross-origin callback fetch — and a framed one — while admitting the
+top-level navigation shape (`Sec-Fetch-Dest: document`).
 
 **e2e (Fire 3, ephemeral stack):** fake IdP + Gateway (trusting the fake's JWKS, audience pinned) + one
 vertical app: a browser-shaped client walks login → callback → bounce, `/api/whoami` reports the
