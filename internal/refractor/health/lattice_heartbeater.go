@@ -44,6 +44,11 @@ const (
 	// above watch the consumer; this one watches the truth — a caught-up
 	// consumer that MISSED events reads as fine on every other signal.
 	issueCapabilityCoverageDivergence = "CapabilityCoverageDivergence"
+	// issueCapabilityRepairFailing is raised when the convergence sweep's own
+	// repair cannot be written. It covers the blind spot of the code above: a
+	// repair that errors heals nothing, so the divergent streak clears and
+	// every other signal reads as converged while the row stays wrong.
+	issueCapabilityRepairFailing = "CapabilityRepairFailing"
 )
 
 // capabilityDivergenceErrorStreak is the number of CONSECUTIVE sweep passes
@@ -51,6 +56,19 @@ const (
 // error. One divergent pass is a repaired incident; a second in a row means the
 // sweep is papering over an ongoing delivery gap rather than a past one.
 const capabilityDivergenceErrorStreak = 2
+
+// capabilityRepairWarnStreak / capabilityRepairErrorStreak are the escalation
+// window for an UNREPAIRED divergence. A single failing pass raises nothing: a
+// failing anchor is retried on the very next pass (no backoff after the first
+// failure), so an isolated write error clears itself inside one interval and
+// alerting on it would flip the whole instance to degraded for every blip. Two
+// consecutive failing passes is a real fault, and a third means it is not
+// converging on its own — which, unlike a healed divergence, leaves the row
+// wrong the entire time.
+const (
+	capabilityRepairWarnStreak  = 2
+	capabilityRepairErrorStreak = 3
+)
 
 // defaultLensLagThreshold / defaultLensLagRaiseCycles mirror the capability-lens
 // defaults (lens-projection-liveness-design.md §5.7 — the cap path's
@@ -87,6 +105,16 @@ type CapabilityLensStatus struct {
 	// with no sweeper installed (every non-auth-plane target).
 	SweepReconciled      uint64
 	SweepDivergentStreak int
+	// SweepFailingActors is how many anchors currently carry an unrepaired
+	// reprojection failure and SweepFailedStreak how many consecutive passes
+	// ended with at least one; SweepLastFailure is the governing error's text.
+	// This is the sweep's REPAIR verdict, independent of the divergence verdict
+	// above and strictly worse: a divergence the sweep healed leaves a correct
+	// row, one it could not write leaves the row wrong — and heals nothing, so
+	// the divergent streak clears and the lens otherwise reads as converged.
+	SweepFailingActors int
+	SweepFailedStreak  int
+	SweepLastFailure   string
 }
 
 // LensLivenessStatus is one non-auth-plane (business) lens's liveness snapshot,
@@ -483,8 +511,9 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 
 	snaps := h.CapabilityLensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging, diverging []string
+	var paused, lagging, diverging, unrepaired []string
 	divergenceSeverity := ""
+	repairSeverity := ""
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := capLensName(s)
@@ -523,11 +552,46 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 				divergenceSeverity = "warning"
 			}
 		}
+		// A repair the sweep could not write is the one verdict every other
+		// signal misses: the consumer is caught up, nothing was healed, so the
+		// divergent streak reads zero — and the row is still wrong.
+		if s.SweepFailedStreak >= capabilityRepairWarnStreak {
+			var detail string
+			if s.SweepFailingActors > 0 {
+				detail = fmt.Sprintf("%s (%d actor(s) unrepaired over %d consecutive passes",
+					name, s.SweepFailingActors, s.SweepFailedStreak)
+			} else {
+				// A pass-level fault — an unreadable survey, or a tick
+				// abandoned before it verified anything — names no actor.
+				detail = fmt.Sprintf("%s (%d consecutive passes verified nothing",
+					name, s.SweepFailedStreak)
+			}
+			if s.SweepLastFailure != "" {
+				detail += ": " + s.SweepLastFailure
+			}
+			unrepaired = append(unrepaired, detail+")")
+			if s.SweepFailedStreak >= capabilityRepairErrorStreak {
+				repairSeverity = "error"
+			} else if repairSeverity == "" {
+				repairSeverity = "warning"
+			}
+			// Alert precedence is paused > repair-failing > lagging. Paused
+			// wins because the sweep is suppressed while paused, so a lingering
+			// failure there is a frozen artifact rather than a live one;
+			// repair-failing outranks lagging because a row that is wrong now
+			// beats a read-model that is merely behind. Neither displaced fact
+			// is lost — `consumerLag` carries the lag value in this same map,
+			// and each condition raises its own issue.
+			if alert != "paused" {
+				alert = "repair-failing"
+			}
+		}
 		metric[name] = map[string]any{
-			"status":      s.Status,
-			"consumerLag": s.ConsumerLag,
-			"alert":       alert,
-			"reconciled":  s.SweepReconciled,
+			"status":        s.Status,
+			"consumerLag":   s.ConsumerLag,
+			"alert":         alert,
+			"reconciled":    s.SweepReconciled,
+			"failingActors": s.SweepFailingActors,
 		}
 	}
 	h.pruneLagState(seen)
@@ -552,6 +616,14 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			severity: divergenceSeverity,
 			message: "capability projection diverged from the graph and was healed by the convergence sweep; " +
 				"a nonzero rate means events are being lost, not just repaired: " + strings.Join(diverging, ", "),
+		}
+	}
+	if len(unrepaired) > 0 {
+		active[issueCapabilityRepairFailing] = capIssue{
+			severity: repairSeverity,
+			message: "the convergence sweep could not repair a divergent capability projection; the row stays wrong " +
+				"and no other signal reports it, because a failed repair heals nothing and so clears the divergence " +
+				"streak: " + strings.Join(unrepaired, ", "),
 		}
 	}
 	return metric, h.reconcileCapIssues(active, now)

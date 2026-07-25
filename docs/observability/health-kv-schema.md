@@ -461,7 +461,7 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "consumerLag": <uint64>, "alert": "ok | paused | lagging", "reconciled": <uint64>}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "consumerLag": <uint64>, "alert": "ok | paused | lagging | repair-failing", "reconciled": <uint64>, "failingActors": <int>}
     },
     "lensLiveness": {
       "<lensCanonicalName>": {"status": "active | paused | rebuilding", "projectionLag": <uint64>, "lastProjectedAt": "<RFC3339>", "alert": "ok | paused | lagging"}
@@ -471,6 +471,7 @@ currently reserved-but-unemitted.
     {"code": "CapabilityLensPaused", "severity": "error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityLensLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityCoverageDivergence", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilityRepairFailing", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
@@ -504,6 +505,30 @@ ongoing gap rather than a past one), and clearing on the first clean pass.
 `metrics.capabilityLens.<name>.reconciled` is the matching cumulative counter: it is
 deliberately loud, because a nonzero *rate* is itself the signal to go find the delivery
 gap. `0` for a lens with no sweeper, which is every non-auth-plane target.
+
+`CapabilityRepairFailing` is the sweep's second, independent verdict, and it covers the
+blind spot of the code above: `CapabilityCoverageDivergence` is keyed on what the sweep
+**healed**, and a repair whose target write *errors* heals nothing — so the divergent
+streak clears and, with the consumer active and caught up, every other signal reads as
+converged while the row stays wrong. The more thoroughly unwritable the row, the healthier
+the lens reads. A single failing pass raises nothing — a failing anchor is retried on the
+very next pass, so an isolated write error clears itself inside one interval — then
+`warning` at two consecutive failing passes and `error` at three, clearing when a
+reprojection of every failing anchor succeeds. It also covers pass-level faults — an
+unreadable survey, or a tick abandoned before it could verify anything — which name no
+actor and would otherwise be indistinguishable from a clean bucket.
+`metrics.capabilityLens.<name>.failingActors` is the matching gauge (anchors currently
+unrepaired) and is emitted every beat regardless of the debounce, so the raw count is
+visible before the alert raises. `alert` reads `repair-failing` once the warning
+threshold is crossed, outranking `lagging` (a row that is wrong now beats a read-model
+that is merely behind — `consumerLag` still carries the lag value); `paused`
+keeps precedence, since the sweep is suppressed while paused and a lingering failure there
+is a frozen artifact rather than a live one. A failing anchor is retried on the next pass,
+then backs off by doubling to a sixteen-pass ceiling — the backoff suppresses the retry
+*work*, never the signal: a skipped anchor still counts in `failingActors`. Both sweep
+streaks are per-process state (a restart opens a fresh escalation window and re-discovers
+a live failure on its first pass), unlike the cumulative `reconciled` counter, which is
+restored from this document.
 
 ### `health.weaver.<instance>` — Weaver heartbeat
 

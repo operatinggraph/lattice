@@ -560,6 +560,17 @@ structurally — the driver simply never installs a `SweepPlan` for it.
   `CapabilityCoverageDivergence` (warning; `error` once two consecutive passes each heal
   something). Healing is deliberately loud — a nonzero rate is the signal to go find the
   delivery gap.
+- A repair the sweep could **not** write raises `CapabilityRepairFailing` instead — nothing
+  on one failing pass (the immediate retry usually clears it), `warning` at two consecutive,
+  `error` at three; `metrics.capabilityLens.<name>.failingActors` is the gauge and `alert`
+  reads `repair-failing`. The two verdicts are separate because a failed repair heals
+  nothing, so keyed on the heal count alone an unwritable row clears the divergent streak
+  and leaves an active, caught-up lens reading as converged. A failing anchor retries next
+  pass, then backs off by doubling to a sixteen-pass ceiling, yielding its batch slot to the
+  next divergent anchor — the backoff suppresses the retry work, never the signal. An actor
+  that leaves both listings is reaped, so a departed anchor cannot pin the alert open.
+  Pass-level faults (unreadable survey, a tick abandoned before it verified anything) raise
+  it too.
 - The sweep suppresses itself while a rebuild is in flight (a rebuild is a superset) and
   while the lens is paused (operator intent wins). The cursor and heal count persist on the
   lens's existing health entry, so a restart resumes rather than restarts the walk.

@@ -314,16 +314,21 @@ func main() {
 			if st.PauseReason != nil {
 				pauseReason = *st.PauseReason
 			}
-			// The sweep's coverage verdict, read from the in-process sweeper
-			// rather than the persisted entry: the streak is what escalates the
-			// issue, and it is per-run state the health entry deliberately does
-			// not carry (a restart starts a fresh escalation window).
+			// The sweep's coverage and repair verdicts, read from the in-process
+			// sweeper rather than the persisted entry: the streaks are what
+			// escalate the issues, and they are per-run state the health entry
+			// deliberately does not carry (a restart starts a fresh escalation
+			// window, and re-discovers a live repair failure on its first pass).
 			var reconciled uint64
-			var divergentStreak int
+			var divergentStreak, failingActors, failedStreak int
+			var lastFailure string
 			if sw := entry.pipeline.Sweeper(); sw != nil {
 				status := sw.Status()
 				reconciled = status.Reconciled
 				divergentStreak = status.DivergentStreak
+				failingActors = status.FailingActors
+				failedStreak = status.FailedStreak
+				lastFailure = status.LastFailure
 			}
 			out = append(out, health.CapabilityLensStatus{
 				CanonicalName:        entry.canonicalName,
@@ -333,6 +338,9 @@ func main() {
 				ConsumerLag:          pending,
 				SweepReconciled:      reconciled,
 				SweepDivergentStreak: divergentStreak,
+				SweepFailingActors:   failingActors,
+				SweepFailedStreak:    failedStreak,
+				SweepLastFailure:     lastFailure,
 			})
 		}
 		return out

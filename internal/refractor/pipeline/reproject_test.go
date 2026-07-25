@@ -18,6 +18,7 @@ type recordingAdapter struct {
 	stored    map[string]any
 	present   bool
 	getErr    error
+	writeErr  error
 	upserts   []recordedWrite
 	deletes   []recordedWrite
 	getCalled int
@@ -31,12 +32,12 @@ type recordedWrite struct {
 
 func (a *recordingAdapter) Upsert(_ context.Context, keys, row map[string]any, seq uint64) error {
 	a.upserts = append(a.upserts, recordedWrite{keys: keys, row: row, seq: seq})
-	return nil
+	return a.writeErr
 }
 
 func (a *recordingAdapter) Delete(_ context.Context, keys map[string]any, seq uint64) error {
 	a.deletes = append(a.deletes, recordedWrite{keys: keys, seq: seq})
-	return nil
+	return a.writeErr
 }
 
 func (a *recordingAdapter) Probe(context.Context) error { return nil }

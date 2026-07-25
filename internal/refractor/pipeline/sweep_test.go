@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -40,10 +41,14 @@ func sweepAnchorFromKey(targetKey string) (string, bool) {
 // live keys, so a test can pose both prefilter directions.
 type listingAdapter struct {
 	recordingAdapter
-	keys []string
+	keys    []string
+	listErr error
 }
 
 func (a *listingAdapter) ListKeys(context.Context) ([]map[string]any, error) {
+	if a.listErr != nil {
+		return nil, a.listErr
+	}
 	out := make([]map[string]any, 0, len(a.keys))
 	for _, k := range a.keys {
 		out = append(out, map[string]any{"key": k})
@@ -321,15 +326,15 @@ func TestSweepRecord_StreakEscalatesAndClears(t *testing.T) {
 	sw := p.Sweeper()
 	ctx := context.Background()
 
-	sw.record(ctx, 2)
+	sw.record(ctx, 2, nil)
 	require.Equal(t, 1, sw.Status().DivergentStreak)
 	require.Equal(t, uint64(2), sw.Status().Reconciled)
 
-	sw.record(ctx, 1)
+	sw.record(ctx, 1, nil)
 	require.Equal(t, 2, sw.Status().DivergentStreak)
 	require.Equal(t, uint64(3), sw.Status().Reconciled)
 
-	sw.record(ctx, 0)
+	sw.record(ctx, 0, nil)
 	require.Zero(t, sw.Status().DivergentStreak)
 	require.Equal(t, uint64(3), sw.Status().Reconciled,
 		"the cumulative heal count is not reset by a clean pass")
@@ -347,4 +352,183 @@ func TestSweepSurvey_SkipsAspectKeysUnderTheAnchorPrefix(t *testing.T) {
 	anchors, _, err := p.Sweeper().survey(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []string{sweepActorA}, anchors)
+}
+
+// unwritableTarget is the adapter posture the repair-failure signal exists for:
+// the row is divergent, the sweep picks it up, and the write fails every time.
+var errUnwritableTarget = errors.New("adapter: target write refused")
+
+func newUnwritableOrphanPipeline(t *testing.T) *Pipeline {
+	t.Helper()
+	orphan := sweepBuildKey(sweepActorC)
+	adpt := &listingAdapter{keys: []string{orphan}}
+	adpt.present = true
+	adpt.stored = map[string]any{"key": orphan}
+	adpt.writeErr = errUnwritableTarget
+	p := newSweepPipeline(t, adpt, 10)
+	p.recordAppliedSeq(910)
+	return p
+}
+
+func TestSweepPass_AFailedRepairDoesNotReadAsAConvergedPass(t *testing.T) {
+	// A repair whose write errors heals nothing, so the heal count is 0 —
+	// indistinguishable, on that count alone, from a pass where everything was
+	// already right. The heal count therefore cannot be the only verdict, or a
+	// row that is still wrong reads as converged.
+	p := newUnwritableOrphanPipeline(t)
+
+	p.Sweeper().pass(context.Background())
+
+	st := p.Sweeper().Status()
+	require.Zero(t, st.Reconciled, "a failed write heals nothing")
+	require.Zero(t, st.DivergentStreak, "the heal count is genuinely zero — that is the blind spot")
+	require.Equal(t, 1, st.FailingActors, "the actor whose repair failed is carried as unrepaired")
+	require.Equal(t, 1, st.FailedStreak)
+	require.Contains(t, st.LastFailure, errUnwritableTarget.Error(),
+		"the health issue must be able to name a cause, not just a count")
+}
+
+func TestSweepPass_RepairFailureEscalatesAcrossPassesAndClearsOnSuccess(t *testing.T) {
+	// The escalation input for CapabilityRepairFailing: consecutive failing
+	// passes accumulate, and a subsequent successful reprojection retires both
+	// the actor and the streak.
+	p := newUnwritableOrphanPipeline(t)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	sw.pass(ctx)
+	require.Equal(t, 1, sw.Status().FailedStreak)
+
+	// The second consecutive failure is what crosses the error threshold. The
+	// actor's first failure carries no backoff, so this pass re-attempts it.
+	sw.pass(ctx)
+	require.Equal(t, 2, sw.Status().FailedStreak)
+	require.Equal(t, 1, sw.Status().FailingActors)
+
+	// The target becomes writable again; the next attempted pass retracts the
+	// orphan and the repair verdict clears completely.
+	adpt := p.currentAdapter().(*listingAdapter)
+	adpt.writeErr = nil
+	for i := 0; i < 4 && sw.Status().FailingActors > 0; i++ {
+		sw.pass(ctx)
+	}
+	st := sw.Status()
+	require.Zero(t, st.FailingActors, "a successful reprojection retires the actor's failure")
+	require.Zero(t, st.FailedStreak)
+	require.Empty(t, st.LastFailure)
+	require.Equal(t, uint64(1), st.Reconciled, "the heal is counted once the write lands")
+}
+
+func TestSweepPass_BackoffSuppressesTheRetryButNotTheSignal(t *testing.T) {
+	// Backoff exists so a permanently unwritable row stops consuming a batch
+	// slot every tick. It must never make the lens look healthier: an actor the
+	// sweep declined to retry is still an actor whose row is wrong.
+	p := newUnwritableOrphanPipeline(t)
+	sw := p.Sweeper()
+	adpt := p.currentAdapter().(*listingAdapter)
+	ctx := context.Background()
+
+	sw.pass(ctx) // failure 1 — no backoff, retried next pass
+	sw.pass(ctx) // failure 2 — now sits out backoffPasses(2) == 1 pass
+	attemptsBefore := len(adpt.deletes)
+
+	sw.pass(ctx)
+	require.Equal(t, attemptsBefore, len(adpt.deletes),
+		"the backed-off actor must not be re-attempted this pass")
+	st := sw.Status()
+	require.Equal(t, 1, st.FailingActors,
+		"a skipped retry still counts as unrepaired — suppressing the work must not suppress the signal")
+	require.Equal(t, 3, st.FailedStreak)
+}
+
+func TestSweepBackoffPasses_ImmediateFirstRetryThenDoublingToACeiling(t *testing.T) {
+	// A transient write error deserves the next tick; a persistent one must
+	// back off, but never so far that a fixed target waits hours.
+	require.Equal(t, uint64(0), backoffPasses(1))
+	require.Equal(t, uint64(1), backoffPasses(2))
+	require.Equal(t, uint64(2), backoffPasses(3))
+	require.Equal(t, uint64(4), backoffPasses(4))
+	require.Equal(t, uint64(16), backoffPasses(6))
+	require.Equal(t, uint64(16), backoffPasses(50), "the ceiling holds")
+}
+
+func TestSweepPass_ASurveyFailureIsNotAConvergedPass(t *testing.T) {
+	// A pass that could not read both sides of the comparison verified
+	// nothing. Returning silently would make an unreadable target
+	// indistinguishable from a clean bucket.
+	adpt := &listingAdapter{listErr: errUnwritableTarget}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+
+	p.Sweeper().pass(context.Background())
+
+	st := p.Sweeper().Status()
+	require.Equal(t, 1, st.FailedStreak)
+	require.Zero(t, st.FailingActors, "a pass-level fault names no actor")
+	require.Contains(t, st.LastFailure, errUnwritableTarget.Error())
+}
+
+func TestSweepRecord_TruncatesAnOversizeFailureText(t *testing.T) {
+	// The failure text rides into a Health-KV document, which has a NATS
+	// payload limit.
+	p := newSweepPipeline(t, &listingAdapter{}, 10)
+	sw := p.Sweeper()
+
+	sw.record(context.Background(), 0, errors.New(strings.Repeat("x", maxFailureText*3)))
+
+	require.LessOrEqual(t, len(sw.Status().LastFailure), maxFailureText+len("…"))
+}
+
+func TestSweepPass_AFailingActorThatLeavesTheGraphIsReaped(t *testing.T) {
+	// A failing actor is re-attempted only if selection reaches it, and
+	// selection draws solely from the two listings. An actor that leaves both
+	// would otherwise hold CapabilityRepairFailing open for the life of the
+	// process — an ordinary sequence, since an orphan retraction that errors
+	// can still land through the CDC path before the retry.
+	p := newUnwritableOrphanPipeline(t)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	sw.pass(ctx)
+	require.Equal(t, 1, sw.Status().FailingActors)
+
+	// The retraction lands by another path: the target key stops being listed,
+	// and the anchor was never in Core KV to begin with.
+	adpt := p.currentAdapter().(*listingAdapter)
+	adpt.keys = nil
+
+	sw.pass(ctx)
+	st := sw.Status()
+	require.Zero(t, st.FailingActors, "an actor that left the graph must not pin the alert open")
+	require.Zero(t, st.FailedStreak)
+	require.Empty(t, st.LastFailure)
+}
+
+func TestSweepCandidates_ABackedOffActorYieldsItsSlot(t *testing.T) {
+	// Backing off is only worth doing if it frees capacity: a skipped actor
+	// must hand its batch slot to the next divergent one, not spend it.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 1)
+	writeAnchor(t, p, sweepActorA, false)
+	writeAnchor(t, p, sweepActorB, false)
+	sw := p.Sweeper()
+	ctx := context.Background()
+
+	anchors, targets, err := sw.survey(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{sweepActorA, sweepActorB}, anchors)
+
+	// Both anchors are divergent (neither has a target key) and the batch
+	// holds one, so the first sorted anchor takes it.
+	require.Equal(t, []string{sweepActorA}, sw.candidates(ctx, anchors, targets))
+
+	sw.mu.Lock()
+	sw.passNo = 7
+	sw.mu.Unlock()
+	sw.noteActorFailure(sweepActorA, errUnwritableTarget, 7)
+	sw.noteActorFailure(sweepActorA, errUnwritableTarget, 7)
+
+	require.Equal(t, []string{sweepActorB}, sw.candidates(ctx, anchors, targets),
+		"the backed-off actor's slot must go to the next divergent actor")
+	require.Equal(t, 1, len(sw.failing), "yielding the slot does not retire the failure")
 }

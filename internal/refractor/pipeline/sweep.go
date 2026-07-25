@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,11 +49,38 @@ type SweepPlan struct {
 // that healed at least one divergence, so the heartbeat can escalate a
 // recurring divergence from warning to error without holding debounce state of
 // its own.
+//
+// The repair fields are the sweep's second, independent verdict, and the worse
+// of the two: a divergence the sweep HEALED leaves a correct row behind, while
+// one it could not write leaves the row wrong. They are separate because a
+// failed repair heals nothing — folding it into the heal count would clear
+// DivergentStreak and publish a converged lens over a projection that is still
+// broken, the more thoroughly broken the healthier it reads.
 type SweepStatus struct {
 	Reconciled      uint64
 	DivergentStreak int
 	Cursor          string
 	LastPassAt      time.Time
+	// FailingActors is how many anchors currently carry an unrepaired
+	// reprojection failure, and FailedStreak how many consecutive passes ended
+	// with at least one failure (per-actor, or a pass-level fault that stopped
+	// the tick before it could verify anything). LastFailure is the governing
+	// error's text, so the heartbeat issue names a cause and not just a count.
+	FailingActors int
+	FailedStreak  int
+	LastFailure   string
+}
+
+// actorFailure is one anchor's unrepaired-reprojection state. It lives from the
+// failure that created it until a reprojection of that actor succeeds —
+// deliberately spanning the passes backoff skips, so suppressing the retry WORK
+// never suppresses the health SIGNAL.
+type actorFailure struct {
+	consecutive int
+	// retryAfter is the last pass number this actor sits out; the sweep skips
+	// it while passNo <= retryAfter.
+	retryAfter uint64
+	err        string
 }
 
 // Sweeper is one auth-plane lens's periodic self-audit: it detects graph ↔
@@ -81,6 +109,10 @@ type Sweeper struct {
 
 	mu     sync.Mutex
 	status SweepStatus
+	// failing is the per-actor unrepaired-failure set, and passNo the monotonic
+	// tick counter the per-actor backoff schedules against.
+	failing map[string]*actorFailure
+	passNo  uint64
 }
 
 // newSweeper builds the sweeper for an installed plan, applying the defaults.
@@ -93,7 +125,13 @@ func newSweeper(p *Pipeline, plan SweepPlan) *Sweeper {
 	if batch <= 0 {
 		batch = DefaultSweepBatch
 	}
-	return &Sweeper{p: p, plan: plan, interval: iv, batch: batch}
+	return &Sweeper{
+		p:        p,
+		plan:     plan,
+		interval: iv,
+		batch:    batch,
+		failing:  map[string]*actorFailure{},
+	}
 }
 
 // Status returns the current sweep snapshot. Thread-safe; read by the
@@ -187,12 +225,21 @@ func (s *Sweeper) pass(ctx context.Context) {
 		return
 	}
 
+	s.mu.Lock()
+	s.passNo++
+	passNo := s.passNo
+	s.mu.Unlock()
+
 	anchors, targets, err := s.survey(ctx)
 	if err != nil {
+		// A pass that could not read both sides of the comparison verified
+		// nothing, so it must not read as a converged tick.
 		slog.Warn("pipeline: sweep: survey failed; retrying next tick",
 			"ruleId", s.p.ruleID, "err", err)
+		s.record(ctx, 0, err)
 		return
 	}
+	s.reapDepartedFailures(anchors, targets)
 
 	candidates := s.candidates(ctx, anchors, targets)
 	healed := 0
@@ -207,13 +254,16 @@ func (s *Sweeper) pass(ctx context.Context) {
 			// every Core KV event, including ack-and-skip).
 			slog.Warn("pipeline: sweep: pass abandoned — no ordering token yet",
 				"ruleId", s.p.ruleID, "actor", actor)
+			s.record(ctx, healed, rerr)
 			return
 		}
 		if rerr != nil {
 			slog.Warn("pipeline: sweep: reproject failed",
 				"ruleId", s.p.ruleID, "actor", actor, "err", rerr)
+			s.noteActorFailure(actor, rerr, passNo)
 			continue
 		}
+		s.clearActorFailure(actor)
 		if res.Wrote {
 			healed++
 			slog.Info("pipeline: sweep: healed a divergent projection",
@@ -222,7 +272,120 @@ func (s *Sweeper) pass(ctx context.Context) {
 		}
 	}
 
-	s.record(ctx, healed)
+	s.record(ctx, healed, nil)
+}
+
+// backoffPasses is how many passes an actor sits out after its Nth consecutive
+// repair failure: none after the first (a transient write error deserves the
+// next tick), then doubling to a sixteen-pass ceiling — about a quarter hour at
+// the 60s default. The ceiling is the part that matters: a permanently
+// unwritable row must stop consuming a batch slot every tick, but must never
+// back off so far that a fixed target waits hours to be re-attempted.
+func backoffPasses(consecutive int) uint64 {
+	if consecutive <= 1 {
+		return 0
+	}
+	shift := consecutive - 2
+	if shift > 4 {
+		shift = 4
+	}
+	return 1 << shift
+}
+
+// backedOff reports whether this actor is serving a retry delay. A skipped
+// actor keeps its entry in the failing set, so it still counts toward the
+// lens's health verdict for every pass it is not attempted.
+func (s *Sweeper) backedOff(actor string, passNo uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.failing[actor]
+	return f != nil && passNo <= f.retryAfter
+}
+
+// reapDepartedFailures drops failure state for an actor that has left the
+// sweep's universe entirely — no anchor vertex, and no target key this lens
+// owns. Selection draws only from those two listings, so such an actor is never
+// reached again and its entry would hold the lens at CapabilityRepairFailing
+// for the life of the process (the case is ordinary: an orphan retraction that
+// errors, then lands via the CDC path before the retry).
+//
+// Both listings are bounded feeds that can come back short, so a truncation
+// clears a live failure for one pass at most — the actor reappears in the next
+// listing and is re-selected. That is the same self-correcting trade the
+// prefilter already makes, and the opposite error (never reaping) is not
+// self-correcting at all.
+func (s *Sweeper) reapDepartedFailures(anchors []string, targets map[string]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.failing) == 0 {
+		return
+	}
+	present := make(map[string]struct{}, len(anchors)+len(targets))
+	for _, actor := range anchors {
+		present[actor] = struct{}{}
+	}
+	for key := range targets {
+		if actor, owned := s.plan.AnchorFromKey(key); owned {
+			present[actor] = struct{}{}
+		}
+	}
+	for actor := range s.failing {
+		if _, ok := present[actor]; !ok {
+			delete(s.failing, actor)
+		}
+	}
+}
+
+// noteActorFailure records an unrepaired reprojection and schedules its retry.
+func (s *Sweeper) noteActorFailure(actor string, err error, passNo uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.failing[actor]
+	if f == nil {
+		f = &actorFailure{}
+		s.failing[actor] = f
+	}
+	f.consecutive++
+	f.retryAfter = passNo + backoffPasses(f.consecutive)
+	f.err = err.Error()
+}
+
+// clearActorFailure retires an actor's failure state once its reprojection
+// succeeds — including the converged no-write case, which proves the row is
+// right just as well as a write does.
+func (s *Sweeper) clearActorFailure(actor string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.failing, actor)
+}
+
+// governingFailureLocked picks the failure the heartbeat message names: the
+// longest-running one, ties broken by actor key so a steady-state fault reports
+// the same cause every beat instead of flapping over map order.
+func (s *Sweeper) governingFailureLocked() string {
+	worst, worstActor := 0, ""
+	for actor, f := range s.failing {
+		if f.consecutive > worst || (f.consecutive == worst && actor < worstActor) {
+			worst, worstActor = f.consecutive, actor
+		}
+	}
+	if worstActor == "" {
+		return ""
+	}
+	return s.failing[worstActor].err
+}
+
+// maxFailureText bounds the error text carried into the heartbeat, which is a
+// Health-KV document with a NATS payload limit.
+const maxFailureText = 200
+
+// truncateFailure bounds the text and drops the partial rune a byte-offset cut
+// can leave behind, which json.Marshal would otherwise coerce to U+FFFD.
+func truncateFailure(s string) string {
+	if len(s) <= maxFailureText {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxFailureText], "") + "…"
 }
 
 // survey reads both sides of the coverage comparison: the lens's live anchors
@@ -303,6 +466,10 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 		prefilterCap = 1
 	}
 
+	s.mu.Lock()
+	passNo := s.passNo
+	s.mu.Unlock()
+
 	out := make([]string, 0, s.batch)
 	seen := make(map[string]struct{}, s.batch)
 	addUpTo := func(actor string, limit int) bool {
@@ -313,6 +480,14 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 			return true
 		}
 		seen[actor] = struct{}{}
+		// An actor serving a retry delay yields its slot to the next divergent
+		// one rather than spending it on a skip — the point of backing off is
+		// to stop a permanently unwritable row from consuming a batch slot
+		// every tick. It stays in the failing set, so declining to retry it
+		// does not change the lens's health verdict.
+		if s.backedOff(actor, passNo) {
+			return true
+		}
 		out = append(out, actor)
 		return true
 	}
@@ -406,15 +581,36 @@ func (s *Sweeper) anchorLive(ctx context.Context, actorKey string) bool {
 
 // record folds this pass's outcome into the status and persists the cursor +
 // cumulative heal count to the lens's Health KV entry. The divergent streak is
-// the escalation input: one divergent pass is a warning, a second consecutive
-// one is an error, and a clean pass clears it.
-func (s *Sweeper) record(ctx context.Context, healed int) {
+// one escalation input: one divergent pass is a warning, a second consecutive
+// one is an error, and a clean pass clears it. The failed streak is the other,
+// and answers the case the heal count cannot see — a pass that repaired nothing
+// because its repairs ERRORED looks identical, on the heal count alone, to a
+// pass that repaired nothing because everything was already converged.
+//
+// fault is a pass-level failure (the survey, or a tick abandoned before it
+// could verify anything); a nil fault with an empty failing set is the only
+// combination that clears the repair verdict.
+func (s *Sweeper) record(ctx context.Context, healed int, fault error) {
 	s.mu.Lock()
 	s.status.Reconciled += uint64(healed)
 	if healed > 0 {
 		s.status.DivergentStreak++
 	} else {
 		s.status.DivergentStreak = 0
+	}
+	s.status.FailingActors = len(s.failing)
+	switch {
+	case fault != nil:
+		s.status.LastFailure = truncateFailure(fault.Error())
+	case s.status.FailingActors > 0:
+		s.status.LastFailure = truncateFailure(s.governingFailureLocked())
+	default:
+		s.status.LastFailure = ""
+	}
+	if s.status.FailingActors > 0 || fault != nil {
+		s.status.FailedStreak++
+	} else {
+		s.status.FailedStreak = 0
 	}
 	s.status.LastPassAt = time.Now()
 	snapshot := s.status

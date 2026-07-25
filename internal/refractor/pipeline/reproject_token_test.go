@@ -61,4 +61,7 @@ func TestSweepPass_AbandonsThePassWhenTheTokenIsUnusable(t *testing.T) {
 	require.Zero(t, st.Reconciled, "a write the guard rejects is not a heal and must never be counted")
 	require.Zero(t, st.DivergentStreak,
 		"an unrepairable pass must not hold CapabilityCoverageDivergence open")
+	require.Equal(t, 1, st.FailedStreak,
+		"a pass that verified nothing before abandoning is not a converged pass either")
+	require.Zero(t, st.FailingActors, "a pass-level fault names no actor")
 }
