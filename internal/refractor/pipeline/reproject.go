@@ -18,22 +18,26 @@ import (
 // nor can answer — a per-actor reprojection request.
 var ErrNotActorAggregate = errors.New("pipeline: reproject: lens is not actor-aggregate")
 
-// ErrNoOrderingToken is returned when reconciliation would have to OVERWRITE or
-// RETRACT an existing row while the pipeline has no usable ordering token — its
-// last-applied sequence is still zero because this process has not applied
-// anything yet.
+// ErrNoOrderingToken is returned when reconciliation would have to write
+// through the KV projection guard while the pipeline has no usable ordering
+// token — its last-applied sequence is still zero because this process has not
+// applied anything yet.
 //
-// The §6.2 guard rejects any write whose projectionSeq is `<=` the stored one,
-// so such a write cannot land: it would be dropped by the guard while every
-// caller read it as a successful heal. Refusing is strictly better than that
-// silence — otherwise the sweep recomputes, rewrites, and is rejected again on
-// every tick forever, churning the auth plane while holding
-// CapabilityCoverageDivergence open on a divergence it never actually repaired.
+// The §6.2 KV guard drops a token-less write outright, BEFORE it compares
+// against any stored watermark, so that it can neither create a clobberable
+// seq-0 key nor no-op a real update (adapter.NatsKVAdapter.guardedWrite). Such
+// a write cannot land whether the target row is present or absent, and the nil
+// the adapter returns is a silent no-op every caller would read as a heal.
+// Refusing is strictly better than that silence — otherwise the sweep
+// recomputes, rewrites, and is dropped again on every tick forever, scoring
+// phantom hits into the prefilter hints' earned share and counting repairs that
+// never happened.
 //
-// Creating an ABSENT row is unaffected: the guard's absent-key branch takes
-// Create, which has no stored watermark to lose to, so the lost-first-projection
-// case this whole design exists for still heals from a cold pipeline.
-var ErrNoOrderingToken = errors.New("pipeline: reproject: pipeline has applied no events, so it holds no ordering token and the guard would reject the write")
+// Nothing durable is lost by refusing: the write was not landing, and
+// seedAppliedSeqFromAckFloor gives a pipeline with any acked history a non-zero
+// token at startup, so a genuinely cold pipeline heals on its first applied
+// event.
+var ErrNoOrderingToken = errors.New("pipeline: reproject: pipeline has applied no events, so it holds no ordering token and the guard would drop the write")
 
 // Reprojection reports what one Reproject call did to one actor's row.
 type Reprojection struct {
@@ -143,9 +147,14 @@ func (p *Pipeline) Reproject(ctx context.Context, actorKey string) (Reprojection
 				out.Converged = true
 				continue
 			}
-			// A divergent row that already exists can only be corrected by a
-			// write that outranks its stored watermark.
-			if present && seq == 0 {
+			// The KV guard drops a token-less write outright, BEFORE it looks
+			// for a stored watermark, so an absent row is no more writable
+			// than a present one — both come back nil having written nothing.
+			// This block is entered only by an adapter that reads its own rows
+			// back, which is that same NATS-KV family; a SQL-guarded target
+			// conditions only its UPDATE branch, so its absent-row insert does
+			// land at token zero and is deliberately left to write.
+			if seq == 0 {
 				return Reprojection{}, ErrNoOrderingToken
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,11 +29,9 @@ func TestReproject_RefusesToOverwriteWithoutAnOrderingToken(t *testing.T) {
 		"a write the guard would reject must not be issued, or the sweep churns forever")
 }
 
-func TestReproject_CreatesAnAbsentRowWithoutAnOrderingToken(t *testing.T) {
-	// The lost-first-projection case must still heal from a cold pipeline: an
-	// absent key takes the guard's Create branch, which has no stored watermark
-	// to lose to. Refusing here would disable the reconciliation this design
-	// exists for exactly when it is needed most — right after a restart.
+func TestReproject_AnAlreadyAbsentRowIsConvergedNotAWrite(t *testing.T) {
+	// The missing-actor branch over a row that is already gone: nothing to
+	// retract, so the token is never needed and no write is issued.
 	adpt := &recordingAdapter{present: false}
 	p := newReprojectPipeline(t, adpt)
 
@@ -40,6 +39,44 @@ func TestReproject_CreatesAnAbsentRowWithoutAnOrderingToken(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, res.Converged, "an already-absent row is converged, not a write")
 	require.Empty(t, adpt.upserts)
+	require.Empty(t, adpt.deletes)
+}
+
+// installProjectingRule gives the pipeline a rule that binds any live identity
+// anchor, so a seeded anchor yields an UPSERT-shaped result rather than the
+// missing-actor retraction every other token test exercises.
+func installProjectingRule(t *testing.T, p *Pipeline) {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse("MATCH (i:identity {key: $actorKey}) RETURN i.key AS actorKey")
+	require.NoError(t, err)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull)
+	fullCR.KeyColumns = []string{"actorKey"}
+	require.NoError(t, fullCR.ValidateKeyColumns())
+	p.fullEngine, p.fullCR = eng, fullCR
+}
+
+func TestReproject_RefusesToCreateAnAbsentRowWithoutAnOrderingToken(t *testing.T) {
+	// The guard drops a token-less write BEFORE it looks for a stored
+	// watermark, so an absent row is no more writable than a present one. Left
+	// unrefused, the adapter returns nil having written nothing and the caller
+	// books a heal that did not happen — inflating Reconciled, logging a repair,
+	// and scoring a phantom hit into the prefilter hints' earned share.
+	//
+	// The refusal is scoped to the block an own-row-reading (NATS-KV) adapter
+	// enters, because a SQL-guarded target conditions only its UPDATE branch
+	// and its absent-row insert really does land at token zero.
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	installProjectingRule(t, p)
+	writeProjectableAnchor(t, p, sweepActorA) // live anchor ⇒ an upsert, not a retraction
+	// lastAppliedSeq deliberately left at zero.
+
+	_, err := p.Reproject(context.Background(), sweepActorA)
+	require.ErrorIs(t, err, ErrNoOrderingToken)
+	require.Empty(t, adpt.upserts,
+		"a write the guard drops must not be issued")
 	require.Empty(t, adpt.deletes)
 }
 
