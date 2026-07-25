@@ -107,12 +107,13 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top picks needing no new design: `actor-aggregate backfill` (★★ S–M, named
-> live consumer), `lint-package-standard` (★★ M), the **unbounded declared-read count** (★★ S–M,
-> carries a Contract #2 §2.4 edit), then the two ★ Processor sensitive-predicate rows. The remaining
-> **appsession** row (production IdP posture) needs the Designer first — the IdP→cookie handoff is an
-> arch fork. Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
-> The Designer needs to restock. A stale callout starves the lane — whoever ships next renames this.
+> 🎯 **Build-ready now.** Top picks needing no new design: `lint-package-standard` (★★ M), the
+> **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit), the **unwritable-row
+> reports-healthy** row (★★ S–M, just surfaced), `actor-aggregate backfill` (★★ S–M, consumers now
+> `identityAnchors` + `myTasks`), then the two ★ Processor sensitive-predicate rows. The
+> **cap-read size bound** and the **appsession** production-IdP row need the Designer first. Every
+> `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot. The Designer
+> needs to restock. A stale callout starves the lane — whoever ships next renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
@@ -123,7 +124,9 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Processor] Declared-read count is unbounded at the envelope** | `ParseEnvelope` caps neither `reads`/`optionalReads`/`egressReads` length nor total. A declared read no longer short-circuits hydration, so an envelope naming N absent keys costs N sequential Core-KV GETs and then commits. Needs an envelope-level bound (Contract #2 §2.4 validation). | ★★ | S–M | 📋 ready · consumer: any actor holding any op grant |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the obvious re-assert ops no-op when state already matches. `reproject`/`rebuild` need an asserted control-plane actor, so no operator-reachable backfill. Consumers: LoftSpace's landlord hat; 51 stale `cap-read.edgeManifest*` docs. | ★★ | S–M | 📋 ready · [live evidence](../../implementation-artifacts/read-grant-single-source-walk-design.md) §10 |
+| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor, and the re-assert ops no-op when state already matches. `reproject`/`rebuild` need an asserted control-plane actor, so no operator-reachable backfill. Only auth-plane lenses get the convergence sweep; every other actorAggregate has no healer. | ★★ | S–M | 📋 ready · consumers: `identityAnchors` (whoami hats) + `myTasks` — no sweeper |
+| **[Refractor] A read-model write that fails forever reports healthy** | A sweep `Reproject` whose adapter write errors logs WARN and heals nothing, so `DivergentStreak` resets to 0 and the lens publishes `alert: ok` — the more thoroughly broken the row, the healthier the lens looks. Same actor is retried every tick with no backoff. Hid a per-60s write failure for days. | ★★ | S–M | 📋 ready · surfaced by `1b9852f2` |
+| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). The hand-chosen `ReadGrantDomain` split is the only lever today. | ★★ | M | 📋 ready · needs design |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere). Also needs a per-path origin-gate exemption: a cross-site OIDC `form_post` callback 403s. | ★★ | M | 📋 ready · Designer first (IdP→cookie handoff = arch fork) · [kit](../../../docs/components/appsession.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
 | NATS account-level write restriction | Close the fabricated-KV-write surface at the substrate (account-level); today defended only by overwrite-by-reprojection. | ★★ | M | ✅ effectively done · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status · only deferred Fire 4 (prod mTLS) remains |
@@ -189,6 +192,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `1b9852f2` · [refractor] DISTINCT binds on the aggregator that carries it, not the RETURN item — composed `collect(DISTINCT)+collect(DISTINCT)` deduped; unfroze a 1MB-over-payload `cap-read` doc; `normalizeForKey` made injective
 - 2026-07-25 · `fbf46f9a` · [scripts] verify-package-loftspace-domain asserts each (op, scope) grant — one id per operationType let map iteration hide `SetListingStatus`'s second (landlord scope=self) vertex, red-or-green at random
 - 2026-07-25 · `8e61174f` · [appsession,demo] a request must prove it came from the app's own origin — Fetch-Metadata + Origin gate at the RequireSession choke point, `_PUBLIC_ORIGIN` + demo wiring, kit component page
 - 2026-07-25 · `2fff6e40` · [starlarksandbox] a script gets no host output channel — `print` discarded, so `print(state)` no longer renders decrypted plaintext to the Processor's stderr

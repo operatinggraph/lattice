@@ -488,14 +488,25 @@ before settling healthy. Investigating one healed actor found its `holdsRole` li
 the 14 "lost" anchors were *stale grants* that should already have been retracted, and the sweep
 correctly healed them away — the divergence was pre-existing drift the spec change merely
 surfaced. After convergence, 39 of the 90 `cap-read.edgeManifest*` documents carry real anchors,
-51 are placeholder-only, none are tombstoned, and 1794 entries still carry the retired hand-typed
-`via`. This is correctness-neutral: `IsReadable` matches `anchorId` only, so a placeholder-only
-document grants exactly what an absent key grants, and `via` is audit-only — which is why
-Refractor is right to call the plane healthy. It is nonetheless the concrete consumer of the filed
-*actor-aggregate lens rows do not backfill on a lens change* item: those documents refresh only
-when a CDC event next touches each actor. The driver-level proof that the new filter *does* delete
-an emptied slice on the normal projection path is `TestMigration_EmptySliceIsDeletedByTheDriver`
-(`185a47ee`) — added because live verification found the claim untested.
+51 are placeholder-only, and none are tombstoned. This much is correctness-neutral: `IsReadable`
+matches `anchorId` only, so a placeholder-only document grants exactly what an absent key grants —
+which is why Refractor is right to call the plane healthy. The driver-level proof that the new
+filter *does* delete an emptied slice on the normal projection path is
+`TestMigration_EmptySliceIsDeletedByTheDriver` (`185a47ee`) — added because live verification found
+the claim untested.
+
+**The "1794 entries carrying a retired `via`" reading was wrong, and the count was the tell**
+(diagnosed 2026-07-25, fixed in `1b9852f2`). It was not stale text awaiting a backfill: 1794 was a
+*duplication multiplier*. A generated producer's `readableAnchors` is
+`collect(DISTINCT …) + collect(DISTINCT …) + …`, and the engine bound `DISTINCT` to the RETURN
+*item* — which for a composed item is a `*BinaryOp`, never a `*FunctionCall` — so no branch deduped.
+The branches are independent `OPTIONAL MATCH`es, so every branch's list came out inflated by the
+product of the others' cardinalities. Live, `cap-read.edgeManifest.identity.MQsm…` held **12,558
+entries carrying 34 distinct grants, at 1,021,658 bytes** — past NATS's max payload, so the sweep
+had been failing to write it every 60s for days while the lens reported `alert: ok`. That document
+was not merely stale; it was **unwritable**, which freezes a grant set and stops revocations
+landing. Read the entry counts in this section as inflated by that factor; the *distinct* grant sets
+they describe were correct throughout.
 
 ## 11. Implementation adversarial pass (2026-07-24, three read-only reviewers)
 
