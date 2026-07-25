@@ -1288,3 +1288,57 @@ backfill (its own filed row); no sibling-app adoption (W3/W4); no contract text.
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
 supplier domain; no Loupe changes; no change to Contract #1/#6/#11 semantics; no touch of planning artifacts
 (FR24 amendment flagged for the planning lead); global-identity-hyperscale untouched (Andrew-gated).
+
+**As-built — Inc 3 SHIPPED (2026-07-25, `4790992b`).** The landlord hat can write. All five ops carry a
+`consumer` scope=self grant and a `require_manages` probe, and the design's §7.2 landlord question is now
+closed on the write side as well as the read side.
+
+*Two fork resolutions taken in-fire, both narrower than the brief proposed.* The brief's §3 keyed the probe
+on `authContextTarget == actor`; review showed that confines a **scope=any** caller too — step 3 authorizes
+a standing grant without inspecting the target at all, so an operator who happened to send its own key would
+have had its writes narrowed to units it manages while its reads stayed portfolio-wide through the staff
+wildcard anchor. The shipped predicate is `op.authTargetValidated AND target == op.actor`: the first clause
+is the platform's own "I checked this target" bit, so a scope=any caller can never reach the probe; the
+second excludes the task path, whose validated target is the renewal rather than the acting identity. That
+also made the brief's §5 FE predicate unnecessary — the FE sends `authContext` whenever the session holds a
+`manages` anchor, and safety is a server-side property rather than a claim about the FE's role knowledge
+(which it could not have made anyway: whoami forwards role *keys*, not canonical names).
+
+*Two platform defects the new grants made load-bearing, both fixed here rather than filed.* Neither is new,
+and both would have shipped as regressions:
+- **`matchPlatformPermission` decided on the first matching row** (`step3_auth_capability.go`). An actor's
+  `platformPermissions` are the union of its roles, nothing sorts them, and the Gateway grants `consumer` to
+  **every** actor it authenticates — so once these ops carried both a `consumer` scope=self and a role-derived
+  scope=any row, whether the front-desk decide path worked at all depended on which `holdsRole` edge was
+  written first. Two reviewers found this independently. The scan now continues past an unmet row and denies
+  only after every match fails, reporting the first denial so a single-row actor's diagnostic is unchanged.
+  The pre-existing `{any, self}` pairs (`CreateLeaseApplication`, `WithdrawLeaseApplication`,
+  `SetApplicantProfile`, several café/clinic ops) were already exposed to this and are now covered too.
+- **Loupe's `kernelRoleIDs` resolved `operator` alone** while claiming parity with lattice-pkg's
+  `roleIDsFromBootstrap`. `loftspace-domain` was installable through Loupe only because it had been
+  operator-only; the `consumer` grant would have hard-failed both its install and upgrade paths there.
+
+*Ordering hardening from the review.* Every probe now answers ahead of its op's liveness check, so a denial
+cannot report whether a leaseapp or renewal exists (the `4098ba21` existence-oracle posture, extended to the
+four lease-signing ops that had kept the check first), and no denial names the unit — a caller holding a
+resource key must not be able to read off which unit it belongs to.
+
+*Tests.* Six guard tests plus three dual-scope matcher tests, all **mutation-verified**: disabling each guard
+fails its own tests on the intended assertion, and the dual-scope tests reproduce the shadowed front-desk
+denial against the old first-match scan. The `VerifyGuarantor` pair discriminates on the failure *message*
+(`AuthDenied` vs `NoGuarantorToVerify`) because both legs reject — an outcome-only assertion would have
+passed for the wrong reason.
+
+*Residuals, filed as rows in the same docs commit:* `AssignUnitOwner` binds no actor (the op that CONFERS
+management compares nothing to `op.actor`; operator-only is the only thing containing it), and the five ops'
+op-metas still declare `authContext: standing`, so only the bespoke LoftSpace FE can drive the new self path
+— Facet's descriptor renderer sends none. Not filed, deliberately: a `.profile` declared in `optionalReads`
+is decrypted at step-4 hydration before any guard runs, so an unauthorized VerifyGuarantor leaves a vault
+decrypt in the audit trail while leaking no plaintext — that is a platform-wide property of declared
+sensitive reads, not this op's, and it belongs with the sensitive-read tracker work.
+
+**Scope-diff gate: PASS** — every touch traces to "the grant rows + guards + FE flip for
+`DecideLeaseApplication`, `SetRenewalTerms`, `VerifyGuarantor`, `CancelRenewal`, `SetListingStatus`". The two
+`internal/` changes are not a widening: each is a defect that this increment's own grants would otherwise
+have turned into a live regression, which is the "wear the other hat / do not bounce coupled work" rule, not
+new scope. No op was left un-granted or un-guarded, and no adjacent mechanism was substituted for a named one.
