@@ -196,7 +196,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
-- 2026-07-25 · `11f22210` · [refractor] a reconciliation write the guard drops is not a heal — absent-row seq-0 upsert refused; the brief's own SeqGuarded conditioning withdrawn at review as a fail-open
+- 2026-07-25 · `82f52fc4` · [refractor] a reconciliation write the guard drops is not a heal — absent-row seq-0 upsert refused where the guard binds; unguarded targets still create
 
 - 2026-07-25 · `7e6030aa` · [refractor] the sweep's prefilter directions are hints that earn their share, not assumptions about the lens — both hints rotate + earn their budget; unstarves the only orphan detector
 
