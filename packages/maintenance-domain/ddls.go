@@ -326,16 +326,31 @@ def workplace_exempt():
     # raises where the op previously succeeded. Call sites therefore gate on
     # this; require_workplace re-checks it anyway, so a site that forgets the
     # gate is still CORRECT, only slower.
-    return op.authContextTarget != "" or actor_holds_operator(op.actor)
+    return op.authTargetValidated or actor_holds_operator(op.actor)
 
 def require_workplace(location_keys, what):
     # Binds the STANDING path only -- operator and staff role grants, which
-    # submit with no authContext (scope=any never sets one). A scope=self caller
-    # is bound instead by its own op's ownership probe (the applicationFor /
-    # identifiedBy indirection): a resident legitimately holds no worksAt link,
-    # and confining them by a rule written for staff would deny every
-    # self-service write. The two guards are complementary, not alternatives --
-    # each binds the path the other cannot see.
+    # authorize via scope=any and so carry no target the platform has checked.
+    # A scope=self or task caller is bound instead by its own op's ownership
+    # probe (the applicationFor / identifiedBy indirection, or an explicit
+    # bind of the validated target to the resource): a resident legitimately
+    # holds no worksAt link, and confining them by a rule written for staff
+    # would deny every self-service write. The two guards are complementary,
+    # not alternatives -- each binds the path the other cannot see.
+    #
+    # The exemption keys on authTargetValidated, NOT on authContextTarget being
+    # non-empty: the raw target is a client-supplied hint that any scope=any
+    # holder can set, so exempting on its presence would let any staff member
+    # opt out of confinement.
+    if op.authTargetValidated:
+        return
+    enforce_workplace(location_keys, what)
+
+def enforce_workplace(location_keys, what):
+    # require_workplace minus the validated-target exemption, for a
+    # resource-scoped op that has already checked for itself that the validated
+    # target names the resource being acted on. Past that check the caller is an
+    # ordinary staff member and must clear the worksAt walk like any other.
     #
     # location_keys is a LIST of candidate locations, and covering ANY ONE of
     # them authorizes the write: a target can legitimately sit at several places
@@ -343,8 +358,6 @@ def require_workplace(location_keys, what):
     # are equally entitled to it. An empty list -- a target whose location
     # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
     # unwired topology fails closed rather than falling open.
-    if op.authContextTarget != "":
-        return
     if actor_holds_operator(op.actor):
         return
     _, actor_id = parts_of(op.actor, "actor", "identity")
@@ -457,12 +470,22 @@ def execute(state, op):
             fail("AlreadyResolved: " + wkey + " was resolved with different notes; " +
                  "a resolution is terminal and cannot be rewritten")
 
-        if not workplace_exempt():
+        # A validated target only exempts a claimant when it names THIS work
+        # order. The task grant is scopedTo one work order (authContext.target),
+        # while the work order actually resolved comes from payload.workOrderKey
+        # -- two independent client fields. Without the bind, a tech holding a
+        # legitimate grant for one work order could resolve a different one at a
+        # building they do not work at. Past the bind the caller is ordinary
+        # staff, so enforce_workplace (not require_workplace, whose own
+        # validated-target exemption would re-open exactly this hole) runs the
+        # worksAt walk.
+        resource_bound = op.authTargetValidated and op.authContextTarget == wkey
+        if not (resource_bound or actor_holds_operator(op.actor)):
             loc = workorder_location(wkey)
             locs = []
             if loc != None:
                 locs = [loc]
-            require_workplace(locs, "ResolveWorkOrder on " + wkey)
+            enforce_workplace(locs, "ResolveWorkOrder on " + wkey)
 
         resolved_at = time.rfc3339_utc(op.submittedAt)
         mutations = [

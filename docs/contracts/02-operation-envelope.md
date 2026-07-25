@@ -285,6 +285,8 @@ Service-scoped operations and task-derived operations require auth information b
 
 All three fields are optional. `null`, omitted, or the entire `authContext` block absent all mean "not applicable for that path."
 
+`authContext.target` is a **client-supplied** field the Processor forwards unexamined on the paths that do not check it (`scope: "any"` and the service path), so an op script must never treat its mere presence as proof of anything. The Processor therefore derives a read-only boolean the script sees as **`op.authTargetValidated`**: true exactly when the auth path that matched *validated* the target — `scope: "self"` (target proven `== actor`) or the task path (target proven `==` the matched `ephemeralGrant.target`) — and false everywhere else, including the service path and the stub authorizer. It is not an envelope input: a client-supplied value is dropped, and the Processor sets it after step 3. A guard that exempts a caller from a confinement rule keys on `op.authTargetValidated`; a guard that merely needs to know which entity the caller named may still read `op.authContextTarget`.
+
 **Processor dispatch at step 3:**
 
 ```

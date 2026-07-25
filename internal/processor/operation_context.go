@@ -24,3 +24,35 @@ type ResolvedPermission struct {
 	AllowedOperation   *AllowedOperation
 	EphemeralGrant     *EphemeralGrant
 }
+
+// authTargetValidated reports whether the auth path that matched actually
+// checked `authContext.target` against something the platform knows, rather
+// than letting a client-supplied value through unexamined.
+//
+// Only two paths validate it:
+//   - platform scope=self — matchPlatformPermission denies unless target == actor,
+//     and denies outright when target is absent
+//   - task — matchEphemeralGrant skips any grant whose target != authContext.target
+//
+// scope=any, the service path, and the stub authorizer (rp == nil) never read
+// target, so it is an unchecked hint there and this is false. Fail-closed: an
+// unrecognized or absent path is "not validated", never "trusted".
+//
+// The task path additionally requires the matched grant to NAME a target. Its
+// comparison is an inequality-skip, so a grant projected with an empty target
+// matches an authContext that carries none — agreeing about nothing. Treating
+// that as validated would exempt a caller who supplied no target at all, which
+// is strictly weaker than the presence test this bit replaces in the guards.
+func authTargetValidated(rp *ResolvedPermission) bool {
+	if rp == nil {
+		return false
+	}
+	switch rp.Path {
+	case "task":
+		return rp.EphemeralGrant != nil && rp.EphemeralGrant.Target != ""
+	case "platform":
+		return rp.PlatformPermission != nil && rp.PlatformPermission.Scope == "self"
+	default:
+		return false
+	}
+}

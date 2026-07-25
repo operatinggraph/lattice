@@ -104,6 +104,17 @@ type OperationEnvelope struct {
 	Class       string       `json:"class,omitempty"`
 	ContextHint *ContextHint `json:"contextHint,omitempty"`
 	AuthContext *AuthContext `json:"authContext,omitempty"`
+	// AuthTargetValidated records whether step 3 *validated* `authContext.target`
+	// rather than merely forwarding it: true only on the platform scope=self path
+	// (target proven == actor) and the task path (target proven == the
+	// ephemeralGrant's target). On scope=any, the service path, and the stub
+	// authorizer, `target` is an unchecked client-supplied hint and this is false.
+	// Scripts read it as `op.authTargetValidated` to key a confinement exemption
+	// on a target the platform vouched for instead of on mere target presence.
+	//
+	// `json:"-"` is load-bearing: the field is never accepted from the wire (a
+	// client cannot assert it) and is set by the commit path after authorization.
+	AuthTargetValidated bool `json:"-"`
 }
 
 // ErrorCode is the closed enumeration of operation-reply error codes per

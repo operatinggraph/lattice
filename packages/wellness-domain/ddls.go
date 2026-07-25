@@ -980,16 +980,21 @@ def workplace_exempt():
     # raises where the op previously succeeded. Call sites therefore gate on
     # this; require_workplace re-checks it anyway, so a site that forgets the
     # gate is still CORRECT, only slower.
-    return op.authContextTarget != "" or actor_holds_operator(op.actor)
+    return op.authTargetValidated or actor_holds_operator(op.actor)
 
 def require_workplace(location_keys, what):
     # Binds the STANDING path only -- operator and staff role grants, which
-    # submit with no authContext (scope=any never sets one). A scope=self caller
-    # is bound instead by its own op's ownership probe (the applicationFor /
-    # identifiedBy indirection): a resident legitimately holds no worksAt link,
-    # and confining them by a rule written for staff would deny every
-    # self-service write. The two guards are complementary, not alternatives --
-    # each binds the path the other cannot see.
+    # authorize via scope=any and so carry no target the platform has checked.
+    # A scope=self caller is bound instead by its own op's ownership probe (the
+    # applicationFor / identifiedBy indirection): a resident legitimately holds
+    # no worksAt link, and confining them by a rule written for staff would deny
+    # every self-service write. The two guards are complementary, not
+    # alternatives -- each binds the path the other cannot see.
+    #
+    # The exemption keys on authTargetValidated, NOT on authContextTarget being
+    # non-empty: the raw target is a client-supplied hint that any scope=any
+    # holder can set, so exempting on its presence would let any staff member
+    # opt out of confinement.
     #
     # location_keys is a LIST of candidate locations, and covering ANY ONE of
     # them authorizes the write: a target can legitimately sit at several places
@@ -997,7 +1002,7 @@ def require_workplace(location_keys, what):
     # are equally entitled to it. An empty list -- a target whose location
     # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
     # unwired topology fails closed rather than falling open.
-    if op.authContextTarget != "":
+    if op.authTargetValidated:
         return
     if actor_holds_operator(op.actor):
         return

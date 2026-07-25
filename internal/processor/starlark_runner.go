@@ -441,6 +441,12 @@ func operationEnvelopeToStarlark(op *OperationEnvelope) *starlarkstruct.Struct {
 		"payload":            starlarkstruct.FromStringDict(starlarkstruct.Default, payloadFields),
 		"authContextTarget":  starlarklib.String(authContextTarget),
 		"authContextService": starlarklib.String(authContextService),
+		// True only when step 3 proved `authContextTarget` (scope=self target ==
+		// actor, or a task grant scoped to exactly that target). A guard that
+		// exempts a caller from confinement must key on this, not on the mere
+		// presence of `authContextTarget` — that one is a client-supplied hint
+		// any scope=any holder can set to an arbitrary value.
+		"authTargetValidated": starlarklib.Bool(op.AuthTargetValidated),
 	})
 }
 

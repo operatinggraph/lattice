@@ -177,6 +177,102 @@ func TestWorkplace_StaffConfinedToWorkplace(t *testing.T) {
 	}
 }
 
+// wcSubmitVoidCharge submits VoidCharge as an arbitrary actor. forgedTarget,
+// when non-empty, becomes authContext.target with no task — the shape any
+// scope=any holder can put on the wire, since the Gateway forwards target
+// verbatim and step 3 never inspects it on the scope=any path.
+func wcSubmitVoidCharge(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, tabKey, actorKey, forgedTarget string) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-20T12:30:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":100}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	if forgedTarget != "" {
+		env.AuthContext = &processor.AuthContext{Target: forgedTarget}
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// TestWorkplace_ForgedAuthContextTargetStaysConfined: the exemption that lets a
+// self-service resident past confinement must key on a target the PLATFORM
+// validated, not on the caller having set one — a scope=any staff member can
+// put any target on the wire.
+//
+// The vector runs on VoidCharge deliberately. OpenTab/Charge/Settle each pair
+// the workplace guard with an ownership proof that independently denies a
+// caller who names a lease they do not hold, so a forged target there is
+// stopped by the second guard whatever the first one does. VoidCharge is
+// staff-only by design (no scope=self grant exists for it) and so carries no
+// ownership proof — the workplace guard is the ONLY thing confining it, which
+// makes it the op where exempting on target presence is actually exploitable.
+func TestWorkplace_ForgedAuthContextTargetStaysConfined(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	doc := wcStaffCapDoc()
+	doc.PlatformPermissions = append(doc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "VoidCharge", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, doc)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcforge")
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+
+	// Two tabs the operator opens and charges — one at each building.
+	tabA := openTab(t, ctx, conn, cp, cons, "wcfgtaba0000000001", leaseA)
+	tabB := openTab(t, ctx, conn, cp, cons, "wcfgtabb0000000001", leaseB)
+	for _, tc := range []struct{ label, tab string }{
+		{"wcfgchga000000000001", tabA}, {"wcfgchgb000000000001", tabB},
+	} {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(tc.label),
+			Lane:          processor.LaneDefault,
+			OperationType: "Charge",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-20T12:10:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tc.tab + `","amountCents":800}`),
+			ContextHint:   &processor.ContextHint{Reads: []string{tc.tab, tc.tab + ".status"}},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	}
+
+	// Positive sibling first: the staff member voids at their OWN building, so
+	// a Rejected below is the confinement guard talking and not a broken path.
+	if got := wcSubmitVoidCharge(t, ctx, conn, cp, cons, "wcfgva00000000000001",
+		tabA, wcStaffKey, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("staff VoidCharge at its OWN workplace = %v, want Accepted "+
+			"(the positive sibling — if this fails the negatives prove nothing)", got)
+	}
+	// Unforged control: without a target they are confined to their building.
+	if got := wcSubmitVoidCharge(t, ctx, conn, cp, cons, "wcfgvb00000000000002",
+		tabB, wcStaffKey, ""); got != processor.OutcomeRejected {
+		t.Fatalf("staff VoidCharge at ANOTHER building = %v, want Rejected", got)
+	}
+	// THE FORGERY: the same denied call, plus a fabricated target.
+	if got := wcSubmitVoidCharge(t, ctx, conn, cp, cons, "wcfgvc00000000000003",
+		tabB, wcStaffKey, wcStaffKey); got != processor.OutcomeRejected {
+		t.Fatalf("staff VoidCharge at ANOTHER building with a FORGED authContext.target = %v, want Rejected — "+
+			"target presence must not exempt a scope=any caller from workplace confinement", got)
+	}
+	// A target naming an unrelated vertex is no better than one naming self.
+	if got := wcSubmitVoidCharge(t, ctx, conn, cp, cons, "wcfgvd00000000000004",
+		tabB, wcStaffKey, leaseB); got != processor.OutcomeRejected {
+		t.Fatalf("staff VoidCharge at ANOTHER building with a forged lease target = %v, want Rejected", got)
+	}
+	// Denied before any mutation: the void must not have moved tabB's total.
+	statusDoc := readDoc(t, ctx, conn, tabB+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["totalCents"].(float64); got != 800 {
+		t.Errorf("tabB totalCents = %v, want 800 — a denied VoidCharge must write nothing", got)
+	}
+}
+
 // TestWorkplace_UnwiredStaffDeniedNotWidened pins the design decision, and is
 // the vector a `kv.Read(link) == None` guard fails.
 //

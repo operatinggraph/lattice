@@ -263,6 +263,12 @@ func (cp *CommitPath) dispatch(ctx context.Context, msg substrate.Message) (Mess
 	// without re-reading Capability KV. Allocated by CapabilityAuthorizer; nil
 	// on the StubAuthorizer path.
 	resolvedPermission := decision.Resolved
+	// Stamp the derived validated-target bit onto the envelope once, here — the
+	// commit pipeline re-executes the script on an OCC retry without re-running
+	// auth, so this must be settled before the loop is entered. Unconditional:
+	// whatever a client put on the wire is irrelevant (the field is `json:"-"`)
+	// and every path lands its own answer.
+	env.AuthTargetValidated = authTargetValidated(resolvedPermission)
 	cp.deps.Logger.Info("step 3: authorized",
 		"requestId", env.RequestID, "stub", decision.Stub,
 		"authPath", resolvedPermissionPath(resolvedPermission),
