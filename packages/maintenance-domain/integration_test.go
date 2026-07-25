@@ -171,6 +171,27 @@ func mdSeedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, 
 	}
 }
 
+// mdAssertUntouched proves a document was not rewritten between two reads.
+// lastModifiedByOp is the discriminating field: it carries the per-op tracker
+// key, so it differs on every submission that actually commits — unlike
+// lastModifiedAt, which every vector here hardcodes to the same submittedAt.
+// The presence check is load-bearing: a comparison of two fields the committed
+// document does not carry (step8_commit writes key/class/isDeleted/data plus
+// the created*/lastModified* triplets, and nothing else) is nil == nil, which
+// passes no matter what the op did.
+func mdAssertUntouched(t *testing.T, before, after map[string]any, what string) {
+	t.Helper()
+	stamp, ok := before["lastModifiedByOp"].(string)
+	if !ok || stamp == "" {
+		t.Fatalf("lastModifiedByOp absent from the committed document — "+
+			"the %s no-write assertion would be vacuous", what)
+	}
+	if got := after["lastModifiedByOp"]; got != stamp {
+		t.Errorf("%s rewrote the document (lastModifiedByOp %v → %v); it must be a NO-OP",
+			what, stamp, got)
+	}
+}
+
 func mdReadDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) map[string]any {
 	t.Helper()
 	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
@@ -419,15 +440,51 @@ func TestResolveWorkOrder_IdenticalNotesReplayIsAcceptedNoOp(t *testing.T) {
 		t.Fatalf("replayed ResolveWorkOrder with identical notes = %v, want Accepted (idempotent no-op)", got)
 	}
 	again := mdReadDoc(t, ctx, conn, woKey+".resolution")
-	if first["revision"] != again["revision"] {
-		t.Errorf("replay rewrote the resolution (revision %v → %v); it must be a NO-OP, not a re-write",
-			first["revision"], again["revision"])
-	}
+	mdAssertUntouched(t, first, again, "the identical-notes replay")
 
 	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrpl00000000000004",
 		mdActorKey, woKey, "Actually I replaced the whole door.", ""); got != processor.OutcomeRejected {
 		t.Fatalf("ResolveWorkOrder with DIFFERENT notes = %v, want Rejected — a resolution is terminal", got)
 	}
+}
+
+// TestResolveWorkOrder_TaskPathReplayStaysIdempotent is the offline drain's
+// vector on the path that actually carries it: the tech resolves under the
+// task's ephemeral grant, the §10.6 auto-complete closes the task, and the
+// reconnecting device re-submits the identical notes under a fresh requestId
+// while the grant itself is still live. The resource bind — not a worksAt walk
+// — is what has to carry that replay through the authorization the script runs
+// ahead of its terminal branch, so the beat needs its own vector rather than
+// resting on the standing path's.
+func TestResolveWorkOrder_TaskPathReplayStaysIdempotent(t *testing.T) {
+	ctx, conn := setupMaintenanceEnv(t)
+	cp, cons := mdPipeline(t, ctx, conn, "mdtaskreplay")
+	mdSeedWorld(t, ctx, conn)
+
+	const woID = "BBMANTWQRKMHJKMNPQRS"
+	woKey := "vtx.workorder." + woID
+	if got := mdSubmitReportIssue(t, ctx, conn, cp, cons, "mdrtr00000000000001",
+		mdActorKey, mdUnitAKey, "Radiator knocking", woID); got != processor.OutcomeAccepted {
+		t.Fatalf("ReportIssue = %v, want Accepted", got)
+	}
+	mdSeedQueuedTask(t, ctx, conn, woKey)
+	testutil.SeedCapDoc(t, ctx, conn, mdTechCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, mdTechTaskGrantDoc(woKey))
+
+	const notes = "Bled the radiator."
+	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrtr00000000000002",
+		mdTechKey, woKey, notes, mdTaskKey); got != processor.OutcomeAccepted {
+		t.Fatalf("tech ResolveWorkOrder on the task path = %v, want Accepted", got)
+	}
+	first := mdReadDoc(t, ctx, conn, woKey+".resolution")
+
+	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrtr00000000000003",
+		mdTechKey, woKey, notes, mdTaskKey); got != processor.OutcomeAccepted {
+		t.Fatalf("task-path drain retry with identical notes = %v, want Accepted "+
+			"(the resource bind carries the replay past the guard)", got)
+	}
+	mdAssertUntouched(t, first, mdReadDoc(t, ctx, conn, woKey+".resolution"),
+		"the task-path drain retry")
 }
 
 // TestResolveWorkOrder_StandingPathConfinedToWorkplace: the resolve path's own
@@ -458,5 +515,103 @@ func TestResolveWorkOrder_StandingPathConfinedToWorkplace(t *testing.T) {
 	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrcf00000000000002",
 		mdTechKey, woKey, "Not my building.", ""); got != processor.OutcomeRejected {
 		t.Fatalf("staff standing ResolveWorkOrder at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// TestResolveWorkOrder_ForeignBuildingCannotDistinguishResolvedFromOpen is the
+// READ-oracle vector, not a write one: the terminal branch answers a resolved
+// work order (idempotent accept / AlreadyResolved) differently from an open one,
+// so a caller the workplace guard denies must be denied IDENTICALLY on both, or
+// the pair of outcomes leaks the state — and, by probing notes until the accept
+// appears, the resolution text itself — for a building the caller does not work
+// at. The positive halves keep the negatives honest: the same tech with the same
+// standing grant IS accepted on its OWN building's resolved work order, so the
+// rejections track the workplace, not the resolution state.
+func TestResolveWorkOrder_ForeignBuildingCannotDistinguishResolvedFromOpen(t *testing.T) {
+	ctx, conn := setupMaintenanceEnv(t)
+	cp, cons := mdPipeline(t, ctx, conn, "mdresolveoracle")
+	mdSeedWorld(t, ctx, conn)
+
+	const notes = "Rebalanced the lift counterweight."
+
+	// Building B — outside the tech's workplace: one resolved, one still open.
+	const foreignResolvedID = "BBMANTWQRKGHJKMNPQRS"
+	const foreignOpenID = "BBMANTWQRKHHJKMNPQRS"
+	foreignResolved := "vtx.workorder." + foreignResolvedID
+	foreignOpen := "vtx.workorder." + foreignOpenID
+	// Building A — the tech's own workplace, resolved with the SAME notes.
+	const homeResolvedID = "BBMANTWQRKJHJKMNPQRS"
+	homeResolved := "vtx.workorder." + homeResolvedID
+
+	for _, seed := range []struct {
+		label, loc, id, summary string
+	}{
+		{"mdrcl00000000000001", mdBuildingBKey, foreignResolvedID, "Lift is out at B"},
+		{"mdrcl00000000000002", mdBuildingBKey, foreignOpenID, "Stairwell light out at B"},
+		{"mdrcl00000000000003", mdUnitAKey, homeResolvedID, "Lift is out at A"},
+	} {
+		if got := mdSubmitReportIssue(t, ctx, conn, cp, cons, seed.label,
+			mdActorKey, seed.loc, seed.summary, seed.id); got != processor.OutcomeAccepted {
+			t.Fatalf("operator ReportIssue %q = %v, want Accepted", seed.summary, got)
+		}
+	}
+	for _, seed := range []struct{ label, key string }{
+		{"mdrcl00000000000004", foreignResolved},
+		{"mdrcl00000000000005", homeResolved},
+	} {
+		if got := mdSubmitResolve(t, ctx, conn, cp, cons, seed.label,
+			mdActorKey, seed.key, notes, ""); got != processor.OutcomeAccepted {
+			t.Fatalf("operator ResolveWorkOrder on %s = %v, want Accepted", seed.key, got)
+		}
+	}
+	before := mdReadDoc(t, ctx, conn, foreignResolved+".resolution")
+
+	// A standing grant the tech does not normally hold — the capability plane
+	// alone cannot tell staff from root, which is what makes the script guard
+	// the only thing standing between them and building B.
+	doc := mdTechCapDoc()
+	doc.PlatformPermissions = append(doc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "ResolveWorkOrder", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, doc)
+
+	// The probe: identical notes on a RESOLVED foreign work order (the branch
+	// that would otherwise accept as an idempotent no-op) and on an OPEN one.
+	// Both must fail the same way.
+	resolvedProbe := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrcl00000000000006",
+		mdTechKey, foreignResolved, notes, "")
+	openProbe := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrcl00000000000007",
+		mdTechKey, foreignOpen, notes, "")
+	if resolvedProbe != processor.OutcomeRejected || openProbe != processor.OutcomeRejected {
+		t.Fatalf("foreign-building probes: resolved = %v, open = %v — both want Rejected; "+
+			"a differing pair is the read oracle (resolved-vs-open at a building the caller does not work at)",
+			resolvedProbe, openProbe)
+	}
+	// Differing notes are denied too. The harness surfaces the outcome and not
+	// the reason, so this asserts only that the probe cannot WRITE its way in;
+	// the resolved-vs-open pair above is what proves it cannot READ either.
+	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrcl00000000000008",
+		mdTechKey, foreignResolved, "Guessing at the notes.", ""); got != processor.OutcomeRejected {
+		t.Fatalf("foreign-building probe with differing notes = %v, want Rejected", got)
+	}
+
+	after := mdReadDoc(t, ctx, conn, foreignResolved+".resolution")
+	mdAssertUntouched(t, before, after, "denied probes")
+
+	// Positive halves — the guard denies on WORKPLACE, not on resolution state:
+	// the same tech, same grant, on its own building's already-resolved work
+	// order still reaches the idempotent branch, and an open one still resolves.
+	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrcl00000000000009",
+		mdTechKey, homeResolved, notes, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("tech re-submit on its OWN building's resolved work order = %v, "+
+			"want Accepted (the idempotent no-op is still reachable once authorized)", got)
+	}
+	const homeOpenID = "BBMANTWQRKKHJKMNPQRS"
+	if got := mdSubmitReportIssue(t, ctx, conn, cp, cons, "mdrcm00000000000001",
+		mdActorKey, mdUnitAKey, "Tap dripping at A", homeOpenID); got != processor.OutcomeAccepted {
+		t.Fatalf("operator ReportIssue at unit A = %v, want Accepted", got)
+	}
+	if got := mdSubmitResolve(t, ctx, conn, cp, cons, "mdrcm00000000000002",
+		mdTechKey, "vtx.workorder."+homeOpenID, "Replaced the washer.", ""); got != processor.OutcomeAccepted {
+		t.Fatalf("tech ResolveWorkOrder inside its OWN workplace = %v, want Accepted", got)
 	}
 }

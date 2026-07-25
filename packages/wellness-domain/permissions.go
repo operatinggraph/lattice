@@ -30,11 +30,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // CreateInstructor / TombstoneInstructor are operator-only (mirrors
 // clinic-domain's CreateProvider / TombstoneProvider — entity provisioning
-// stays a trusted-tool ceremony). BindInstructorIdentity additionally grants
-// `frontOfHouse` at scope=any — the staff-run bind ceremony that establishes
-// an instructor's login, mirroring clinic-domain's BindProviderIdentity
-// grant verbatim (the op's own CreateOnly guards on both sides already make
-// a bind mutually exclusive regardless of who submits it).
+// stays a trusted-tool ceremony). BindInstructorIdentity is operator-only
+// too, mirroring clinic-domain's BindProviderIdentity: the bind mints the
+// identity-domain `provider` role, so it matches its operator-only
+// precondition CreateInstructor (front-of-house cannot create the instructor
+// entity a bind would target) and keeps role-minting off the front-desk
+// grant.
 func Permissions() []pkgmgr.PermissionSpec {
 	mk := func(op string) pkgmgr.PermissionSpec {
 		return pkgmgr.PermissionSpec{

@@ -447,6 +447,39 @@ def execute(state, op):
         if not vertex_alive(state, wkey):
             fail("UnknownWorkOrder: " + wkey)
 
+        # Authorization runs ahead of the terminal branch below, the ordering
+        # clinic's SetAppointmentStatus gives its own terminal-status read
+        # (its identity binding precedes that read for the same reason; its
+        # payload-matching probes are a separate matter). That branch answers a
+        # resolved work order differently from an open one -- an idempotent
+        # accept versus AlreadyResolved -- so a caller who reached it before
+        # being authorized would hold a read oracle over a building they do not
+        # work at: resolved-vs-open, and the resolution notes themselves,
+        # recoverable by probing which submission the branch accepts. Guarding
+        # first means a caller who may not resolve the work order cannot read
+        # its resolution state either. The liveness check above still answers
+        # ahead of the guard, so key EXISTENCE remains distinguishable from
+        # denial -- the same shape clinic's SetAppointmentStatus carries.
+        #
+        # A validated target only exempts a claimant when it names THIS work
+        # order. The task grant is scopedTo one work order (authContext.target),
+        # while the work order actually resolved comes from payload.workOrderKey
+        # -- two independent client fields. Without the bind, a tech holding a
+        # legitimate grant for one work order could resolve a different one at a
+        # building they do not work at. Past the bind the caller is ordinary
+        # staff, so enforce_workplace (not require_workplace, whose own
+        # validated-target exemption would re-open exactly this hole) runs the
+        # worksAt walk.
+        # authcontext-target: (resource-bind) the VALIDATED target must name
+        # the work order this op resolves.
+        resource_bound = op.authTargetValidated and op.authContextTarget == wkey
+        if not (resource_bound or actor_holds_operator(op.actor)):
+            loc = workorder_location(wkey)
+            locs = []
+            if loc != None:
+                locs = [loc]
+            enforce_workplace(locs, "ResolveWorkOrder on " + wkey)
+
         # Read-before-write terminal, mirroring lease-signing's .decision. The
         # aspect is an OptionalRead: it is legitimately absent on the first
         # resolve, which is the overwhelmingly common case.
@@ -474,25 +507,6 @@ def execute(state, op):
                 return {"mutations": [], "events": []}
             fail("AlreadyResolved: " + wkey + " was resolved with different notes; " +
                  "a resolution is terminal and cannot be rewritten")
-
-        # A validated target only exempts a claimant when it names THIS work
-        # order. The task grant is scopedTo one work order (authContext.target),
-        # while the work order actually resolved comes from payload.workOrderKey
-        # -- two independent client fields. Without the bind, a tech holding a
-        # legitimate grant for one work order could resolve a different one at a
-        # building they do not work at. Past the bind the caller is ordinary
-        # staff, so enforce_workplace (not require_workplace, whose own
-        # validated-target exemption would re-open exactly this hole) runs the
-        # worksAt walk.
-        # authcontext-target: (resource-bind) the VALIDATED target must name
-        # the work order this op resolves.
-        resource_bound = op.authTargetValidated and op.authContextTarget == wkey
-        if not (resource_bound or actor_holds_operator(op.actor)):
-            loc = workorder_location(wkey)
-            locs = []
-            if loc != None:
-                locs = [loc]
-            enforce_workplace(locs, "ResolveWorkOrder on " + wkey)
 
         resolved_at = time.rfc3339_utc(op.submittedAt)
         mutations = [
