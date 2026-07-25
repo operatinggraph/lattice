@@ -5,27 +5,32 @@
 // (nats-subject) Lens projects a row keyed on some vertex OTHER than the
 // recipient identity, and Refractor's D1 readableAnchors gate
 // (internal/refractor/projection/personal.go → capabilityread.IsReadable)
-// SILENTLY drops that row unless a read-grant PRODUCER lens in the SAME package
-// grants the anchor's kind. The data walk and the grant walk are hand-authored
-// twice and nothing compiles one from the other, so a producer that forgets a
-// slice fails closed with nothing reporting why — the Fire-1 bug that left only
-// edgeIdentity's self-anchor reaching a live tenant.
+// SILENTLY drops that row unless the actor's cap-read.* slices grant the
+// anchor's bare NanoID. Nothing at runtime reports the drop.
 //
-// This is the Stage-1 structural half of the dual-enumeration hardening (the
-// runtime half is packages/edge-manifest/coverage_proof_test.go). It does NOT
-// derive grants from the data lenses — that would make D1's gate a tautology
-// and delete the boundary. It only asserts the two independent enumerations
-// STRUCTURALLY agree: every anchor KIND a Personal lens projects has a matching
-// producer branch.
+// The walk is DECLARED once, as `pkgmgr.AnchorWalk`, and pkgmgr compiles both
+// artifacts from it (internal/pkgmgr/anchorwalk.go): the lens's own reachability
+// prefix and the whole read-grant producer. So the invariant this gate enforces
+// is the declaration itself:
 //
-// The invariant, precisely:
-//   - A Personal lens's anchor kind is the LABEL of the vertex its
-//     `RETURN <var>.key AS anchor` binds — `(wo:workorder)` → "workorder".
-//   - A self-anchored lens (its anchor var bound `{key: $actorKey}`) is exempt:
-//     the platform base cap-read self-grant already covers the actor's own key.
-//   - A producer branch is an `anchorType: '<kind>'` element of an
-//     actorAggregate lens's readableAnchors, in the same package.
-//   - Every non-self anchor kind must appear as some producer's anchorType.
+//   - Every Personal lens either anchors on the ACTOR (its anchor variable
+//     bound `{key: $actorKey}` — covered by the platform base cap-read
+//     self-grant) or declares a `Walk`.
+//   - A package that ships Personal lenses does not ALSO hand-author a Path-B
+//     cap-read producer (`ProjectionKind: "actorAggregate"` writing a
+//     `cap-read.*` key). Those are generated per declared ReadGrantDomain; a
+//     hand-authored one beside its own lenses restates every walk it grants,
+//     which is the footgun itself. A cap-read slice with no lens counterpart
+//     (the kernel's own self-anchor base is this shape) stays legal.
+//
+// Path A producers (`GrantTable: true`, Postgres `actor_read_grants`) are a
+// different mechanism — a row→anchor comprehension meeting actor→anchor grants
+// at the anchor vocabulary, not one walk duplicated — and are untouched here.
+//
+// pkgmgr's expansion pass rejects the missing-Walk violation at package-build
+// time too (and a registry-wide test compiles every shipped package), but only
+// this gate catches BOTH across every package in CI without an install — which
+// is what binds the NEXT author.
 //
 // Runs per package under packages/. STRICT=1 exits non-zero on any issue.
 package main
@@ -38,7 +43,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -47,25 +51,16 @@ type lens struct {
 	name           string // CanonicalName
 	adapter        string
 	personal       bool
+	hasWalk        bool
 	projectionKind string
-	spec           string // resolved cypher
+	hasOutput      bool
+	outputKey      string // Output.OutputKeyPattern, "" when not statically resolvable
+	grantTable     bool
+	spec           string // resolved cypher (the presentation tail only, with a Walk)
 	pos            token.Position
 }
 
-var (
-	reAnchor   = regexp.MustCompile(`(\w+)\.key\s+AS\s+anchor\b`)
-	reAnchorTy = regexp.MustCompile(`anchorType:\s*'([A-Za-z0-9_]+)'`)
-)
-
-// nodeLabel finds the label the pattern binds to variable v — the first
-// `(v:label` occurrence in the cypher. "" if none.
-func nodeLabel(cypher, v string) string {
-	re := regexp.MustCompile(`\(\s*` + regexp.QuoteMeta(v) + `\s*:\s*([A-Za-z0-9_]+)`)
-	if m := re.FindStringSubmatch(cypher); m != nil {
-		return m[1]
-	}
-	return ""
-}
+var reAnchor = regexp.MustCompile(`(\w+)\.key\s+AS\s+anchor\b`)
 
 // isSelfAnchored reports whether v is bound with `{key: $actorKey}` — the actor
 // itself, covered by the base self-grant.
@@ -95,7 +90,7 @@ func main() {
 	}
 
 	if issues == 0 && warns == 0 {
-		fmt.Println("lint-lens-anchors: 0 issues — every Personal-lens anchor kind has a producer branch")
+		fmt.Println("lint-lens-anchors: 0 issues — every non-self-anchored Personal lens declares its read-grant Walk")
 		return
 	}
 	fmt.Printf("lint-lens-anchors: %d issue(s), %d advisory warning(s)\n", issues, warns)
@@ -104,8 +99,8 @@ func main() {
 	}
 }
 
-// checkPackage parses one package directory and enforces the anchor-coverage
-// invariant over its Personal lenses and producers.
+// checkPackage parses one package directory and enforces both invariants over
+// its lens declarations.
 func checkPackage(dir string) (issues, warns int) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
@@ -129,48 +124,55 @@ func checkPackage(dir string) (issues, warns int) {
 		}
 	}
 
-	// Only packages that ship a Personal (nats-subject) lens participate.
-	var personal []lens
-	providedKinds := map[string]bool{}
+	// A hand-authored Path-B producer is only a DUPLICATED walk if this package
+	// also ships Personal lenses whose walks it would be restating. A package
+	// with none has no walk to duplicate — the carve-out for a cap-read slice
+	// with no lens counterpart (the kernel's own self-anchor base is this shape)
+	// stays legal.
+	shipsPersonalLens := false
 	for _, l := range lenses {
 		if l.adapter == "nats-subject" && l.personal {
-			personal = append(personal, l)
+			shipsPersonalLens = true
+			break
 		}
-		if l.projectionKind == "actorAggregate" {
-			for _, m := range reAnchorTy.FindAllStringSubmatch(l.spec, -1) {
-				providedKinds[m[1]] = true
-			}
-		}
-	}
-	if len(personal) == 0 {
-		return 0, 0
 	}
 
-	for _, l := range personal {
+	for _, l := range lenses {
+		if shipsPersonalLens && l.projectionKind == "actorAggregate" && !l.grantTable && l.hasOutput {
+			switch {
+			case strings.HasPrefix(l.outputKey, "cap-read."):
+				fmt.Printf("%s: lens %s hand-authors a Path-B cap-read producer (%s) beside this package's own Personal lenses — declare a pkgmgr.ReadGrantDomain and let their Walks compile it; a hand-authored producer restates every walk it grants, which is the dual-enumeration footgun\n",
+					posOf(l), l.name, l.outputKey)
+				issues++
+				continue
+			case l.outputKey == "":
+				// Fail closed: a pattern this gate cannot read statically may
+				// well be a cap-read key.
+				fmt.Printf("%s: lens %s is an actorAggregate producer whose OutputKeyPattern is neither a string literal nor a string const, so this gate cannot tell whether it writes a cap-read.* slice — spell it as one so the Path-B rule stays checkable\n",
+					posOf(l), l.name)
+				issues++
+				continue
+			}
+		}
+
+		if l.adapter != "nats-subject" || !l.personal {
+			continue
+		}
+		if l.hasWalk {
+			continue // non-self by construction, and its producer is compiled
+		}
 		m := reAnchor.FindStringSubmatch(l.spec)
 		if m == nil {
-			// A Personal lens with no `.key AS anchor` cannot be classified —
-			// surface it rather than pass silently, but do not block CI on a
-			// shape this lint does not model.
-			fmt.Printf("%s: warn: Personal lens %s has no `<var>.key AS anchor` — cannot verify its read-grant coverage\n", posOf(l), l.name)
+			fmt.Printf("%s: warn: Personal lens %s declares no Walk and has no `<var>.key AS anchor` — cannot verify its read-grant coverage\n", posOf(l), l.name)
 			warns++
 			continue
 		}
-		anchorVar := m[1]
-		if isSelfAnchored(l.spec, anchorVar) {
+		if isSelfAnchored(l.spec, m[1]) {
 			continue // self-anchored — base cap-read self-grant covers it
 		}
-		kind := nodeLabel(l.spec, anchorVar)
-		if kind == "" {
-			fmt.Printf("%s: warn: Personal lens %s anchors on `%s` but its node label is undeterminable — cannot verify coverage\n", posOf(l), l.name, anchorVar)
-			warns++
-			continue
-		}
-		if !providedKinds[kind] {
-			fmt.Printf("%s: Personal lens %s projects a '%s' anchor but NO read-grant producer in package %s grants anchorType '%s' — Refractor's D1 gate would silently drop every row (the 'forgot the slice' dual-enumeration bug). Producer kinds present: %v\n",
-				posOf(l), l.name, kind, filepath.Base(dir), kind, sortedKeys(providedKinds))
-			issues++
-		}
+		fmt.Printf("%s: Personal lens %s anchors on `%s` (not the actor) but declares no Walk — pkgmgr cannot compile its read-grant producer, so Refractor's D1 gate would silently drop every row it projects (the 'forgot the slice' dual-enumeration bug). Declare Walk with the actor→anchor chain and a GrantDomain.\n",
+			posOf(l), l.name, m[1])
+		issues++
 	}
 	return issues, warns
 }
@@ -240,10 +242,21 @@ func collectLenses(fset *token.FileSet, f *ast.File, consts map[string]string) [
 					l.adapter = stringLit(kv.Value)
 				case "ProjectionKind":
 					l.projectionKind = stringLit(kv.Value)
+				case "Walk":
+					// An explicit `Walk: nil` declares nothing.
+					id, isIdent := kv.Value.(*ast.Ident)
+					l.hasWalk = !isIdent || id.Name != "nil"
 				case "Personal":
 					if id, ok := kv.Value.(*ast.Ident); ok {
 						l.personal = id.Name == "true"
 					}
+				case "GrantTable":
+					if id, ok := kv.Value.(*ast.Ident); ok {
+						l.grantTable = id.Name == "true"
+					}
+				case "Output":
+					l.hasOutput = true
+					l.outputKey = outputKeyPattern(kv.Value, consts)
 				case "Spec":
 					switch v := kv.Value.(type) {
 					case *ast.Ident:
@@ -262,6 +275,39 @@ func collectLenses(fset *token.FileSet, f *ast.File, consts map[string]string) [
 	return out
 }
 
+// outputKeyPattern reads OutputKeyPattern out of an
+// `&pkgmgr.OutputDescriptorSpec{...}` literal, resolving a bare const
+// reference. Returns "" when the expression is not statically resolvable — the
+// caller treats that as UNVERIFIABLE rather than as "not a cap-read producer",
+// so a computed key pattern cannot walk past the gate.
+func outputKeyPattern(e ast.Expr, consts map[string]string) string {
+	if u, ok := e.(*ast.UnaryExpr); ok {
+		e = u.X
+	}
+	cl, ok := e.(*ast.CompositeLit)
+	if !ok {
+		return ""
+	}
+	for _, fe := range cl.Elts {
+		kv, ok := fe.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		id, ok := kv.Key.(*ast.Ident)
+		if !ok || id.Name != "OutputKeyPattern" {
+			continue
+		}
+		if lit := stringLit(kv.Value); lit != "" {
+			return lit
+		}
+		if ref, ok := kv.Value.(*ast.Ident); ok {
+			return consts[ref.Name]
+		}
+		return ""
+	}
+	return ""
+}
+
 func isLensSpecSelector(e ast.Expr) bool {
 	se, ok := e.(*ast.SelectorExpr)
 	return ok && se.Sel != nil && se.Sel.Name == "LensSpec"
@@ -274,13 +320,4 @@ func stringLit(e ast.Expr) string {
 		}
 	}
 	return ""
-}
-
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

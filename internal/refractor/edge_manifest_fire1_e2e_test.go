@@ -135,19 +135,23 @@ func activateEdgeManifestLenses(t *testing.T, h *pl2Harness) {
 	const subjectPrefix = "lattice.sync.user"
 	const syncStream = "SYNC"
 
-	// edgemanifest.Lenses() now also returns edgeManifestReadGrants (Fire 2:
-	// a nats-kv/actorAggregate lens, no IntoKey, no subjectPrefix/stream) —
-	// a structurally different kind this Personal-Lens-only activation
-	// helper was never built to wire (TargetType/adapter below are
-	// nats_subject-specific throughout). h.capKV is nil in this harness, so
-	// the D1 read-grant gate this lens feeds is already bypassed for every
-	// row this test observes (personalEnvelopeFn's capKV!=nil check never
-	// runs) — testing the grant lens itself is packages/edge-manifest's own
-	// job (TestPackage_ReadGrantLensIsActorAggregateNatsKV), not this Fire-1
-	// e2e's, so it's excluded here rather than reworking this helper's
-	// nats-subject-only wiring to also cover a second lens shape.
+	// The package declares each non-self-anchored lens's reachability as an
+	// AnchorWalk and pkgmgr compiles the executable cypher from it, so this
+	// wires the COMPOSED definition — a declared Spec on its own is the
+	// presentation tail, not a runnable query.
+	//
+	// The composed definition also carries the generated cap-read producers
+	// (nats-kv / actorAggregate: no IntoKey, no subjectPrefix/stream) — a
+	// structurally different kind this Personal-Lens-only helper does not wire
+	// (TargetType/adapter below are nats_subject-specific throughout). h.capKV
+	// is nil in this harness, so the D1 read-grant gate those producers feed is
+	// bypassed for every row this test observes (personalEnvelopeFn's
+	// capKV!=nil check never runs); the producers are packages/edge-manifest's
+	// own job to prove, not this Fire-1 e2e's.
+	composed, err := edgemanifest.Package.ExpandReadGrantWalks()
+	require.NoError(t, err, "edge-manifest's read-grant walks must compile")
 	var specs []pkgmgr.LensSpec
-	for _, ls := range edgemanifest.Lenses() {
+	for _, ls := range composed.Lenses {
 		if ls.Adapter == "nats-subject" {
 			specs = append(specs, ls)
 		}

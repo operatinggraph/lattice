@@ -160,15 +160,15 @@ func TestManifestAnchorCoverage_ResidentWorld(t *testing.T) {
 	f := emResidentWorld(t)
 	f.assertAnchorsCovered(t, f.key("resident"),
 		[]dataLens{
-			{"edgeServices", edgeServicesSpec},
-			{"edgeCatalog", edgeCatalogSpec},
-			{"edgeTasks", edgeTasksSpec},
-			{"edgeInstances", edgeInstancesSpec},
-			{"edgeEntitySessions", edgeEntitySessionsSpec},
-			{"edgeEntityProviders", edgeEntityProvidersSpec},
-			{"edgeEntityBookings", edgeEntityBookingsSpec},
+			{"edgeServices", emComposedSpec(t, "edgeServices")},
+			{"edgeCatalog", emComposedSpec(t, "edgeCatalog")},
+			{"edgeTasks", emComposedSpec(t, "edgeTasks")},
+			{"edgeInstances", emComposedSpec(t, "edgeInstances")},
+			{"edgeEntitySessions", emComposedSpec(t, "edgeEntitySessions")},
+			{"edgeEntityProviders", emComposedSpec(t, "edgeEntityProviders")},
+			{"edgeEntityBookings", emComposedSpec(t, "edgeEntityBookings")},
 		},
-		[]string{edgeManifestReadGrantsSpec})
+		[]string{emComposedSpec(t, "edgeManifestReadGrants")})
 }
 
 // --- Staff persona -----------------------------------------------------------
@@ -200,11 +200,11 @@ func TestManifestAnchorCoverage_StaffWorld(t *testing.T) {
 	f := emStaffWorldFull(t)
 	f.assertAnchorsCovered(t, f.key("tech"),
 		[]dataLens{
-			{"edgeStaffWorkOrders", edgeStaffWorkOrdersSpec},
-			{"edgeCatalogRoles", edgeCatalogRolesSpec},
-			{"edgeTasksQueued", edgeTasksQueuedSpec},
+			{"edgeStaffWorkOrders", emComposedSpec(t, "edgeStaffWorkOrders")},
+			{"edgeCatalogRoles", emComposedSpec(t, "edgeCatalogRoles")},
+			{"edgeTasksQueued", emComposedSpec(t, "edgeTasksQueued")},
 		},
-		[]string{edgeManifestStaffReadGrantsSpec})
+		[]string{emComposedSpec(t, "edgeManifestStaffReadGrants")})
 }
 
 // --- Provider persona --------------------------------------------------------
@@ -245,9 +245,9 @@ func TestManifestAnchorCoverage_ProviderWorld(t *testing.T) {
 	f := emProviderWorld(t)
 	f.assertAnchorsCovered(t, f.key("providerId"),
 		[]dataLens{
-			{"edgeProviderSchedule", edgeProviderScheduleSpec},
-			{"edgeProviderQueue", edgeProviderQueueSpec},
-			{"edgeInstructorSessions", edgeInstructorSessionsSpec},
+			{"edgeProviderSchedule", emComposedSpec(t, "edgeProviderSchedule")},
+			{"edgeProviderQueue", emComposedSpec(t, "edgeProviderQueue")},
+			{"edgeInstructorSessions", emComposedSpec(t, "edgeInstructorSessions")},
 		},
-		[]string{edgeManifestProviderReadGrantsSpec})
+		[]string{emComposedSpec(t, "edgeManifestProviderReadGrants")})
 }

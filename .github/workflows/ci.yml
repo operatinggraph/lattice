@@ -104,11 +104,13 @@ jobs:
         # history/changelog comments. STRICT=1 fails the build on any finding.
         run: STRICT=1 go run ./scripts/lint-conventions.go
 
-      - name: Lens anchor-coverage lint (read-grant dual-enumeration seam)
-        # Every non-self anchor kind a Personal (nats-subject) lens projects
-        # must have a read-grant producer branch in the same package, or
-        # Refractor's D1 gate silently drops every row of that lens. STRICT=1
-        # fails the build on any uncovered anchor kind.
+      - name: Lens read-grant walk lint (dual-enumeration seam)
+        # A Personal (nats-subject) lens that anchors on anything but the actor
+        # must declare its actor→anchor `Walk`, so pkgmgr compiles the read-grant
+        # producer that grants those anchors — otherwise Refractor's D1 gate
+        # silently drops every row of that lens. A Path-B cap-read producer must
+        # be generated from those walks, never hand-authored beside them.
+        # STRICT=1 fails the build on either violation.
         run: STRICT=1 go run ./scripts/lint-lens-anchors.go
 
       - name: Package version-bump gate (packages/ content edits bump the manifest)

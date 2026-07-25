@@ -68,11 +68,11 @@ var readGrantLensNames = map[string]bool{
 }
 
 func TestPackage_SeventeenLenses(t *testing.T) {
-	if got := len(Package.Lenses); got != 17 {
+	if got := len(emComposedLenses(t)); got != 17 {
 		t.Fatalf("expected 17 lenses (14 manifest + 3 read-grant producers), got %d", got)
 	}
 	names := map[string]bool{}
-	for _, l := range Package.Lenses {
+	for _, l := range emComposedLenses(t) {
 		names[l.CanonicalName] = true
 	}
 	for want := range manifestLensNames {
@@ -97,7 +97,7 @@ func TestPackage_SeventeenLenses(t *testing.T) {
 // — see TestPackage_ReadGrantLensIsActorAggregateNatsKV) and is excluded
 // here.
 func TestPackage_LensesAreNatsSubjectPersonal(t *testing.T) {
-	for _, l := range Package.Lenses {
+	for _, l := range emComposedLenses(t) {
 		if !manifestLensNames[l.CanonicalName] {
 			continue
 		}
@@ -136,9 +136,10 @@ func TestPackage_LensesAreNatsSubjectPersonal(t *testing.T) {
 // which is Path A / RLS for Protected postgres reads and irrelevant here).
 func TestPackage_ReadGrantLensIsActorAggregateNatsKV(t *testing.T) {
 	var found *pkgmgr.LensSpec
-	for i := range Package.Lenses {
-		if Package.Lenses[i].CanonicalName == readGrantLensName {
-			found = &Package.Lenses[i]
+	lenses := emComposedLenses(t)
+	for i := range lenses {
+		if lenses[i].CanonicalName == readGrantLensName {
+			found = &lenses[i]
 		}
 	}
 	if found == nil {
@@ -198,7 +199,7 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 		"edgeProviderQueue":      `"manifest.ent" AS ns`,
 		"edgeInstructorSessions": `"manifest.ent" AS ns`,
 	}
-	for _, l := range Package.Lenses {
+	for _, l := range emComposedLenses(t) {
 		if readGrantLensNames[l.CanonicalName] {
 			continue
 		}
@@ -221,7 +222,7 @@ func TestPackage_LensRowKeysAreManifestNamespaced(t *testing.T) {
 func TestPackage_TaskLensesNameBothScopedSubjects(t *testing.T) {
 	for _, name := range []string{"edgeTasks", "edgeTasksQueued"} {
 		var spec string
-		for _, l := range Package.Lenses {
+		for _, l := range emComposedLenses(t) {
 			if l.CanonicalName == name {
 				spec = l.Spec
 			}
@@ -248,7 +249,7 @@ func TestPackage_TaskLensesNameBothScopedSubjects(t *testing.T) {
 // stack to install against.
 func TestPackage_SpecsParseUnderFullEngine(t *testing.T) {
 	eng := full.New()
-	for _, l := range Package.Lenses {
+	for _, l := range emComposedLenses(t) {
 		if _, err := eng.Parse(l.Spec); err != nil {
 			t.Errorf("%s: cypher failed to parse under the full engine: %v\nspec:\n%s", l.CanonicalName, err, l.Spec)
 		}
@@ -260,7 +261,7 @@ func TestPackage_SpecsParseUnderFullEngine(t *testing.T) {
 // only supports `= null` / `<> null` — see lease-signing/lenses.go:565 and
 // semantic-contracts/lenses.go:61 for the same guard elsewhere).
 func TestPackage_SpecsUseNullTestNotIsNull(t *testing.T) {
-	for _, l := range Package.Lenses {
+	for _, l := range emComposedLenses(t) {
 		upper := strings.ToUpper(l.Spec)
 		if strings.Contains(upper, "IS NULL") || strings.Contains(upper, "IS NOT NULL") {
 			t.Errorf("%s: spec uses unsupported IS [NOT] NULL — use = null / <> null instead", l.CanonicalName)

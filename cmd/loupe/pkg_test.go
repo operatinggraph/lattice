@@ -38,18 +38,18 @@ func TestComputePackage(t *testing.T) {
 				"vtx.orphanaspectparent.x0000!bad",
 				"vtx.meta.orphanparent00000000.detail"
 			]}}`),
-		"vtx.meta.ddl00000000000000000":               []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
-		"vtx.meta.ddl00000000000000000.canonicalName": []byte(`{"data":{"value":"booking"}}`),
-		"vtx.meta.asp00000000000000000":               []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
-		"vtx.meta.asp00000000000000000.canonicalName": []byte(`{"data":{"value":"contactInfo"}}`),
-		"vtx.meta.opm00000000000000000":               []byte(`{"class":"meta.ddl.vertexType","data":{"operationType":"CreateBooking"}}`),
-		"vtx.meta.lens0000000000000000":               []byte(`{"class":"meta.lens","data":{}}`),
-		"vtx.meta.lens0000000000000000.canonicalName": []byte(`{"data":{"value":"bookings-by-day"}}`),
-		"vtx.meta.wvt00000000000000000":               []byte(`{"class":"meta.weaverTarget","data":{}}`),
-		"vtx.role.role0000000000000000":               []byte(`{"class":"role","data":{}}`),
-		"vtx.role.role0000000000000000.canonicalName": []byte(`{"data":{"value":"receptionist"}}`),
-		"vtx.roleindex.ri0000000000000":               []byte(`{"class":"roleindex","data":{}}`),
-		"vtx.permission.perm0000000000":               []byte(`{"class":"permission","data":{"name":"booking.create"}}`),
+		"vtx.meta.ddl00000000000000000":                                     []byte(`{"class":"meta.ddl.vertexType","data":{}}`),
+		"vtx.meta.ddl00000000000000000.canonicalName":                       []byte(`{"data":{"value":"booking"}}`),
+		"vtx.meta.asp00000000000000000":                                     []byte(`{"class":"meta.ddl.aspectType","data":{}}`),
+		"vtx.meta.asp00000000000000000.canonicalName":                       []byte(`{"data":{"value":"contactInfo"}}`),
+		"vtx.meta.opm00000000000000000":                                     []byte(`{"class":"meta.ddl.vertexType","data":{"operationType":"CreateBooking"}}`),
+		"vtx.meta.lens0000000000000000":                                     []byte(`{"class":"meta.lens","data":{}}`),
+		"vtx.meta.lens0000000000000000.canonicalName":                       []byte(`{"data":{"value":"bookings-by-day"}}`),
+		"vtx.meta.wvt00000000000000000":                                     []byte(`{"class":"meta.weaverTarget","data":{}}`),
+		"vtx.role.role0000000000000000":                                     []byte(`{"class":"role","data":{}}`),
+		"vtx.role.role0000000000000000.canonicalName":                       []byte(`{"data":{"value":"receptionist"}}`),
+		"vtx.roleindex.ri0000000000000":                                     []byte(`{"class":"roleindex","data":{}}`),
+		"vtx.permission.perm0000000000":                                     []byte(`{"class":"permission","data":{"name":"booking.create"}}`),
 		"lnk.permission.perm0000000000.grantedBy.role.role0000000000000000": []byte(`{"class":"grantedBy","data":{}}`),
 		// vtx.meta.gone0000000000000000 intentionally absent (uninstalled remnant).
 	}
@@ -215,3 +215,27 @@ func TestPackageRegistryMirrorsLatticePkg(t *testing.T) {
 	}
 }
 
+// TestEveryPackageCompilesItsReadGrantWalks runs the install-time compilation
+// every shipped package goes through, over the whole registry: read-grant walks
+// must compile (which is where the walk grammar and the "every non-self-anchored
+// Personal lens declares a Walk" invariant are enforced), and the on-disk
+// manifest must agree with the COMPOSED definition — generated cap-read
+// producers included, index-wise, so a manifest that lists them out of
+// ReadGrantDomains order fails here rather than at install.
+func TestEveryPackageCompilesItsReadGrantWalks(t *testing.T) {
+	for name := range packageRegistry {
+		def := packageRegistry[name]
+		t.Run(name, func(t *testing.T) {
+			if _, err := def.ExpandReadGrantWalks(); err != nil {
+				t.Fatalf("read-grant walks do not compile: %v", err)
+			}
+			manifest, err := pkgmgr.ParseManifest("../../packages/" + name + "/manifest.yaml")
+			if err != nil {
+				t.Skipf("no parsable manifest at packages/%s: %v", name, err)
+			}
+			if err := manifest.VerifyAgainstDefinition(def); err != nil {
+				t.Errorf("manifest drifts from the composed definition: %v", err)
+			}
+		})
+	}
+}

@@ -7,72 +7,55 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // facet-entity-browse-design.md; the staff siblings edgeCatalogRoles +
 // edgeTasksQueued + edgeStaffWorkOrders per facet-staff-worlds-design.md
 // §3.3; the provider-hat siblings edgeProviderSchedule + edgeProviderQueue +
-// edgeInstructorSessions per persona-worlds-design.md Fire W0) — the first real
-// `nats-subject` / Personal Lens package in the repo (the adapter plumbing
-// shipped latent in Fire 0; this is its first production consumer) — plus THREE
-// read-grant PRODUCER lenses, edgeManifestReadGrants (Fire 2 fix, added
-// building
-// cmd/facet): every non-self-anchored Personal Lens row (edgeServices/
-// edgeCatalog/edgeTasks/edgeInstances each anchor on a vertex OTHER than the
-// recipient identity — a service template, op meta, task, or instance) is
-// silently dropped by Refractor's D1 `readableAnchors` fail-closed gate
-// (internal/refractor/projection/personal.go's personalEnvelopeFn calls
-// capabilityread.IsReadable, which reads the NATS-KV "capability" bucket's
-// per-actor `cap-read.<domain>.<actor>` documents — Contract #6 §6.14 Path
-// B — NOT the Postgres actor_read_grants table a `GrantTable:true` lens
-// feeds (Path A, RLS enforcement for Protected postgres reads; irrelevant
-// here since edge-manifest has no Postgres/Protected lens at all). This
-// gate is orthogonal to — and never derived from — the manifest lenses' own
-// cypher reachability (internal/bootstrap/lenses.go's
-// CapabilityReadLensDefinition doc: "each package ships its own
-// cap-read.<domain>... lens for the relationships it owns"). Fire 1 shipped
-// the five manifest lenses without this read-grant half, which is why only
-// edgeIdentity's self-anchored manifest.me ever reached a live tenant.
-// edgeManifestReadGrants is edge-manifest's own
-// `ProjectionKind:"actorAggregate"` + nats-kv `Output` descriptor lens —
-// the SAME declarative shape internal/bootstrap/lenses.go's
-// CapabilityReadLensDefinition uses at the kernel level, just the first
-// PACKAGE to use it (every existing package cap-read producer —
-// console-operator, clinic-domain — is the OTHER kind, a Postgres
-// GrantTable feeding Path A; this is Path B, and edge-manifest is Path B's
-// first package producer). One combined `cap-read.edgeManifest.<actor>`
-// slice covers all seven non-self anchor kinds
-// (service/op/task/instance/session/provider/booking) — no need for separate
-// lenses, since the actor's effective readable
-// set is already a union over every slice class, and one slice may itself
-// list many anchors. edgeManifestStaffReadGrants is the SECOND slice, covering
-// the anchor kinds the staff lenses add (role-granted op metas, role-queued
-// tasks, workplace work orders) — kept separate precisely because §6.14 unions
-// slices, so the base producer's cross-product fan-out need not grow for every
-// actor to serve a staff-only reachability path. edgeManifestProviderReadGrants
-// is the THIRD slice (persona-worlds-design.md Fire W0), covering the three
-// anchor kinds the provider-hat lenses add (own appointments, own service
-// queue, own led sessions) for the same cross-product-avoidance reason.
+// edgeInstructorSessions per persona-worlds-design.md Fire W0) — the repo's
+// first `nats-subject` / Personal Lens package.
 //
-// Every Personal-Lens cypher below is Personal:true (Refractor's
-// cross-vertex fan-out re-executes the cypher once per reachable identity,
-// binding $actorKey to that identity's own key — personal-secure-lens-
-// design.md §3.3), delivers over the shared `lattice.sync.user.<actor>`
-// subject (SubjectPrefix/Stream), and keys its rows under the reserved
-// `manifest.` namespace via IntoKey's dot-join (edge/store.go's
-// ApplyUpsert/ApplyDelete carry a matching exemption for this prefix, since
-// a `manifest.*` key is a projection-row key, not a Contract #1 key).
+// Thirteen of the fourteen are NON-SELF-ANCHORED: each keys its rows on a
+// vertex other than the recipient identity (a service template, an op meta, a
+// task, an instance, a session, a provider, a booking, a work order, an
+// appointment). Refractor's D1 gate (internal/refractor/projection/personal.go
+// → capabilityread.IsReadable) drops such a row unless the actor's unioned
+// `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently,
+// fail-closed, by design (Contract #6 §6.14 Path B; NOT the Postgres
+// actor_read_grants table a `GrantTable:true` lens feeds, which is Path A / RLS
+// for Protected reads and irrelevant here — this package has no Postgres lens).
+//
+// So each of those thirteen declares its actor→anchor reachability ONCE, as a
+// `Walk`, and pkgmgr compiles BOTH artifacts from it: the lens's own OPTIONAL
+// MATCH prefix, and the read-grant producer that grants the anchors. `Spec`
+// therefore carries the presentation TAIL only. The three producers
+// (edgeManifestReadGrants / …Staff… / …Provider…) are generated, one per
+// declared ReadGrantDomain — they are not written here, and must not be.
+//
+// Three domains rather than one: §6.14 unions every cap-read slice into the
+// actor's effective readable set, so a reachability path not every actor has
+// (staff role-standing grants, provider-hat bindings) lives in its own slice
+// and its branches never join the base producer's cross-branch fan-out. An
+// identity with no such binding simply gets an empty slice, deleted by the
+// generated producer's EmptyBehavior + realness filter.
+//
+// Every Personal-Lens cypher below is Personal:true (Refractor's cross-vertex
+// fan-out re-executes the cypher once per reachable identity, binding
+// $actorKey to that identity's own key — personal-secure-lens-design.md §3.3),
+// delivers over the shared `lattice.sync.user.<actor>` subject
+// (SubjectPrefix/Stream), and keys its rows under the reserved `manifest.`
+// namespace via IntoKey's dot-join (edge/store.go's ApplyUpsert/ApplyDelete
+// carry a matching exemption for this prefix, since a `manifest.*` key is a
+// projection-row key, not a Contract #1 key).
 //
 // $actorKey is NOT the "current identity" for actor-aggregate lenses (those
 // bind $actorKey to whichever vertex was mutated); for a Personal:true lens
-// it is always the enumerated recipient identity's own key — every cypher
-// below anchors `MATCH (identity:identity {key: $actorKey})` on exactly
-// that basis.
+// it is always the enumerated recipient identity's own key.
 //
 // v1 scope-downs (named, not silent — each is a reasonable narrowing the
-// engine or the data model makes convenient to defer, not a correctness
-// gap in what IS built): edgeIdentity's anchors carry the location's
+// engine or the data model makes convenient to defer, not a correctness gap in
+// what IS built): edgeIdentity's anchors carry the location's
 // `.presentation.data.name` (class-2 display source, display-name-convention-
-// design.md N1) plus its container's name, so a named world renders a
-// human label instead of a bare NanoID; the location TYPE segment is still
-// not synthesized into the row (the engine has no vertex-type-from-key
-// function outside nanoIdFromKey, and no string concatenation to build one),
-// so the renderer derives type from the key client-side; edgeCatalog covers the
+// design.md N1) plus its container's name, so a named world renders a human
+// label instead of a bare NanoID; the location TYPE segment is still not
+// synthesized into the row (the engine has no vertex-type-from-key function
+// outside nanoIdFromKey, and no string concatenation to build one), so the
+// renderer derives type from the key client-side; edgeCatalog covers the
 // service-permitsOperation reachability path and edgeTasks the direct
 // `assignedTo` one, with their role-derived counterparts split into the sibling
 // lenses edgeCatalogRoles + edgeTasksQueued rather than folded in (this engine
@@ -102,7 +85,13 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeServicesSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "service",
+				AnchorVar:   "tpl",
+				Chain:       []string{chainResidence, chainAvailableTemplates},
+			},
+			Spec: edgeServicesTail,
 		},
 		{
 			CanonicalName: "edgeCatalog",
@@ -113,7 +102,17 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeCatalogSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "meta",
+				AnchorVar:   "op",
+				Chain: []string{
+					chainResidence,
+					chainAvailableTemplates,
+					"(tpl)-[:permitsOperation]->(op:meta)",
+				},
+			},
+			Spec: edgeCatalogTail,
 		},
 		{
 			CanonicalName: "edgeTasks",
@@ -124,7 +123,13 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeTasksSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "task",
+				AnchorVar:   "task",
+				Chain:       []string{"(identity)<-[:assignedTo]-(task:task)"},
+			},
+			Spec: edgeTasksTail,
 		},
 		{
 			CanonicalName: "edgeInstances",
@@ -135,7 +140,13 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeInstancesSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "service",
+				AnchorVar:   "inst",
+				Chain:       []string{"(identity)<-[:providedTo]-(inst:service)"},
+			},
+			Spec: edgeInstancesTail,
 		},
 		{
 			CanonicalName: "edgeEntitySessions",
@@ -146,7 +157,17 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeEntitySessionsSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "session",
+				AnchorVar:   "sess",
+				Chain: []string{
+					chainResidence,
+					"(container)<-[:locatedAt]-(studio:studio)",
+					"(studio)<-[:atStudio]-(sess:session)",
+				},
+			},
+			Spec: edgeEntitySessionsTail,
 		},
 		{
 			CanonicalName: "edgeEntityProviders",
@@ -157,7 +178,16 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeEntityProvidersSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "provider",
+				AnchorVar:   "prov",
+				Chain: []string{
+					chainResidence,
+					"(container)<-[:practicesAt]-(prov:provider)",
+				},
+			},
+			Spec: edgeEntityProvidersTail,
 		},
 		{
 			CanonicalName: "edgeEntityBookings",
@@ -168,7 +198,13 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeEntityBookingsSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainBase,
+				AnchorType:  "booking",
+				AnchorVar:   "bk",
+				Chain:       []string{"(identity)<-[:bookedBy]-(bk:booking)"},
+			},
+			Spec: edgeEntityBookingsTail,
 		},
 		{
 			CanonicalName: "edgeCatalogRoles",
@@ -179,7 +215,16 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeCatalogRolesSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainStaff,
+				AnchorType:  "meta",
+				AnchorVar:   "op",
+				Chain: []string{
+					chainHeldRoles,
+					"(role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)",
+				},
+			},
+			Spec: edgeCatalogRolesTail,
 		},
 		{
 			CanonicalName: "edgeTasksQueued",
@@ -190,7 +235,16 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeTasksQueuedSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainStaff,
+				AnchorType:  "task",
+				AnchorVar:   "task",
+				Chain: []string{
+					chainHeldRoles,
+					"(role)<-[:queuedFor]-(task:task)",
+				},
+			},
+			Spec: edgeTasksQueuedTail,
 		},
 		{
 			CanonicalName: "edgeStaffWorkOrders",
@@ -201,7 +255,16 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeStaffWorkOrdersSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainStaff,
+				AnchorType:  "workorder",
+				AnchorVar:   "wo",
+				Chain: []string{
+					"(identity)-[:worksAt]->(work)",
+					"(work)<-[:containedIn*0..]-(place)<-[:locatedAt]-(wo:workorder)",
+				},
+			},
+			Spec: edgeStaffWorkOrdersTail,
 		},
 		{
 			CanonicalName: "edgeProviderSchedule",
@@ -212,7 +275,15 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeProviderScheduleSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainProvider,
+				AnchorType:  "appointment",
+				AnchorVar:   "appt",
+				Chain: []string{
+					"(identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt:appointment)",
+				},
+			},
+			Spec: edgeProviderScheduleTail,
 		},
 		{
 			CanonicalName: "edgeProviderQueue",
@@ -223,7 +294,15 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeProviderQueueSpec,
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainProvider,
+				AnchorType:  "service",
+				AnchorVar:   "inst",
+				Chain: []string{
+					"(identity)<-[:identifiedBy]-(sp:serviceprovider)<-[:providedBy]-(tpl:service)<-[:instanceOf]-(inst:service)",
+				},
+			},
+			Spec: edgeProviderQueueTail,
 		},
 		{
 			CanonicalName: "edgeInstructorSessions",
@@ -234,63 +313,37 @@ func Lenses() []pkgmgr.LensSpec {
 			Personal:      true,
 			Engine:        "full",
 			IntoKey:       []string{"__actor", "ns", "entityId"},
-			Spec:          edgeInstructorSessionsSpec,
-		},
-		{
-			CanonicalName:  "edgeManifestStaffReadGrants",
-			Class:          "meta.lens",
-			Adapter:        "nats-kv",
-			Bucket:         "capability-kv",
-			Engine:         "full",
-			ProjectionKind: "actorAggregate",
-			Output: &pkgmgr.OutputDescriptorSpec{
-				AnchorType:       "identity",
-				OutputKeyPattern: "cap-read.edgeManifestStaff.{actorSuffix}",
-				BodyColumns:      []string{"readableAnchors"},
-				EmptyBehavior:    "delete",
-				Freshness:        "auto",
-				Lanes:            []string{"default"},
+			Walk: &pkgmgr.AnchorWalk{
+				GrantDomain: domainProvider,
+				AnchorType:  "session",
+				AnchorVar:   "sess",
+				Chain: []string{
+					"(identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)",
+				},
 			},
-			Spec: edgeManifestStaffReadGrantsSpec,
-		},
-		{
-			CanonicalName:  "edgeManifestReadGrants",
-			Class:          "meta.lens",
-			Adapter:        "nats-kv",
-			Bucket:         "capability-kv",
-			Engine:         "full",
-			ProjectionKind: "actorAggregate",
-			Output: &pkgmgr.OutputDescriptorSpec{
-				AnchorType:       "identity",
-				OutputKeyPattern: "cap-read.edgeManifest.{actorSuffix}",
-				BodyColumns:      []string{"readableAnchors"},
-				EmptyBehavior:    "delete",
-				Freshness:        "auto",
-				Lanes:            []string{"default"},
-			},
-			Spec: edgeManifestReadGrantsSpec,
-		},
-		{
-			CanonicalName:  "edgeManifestProviderReadGrants",
-			Class:          "meta.lens",
-			Adapter:        "nats-kv",
-			Bucket:         "capability-kv",
-			Engine:         "full",
-			ProjectionKind: "actorAggregate",
-			Output: &pkgmgr.OutputDescriptorSpec{
-				AnchorType:       "identity",
-				OutputKeyPattern: "cap-read.edgeManifestProvider.{actorSuffix}",
-				BodyColumns:      []string{"readableAnchors"},
-				EmptyBehavior:    "delete",
-				Freshness:        "auto",
-				Lanes:            []string{"default"},
-			},
-			Spec: edgeManifestProviderReadGrantsSpec,
+			Spec: edgeInstructorSessionsTail,
 		},
 	}
 }
 
+// ReadGrantDomains declares the three cap-read slices this package owns. pkgmgr
+// generates one actorAggregate producer lens per entry, in this order, appended
+// after the declared lenses — which is the order manifest.yaml lists them in.
+func ReadGrantDomains() []pkgmgr.ReadGrantDomainSpec {
+	return []pkgmgr.ReadGrantDomainSpec{
+		{Name: domainStaff},
+		{Name: domainBase},
+		{Name: domainProvider},
+	}
+}
+
 const (
+	// The cap-read domains, one generated producer each:
+	// cap-read.<domain>.<actorSuffix>.
+	domainBase     = "edgeManifest"
+	domainStaff    = "edgeManifestStaff"
+	domainProvider = "edgeManifestProvider"
+
 	// manifestSubjectPrefix + manifestStream are the shared Personal Lens
 	// transport every edge-manifest lens rides — the same SYNC stream +
 	// lattice.sync.user.<actor> subject prefix Fire 0 provisioned
@@ -300,22 +353,41 @@ const (
 	manifestStream        = "SYNC"
 )
 
+// Chain clauses several walks share. Prefix factoring in the generated producer
+// keys on TEXTUAL identity of leading clauses, so sharing a named constant is
+// what keeps four resident walks binding the residence chain once instead of
+// four times — a fan-out difference, not a correctness one.
+const (
+	// chainResidence is the resident reachability spine: residesIn to a
+	// location, then an unbounded (possibly zero-hop) containedIn walk up the
+	// location hierarchy.
+	chainResidence = "(identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)"
+
+	// chainAvailableTemplates reaches service templates back off each
+	// container. availableAt's source is required-live-template
+	// (service-location/ddls.go), so every `tpl` matched here IS a template —
+	// no class filter needed.
+	chainAvailableTemplates = "(container)<-[:availableAt]-(tpl:service)"
+
+	// chainHeldRoles is the staff spine: the roles the actor holds, which both
+	// the role-standing-grant catalog path and the role queue hang off.
+	chainHeldRoles = "(identity)-[:holdsRole]->(role:role)"
+)
+
 // edgeIdentitySpec projects the single `manifest.me` row: who the actor is,
 // their standing roles, and their residence anchor(s) (edge-showcase-app-
-// design.md §3.2). Anchored non-optionally on the identity itself so
-// exactly one row is always produced (Personal:true re-executes per
-// recipient, so "the identity" is always this identity); roles/anchors
-// collect via OPTIONAL MATCH the same way myTasks/capabilityEphemeral do —
-// a degenerate {key:null,...} entry when the identity holds no role / has
-// no residence is expected and, per the design's own renderer-obligations
-// note (§3.2, inherited from the my-tasks corpus), dropped client-side.
-// `anchor` (the identity's own key — this row is never degenerate, so
-// self-anchoring is correct, unlike a fan-out-reached neighbor) is
-// required by projection.personalEnvelopeFn: every Personal Lens row must
-// alias a Contract #1 vertex key to `anchor` or the row is silently
-// declined as a hollow/degenerate delegation row (personal.go's own doc:
-// "a personal lens's cypher must therefore always alias its neighbor's key
-// to anchor").
+// design.md §3.2). It is the one SELF-anchored lens — `anchor` is the
+// identity's own key, covered by the platform base cap-read self-grant, so it
+// declares no Walk and carries its whole cypher. Anchored non-optionally on the
+// identity itself so exactly one row is always produced (Personal:true
+// re-executes per recipient, so "the identity" is always this identity);
+// roles/anchors collect via OPTIONAL MATCH the same way myTasks/
+// capabilityEphemeral do — a degenerate {key:null,...} entry when the identity
+// holds no role / has no residence is expected and, per the design's own
+// renderer-obligations note (§3.2, inherited from the my-tasks corpus), dropped
+// client-side. `anchor` is required by projection.personalEnvelopeFn: every
+// Personal Lens row must alias a Contract #1 vertex key to `anchor` or the row
+// is silently declined as a hollow/degenerate delegation row.
 //
 // The name is projected twice on purpose (display-name-convention-design.md
 // §3 N3). `name` is a sensitive aspect, so the Processor seals it at rest
@@ -377,19 +449,11 @@ RETURN
   collect(DISTINCT {type: 'serviceprovider', key: sp.key}) AS selfAnchors
 `
 
-// edgeServicesSpec projects one `manifest.svc.<tplId>` row per service
-// template reachable via the actor's residence chain: residesIn to a
-// location, an unbounded (possibly zero-hop) containedIn walk up the
-// location hierarchy, then availableAt reached backwards from each
-// container (availableAt's source is required-live-template,
-// service-location/ddls.go, so every `tpl` matched here IS a template —
-// no class filter needed). `<> null` is this engine's null test (its
-// grammar accepts, but silently mis-evaluates, `IS NOT NULL` — full/
-// visitor.go; do not "correct" this to IS NOT NULL).
-const edgeServicesSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
+// edgeServicesTail presents one `manifest.svc.<tplId>` row per service template
+// the residence walk reaches. `<> null` is this engine's null test (its grammar
+// accepts, but silently mis-evaluates, `IS NOT NULL` — full/visitor.go; do not
+// "correct" this to IS NOT NULL).
+const edgeServicesTail = `
 OPTIONAL MATCH (tpl)-[:providedBy]->(provider)
 WITH tpl, provider, container
 WHERE tpl.key <> null
@@ -406,27 +470,20 @@ RETURN
   container.key AS resolvedVia
 `
 
-// edgeCatalogSpec projects one `manifest.op.<opMetaId>` row per op meta
-// reachable via a service template the actor can reach (§3.3's descriptor
-// vocabulary, read back off the op meta's optional aspects — an op meta
-// that never adopted the vocabulary still projects a row, just with those
-// fields null, per §3.3 "ops without descriptors still render, degraded").
-// v1 scope: the service-permitsOperation path only (see the package doc
-// comment above for the two deferred paths).
+// edgeCatalogTail presents one `manifest.op.<opMetaId>` row per op meta the
+// walk reaches through a service template (§3.3's descriptor vocabulary, read
+// back off the op meta's optional aspects — an op meta that never adopted the
+// vocabulary still projects a row, just with those fields null, per §3.3 "ops
+// without descriptors still render, degraded").
 //
-// viaServices (added Fire 2, facet-app-ux.md §3.3 Service detail) answers
-// "which service(s) offer this op" without a WITH/collect grouping stage —
-// it reuses the pattern-comprehension-in-RETURN form service-location/
-// lenses.go's `allowedOperations` already proves parses under this engine,
-// just walked in the reverse direction from `op`. This is presentation
-// only (design §4.5: the manifest affects visibility, never permission),
-// so a global (not actor-scoped) permitsOperation fan-in is an acceptable
-// v1 narrowing, same class as the other named scope-downs above.
-const edgeCatalogSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
-OPTIONAL MATCH (tpl)-[:permitsOperation]->(op:meta)
+// viaServices answers "which service(s) offer this op" without a WITH/collect
+// grouping stage — it reuses the pattern-comprehension-in-RETURN form
+// service-location/lenses.go's `allowedOperations` already proves parses under
+// this engine, just walked in the reverse direction from `op`. This is
+// presentation only (design §4.5: the manifest affects visibility, never
+// permission), so a global (not actor-scoped) permitsOperation fan-in is an
+// acceptable v1 narrowing, same class as the other named scope-downs above.
+const edgeCatalogTail = `
 WITH op
 WHERE op.key <> null
 RETURN
@@ -455,11 +512,12 @@ RETURN
   [(op)<-[:permitsOperation]-(svc:service) | svc.key] AS viaServices
 `
 
-// edgeTasksSpec projects one `manifest.task.<taskId>` row per task directly
-// assignedTo the actor and still open (Contract #10 §10.1 link-sourced
-// shape, mirrored from orchestration-base's myTasksSpec). v1 scope: direct
-// assignedTo only — FR28 role-queued tasks are deferred (see the package
-// doc comment above).
+// edgeTasksTail presents one `manifest.task.<taskId>` row per task directly
+// assignedTo the actor and still open (Contract #10 §10.1 link-sourced shape,
+// mirrored from orchestration-base's myTasksSpec). The open-status filter is a
+// PRESENTATION narrowing, not a reachability one — the walk grants the task
+// anchor regardless of status, which is the correct asymmetry (grant ⊇
+// projection).
 //
 // scopedName projects the display name of the task's scoped target
 // (class-4 relational label, display-name-convention-design.md §2), from
@@ -473,12 +531,12 @@ RETURN
 // scoped and its summary is declared PII-free (D3 forbids plaintext identity
 // PII on the SYNC plane, which is why NO name arrives this way). Null when
 // the target is neither, and the renderer falls to its typed floor.
-const edgeTasksSpec = `
-MATCH (identity:identity {key: $actorKey})<-[:assignedTo]-(task:task)
-WHERE task.data.status = "open"
+const edgeTasksTail = `
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
+WITH task, identity, op, tgt, scopedUnit
+WHERE task.data.status = "open"
 RETURN
   task.key AS anchor,
   "manifest.task" AS ns,
@@ -493,7 +551,7 @@ RETURN
   task.data.expiresAt AS expiresAt
 `
 
-// edgeInstancesSpec projects one `manifest.inst.<instId>` row per service
+// edgeInstancesTail presents one `manifest.inst.<instId>` row per service
 // instance providedTo the actor — "my orders" (§3.2). status derives from
 // the instance's optional `.outcome` aspect: absent ⇒ "open" (no external
 // result recorded yet), present ⇒ the outcome's own status
@@ -501,9 +559,10 @@ RETURN
 // is this engine's only supported CASE shape (full/visitor.go
 // visitCaseExpression) — the simple `CASE <expr> WHEN <value>` form is
 // rejected.
-const edgeInstancesSpec = `
-MATCH (identity:identity {key: $actorKey})<-[:providedTo]-(inst:service)
+const edgeInstancesTail = `
 OPTIONAL MATCH (inst)-[:instanceOf]->(tpl:service)
+WITH inst, tpl
+WHERE inst.key <> null
 RETURN
   inst.key AS anchor,
   "manifest.inst" AS ns,
@@ -517,26 +576,20 @@ RETURN
   inst.outcome.data.completedAt AS completedAt
 `
 
-// edgeEntitySessionsSpec projects one `manifest.ent.<sessionId>` row per
-// wellness class session reachable from the actor's residence chain — the
-// browse rows that give a declared `dispatch.targetType: "session"` something
-// to resolve against (facet-entity-browse-design.md §3 F2). Reachability is
+// edgeEntitySessionsTail presents one `manifest.ent.<sessionId>` row per
+// wellness class session the residence walk reaches — the browse rows that give
+// a declared `dispatch.targetType: "session"` something to resolve against
+// (facet-entity-browse-design.md §3 F2). The walk reaches them through
 // wellness-domain's authZ-free `studio locatedAt location` link off the same
-// containedIn walk edgeServices uses (NEVER availableAt — that edge is
+// containment spine edgeServices uses (NEVER availableAt — that edge is
 // service-access authZ, §3 F1). `entityType` is a literal stamped per walk,
 // exactly as edgeIdentity's selfAnchors stamps its type — the engine has no
-// vertex-type-from-key function, and the type is a declaration of what the
-// walk means. One lens per entity kind: the engine has no UNION, and a
-// row-per-entity cypher carrying two unrelated kinds would cross-product
-// (the same constraint the package doc comment names for edgeCatalog's
-// scope-downs). The schedule instant projects as `startsAt`, not the
-// design's `when` — WHEN is a CASE keyword in this engine's lexer and an
-// alias by that name fails to parse.
-const edgeEntitySessionsSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:locatedAt]-(studio:studio)
-OPTIONAL MATCH (studio)<-[:atStudio]-(sess:session)
+// vertex-type-from-key function, and the type is a declaration of what the walk
+// means. One lens per entity kind: the engine has no UNION, and a row-per-entity
+// cypher carrying two unrelated kinds would cross-product. The schedule instant
+// projects as `startsAt`, not the design's `when` — WHEN is a CASE keyword in
+// this engine's lexer and an alias by that name fails to parse.
+const edgeEntitySessionsTail = `
 WITH sess, studio
 WHERE sess.key <> null
 RETURN
@@ -550,17 +603,14 @@ RETURN
   sess.schedule.data.startsAt AS startsAt
 `
 
-// edgeEntityProvidersSpec projects one `manifest.ent.<providerId>` row per
-// clinic provider reachable from the actor's residence chain — the browse
-// rows for `dispatch.targetType: "provider"` (CreateAppointment). The
-// provider's own `practicesAt` link (clinic-domain site.go) already lands on
-// a location-domain building, so this walk needs no new DDL anywhere. Same
-// row shape as edgeEntitySessions minus `startsAt` (a provider is not a
-// scheduled thing); the renderer treats the shape generically by entityType.
-const edgeEntityProvidersSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:practicesAt]-(prov:provider)
+// edgeEntityProvidersTail presents one `manifest.ent.<providerId>` row per
+// clinic provider the residence walk reaches — the browse rows for
+// `dispatch.targetType: "provider"` (CreateAppointment). The provider's own
+// `practicesAt` link (clinic-domain site.go) already lands on a location-domain
+// building, so the walk needs no new DDL anywhere. Same row shape as
+// edgeEntitySessions minus `startsAt` (a provider is not a scheduled thing);
+// the renderer treats the shape generically by entityType.
+const edgeEntityProvidersTail = `
 WITH prov
 WHERE prov.key <> null
 RETURN
@@ -573,26 +623,23 @@ RETURN
   prov.profile.data.specialty AS subtitle
 `
 
-// edgeEntityBookingsSpec projects one `manifest.ent.<bookingId>` row per
+// edgeEntityBookingsTail presents one `manifest.ent.<bookingId>` row per
 // booking the actor themself made — the browse rows for
 // `dispatch.targetType: "booking"` (CancelBooking).
 //
-// Reachability here is the actor's OWN `bookedBy` link, NOT the residence
-// chain the session/provider lenses walk. Locality is the wrong predicate for
-// a booking in both directions: it would surface co-residents' bookings (a
-// booking is nobody's business but the booker's) and it would drop the
-// actor's own booking at a studio outside their building. That makes this the
-// first manifest.ent lens whose row set is inherently private rather than
-// merely locality-scoped.
+// The walk is the actor's OWN `bookedBy` link, NOT the residence spine the
+// session/provider lenses use. Locality is the wrong predicate for a booking in
+// both directions: it would surface co-residents' bookings (a booking is
+// nobody's business but the booker's) and it would drop the actor's own booking
+// at a studio outside their building. That makes this the first manifest.ent
+// lens whose row set is inherently private rather than merely locality-scoped.
 //
 // `sessionKey` rides along because CancelBooking needs the booking's session
 // in its payload (the seat-cell key it tombstones is rebuilt from it) and the
 // renderer fills that from the viewed row via `{entity.<column>}`. A
 // cancelled booking tombstones its own vertex, so the row self-clears with no
 // status filter.
-const edgeEntityBookingsSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)<-[:bookedBy]-(bk:booking)
+const edgeEntityBookingsTail = `
 OPTIONAL MATCH (bk)-[:forSession]->(sess:session)
 OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
 WITH bk, sess, studio
@@ -609,14 +656,12 @@ RETURN
   sess.key AS sessionKey
 `
 
-// edgeCatalogRolesSpec projects one `manifest.op.<opMetaId>` row per op meta
-// the actor can reach through a ROLE they hold, rather than through a service
-// template — the role-standing-grant path the package doc names as deferred,
-// now built (staff-worlds F2). The walk is
-// (identity)-[:holdsRole]->(role)<-[:grantedBy]-(perm)-[:forOperation]->(op),
-// where the last hop is the install-time edge pkgmgr mints beside `grantedBy`
-// (internal/pkgmgr/build.go): without it the walk dead-ends at
-// perm.data.operationType, a STRING this engine cannot join to a vertex.
+// edgeCatalogRolesTail presents one `manifest.op.<opMetaId>` row per op meta the
+// actor reaches through a ROLE they hold, rather than through a service
+// template (staff-worlds F2). The walk's last hop is the install-time edge
+// pkgmgr mints beside `grantedBy` (internal/pkgmgr/build.go): without it the
+// walk dead-ends at perm.data.operationType, a STRING this engine cannot join
+// to a vertex.
 //
 // A sibling lens rather than more branches on edgeCatalog, for the same reason
 // the entity lenses are siblings: this engine has no UNION, so folding a second
@@ -631,9 +676,7 @@ RETURN
 // catalog cannot drift into offering ops step 3 will deny. It also closes the
 // named "browse all my ops" gap for ordinary residents, whose consumer-role
 // grants project through exactly the same walk.
-const edgeCatalogRolesSpec = `
-MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
-OPTIONAL MATCH (role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)
+const edgeCatalogRolesTail = `
 WITH op, role
 WHERE op.key <> null
 RETURN
@@ -663,9 +706,8 @@ RETURN
   role.canonicalName.data.value AS viaRoleName
 `
 
-// edgeTasksQueuedSpec projects one `manifest.task.<taskId>` row per OPEN task
-// queued to a role the actor holds (FR28) — the role-queue path edgeTasks names
-// as deferred, now built. The walk
+// edgeTasksQueuedTail presents one `manifest.task.<taskId>` row per OPEN task
+// queued to a role the actor holds (FR28). The walk
 // (identity)-[:holdsRole]->(role)<-[:queuedFor]-(task) is the one
 // orchestration-base's my-tasks aggregate already runs verbatim; this re-emits
 // it per-row over the personal SYNC transport a Facet device mirrors.
@@ -676,12 +718,12 @@ RETURN
 // atomic queuedFor→assignedTo swap then stops this branch matching for every
 // non-claimant and materializes the edgeTasks row for the winner — so the whole
 // claim beat is existing machinery, reached over a new projection.
-const edgeTasksQueuedSpec = `
-MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)<-[:queuedFor]-(task:task)
-WHERE task.data.status = "open"
+const edgeTasksQueuedTail = `
 OPTIONAL MATCH (task)-[:forOperation]->(op)
 OPTIONAL MATCH (task)-[:scopedTo]->(tgt)
 OPTIONAL MATCH (tgt)-[:appliesToUnit]->(scopedUnit:unit)
+WITH task, op, tgt, scopedUnit, role
+WHERE task.data.status = "open"
 RETURN
   task.key AS anchor,
   "manifest.task" AS ns,
@@ -697,7 +739,7 @@ RETURN
   role.canonicalName.data.value AS queuedRoleName
 `
 
-// edgeStaffWorkOrdersSpec projects one `manifest.work.<workOrderId>` row per
+// edgeStaffWorkOrdersTail presents one `manifest.work.<workOrderId>` row per
 // maintenance work order at a place the actor worksAt — FORK-S1 A's per-row
 // domain worklist, the half of a staff world that is MIRROR rather than
 // server-pane.
@@ -713,13 +755,12 @@ RETURN
 // The walk runs DOWN from the workplace: `(work)<-[:containedIn*0..]-(place)`
 // enumerates the workplace itself (0 hops) and everything contained in it
 // transitively, then `(place)<-[:locatedAt]-(wo:workorder)` takes the orders
-// at each. Every shipped variable-length walk before this one runs UP
-// (a resident's residence to its containers), because that is the direction
-// a resident's reachability has; a staff actor's is the mirror image — you
-// work at the building, the work is in the units. The engine handles it with
-// the same code either way (executor.traverseRel filters each hop through
-// directionMatches, and Adjacency records every edge under both endpoints),
-// so this is a new direction for the corpus, not a new engine capability.
+// at each. Every other variable-length walk in this package runs UP (a
+// resident's residence to its containers), because that is the direction a
+// resident's reachability has; a staff actor's is the mirror image — you work
+// at the building, the work is in the units. The engine handles it with the
+// same code either way (executor.traverseRel filters each hop through
+// directionMatches, and Adjacency records every edge under both endpoints).
 //
 // D3 holds without effort here, and that is the whole reason FORK-S1 A is
 // safe to build: a work order carries a summary, a priority and a place —
@@ -732,9 +773,7 @@ RETURN
 // read-before-write terminal marker ResolveWorkOrder consults — so a resolve
 // that drains after a device reconnects flips this row to "resolved" on the
 // mirror without any second write to model it.
-const edgeStaffWorkOrdersSpec = `
-MATCH (identity:identity {key: $actorKey})-[:worksAt]->(work)
-OPTIONAL MATCH (work)<-[:containedIn*0..]-(place)<-[:locatedAt]-(wo:workorder)
+const edgeStaffWorkOrdersTail = `
 WITH wo, place, work
 WHERE wo.key <> null
 RETURN
@@ -753,12 +792,12 @@ RETURN
   wo.resolution.data.notes AS resolutionNotes
 `
 
-// edgeProviderScheduleSpec projects one `manifest.ent.<appointmentId>` row
-// per clinic appointment the actor's OWN bound provider is withProvider of —
-// the provider-hat schedule (persona-worlds-design.md Fire W0). Reachability
-// is the actor's own inbound `identifiedBy` binding to a clinic provider,
-// NOT the residence chain the browse lenses above walk: a provider's
-// schedule is private to that provider, never locality-scoped.
+// edgeProviderScheduleTail presents one `manifest.ent.<appointmentId>` row per
+// clinic appointment the actor's OWN bound provider is withProvider of — the
+// provider-hat schedule (persona-worlds-design.md Fire W0). The walk is the
+// actor's own inbound `identifiedBy` binding to a clinic provider, NOT the
+// residence spine the browse lenses use: a provider's schedule is private to
+// that provider, never locality-scoped.
 //
 // The namespace is deliberately `manifest.ent` with `entityType: "appointment"`
 // (not a bespoke `manifest.sched` namespace): the renderer only knows the
@@ -769,9 +808,7 @@ RETURN
 // No patient name is projected (D3 — no plaintext identity PII on the SYNC
 // plane): `title` carries the visit reason (an appointment's own .schedule
 // data, not a person's), `subtitle` the status.
-const edgeProviderScheduleSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt:appointment)
+const edgeProviderScheduleTail = `
 WITH appt, pr
 WHERE appt.key <> null
 RETURN
@@ -787,22 +824,20 @@ RETURN
   pr.key AS providerKey
 `
 
-// edgeProviderQueueSpec projects one `manifest.ent.<instanceId>` row per
+// edgeProviderQueueTail presents one `manifest.ent.<instanceId>` row per
 // service instance whose template is providedBy the actor's OWN bound
 // serviceprovider — the provider-hat work queue (persona-worlds-design.md
-// Fire W0): "what runs do I need to complete". Reachability is the actor's
-// own inbound `identifiedBy` binding to a serviceprovider, then that
+// Fire W0): "what runs do I need to complete". The walk goes through the
+// actor's own inbound `identifiedBy` binding to a serviceprovider, then that
 // serviceprovider's providedBy templates, then each template's instances
 // (instanceOf, NOT providedTo — the instance→template direction, mirroring
-// edgeInstancesSpec's own walk). No startsAt: a service instance is
-// always-current work, not a scheduled thing (unlike a session/appointment).
+// edgeInstances' own walk). No startsAt: a service instance is always-current
+// work, not a scheduled thing (unlike a session/appointment).
 //
-// `subtitle` mirrors edgeInstancesSpec's status CASE idiom exactly: absent
+// `subtitle` mirrors edgeInstancesTail's status CASE idiom exactly: absent
 // `.outcome` reads "open" (not yet recorded), present reads the outcome's
 // own status.
-const edgeProviderQueueSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)<-[:identifiedBy]-(sp:serviceprovider)<-[:providedBy]-(tpl:service)<-[:instanceOf]-(inst:service)
+const edgeProviderQueueTail = `
 WITH inst, tpl, sp
 WHERE inst.key <> null
 RETURN
@@ -817,23 +852,21 @@ RETURN
   sp.key AS serviceproviderKey
 `
 
-// edgeInstructorSessionsSpec projects one `manifest.ent.<sessionId>` row per
+// edgeInstructorSessionsTail presents one `manifest.ent.<sessionId>` row per
 // wellness session the actor's OWN bound instructor leads — the provider-hat
-// "my classes to teach" queue (persona-worlds-design.md Fire W0). Reachability
-// is the actor's own inbound `identifiedBy` binding to an instructor, then
-// that instructor's `ledBy`-inverse sessions, NOT the residence chain
-// edgeEntitySessionsSpec walks: an instructor teaches wherever they're
-// assigned, not only where they happen to live.
+// "my classes to teach" queue (persona-worlds-design.md Fire W0). The walk goes
+// through the actor's own inbound `identifiedBy` binding to an instructor, then
+// that instructor's `ledBy`-inverse sessions, NOT the residence spine
+// edgeEntitySessions uses: an instructor teaches wherever they're assigned, not
+// only where they happen to live.
 //
-// The RETURN is byte-identical to edgeEntitySessionsSpec's (same aliases,
+// The RETURN is byte-identical to edgeEntitySessionsTail's (same aliases,
 // same title/subtitle/startsAt expressions, same entityType "session") on
 // purpose: a resident who is ALSO the instructor of a session reachable by
 // BOTH walks projects the identical row under the identical key — an
-// LWW-idempotent overlap, the same pattern edgeCatalogRolesSpec already
+// LWW-idempotent overlap, the same pattern edgeCatalogRolesTail already
 // proves for a dual-reachable op meta.
-const edgeInstructorSessionsSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)
+const edgeInstructorSessionsTail = `
 OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
 WITH sess, studio
 WHERE sess.key <> null
@@ -846,107 +879,4 @@ RETURN
   sess.schedule.data.name AS title,
   studio.profile.data.name AS subtitle,
   sess.schedule.data.startsAt AS startsAt
-`
-
-// edgeManifestStaffReadGrantsSpec is the Path B read-grant slice covering the
-// two anchor kinds the staff lenses introduce: role-granted op metas and
-// role-queued tasks. Without it Refractor's D1 readableAnchors gate silently
-// drops every row those two lenses project — the same fail-closed trap that
-// left Fire 1's manifest lenses invisible, which is why this slice lands in the
-// SAME change as its lenses.
-//
-// A SEPARATE slice rather than more branches on edgeManifestReadGrants:
-// Contract #6 §6.14 unions every cap-read.*.<actor> slice into one effective
-// readable set, and that producer's own doc comment already flags its
-// multi-branch cross-product fan-out — adding two more independent branches
-// there would multiply it for every actor, staff or not. A resident who holds
-// no role-queued tasks simply gets an empty slice, deleted by EmptyBehavior.
-const edgeManifestStaffReadGrantsSpec = `
-MATCH (identity:identity {key: $actorKey})-[:holdsRole]->(role:role)
-OPTIONAL MATCH (role)<-[:grantedBy]-(perm:permission)-[:forOperation]->(op:meta)
-OPTIONAL MATCH (role)<-[:queuedFor]-(task:task)
-OPTIONAL MATCH (identity)-[:worksAt]->(work)<-[:containedIn*0..]-(place)<-[:locatedAt]-(wo:workorder)
-RETURN
-  identity.key AS actorKey,
-  collect(DISTINCT {anchorType: 'meta', anchorId: nanoIdFromKey(op.key), via: ['holdsRole', 'grantedBy', 'forOperation']}) +
-  collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(task.key), via: ['holdsRole', 'queuedFor']}) +
-  collect(DISTINCT {anchorType: 'workorder', anchorId: nanoIdFromKey(wo.key), via: ['worksAt', 'containedIn', 'locatedAt']})
-  AS readableAnchors
-`
-
-// edgeManifestReadGrantsSpec is edge-manifest's single combined read-grant
-// producer for all seven non-self-anchored manifest lenses (edgeServices,
-// edgeCatalog, edgeTasks, edgeInstances, edgeEntitySessions,
-// edgeEntityProviders, edgeEntityBookings) — an actorAggregate lens mirroring
-// internal/bootstrap/lenses.go's CapabilityReadLensDefinition shape exactly
-// (one row per actor, a readableAnchors[] array), just walking THIS
-// package's reachability chains instead of the trivial self-anchor.
-// The session/provider anchor branches land in the SAME change as their
-// lenses (facet-entity-browse-design.md §3 F4): without them Refractor's D1
-// readableAnchors fail-closed gate silently drops every manifest.ent row.
-//
-// Each anchor kind's OPTIONAL MATCH is independent of the others (no shared
-// WITH-scoping), so a tenant reachable to N services and M tasks produces
-// an N×M intermediate row fan-out before collect(DISTINCT ...) re-dedupes
-// each column — correct (DISTINCT drops the cross-product duplicates), not
-// maximally efficient, but the same multi-branch collect()+concat shape
-// packages/orchestration-base's ephemeralGrants lens already proves parses
-// and executes under this engine (no UNION, no list comprehension across
-// independent branches — string "+" is the only concatenation this engine
-// has, and it works on two collect() results the same way it works on two
-// strings).
-const edgeManifestReadGrantsSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)
-OPTIONAL MATCH (container)<-[:availableAt]-(tpl:service)
-OPTIONAL MATCH (tpl)-[:permitsOperation]->(op:meta)
-OPTIONAL MATCH (identity)<-[:assignedTo]-(task:task)
-OPTIONAL MATCH (identity)<-[:providedTo]-(inst:service)
-OPTIONAL MATCH (container)<-[:locatedAt]-(studio:studio)
-OPTIONAL MATCH (studio)<-[:atStudio]-(sess:session)
-OPTIONAL MATCH (container)<-[:practicesAt]-(prov:provider)
-OPTIONAL MATCH (identity)<-[:bookedBy]-(bk:booking)
-RETURN
-  identity.key AS actorKey,
-  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(tpl.key), via: ['availableAt']}) +
-  collect(DISTINCT {anchorType: 'meta', anchorId: nanoIdFromKey(op.key), via: ['permitsOperation']}) +
-  collect(DISTINCT {anchorType: 'task', anchorId: nanoIdFromKey(task.key), via: ['assignedTo']}) +
-  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(inst.key), via: ['providedTo']}) +
-  collect(DISTINCT {anchorType: 'session', anchorId: nanoIdFromKey(sess.key), via: ['locatedAt', 'atStudio']}) +
-  collect(DISTINCT {anchorType: 'provider', anchorId: nanoIdFromKey(prov.key), via: ['practicesAt']}) +
-  collect(DISTINCT {anchorType: 'booking', anchorId: nanoIdFromKey(bk.key), via: ['bookedBy']})
-  AS readableAnchors
-`
-
-// edgeManifestProviderReadGrantsSpec is the Path B read-grant slice covering
-// the three provider-hat anchor kinds edgeProviderSchedule /
-// edgeProviderQueue / edgeInstructorSessions introduce (persona-worlds-
-// design.md Fire W0). Without it Refractor's D1 readableAnchors gate
-// silently drops every row those three lenses project — the same
-// fail-closed trap edgeManifestStaffReadGrantsSpec's own doc comment names,
-// which is why this slice lands in the SAME change as its lenses.
-//
-// A THIRD separate slice rather than more branches on edgeManifestReadGrants
-// (or folded into the staff slice): Contract #6 §6.14 unions every
-// cap-read.*.<actor> slice into one effective readable set, and each
-// existing producer's own doc comment already flags its multi-branch
-// cross-product fan-out — adding three more independent branches to either
-// existing producer would multiply it for every actor, provider-bound or
-// not. An identity holding none of the three provider bindings simply gets
-// an empty slice, deleted by EmptyBehavior.
-//
-// Each branch mirrors its sibling lens's own walk exactly (the same
-// identifiedBy-rooted reachability, just collecting the anchor instead of
-// projecting a full row).
-const edgeManifestProviderReadGrantsSpec = `
-MATCH (identity:identity {key: $actorKey})
-OPTIONAL MATCH (identity)<-[:identifiedBy]-(pr:provider)<-[:withProvider]-(appt:appointment)
-OPTIONAL MATCH (identity)<-[:identifiedBy]-(sp:serviceprovider)<-[:providedBy]-(tpl:service)<-[:instanceOf]-(inst:service)
-OPTIONAL MATCH (identity)<-[:identifiedBy]-(instr:instructor)<-[:ledBy]-(sess:session)
-RETURN
-  identity.key AS actorKey,
-  collect(DISTINCT {anchorType: 'appointment', anchorId: nanoIdFromKey(appt.key), via: ['identifiedBy', 'withProvider']}) +
-  collect(DISTINCT {anchorType: 'service', anchorId: nanoIdFromKey(inst.key), via: ['identifiedBy', 'providedBy', 'instanceOf']}) +
-  collect(DISTINCT {anchorType: 'session', anchorId: nanoIdFromKey(sess.key), via: ['identifiedBy', 'ledBy']})
-  AS readableAnchors
 `

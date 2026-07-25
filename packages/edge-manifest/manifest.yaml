@@ -1,5 +1,5 @@
 name: edge-manifest
-version: 0.9.0
+version: 0.10.0
 description: |
   The Facet edge app's world manifest: fourteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/
@@ -15,15 +15,18 @@ description: |
   own instance queue, a bound instructor's own led sessions — manifest.ent
   rows a declared dispatch.targetType resolves against) into the manifest.*
   namespace over the per-actor SYNC transport.
-  Plus edgeManifestReadGrants, edgeManifestStaffReadGrants, and
-  edgeManifestProviderReadGrants, three cap-read.edgeManifest*.<actor>
-  read-grant producer lenses (Fire 2; provider slice Fire W0): every
-  non-self-anchored manifest row is otherwise dropped by Refractor's D1
-  readableAnchors fail-closed gate, which is never derived from the manifest
-  lenses' own reachability. These are actorAggregate nats-kv lenses (the same
-  shape internal/bootstrap/lenses.go's CapabilityReadLensDefinition uses at
-  the kernel level, this package's own instance of it) — not a Postgres
-  GrantTable (that's Path A / RLS for Protected reads, irrelevant here).
+  Each non-self-anchored lens declares its actor->anchor reachability once, as
+  an AnchorWalk, and pkgmgr compiles both the lens's own cypher and the
+  read-grant producer that grants its anchors. That yields three generated
+  producer lenses — edgeManifestReadGrants, edgeManifestStaffReadGrants,
+  edgeManifestProviderReadGrants — one per declared ReadGrantDomain, writing
+  cap-read.edgeManifest*.<actor>: without them every non-self-anchored manifest
+  row is dropped by Refractor's D1 readableAnchors fail-closed gate, which is
+  never derived from the manifest lenses' own reachability. They are
+  actorAggregate nats-kv lenses (Contract #6 §6.14 Path B, the same shape
+  internal/bootstrap/lenses.go's CapabilityReadLensDefinition uses at the kernel
+  level) — not a Postgres GrantTable (that's Path A / RLS for Protected reads,
+  irrelevant here).
 depends:
   - identity-domain
   - orchestration-base

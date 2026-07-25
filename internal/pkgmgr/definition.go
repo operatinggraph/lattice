@@ -22,7 +22,16 @@ import (
 // the shared pre-flight for Install / Upgrade / Apply so all three reject a
 // malformed Definition identically, before any KV operation. Pure (no I/O):
 // each constituent validator is a pure function over the Definition.
+//
+// It validates the EXPANDED Definition: read-grant walks compile first (which
+// is also where the walk grammar is enforced), so every validator downstream —
+// canonical-name uniqueness, adapters, read-path posture — sees the generated
+// producer lenses exactly as the installer will install them.
 func (def Definition) validateAll() error {
+	def, err := def.ExpandReadGrantWalks()
+	if err != nil {
+		return err
+	}
 	for _, check := range []func() error{
 		def.validateLensBuckets,
 		def.validateLensAdapters,
@@ -166,6 +175,23 @@ type Definition struct {
 	// meta-vertex. A package declaring an op as the target of `assignTask`
 	// (or a `userTask` step) must declare a matching OpMetaSpec.
 	OpMetas []OpMetaSpec
+
+	// ReadGrantDomains declares the cap-read producer slices this package owns
+	// (Contract #6 §6.14 `cap-read.<domain>.<actorSuffix>`). Every Personal
+	// lens Walk.GrantDomain must name one, and every declared domain must be
+	// named by at least one walk. ExpandReadGrantWalks generates exactly one
+	// actorAggregate producer lens per domain — a Path-B producer is compiled
+	// from the walks it grants, never hand-authored.
+	ReadGrantDomains []ReadGrantDomainSpec
+
+	// readGrantWalksExpanded marks a Definition that already ran through
+	// ExpandReadGrantWalks and is what makes the pass idempotent. A composed
+	// lens still carries the Walk it was compiled from (only its Spec is
+	// rewritten), so without this flag a second pass would prepend the head and
+	// chain again and append a duplicate producer. The flag travels with the
+	// value, so the composed Definition must be the one every downstream step
+	// uses — assembling a fresh Definition from a composed one's Lenses loses it.
+	readGrantWalksExpanded bool
 }
 
 // WeaverTargetSpec is one meta.weaverTarget meta-vertex a package declares
@@ -675,6 +701,18 @@ type LensSpec struct {
 	// cypher once per enumerated identity recipient instead of relying on
 	// the cypher's own RETURN to supply the actor. nats-subject only.
 	Personal bool
+
+	// Walk declares a non-self-anchored Personal lens's actor→anchor
+	// reachability ONCE. ExpandReadGrantWalks compiles it into both this
+	// lens's reachability prefix and the owning grant domain's producer, so
+	// the walk the D1 gate's two enumerations run cannot drift apart. Required
+	// on every non-self-anchored Personal lens; nil on a self-anchored one
+	// (the platform base cap-read self-grant covers the actor's own key) and
+	// on every non-Personal lens.
+	//
+	// With a Walk declared, Spec carries the presentation TAIL only — the head
+	// and the chain's OPTIONAL MATCH clauses are compiled in front of it.
+	Walk *AnchorWalk
 
 	// DSN is the Postgres connection string (postgres adapter only). A package
 	// declares posture + columns, not a deployment connection string, so DSN may

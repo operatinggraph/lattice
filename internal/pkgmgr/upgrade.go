@@ -55,7 +55,8 @@ type UpgradeResult struct {
 // kernel/auth roots cannot be touched — the Processor's step-8 guard rejects
 // any update/tombstone of a protected root, path-independently.
 func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult, error) {
-	if err := i.preflight(def); err != nil {
+	def, err := i.preflight(def)
+	if err != nil {
 		return nil, err
 	}
 	if err := i.checkCoreBucketExists(ctx); err != nil {
@@ -101,18 +102,28 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 }
 
 // preflight runs the required-field + field-level validation shared by Install,
-// Upgrade, and Apply before any KV operation.
-func (i *Installer) preflight(def Definition) error {
+// Upgrade, and Apply before any KV operation, and returns the COMPOSED
+// Definition every downstream step must build from: read-grant walks are
+// compiled here, so the generated cap-read producers travel with the data
+// lenses they grant for through manifest-batch, diff, and submit alike.
+func (i *Installer) preflight(def Definition) (Definition, error) {
 	if def.Name == "" {
-		return fmt.Errorf("pkgmgr: Definition.Name is required")
+		return Definition{}, fmt.Errorf("pkgmgr: Definition.Name is required")
 	}
 	if def.Version == "" {
-		return fmt.Errorf("pkgmgr: Definition.Version is required")
+		return Definition{}, fmt.Errorf("pkgmgr: Definition.Version is required")
 	}
 	if i.AdminActor == "" {
-		return fmt.Errorf("pkgmgr: AdminActor is required")
+		return Definition{}, fmt.Errorf("pkgmgr: AdminActor is required")
 	}
-	return def.validateAll()
+	def, err := def.ExpandReadGrantWalks()
+	if err != nil {
+		return Definition{}, err
+	}
+	if err := def.validateAll(); err != nil {
+		return Definition{}, err
+	}
+	return def, nil
 }
 
 // computeDeltaAgainst rebuilds def's manifest on version-independent keys and

@@ -60,7 +60,8 @@ type ApplyResult struct {
 // is P2-clean: every mutating path routes through the Processor (Install's
 // InstallPackage op or the UpgradePackage op); it never writes Core KV directly.
 func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions) (*ApplyResult, error) {
-	if err := i.preflight(def); err != nil {
+	def, err := i.preflight(def)
+	if err != nil {
 		return nil, err
 	}
 	if err := i.checkCoreBucketExists(ctx); err != nil {

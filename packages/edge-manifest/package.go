@@ -16,9 +16,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
-	Name:        "edge-manifest",
-	Version:     "0.9.0",
-	Description: "The Facet edge app's world manifest: fourteen Personal Lenses (edgeIdentity/edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue/edgeInstructorSessions) projecting identity (incl. the provider/instructor/serviceprovider self-anchors, persona-worlds-design.md Fire W0), reachable services, the op descriptor vocabulary, open and queued tasks, the maintenance work orders at a staff actor's workplace, service instances, and browsable dispatch-target entities (manifest.ent rows a declared dispatch.targetType resolves against) — incl. the provider-hat rows: a bound provider's own appointments, a bound serviceprovider's own instance queue, a bound instructor's own led sessions — into the manifest.* namespace over the per-actor SYNC transport. Plus edgeManifestReadGrants, edgeManifestStaffReadGrants, and edgeManifestProviderReadGrants, the cap-read.edgeManifest read-grant producers the non-self-anchored lenses need to actually publish (Fire 2; provider slice Fire W0).",
-	Depends:     []string{"identity-domain", "orchestration-base", "service-domain", "service-location"},
-	Lenses:      Lenses(),
+	Name:             "edge-manifest",
+	Version:          "0.10.0",
+	Description:      "The Facet edge app's world manifest: fourteen Personal Lenses (edgeIdentity/edgeServices/edgeCatalog/edgeCatalogRoles/edgeTasks/edgeTasksQueued/edgeInstances/edgeEntitySessions/edgeEntityProviders/edgeEntityBookings/edgeStaffWorkOrders/edgeProviderSchedule/edgeProviderQueue/edgeInstructorSessions) projecting identity (incl. the provider/instructor/serviceprovider self-anchors, persona-worlds-design.md Fire W0), reachable services, the op descriptor vocabulary, open and queued tasks, the maintenance work orders at a staff actor's workplace, service instances, and browsable dispatch-target entities (manifest.ent rows a declared dispatch.targetType resolves against) — incl. the provider-hat rows: a bound provider's own appointments, a bound serviceprovider's own instance queue, a bound instructor's own led sessions — into the manifest.* namespace over the per-actor SYNC transport. Each non-self-anchored lens declares its actor\u2192anchor reachability once, as an AnchorWalk, and pkgmgr compiles both the lens's own cypher and the read-grant producer that grants its anchors: three generated producers (edgeManifestReadGrants, edgeManifestStaffReadGrants, edgeManifestProviderReadGrants), one per declared ReadGrantDomain, without which Refractor's D1 readableAnchors gate silently drops every row those lenses project.",
+	Depends:          []string{"identity-domain", "orchestration-base", "service-domain", "service-location"},
+	Lenses:           Lenses(),
+	ReadGrantDomains: ReadGrantDomains(),
 }

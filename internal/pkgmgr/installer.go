@@ -79,20 +79,13 @@ func NewInstaller(conn *substrate.Conn, adminActor string) *Installer {
 //
 // Returns a Result describing what happened (or what was skipped).
 func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult, error) {
-	if def.Name == "" {
-		return nil, fmt.Errorf("pkgmgr: Definition.Name is required")
-	}
-	if def.Version == "" {
-		return nil, fmt.Errorf("pkgmgr: Definition.Version is required")
-	}
-	if i.AdminActor == "" {
-		return nil, fmt.Errorf("pkgmgr: AdminActor is required")
-	}
-
 	// Fail closed before any KV operation: e.g. a lens whose declared Bucket is
 	// a reserved short alias would auto-create a phantom bucket no reader
-	// consults (silent mis-targeting of the auth plane).
-	if err := def.validateAll(); err != nil {
+	// consults (silent mis-targeting of the auth plane). Returns the composed
+	// Definition — the generated cap-read producers install alongside the data
+	// lenses they grant for.
+	def, err := i.preflight(def)
+	if err != nil {
 		return nil, err
 	}
 

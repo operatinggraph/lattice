@@ -108,6 +108,15 @@ func ParseManifestBytes(raw []byte) (*Manifest, error) {
 // version, declared DDL/lens/permission counts, and canonical-name
 // listings. Drift surfaces as an error before any Core KV write.
 func (m *Manifest) VerifyAgainstDefinition(d Definition) error {
+	// Compare against the COMPOSED Definition: a generated cap-read producer is
+	// a real declared lens the installer emits a meta-vertex for, so the
+	// manifest lists it like any other. Lens comparison below is index-wise,
+	// which is why generated producers are appended in ReadGrantDomains order
+	// and the manifest's lens list must follow the same order.
+	d, err := d.ExpandReadGrantWalks()
+	if err != nil {
+		return err
+	}
 	if m.Name != d.Name {
 		return fmt.Errorf("pkgmgr: manifest.name=%q != Definition.Name=%q", m.Name, d.Name)
 	}

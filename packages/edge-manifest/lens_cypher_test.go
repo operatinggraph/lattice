@@ -192,7 +192,7 @@ func emRowsByEntity(rows []ruleengine.ProjectionResult) map[string]map[string]an
 // — which is every work order in the showcase.
 func TestEdgeStaffWorkOrders_WalksDownFromTheWorkplace(t *testing.T) {
 	f := emStaffWorld(t)
-	rows := emRowsByEntity(f.project(t, edgeStaffWorkOrdersSpec, f.key("tech")))
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeStaffWorkOrders"), f.key("tech")))
 
 	unitRow, ok := rows[f.ids["woUnit"]]
 	require.True(t, ok, "work order at a UNIT inside the workplace must project (the *0.. inbound hop)")
@@ -222,7 +222,7 @@ func TestEdgeStaffWorkOrders_ResolvedStatusDerivesFromTheAspect(t *testing.T) {
 		"notes": "Repacked the gland.", "resolvedAt": "2026-07-21T12:00:00Z",
 		"resolvedBy": f.key("tech")})
 
-	rows := emRowsByEntity(f.project(t, edgeStaffWorkOrdersSpec, f.key("tech")))
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeStaffWorkOrders"), f.key("tech")))
 	require.Equal(t, "resolved", rows[f.ids["woUnit"]]["status"])
 	require.Equal(t, "Repacked the gland.", rows[f.ids["woUnit"]]["resolutionNotes"])
 	require.Equal(t, "open", rows[f.ids["woBldg"]]["status"], "an unresolved sibling stays open")
@@ -234,7 +234,7 @@ func TestEdgeStaffWorkOrders_ResolvedStatusDerivesFromTheAspect(t *testing.T) {
 func TestEdgeStaffWorkOrders_NoWorkplaceProjectsNothing(t *testing.T) {
 	f := emStaffWorld(t)
 	f.vtx(t, "resident", "identity")
-	require.Empty(t, f.project(t, edgeStaffWorkOrdersSpec, f.key("resident")))
+	require.Empty(t, f.project(t, emComposedSpec(t, "edgeStaffWorkOrders"), f.key("resident")))
 }
 
 // TestStaffReadGrants_CoverTheWorkOrderAnchors is the same-commit grant
@@ -247,7 +247,7 @@ func TestStaffReadGrants_CoverTheWorkOrderAnchors(t *testing.T) {
 	f.vtx(t, "maintRole", "role")
 	f.edge(t, "holdsRole", "tech", "maintRole")
 
-	rows := f.project(t, edgeManifestStaffReadGrantsSpec, f.key("tech"))
+	rows := f.project(t, emComposedSpec(t, "edgeManifestStaffReadGrants"), f.key("tech"))
 	require.Len(t, rows, 1)
 
 	granted := map[string]bool{}
