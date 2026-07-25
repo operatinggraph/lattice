@@ -15,6 +15,7 @@ import (
 var _ Adapter = (*PostgresAdapter)(nil)
 var _ Truncater = (*PostgresAdapter)(nil)
 var _ KeyLister = (*PostgresAdapter)(nil)
+var _ SeqGuarded = (*PostgresAdapter)(nil)
 
 // PostgresAdapter writes materialized rows to a Postgres table.
 // It uses a shared pgxpool.Pool (owned by PoolManager) so connection count

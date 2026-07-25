@@ -30,9 +30,27 @@ type GrantWriterAdapter struct {
 }
 
 var (
-	_ Adapter   = (*GrantWriterAdapter)(nil)
-	_ KeyLister = (*GrantWriterAdapter)(nil)
+	_ Adapter    = (*GrantWriterAdapter)(nil)
+	_ KeyLister  = (*GrantWriterAdapter)(nil)
+	_ SeqGuarded = (*GrantWriterAdapter)(nil)
 )
+
+// Guarded reports the §6.14 monotonic guard, which this adapter carries
+// unconditionally: UpsertGrant and RevokeGrant each end
+// `WHERE EXCLUDED.projection_seq > actor_read_grants.projection_seq`, so there
+// is no unguarded GrantWriterAdapter to build and nothing to switch off. That
+// is why it is a constant rather than a SetGuarded flag like the NATS-KV and
+// Postgres adapters, whose guard is opted into per lens.
+//
+// This report is the pipeline's only route to that fact. Every other target
+// has its guard turned on by projection.RequiresGuard, which answers false for
+// any lens that is not an actorAggregate — which is every grant lens — so the
+// guard-aware paths would otherwise treat writes the storage layer is ordering
+// as last-writer-wins. The adjacency-watch path is the one that matters most:
+// it carries no stream sequence, so it writes at the sentinel seq 0, and
+// against an absent row that INSERT lands — an unordered live read grant in
+// the table every protected table's RLS policy consults.
+func (g *GrantWriterAdapter) Guarded() bool { return true }
 
 // NewGrantWriterAdapter wraps a non-nil PostgresGrantWriter. source is the
 // lens's declared grant_source (see GrantWriterAdapter.source); "" is a lens
@@ -159,9 +177,10 @@ type ProtectedAdapter struct {
 }
 
 var (
-	_ Adapter   = (*ProtectedAdapter)(nil)
-	_ Truncater = (*ProtectedAdapter)(nil)
-	_ KeyLister = (*ProtectedAdapter)(nil)
+	_ Adapter    = (*ProtectedAdapter)(nil)
+	_ Truncater  = (*ProtectedAdapter)(nil)
+	_ KeyLister  = (*ProtectedAdapter)(nil)
+	_ SeqGuarded = (*ProtectedAdapter)(nil)
 )
 
 // NewProtectedAdapter wraps a non-nil PostgresAdapter. arrayCols names the row

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
@@ -78,6 +79,31 @@ func compileAdjRule(t *testing.T, spec string) (*full.Engine, ruleengine.Compile
 	eng := full.New()
 	cr, err := eng.Parse(spec)
 	require.NoError(t, err)
+	return eng, cr
+}
+
+// grantTestSource is the grant_source the grant-family adj-watch test declares
+// on both the adapter and the projected row — they must agree or the adapter
+// rejects the write before it reaches the writer.
+const grantTestSource = "cap-read.test"
+
+// compileGrantRow compiles a lens shaped like a grant producer: it RETURNs the
+// three columns actor_read_grants is keyed by, and threads them as the key
+// columns so the projected Keys map is one GrantWriterAdapter accepts. The
+// default first-RETURN-item key fallback would yield a single `key` column,
+// which the adapter refuses outright.
+func compileGrantRow(t *testing.T) (*full.Engine, ruleengine.CompiledRule) {
+	t.Helper()
+	eng := full.New()
+	cr, err := eng.Parse(`
+MATCH (n:widget {key: $actorKey})
+RETURN n.key AS actor_id, n.data.name AS anchor_id, n.data.src AS grant_source
+`)
+	require.NoError(t, err)
+	fullCR, isFull := cr.(*full.CompiledRule)
+	require.True(t, isFull)
+	fullCR.KeyColumns = []string{"actor_id", "anchor_id", "grant_source"}
+	require.NoError(t, fullCR.ValidateKeyColumns())
 	return eng, cr
 }
 
@@ -216,6 +242,75 @@ func TestHandleAdjNode_GuardedSkip_NonVacuous(t *testing.T) {
 	p.handleAdjNode(ctx, nodeKey, widgetBody(nodeKey, map[string]any{"name": "gadget"}))
 	require.Empty(t, ad.writes,
 		"a guarded target must never be written by the adjacency-watch path, even when results are non-empty")
+}
+
+// TestHandleAdjNode_GuardedSkip_AppliesToTheGrantFamily pins the same arm
+// against the REAL adapter type rather than a spy that can be told what to
+// report. The grant family's guard lives in SQL and is unconditional, but
+// nothing in the projection layer enables it — projection.RequiresGuard
+// answers false for every lens that is not an actorAggregate, which is every
+// grantTable lens shipped — so the adapter's own report is the only way this
+// path can learn the writes are ordered. A spy proves the arm; only the real
+// type proves the family reaches it.
+//
+// The nil pool IS the assertion. The skip returns before any write, so the
+// writer is never dereferenced; if the skip stops firing, the write reaches
+// UpsertGrant and panics on the nil *pgxpool.Pool. Letting it through would
+// otherwise be silent — a token-less INSERT against an absent row lands a live
+// read grant that no stream sequence ordered.
+func TestHandleAdjNode_GuardedSkip_AppliesToTheGrantFamily(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping NATS-backed test in short mode")
+	}
+	coreKV, adjKV, _ := newCollisionKVs(t)
+	ctx := context.Background()
+	eng, cr := compileGrantRow(t)
+
+	const widgetID = "AdjGrantWidgetAAAAAA"
+	nodeKey := "vtx.widget." + widgetID
+	row := map[string]any{"name": "AdjGrantAnchorAAAAAA", "src": grantTestSource}
+	writeCollisionVertex(t, coreKV, nodeKey, "widget", row)
+
+	ga, err := adapter.NewGrantWriterAdapter(&adapter.PostgresGrantWriter{}, grantTestSource)
+	require.NoError(t, err)
+	p := &Pipeline{
+		ruleID:     "rule-adj-grant",
+		coreKV:     coreKV,
+		adjKV:      adjKV,
+		adpt:       ga,
+		engineKind: ruleengine.EngineFull,
+		fullEngine: eng,
+		fullCR:     cr,
+	}
+
+	// Non-vacuity has to be established twice over here. The lens must match —
+	// as the spy-backed sibling requires — and the row it yields must also
+	// survive the adapter's OWN key/source validation, or Upsert would fail
+	// before reaching the writer and the nil pool would never be touched no
+	// matter how broken the skip was. Both are asserted, so the only remaining
+	// reason nothing panics is the guarded skip.
+	entry := ruleengine.NodeEntry{CoreKVKey: nodeKey, NodeLabel: "widget",
+		Properties: map[string]any{"lastModifiedAt": "2026-07-02T10:00:00Z", "data": row}}
+	results, _, err := p.evaluateForEntry(ctx, entry)
+	require.NoError(t, err)
+	require.NotEmpty(t, results, "the guarded-skip assertion is meaningless unless the lens actually matches")
+	require.Equal(t, map[string]any{
+		"actor_id": nodeKey, "anchor_id": "AdjGrantAnchorAAAAAA", "grant_source": grantTestSource,
+	}, results[0].Keys, "the projected keys must be ones the grant adapter accepts, or the write dies before the pool")
+
+	// The canary keeps the assertion below from decaying into a tautology. It
+	// holds only while an actual write through this adapter panics on the nil
+	// pool; if a pgx release starts returning an error there instead,
+	// handleAdjNode's own error handling would swallow it and NotPanics would
+	// pass whether or not the skip fired. Asserting the panic directly means
+	// that day fails here, loudly, rather than going quietly vacuous.
+	require.Panics(t, func() {
+		_ = ga.Upsert(ctx, results[0].Keys, nil, 0)
+	}, "a write that reaches the nil pool must panic, or the NotPanics assertion below proves nothing")
+
+	require.NotPanics(t, func() {
+		p.handleAdjNode(ctx, nodeKey, widgetBody(nodeKey, row))
+	}, "the grant adapter must be recognised as guarded and skipped, not written through at seq 0")
 }
 
 // TestHandleAdjNode_WriteError_RecordsAndContinues pins arm 9

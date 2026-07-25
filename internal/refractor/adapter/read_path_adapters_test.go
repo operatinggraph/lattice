@@ -19,6 +19,31 @@ func TestNewGrantWriterAdapter_NilWriter(t *testing.T) {
 	assert.Contains(t, err.Error(), "writer must not be nil")
 }
 
+// TestGrantWriterAdapter_ReportsItsUnconditionalGuard pins the signal three
+// pipeline paths read to decide how to treat this adapter's writes: the
+// adjacency-watch skip (which must not write at the sentinel seq 0), the
+// rebuild force-truncate, and HotReloadInto's refusal of an unguarded
+// replacement. Two of those three assert the ANONYMOUS `interface{ Guarded()
+// bool }` rather than adapter.SeqGuarded, so both forms are asserted here — a
+// signal only one of them can see is not the signal the call sites read.
+//
+// The value is a constant because the guard is a property of the SQL this type
+// always issues, not of a settable flag: there is no unguarded
+// GrantWriterAdapter to construct.
+func TestGrantWriterAdapter_ReportsItsUnconditionalGuard(t *testing.T) {
+	ga, err := NewGrantWriterAdapter(&PostgresGrantWriter{}, "cap-read.test")
+	require.NoError(t, err)
+
+	viaNamed, ok := any(ga).(SeqGuarded)
+	require.True(t, ok, "the grant family must satisfy adapter.SeqGuarded, or Reproject's guard test cannot see it")
+	assert.True(t, viaNamed.Guarded())
+
+	viaAnon, ok := any(ga).(interface{ Guarded() bool })
+	require.True(t, ok, "the adjacency-watch skip and rebuild force-truncate assert this anonymous form")
+	assert.True(t, viaAnon.Guarded(),
+		"a false here lets the adjacency-watch path write a read grant with no ordering token")
+}
+
 // TestGrantWriterAdapter_ListKeys_RequiresDeclaredSource pins the fail-closed
 // end of the scoping rule: with no declared grant_source there is no safe
 // enumeration of the shared table, so ListKeys errors rather than returning

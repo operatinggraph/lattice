@@ -17,6 +17,7 @@ var _ Adapter = (*NatsKVAdapter)(nil)
 var _ Truncater = (*NatsKVAdapter)(nil)
 var _ KeyLister = (*NatsKVAdapter)(nil)
 var _ RowReader = (*NatsKVAdapter)(nil)
+var _ SeqGuarded = (*NatsKVAdapter)(nil)
 
 // guardCASMaxAttempts caps the conditional-write retry loop a guarded adapter
 // runs when a concurrent writer (the retry-queue goroutine) collides on the

@@ -574,10 +574,23 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	// stream replays from empty and the highest-seq write wins, yielding a steady
 	// state identical to a from-scratch projection (Contract #6 §6.2). The force
 	// keys off Guarded() so the pipeline never learns lens canonical names.
+	//
+	// The force applies only to a target that can actually be truncated. A
+	// guarded target that cannot (the grant family, which shares one table
+	// across every producer and so must never TRUNCATE it) gets the honest
+	// warning instead: forcing there would announce a repair that the
+	// Truncater branch below then silently declines, leaving the operator to
+	// believe the watermarks were cleared when a replay is still about to be
+	// rejected against them.
 	if g, ok := p.currentAdapter().(interface{ Guarded() bool }); ok && g.Guarded() && !truncate {
-		slog.Info("pipeline: rebuild: guarded bucket forces truncate (avoids rejected-write holes)",
-			"ruleId", p.ruleID)
-		truncate = true
+		if _, truncatable := p.currentAdapter().(adapter.Truncater); truncatable {
+			slog.Info("pipeline: rebuild: guarded bucket forces truncate (avoids rejected-write holes)",
+				"ruleId", p.ruleID)
+			truncate = true
+		} else {
+			slog.Warn("pipeline: rebuild: guarded target cannot be truncated — the replay is written against the stored watermarks, so rows at or below them are rejected and survive the rebuild",
+				"ruleId", p.ruleID)
+		}
 	}
 	if truncate {
 		adpt := p.currentAdapter()
