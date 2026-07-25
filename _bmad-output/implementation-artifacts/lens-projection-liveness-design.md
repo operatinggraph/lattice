@@ -937,3 +937,62 @@ full `go test ./...` (the entry-baseline change is read by the activation path e
 - **`Output` is a pointer** (`*lens.OutputDescriptorSpec`) with slice fields — the comparison handles nil on
   either side and compares slices elementwise, mirroring `secureColumnsEqual`'s order-sensitive posture (the
   descriptor is authored, not computed).
+
+### 14.5 Build outcome — SHIPPED, with three review rounds and one residual filed
+
+All four rows shipped as one commit. Two adversarial passes ran; **neither could refute the change's
+core claims**, and both found real defects around them, which are fixed in the shipped commit.
+
+**Round 1 confirmed** that the `guarded` source swap cannot disarm a pin that was previously armed
+(`RequiresGuard(r)` true ⟹ `ApplyGuard` ⟹ `EnableProjectionGuard`'s concrete `*NatsKVAdapter`
+assertion ⟹ the built adapter reports guarded; a failed build means the lens never started), that
+`ProtectedAdapter` forwards `SeqGuarded` rather than hiding it, and that no shipped `Output`
+descriptor is defaulted or re-serialized in a way that could make an unchanged lens refuse forever.
+It found three defects:
+
+- **The secure-lens table/DSN pin read a poisoned baseline.** `CoreKVSource` records
+  `s.known[lensID] = rule` *before* invoking the callback, so `old` is the last-**seen** spec, not the
+  last-**applied** one: a refused DSN edit became the baseline for the next edit, which then let it
+  ride in unexamined — with no verify-and-pause on the swap, onto a database whose RLS posture was
+  never probed while the rows carry decrypted PII. Fixed by removing the `old` parameter entirely and
+  snapshotting `dsn` on the entry, so the running pipeline is the only baseline there is.
+- **The `Output` pin was one-sided.** `ClassifyUpdate` keys on the Match string alone, so editing
+  `output` *and* the cypher together lands on the MATCH path — which swapped the compiled rule while
+  re-installing the envelope no more than the INTO path does. An operator refused on an Output edit
+  could apply it by touching the cypher alongside it, and the result (new cypher, old
+  `BodyColumns`) silently dropped newly-returned columns. Fixed by running one refusal set for both
+  kinds.
+- **Column order was treated as content.** `BodyColumns` / `StaticEmptyColumns` name keys the
+  envelope writes into a map, so a reorder means nothing; `Lanes` is emitted verbatim. Fixed by
+  comparing the first two as multisets and leaving `Lanes` ordered.
+
+**Round 2 attacked those fixes** and cleared them — the DSN-defaulting hypothesis is dead
+(`translateSpec` resolves `REFRACTOR_PG_DSN` and fails closed before the Rule exists, and the pool
+manager supplies no default of its own), no `*OutputDescriptorSpec` is aliased across loads, and every
+consumer of the column lists is name-keyed. It found the pin set was still **incomplete**:
+
+- **`protected` was the unpinned fourth guard source.** `NewProtectedAdapter` forces the §6.2 guard
+  onto its inner adapter; a bare `PostgresAdapter` has it off. And this family has **no backstop** —
+  `HotReloadInto`'s refusal arms from `RequireGuardedAdapter`, whose sole caller is
+  `InstallActorAggregate`, which never runs for a protected postgres lens and structurally cannot
+  (the guard-enabler requires a NATS-KV adapter). So `protected: true → false` on a live read model
+  would have retired the monotonic write guard silently, on exactly the surface that carries
+  read-path authorization. Pinned; with the auth-plane bucket, the tombstone empty-behavior and
+  `grantTable` already pinned, the set of guard sources is now closed. This also closes the two-step
+  escape round 2 named (acquire the guard mid-life via one accepted edit, then move the surface
+  against the stale flag).
+- **`dsn` was missing from the guarded surface pin** it had just been added for. Pinned.
+- **`actorField`'s parse-time default was not normalized**, so spelling out `"actor"` refused the
+  whole update. Normalized.
+
+**Residual — a package upgrade that changes a lens's `Output` no longer half-applies, and does not
+apply either.** Lens NanoIDs are version-independent, so a package upgrade is an *update* on
+`vtx.meta.<id>.spec`, not a delete-and-recreate; a re-authored actor-aggregate lens that changes its
+cypher and `BodyColumns` together (a shipped shape — `b425c25b` did exactly this to
+`appointmentReminders`) is now refused whole. That is the correct call — the alternative was applying
+the cypher against the old envelope and dropping the new column silently — but nothing re-activates
+the lens afterwards, so `lattice-pkg apply` reports success while the running Refractor keeps serving
+the old spec until it restarts. The refusal message names the real remedy, and the durable fix (an
+update the pipeline can re-activate through rather than refuse) is a new mechanism, not an extension
+of this one. **Consumer: a package author upgrading an actor-aggregate lens's `Output`.** Filed as a
+row.
