@@ -1502,6 +1502,61 @@ Declared dependencies re-verified both ways: W4 depends on P1+P2 (both SHIPPED �
 and clinic/loftspace run on it) and **not** on W0's provider spine (café has no provider hat), so nothing
 sequences ahead of it.
 
+**As-built — W4 SHIPPED (2026-07-25, `f5a9c8a3`).** Café is sign-in-first. Both mints and the fixed admin
+actor are gone, the eight read endpoints answer only a verified session and scope to its subject, and the FE
+renders hats from whoami. App-only, exactly as the brief predicted: no package, DDL, lens, script, grant or
+seed change, so no version bump.
+
+*The brief's two forks held, and the audit that made this fire app-only was the load-bearing one.* Every
+café-domain op already carried both its staff scope=any and its `consumer` scope=self grant with a
+tombstone-probed ownership guard, so the sign-in flip needed no package work at all — the single gap was
+`CreditAccount`, resolved as the brief decided (surface removed, op untouched, confined-credit work filed).
+
+*Three defects found in review, none of which the gates would have caught.*
+- **The FE stamped `authContext.target` on every submit.** This is the one that would have shipped broken.
+  cafe-domain branches on the mere **presence** of that field rather than on `authTargetValidated`, and the
+  Processor passes it through verbatim from the envelope (`starlark_runner.go:645-648`) no matter which grant
+  authorized the op — so a staff `Charge` was pushed onto the self-order branch, **silently discarding the
+  staff-entered `amountCents` in favour of the catalog price**, and `OpenTab`/`Settle` then required the
+  staffer to be the lease's own applicant. Every POS and front-desk write would have been denied. The target
+  now rides the resident hat only (`selfMode` is already `!isFrontDesk()`, so the hat boundary was exact).
+  The builder had written a comment asserting the opposite — that attaching it was "harmless for a staff
+  submit (the scope=any grant never consults target)" — which is true of the *grant* and false of the
+  *script*; the DDL's own comment says the check "is a no-op there" precisely **because** a scope=any caller
+  sends no authContext.
+- **`isStaff` tested the anchor's `relation` alone.** `identityAnchors` stamps `relation` as a literal
+  constant on every collected entry, so an identity with no workplace still yields `{key:null,
+  relation:"worksAt"}` from the unmatched OPTIONAL MATCH (`identity-domain/lenses.go:168`; the package's own
+  test calls it "the degenerate {key:null} OPTIONAL-MATCH entry"). Only the lens's `RealnessFilter: "key"`
+  strips it — so café's entire staff boundary rested on a filter declared in a *different package*. Not
+  exploitable today (traced end to end, and confirmed live: a resident's whoami carries no worksAt entry),
+  but one clause makes it self-contained. The idiom was transplanted from clinic and Facet, where the same
+  predicate is **UX curation** over a grant/RLS authority; here it *was* the authority.
+- **`computeTabs` kept a row with a `tabKey` but no `leaseAppKey`**, which every sibling compute function
+  already skips.
+
+*Live-verified against the running stack, both directions, with positive controls.* Uncredentialed reads 401
+where they returned 200. A resident sees 1 lease / 2 tabs against staff's 13 / 12; is 403'd naming another
+resident's lease and **200 on their own** (so the 403 is not a blanket refusal); front-desk endpoints 403 for
+a resident, 200 for staff. A resident opened a tab and self-ordered at the catalog price (450); front-of-house
+charged 275 on that tab. **The discriminating pair:** the same `Settle`, same actor, same tab is `AuthDenied:
+a resident may only settle their own tab` **with** `authContext.target` attached and **committed** without it
+— the pre-fix FE against the shipped one, differing in exactly one field. A `backOfHouse` `worksAt` holder is
+correctly denied (café grants it nothing), which also caught the first live attempt using the wrong persona.
+
+*Residuals, filed as rows in the same docs commit.* (a) The staff read hat is **workplace-unscoped** — a
+`worksAt` anchor to any location anywhere grants the whole café house, a read/write asymmetry inside one
+vertical, since café-domain's staff *writes* are workplace-confined (`ddls.go:441-467`) and Facet's staff
+*read* spine is grant-confined. Ratified as-is by §7.4's "a `worksAt` staffer sees the house" and a strict
+improvement on the unauthenticated dump it replaces, but it needs a lease→unit→building join no café lens
+projects, so it is design work rather than this fire's execution. (b) The kit's `/api/dev-login` persona
+**fence is unwired in every vertical's Makefile target** — `CAFE_APP_DEMO_PERSONAS` and its clinic/loftspace
+equivalents are set nowhere, so `personaAllowed` returns true for any valid NanoID on a `make up-*` stack.
+The brief's touch-list named this for café; it was deliberately not done, because neither shipped sibling does
+it either (verified) and doing it café-only would invent local-dev behaviour no sibling has. It is a
+platform-wide dev-posture gap, not a café regression, and the hard fences still hold (`signer.go:78-80`
+refuses a non-loopback bind; `session.go:145-154` refuses a public origin + signer without personas).
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
