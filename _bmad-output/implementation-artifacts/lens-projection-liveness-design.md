@@ -525,3 +525,98 @@ tick. Neither is a regression and neither is in this fire's scope.
 lenses. That row's remaining scope is §10.1's other two findings — the `severity: error` escalation
 contradicting the business-lens invariant, and 14 lenses each enumerating the shared
 `weaver-targets` bucket — plus enrolment itself. This fire removed its blocker.
+
+---
+
+## 12. Fire 7 — a reconciliation write the guard drops is not a heal (build note / fire brief)
+
+The precondition increment of the still-open enrolment row. Enrolling a business lens gives it the
+sweep's earned-share hints, and those hints are scored on `Reproject`'s `Wrote`. A `Wrote` that is
+false is therefore not a reporting blemish — it is corrupt evidence feeding the selection algorithm
+§11 just shipped. It gets fixed before anything is enrolled, on the auth plane where it is live today.
+
+**Scope sentence (verbatim, from the board row).** *"`Reproject` claims `Wrote` for a write the
+ordering guard dropped — the `seq==0` → `ErrNoOrderingToken` guard fires only when the row is
+*present*, so an absent-row upsert reaches `guardedWrite`, which returns nil without writing while
+`Reproject` reports `Wrote=true` — inflating `reconciled` and logging a heal that did not happen."*
+
+**Grounded mechanism (verified `file:line`).**
+
+- `reproject.go:148` — the refusal is `present && seq == 0`. With `present == false` control falls
+  through to `adpt.Upsert(..., seq)` at `:153` and sets `out.Wrote = true` at `:156` on a nil error.
+- `adapter/natskv.go:197-201` — `guardedWrite` returns **nil without writing** whenever
+  `incomingSeq == 0`, before any absent-key branch. So the nil `Reproject` reads as success is the
+  guard's silent drop.
+- **Two comments in the tree contradict each other, and the guard is the runtime authority.**
+  `reproject.go:33-35` asserts *"Creating an ABSENT row is unaffected: the guard's absent-key branch
+  takes Create … so the lost-first-projection case this whole design exists for still heals from a
+  cold pipeline."* `natskv.go:191-195` states the opposite as a deliberate fail-closed choice — a
+  seq-0 write is dropped *"so it can neither create a clobberable seq-0 key nor no-op a real
+  update."* The guard is what runs; the `reproject.go` paragraph is false and is corrected here.
+  Reversing the guard instead was rejected: it would reintroduce the clobberable seq-0 key its author
+  deliberately excluded, on the adapter the auth plane writes through.
+- **Consumers of the phantom** — `sweep.go:379/385` score it into `coverageHits`/`orphanHits` →
+  `noteHintOutcome` (`:394-395`), so a phantom clears the earned-share miss record and holds a
+  hint at full budget on evidence of nothing; `sweep.go:389-393` logs `"healed a divergent
+  projection"`; `sweep.go:879` adds it to the persisted `SweepStatus.Reconciled`;
+  `control/service.go:838` returns it to an operator.
+
+**Decisions taken here as Winston (impl-level, recorded not parked).**
+
+1. **Refuse the write the guard is certain to drop** — extend `ErrNoOrderingToken` to the absent-row
+   upsert, mirroring `b9b5b892`'s stated intent for the present-row case. Nothing real is lost: the
+   write was never landing. `seedAppliedSeqFromAckFloor` (`pipeline.go:197+`) makes `seq == 0` mean a
+   genuinely cold pipeline, so the heal follows the first applied event.
+2. **Condition the refusal on the adapter actually being seq-guarded**, via a new optional
+   `adapter.SeqGuarded` interface over the existing `NatsKVAdapter.Guarded()` (`natskv.go:86`). One
+   rule, no asymmetry: *a seq-0 reconciliation write cannot land through a guarded adapter, so refuse
+   rather than report a phantom heal.* Applied to the delete branch (`:126`) and both upsert cases.
+   This is **load-bearing for enrolment**, not tidiness: the 14 business actorAggregate lenses write
+   through **unguarded** adapters, where a seq-0 write lands normally and `Wrote` is truthful. Left
+   unconditional, the refusal would abandon a business sweep pass on every cold pipeline.
+
+**Grounding corrections to §10.1's remaining scope (verified; they resize the enrolment row).**
+
+- **The `severity: error` finding is already moot.** `evalLenses` raises exactly three issues —
+  `LensProjectionPaused` / `Lagging` / `Unreadable` — every one `severity: "warning"`
+  (`health/lattice_heartbeater.go:1070-1088`); `LensLivenessStatus` (`:194-208`) carries no sweep
+  fields; `LensCoverageDivergence` / `LensRepairFailing` exist nowhere in the `.go` tree (the revert
+  §10.1 describes). `aggregateStatus` (`:949-960`) only reaches `unhealthy` via an `error`, which no
+  business-lens path can emit, and `lens_alert_test.go:56` enforces it. So this is not a defect to
+  fix but a **constraint on any new reporting**: business-lens sweep verdicts must be warning-only
+  (`docs/components/refractor.md:717`).
+- **The shared-bucket *orphan* hazard is already closed** — and it was the dangerous half.
+  `ListKeys` enumerates the **whole** bucket (`natskv.go:308-335`), so a `weaver-targets` sweeper
+  sees all 12 lenses' rows; `AnchorFromKey`'s exact prefix+suffix+`ParseVertexKey`+`AnchorType` test
+  (`output.go:218-246`, applied at `sweep.go:673`) rejects every key the lens does not own. Each of
+  the 12 carries a distinct literal prefix, so no lens can retract another's rows. Verified, not
+  assumed.
+- **The shared-bucket *cost* is real and unfixed**: `survey` calls `ListKeys` once per sweeper per
+  tick (`sweep.go:570`), so enrolling 12 `weaver-targets` lenses is 12 full bucket enumerations a
+  minute at `DefaultSweepInterval = 60s`.
+- **A new enrolment gate the row never named.** `survey` extracts `row["key"]` with the field name
+  hardcoded (`sweep.go:576`). That is correct only for a keyOrder of exactly `["key"]`. All 17
+  actorAggregate lenses get that by default (`pkgmgr/build.go:435-438`) but **nothing enforces it** —
+  a future composite- or renamed-key actorAggregate lens would yield an **empty** `targets` set,
+  making direction 1 read every anchor as row-less. Enrolment must gate on the key shape, not assume
+  it.
+
+**Touch-list (verified `file:line`).**
+
+- `internal/refractor/adapter/adapter.go:41` — add the optional `SeqGuarded` interface beside `KeyLister`.
+- `internal/refractor/pipeline/reproject.go:21-36` — correct the false absent-row paragraph.
+- `internal/refractor/pipeline/reproject.go:111-157` — resolve guardedness once; gate `:126` and add
+  the absent-row refusal.
+- `internal/refractor/pipeline/reproject_token_test.go` — the fake adapter reports `Guarded() = true`
+  so the existing cases keep asserting guarded semantics; new cases for guarded-absent-refuses and
+  unguarded-absent-writes.
+
+**Increment order + green checks.**
+
+- **Inc 1 — the refusal + the doc correction.** Green: `go test ./internal/refractor/...`.
+- **Inc 2 — the regression guard.** New cases proving a guarded absent-row seq-0 upsert issues no
+  write and reports no heal, and that an unguarded one still writes.
+
+**Non-goals (this fire).** No enrolment of business lenses (the row stays open, with its scope
+resized by the corrections above). No change to `guardedWrite`'s seq-0 policy, to any threshold,
+health issue name, the Health-KV schema, or any contract. No new reporting.
