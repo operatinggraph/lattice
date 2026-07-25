@@ -149,11 +149,17 @@ MaxAge 10m, value = JSON `{state, nonce, verifier, returnTo}`.
   delegating the check to the IdP's registered-URI list would make a kit invariant depend on an optional
   external precondition. Neither configured ⇒ the posture refuses to boot (same check as the secure-context
   requirement above).
-- **Known asymmetry (accepted, documented):** this route sets a cookie on a GET, and `stateChanging()`
-  treats GET as safe, so a cross-origin *navigation* can trigger it. The blast radius is a discarded flow
-  cookie on a browser that has not started a sign-in — no session, no token, no state change the user can
-  observe — and it self-heals on the next real `/api/oidc/login`. It is the same class the gate documents
-  for Facet's `GET /api/feed`, and it is named here rather than papered over.
+- **Known asymmetry (accepted, documented — and narrower than when this was written):** this route sets a
+  cookie on a GET, and `stateChanging()` treats GET as safe, so the gate does not refuse it outright. The
+  blast radius is a discarded flow cookie on a browser that has not started a sign-in — no session, no
+  token, no state change the user can observe — and it self-heals on the next real `/api/oidc/login`.
+  **The `Sec-Fetch-Dest: document` term shipped since (`1a0d1849`) shrinks the reachable shapes:** a
+  cross-origin **subresource** GET now carries `dest=image`/`script`/… and is refused by `metadataAdmits`,
+  so the bare `<img src>` vector — the class the gate's own doc comment still cites for Facet's
+  `GET /api/feed` — no longer reaches this route on a Fetch-Metadata browser. What remains is a genuine
+  cross-origin **top-level navigation** (the user's own act, and it lands them on the IdP's page, which is
+  self-evident), plus a browser that sends no Fetch Metadata at all — the gate's standing honest limit,
+  not something this route adds. Named rather than papered over.
 
 ### 3.3 `GET /api/oidc/callback` — complete
 
