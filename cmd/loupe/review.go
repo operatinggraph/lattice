@@ -140,8 +140,8 @@ func computeCapabilityProposals(keys []string, get kvGetter) []capabilityProposa
 }
 
 // handleReview routes GET /api/review/{capability,augur}(/<id>) to the two
-// tabs' queue/detail handlers, plus the capability tab's two POST action
-// endpoints (F16.2): /api/review/capability/<id>/{approve,apply}. Augur's
+// tabs' queue/detail handlers, plus the capability tab's three POST action
+// endpoints: /api/review/capability/<id>/{approve,apply,mark-applied}. Augur's
 // approve/reject need no dedicated endpoint — they reuse POST /api/op
 // directly (§4.4) since Augur's verdict carries no server-computed payload.
 func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +178,7 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if tab != "capability" {
-			s.writeError(w, http.StatusBadRequest, "only capability proposals support an approve/apply endpoint")
+			s.writeError(w, http.StatusBadRequest, "only capability proposals have approve/apply/mark-applied endpoints")
 			return
 		}
 		switch parts[2] {
@@ -186,8 +186,10 @@ func (s *server) handleReview(w http.ResponseWriter, r *http.Request) {
 			s.reviewCapabilityApprove(w, r, parts[1])
 		case "apply":
 			s.reviewCapabilityApply(w, r, parts[1])
+		case "mark-applied":
+			s.reviewCapabilityMarkApplied(w, r, parts[1])
 		default:
-			s.writeError(w, http.StatusBadRequest, "expected POST /api/review/capability/<id>/{approve,apply}")
+			s.writeError(w, http.StatusBadRequest, "expected POST /api/review/capability/<id>/{approve,apply,mark-applied}")
 		}
 	default:
 		s.writeError(w, http.StatusBadRequest, "expected GET /api/review/{capability,augur} or GET /api/review/{capability,augur}/<id>")
@@ -634,9 +636,13 @@ func (s *server) reviewCapabilityApprove(w http.ResponseWriter, r *http.Request,
 // already use — s.adminActor for provenance, s.pkgmgrSubmit relaying every
 // submitted op through the Gateway), then MarkCapabilityProposalApplied
 // closes the loop. A failure between the two commits leaves the package
-// installed but the proposal still "approved, not applied" — the error
-// message says so explicitly, mirroring the CLI's own guidance, so an
-// operator retries the mark-applied step rather than re-running apply.
+// installed but the proposal still "approved, not applied". Re-running apply
+// cannot recover that: CapabilityApplyPlanForProposal binds a newPackage
+// target to the LIVE catalog and refuses once the name is installed, which is
+// a guard worth keeping (an AI-authored name must never diff-apply into an
+// unrelated package). So the reply says so structurally — resumable marks the
+// half-committed state and points at the mark-applied endpoint below, which
+// re-derives everything server-side.
 func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, id string) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -655,6 +661,26 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 	defer cancel()
 
 	proposalKey := "vtx.capabilityproposal." + id
+	// A half-committed apply survives the page that produced it, so this
+	// recognizes it on a COLD load too — otherwise the operator returning to a
+	// proposal that reads "approved, not applied" clicks Apply, gets the plan
+	// builder's bare refusal, and is told nothing about the recovery that
+	// actually finishes it. The reply carries the same resumable marker the
+	// in-session failure below does, so one classifier handles both. A proposal
+	// whose read-model row cannot be read at all is left to the plan builder,
+	// which is the authority regardless.
+	if cols, ok := s.capabilityRow(ctx, conn, proposalKey); ok && cols.ReviewState == "approved" {
+		if packageKey, installed, err := s.targetInstall(ctx, conn, cols); err == nil && installed {
+			s.writeJSON(w, http.StatusConflict, map[string]any{
+				"error": fmt.Sprintf(
+					"%s is already installed at version %s, so this proposal's install has already committed — close it with mark-applied rather than re-applying",
+					cols.TargetPackageName, targetInstallVersion(cols)),
+				"resumable":  true,
+				"packageKey": packageKey,
+			})
+			return
+		}
+	}
 	plan, err := pkgmgr.CapabilityApplyPlanForProposal(ctx, conn, proposalKey)
 	if err != nil {
 		s.writeError(w, http.StatusConflict, "build apply plan: "+err.Error())
@@ -691,15 +717,287 @@ func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, i
 		Payload:       markPayload,
 		Reads:         []string{proposalKey + ".review", proposalKey + ".target", res.PackageKey + ".manifest"},
 	})
-	if err != nil {
-		s.writeError(w, http.StatusBadGateway, fmt.Sprintf(
-			"apply succeeded (packageKey=%s, installRequestId=%s) but MarkCapabilityProposalApplied failed: %s — the package IS already applied; retry MarkCapabilityProposalApplied alone rather than re-applying",
-			res.PackageKey, installRequestID, err.Error()))
+	if failure := markOpFailure(reply, err); failure != "" {
+		s.writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": fmt.Sprintf(
+				"apply succeeded (packageKey=%s, installRequestId=%s) but MarkCapabilityProposalApplied failed: %s — the package IS already installed; recover with mark-applied rather than re-applying",
+				res.PackageKey, installRequestID, failure),
+			"resumable":  true,
+			"packageKey": res.PackageKey,
+		})
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"apply":            applyReply(res),
 		"markApplied":      reply,
+		"installRequestId": installRequestID,
+	})
+}
+
+// markOpFailure reduces a relayed MarkCapabilityProposalApplied outcome to one
+// operator-facing reason, or "" when the op really committed.
+//
+// A transport error is only half of it. submitOpViaGateway returns (reply,
+// nil) whenever the Gateway shaped a reply at all, so a Processor REJECTION —
+// the likelier failure, and the one every guard in the DDL script produces —
+// arrives with a nil error and a rejected status. Branching on err alone would
+// report the console's central "the second commit can fail" case as success,
+// which is the thing this whole path exists to notice.
+func markOpFailure(reply *processor.OperationReply, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	if reply == nil {
+		return "the Gateway returned no reply"
+	}
+	if reply.Status != processor.ReplyStatusRejected {
+		return ""
+	}
+	if reply.Error != nil && reply.Error.Message != "" {
+		return "rejected by the Processor: " + reply.Error.Message
+	}
+	return "rejected by the Processor"
+}
+
+// recoveredInstallRequestID is the audit pointer mark-applied stamps as
+// appliedByOp. It is deliberately NOT the "install:<name>@<version>" string a
+// successful apply would have produced: this path never observed that op, and
+// a reconstructed pointer that reads identically to an observed one would put
+// a small fiction into the audit record. The "recovered:" prefix says which
+// path wrote it.
+func recoveredInstallRequestID(packageName, version string) string {
+	return "recovered:" + packageName + "@" + version
+}
+
+// findInstalledPackageByName resolves the live vtx.package.<id> vertex whose
+// .manifest aspect records name, returning its key and installed version.
+//
+// It is the mark-applied path's answer to "did the install half actually
+// commit", and it checks isDeleted on BOTH the manifest aspect and the package
+// root: an uninstall tombstones them rather than removing the keys, and a
+// tombstoned manifest still decodes. Marking a proposal applied against an
+// uninstalled package would record an appliedAs link to a dead vertex. The op
+// itself re-verifies liveness independently — this check exists so the console
+// refuses with an explanation instead of relaying a doomed op.
+//
+// Manifests are scanned in sorted key order so a (pathological) double claim
+// on one name resolves deterministically, matching findOwningPackage.
+//
+// Name alone never establishes that a package is a given proposal's install —
+// see targetInstallVersion for the version callers must also match.
+func findInstalledPackageByName(coreKeys []string, get kvGetter, name string) (key, version string, ok bool) {
+	if name == "" {
+		return "", "", false
+	}
+	manifests := make([]string, 0, 4)
+	for _, k := range coreKeys {
+		if strings.HasPrefix(k, "vtx.package.") && strings.HasSuffix(k, ".manifest") && classifyKey(k) == classAspect {
+			manifests = append(manifests, k)
+		}
+	}
+	sort.Strings(manifests)
+	for _, mk := range manifests {
+		manifest, found := readPkgEnvelope(get, mk)
+		if !found || manifest.IsDeleted || dataString(manifest.Data, "name") != name {
+			continue
+		}
+		rootKey := strings.TrimSuffix(mk, ".manifest")
+		root, found := readPkgEnvelope(get, rootKey)
+		if !found || root.IsDeleted {
+			continue
+		}
+		return rootKey, dataString(manifest.Data, "version"), true
+	}
+	return "", "", false
+}
+
+// capabilityRow reads one proposal's read-model row, absence-tolerant: ok is
+// false for a missing row, an unprovisioned bucket, a read failure, or a
+// poison entry alike. Callers that need to distinguish those read the bucket
+// themselves; the ones using this treat "cannot see the row" as "no opinion",
+// which is why it swallows the error rather than returning it.
+func (s *server) capabilityRow(ctx context.Context, conn *substrate.Conn, proposalKey string) (capabilityProposalCols, bool) {
+	entry, err := conn.KVGet(ctx, capabilityauthor.CapabilityProposalsBucket, proposalKey)
+	if err != nil {
+		return capabilityProposalCols{}, false
+	}
+	return decodeCapabilityProposalCols(entry.Value)
+}
+
+// targetInstallVersion is the version a proposal's apply lands: its declared
+// target.newVersion, or the same "0.1.0" default CapabilityApplyPlanForProposal
+// substitutes when the proposal declares none.
+//
+// Matching on it is what separates "this proposal's install committed" from "a
+// package of that name was already there". Name alone cannot make that
+// distinction, and for an upgradeExisting target it is not even close: a
+// package of that name is installed BEFORE the apply by definition — that is
+// the mode's own precondition — so a name-only check would report every
+// never-applied upgrade proposal as recoverable and close it over an artifact
+// that was never installed.
+func targetInstallVersion(cols capabilityProposalCols) string {
+	if cols.TargetNewVersion != "" {
+		return cols.TargetNewVersion
+	}
+	return "0.1.0"
+}
+
+// coreKVGetter returns a kvGetter over Core KV plus an accessor for the first
+// read error it swallowed.
+//
+// kvGetter's (value, ok) shape cannot tell "no such key" from "the read
+// failed", and here the two lead to opposite advice: absent means the install
+// never ran, so run Apply; a timeout means the console does not know, and
+// telling the operator to run Apply on a proposal whose install DID commit
+// sends them to a refusal that flatly contradicts this one. Recording the
+// error lets the caller say which it was.
+func coreKVGetter(ctx context.Context, conn *substrate.Conn) (get kvGetter, readErr func() error) {
+	var first error
+	get = func(key string) ([]byte, bool) {
+		e, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+		if err != nil {
+			if first == nil && !errors.Is(err, substrate.ErrKeyNotFound) {
+				first = err
+			}
+			return nil, false
+		}
+		return e.Value, true
+	}
+	return get, func() error { return first }
+}
+
+// targetInstall reports whether the package a proposal's apply would install
+// is ALREADY live at that proposal's target version — i.e. whether the install
+// half of the two-commit apply has landed.
+//
+// It is the single source of that answer for both halves of the flow: apply
+// consults it to recognize a proposal it can no longer install, and
+// mark-applied consults it to refuse closing a proposal whose install never
+// ran. Deriving it once keeps the two from disagreeing about the same state.
+func (s *server) targetInstall(ctx context.Context, conn *substrate.Conn, cols capabilityProposalCols) (packageKey string, installed bool, err error) {
+	if cols.TargetPackageName == "" {
+		return "", false, nil
+	}
+	coreKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.package.")
+	if err != nil {
+		return "", false, fmt.Errorf("list core-kv packages: %w", err)
+	}
+	get, readErr := coreKVGetter(ctx, conn)
+	key, version, found := findInstalledPackageByName(coreKeys, get, cols.TargetPackageName)
+	if rErr := readErr(); rErr != nil {
+		return "", false, fmt.Errorf("read core-kv package catalog: %w", rErr)
+	}
+	if !found || version != targetInstallVersion(cols) {
+		return key, false, nil
+	}
+	return key, true, nil
+}
+
+// reviewCapabilityMarkApplied implements POST /api/review/capability/<id>/
+// mark-applied: the recovery half of apply, for a proposal whose package
+// install committed but whose closing MarkCapabilityProposalApplied did not.
+//
+// Apply cannot repair that state: CapabilityApplyPlanForProposal's
+// newPackage-vs-live-catalog guard refuses precisely because the package IS
+// installed, and an upgrade would re-run an install that already landed. This
+// is the door out, and it has to work on a cold load — the ordinary case is an
+// operator who closed the tab after the failed apply.
+//
+// It takes NO request body. Every field the op needs is re-derived here from
+// the proposal's own read-model row plus the live package catalog, so there is
+// no client-supplied provenance to trust and the in-session retry and the
+// post-reload recovery are the same call. The op re-verifies all of it anyway
+// (an approved-only transition, a live .manifest, a name matching this
+// proposal's target.packageName), so this handler's checks exist to refuse
+// with an operator-legible reason rather than to be the boundary — with one
+// exception it owns alone: the op cannot check the VERSION, so "a package of
+// this name exists" versus "this proposal's install committed" is decided
+// here or nowhere.
+func (s *server) reviewCapabilityMarkApplied(w http.ResponseWriter, r *http.Request, id string) {
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	if err := validateControlName(id); err != nil {
+		s.writeError(w, http.StatusBadRequest, "proposal id: "+err.Error())
+		return
+	}
+	ctx, cancel := s.pkgContext(r)
+	defer cancel()
+
+	proposalKey := "vtx.capabilityproposal." + id
+	entry, err := conn.KVGet(ctx, capabilityauthor.CapabilityProposalsBucket, proposalKey)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "capability proposal "+id+" not found: "+err.Error())
+		return
+	}
+	cols, ok := decodeCapabilityProposalCols(entry.Value)
+	if !ok {
+		s.writeError(w, http.StatusBadGateway, "capability proposal "+id+": malformed read-model row")
+		return
+	}
+	if cols.ReviewState == "applied" {
+		s.writeError(w, http.StatusConflict,
+			"proposal "+id+" is already applied — nothing to recover")
+		return
+	}
+	if cols.ReviewState != "approved" {
+		s.writeError(w, http.StatusConflict, fmt.Sprintf(
+			"proposal %s is %q, not approved — mark-applied only recovers an approved proposal whose install already committed",
+			id, cols.ReviewState))
+		return
+	}
+	if cols.TargetPackageName == "" {
+		s.writeError(w, http.StatusConflict,
+			"proposal "+id+" records no target.packageName, so the installed package it would close over cannot be resolved")
+		return
+	}
+
+	// Loupe reads the package catalog straight from Core KV as the console
+	// inspector (P5's named exception, the same read handleSystemMap and
+	// findOwningPackage already make), scoped to the vtx.package. subtree.
+	packageKey, installed, err := s.targetInstall(ctx, conn, cols)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if !installed {
+		s.writeError(w, http.StatusConflict, fmt.Sprintf(
+			"no package named %q is installed at version %s — this proposal's install never committed, so run Apply rather than mark-applied",
+			cols.TargetPackageName, targetInstallVersion(cols)))
+		return
+	}
+
+	installRequestID := recoveredInstallRequestID(cols.TargetPackageName, targetInstallVersion(cols))
+	markPayload, err := json.Marshal(map[string]any{
+		"proposalId":       id,
+		"packageKey":       packageKey,
+		"installRequestId": installRequestID,
+	})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "marshal mark-applied payload: "+err.Error())
+		return
+	}
+	reply, err := submitOpViaGateway(ctx, s.gatewayURL, operatorToken(ctx), gatewayOperationRequest{
+		OperationType: "MarkCapabilityProposalApplied",
+		Lane:          string(processor.LaneDefault),
+		Payload:       markPayload,
+		Reads:         []string{proposalKey + ".review", proposalKey + ".target", packageKey + ".manifest"},
+	})
+	if failure := markOpFailure(reply, err); failure != "" {
+		// A rejection is a refusal by the Processor's own guards (the proposal
+		// moved on, the package does not match), not an upstream fault, so it
+		// reads as a conflict; only a transport failure is a 502.
+		status := http.StatusBadGateway
+		if err == nil {
+			status = http.StatusConflict
+		}
+		s.writeError(w, status, "mark applied: "+failure)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"markApplied":      reply,
+		"packageKey":       packageKey,
 		"installRequestId": installRequestID,
 	})
 }

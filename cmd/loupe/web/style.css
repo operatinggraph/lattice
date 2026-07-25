@@ -85,8 +85,13 @@ button {
   cursor: pointer;
   font-size: 13px;
 }
-button:hover { background: var(--accent); }
-button:active { transform: translateY(1px); }
+button:hover:not(:disabled) { background: var(--accent); }
+button:active:not(:disabled) { transform: translateY(1px); }
+/* A disabled control must LOOK disabled. Some of them stay disabled past the
+   end of a request — a control the console has established cannot succeed is
+   latched off — and without this a locked button is pixel-identical to a live
+   one, lights up on hover, and swallows clicks in silence. */
+button:disabled { opacity: 0.4; cursor: default; }
 
 .muted { color: var(--text-dim); font-size: 12px; }
 .small { font-size: 12px; }
@@ -1036,6 +1041,16 @@ a.pulse-derived-text:hover { color: var(--text); }
 .lens-rows { display: flex; flex-direction: column; gap: 4px; }
 .lens-row summary { cursor: pointer; font-family: var(--mono); font-size: 12px; word-break: break-all; }
 .lens-row[open] { background: var(--bg); border-radius: 6px; padding: 4px 6px; }
+
+/* Secondary action sitting beside a primary one: same shape, no fill, so the
+   primary control keeps the visual weight. Used for a recovery path — a
+   button an operator must be able to find, but should never reach for first. */
+.ghost-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.ghost-btn:hover:not(:disabled) { background: none; border-color: var(--accent); color: var(--text); }
 
 /* Destructive action + typed-confirm modal (the .file-detach red-outline family). */
 .danger-btn {

@@ -256,3 +256,90 @@ func TestProposalRows(t *testing.T) {
 		t.Errorf("approved-newest row shape = %v", approved)
 	}
 }
+
+// applyOutcome is the fork between "the apply failed, try again" and "the
+// apply half-committed, and only recovery can finish it" — the branch that
+// decides whether re-arming "Apply now" would send the operator round a loop
+// with no exit.
+func TestApplyOutcome(t *testing.T) {
+	vm := logicVM(t, "review.js")
+
+	ordinary, _ := call(t, vm, "applyOutcome", map[string]any{"error": "NATS is not connected"}).(map[string]any)
+	if ordinary["retryable"] != true || ordinary["resumable"] != false {
+		t.Errorf("an ordinary failure = %v, want retryable + not resumable", ordinary)
+	}
+	if msg, _ := ordinary["message"].(string); msg != "apply failed: NATS is not connected" {
+		t.Errorf("message = %q", msg)
+	}
+	if hint, _ := ordinary["hint"].(string); hint != "" {
+		t.Errorf("an ordinary failure carries a recovery hint (%q); only the resumable branch should", hint)
+	}
+
+	half, _ := call(t, vm, "applyOutcome", map[string]any{
+		"error": "apply succeeded … but MarkCapabilityProposalApplied failed", "resumable": true,
+	}).(map[string]any)
+	if half["resumable"] != true || half["retryable"] != false {
+		t.Errorf("a half-committed apply = %v, want resumable + NOT retryable", half)
+	}
+	if hint, _ := half["hint"].(string); hint == "" {
+		t.Error("a half-committed apply gives the operator no hint about the recovery control")
+	}
+
+	// A reply with neither field still has to produce a legible message rather
+	// than "apply failed: undefined".
+	empty, _ := call(t, vm, "applyOutcome", map[string]any{}).(map[string]any)
+	if msg, _ := empty["message"].(string); msg != "apply failed: unknown error" {
+		t.Errorf("empty body message = %q", msg)
+	}
+
+	// An op reply's error is an OBJECT, not a string, and both shapes reach
+	// these status lines — concatenating the object prints "[object Object]"
+	// where the reason belongs.
+	obj, _ := call(t, vm, "applyOutcome", map[string]any{
+		"error": map[string]any{"code": "Denied", "message": "no grant for this op"},
+	}).(map[string]any)
+	if msg, _ := obj["message"].(string); msg != "apply failed: no grant for this op" {
+		t.Errorf("object-shaped error message = %q", msg)
+	}
+}
+
+func TestErrorText(t *testing.T) {
+	vm := logicVM(t, "review.js")
+
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{"plain", "plain"},
+		{map[string]any{"code": "Denied", "message": "no grant"}, "no grant"},
+		{map[string]any{"code": "Denied"}, "Denied"},
+		{map[string]any{}, "see reply"},
+		{nil, ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := call(t, vm, "errorText", c.in); got != c.want {
+			t.Errorf("errorText(%v) = %v, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// A Processor rejection arrives as a well-formed reply with HTTP 200 and no
+// error field, so a handler testing only for an error reports the platform's
+// refusal to the operator as a success.
+func TestOpRejected(t *testing.T) {
+	vm := logicVM(t, "review.js")
+
+	if got := call(t, vm, "opRejected", map[string]any{"status": "rejected"}); got != true {
+		t.Errorf("rejected reply = %v", got)
+	}
+	if got := call(t, vm, "opRejected", map[string]any{"status": "accepted"}); got != false {
+		t.Errorf("accepted reply = %v", got)
+	}
+	if got := call(t, vm, "opRejected", map[string]any{"status": "duplicate"}); got != false {
+		t.Errorf("duplicate reply = %v", got)
+	}
+	if got := call(t, vm, "opRejected", nil); got != false {
+		t.Errorf("absent reply = %v, want false (a reply the console never got is not a rejection)", got)
+	}
+}

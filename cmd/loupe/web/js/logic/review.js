@@ -181,4 +181,48 @@ function augurProposalRows(list) {
   return rows;
 }
 
-export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, isActionable, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows };
+// errorText renders a reply's error field. An op reply's error is an object
+// ({code, message}) while a handler's is a plain string, and both shapes reach
+// the same status lines — concatenating the object would print
+// "[object Object]" where the reason belongs.
+function errorText(err) {
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  return err.message || err.code || "see reply";
+}
+
+// applyOutcome classifies an /apply failure into what the operator should be
+// told and which control should come back alive.
+//
+// The distinction that matters is `resumable`: the package this proposal would
+// install is already installed at its target version, so the install half has
+// committed and only the closing MarkCapabilityProposalApplied has not.
+// Re-applying cannot finish it — for a newPackage target the server's plan
+// builder refuses outright, and for an upgrade it would re-run an install that
+// already landed — so re-arming "Apply now" only walks the operator back into
+// the same wall. That case arms the recovery control instead, and the arming
+// is a LATCH: it must survive a failed recovery attempt, or the first gateway
+// hiccup hands the dead-end button back.
+function applyOutcome(body) {
+  var reason = errorText(body && body.error) || "unknown error";
+  if (body && body.resumable) {
+    return {
+      message: "apply failed: " + reason,
+      resumable: true,
+      retryable: false,
+      hint: "the package IS installed — close the proposal with “Mark applied (recover)”; re-applying cannot succeed now.",
+    };
+  }
+  return { message: "apply failed: " + reason, resumable: false, retryable: true, hint: "" };
+}
+
+// opRejected reports whether a relayed op reply came back refused by the
+// Processor rather than committed. A rejection arrives as a well-formed reply
+// with HTTP 200, not as an error, so a handler that branches on the error field
+// alone reports the platform's refusal as success — which is exactly the
+// half-committed state the recovery path exists to notice.
+function opRejected(reply) {
+  return !!(reply && reply.status === "rejected");
+}
+
+export { kindGlyph, proposalDisplayState, reviewStateClass, confidenceBand, isActionable, agoFrom, proposalRows, pendingCount, augurDisplayState, augurProposalRows, applyOutcome, opRejected, errorText };

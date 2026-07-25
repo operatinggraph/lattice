@@ -14,6 +14,7 @@ import { renderDoc, keyLinkEl } from "../render.js";
 import {
   kindGlyph, reviewStateClass, confidenceBand, agoFrom,
   proposalRows, proposalDisplayState, augurProposalRows, augurDisplayState,
+  applyOutcome, opRejected, errorText,
 } from "../logic/review.js";
 
 const TABS = ["capability", "augur"];
@@ -388,35 +389,99 @@ function actionSection(p, raw) {
   return box;
 }
 
-// applyRow renders the "Apply now" control for an approved-but-not-applied
-// proposal (F16.2, design §3.3). Apply is the two-Processor-commit F-004
-// install flow the /apply endpoint drives server-side; on success the reply
-// carries the install delta + the mark-applied outcome and the card reloads
-// into its final "applied" state.
+// applyRow renders the controls for an approved-but-not-applied proposal
+// (F16.2, design §3.3): "Apply now", the two-Processor-commit F-004 install
+// flow the /apply endpoint drives server-side, and beside it the recovery for
+// when only the first of those two commits landed.
+//
+// Recovery is a standing control, not one the failed apply reveals, because
+// the state it repairs outlives the page: an operator who closes the tab after
+// a failed apply comes back to a proposal that reads "approved, not applied",
+// and from there Apply can only fail. The endpoint takes no payload and
+// re-derives everything, so the button works on a cold load; when its
+// precondition does not hold it answers with the reason (nothing installed at
+// this proposal's target version → run Apply instead) rather than acting.
+//
+// deadEnd latches the case where the server has told us re-applying cannot
+// work. It has to persist across a failed recovery attempt: re-enabling Apply
+// on any recovery error would hand back a button whose next click earns the
+// same refusal, and whose refusal re-enables it again.
 function applyRow(p, raw) {
   const row = el("div", "lens-ctlrow");
+  let deadEnd = false;
   const apply = demoHide(el("button", null, "Apply now"));
   apply.title = "installs the approved artifact (" + (p.targetMode || "install") +
     (p.targetPackageName ? " " + p.targetPackageName : "") + ") and closes the proposal";
+  const recover = demoHide(el("button", "ghost-btn", "Mark applied (recover)"));
+  recover.title = "closes a proposal whose package install already committed but whose closing op did not; " +
+    "verifies that package is installed at this proposal's target version before submitting";
+
   apply.addEventListener("click", async () => {
     if (!window.confirm(
       "Install this approved artifact now? This runs a real package install/upgrade against the running system.")) return;
     apply.disabled = true;
+    recover.disabled = true;
     setStatus("review-detail-status", "installing…");
     const body = await api("/api/review/capability/" + encodeURIComponent(p.proposalId) + "/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
     if (state.arg !== raw) return; // navigated away
-    if (body.error) {
-      setStatus("review-detail-status", "apply failed: " + body.error, true);
-      apply.disabled = false;
+    if (body.error || body.resumable) {
+      const outcome = applyOutcome(body);
+      setStatus("review-detail-status", outcome.message + (outcome.hint ? " — " + outcome.hint : ""), true);
+      deadEnd = deadEnd || !outcome.retryable;
+      apply.disabled = deadEnd;
+      recover.disabled = false;
+      return;
+    }
+    // The install can succeed while the closing op is REFUSED by the
+    // Processor: that arrives as an ordinary reply, not an error, so a
+    // success toast here would report the half-committed state as done.
+    if (opRejected(body.markApplied)) {
+      setStatus("review-detail-status",
+        "the artifact installed, but closing the proposal was rejected: " +
+        errorText(body.markApplied.error) + " — close it with “Mark applied (recover)”.", true);
+      deadEnd = true;
+      apply.disabled = true;
+      recover.disabled = false;
       return;
     }
     toast("artifact installed — proposal applied");
     loadDetail("capability", p.proposalId, raw);
   });
   row.appendChild(apply);
+
+  recover.addEventListener("click", async () => {
+    if (!window.confirm(
+      "Mark this proposal applied against the installed package named “" + (p.targetPackageName || "?") + "”? " +
+      "Use this only when a previous install committed but failed to close the proposal. Loupe verifies that " +
+      "package is installed at this proposal's target version before submitting, and installs nothing itself.")) return;
+    apply.disabled = true;
+    recover.disabled = true;
+    setStatus("review-detail-status", "verifying the install + submitting mark-applied…");
+    const body = await api("/api/review/capability/" + encodeURIComponent(p.proposalId) + "/mark-applied", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (state.arg !== raw) return; // navigated away
+    if (body.error) {
+      setStatus("review-detail-status", "mark applied failed: " + errorText(body.error), true);
+      apply.disabled = deadEnd;
+      recover.disabled = false;
+      return;
+    }
+    if (opRejected(body.markApplied)) {
+      setStatus("review-detail-status",
+        "mark applied was rejected: " + errorText(body.markApplied.error), true);
+      apply.disabled = deadEnd;
+      recover.disabled = false;
+      return;
+    }
+    toast("proposal closed — marked applied against " + (body.packageKey || "the installed package"));
+    loadDetail("capability", p.proposalId, raw);
+  });
+  row.appendChild(recover);
   return row;
 }
 
