@@ -1557,6 +1557,144 @@ it either (verified) and doing it café-only would invent local-dev behaviour no
 platform-wide dev-posture gap, not a café regression, and the hard fences still hold (`signer.go:78-80`
 refuses a non-loopback bind; `session.go:145-154` refuses a public origin + signer without personas).
 
+### Fire W3 (wellness) Inc 1 fire brief (build note, 2026-07-25)
+
+**1 · Scope sentence (verbatim, §7.3):** *"Wellness — hats: member (browse/book/cancel), staff (create
+sessions, roster), **instructor** (`vtx.instructor`, `ledBy` on sessions, own-roster + attendance +
+cancel-own-session ops). Stands up the Tier-B read boundary for per-user reads (bookings/My Classes move behind
+the session; schedule stays public-read)."* Plus the §7 common obligations: adopt the kit, delete
+pickers/mints, whoami-driven hats, per-actor submits, grants audit.
+
+**Increment split.** Inc 1 = the board row's named next step, *sign-in-first flip + read auth* + the three
+hats over already-granted ops. **`attendance` is Inc 2** — it is a genuinely new op (no `AttendBooking` /
+`MarkNoShow` exists in wellness-domain), and its consumer is the instructor roster this increment ships, so it
+files as a row rather than hiding in a paragraph (deferred-tail rule).
+
+**2 · The premise verified live, and it is café's exactly.** Scouted at `753a7fad`. Four facts, each read:
+- **A fixed admin actor.** `main.go:87` sets `adminActor = bootstrap.BootstrapIdentityKey`; `readauth.go:78-109`
+  mints a Bearer token for it. Every staff write — CreateStudio, CreateSession, roster CancelBooking — is
+  submitted as the **bootstrap identity** (`app.js:26-33`, `app.js:79-88`). The §6(1) fixed-admin mint verbatim.
+- **An any-subject mint.** `readauth.go:111-150` mints a token for whatever `subject` the body names, with no
+  check the caller *is* that identity. The FE's "sign in as resident" is `app.js:45-49` writing a NanoID to
+  `localStorage["wellness.selfBookerKey"]` — UI state, not authentication. The §6(1) impersonation mint verbatim.
+- **Every read is unauthenticated,** and one is worse than a dump: `/api/bookings?bookerKey=<anyone>`
+  (`bookings.go:94-96`) is a **client-supplied identity filter** — any caller reads any resident's class
+  history. This is the same vector clinic already closed when it deleted `?provider=` (`appointments.go:328-331`).
+  `?sessionKey=` returns a session's full roster of booker keys to anyone.
+- **`/api/residents` dumps the house** (`residents.go`) — every lease applicant's identity key, uncredentialed,
+  to populate the picker.
+
+**3 · Fork resolved in-fire — "schedule stays public-read" is honored literally, and it is the narrower claim.**
+Café put its whole mux behind `RequireSession`, `/api/menu` included. §7.3 does not say that: it tiers
+*by data*, naming bookings/My Classes as the reads that move behind the session and the schedule as staying
+public. Studios and sessions project class name / time / capacity / studio name — no person-identifying column,
+the S3-admissible open-KV shape. Shipped: `/api/studios` + `/api/sessions` are `ExtraExemptPaths`
+(`session.go:58` Config), everything else is gated. The **app shell stays sign-in-first** (`/` gated, browser
+lands on `/login`) exactly like every sibling — so the *data* is public-read while the *app* is sign-in-first,
+which is what the scope sentence claims and nothing more.
+
+**4 · Fork resolved in-fire — the grants audit came back DIRTY, and §7.3's ratified staff hat is what resolves it.**
+Unlike café, three surfaces this FE offers have no authorized hat once the admin mint dies
+(`permissions.go:49-84`):
+
+| Surface | Op | Granted to | Post-flip |
+|---|---|---|---|
+| Studios tab → "New studio" | `CreateStudio` | `operator` only | **no hat** |
+| Schedule tab → book-for-a-resident picker | `CreateBooking` scope=any | `operator` only | **no hat** |
+| Roster tab → per-seat Cancel | `CancelBooking` scope=any | `operator` only | **no hat** |
+
+§7.3's ratified staff hat is exactly **"create sessions, roster"** — not create-studios, not book-for-anyone,
+not cancel-anyone's-booking. `CreateSession` already grants `frontOfHouse` **and** confines it to the studio's
+location by a `worksAt`→`containedIn` walk (`ddls.go:931-972`), so the one op §7.3 names is already correct and
+already confined. The other three are surfaces the app only ever had **because it impersonated bootstrap**.
+Shipped, per café's §6(4) precedent: **remove the surfaces, leave the ops and grants untouched** (an operator
+still creates studios and force-cancels through Loupe or the CLI), and file a capped row naming each consumer.
+Roster becomes a read-only seat list — which is what "roster" means in the scope sentence. The member cancels
+their own booking through My Classes on the `consumer` scope=self grant that already exists and already probes
+`bookedBy` with the tombstone idiom (`ddls.go:1480-1489`).
+
+*Rejected: granting `frontOfHouse` on the three ops.* For `CreateStudio` a confined grant is arguably
+mirrorable (the `worksAt` helpers exist in the sibling `sessionDDLScript`), but it is **scope widening** — the
+ratified staff hat does not include it, and the scope-diff gate is narrow-only. For `CancelBooking`/`CreateBooking`
+scope=any it would hand staff unconfined authority over any resident's bookings, below the bar café already set
+for `CreditAccount`.
+
+**5 · The one package change: `wellnessSessions` must project its instructor.** §7.3 names "`ledBy` on
+sessions" as the instructor hat's spine, and the lens does not project it (`lenses.go:68-87` walks `atStudio`
+only), so nothing can answer "which sessions do I lead". A missing **lens** is package work built here (not a
+platform primitive), and the fix mirrors the spec's own existing `OPTIONAL MATCH` studio walk one line down.
+Adds `instructorKey` + `instructorName`. Projecting an instructor's `displayName` on the public-read schedule is
+deliberate and precedented: clinic's **provider directory stays public** while patient names went Protected
+(`6b1c667c`) — a class instructor's professional name is the provider-directory analog, not private PII.
+⇒ wellness-domain **0.10.4 → 0.11.0**, `make refresh-wellness` to hot-activate.
+
+**6 · Verified touch-list (read live @ `753a7fad`).** `cmd/wellness-app/` — `main.go:79-89` (bootstrap loader +
+`adminActor`), `main.go:110-125` (signer setup → kit setup, mirror `cafe-app/main.go:145-204`), `main.go:1-35`
+(the doc comment's "NO authentication and acts as admin" is now false), `server.go:21-37` (drop `adminActor` /
+`devSigner`, gain `authn` + `session`), `server.go:39-55` (inner mux + `RegisterRoutes` + `RequireSession`),
+`readauth.go:78-150` (both mint handlers die; file collapses to café's `authenticateRead`/`resolveSubjectHats`
+shape, `cafe-app/readauth.go:29-115`), `bookings.go:76-98` (`bookerKey` param deleted, subject-scoped, roster
+gated), `residents.go` (house dump → `/api/my-residency`, one row, subject-scoped), `sessions.go` (pass the new
+instructor columns through), `health.go:16-20` (drop the `adminActor` probe, gain the signer probe),
+`web/index.html:20-25` (me-bar picker dies), `web/app.js` (707 lines: token caches → one cookie, picker →
+whoami hats, three surfaces removed, instructor tab added), **new** `web/login.html` (mirror
+`cmd/cafe-app/web/login.html`). `packages/wellness-domain/lenses.go:68-87` + `manifest.yaml:2` + `package.go:92`.
+Makefile `up-wellness:996-1008` / `refresh-wellness:1276-1292` — env is **already** the post-flip shape
+(`WELLNESS_APP_DEV_AUTH=1`, same as café's), so only the echo text changes.
+
+**7 · The hats, and how each is resolved.** All three from the Gateway's `/v1/actor` anchors, server-side,
+fail-closed (café's `resolveSubjectHats` verbatim):
+- **member** — any verified session. Books/cancels **as themselves** with `authContext.target` = own identity.
+- **staff** — a `worksAt` anchor with a **non-empty key**. Café's lesson is load-bearing and applies unchanged:
+  `identityAnchors` stamps `relation` as a literal constant on every collected entry, so an identity with no
+  workplace still yields `{key:null, relation:"worksAt"}` from the unmatched OPTIONAL MATCH
+  (`identity-domain/lenses.go:168`); testing the relation alone would rest this boundary on another package's
+  `RealnessFilter`.
+- **instructor** — an `identifiedBy` anchor whose key is prefixed `vtx.instructor.` (the anchor's key **is** the
+  bound entity key — `identityAnchors` collects `{key: bound.key, relation: 'identifiedBy'}`, so the type prefix
+  is what distinguishes a wellness instructor from a clinic provider on a multi-hat human). That key scopes the
+  own-roster read and is the `instructor` payload param `TombstoneSession` already requires.
+
+**8 · Increment order + green checks.** (a) kit wiring in `main.go`/`server.go` + `login.html` → `/login`
+serves, `/api/whoami` answers; (b) delete both mints + `adminActor` → `go build` names every dead reference;
+(c) `RequireSession` over the mux with the two schedule exemptions → `/api/bookings` 401s uncredentialed while
+`/api/sessions` still 200s; (d) lens instructor columns + version bump; (e) subject-scoping + hat-gating in the
+read handlers; (f) FE picker → whoami hats, per-actor submits, three surfaces removed, instructor roster added.
+*Gates:* `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+`STRICT=1 go run ./scripts/lint-board.go`, `go run ./scripts/lint-package-version.go`,
+`go test ./cmd/wellness-app/... ./packages/wellness-domain/... ./internal/appsession/...`, `make verify-package-wellness`.
+*Live:* `refresh-wellness`, sign in as a seeded member, book and cancel **as that member**, and confirm the
+discriminating pairs — an uncredentialed `/api/bookings` 401s where it returned 200; `/api/sessions` still 200s
+uncredentialed; a member's `/api/bookings` returns only their own rows; a member is 403'd on a roster; the
+bound instructor (Sam, `seedSamMultiHat`) sees the roster for the session they lead and not one they don't.
+
+**9 · In-scope gotchas.** (i) `WELLNESS_APP_DEV_AUTH` **survives** the flip as the dev *sign-in* posture — do
+not delete the flag, only the any-subject semantics behind it. (ii) `RequireSession` must wrap an **inner** mux
+or `/login` needs a credential (`cafe-app/server.go:56-70`). (iii) **No `FallbackIdentityID`** — a wellness
+browser with no cookie is genuinely anonymous; café deliberately omits it and so must this. (iv) The FE stamps
+`authContext.target` on the **member hat only** — café's shipped defect was stamping it on every submit, and
+`wellness-domain` likewise branches on presence (`ddls.go:1361-1362`). (v) The resident-rate hint needs the
+caller's **own** `leaseAppKey`; that is what `/api/my-residency` returns, and it is why `/api/residents` is
+rescoped rather than simply deleted. (vi) `cmd/wellness-app` has **zero tests today** — the sibling apps carry
+10–13 files; this fire lands the boundary tests with the boundary.
+
+**10 · Non-goals (W3 Inc 1).** No `attendance` op (Inc 2, row filed). No new role, grant, guard, DDL, script or
+seed change — the only package edit is the lens's two instructor columns. No Postgres read model for wellness
+(every lens is plain NATS-KV; §7.3 asks for authenticated reads, not a rewrite). No `CreateStudio` /
+`CancelBooking`-any grant change (§4). No W5 Facet work. No café/clinic/loftspace changes.
+
+**Scope-diff gate (pre-build): PASS.** Item-by-item against §7.3 + the §7 common list, narrow-only. Kit
+adoption, mint/picker deletion, whoami hats, per-actor submits and the grants audit each trace to a §7 common
+clause. `RequireSession` + subject-scoping is "bookings/My Classes move behind the session", and §3 argues the
+schedule exemption *down* from café's blanket gate rather than up. The lens instructor columns are §7.3's own
+"`ledBy` on sessions" and are the minimum that makes the named instructor hat answerable. The three removed
+surfaces are **narrowings** forced by §6(4) given §4's audit, not adjacent mechanisms substituted for named
+ones. `attendance` is the one named item deliberately not built — split to Inc 2 with a filed row, not dropped.
+Declared dependencies re-verified both ways: W3 depends on P1+P2 (**both SHIPPED** — `internal/appsession`
+exists, café/clinic/loftspace run on it) and on W0 (**SHIPPED `626763bc`** — `vtx.instructor`,
+`BindInstructorIdentity`, the `provider` role grant and `TombstoneSession`'s instructor confinement are all
+present, verified at `ddls.go:1680-1727` and `permissions.go:57-62`), so nothing sequences ahead of it.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
