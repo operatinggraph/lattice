@@ -1,30 +1,50 @@
 // cmd/wellness-app — the Wellness app: a local web front-end for scheduling
-// and booking studio classes over a running Lattice deployment. Three thin
+// and booking studio classes over a running Lattice deployment. Four thin
 // views: Schedule (every upcoming session across studios, book a seat),
-// Roster (one session's booked seats, cancel a booking), and My Classes (one
-// resident's own bookings across sessions).
+// Roster (one session's booked seats — a staff/instructor read), My Classes
+// (the signed-in member's own bookings), and Studios (the staff surface for
+// scheduling a class).
 //
 // It is a vertical product app, distinct from Loupe (the operator tool) and a
-// sibling of loftspace-app/clinic-app/cafe-app. WRITES go browser-direct to
-// the Gateway's POST /v1/operations with a staff Bearer token by default
-// (most wellness-domain ops are grantsTo:[operator] scope:any); a resident
-// who signs in as themselves (the Schedule/My Classes "Me" bar) instead
-// books/cancels with a token minted for their own identity, exercising
-// CreateBooking/CancelBooking's consumer scope=self grant. READS are all
-// plain NATS-KV lens projections (P5) plus the shared weaver-targets
-// convergence bucket (the resident picker) — no protected Postgres read
-// model exists for wellness, so this app carries no pgxpool.
+// sibling of loftspace-app/clinic-app/cafe-app. It is SIGN-IN-FIRST: a person
+// signs in at /login, and the resulting HttpOnly cookie carries the JWT that
+// is simultaneously the read boundary's principal here and the actor the
+// Gateway verifies on writes. The app holds no way to mint a token for anyone
+// but the person signing in, so it can never act as a subject the browser
+// merely named.
 //
-// SAFETY: this app has NO authentication and acts as admin. It binds
-// 127.0.0.1 only by default; a non-loopback WELLNESS_APP_ADDR is an explicit
-// opt-in and logs a loud warning at startup.
+// WRITES go browser-direct to the Gateway's POST /v1/operations under the
+// signed-in actor's own token — the app never proxies a write. READS are all
+// plain NATS-KV lens projections (P5) plus the shared weaver-targets
+// convergence bucket — no protected Postgres read model exists for wellness,
+// so this app carries no pgxpool — and the boundary over them is the session
+// (persona-worlds-design.md Fire W3 §3): the class SCHEDULE is public-read
+// (studios and sessions carry no person-identifying column), while every
+// per-user read is gated and scoped server-side to the session's subject.
+// Three hats derive from the Gateway's own /v1/actor anchors: a member (any
+// verified session), a `worksAt` staffer, and an instructor bound to a
+// vtx.instructor entity by `identifiedBy`.
+//
+// The app's own NATS connection acts as admin behind that session, so it
+// binds 127.0.0.1 only by default; a non-loopback WELLNESS_APP_ADDR is an
+// explicit opt-in and logs a loud warning at startup.
 //
 // Environment:
 //
 //	WELLNESS_APP_ADDR      HTTP listen address (default: 127.0.0.1:7802)
 //	NATS_URL               NATS server URL (default: nats://localhost:4222)
 //	BOOTSTRAP_JSON_PATH    path to lattice.bootstrap.json (default: ./lattice.bootstrap.json)
-//	WELLNESS_APP_DEV_AUTH  "1" enables the demo staff dev-token minter (loopback bind only).
+//	WELLNESS_APP_DEV_AUTH  "1" enables the demo in-process minter behind /api/dev-login
+//	                       (loopback bind only).
+//	WELLNESS_APP_JWT_PUBLIC_KEY / _JWT_ISSUER  the production verify-only posture: an
+//	                       external IdP's PEM public key and the issuer it is pinned to
+//	                       (optionally _JWT_KID, _JWT_AUDIENCE). Nothing is minted here.
+//	WELLNESS_APP_DEMO_PERSONAS  JSON list fencing sign-in to a curated set of seeded
+//	                       identities (the hosted-demo posture).
+//	WELLNESS_APP_PUBLIC_ORIGIN  the exact external https origin a proxied deployment is
+//	                       served at. Admits that origin at the cross-origin write gate
+//	                       and forces the session cookie's Secure flag; unset is the
+//	                       loopback posture.
 //	WELLNESS_APP_INSTANCE  Health-KV instance id (default: auto-generated wellness-<NanoID>).
 //	WELLNESS_APP_HEARTBEAT_EVERY  Health-KV heartbeat cadence (default: 10s).
 //	WELLNESS_APP_GATEWAY_URL  the Gateway's base URL the FE submits writes to, browser-direct
@@ -40,22 +60,28 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
+	"github.com/operatinggraph/lattice/internal/gateway/revocation"
 	"github.com/operatinggraph/lattice/internal/healthkv"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 const (
+	// appName names the app in logs and derives its session cookie's name;
+	// envPrefix is the prefix every one of its env vars carries.
+	appName   = "wellness-app"
+	envPrefix = "WELLNESS_APP"
+
 	defaultAddr       = "127.0.0.1:7802"
 	natsRequestLimit  = 8 * time.Second
 	defaultGatewayURL = "http://localhost:8080"
@@ -76,16 +102,16 @@ func run(logger *slog.Logger) error {
 
 	warnIfNonLoopback(logger, addr)
 
-	// The primordial admin actor. A missing/invalid bootstrap file is NOT fatal:
-	// the UI still serves and /api/* handlers report the unconfigured actor as a
-	// clean JSON error.
-	var adminActor string
+	// A missing/invalid bootstrap file is NOT fatal: the UI still serves and
+	// every read is scoped by the signed-in session rather than any
+	// platform-derived actor. What is lost is the Health-KV bucket
+	// provisioning signal, so this process cannot report its own health as
+	// fully configured.
+	bootstrapLoaded := true
 	if err := bootstrap.Load(bootstrapJSONPath); err != nil {
-		logger.Warn("bootstrap file not loaded; booking/cancelling will report an error until it is present",
+		bootstrapLoaded = false
+		logger.Warn("bootstrap file not loaded; this process cannot publish its health until it is present",
 			"path", bootstrapJSONPath, "error", err)
-	} else {
-		adminActor = bootstrap.BootstrapIdentityKey
-		logger.Info("admin actor loaded", "actor", adminActor)
 	}
 
 	// A failed dial is NOT fatal: substrate reconnects in the background and each
@@ -107,21 +133,80 @@ func run(logger *slog.Logger) error {
 		defer conn.Close()
 	}
 
-	signer, err := setupDevSigner(logger, isLoopbackHost(hostOf(addr)))
+	// Token-revocation kill-switch (external-actor-authn-binding-design.md
+	// §12.1) is additive/best-effort here: a deployment that hasn't re-run
+	// bootstrap yet (bucket doesn't exist) still starts — sessions simply
+	// aren't revocation-gated until the bucket is provisioned, with the short
+	// token TTL as the backstop.
+	var revocationChecker auth.RevocationChecker
+	if conn != nil {
+		if revKV, err := conn.OpenKV(context.Background(), revocation.BucketName); err != nil {
+			logger.Warn("wellness-app: token-revocation bucket unavailable; revocation kill-switch disabled for reads", "error", err)
+		} else {
+			revocationChecker = revocation.New(revKV)
+		}
+	}
+
+	gatewayURL := envOrDefault("WELLNESS_APP_GATEWAY_URL", defaultGatewayURL)
+	bindHost := appsession.HostOf(addr)
+	loopback := appsession.IsLoopbackHost(bindHost)
+	publicOrigin, err := appsession.ParsePublicOrigin(envPrefix+"_PUBLIC_ORIGIN", os.Getenv(envPrefix+"_PUBLIC_ORIGIN"))
 	if err != nil {
 		return err
 	}
-	if signer == nil {
-		logger.Warn("no staff dev-token minter configured (set WELLNESS_APP_DEV_AUTH); booking/cancelling writes will fail to obtain a Bearer token")
+	signer, err := appsession.NewDevSigner(logger, envPrefix, loopback)
+	if err != nil {
+		return err
+	}
+	authn, refreshAuthn, err := appsession.NewAuthenticators(logger, envPrefix, signer, revocationChecker)
+	if err != nil {
+		return err
+	}
+	if authn == nil {
+		logger.Warn("no session auth posture (set WELLNESS_APP_DEV_AUTH, or WELLNESS_APP_JWT_PUBLIC_KEY + WELLNESS_APP_JWT_ISSUER); every gated /api/* request will return 401")
+	}
+	personas, err := appsession.ParsePersonas(envPrefix+"_DEMO_PERSONAS", os.Getenv(envPrefix+"_DEMO_PERSONAS"))
+	if err != nil {
+		return err
+	}
+	if len(personas) > 0 {
+		logger.Info("demo-persona posture enabled: login is fenced to the listed personas", "personas", len(personas))
+	}
+	loginPage, err := webFS.ReadFile("web/login.html")
+	if err != nil {
+		return fmt.Errorf("read embedded login page: %w", err)
+	}
+	// No FallbackIdentityID: a wellness browser with no cookie is genuinely
+	// anonymous. There is no single-user boot identity to inherit — the only
+	// thing it may read is the public class schedule, and every other read is
+	// scoped to a specific member or to a staff/instructor hat.
+	session, err := appsession.New(appsession.Config{
+		AppName:          appName,
+		EnvPrefix:        envPrefix,
+		Logger:           logger,
+		GatewayURL:       gatewayURL,
+		Signer:           signer,
+		Authn:            authn,
+		RefreshAuthn:     refreshAuthn,
+		Loopback:         loopback,
+		BindHost:         bindHost,
+		PublicOrigin:     publicOrigin,
+		Personas:         personas,
+		LoginPage:        loginPage,
+		ExtraExemptPaths: publicReadPaths,
+	})
+	if err != nil {
+		return err
 	}
 
 	srv := &server{
-		conn:        conn,
-		adminActor:  adminActor,
-		logger:      logger,
-		natsTimeout: natsRequestLimit,
-		devSigner:   signer,
-		gatewayURL:  envOrDefault("WELLNESS_APP_GATEWAY_URL", defaultGatewayURL),
+		conn:            conn,
+		bootstrapLoaded: bootstrapLoaded,
+		logger:          logger,
+		natsTimeout:     natsRequestLimit,
+		authn:           authn,
+		session:         session,
+		gatewayURL:      gatewayURL,
 	}
 
 	mux := http.NewServeMux()
@@ -185,44 +270,20 @@ func run(logger *slog.Logger) error {
 }
 
 // warnIfNonLoopback logs a loud warning when addr binds anything other than a
-// loopback host: this app is auth-less and acts as admin, so a non-local bind
-// exposes admin control to the network.
+// loopback host: this app's own NATS connection acts as admin behind every
+// session and it serves plain http, so a non-local bind puts both that
+// surface and the session cookie on the wire.
 func warnIfNonLoopback(logger *slog.Logger, addr string) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		logger.Warn("could not parse WELLNESS_APP_ADDR host; ensure it binds a loopback address", "addr", addr, "error", err)
-		return
-	}
-	if isLoopbackHost(host) {
-		return
-	}
-	logger.Warn("wellness-app has no auth and acts as admin; binding to a non-local address exposes admin control to the network",
-		"addr", addr)
-}
-
-// isLoopbackHost reports whether host is a loopback bind. An empty host (the
-// bare ":7802" form) means all interfaces and is NOT loopback.
-func isLoopbackHost(host string) bool {
+	host := appsession.HostOf(addr)
 	if host == "" {
-		return false
+		logger.Warn("could not parse WELLNESS_APP_ADDR host; ensure it binds a loopback address", "addr", addr)
+		return
 	}
-	if strings.EqualFold(host, "localhost") {
-		return true
+	if appsession.IsLoopbackHost(host) {
+		return
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
-}
-
-// hostOf returns the host portion of a listen address, or "" when it cannot be
-// parsed (treated as non-loopback by isLoopbackHost — fail safe).
-func hostOf(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return ""
-	}
-	return host
+	logger.Warn("wellness-app's own NATS connection acts as admin behind every session; binding to a non-local address exposes that surface, and the session cookie, to the network",
+		"addr", addr)
 }
 
 func envOrDefault(key, def string) string {

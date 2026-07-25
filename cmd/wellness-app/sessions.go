@@ -10,13 +10,15 @@ import (
 
 // sessionProjection is one row of the wellness-domain `wellnessSessions` lens.
 type sessionProjection struct {
-	SessionKey string   `json:"sessionKey"`
-	Name       string   `json:"name"`
-	StartsAt   string   `json:"startsAt"`
-	EndsAt     string   `json:"endsAt"`
-	Capacity   *float64 `json:"capacity"`
-	StudioKey  string   `json:"studioKey"`
-	StudioName string   `json:"studioName"`
+	SessionKey     string   `json:"sessionKey"`
+	Name           string   `json:"name"`
+	StartsAt       string   `json:"startsAt"`
+	EndsAt         string   `json:"endsAt"`
+	Capacity       *float64 `json:"capacity"`
+	StudioKey      string   `json:"studioKey"`
+	StudioName     string   `json:"studioName"`
+	InstructorKey  string   `json:"instructorKey"`
+	InstructorName string   `json:"instructorName"`
 }
 
 // sessionRow is the schedule-grid row the Schedule view renders. BookedCount
@@ -25,14 +27,16 @@ type sessionProjection struct {
 // it here from the wellnessBookings lens, the same client-of-the-lens
 // aggregation idiom cmd/cafe-app's computeTabs uses for its posted-total.
 type sessionRow struct {
-	SessionKey  string `json:"sessionKey"`
-	Name        string `json:"name"`
-	StartsAt    string `json:"startsAt"`
-	EndsAt      string `json:"endsAt"`
-	Capacity    int64  `json:"capacity"`
-	StudioKey   string `json:"studioKey"`
-	StudioName  string `json:"studioName"`
-	BookedCount int    `json:"bookedCount"`
+	SessionKey     string `json:"sessionKey"`
+	Name           string `json:"name"`
+	StartsAt       string `json:"startsAt"`
+	EndsAt         string `json:"endsAt"`
+	Capacity       int64  `json:"capacity"`
+	StudioKey      string `json:"studioKey"`
+	StudioName     string `json:"studioName"`
+	InstructorKey  string `json:"instructorKey"`
+	InstructorName string `json:"instructorName"`
+	BookedCount    int    `json:"bookedCount"`
 }
 
 // computeSessions decodes every wellnessSessions row, joins each to its live
@@ -57,14 +61,16 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 			capacity = int64(*p.Capacity)
 		}
 		rows = append(rows, sessionRow{
-			SessionKey:  p.SessionKey,
-			Name:        p.Name,
-			StartsAt:    p.StartsAt,
-			EndsAt:      p.EndsAt,
-			Capacity:    capacity,
-			StudioKey:   p.StudioKey,
-			StudioName:  p.StudioName,
-			BookedCount: bookedCounts[p.SessionKey],
+			SessionKey:     p.SessionKey,
+			Name:           p.Name,
+			StartsAt:       p.StartsAt,
+			EndsAt:         p.EndsAt,
+			Capacity:       capacity,
+			StudioKey:      p.StudioKey,
+			StudioName:     p.StudioName,
+			InstructorKey:  p.InstructorKey,
+			InstructorName: p.InstructorName,
+			BookedCount:    bookedCounts[p.SessionKey],
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

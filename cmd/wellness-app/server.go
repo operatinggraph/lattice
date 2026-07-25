@@ -9,30 +9,44 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/appsession"
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
 //go:embed web
 var webFS embed.FS
 
+// publicReadPaths are the reads that answer with no session at all: the class
+// schedule (persona-worlds-design.md §7.3). Both project class name, time,
+// capacity, studio and instructor display name — no person-identifying column
+// about the people their rows are ABOUT — which is the tier that stays open
+// on plain NATS-KV. Every other read is gated and scoped to the session's
+// subject. Passed to the kit as ExtraExemptPaths.
+var publicReadPaths = []string{"/api/studios", "/api/sessions"}
+
 // server holds the dependencies the HTTP handlers share. conn may be nil when
 // NATS was unreachable at startup; every handler checks requireConn first and
 // returns a JSON error rather than dereferencing a nil connection.
 type server struct {
-	conn        *substrate.Conn
-	adminActor  string
-	logger      *slog.Logger
-	natsTimeout time.Duration
+	conn            *substrate.Conn
+	bootstrapLoaded bool
+	logger          *slog.Logger
+	natsTimeout     time.Duration
 
-	// devSigner mints Bearer tokens the FE presents to the Gateway; nil
-	// unless WELLNESS_APP_DEV_AUTH is enabled. It mints the fixed staff token
-	// (this app's own admin actor) for operator-scoped writes, and — via
-	// handleDevToken — a per-resident token for the consumer scope=self
-	// CreateBooking/CancelBooking self-service path.
-	devSigner *devSigner
+	// authn is the session cookie's verifier, held here so the health probe
+	// can report whether an auth posture is configured at all; nil ⇒ every
+	// session-gated request 401s (fail closed).
+	authn *auth.Authenticator
+
+	// session serves the login/logout/whoami/refresh surface and resolves
+	// every request to a signed-in identity (internal/appsession).
+	session *appsession.Manager
 
 	// gatewayURL is the Gateway's externally-reachable base URL, served to
-	// the FE via GET /api/config so it can submit writes browser-direct.
+	// the FE via GET /api/config so it can submit writes browser-direct, and
+	// used server-side by resolveSubjectHats to ask the Gateway's own
+	// external /v1/actor door which anchors the signed-in session carries.
 	gatewayURL string
 }
 
@@ -43,15 +57,24 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 		// programmer error, not a runtime condition.
 		panic("wellness-app: embed web sub-fs: " + err.Error())
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	// The kit's own routes (login/logout/whoami/refresh) and every /api/*
+	// handler live on the INNER mux, wrapped in RequireSession — /login
+	// itself must be reachable with no session, which registering it on the
+	// session-gated mux would break. The two schedule reads are gated the
+	// same way but exempted by name (ExtraExemptPaths, main.go): the class
+	// schedule is public-read.
+	inner := http.NewServeMux()
+	inner.Handle("/", http.FileServer(http.FS(sub)))
 
-	mux.HandleFunc("/api/studios", s.handleStudios)
-	mux.HandleFunc("/api/sessions", s.handleSessions)
-	mux.HandleFunc("/api/bookings", s.handleBookings)
-	mux.HandleFunc("/api/residents", s.handleResidents)
-	mux.HandleFunc("/api/staff/dev-token", s.handleStaffDevToken)
-	mux.HandleFunc("/api/dev-token", s.handleDevToken)
-	mux.HandleFunc("/api/config", s.handleConfig)
+	inner.HandleFunc("/api/studios", s.handleStudios)
+	inner.HandleFunc("/api/sessions", s.handleSessions)
+	inner.HandleFunc("/api/instructors", s.handleInstructors)
+	inner.HandleFunc("/api/bookings", s.handleBookings)
+	inner.HandleFunc("/api/my-residency", s.handleMyResidency)
+	inner.HandleFunc("/api/config", s.handleConfig)
+
+	s.session.RegisterRoutes(inner)
+	mux.Handle("/", s.session.RequireSession(inner))
 }
 
 // handleConfig implements GET /api/config: the FE's one bit of runtime

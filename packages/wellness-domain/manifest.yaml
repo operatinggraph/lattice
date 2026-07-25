@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.10.4
+version: 0.11.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -71,6 +71,10 @@ declares:
     - canonicalName: wellnessBookings
       adapter: nats-kv
       bucket: wellness-bookings
+      engine: full
+    - canonicalName: wellnessInstructors
+      adapter: nats-kv
+      bucket: wellness-instructors
       engine: full
   permissions:
     - operationType: CreateStudio

@@ -1,5 +1,25 @@
 "use strict";
 
+// Wellness app — Schedule · My Classes · Roster · Studios. Vanilla JS, no
+// build step. The page is sign-in-first: one identity holds the whole
+// session, the HttpOnly session cookie authenticates every same-origin read,
+// and writes (CreateBooking / CancelBooking / CreateSession) go
+// browser-direct to the Gateway's POST /v1/operations via submitOp() with
+// that same session's bearer (real-actor-write-auth-e2e-design.md §3.1).
+//
+// The Go server does the NATS I/O behind the read endpoints and owns the
+// boundary over them (persona-worlds-design.md Fire W3 §3): the class
+// SCHEDULE is public-read, while My Classes is scoped server-side to the
+// session's own subject and a Roster is served only to a `worksAt` staffer or
+// to the instructor who leads that session. The hat gating below is UX
+// curation over that boundary, never the boundary itself.
+
+const state = {
+  identityId: null, // the signed-in identity's bare NanoID (GET /api/whoami) — the one actor every read and write runs as
+  canSignOut: false, // whether whoami reports a real cookie session
+  anchors: [], // the signed-in identity's anchors (whoami hat hints, persona-worlds-design.md §4): `worksAt` marks studio staff, an `identifiedBy` vtx.instructor binding marks an instructor
+};
+
 // ---- wire helpers -----------------------------------------------------
 
 async function api(path, opts) {
@@ -14,77 +34,129 @@ async function api(path, opts) {
   return body;
 }
 
+// isAuthLapse reports whether a failed request failed because the caller has
+// no valid session, as opposed to any other error.
+function isAuthLapse(e) {
+  return /HTTP 401|no signed-in identity|login required/i.test((e && e.message) || "");
+}
+
+// onSessionLapsed hands the browser back to the login page. Once only: several
+// panels can load in parallel and would otherwise each fire their own navigation.
+let sessionLapseHandled = false;
+function onSessionLapsed() {
+  if (sessionLapseHandled) return;
+  sessionLapseHandled = true;
+  location.replace("/login");
+}
+
+// appGet reads one of this app's own session-gated endpoints. The session
+// cookie is HttpOnly and rides a same-origin request automatically; a 401
+// means the session itself is over, and the only answer is to sign in again.
+async function appGet(path) {
+  try {
+    return await api(path, { credentials: "same-origin" });
+  } catch (e) {
+    if (isAuthLapse(e)) onSessionLapsed();
+    throw e;
+  }
+}
+
 let gatewayURLCache = null;
 async function gatewayURL() {
   if (gatewayURLCache) return gatewayURLCache;
-  const body = await api("/api/config");
+  const body = await appGet("/api/config");
   gatewayURLCache = body.gatewayUrl;
   return gatewayURLCache;
 }
 
-let staffTokenCache = null;
-async function staffReadToken() {
-  if (staffTokenCache && Date.parse(staffTokenCache.expiresAt) - Date.now() > 5000) {
-    return staffTokenCache.token;
+// sessionWriteToken is the raw bearer the Gateway-direct write path needs. The
+// cookie cannot serve it — an Authorization header takes the literal value and
+// the cookie is unreadable from script — so POST /api/session/refresh hands the
+// token back (while re-setting the cookie) for exactly this. Cached until
+// shortly before its stated expiry; pass force to re-fetch after the Gateway
+// rejects the cached one. There is no separate staff/self token cache — the
+// signed-in session is the one actor every write submits as.
+let writeTokenCache = { token: null, exp: 0 };
+
+async function sessionWriteToken(force) {
+  const now = Date.now();
+  if (!force && writeTokenCache.token && now < writeTokenCache.exp - 5000) {
+    return writeTokenCache.token;
   }
-  const body = await api("/api/staff/dev-token", { method: "POST" });
-  staffTokenCache = body;
+  const res = await fetch("/api/session/refresh", { method: "POST", credentials: "same-origin" });
+  if (res.status === 401) {
+    writeTokenCache = { token: null, exp: 0 };
+    onSessionLapsed();
+    throw new Error("your session has ended — sign in again");
+  }
+  if (!res.ok) {
+    throw new Error("could not renew the session (HTTP " + res.status + ")");
+  }
+  const body = await res.json();
+  writeTokenCache = { token: body.token, exp: Date.parse(body.expiresAt) || now + 5 * 60000 };
   return body.token;
 }
 
-// ---- self-service session -------------------------------------------
-
-// selfBookerKey is the signed-in resident's own identity key (the "Me" bar),
-// persisted across reloads. CreateBooking/CancelBooking's consumer
-// scope=self grant targets the identity vertex directly (no device-claim
-// indirection — wellness-domain permissions.go), so signing in is just
-// picking which resident you are, not a claim/link ceremony.
-const SELF_BOOKER_STORAGE_KEY = "wellness.selfBookerKey";
-let selfBookerKey = localStorage.getItem(SELF_BOOKER_STORAGE_KEY) || null;
-
-function signInAsSelf(bookerKey) {
-  selfBookerKey = bookerKey;
-  selfTokenCache = null;
-  localStorage.setItem(SELF_BOOKER_STORAGE_KEY, bookerKey);
-}
-
-function signOutSelf() {
-  selfBookerKey = null;
-  selfTokenCache = null;
-  localStorage.removeItem(SELF_BOOKER_STORAGE_KEY);
-}
-
-let selfTokenCache = null;
-async function selfWriteToken() {
-  if (!selfBookerKey) throw new Error("not signed in");
-  if (selfTokenCache && selfTokenCache.subject === selfBookerKey &&
-      Date.parse(selfTokenCache.expiresAt) - Date.now() > 5000) {
-    return selfTokenCache.token;
+// identityKey is the signed-in session's own full vertex key — the
+// authContext.target a member's self-scoped write is checked against by
+// wellness-domain's `consumer` scope=self grant
+// (packages/wellness-domain/permissions.go).
+//
+// Throws rather than composing a key when whoami never answered. Reads keep
+// working off the session cookie in that state, so the page looks signed in
+// while state.identityId is null; a composed "vtx.identity.null" would reach
+// the Gateway and come back as an opaque scope=self rejection. Failing here
+// names the real problem instead.
+function identityKey() {
+  if (!state.identityId) {
+    throw new Error("we could not confirm who you are signed in as — reload the page and try again");
   }
-  const body = await api("/api/dev-token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ subject: idOf(selfBookerKey) }),
-  });
-  selfTokenCache = { subject: selfBookerKey, token: body.token, expiresAt: body.expiresAt };
-  return body.token;
+  return "vtx.identity." + state.identityId;
 }
 
-// submitOp posts one operation to the Gateway, browser-direct. By default it
-// uses the staff Bearer token (operator scope:any covers most ops); passing
-// opts.asSelf instead submits with a token minted for the signed-in
-// resident's own identity, and stamps authContext.target so the platform's
-// scope=self check (op.actor == authContext.target) and wellness-domain's
-// own booker/bookedBy check both resolve to that resident.
-async function submitOp(body, opts) {
-  const asSelf = !!(opts && opts.asSelf);
-  const [base, token] = await Promise.all([gatewayURL(), asSelf ? selfWriteToken() : staffReadToken()]);
-  const withAuth = asSelf ? Object.assign({}, body, { authContext: { target: selfBookerKey } }) : body;
-  return api(base + "/v1/operations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify(withAuth),
-  });
+// submitOp posts one operation to the Gateway, browser-direct, under the
+// signed-in session's own token. selfScoped marks a submit made under the
+// MEMBER hat, and only then is authContext.target attached.
+//
+// A staff or instructor submit must NOT carry a target, even its own.
+// wellness-domain's scripts branch on the mere PRESENCE of authContextTarget,
+// not on whether the platform validated it: CreateBooking reads presence as
+// "self-service — the booker must BE the target", and CancelBooking then
+// requires the target to be the booking's own bookedBy identity
+// (packages/wellness-domain/ddls.go). A staffer acting on a member's seat is
+// not that member, so an unconditional target would deny it. The Processor
+// passes the field through verbatim from the envelope
+// (internal/processor/starlark_runner.go), so which grant authorized the op
+// does not change what the script sees.
+async function submitOp(body, selfScoped) {
+  const [base, token] = await Promise.all([gatewayURL(), sessionWriteToken()]);
+  const withAuth = selfScoped
+    ? Object.assign({}, body, { authContext: { target: identityKey() } })
+    : body;
+  const post = (bearer) =>
+    api(base + "/v1/operations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + bearer },
+      body: JSON.stringify(withAuth),
+    });
+  try {
+    return await post(token);
+  } catch (e) {
+    if (!isAuthLapse(e)) throw e;
+    // The cached token aged out between the expiry check and this request;
+    // one forced renewal settles it, and a second 401 is a session that is
+    // genuinely over (sessionWriteToken hands off to /login).
+    return post(await sessionWriteToken(true));
+  }
+}
+
+async function opOrThrow(body, what, selfScoped) {
+  const reply = await submitOp(body, selfScoped);
+  if (reply && reply.status === "rejected") {
+    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+    throw new Error(`Could not ${what} — ${msg}`);
+  }
+  return reply || {};
 }
 
 // idOf returns a key's raw trailing NanoID segment (unlike shortKey, which
@@ -105,16 +177,120 @@ function seatKeys(sessionKey, capacity) {
   return keys;
 }
 
-async function opOrThrow(body, what, opts) {
-  const reply = await submitOp(body, opts);
-  if (reply && reply.status === "rejected") {
-    const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
-    throw new Error(`Could not ${what} — ${msg}`);
+// ---- session (whoami + hat gating) ---------------------------------
+
+// whoamiRetryBackoffsMs bounds loadWhoami's retry: a transient failure at
+// first paint must not permanently render a real cookie session as anonymous.
+const whoamiRetryBackoffsMs = [200, 500, 1200];
+
+// loadWhoami records who is signed in — the single actor every read and
+// write runs as — before the first render that reads it.
+async function loadWhoami() {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const body = await api("/api/whoami", { credentials: "same-origin" });
+      state.identityId = (body && body.loggedIn && body.identityId) || null;
+      state.canSignOut = !!(body && body.canSignOut);
+      state.anchors = (body && Array.isArray(body.anchors) && body.anchors) || [];
+      return;
+    } catch (_) {
+      if (attempt >= whoamiRetryBackoffsMs.length) {
+        state.identityId = null;
+        state.canSignOut = false;
+        state.anchors = [];
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, whoamiRetryBackoffsMs[attempt]));
+    }
   }
-  return reply || {};
+}
+
+// anchorKey returns the key of the first anchor matching relation (and, when
+// given, the vertex-type prefix), or "". The KEY must be present, not just
+// the relation: identityAnchors stamps `relation` as a literal constant on
+// every collected entry, so an identity with no such binding still yields a
+// {key:null, relation:"..."} entry from the unmatched OPTIONAL MATCH
+// (packages/identity-domain/lenses.go).
+function anchorKey(relation, keyPrefix) {
+  if (!Array.isArray(state.anchors)) return "";
+  for (const a of state.anchors) {
+    if (!a || a.relation !== relation) continue;
+    const key = (a.key || "").trim();
+    if (!key) continue;
+    if (keyPrefix && key.indexOf(keyPrefix) !== 0) continue;
+    return key;
+  }
+  return "";
+}
+
+// isStaff marks a session that works a studio. The signal is the whoami
+// `worksAt` anchor (persona-worlds-design.md §4); gating rides anchors, not
+// roles — whoami's roles[] arrives as opaque role vertex keys, never
+// canonical names, so it cannot name the frontOfHouse role FE-side.
+function isStaff() {
+  return anchorKey("worksAt") !== "";
+}
+
+// instructorKey is the vtx.instructor entity this login is bound to, or "".
+// A clinic provider and a wellness instructor are both `identifiedBy`
+// bindings, so the vertex TYPE is what distinguishes them on a multi-hat
+// human — the same test the server's own read boundary applies.
+function instructorKey() {
+  return anchorKey("identifiedBy", "vtx.instructor.");
+}
+
+// hatLabel names the hats this session holds, for the me-bar. One human can
+// hold several at once (persona-worlds-design.md §3.4), so they are listed
+// rather than resolved to a single winner.
+function hatLabel() {
+  const hats = [];
+  if (isStaff()) hats.push("staff");
+  if (instructorKey()) hats.push("instructor");
+  hats.push("member");
+  return hats.join(" · ");
+}
+
+function refreshMeBar() {
+  const status = document.getElementById("me-status");
+  const signOutBtn = document.getElementById("sign-out");
+  status.textContent = state.identityId
+    ? "Signed in as " + shortKey(state.identityId) + " (" + hatLabel() + ")"
+    : "";
+  signOutBtn.hidden = !state.canSignOut;
+}
+
+function signOut() {
+  fetch("/api/logout", { method: "POST", credentials: "same-origin" })
+    .catch(() => {})
+    .finally(() => location.replace("/login"));
+}
+
+// applyHatGating hides the tabs a session has no hat for — Roster needs staff
+// or an instructor binding, Studios needs staff (CreateSession grants
+// frontOfHouse, packages/wellness-domain/permissions.go) — and bounces the
+// active view if it just became disallowed. Idempotent; re-run whenever
+// whoami resolves.
+function applyHatGating() {
+  document.getElementById("tab-roster").hidden = !(isStaff() || instructorKey());
+  document.getElementById("tab-studios").hidden = !isStaff();
+  refreshMeBar();
+  const active = document.querySelector(".tab.active");
+  if (active && active.hidden) showView("schedule");
 }
 
 // ---- formatting --------------------------------------------------------
+
+// esc renders an untrusted string as text inside the innerHTML templates
+// below. Class, studio and instructor names are operator/staff-entered free
+// text (CreateStudio/CreateSession take a required_string with no charset
+// restriction), and the schedule that carries them is public-read — so an
+// unescaped name would be stored XSS in this app's own origin, where
+// /api/session/refresh hands out the caller's raw Gateway bearer.
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
 
 function shortKey(key) {
   if (!key) return "";
@@ -142,6 +318,8 @@ function toast(msg, ok) {
 // ---- view routing -------------------------------------------------
 
 function showView(view) {
+  if (view === "roster" && !(isStaff() || instructorKey())) view = "schedule";
+  if (view === "studios" && !isStaff()) view = "schedule";
   document.querySelectorAll("[role=tabpanel]").forEach((s) => {
     s.hidden = s.id !== "view-" + view;
   });
@@ -156,56 +334,52 @@ function showView(view) {
   else if (view === "studios") loadStudiosAdmin();
 }
 
-// ---- shared picker data ------------------------------------------------
+// ---- shared data ------------------------------------------------
 
 let studiosCache = null;
 async function loadStudios() {
   if (studiosCache) return studiosCache;
-  const body = await api("/api/studios");
+  const body = await appGet("/api/studios");
   studiosCache = body.studios || [];
   return studiosCache;
 }
 
-let residentsCache = null;
-async function loadResidents() {
-  if (residentsCache) return residentsCache;
-  const body = await api("/api/residents");
-  residentsCache = body.residents || [];
-  return residentsCache;
+let sessionsCache = null;
+async function loadSessions(force) {
+  if (sessionsCache && !force) return sessionsCache;
+  const body = await appGet("/api/sessions");
+  sessionsCache = body.sessions || [];
+  return sessionsCache;
 }
 
-function fillResidentSelect(select, residents, allowAll) {
-  const prev = select.value;
-  select.innerHTML = "";
-  if (allowAll) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(choose a resident)";
-    select.appendChild(opt);
-  }
-  if (!residents.length) {
-    const opt = document.createElement("option");
-    opt.textContent = "(no residents)";
-    opt.value = "";
-    select.appendChild(opt);
-    return;
-  }
-  for (const r of residents) {
-    const opt = document.createElement("option");
-    opt.value = r.bookerKey;
-    opt.dataset.leaseAppKey = r.leaseAppKey;
-    opt.textContent = shortKey(r.bookerKey) + (r.approved ? " (resident)" : " (applicant)");
-    select.appendChild(opt);
-  }
-  if (prev && residents.some((r) => r.bookerKey === prev)) select.value = prev;
+let instructorsCache = null;
+async function loadInstructors() {
+  if (instructorsCache) return instructorsCache;
+  const body = await appGet("/api/instructors");
+  instructorsCache = body.instructors || [];
+  return instructorsCache;
 }
 
-// leaseAppKeyForBooker looks up a booker's lease application key from the
-// resident roster (the resident-rate hint payload param), uniformly for both
-// the staff picker and a signed-in self-service booker.
-function leaseAppKeyForBooker(bookerKey, residents) {
-  const r = residents.find((x) => x.bookerKey === bookerKey);
-  return r ? r.leaseAppKey : "";
+// ownLeaseAppKey is the signed-in member's own lease, CreateBooking's
+// optional resident-rate hint. The server answers only for the caller
+// (GET /api/my-residency), so there is nobody else's to pick. An approved
+// lease wins over a merely-applied one; absence just means the standard rate,
+// which is why a failed lookup is cached as "none" rather than thrown.
+let residencyCache = null;
+async function ownLeaseAppKey() {
+  if (residencyCache === null) {
+    // A FAILED lookup is deliberately not cached: absence just means the
+    // standard rate, so a transient error must not silently cost the member
+    // their resident rate for the life of the page. The next book retries.
+    try {
+      const body = await appGet("/api/my-residency");
+      residencyCache = (body && body.leases) || [];
+    } catch (_) {
+      return "";
+    }
+  }
+  const chosen = residencyCache.find((l) => l.approved) || residencyCache[0];
+  return chosen ? chosen.leaseAppKey : "";
 }
 
 // ---- Schedule view ------------------------------------------------
@@ -236,10 +410,9 @@ async function renderSchedule() {
   summary.textContent = "";
   let sessions;
   try {
-    const r = await api("/api/sessions");
-    sessions = r.sessions || [];
+    sessions = await loadSessions(true);
   } catch (e) {
-    grid.innerHTML = '<div class="empty">' + e.message + "</div>";
+    grid.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
     return;
   }
   if (studioKey) sessions = sessions.filter((se) => se.studioKey === studioKey);
@@ -248,21 +421,17 @@ async function renderSchedule() {
     grid.innerHTML = '<div class="empty">No upcoming sessions.</div>';
     return;
   }
-  const residents = await loadResidents();
-  const selfMode = !!selfBookerKey;
-  grid.innerHTML = sessions.map((se) => scheduleCard(se, selfMode)).join("");
+  const leaseAppKey = await ownLeaseAppKey();
+  grid.innerHTML = sessions.map(scheduleCard).join("");
   sessions.forEach((se) => {
-    const id = domId(se.sessionKey);
-    const bookBtn = document.getElementById("book-" + id);
-    const select = document.getElementById("booker-" + id);
-    if (select) fillResidentSelect(select, residents, true);
+    const bookBtn = document.getElementById("book-" + domId(se.sessionKey));
     if (!bookBtn) return;
     bookBtn.addEventListener("click", async () => {
-      const bookerKey = selfBookerKey || (select ? select.value : "");
-      if (!bookerKey) { toast("Pick a resident to book.", false); return; }
-      const leaseAppKey = leaseAppKeyForBooker(bookerKey, residents);
       bookBtn.disabled = true;
       try {
+        // A member books for THEMSELVES — the booker is the signed-in
+        // identity, and nothing in the page can name anyone else.
+        const bookerKey = identityKey();
         const payload = { session: se.sessionKey, booker: bookerKey };
         if (leaseAppKey) payload.leaseAppKey = leaseAppKey;
         // Resident-rate lookup (leaseapp + .tenancy + applicationFor link) is
@@ -283,11 +452,11 @@ async function renderSchedule() {
           );
         }
         // booker is an (a)-declared required read (require_live_typed, ddls.go)
-        // — CreateBooking fails UnknownEndpoint without it, staff or self alike.
+        // — CreateBooking fails UnknownEndpoint without it.
         await opOrThrow(
           { operationType: "CreateBooking", class: "booking", reads: [se.sessionKey, se.sessionKey + ".schedule", bookerKey], optionalReads, payload },
           "book the class",
-          { asSelf: selfMode }
+          true,
         );
         toast("Booked.", true);
         setTimeout(renderSchedule, 700);
@@ -303,31 +472,120 @@ function domId(key) {
   return key.replace(/[^a-zA-Z0-9]/g, "");
 }
 
-function scheduleCard(se, selfMode) {
+function scheduleCard(se) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
-  const picker = selfMode ? '<span class="me-inline">booking as you</span>' : '<select id="booker-' + id + '"></select>';
+  const led = se.instructorName ? '<div class="meta">with ' + esc(se.instructorName) + "</div>" : "";
   return (
     '<div class="card">' +
     '<span class="badge ' + (full ? "settled" : "open") + '">' + se.bookedCount + " / " + se.capacity + " seats</span>" +
-    '<div class="who">' + (se.name || "?") + "</div>" +
-    '<div class="meta">' + (se.studioName || shortKey(se.studioKey)) + "</div>" +
-    '<div class="meta">' + fmtRange(se.startsAt, se.endsAt) + "</div>" +
+    '<div class="who">' + esc(se.name || "?") + "</div>" +
+    '<div class="meta">' + esc(se.studioName || shortKey(se.studioKey)) + "</div>" +
+    led +
+    '<div class="meta">' + esc(fmtRange(se.startsAt, se.endsAt)) + "</div>" +
     '<div class="field-row">' +
-    picker +
     '<button id="book-' + id + '"' + (full ? " disabled" : "") + ">Book</button>" +
     "</div>" +
     "</div>"
   );
 }
 
+// ---- My Classes view ------------------------------------------------
+//
+// The signed-in member's own bookings. GET /api/bookings with no sessionKey
+// answers for the session's own subject and nobody else — there is no booker
+// parameter to send, and no picker to send one from.
+
+async function loadMyClasses() {
+  await renderMyClasses();
+}
+
+async function renderMyClasses() {
+  const body = document.getElementById("myclasses-body");
+  const summary = document.getElementById("myclasses-summary");
+  body.innerHTML = "";
+  summary.textContent = "";
+  let bookings;
+  try {
+    const r = await appGet("/api/bookings");
+    bookings = r.bookings || [];
+  } catch (e) {
+    body.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+    return;
+  }
+  summary.textContent = bookings.length + " class" + (bookings.length === 1 ? "" : "es");
+  if (!bookings.length) {
+    body.innerHTML = '<div class="empty">No booked classes — book one from the Schedule.</div>';
+    return;
+  }
+  body.innerHTML = '<div class="grid">' + bookings.map(myClassCard).join("") + "</div>";
+  bookings.forEach((b) => {
+    const btn = document.getElementById("mycancel-" + domId(b.bookingKey));
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const forSessionLnk = "lnk.booking." + idOf(b.bookingKey) + ".forSession.session." + idOf(b.sessionKey);
+        // The self-cancel guard needs the bookedBy link as a (d)-declared
+        // optionalReads — the script checks it names THIS booker (ddls.go).
+        const optionalReads = ["lnk.booking." + idOf(b.bookingKey) + ".bookedBy.identity." + idOf(identityKey())];
+        await opOrThrow(
+          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
+          "cancel the booking",
+          true,
+        );
+        toast("Booking cancelled.", true);
+        setTimeout(renderMyClasses, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+function myClassCard(b) {
+  const id = domId(b.bookingKey);
+  return (
+    '<div class="card">' +
+    '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
+    '<div class="who">' + esc(b.sessionName || "?") + "</div>" +
+    '<div class="meta">' + esc(fmtRange(b.startsAt, b.endsAt)) + "</div>" +
+    '<div class="card-actions"><button id="mycancel-' + id + '" class="danger">Cancel</button></div>' +
+    "</div>"
+  );
+}
+
 // ---- Roster view --------------------------------------------------------
+//
+// Who is booked into one session. The server serves it to a `worksAt`
+// staffer for any session and to an instructor only for the sessions their
+// own binding leads (persona-worlds-design.md §7.3), so the picker below
+// offers an instructor exactly their own classes.
+//
+// The seat list is read-only: CancelBooking scope=any grants `operator` alone
+// (packages/wellness-domain/permissions.go), so neither hat may cancel
+// somebody else's seat — a member cancels their own from My Classes.
+//
+// The CLASS itself is different. TombstoneSession grants `provider`
+// scope=any, confined in-script to a session the caller both leads (ledBy)
+// and is identifiedBy-bound to, so a bound instructor may call off their own
+// class — the "cancel-own-session" half of §7.3's instructor hat. Staff hold
+// no such grant, so the control appears for the bound instructor alone.
 
 async function loadRoster() {
   const select = document.getElementById("roster-session");
   if (!select.dataset.loaded) {
-    const r = await api("/api/sessions");
-    const sessions = r.sessions || [];
+    let sessions;
+    try {
+      sessions = await loadSessions();
+    } catch (e) {
+      select.innerHTML = '<option value="">(' + esc(e.message) + ")</option>";
+      return;
+    }
+    // An instructor sees their own classes; a staffer sees the house.
+    const mine = instructorKey();
+    if (!isStaff() && mine) sessions = sessions.filter((se) => se.instructorKey === mine);
     const prev = select.value;
     select.innerHTML = "";
     if (!sessions.length) {
@@ -348,143 +606,106 @@ async function loadRoster() {
 
 async function renderRoster() {
   const body = document.getElementById("roster-body");
+  const summary = document.getElementById("roster-summary");
   const sessionKey = document.getElementById("roster-session").value;
   body.innerHTML = "";
+  summary.textContent = "";
   if (!sessionKey) {
     body.innerHTML = '<div class="empty">No session selected.</div>';
     return;
   }
   let bookings;
   try {
-    const r = await api("/api/bookings?sessionKey=" + encodeURIComponent(sessionKey));
+    const r = await appGet("/api/bookings?sessionKey=" + encodeURIComponent(sessionKey));
     bookings = r.bookings || [];
   } catch (e) {
-    body.innerHTML = '<div class="empty">' + e.message + "</div>";
+    body.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
     return;
   }
-  if (!bookings.length) {
-    body.innerHTML = '<div class="empty">No one has booked this session yet.</div>';
-    return;
-  }
-  body.innerHTML = '<div class="grid">' + bookings.map((b) => rosterCard(b, sessionKey)).join("") + "</div>";
-  bookings.forEach((b) => {
-    const btn = document.getElementById("cancel-" + domId(b.bookingKey));
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      try {
-        // forSession validation link is (a)-declared reads (require_matching_session,
-        // ddls.go — absence means the caller named the wrong session).
-        const forSessionLnk = "lnk.booking." + idOf(b.bookingKey) + ".forSession.session." + idOf(sessionKey);
-        await opOrThrow(
-          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", forSessionLnk], payload: { bookingKey: b.bookingKey, session: sessionKey } },
-          "cancel the booking"
-        );
-        toast("Booking cancelled.", true);
-        setTimeout(renderRoster, 700);
-      } catch (e) {
-        toast(e.message, false);
-        btn.disabled = false;
-      }
-    });
+  summary.textContent = bookings.length + " booked";
+  body.innerHTML = bookings.length
+    ? '<div class="grid">' + bookings.map(rosterCard).join("") + "</div>"
+    : '<div class="empty">No one has booked this session yet.</div>';
+  renderCancelClass(sessionKey);
+}
+
+// renderCancelClass appends the instructor's own "Call off this class"
+// control, for a session THIS login is the bound instructor of. The server
+// re-derives the same fact for the roster read, and the Starlark guard
+// re-derives it again at submit — this is the affordance, not the authority.
+function renderCancelClass(sessionKey) {
+  const mine = instructorKey();
+  if (!mine) return;
+  const se = (sessionsCache || []).find((x) => x.sessionKey === sessionKey);
+  if (!se || se.instructorKey !== mine) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "card-actions";
+  wrap.innerHTML = '<button id="cancel-class" class="danger">Call off this class</button>';
+  document.getElementById("roster-body").appendChild(wrap);
+  document.getElementById("cancel-class").addEventListener("click", async () => {
+    const btn = document.getElementById("cancel-class");
+    btn.disabled = true;
+    try {
+      await cancelOwnClass(se, mine);
+      toast("Class called off.", true);
+      sessionsCache = null;
+      document.getElementById("roster-session").dataset.loaded = "";
+      setTimeout(loadRoster, 700);
+    } catch (e) {
+      toast(e.message, false);
+      btn.disabled = false;
+    }
   });
 }
 
-function rosterCard(b, sessionKey) {
-  const id = domId(b.bookingKey);
+// cancelOwnClass submits TombstoneSession for a class this instructor leads.
+// It carries NO authContext.target — the grant is scope=any and the script
+// confines it by the two ownership links below, not by a caller-supplied
+// target (packages/wellness-domain/ddls.go's TombstoneSession).
+async function cancelOwnClass(se, mine) {
+  const sessId = idOf(se.sessionKey);
+  await opOrThrow(
+    {
+      operationType: "TombstoneSession",
+      class: "session",
+      // The session and its schedule are (a)-declared required reads — the
+      // schedule is what the script releases the studio's held slot cells
+      // from. The atStudio link proves the named studio is genuinely this
+      // session's, and the two ownership probes are (d)-declared: an absent
+      // link is a meaningful AuthDenied, not a correctness error.
+      reads: [se.sessionKey, se.sessionKey + ".schedule"],
+      optionalReads: [
+        "lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey),
+        "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
+        "lnk.instructor." + idOf(mine) + ".identifiedBy.identity." + idOf(identityKey()),
+      ],
+      payload: { sessionKey: se.sessionKey, studio: se.studioKey, instructor: mine },
+    },
+    "call off the class",
+    false,
+  );
+}
+
+function rosterCard(b) {
   return (
     '<div class="card">' +
-    '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + (b.rate || "standard") + "</span>" +
-    '<div class="who">' + shortKey(b.bookerKey) + "</div>" +
-    '<div class="card-actions"><button id="cancel-' + id + '" class="danger">Cancel</button></div>' +
+    '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
+    '<div class="who">' + esc(shortKey(b.bookerKey)) + "</div>" +
     "</div>"
   );
 }
 
-// ---- My Classes view ------------------------------------------------
-
-async function loadMyClasses() {
-  const select = document.getElementById("myclasses-resident");
-  const label = document.getElementById("myclasses-resident-label");
-  if (selfBookerKey) {
-    select.hidden = true;
-    label.hidden = true;
-  } else {
-    select.hidden = false;
-    label.hidden = false;
-    const residents = await loadResidents();
-    fillResidentSelect(select, residents, true);
-  }
-  await renderMyClasses();
-}
-
-async function renderMyClasses() {
-  const body = document.getElementById("myclasses-body");
-  const bookerKey = selfBookerKey || document.getElementById("myclasses-resident").value;
-  body.innerHTML = "";
-  if (!bookerKey) {
-    body.innerHTML = '<div class="empty">Pick a resident to see their booked classes.</div>';
-    return;
-  }
-  let bookings;
-  try {
-    const r = await api("/api/bookings?bookerKey=" + encodeURIComponent(bookerKey));
-    bookings = r.bookings || [];
-  } catch (e) {
-    body.innerHTML = '<div class="empty">' + e.message + "</div>";
-    return;
-  }
-  if (!bookings.length) {
-    body.innerHTML = '<div class="empty">No booked classes.</div>';
-    return;
-  }
-  body.innerHTML = '<div class="grid">' + bookings.map(myClassCard).join("") + "</div>";
-  bookings.forEach((b) => {
-    const btn = document.getElementById("mycancel-" + domId(b.bookingKey));
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      try {
-        const forSessionLnk = "lnk.booking." + idOf(b.bookingKey) + ".forSession.session." + idOf(b.sessionKey);
-        // asSelf's self-cancel guard needs the bookedBy link as a (d)-declared
-        // optionalReads — the script checks it names THIS booker (ddls.go).
-        const optionalReads = selfBookerKey
-          ? ["lnk.booking." + idOf(b.bookingKey) + ".bookedBy.identity." + idOf(selfBookerKey)]
-          : [];
-        await opOrThrow(
-          { operationType: "CancelBooking", class: "booking", reads: [b.bookingKey, b.bookingKey + ".status", forSessionLnk], optionalReads, payload: { bookingKey: b.bookingKey, session: b.sessionKey } },
-          "cancel the booking",
-          { asSelf: !!selfBookerKey }
-        );
-        toast("Booking cancelled.", true);
-        setTimeout(renderMyClasses, 700);
-      } catch (e) {
-        toast(e.message, false);
-        btn.disabled = false;
-      }
-    });
-  });
-}
-
-function myClassCard(b) {
-  const id = domId(b.bookingKey);
-  return (
-    '<div class="card">' +
-    '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + (b.rate || "standard") + "</span>" +
-    '<div class="who">' + (b.sessionName || "?") + "</div>" +
-    '<div class="meta">' + fmtRange(b.startsAt, b.endsAt) + "</div>" +
-    '<div class="card-actions"><button id="mycancel-' + id + '" class="danger">Cancel</button></div>' +
-    "</div>"
-  );
-}
-
-// ---- Studios (admin) view ------------------------------------------
+// ---- Studios (staff) view ------------------------------------------
 //
-// The operator surface for standing up the studios + classes the other three
-// tabs consume — the wellness analog of LoftSpace's Landlord listing creation
-// and Clinic's in-FE provider registration. CreateStudio/CreateSession are
-// operator-scope (wellness-domain permissions.go), so this view submits with
-// the default staff token, the same path Schedule/Roster already use.
+// The staff surface for scheduling a class into an existing studio.
+// CreateSession grants `frontOfHouse` and confines it in-script to studios at
+// a location the caller `worksAt` (packages/wellness-domain/ddls.go), which
+// is the one wellness write §7.3 gives the staff hat.
+//
+// Creating a STUDIO is not offered: CreateStudio grants `operator` alone, so
+// no staff hat may submit it — an operator stands studios up through Loupe or
+// the CLI.
 
 // toUtcInstant canonicalizes a datetime-local field ("YYYY-MM-DDTHH:MM",
 // grid-stepped) to the whole-second UTC RFC3339 instant CreateSession's grid
@@ -526,15 +747,14 @@ async function renderStudiosAdmin() {
   summary.textContent = "";
   let studios;
   try {
-    const r = await api("/api/studios");
-    studios = r.studios || [];
+    studios = await loadStudios();
   } catch (e) {
-    grid.innerHTML = '<div class="empty">' + e.message + "</div>";
+    grid.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
     return;
   }
   summary.textContent = studios.length + " studio" + (studios.length === 1 ? "" : "s");
   if (!studios.length) {
-    grid.innerHTML = '<div class="empty">No studios yet — create one above.</div>';
+    grid.innerHTML = '<div class="empty">No studios yet.</div>';
     return;
   }
   grid.innerHTML = studios.map(studioCard).join("");
@@ -545,14 +765,15 @@ function studioCard(s) {
   const id = domId(s.studioKey);
   return (
     '<div class="card">' +
-    '<div class="who">' + (s.name || "?") + "</div>" +
-    '<div class="meta">' + shortKey(s.studioKey) + "</div>" +
+    '<div class="who">' + esc(s.name || "?") + "</div>" +
+    '<div class="meta">' + esc(shortKey(s.studioKey)) + "</div>" +
     '<div class="card-actions"><button id="sess-toggle-' + id + '" class="ghost">Schedule a class</button></div>' +
     '<div id="sess-form-' + id + '" class="session-form" hidden>' +
     '<div class="field"><label>Class name</label><input type="text" id="sess-name-' + id + '" placeholder="e.g. Vinyasa Flow" maxlength="120" /></div>' +
     '<div class="field"><label>Starts</label><input type="datetime-local" id="sess-starts-' + id + '" step="900" /></div>' +
     '<div class="field"><label>Ends</label><input type="datetime-local" id="sess-ends-' + id + '" step="900" /></div>' +
     '<div class="field"><label>Capacity</label><input type="number" id="sess-cap-' + id + '" min="1" max="200" value="20" /></div>' +
+    '<div class="field"><label>Led by</label><select id="sess-instr-' + id + '"></select></div>' +
     '<button id="sess-create-' + id + '">Schedule class</button>' +
     "</div>" +
     "</div>"
@@ -562,8 +783,28 @@ function studioCard(s) {
 function wireStudioCard(s) {
   const id = domId(s.studioKey);
   const form = document.getElementById("sess-form-" + id);
-  document.getElementById("sess-toggle-" + id).addEventListener("click", () => {
+  const instrSelect = document.getElementById("sess-instr-" + id);
+  document.getElementById("sess-toggle-" + id).addEventListener("click", async () => {
     form.hidden = !form.hidden;
+    if (form.hidden || instrSelect.dataset.loaded) return;
+    // Instructors who teach at THIS studio lead its classes; the rest stay
+    // offerable, since teachesAt is optional and a stand-in is ordinary.
+    let instructors = [];
+    try {
+      instructors = await loadInstructors();
+    } catch (e) {
+      toast(e.message, false);
+    }
+    const here = instructors.filter((i) => i.studioKey === s.studioKey);
+    const elsewhere = instructors.filter((i) => i.studioKey !== s.studioKey);
+    instrSelect.innerHTML = '<option value="">(no instructor)</option>';
+    for (const i of here.concat(elsewhere)) {
+      const opt = document.createElement("option");
+      opt.value = i.instructorKey;
+      opt.textContent = i.displayName + (i.studioKey === s.studioKey ? "" : " (visiting)");
+      instrSelect.appendChild(opt);
+    }
+    instrSelect.dataset.loaded = "1";
   });
   document.getElementById("sess-create-" + id).addEventListener("click", () => {
     createSession(s.studioKey, {
@@ -571,34 +812,10 @@ function wireStudioCard(s) {
       starts: document.getElementById("sess-starts-" + id),
       ends: document.getElementById("sess-ends-" + id),
       capacity: document.getElementById("sess-cap-" + id),
+      instructor: instrSelect,
       submit: document.getElementById("sess-create-" + id),
     });
   });
-}
-
-async function createStudio() {
-  const input = document.getElementById("studio-name");
-  const name = input.value.trim();
-  if (!name) { toast("Enter a studio name.", false); return; }
-  const btn = document.getElementById("studio-create");
-  btn.disabled = true;
-  try {
-    await opOrThrow(
-      { operationType: "CreateStudio", class: "studio", reads: [], payload: { name } },
-      "create the studio"
-    );
-    toast("Studio created.", true);
-    input.value = "";
-    studiosCache = null;
-    // The Schedule tab's studio picker also lists studios — force it to
-    // re-pull next time it loads so the new studio appears there too.
-    document.getElementById("schedule-studio").dataset.loaded = "";
-    setTimeout(renderStudiosAdmin, 700);
-  } catch (e) {
-    toast(e.message, false);
-  } finally {
-    btn.disabled = false;
-  }
 }
 
 async function createSession(studioKey, els) {
@@ -610,73 +827,42 @@ async function createSession(studioKey, els) {
   if (!startsAt || !endsAt) { toast("Pick a start and end time.", false); return; }
   if (!(capacity >= 1 && capacity <= 200)) { toast("Capacity must be 1–200.", false); return; }
   if (!(Date.parse(startsAt) < Date.parse(endsAt))) { toast("End time must be after start time.", false); return; }
+  const instructor = els.instructor ? els.instructor.value : "";
   els.submit.disabled = true;
   try {
+    const payload = { studio: studioKey, name, startsAt, endsAt, capacity };
+    // The instructor endpoint is validated alive + typed by the script
+    // (require_live_typed), so it is an (a)-declared REQUIRED read whenever
+    // one is named — omitted entirely when the class has no instructor.
+    const reads = [studioKey];
+    if (instructor) {
+      payload.instructor = instructor;
+      reads.push(instructor);
+    }
+    // A staff submit carries NO authContext.target: CreateSession's
+    // frontOfHouse grant is scope=any, confined in-script by the caller's own
+    // worksAt walk rather than by a caller-supplied target.
     await opOrThrow(
       {
         operationType: "CreateSession",
         class: "session",
-        reads: [studioKey],
+        reads,
         optionalReads: slotCellKeys(studioKey, startsAt, endsAt),
-        payload: { studio: studioKey, name, startsAt, endsAt, capacity },
+        payload,
       },
-      "schedule the class"
+      "schedule the class",
+      false,
     );
     toast("Class scheduled.", true);
     els.name.value = "";
+    sessionsCache = null;
+    document.getElementById("roster-session").dataset.loaded = "";
     setTimeout(renderStudiosAdmin, 700);
   } catch (e) {
     toast(e.message, false);
   } finally {
     els.submit.disabled = false;
   }
-}
-
-// ---- Me bar ---------------------------------------------------------
-
-// refreshCurrentView re-renders whichever tab is active — called after
-// signing in/out so the Schedule and My Classes views pick up the new
-// self-service mode without a full page reload.
-function refreshCurrentView() {
-  const active = document.querySelector(".tab.active");
-  if (active) showView(active.dataset.view);
-}
-
-async function initMeBar() {
-  const status = document.getElementById("me-status");
-  const select = document.getElementById("me-resident");
-  const signinBtn = document.getElementById("me-signin");
-  const signoutBtn = document.getElementById("me-signout");
-
-  function refreshMeUI() {
-    if (selfBookerKey) {
-      status.textContent = "Signed in as " + shortKey(selfBookerKey);
-      select.hidden = true;
-      signinBtn.hidden = true;
-      signoutBtn.hidden = false;
-    } else {
-      status.textContent = "Not signed in";
-      select.hidden = false;
-      signinBtn.hidden = false;
-      signoutBtn.hidden = true;
-    }
-  }
-
-  const residents = await loadResidents();
-  fillResidentSelect(select, residents, true);
-  refreshMeUI();
-
-  signinBtn.addEventListener("click", () => {
-    if (!select.value) { toast("Pick a resident first.", false); return; }
-    signInAsSelf(select.value);
-    refreshMeUI();
-    refreshCurrentView();
-  });
-  signoutBtn.addEventListener("click", () => {
-    signOutSelf();
-    refreshMeUI();
-    refreshCurrentView();
-  });
 }
 
 // ---- init --------------------------------------------------------
@@ -687,21 +873,29 @@ function init() {
   });
   document.getElementById("schedule-studio").addEventListener("change", renderSchedule);
   document.getElementById("schedule-refresh").addEventListener("click", () => {
-    studiosCache = null; residentsCache = null;
+    studiosCache = null; sessionsCache = null; residencyCache = null;
     document.getElementById("schedule-studio").dataset.loaded = "";
     loadSchedule();
   });
+  document.getElementById("myclasses-refresh").addEventListener("click", renderMyClasses);
   document.getElementById("roster-session").addEventListener("change", renderRoster);
   document.getElementById("roster-refresh").addEventListener("click", () => {
+    sessionsCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
     loadRoster();
   });
-  document.getElementById("myclasses-resident").addEventListener("change", renderMyClasses);
-  document.getElementById("myclasses-refresh").addEventListener("click", () => { residentsCache = null; loadMyClasses(); });
-  document.getElementById("studio-create").addEventListener("click", createStudio);
-  document.getElementById("studios-refresh").addEventListener("click", () => { studiosCache = null; renderStudiosAdmin(); });
-  initMeBar();
-  loadSchedule();
+  document.getElementById("studios-refresh").addEventListener("click", () => {
+    studiosCache = null; instructorsCache = null;
+    renderStudiosAdmin();
+  });
+  document.getElementById("sign-out").addEventListener("click", signOut);
+
+  // Who signed in decides every derived affordance (which hats, which tabs),
+  // so it has to be known before the first render that reads it.
+  loadWhoami().then(() => {
+    applyHatGating();
+    showView("schedule");
+  });
 }
 
 init();

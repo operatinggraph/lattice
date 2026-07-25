@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/operatinggraph/lattice/internal/gateway/auth"
 )
 
 // weaverTargetsBucket is the shared cross-package Weaver convergence bucket
@@ -31,21 +33,26 @@ type leaseApplicationProjection struct {
 	LandlordApproved bool   `json:"landlordApproved"`
 }
 
-// residentRow is the resident/lease picker row the Schedule + My Classes
-// views render — the "who" dimension for a thin admin FE with no
-// per-resident login, mirroring cmd/cafe-app's lease picker precedent.
-type residentRow struct {
+// residencyRow is one lease the signed-in member holds. Its only job is the
+// resident-rate hint: CreateBooking takes an optional leaseAppKey and
+// re-derives the authoritative check itself from that leaseapp's own .tenancy
+// aspect + applicationFor link, so this is a lookup the booker performs about
+// THEMSELVES, never a picker of other people.
+type residencyRow struct {
 	LeaseAppKey string `json:"leaseAppKey"`
-	BookerKey   string `json:"bookerKey"`
 	Approved    bool   `json:"approved"`
 }
 
-// computeResidents decodes every leaseApplicationComplete row, sorted by
-// booker key for a stable picker order. A row that fails to decode or
-// carries no applicant (a tombstoned projection entry, or one that hasn't
-// reached the applicant-known stage yet) is skipped.
-func computeResidents(keys []string, get kvGetter) []residentRow {
-	rows := make([]residentRow, 0)
+// computeOwnResidency decodes every leaseApplicationComplete row and keeps
+// only those whose applicant is bookerKey — the caller's own leases, sorted
+// for a stable answer. A row that fails to decode or carries no applicant (a
+// tombstoned projection entry, or one that hasn't reached the
+// applicant-known stage yet) is skipped.
+func computeOwnResidency(keys []string, get kvGetter, bookerKey string) []residencyRow {
+	rows := make([]residencyRow, 0)
+	if bookerKey == "" {
+		return rows
+	}
 	for _, k := range keys {
 		if !strings.HasPrefix(k, leaseApplicationKeyPrefix) {
 			continue
@@ -58,24 +65,26 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 		if json.Unmarshal(raw, &p) != nil || p.Applicant == "" || p.EntityKey == "" {
 			continue
 		}
-		rows = append(rows, residentRow{LeaseAppKey: p.EntityKey, BookerKey: p.Applicant, Approved: p.LandlordApproved})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].BookerKey != rows[j].BookerKey {
-			return rows[i].BookerKey < rows[j].BookerKey
+		if p.Applicant != bookerKey {
+			continue
 		}
-		return rows[i].LeaseAppKey < rows[j].LeaseAppKey
-	})
+		rows = append(rows, residencyRow{LeaseAppKey: p.EntityKey, Approved: p.LandlordApproved})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].LeaseAppKey < rows[j].LeaseAppKey })
 	return rows
 }
 
-// handleResidents implements GET /api/residents — every lease applicant the
-// Schedule (book) and My Classes (whose classes) pickers offer, served from
-// the shared leaseApplicationComplete convergence lens (P5). A booker not
-// tied to any lease can still be booked directly against a bookerKey typed
-// into the FE — this picker is a convenience, not an enforcement boundary
-// (wellness classes are not lease-gated, per wellness-vertical-design.md).
-func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
+// handleMyResidency implements GET /api/my-residency — the leases the
+// SIGNED-IN member holds, served from the shared leaseApplicationComplete
+// convergence lens (P5) and scoped server-side to the session's own subject.
+// The FE needs it to pass CreateBooking's optional resident-rate hint; nobody
+// needs, and nothing here returns, anyone else's residency.
+func (s *server) handleMyResidency(w http.ResponseWriter, r *http.Request) {
+	subject, err := s.authenticateRead(r)
+	if err != nil {
+		s.writeAuthError(w, err)
+		return
+	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return
@@ -89,6 +98,6 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 			"list "+weaverTargetsBucket+": "+err.Error()+" (is lease-signing installed and the Weaver projecting?)")
 		return
 	}
-	rows := computeResidents(keys, s.kvGetter(ctx, weaverTargetsBucket))
-	s.writeJSON(w, http.StatusOK, map[string]any{"residents": rows})
+	rows := computeOwnResidency(keys, s.kvGetter(ctx, weaverTargetsBucket), auth.IdentityKeyPrefix+subject)
+	s.writeJSON(w, http.StatusOK, map[string]any{"leases": rows})
 }

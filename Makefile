@@ -990,8 +990,8 @@ install-maintenance:
 
 ## up-wellness — One-command Wellness vertical: up-full → install-wellness →
 ## build + start wellness-app (:7802) in the background alongside Loupe
-## (:7777). No protected Postgres read model exists for wellness (every lens
-## is plain NATS-KV), so no provision-*-role step is needed, unlike
+## (:7777). Sign in at /login. No protected Postgres read model exists for
+## wellness (every lens is plain NATS-KV), so no provision-*-role step is needed, unlike
 ## up-loftspace/up-clinic. Logs: wellness-app.log (+ the up-full logs).
 up-wellness:
 	@$(MAKE) up-full
@@ -1000,12 +1000,12 @@ up-wellness:
 	go build -o bin/wellness-app ./cmd/wellness-app
 	@echo "==> Killing any prior wellness-app process..."
 	-pkill -f "bin/wellness-app" 2>/dev/null || true
-	@echo "==> Starting wellness-app in background (dev-auth staff token minter)..."
+	@echo "==> Starting wellness-app in background (sign-in-first: dev-auth session posture, sign in at /login)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) \
 		WELLNESS_APP_DEV_AUTH=1 \
 		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
 	@sleep 1
-	@echo "==> Wellness ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · wellness app: http://127.0.0.1:7802"
+	@echo "==> Wellness ready. Operator/inspector: http://127.0.0.1:7777 (Loupe) · wellness app: http://127.0.0.1:7802 (sign in at /login)"
 
 ## install-edge-manifest — Install the edge-manifest personal-lens package
 ## (edge-showcase-app-design.md Fire 1, G9) onto a running up-full stack, in
@@ -1289,7 +1289,7 @@ refresh-wellness:
 		WELLNESS_APP_DEV_AUTH=1 \
 		./bin/wellness-app >wellness-app.log 2>&1 </dev/null &
 	@sleep 1
-	@echo "==> Wellness refreshed (packages diff-applied + wellness-app restarted). Wellness app: http://127.0.0.1:7802"
+	@echo "==> Wellness refreshed (packages diff-applied + wellness-app restarted). Wellness app: http://127.0.0.1:7802 (sign in at /login)"
 
 ## refresh-loftspace — Dev-loop refresh of the LoftSpace vertical onto the RUNNING
 ## stack, no `make down`: diff-apply the vertical's packages in place (F-004

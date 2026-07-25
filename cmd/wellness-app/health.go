@@ -6,18 +6,18 @@ import (
 	"github.com/operatinggraph/lattice/internal/healthkv"
 )
 
-// healthProbe re-checks wellness-app's own dependencies each tick — the admin
-// actor, NATS, and the staff dev-token minter — so a heartbeat can never
+// healthProbe re-checks wellness-app's own dependencies each tick —
+// bootstrap, NATS, and the session auth posture — so a heartbeat can never
 // merely echo a boot-time snapshot (mirrors cafe-app/loftspace-app/clinic-app's
 // probe).
 func (s *server) healthProbe(ctx context.Context) healthkv.Snapshot {
 	var issues []healthkv.Issue
 
-	if s.adminActor == "" {
+	if !s.bootstrapLoaded {
 		issues = append(issues, healthkv.Issue{
-			Code:     "AdminActorUnconfigured",
+			Code:     "BootstrapUnloaded",
 			Severity: "error",
-			Message:  "bootstrap.json not loaded (version mismatch?); booking/cancelling will 400",
+			Message:  "bootstrap.json not loaded (version mismatch?); platform-derived identifiers are unavailable",
 		})
 	}
 	if s.conn == nil || !s.conn.NATS().IsConnected() {
@@ -27,11 +27,11 @@ func (s *server) healthProbe(ctx context.Context) healthkv.Snapshot {
 			Message:  "NATS connection is down; every /api/* read will fail",
 		})
 	}
-	if s.devSigner == nil {
+	if s.authn == nil {
 		issues = append(issues, healthkv.Issue{
-			Code:     "NoStaffTokenMinter",
+			Code:     "NoAuthPosture",
 			Severity: "warning",
-			Message:  "no staff dev-token minter configured (set WELLNESS_APP_DEV_AUTH); booking/cancelling writes cannot obtain a Bearer token",
+			Message:  "no session auth posture configured (set WELLNESS_APP_DEV_AUTH, or WELLNESS_APP_JWT_PUBLIC_KEY + WELLNESS_APP_JWT_ISSUER); every gated /api/* request will 401",
 		})
 	}
 

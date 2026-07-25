@@ -20,7 +20,13 @@ const WellnessSessionsBucket = "wellness-sessions"
 // its session), never Core KV.
 const WellnessBookingsBucket = "wellness-bookings"
 
-// Lenses returns the package's three flat projection lenses. No aggregation
+// WellnessInstructorsBucket is the NATS-KV read model the wellnessInstructors
+// lens projects into — the **P5 query surface** for "who teaches here": the
+// staff class-scheduling form reads THIS bucket to offer the instructor a
+// class is `ledBy`, never Core KV.
+const WellnessInstructorsBucket = "wellness-instructors"
+
+// Lenses returns the package's four flat projection lenses. No aggregation
 // (no WITH), so OPTIONAL-matched neighbour bindings are live directly in
 // RETURN — the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
 // None of these carry PHI/PII, so — unlike clinic-domain's patient/provider
@@ -51,6 +57,14 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          wellnessBookingsSpec,
 		},
+		{
+			CanonicalName: "wellnessInstructors",
+			Class:         "meta.lens",
+			Adapter:       "nats-kv",
+			Bucket:        WellnessInstructorsBucket,
+			Engine:        "full",
+			Spec:          wellnessInstructorsSpec,
+		},
 	}
 }
 
@@ -65,17 +79,48 @@ RETURN
   s.key AS studioKey,
   s.profile.data.name AS name`
 
-// wellnessSessionsSpec projects one row per session, walking atStudio (0..1,
-// so the row stays one-per-anchor — the §10.2 shape, mirroring
-// clinicAppointmentsSpec's forPatient/withProvider walk). studioName is null
-// when the studio link is absent (should not happen post-CreateSession, but
-// the OPTIONAL keeps the lens null-safe rather than dropping the row).
+// wellnessInstructorsSpec projects one row per NAMED instructor — the
+// "who leads this class" picker on the staff scheduling form, mirroring
+// wellnessStudiosSpec's aspect-presence WHERE. teachesAt (0..1) is projected
+// so the form can offer the instructors attached to the studio being
+// scheduled first.
+//
+// displayName is a professional name on an OPEN read model, the same posture
+// wellnessSessions' instructorName carries and the same one clinic's public
+// provider directory already sets — an instructor is listed so members can
+// find their classes, unlike a patient or a booker, who stay bare keys.
+const wellnessInstructorsSpec = `MATCH (i:instructor)
+WHERE i.profile.data.displayName <> null
+OPTIONAL MATCH (i)-[:teachesAt]->(s:studio)
+RETURN
+  i.key AS key,
+  i.key AS instructorKey,
+  i.profile.data.displayName AS displayName,
+  s.key AS studioKey`
+
+// wellnessSessionsSpec projects one row per session, walking atStudio and
+// ledBy (each 0..1, so the row stays one-per-anchor — the §10.2 shape,
+// mirroring clinicAppointmentsSpec's forPatient/withProvider walk).
+// studioName is null when the studio link is absent (should not happen
+// post-CreateSession, but the OPTIONAL keeps the lens null-safe rather than
+// dropping the row); instructorKey/instructorName are null for the many
+// sessions nobody leads, CreateSession's instructor param being optional.
+//
+// instructorKey is what scopes a bound instructor's own-roster read: their
+// `identifiedBy` anchor names their instructor vertex, and this column is the
+// only projection that answers which sessions that vertex leads.
+// instructorName is the instructor's professional display name and is
+// projected on this OPEN read model deliberately — a class instructor is the
+// analog of clinic's provider directory, which stays public precisely while
+// patient names moved behind the Protected lens.
+//
 // bookedCount is DELIBERATELY not projected here — the lens engine has no
 // aggregate COUNT; a consuming FE derives it client-side from
 // wellnessBookings, the same client-side aggregation idiom
 // cmd/cafe-app's computeTabs already uses (see wellness-vertical-design.md).
 const wellnessSessionsSpec = `MATCH (se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
+OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)
 RETURN
   se.key AS key,
   se.key AS sessionKey,
@@ -84,7 +129,9 @@ RETURN
   se.schedule.data.endsAt AS endsAt,
   se.schedule.data.capacity AS capacity,
   s.key AS studioKey,
-  s.profile.data.name AS studioName`
+  s.profile.data.name AS studioName,
+  i.key AS instructorKey,
+  i.profile.data.displayName AS instructorName`
 
 // wellnessBookingsSpec projects one row per booking, walking forSession and
 // bookedBy (each 0..1). bookerKey (not a name) is projected — identity

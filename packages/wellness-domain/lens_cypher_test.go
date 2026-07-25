@@ -249,3 +249,76 @@ func TestWellnessBookings_JoinsSessionAndBooker(t *testing.T) {
 	require.Equal(t, "2026-07-08T09:30:00Z", v["endsAt"])
 	require.Equal(t, bookerKey, v["bookerKey"])
 }
+
+// TestWellnessSessions_JoinsInstructor proves the ledBy hop the instructor
+// hat rests on: a session led by a bound instructor projects that
+// instructor's key (which scopes their own-roster read) and display name
+// (which the public schedule renders as "with …").
+func TestWellnessSessions_JoinsInstructor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	sessKey := f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	f.aspect(t, "sunrise", "profile", "studioProfile", map[string]any{"name": "Sunrise Yoga Room"})
+	instrKey := f.vtx(t, "sam", "instructor")
+	f.aspect(t, "sam", "profile", "instructorProfile", map[string]any{"displayName": "Sam Okafor"})
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Evening Flow", "startsAt": "2026-07-08T18:00:00Z", "endsAt": "2026-07-08T19:00:00Z", "capacity": 12.0,
+	})
+	f.edge(t, "atStudio", "flow", "sunrise")
+	f.edge(t, "ledBy", "flow", "sam")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1, "one row per session even with BOTH studio and instructor joined")
+	v := rows[0].Values
+	require.Equal(t, sessKey, v["sessionKey"])
+	require.Equal(t, instrKey, v["instructorKey"])
+	require.Equal(t, "Sam Okafor", v["instructorName"], "neighbour aspect-hop i.profile.data.displayName")
+}
+
+// TestWellnessSessions_NoInstructorNullSafe proves the common case — most
+// classes have no instructor — still projects a row, with null instructor
+// columns. The Go decode relies on this: a nil column lands as "" in a
+// non-pointer string field, which is what the roster's ledBy check treats as
+// "nobody leads this".
+func TestWellnessSessions_NoInstructorNullSafe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "solo", "session")
+	f.aspect(t, "solo", "schedule", "sessionSchedule", map[string]any{
+		"name": "Unled Class", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 5.0,
+	})
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["instructorKey"])
+	require.Nil(t, rows[0].Values["instructorName"])
+}
+
+// TestWellnessInstructors_RostersNamedInstructors proves the scheduling
+// form's picker source: named instructors only, with their teachesAt studio
+// when they have one.
+func TestWellnessInstructors_RostersNamedInstructors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	namedKey := f.vtx(t, "sam", "instructor")
+	f.aspect(t, "sam", "profile", "instructorProfile", map[string]any{"displayName": "Sam Okafor"})
+	studioKey := f.vtx(t, "sunrise", "studio")
+	f.edge(t, "teachesAt", "sam", "sunrise")
+	// An instructor with NO .profile aspect must be excluded by the WHERE.
+	f.vtx(t, "ghost", "instructor")
+
+	rows := f.project(t, wellnessInstructorsSpec)
+	require.Len(t, rows, 1, "only the named instructor rosters; the profile-less one is filtered out")
+	v := wdRowByKey(rows, namedKey)
+	require.NotNil(t, v)
+	require.Equal(t, namedKey, v["instructorKey"])
+	require.Equal(t, "Sam Okafor", v["displayName"])
+	require.Equal(t, studioKey, v["studioKey"])
+}
