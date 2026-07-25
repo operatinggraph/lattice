@@ -126,9 +126,6 @@ func (s *server) handleVaultDecrypt(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "POST required")
 		return
 	}
-	if s.crossOriginBlocked(w, r) {
-		return
-	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return

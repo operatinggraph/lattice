@@ -553,9 +553,6 @@ func freshCapabilityVerdict(ctx context.Context, conn *substrate.Conn, cols capa
 // reviewer identity is the logged-in operator automatically (Loupe stamps no
 // actor — the Gateway stamps the verified token's subject).
 func (s *server) reviewCapabilityApprove(w http.ResponseWriter, r *http.Request, id string) {
-	if s.crossOriginBlocked(w, r) {
-		return
-	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return
@@ -641,9 +638,6 @@ func (s *server) reviewCapabilityApprove(w http.ResponseWriter, r *http.Request,
 // message says so explicitly, mirroring the CLI's own guidance, so an
 // operator retries the mark-applied step rather than re-running apply.
 func (s *server) reviewCapabilityApply(w http.ResponseWriter, r *http.Request, id string) {
-	if s.crossOriginBlocked(w, r) {
-		return
-	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return

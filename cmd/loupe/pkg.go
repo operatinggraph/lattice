@@ -364,9 +364,6 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 		s.writeError(w, http.StatusBadRequest, "POST required")
 		return
 	}
-	if s.crossOriginBlocked(w, r) {
-		return
-	}
 	conn, ok := s.requireConn(w)
 	if !ok {
 		return
@@ -456,9 +453,6 @@ func (s *server) packagesApply(w http.ResponseWriter, r *http.Request, requireIn
 func (s *server) handlePackagesUninstall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
-		return
-	}
-	if s.crossOriginBlocked(w, r) {
 		return
 	}
 	conn, ok := s.requireConn(w)

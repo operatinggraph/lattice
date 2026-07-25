@@ -299,8 +299,18 @@ func operatorToken(ctx context.Context) string {
 // the API, tests — no Sec-Fetch-Dest: document) still sees the plain 401. On
 // success, the winning raw token is attached to the request context
 // (operatorToken) so a handler can relay it onward.
+//
+// It is also where the cross-origin gate runs (crossOriginBlocked, server.go),
+// ahead of everything else INCLUDING the auth exemption: the exempt endpoints
+// are exactly the credential-exchange ones, and a forced login or logout is a
+// state change a hostile page must not be able to trigger. Being the outermost
+// wrapper (main.go) makes this the console's one choke point for both gates, so
+// no route can be added ungated.
 func (s *server) requireOperator(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.crossOriginBlocked(w, r) {
+			return
+		}
 		if isOperatorAuthExempt(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
@@ -387,14 +397,6 @@ func (s *server) handleOperatorDevToken(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
-	// crossOriginBlocked here too: mint is a state-changing action (issues a
-	// live credential) like every other endpoint that checks it, even though
-	// it takes no body — a hostile page's blind cross-origin POST is refused
-	// before touching operatorActorKey, not just left to CORS to block the
-	// response.
-	if s.crossOriginBlocked(w, r) {
-		return
-	}
 	if s.operatorActorKey == "" {
 		s.writeError(w, http.StatusBadGateway, "no operator actor configured (LOUPE_OPERATOR_ACTOR_KEY unset and no bootstrap admin actor loaded)")
 		return
@@ -431,9 +433,6 @@ func (s *server) handleOperatorSession(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
 		return
 	}
-	if s.crossOriginBlocked(w, r) {
-		return
-	}
 	// Bounded like every other body-reading handler in this package
 	// (handleOp, handleVaultDecrypt, the package installers) — this endpoint
 	// is reachable with no credential at all, so an unbounded read would be a
@@ -468,9 +467,6 @@ func (s *server) handleOperatorSession(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleOperatorLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
-	if s.crossOriginBlocked(w, r) {
 		return
 	}
 	s.clearOperatorSessionCookie(w)

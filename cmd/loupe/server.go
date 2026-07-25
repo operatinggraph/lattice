@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -177,28 +178,128 @@ func (s *server) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// crossOriginBlocked rejects a state-changing request whose Origin header
-// names a different site — the cheap same-origin gate for a loopback-bound
-// operator console (a hostile web page can form-POST to a well-known local
-// port; the browser always attaches Origin to cross-origin POSTs), defense in
-// depth alongside the operator login gate (requireOperator, readauth.go).
-// Requests without an Origin (curl, same-site GET-initiated) pass.
-// Every mutating endpoint checks this before doing any work: the op submit,
-// the control planes, object upload/detach, and the package installer family.
+// stateChanging reports whether a method can change state. GET/HEAD/OPTIONS are
+// the methods the HTTP spec defines as safe; every handler enforces its own
+// method anyway, so an unlisted one (PUT, PATCH, DELETE, or anything exotic) is
+// treated as changing state.
+func stateChanging(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// metadataAdmits applies the resource-isolation policy to a request's
+// Sec-Fetch-Site, which the caller has already found present.
 //
-// Matching Origin against r.Host alone is rebindable — under DNS rebinding
-// both headers carry the attacker's name and agree by construction — so the
-// Origin's host must ALSO be one the console is legitimately served from: a
-// loopback host, or the explicitly-configured bind host (the warned-about
-// non-loopback opt-in). Origin "null" (sandboxed iframe, some redirects) has
-// no host and fails closed.
+// The one cross-origin shape it admits is a TOP-LEVEL GET navigation: a link,
+// bookmark or redirect that lands the operator on a page. Refusing those would
+// break an ordinary link into the console — from a vertical app co-hosted on
+// another port, say.
 //
-// Behind a TLS-terminating reverse proxy neither of those holds — the browser's
-// Origin names the public site while the bind is loopback — so a declared
-// public origin (LOUPE_PUBLIC_ORIGIN, publicorigin.go) is accepted as its own
-// branch. That branch does not consult r.Host at all; see publicOrigin.matches
-// for why equality against a boot-time constant keeps the rebinding hardening.
+// Top-level is checked with Sec-Fetch-Dest, not Sec-Fetch-Mode alone. `navigate`
+// is sent for a NESTED navigation too, so mode alone admits
+// `<iframe src="http://127.0.0.1:7777/">` on a co-hosted app's page: same-site,
+// so the operator's session cookie rides (SameSite=Strict is site-scoped and
+// port-agnostic, readauth.go), and the fully authenticated console — with its
+// approve, apply, uninstall, pause and decrypt controls — renders inside a
+// hostile frame. Sec-Fetch-Dest is the only header that separates `document`
+// from `iframe`/`frame`/`object`/`embed`, so the exemption requires it
+// explicitly. isBrowserNavigation (readauth.go) reads the same header for the
+// login redirect.
+//
+// Honest limit: a script-driven top-level navigation (location.href from a
+// same-site page) is admitted, since Sec-Fetch-User — the only signal that
+// separates it from a click — is absent on a redirect the console itself issues
+// (requireOperator's bounce to /login), so requiring it would break the
+// console's own flow. What that buys an attacker is a full-page navigation away
+// from their own page, which is visible and cannot read the response; the
+// residual is that it can reach a side-effecting GET, e.g. consuming one of the
+// bounded SSE slots (eventStreamMax).
+func metadataAdmits(site string, r *http.Request) bool {
+	switch strings.ToLower(site) {
+	case "same-origin", "none":
+		return true
+	case "same-site", "cross-site":
+		return !stateChanging(r.Method) &&
+			strings.EqualFold(r.Header.Get("Sec-Fetch-Mode"), "navigate") &&
+			strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "document")
+	}
+	// An unknown or empty token is a value this policy cannot reason about;
+	// fail closed rather than guess it is benign.
+	return false
+}
+
+// crossOriginBlocked reports whether r came from somewhere other than the
+// console's own origin, writing the 403 when it did. requireOperator
+// (readauth.go) calls it ahead of everything else, for every request the
+// console serves — the static UI, every /api handler, and the auth-exempt
+// credential endpoints alike. It is a CHOKE POINT, deliberately: a per-handler
+// opt-in leaves the next handler someone adds silently ungated, and a forced
+// login or logout is a state change a hostile page must not be able to trigger
+// either.
+//
+// A loopback-bound console is the case that needs it. Cookies are scoped by
+// HOST, not by port, so loupe :7777, loftspace :7788 and clinic :7799 share one
+// cookie jar: a page served by any of them can POST to the console with
+// `credentials: 'include'` and the operator's session cookie rides along
+// cross-ORIGIN, with SameSite=Strict fully honored. Two independent signals say
+// a request came from the console itself, and both must hold:
+//
+//   - Sec-Fetch-Site, when the browser sends it, is authoritative — read as a
+//     resource-isolation policy (metadataAdmits). It is the signal that catches
+//     a cross-origin GET, which no Origin header would: a bare <img src> on a
+//     sibling app's page is a same-site subresource carrying the cookie and
+//     sending no Origin at all. A GET is not automatically side-effect-free
+//     here — /api/operator/dev-token aside, the console's reads touch a live
+//     stack — so the side effect alone is the exposure.
+//   - Origin, when present, must name this console. A browser attaches it to
+//     every request whose method is not GET/HEAD, so it is what catches a
+//     state-changing request from a browser too old to send Sec-Fetch-Site
+//     (Safari before 16.4).
+//
+// A request with NEITHER header is not browser-driven (curl, the API, a test)
+// and carries nobody's ambient cookie, so it passes.
+//
+// Honest limit: browsers send Sec-Fetch-* only from a potentially-trustworthy
+// origin. Loopback qualifies, and so does anything behind the declared HTTPS
+// public origin — but a plain-HTTP NON-loopback bind (the warned-about opt-in)
+// gets no Fetch Metadata at all, leaving only the Origin check, where a
+// cross-origin subresource GET is indistinguishable from a same-origin one.
+//
+// Matching Origin against r.Host alone is rebindable — under DNS rebinding both
+// headers carry the attacker's name and agree by construction — so the Origin's
+// host must ALSO be one the console is legitimately served from: a loopback
+// host, or the explicitly-configured bind host (the warned-about non-loopback
+// opt-in). Origin "null" (sandboxed iframe, some redirects) has no host and
+// fails closed. Both sides of that comparison are normalized (normalizeHost),
+// since a browser sends the hostname the operator typed and an FQDN-rooting
+// trailing dot addresses the same site.
+//
+// Behind a TLS-terminating reverse proxy neither host branch holds — the
+// browser's Origin names the public site while the bind is loopback — so a
+// declared public origin (LOUPE_PUBLIC_ORIGIN, publicorigin.go) is accepted as
+// its own branch. That branch does not consult r.Host at all; see
+// publicOrigin.matches for why equality against a boot-time constant keeps the
+// rebinding hardening.
+//
+// This is the same policy internal/appsession's kit gate enforces for the
+// vertical apps, kept in step with it by hand until the kit exposes a
+// session-manager-independent gate the console can call directly.
 func (s *server) crossOriginBlocked(w http.ResponseWriter, r *http.Request) bool {
+	// Presence of the header KEY is what says "this browser speaks Fetch
+	// Metadata", so an empty value blocks rather than falling through to the
+	// weaker Origin check — and more than one value is a shape no browser
+	// produces (Sec-* is a forbidden header name), so it is refused rather than
+	// resolved by taking the first, which Header.Get would do silently.
+	if vals, ok := r.Header["Sec-Fetch-Site"]; ok {
+		if len(vals) != 1 || !metadataAdmits(vals[0], r) {
+			s.writeError(w, http.StatusForbidden,
+				"cross-origin request blocked (Sec-Fetch-Site "+strings.Join(vals, ", ")+")")
+			return true
+		}
+	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return false
@@ -206,10 +307,19 @@ func (s *server) crossOriginBlocked(w http.ResponseWriter, r *http.Request) bool
 	if s.publicOrigin.matches(origin) {
 		return false
 	}
+	// Both schemes are accepted against r.Host. Pinning the scheme to the
+	// connection would 403 every write on a non-loopback bind behind a
+	// TLS-terminating proxy — the browser's Origin says https, the proxied hop
+	// arrives as plain http — and buys nothing: the host must still be loopback
+	// or the configured bind host, which is where the rebinding hardening lives.
+	// Neither arm consults X-Forwarded-Proto; a forwarding header is set by
+	// whoever spoke to us and is never trusted here.
 	if origin == "http://"+r.Host || origin == "https://"+r.Host {
 		if u, err := url.Parse(origin); err == nil {
-			if h := u.Hostname(); isLoopbackHost(h) || (s.bindHost != "" && h == s.bindHost) {
-				return false
+			if h := normalizeHost(u.Hostname()); h != "" {
+				if isLoopbackHost(h) || (s.bindHost != "" && h == normalizeHost(s.bindHost)) {
+					return false
+				}
 			}
 		}
 	}
@@ -480,9 +590,6 @@ func (s *server) handleControl(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && len(parts) == 1:
 		s.controlRead(w, r, parts[0])
 	case r.Method == http.MethodPost && len(parts) == 3:
-		if s.crossOriginBlocked(w, r) {
-			return
-		}
 		s.controlMutate(w, r, parts[0], parts[1], parts[2])
 	default:
 		s.writeError(w, http.StatusBadRequest,
@@ -608,9 +715,6 @@ func (s *server) handlePackages(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleOp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusBadRequest, "POST required")
-		return
-	}
-	if s.crossOriginBlocked(w, r) {
 		return
 	}
 

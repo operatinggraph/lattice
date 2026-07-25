@@ -29,6 +29,29 @@ func testServer() *http.ServeMux {
 	return mux
 }
 
+// testGatedServer builds the console's handler exactly as main.go assembles
+// it — requireOperator wrapping demoReadOnly wrapping the route mux — and
+// returns the server alongside it so a test can configure bindHost or
+// publicOrigin before driving requests through.
+//
+// The cross-origin gate lives in the outermost wrapper, so a test that calls a
+// handler function directly does not exercise it at all; that is the shape the
+// per-handler opt-in used to hide behind. Anything asserting on the gate must
+// go through this.
+func testGatedServer() (*server, http.Handler) {
+	s := &server{
+		conn:        nil,
+		adminActor:  "vtx.identity.admin1",
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		natsTimeout: time.Second,
+		uploadCap:   1 << 20,
+		bindHost:    "127.0.0.1",
+	}
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	return s, s.requireOperator(s.demoReadOnly(mux))
+}
+
 // TestHandlers_NilConn_ReturnsBadGateway pins the load-bearing requireConn
 // guard: with no NATS connection every data handler must answer a JSON 502, not
 // panic on the nil *substrate.Conn. This also drives each handler's routing

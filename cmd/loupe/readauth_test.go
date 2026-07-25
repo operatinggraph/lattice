@@ -247,12 +247,18 @@ func TestHandleOperatorDevToken_WrongMethod_405(t *testing.T) {
 	}
 }
 
+// The gate is the outermost wrapper, not a check inside the handler, so this
+// drives the chain main.go builds. The mint is auth-EXEMPT and still gated:
+// a hostile page's blind cross-origin POST must be refused before it can
+// issue a live credential.
 func TestHandleOperatorDevToken_CrossOrigin_403(t *testing.T) {
 	s := devAuthServer(t)
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, operatorDevTokenPath, nil)
 	r.Header.Set("Origin", "https://evil.example")
-	s.handleOperatorDevToken(rec, r)
+	s.requireOperator(mux).ServeHTTP(rec, r)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (cross-origin mint request blocked)", rec.Code)
 	}
@@ -604,10 +610,12 @@ func TestHandleOperatorSession_WrongMethod_405(t *testing.T) {
 
 func TestHandleOperatorSession_CrossOrigin_403(t *testing.T) {
 	s := devAuthServer(t)
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, operatorSessionPath, strings.NewReader(`{"token":"x"}`))
 	r.Header.Set("Origin", "https://evil.example")
-	s.handleOperatorSession(rec, r)
+	s.requireOperator(mux).ServeHTTP(rec, r)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (cross-origin session request blocked)", rec.Code)
 	}
@@ -647,10 +655,12 @@ func TestHandleOperatorLogout_WrongMethod_405(t *testing.T) {
 
 func TestHandleOperatorLogout_CrossOrigin_403(t *testing.T) {
 	s := devAuthServer(t)
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, operatorLogoutPath, nil)
 	r.Header.Set("Origin", "https://evil.example")
-	s.handleOperatorLogout(rec, r)
+	s.requireOperator(mux).ServeHTTP(rec, r)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (cross-origin logout request blocked)", rec.Code)
 	}
