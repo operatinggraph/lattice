@@ -1031,6 +1031,104 @@ never escalates — consistent with the platform-level `lattice.md` security row
 the landlord submit migration off the admin mint (a landlord-role decision the design flags as possibly
 contract-ish — resolve or flag in-fire).
 
+#### Fire W2 Inc 2 fire brief (build note, 2026-07-24)
+
+**1 · Scope sentence (verbatim §8, clinic-W1's own split applied):** *"sign-in-first; pickers + both mints
+deleted; RLS tests keep passing with session subjects"* — LoftSpace's §7.2 hats: applicant/resident, landlord
+(existing RLS world), staff. **Inc 2 = the session spine only** (clinic W1 Inc 1's bar verbatim: parity
+invariant §6.1–6.3 — no foreign-subject mint, session-keyed read boundary). §6.4 (offered ⊆ discovered) and the
+landlord *write* migration are Inc 3's bar, for the reason clinic hit: the grants audit is its own increment
+(clinic shipped it as Inc 2a, `1e8dc41b`).
+
+**2 · The landlord-role fork — RESOLVED IN-FIRE (Winston, not contract-ish; no Andrew gate).** §7.2 left open
+whether the landlord decision ops get "a landlord-scoped path or an explicit landlord role". **Decided: NO new
+role — a `consumer` scope=self grant + an in-script guard that walks the acting identity's `manages` link**,
+mirroring Inc 1's applicant guards keyed off `manages` instead of `applicationFor`. Grounds:
+- The **read** side already scopes a landlord with **no role at all** — `landlordLeaseApplicationsRead` bakes the
+  managing landlord's NanoID into each row's `authz_anchors` by walking `manages`
+  (`lease-signing/lenses.go:151-153,217-254`), and the primordial cap-read self-grant does the rest;
+  `lenses.go:137-146` states outright that the residence audience needs no grant lens. A role would add nothing
+  the write path cannot get the same way.
+- A landlord **is already** a `vtx.identity`; `consumer` is the generic signed-in-human self-service role. The
+  `provider` role existed only because a provider was *not* an identity at all (§1) — the reason does not
+  transfer.
+- A new role costs identity-domain + `personalLensPermissions` (`control-authz/permissions.go:56-67`, pinned by
+  the `control-authz` test) + every cross-package install harness — the `provider` precedent (`626763bc`) touched
+  47 files. That is the "possibly contract-ish" weight §7.2 flagged, bought for no authorization gain.
+- Guard shape is further-restricting only (no-op when `op.authContextTarget == ""`), so the `operator` /
+  `frontOfHouse` scope=any path is untouched — the same property Inc 1's review cleared.
+Deferred to Inc 3 with its consumer named: the grant rows + guards + FE flip for `DecideLeaseApplication`,
+`SetRenewalTerms`, `VerifyGuarantor`, `CancelRenewal`, `SetListingStatus`.
+
+**3 · Verified touch-list (scouted live @ `cf95b5e5`):**
+- **Mints deleted:** `readauth.go:224-262` `handleDevToken` (**any-subject** — subject straight from the request
+  body at `:248`) and `readauth.go:264-300` `handleStaffDevToken` (**fixed root-equivalent** —
+  `bootstrap.BootstrapIdentityKey` via `main.go:95`, unauthenticated, no body). Routes `server.go:85-86`.
+- **Superseded by the kit:** `devSigner`/`mint` (`readauth.go:63-93`), `setupReadAuth` (`:95-160`),
+  `parsePublicKeyPEM` (`:162-173`), `bearerToken` (`:175-184`), `isTruthy` (`:302-309`), `devTokenTTL` (`:61`),
+  `credentialBindingResolver` + its per-request resolve (`:32-34,210-220` — the kit resolves the binding **once
+  at login**, `session.go:394`), `hostOf`/`isLoopbackHost` (`main.go:279-302`).
+- **Read boundary:** `authenticateRead` (`readauth.go:186-222`) keeps its signature and sources the subject from
+  `appsession.Identity(ctx)`. **All twelve read handlers already funnel through it** — `applications.go:198`,
+  `credentials.go:93`, `landlord_applications.go:235`, `lease_document.go:49`, `objects.go:301,381,573`,
+  `portfolio.go:235`, `renewals.go:110`, `search.go:292`, `staff_identities.go:92`,
+  `tasks.go:94`, `unit_applications.go:201` — so one function change moves the whole boundary.
+- **The one admin-standing-in-for-a-user read (§6.3):** `unit_applications.go:270` decorates the landlord console
+  with applicant names read as `s.adminActorID()` (the WildcardAnchor holder). It reads as the **session** actor
+  now; a landlord with no roster grant degrades to bare keys down the path already there (`:277-279`).
+  `adminActor` then retires to `bootstrapLoaded` (`health.go:18`, `server.go:28,132-143`, `main.go:90-97`),
+  removing the last `BootstrapIdentityKey` reference §6's gate will reject.
+- **Wiring:** `main.go:79-199` (kit construction, mirroring `cmd/clinic-app/main.go:176-228`), `server.go:62-88`
+  (inner mux + `RequireSession`, mirroring `cmd/clinic-app/server.go:58-85`).
+- **New:** `cmd/loftspace-app/web/login.html` — LoftSpace-branded, mechanism copied from
+  `cmd/clinic-app/web/login.html` (whoami bounce · `/api/login-options` · `POST /api/dev-login`).
+- **FE (`web/app.js`, 4106 lines):** the two token caches collapse to one session token —
+  `readTokenCache:209`/`readToken:218`, `staffTokenCache:261`/`staffReadToken:263`; `authedGet:241` +
+  `authedGetAsStaff:280` collapse to one cookie-authenticated `appGet`; the whole device-claim ceremony goes
+  (`APPLICANT_AUTH_KEY:381`, `pendingClaimSecrets:405`, `mintDeviceToken:419`, `postOpAsSubject:434`,
+  `ensureClaimedDevice:460`, `runClaimCeremony:472`). `submitOp:327` drops its `actorKind` parameter.
+  `state.applicant` stops being picked (`APPLICANT_KEY:8` localStorage + the `#applicant` select) and becomes the
+  signed-in identity; `state.mode` (`MODE_KEY:9`, `applyMode:1147`) stops being a stored toggle and becomes
+  hat-gating on the whoami `manages` anchor, mirroring clinic's `applyHatGating` (`clinic web/app.js:3941-3960`).
+- **Tests:** the RLS files present a session cookie instead of a Bearer header —
+  `applications_rls_test.go`, `landlord_applications_rls_test.go`, `objects_rls_test.go`, `search_rls_test.go`,
+  `staff_identities_rls_test.go`; `readauth_test.go` loses its `handleDevToken`/`setupReadAuth`/`isTruthy`
+  coverage (now the kit's).
+
+**4 · Precedents to mirror:** `cmd/clinic-app` end-to-end — it shipped this exact conversion three days ago
+(`17aecdbf` + `4fe21968`): construction `main.go:176-228`, inner-mux delegation `server.go:58-85`, the
+session-sourced `authenticateRead` `readauth.go:42-52`, the FE session block `web/app.js:79-240`
+(`appGet`/`sessionWriteToken`/keepalive/`loadWhoami`), and hat gating `web/app.js:3886-3960`. The kit itself
+(`internal/appsession`) is unchanged by this fire — clinic already gave it its production branch + revocation
+parameter.
+
+**5 · Increment order + green checks:** (1) Go wiring + mint deletion + `adminActor` retirement →
+`go test ./cmd/loftspace-app/...`; (2) login page + FE collapse → `node --check web/app.js`; (3) test rewires →
+full package. Gates: `go build ./...`, `make vet`, `golangci-lint run ./...`,
+`STRICT=1 go run ./scripts/lint-conventions.go`, every `scripts/lint-*.go`. Live: cycle `bin/loftspace-app` per
+the Makefile's `up-loftspace` recipe, then whoami → login-options → dev-login → gated read → refresh → logout,
+plus one browser load.
+
+**6 · In-scope gotchas:** the cookie name is derived (`loftspace-app_session`), so `AppName` is load-bearing.
+`IsAuthExempt` is exact-match only (`session.go:168`), so `/api/config` becomes gated and the login page must
+stay self-contained (clinic's is). `resolve` falls back to `FallbackIdentityID` only when the cookie is
+**absent** — LoftSpace sets none, so anonymous is genuinely anonymous. The default bind is `127.0.0.1:7788`
+(`main.go:64`), already loopback, so dev auth is not refused (`signer.go:121`). `submitOp`'s applicant path
+already carries the `isTransientAuthLag` retry — it must survive the collapse, because the claim-race it
+covers is replaced by, not removed with, the login-time binding resolve.
+
+**7 · Non-goals (Inc 2):** no landlord/staff **grant** rows or Starlark guards (Inc 3, §2 above); no §6.4
+op-set parity script; no `lint-conventions` parity-gate flip (§8(e), after W1–W4); no new lens or DDL content;
+no package version bump; no sibling-app adoption (W3/W4); no contract text.
+
+**Scope-diff gate: PASS** — every touch traces to "sign-in-first; pickers + both mints deleted; RLS tests keep
+passing with session subjects". Two narrowings recorded (landlord write-grant migration → Inc 3, matching
+clinic's own Inc 1 → Inc 2a split; §6.4 parity not this increment's bar) and one in-fire fork resolution
+recorded (§2, no new role). No substitution: the mints deleted are the two the design names, not an adjacent
+mechanism. Dependencies re-verified both ways: P1 shipped (`/v1/actor` roles+anchors — the hat gating consumes
+`anchors`), P2 shipped (`internal/appsession` present, clinic-hardened), W0 shipped; Inc 1 shipped (`02be1f86`,
+`git merge-base --is-ancestor` verified against `main`).
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café

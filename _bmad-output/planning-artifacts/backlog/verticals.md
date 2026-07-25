@@ -69,7 +69,7 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-07-24 · `50ff65dd` · Wellness `CreateBooking` rejects double-books (per-(session,booker) `sessionBookerClaim` guard, café-idiom, released on cancel) + past-start sessions (`SessionInPast`); wellness-domain 0.10.0
 - 2026-07-24 · `6b1c667c` · Patient names out of open clinic nats-kv lenses — `clinicAppointments`/`clinicPatients` are key-only; names stay Protected (`clinicPatientsRead` RLS); provider directory stays public
 - 2026-07-23 · `1e8dc41b` · Clinic front-desk (`frontOfHouse`) can book + register again — grants audit + workplace confinement; closes a forgeable-`authContext.target` bypass (persona-worlds W1 Inc 2a)
-- 2026-07-24 · `17aecdbf` · Clinic is sign-in-first — session-keyed reads/writes, both dev-token mints deleted, appsession production branch, patient identity read-grant bridge (persona-worlds W1 Inc 1+1b)
+- 2026-07-24 · `283dd1a9` · Clinic is sign-in-first — session-keyed reads/writes, both dev-token mints deleted, appsession production branch, patient identity read-grant bridge (persona-worlds W1 Inc 1+1b)
 - 2026-07-23 · `626763bc` · Persona-worlds W0 — provider archetype spine (role + per-domain bindings + operator-only Bind* + provider grants/guards + clinic GrantTable + 3 edge-manifest hat lenses + seeds); live-verified
 - 2026-07-23 · `8c246540` · Clinic booking date/time field now snaps to the 15-minute grid — off-grid `min` was rejecting legal grid times and suggesting off-grid ones; Andrew-reported, live-verified (change-time snap + submit-time backstop)
 - 2026-07-23 · `29b653c8` · Clinic `StartVisitSeries` rejects a duplicate active series — per-patient+provider guard aspect, live-verified (accept/reject/pause-revival/expiry-revival)
