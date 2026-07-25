@@ -223,6 +223,15 @@ types; only generic types exist, and a cold generic agent would just re-derive w
 You are Winston throughout: follow the playbook, build, and **admit (§4) yourself** — there is no separate
 hand-up.
 
+**Every sub-agent you DO spawn (scouts, builders, reviewers) gets an EXPLICIT `model` — never inherit.** The
+`Agent` tool defaults to the *session* model when `model` is omitted, so an omitted parameter silently runs a
+mechanical scout on the lead's expensive tier; "cheaper tier" (§ builder economics,
+[`fire-brief-template.md`](../fire-brief-template.md)) is only real if the parameter is actually passed. Choose
+per task, every call, no exceptions: **`haiku`** for mechanical read-only fan-out (Phase-0 scouts: grep/read/
+file:line collection, inventory sweeps) · **`sonnet`** for brief-driven mechanical build increments and
+single-lens review passes · **`opus`** only for genuinely judgment-heavy work (adversarial security/capability
+review, a design fork). If you can't name why the task needs the tier above, it doesn't.
+
 **Phase 0 — compile the fire brief BEFORE any edit (mandatory; template + full rules:
 [`agents/fire-brief-template.md`](../fire-brief-template.md)).** Between selecting the item and opening a
 worktree: fan out **read-only scout sub-agent(s)** (Read/Grep/Glob + read-only git; no make/docker/builds/
