@@ -1203,6 +1203,86 @@ mechanism. Dependencies re-verified both ways: P1 shipped (`/v1/actor` roles+anc
 `anchors`), P2 shipped (`internal/appsession` present, clinic-hardened), W0 shipped; Inc 1 shipped (`02be1f86`,
 `git merge-base --is-ancestor` verified against `main`).
 
+#### Fire W2 Inc 3 fire brief (build note, 2026-07-25)
+
+**1 · Scope sentence (verbatim, Inc 2 §2's deferral):** *"the grant rows + guards + FE flip for
+`DecideLeaseApplication`, `SetRenewalTerms`, `VerifyGuarantor`, `CancelRenewal`, `SetListingStatus`"* —
+the landlord half of the §7.2 grants audit, closing the hat Inc 2 opened.
+
+**2 · Why this is a FUNCTIONAL fix, not only a hardening.** Inc 2 deleted both mints, so the landlord console
+now writes under the signed-in landlord's own token. Four of the five ops are granted `operator` scope=any
+**only** (`lease-signing/permissions.go:126,132,144`, `loftspace-domain/permissions.go:20`); the seeded
+landlord persona holds `frontOfHouse`, not `operator` (`scripts/seed-showcase.go:550`, ~`:1123` wires its
+`manages` link). So today a signed-in landlord is AuthDenied on Set-terms / Verify-guarantor / Cancel-renewal /
+Set-listing-status, and reaches `DecideLeaseApplication` only through the front-desk grant. Inc 3 gives the
+landlord hat its own authorization path.
+
+**3 · Guard shape — the scope=self counterpart to `require_workplace`.** `scripts.go:266-291`'s own doc states
+the structure: `require_workplace` "binds the STANDING path only … a scope=self caller is bound instead by its
+own op's ownership probe … each binds the path the other cannot see." The landlord probe is that missing half:
+walk the op's subject to its unit and require the acting identity's `manages` link
+(`lnk.identity.<landlordID>.manages.unit.<unitID>`, `loftspace-domain/ownership.go:18-28,191`).
+**Fires exactly when the caller declares self-action** — `op.authContextTarget != "" and op.authContextTarget
+== op.actor` — chosen over the bare presence test Inc 1 used and over `op.authTargetValidated`:
+- vs. **bare presence** (Inc 1's applicant shape): the renewal ops are task-minted, and a task's
+  `authContext.target` is the *renewal*, not an identity — a presence test would try to parse a renewal key as
+  the landlord and misfire. Equality with `op.actor` is presence plus the fact that makes the read meaningful.
+- vs. **`authTargetValidated`**: that bit is also true on the task path
+  (`internal/processor/operation_context.go:46-58`), which would newly confine every task-minted renewal write.
+- Safety is unchanged from Inc 1's cleared review: a scope=self holder **cannot** omit `authContext`
+  (`matchPlatformPermission` denies an absent target), so the guard is unbypassable for the path it binds; a
+  scope=any holder that sends its own key is only *further*-restricted, never escalated.
+**Ordering:** the probe goes **before** any payload-matching or PII read (`c4b45b33`, ownership-guards-answer-
+first) — for `VerifyGuarantor` that means before the applicant `.profile` read.
+
+**4 · Verified touch-list (scouted live @ `d60daa56`):**
+- **Grants (+1 `consumer` scope=self row each, mirroring `permissions.go:96-99`/`114-117`):**
+  `lease-signing/permissions.go:102` (Decide, keeps `operator`+`frontOfHouse` scope=any), `:126` (SetRenewalTerms),
+  `:132` (VerifyGuarantor), `:144` (CancelRenewal); `loftspace-domain/permissions.go:20` (SetListingStatus —
+  needs a per-op row, its `mk()` helper is uniform `operator`/any).
+- **`DecideLeaseApplication`** (`lease-signing/scripts.go:495-637`): the unit walk already exists at `:521-533`
+  (`kv.Links(app_key,"appliesToUnit","out")`, annotated `(e)`) but runs only inside `if not workplace_exempt()`
+  — and `workplace_exempt()` returns true for a scope=self caller (`:259-268`), so the landlord path skips it.
+  Hoist the walk into a helper both branches call.
+- **Renewal ops** (`lease-signing/renewal_scripts.go:196` SetRenewalTerms, `:235` VerifyGuarantor, `:371`
+  CancelRenewal): this script is its own Starlark module with no `kv.Links` use today. Add a two-hop walk
+  `renewal -renews-> leaseapp -appliesToUnit-> unit`; both hops are single-valued by construction (OpenRenewal
+  writes exactly one `renews` link in the vertex's own batch, `:180-186`; `appliesToUnit` is required at
+  `CreateLeaseApplication`), the same bounded shape `cafe-domain/ddls.go:517` already ships.
+- **`SetListingStatus`** (`loftspace-domain/ddls.go:391-433`): unit is the payload field, already
+  `require_live_unit`-checked — no walk. The convergence **directOp** path carries no `authContext`, so the
+  guard is inert there (verified: Weaver's service actor dispatches it off `missing_listingLeased`,
+  `lease-signing/targets.go:20`; the renewal tasks are `Assignee: "row.landlord"`, `renewal_targets.go:90,100`).
+- **FE** (`cmd/loftspace-app/web/app.js`): `loadWhoami:348-372` drops `body.roles` on the floor — capture it;
+  `isLandlord:817` already reads the `manages` anchor. Submit sites: `:3491` Decide, `:3569` SetListingStatus,
+  `:2153` the task-completion submit that carries all three renewal ops via `task.operationName`.
+- **Versions:** `lease-signing/package.go:85` 0.24.4→0.25.0, `loftspace-domain/package.go:51` 0.7.1→0.8.0
+  (a permission + script edit no-ops on install without a bump — `lint-package-version`).
+
+**5 · FE predicate — `isLandlord() && !roles.includes("operator")`.** One predicate for all five ops, and it
+duplicates no grant matrix. A **plain landlord** (consumer + `manages`) and the **front-desk landlord** (the
+demo's own persona: `frontOfHouse` + `manages`) both write as themselves and satisfy the probe; a
+**front-desk non-landlord** holds no `manages` anchor, sends no `authContext`, and keeps the standing
+`frontOfHouse` decide path exactly as today; an **operator** is excluded so a portfolio-wide console is never
+narrowed to the units it happens to manage. No regression in any of the four cells. Degradation is consistent:
+a session whose `manages` anchor has not projected yet cannot see the landlord surface at all, so the predicate
+and the tab hide together.
+
+**6 · Increment order + green checks:** (1) grants + guards + package tests → `go test ./packages/...`;
+(2) FE → `node --check web/app.js` + `go test ./cmd/loftspace-app/...`. Gates: `go build ./...`, `make vet`,
+`golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `lint-package-version`,
+`lint-lens-anchors`, `lint-board`. Live: `make reinstall-package` both packages, cycle `bin/loftspace-app`.
+
+**7 · In-scope gotchas:** `parts_of(op.actor, …)` must tolerate an actor that is not `vtx.identity.*` — a
+service actor never reaches the guard because it sends no `authContext`, but the parse must not raise before
+that check. The renewal script's helper set is independent (no cross-script imports, `:114-120`), so the walk
+helpers are written there rather than shared. `RemoveUnitOwner`/`AssignUnitOwner` are deliberately NOT granted
+to `consumer` — a landlord must not be able to assign themselves units (the escalation Inc 2's as-built found).
+
+**8 · Non-goals (Inc 3):** no new role (§2 of the Inc 2 brief, standing); no `require_workplace` on the renewal
+ops (operator-only standing path, operator is exempt anyway); no §6.4 op-set parity script; no `manages`-anchor
+backfill (its own filed row); no sibling-app adoption (W3/W4); no contract text.
+
 ## 10a. Non-goals
 
 No OIDC/IdP build; no SSO; no runtime archetype enum; no generic collections surface (named-deferred); no café
