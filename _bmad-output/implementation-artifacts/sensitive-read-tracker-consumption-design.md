@@ -1,6 +1,7 @@
 # Sensitive-read tracker — flip on consumption, not on hydration
 
-**Status:** ✅ Winston-ratified — build-ready (implementation-level throughout; no contract change).
+**Status:** ✅ SHIPPED `ae05f60a` (Winston-ratified, implementation-level throughout). Two contract-doc
+truth-ups prepared UNCOMMITTED for Andrew — see §6.1; neither gated the build.
 **Lane:** Lattice (Stream 2). **Board row:** [Processor] Sensitive-read tracker flips at hydration, not at
 consumption (★★ M).
 **Filed by:** `4098ba21`, as the residual §2.5 of
@@ -48,8 +49,9 @@ document, at the seams the script reaches through:
 | `kv.Read(K)` cache-first hit | `starlark_kv.go` hydrated branch | **yes** — names `K` |
 | `kv.Read(K)` lazy live read | `starlark_kv.go` `KVReader.ReadVertex` branch | **yes** — names `K` |
 | `state[K]`, `K in state`, `state.get(K)` | `stateMapValue.Get` | **yes** — names `K` |
-| `state.items()`, `state.values()` | `stateMapValue.Attr` — re-bound | **yes** — hands out every hydrated value (§2.2) |
-| `state.keys()`, `for k in state` | `Attr` / `Iterate` delegate untouched | **no** — key names only, no document |
+| `state.items()`, `state.values()` | `stateMapValue.Attr` — re-bound | **yes** — hands out every hydrated value (§2.1) |
+| `str(state)`, `repr(state)`, `"%s" % state`, `"{}".format(state)`, `"x" + str(state)` | `stateMapValue.String` | **yes** — a dict renders its VALUES (§2.1) |
+| `state.keys()`, `for k in state`, `list`/`sorted`/`tuple(state)` | `Attr` / `Iterate` delegate untouched | **no** — key names only, no document |
 | `egressReads` ref disposition | `sensitive_decrypt.go` egress branch | **no** — never decrypts (unchanged) |
 | step 6's governing-DDL walk | `step6_resolve_ddl.go:287` | **no** — Processor-internal (§2.3) |
 
@@ -58,7 +60,7 @@ same `ViolatedConstraint`. If it does not, the declaration was surplus: it could
 plaintext into an external event, and it now does not change the reply either. That surplus case is
 exactly and only the oracle.
 
-### 2.1 Why the whole set flips on `items()` / `values()`
+### 2.1 Why the whole set flips on `items()` / `values()` / `String()`
 
 `state` is built eagerly over the entire hydrated set (`vertexMapToStarlarkWithHydrated`,
 `starlark_runner.go:521`), and its values are already-decrypted plaintext. `items()` / `values()`
@@ -67,7 +69,16 @@ naming a key**. Flipping only on named keys would therefore have been a *real* l
 script could enumerate values, derive from sensitive plaintext, and emit `external.*` with the guard
 silent.
 
-So these two enumerators flip whenever any recorded plaintext key exists. This is the one place where
+**`String()` is the same exposure and is easy to miss.** A dict renders its **values**, so
+`str(state)` yields `{"vtx.identity.X.ssn": struct(… data = {"value": "123-45-6789"} …)}` — every
+document's plaintext as a string the script can drop straight into an event's data, having called
+neither `Get` nor `items()` nor `values()`. `repr`, `"%s" % state`, `"{}".format(state)` and `+`
+concatenation all route through the same method. Found by probing this design's own claim rather than by
+reading it, so it is pinned by its own regression vector (§5), non-vacuously: the test asserts the
+rendered string really does carry the plaintext before asserting the rejection. `list`/`sorted`/`tuple`
+of `state` go through `Iterate` and render key names only, so they stay on the non-flipping side.
+
+So the value-yielding seams flip whenever any recorded plaintext key exists. This is the one place where
 this design and the deferred-miss design (§2.4 there: enumeration must **not** fault) deliberately part
 company, and the reason is that they test different things. A deferred miss asks *"did the operation
 depend on this key?"* — enumeration names none, and faulting there would answer "some declared read was
@@ -76,16 +87,43 @@ plaintext reach the script?"* — and via `values()` it demonstrably did. Under-
 containment; over-flipping there creates a leak. `keys()` and `Iterate` yield key names only and stay on
 the non-flipping side in **both** designs.
 
+### 2.1.1 The attribute surface becomes default-deny
+
+Hooking the seams is not enough while `AttrNames`/`Attr` delegate to the dict's **whole** method set.
+Besides the four accessors, a dict carries `pop`, `popitem`, `setdefault`, `clear` and `update` — and
+three of those **return a stored value**: `state.pop(K)` and `state.setdefault(K, d)` hand back the
+document under `K`, `state.popitem()` hands back an arbitrary pair. All three were reachable and bypassed
+`Get` entirely.
+
+That is two hooks bypassed, not one. Besides the consumption record, `Get` is where the **deferred-miss**
+mechanism (`3a78c109`) raises `HydrationMiss` for a declared-absent required read — so
+`state.pop(K, None)` answered `None` for a key the operation declared it depends on, softening a
+fail-closed read into a legitimate-looking absence branch. That bypass **predates this fire**; the same
+change closes it.
+
+Freezing the dict would not have closed it: `setdefault` on a key that already exists never inserts, so
+it never reaches the frozen check.
+
+So `stateAttrs` becomes an **allowlist** — `get`, `items`, `keys`, `values` — and `Attr` returns "no such
+attribute" for anything else, `AttrNames` reporting the same four so `dir(state)` tells the truth. This is
+default-deny on purpose: a future `go.starlark.net` that adds another value-returning dict method fails
+closed here instead of silently re-opening the hole. Nothing is lost — a corpus grep over `packages/` and
+`internal/` finds only `state.get` (7), `state.keys` (2), `state.values` (1) and `state.items` (1); no
+caller anywhere uses a mutator, and mutating the snapshot was never meaningful because the commit path
+reads `ScriptContext.Hydrated`, never this dict.
+
 ### 2.2 The residual this leaves, and why it is not closable here
 
-An op whose script enumerates `state.items()` / `values()` **and** emits `external.*` still splits on a
-surplus sensitive declared read: present → recorded → consumed by the enumeration → `DDLViolation`;
-absent → commits. That flip is *correct* (the plaintext genuinely reached the script), so the residual is
-inherent to a guard keyed on consumption. Closing it needs the declared read set validated against the
-actor's read scope — read-path authorization, D1, Andrew's fork (§1.2 of the oracle design).
+An op whose script takes a **whole-set** exposure — `state.items()`, `state.values()`, or any rendering of
+`state` (§2.1) — **and** emits `external.*` still splits on a surplus sensitive declared read: present →
+recorded → consumed by the whole-set path → `DDLViolation`; absent → commits. That flip is *correct* (the
+data genuinely reached the script), so the residual is inherent to a guard keyed on consumption. Closing it
+needs the declared read set validated against the actor's read scope — read-path authorization, D1,
+Andrew's fork (§1.2 of the oracle design).
 
-**No live victim:** no `packages/` script enumerates `state.items()` / `values()` at all (the only
-enumerating call sites are `internal/processor`'s own tests). Filed as a board row against D1, not built.
+**No live victim:** a corpus grep finds no `packages/` script using `state.items()`, `state.values()`,
+`str(state)` or `print(state)` — the only such call sites are `internal/processor`'s own tests. Filed as a
+board row against D1, not built.
 
 ### 2.3 What is deliberately unchanged
 
@@ -136,8 +174,9 @@ trips the guard no matter how the script reads it.
    flipping.
 2. Consume hooks: `kv.Read`'s hydrated branch + its lazy branch; `stateMapValue.Get`; `stateMapValue.Attr`
    re-binding `items` / `values`.
-3. Tests (§5) + comment truth-up on the tracker doc comment, `sensitive_decrypt.go`'s `egress` paragraph,
-   and `docs/components/processor.md` where it states the hydration-time flip.
+3. Tests (§5) + comment truth-up on the tracker doc comment and `sensitive_decrypt.go`'s `egress`
+   paragraph. `docs/components/processor.md` needs no edit — it documents step 6's DDL checks and step
+   6.5's write-side encryption, never the read-side tracker, so there is no drift there to fix.
 
 ## 5. Security proof obligations
 
@@ -151,6 +190,11 @@ Each negative vector verified non-vacuous by reverting the mechanism it pins.
   via `state.get(K)`, via `K in state`, and via a lazy undeclared `kv.Read`.
 - **Enumeration of values flips.** `for k, v in state.items()` and `for v in state.values()` reject
   (§2.1) — the vector that pins the leak under-flipping would open.
+- **Whole-set rendering flips.** `str`/`repr`/`%`/`.format`/`+` on `state` reject, and the vector first
+  asserts the rendered string actually contains the plaintext so it cannot pass vacuously (§2.1).
+- **The attribute surface is default-deny.** `state.pop` / `setdefault` / `popitem` / `clear` / `update`
+  are unreachable (§2.1.1), and the four allowlisted accessors all still work — the deny must not have
+  swallowed the real surface.
 - **Enumeration of keys does not flip.** `for k in state` and `state.keys()` commit.
 - **Non-sensitive working set never flips.** A script that reads its whole non-sensitive state via every
   path above and emits `external.*` commits.
@@ -165,6 +209,19 @@ Each negative vector verified non-vacuous by reverting the mechanism it pins.
 Read-scope authorization of declared keys (D1, Andrew's fork). Changing the guard's constraint name,
 message, or external-egress-only scope. Changing the `egressReads` ref disposition. The §2.2 enumerating
 residual. Any package/FE work — `internal/processor` only.
+
+### 6.1 Contract edits prepared (UNCOMMITTED, for Andrew)
+
+Two, both in `main`, uncommitted per CLAUDE.md — the diffs are the proposals.
+
+- **Contract #3 §sensitive-aspect, external-egress guard** — stated the guard as "must not have
+  **decrypted** sensitive plaintext". The trigger is now **consumption**, and "readable" is not
+  "decrypted" (§2.1.1's no-Vault case). Rewritten with the oracle rationale.
+- **Contract #2 §2.5** — the deferred-miss paragraph a prior fire left uncommitted listed *enumeration*
+  among the paths that raise `HydrationMiss`. It does not, deliberately and test-enforced
+  (`TestRequiredAbsent_EnumerationDoesNotFault`); the distinction is load-bearing for §2.1 here. Corrected
+  in place rather than left for Andrew to ratify a wrong sentence. Not this fire's proposal — flagged so it
+  is not mistaken for one.
 
 ## 7. Build note — fire brief (Phase 0, 2026-07-25)
 
@@ -185,8 +242,10 @@ nothing else; the guard, the ref disposition, and `optionalReads`' absence seman
 | `internal/processor/starlark_kv.go:82-84` | hydrated `kv.Read` branch → `consume(key)` |
 | `internal/processor/starlark_kv.go:114-122` | lazy `kv.Read` branch → `consume(key)` |
 | `internal/processor/starlark_runner.go:445-449` | `stateMapValue` gains `sensitiveReads` |
+| `internal/processor/starlark_runner.go:451` | `String` → `consumeAll()` (§2.1) |
 | `internal/processor/starlark_runner.go:458-466` | `Get` → `consume(key)` |
-| `internal/processor/starlark_runner.go:498-501` | `Attr` re-binds `items` / `values` → `consumeAll()` |
+| `internal/processor/starlark_runner.go:486-488` | `AttrNames` → the `stateAttrs` allowlist (§2.1.1) |
+| `internal/processor/starlark_runner.go:498-501` | `Attr` re-binds `items` / `values` → `consumeAll()`; default-denies the rest |
 | `internal/processor/starlark_runner.go:521-527` | wire `sc.SensitiveReads` into the wrapper |
 
 **Precedents to mirror:** `deferredMissTracker` (same file) for the nil-safe shared-pointer tracker

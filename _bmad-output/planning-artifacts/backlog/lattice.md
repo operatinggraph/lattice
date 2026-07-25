@@ -107,18 +107,20 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top picks, all needing no new design: the **sensitive-read tracker** row
-> (★★ M — the named residual of the just-closed existence oracle), the two **appsession** rows (★★ M
+> 🎯 **Build-ready now.** Top picks, all needing no new design: the two **appsession** rows (★★ M
 > each — the production IdP posture blocks any non-loopback deploy, and CSRF bites as soon as two FEs
-> are co-hosted), then `actor-aggregate backfill` (★★ S–M, named live consumer) and
-> `lint-package-standard` (★★ M). Every `✅ ratified` row is done or driver-blocked; the rest are
+> are co-hosted), then `actor-aggregate backfill` (★★ S–M, named live consumer),
+> `lint-package-standard` (★★ M), the **unbounded declared-read count** (★★ S–M) and
+> `print(state)` PII-to-stderr (★★ XS). Every `✅ ratified` row is done or driver-blocked; the rest are
 > Whetstone's or parking-lot. The Designer still needs to restock. A stale callout starves the lane —
 > whoever ships next renames this.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|
-| **[Processor] Sensitive-read tracker flips at hydration, not at consumption** | Step 4 flips `plaintextRead` when it decrypts a present declared key, and step 6's egress guard rejects an `external.*` emitter that read plaintext — so a surplus declared read of a sensitive-classed key still splits accept from `DDLViolation`. Fix: key the tracker on what the script consumed. | ★★ | M | 🏗️ building · [design](../../implementation-artifacts/sensitive-read-tracker-consumption-design.md) · next: Inc 1 tracker records |
+| **[Processor] Whole-set `state` exposure remains an existence oracle for sensitive classes** | A guard keyed on consumption still splits on a surplus sensitive declared read when the script takes a whole-set exposure (`items()`/`values()`/rendering `state`) — the flip is correct, so only read-scope validation of the declared set closes it. | ★ | S | 🚧 seq behind read-path auth (D1) · [design §2.2](../../implementation-artifacts/sensitive-read-tracker-consumption-design.md) · no live victim (no package script does it) |
+| **[Processor] `print(state)` writes decrypted PII to the Processor's stderr** | `starlarksandbox` never sets `thread.Print`, so Starlark's `print` falls back to `os.Stderr` and renders values — a script printing `state` logs sensitive plaintext, before any guard runs, and a rejected commit does not un-log it. Fix: set a dropping/redacting sink. | ★★ | XS | 📋 ready · consumer: any package script author who debugs with `print` |
+| **[Processor] The sensitive predicate misses instanceOf-chained classes and links entirely** | Both the encrypt (step 6.5) and decrypt-on-read paths resolve `sensitive` by exact `DDLs.Lookup`, not step 6's `instanceOf` chain walk; and step 6 gates the sensitive write-scope on `KindAspect`, so a `Sensitive: true` **link** class is never rejected, never encrypted, and `kv.Links` never applies the read disposition to it. | ★ | S–M | 📋 ready · no live victim (every shipped sensitive DDL registers under its exact name; no sensitive link class) |
 | **[Processor] Declared-read count is unbounded at the envelope** | `ParseEnvelope` caps neither `reads`/`optionalReads`/`egressReads` length nor total. A declared read no longer short-circuits hydration, so an envelope naming N absent keys costs N sequential Core-KV GETs and then commits. Needs an envelope-level bound (Contract #2 §2.4 validation). | ★★ | S–M | 📋 ready · consumer: any actor holding any op grant |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
@@ -189,6 +191,7 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
 
+- 2026-07-25 · `ae05f60a` · [processor] the external-egress guard fires on what the script CONSUMED, not on what hydration decrypted — closes the sensitive-class oracle; whole-set exposure records, `state` attrs default-deny
 - 2026-07-25 · `3a78c109` · [processor] a declared read faults where the operation NAMES the key, not at hydration — closes the pre-script Core-KV existence oracle; enumeration deliberately does not fault
 - 2026-07-24 · `10f01e71` · [lint,clinic-domain] a declaration binds to its own statement, not the next 8 lines (12 drifted sites fixed); clinic keys its exemption on `op.authTargetValidated`, `(legacy-self-exempt)` deleted
 - 2026-07-24 · `185a47ee` · [edge-manifest,test] the generated cap-read producer driven through the projection driver — an emptied slice retracts its key, a reachable actor keeps every real entry
