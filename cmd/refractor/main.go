@@ -374,36 +374,51 @@ func main() {
 	// cycle), so the backstop alert survives a LagPoller stall (design §5.5).
 	hb.LensProvider = func() []health.LensLivenessStatus {
 		mu.Lock()
-		entries := make([]*pipelineEntry, 0, len(registry))
-		for _, entry := range registry {
+		entries := make([]capLensEntry, 0, len(registry))
+		for lensID, entry := range registry {
 			if !entry.authPlane && entry.pipeline != nil && entry.reporter != nil {
-				entries = append(entries, entry)
+				entries = append(entries, capLensEntry{lensID: lensID, entry: entry})
 			}
 		}
 		mu.Unlock()
 
 		out := make([]health.LensLivenessStatus, 0, len(entries))
-		for _, entry := range entries {
+		for _, ent := range entries {
+			entry := ent.entry
+			// The rule ID comes from the registry, not the health entry, so an
+			// unreadable lens is still identifiable below — and an unnamed lens
+			// never lands under the empty key and collides with the next one.
+			snap := health.LensLivenessStatus{
+				CanonicalName: entry.canonicalName,
+				RuleID:        ent.lensID,
+			}
+			// A lens whose liveness inputs cannot be read is reported as
+			// unknown, never omitted: dropping it removes the lens from
+			// metrics.lensLiveness entirely, which is indistinguishable from a
+			// lens that was never installed — the read model going unobserved
+			// would read as nothing being wrong.
 			st, err := entry.reporter.GetStatus(context.Background())
 			if err != nil {
+				snap.Status = "unknown"
+				snap.Unreadable = "lens health entry: " + err.Error()
+				out = append(out, snap)
 				continue
 			}
 			pending, err := entry.pipeline.Pending(context.Background())
 			if err != nil {
+				snap.Status = "unknown"
+				snap.Unreadable = "consumer pending count: " + err.Error()
+				out = append(out, snap)
 				continue
 			}
-			pauseReason := ""
 			if st.PauseReason != nil {
-				pauseReason = *st.PauseReason
+				snap.PauseReason = *st.PauseReason
 			}
-			out = append(out, health.LensLivenessStatus{
-				CanonicalName:   entry.canonicalName,
-				RuleID:          st.RuleID,
-				Status:          st.Status,
-				PauseReason:     pauseReason,
-				ProjectionLag:   pending,
-				LastProjectedAt: entry.pipeline.Progress().LastProjectedAt,
-			})
+			snap.RuleID = st.RuleID
+			snap.Status = st.Status
+			snap.ProjectionLag = pending
+			snap.LastProjectedAt = entry.pipeline.Progress().LastProjectedAt
+			out = append(out, snap)
 		}
 		return out
 	}

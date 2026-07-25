@@ -464,7 +464,7 @@ currently reserved-but-unemitted.
       "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | sweep-stalled | lagging", "reconciled": <uint64>, "failingActors": <int>, "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "projectionLag": <uint64>, "lastProjectedAt": "<RFC3339>", "alert": "ok | paused | lagging"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | paused | unreadable | lagging", "unreadable": "<string>"}
     }
   },
   "issues": [
@@ -476,6 +476,7 @@ currently reserved-but-unemitted.
     {"code": "CapabilityLensUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensProjectionUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
   ]
 }
@@ -491,7 +492,14 @@ generalized sibling of `CapabilityLens{Paused,Lagging}`: same raise-after-N / cl
 debounce (default threshold 100, raise after 3 consecutive over-threshold cycles), but
 always `severity: warning` (⇒ `status: degraded`) even when paused — a single frozen
 business lens is a real outage for that vertical but must not escalate the whole
-Refractor instance to `unhealthy` the way a frozen auth-plane lens does. Each `issues[]`
+Refractor instance to `unhealthy` the way a frozen auth-plane lens does.
+
+`LensProjectionUnreadable` is the general-lens mirror of `CapabilityLensUnreadable`, with
+the same meaning and the same `warning` severity: a business lens whose liveness inputs
+could not be read this cycle is reported `status: "unknown"`, `alert: "unreadable"`,
+`projectionLag: null` and an `unreadable` field naming the failed read — never dropped from
+`metrics.lensLiveness`. An absent lens is indistinguishable from one that was never
+installed, which is the monitoring equivalent of reporting healthy. Each `issues[]`
 entry's `since` persists across heartbeats while the condition holds and is dropped once
 it resolves.
 

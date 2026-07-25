@@ -122,6 +122,12 @@ const (
 	defaultLensLagRaiseCycles  = 3
 	issueLensProjectionPaused  = "LensProjectionPaused"
 	issueLensProjectionLagging = "LensProjectionLagging"
+	// issueLensProjectionUnreadable is raised when a business lens's liveness
+	// inputs cannot be read. The general-lens mirror of
+	// CapabilityLensUnreadable: an unobserved read model must say so rather
+	// than vanish from the metric map, where it is indistinguishable from a
+	// lens that never existed.
+	issueLensProjectionUnreadable = "LensProjectionUnreadable"
 )
 
 // issueLensRegistryIncomplete is the registry-reconciliation-probe issue
@@ -188,10 +194,17 @@ type CapabilityLensStatus struct {
 type LensLivenessStatus struct {
 	CanonicalName   string
 	RuleID          string
-	Status          string // "active" | "paused" | "rebuilding"
+	Status          string // "active" | "paused" | "rebuilding" | "unknown"
 	PauseReason     string // "" when not paused
 	ProjectionLag   uint64
 	LastProjectedAt time.Time // zero if never projected
+	// Unreadable, when non-empty, is the error that stopped this cycle from
+	// reading the lens's liveness inputs. Status/ProjectionLag are then not to be
+	// trusted, and the snapshot exists only so the lens keeps its place in the
+	// metric map with an honest "we cannot tell" — dropping it is
+	// indistinguishable from a lens that was never installed, which is the
+	// quietest way for a read model to go unobserved.
+	Unreadable string
 }
 
 // issueRecord is one entry of the Health-KV `issues` array (Contract #5 §5.5).
@@ -994,12 +1007,32 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 
 	snaps := h.LensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging []string
+	var paused, lagging, unreadable []string
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := lensName(s)
 		seen[name] = struct{}{}
 		alert := "ok"
+		if s.Unreadable != "" {
+			// The reporter-derived inputs (status, pause reason, projection lag)
+			// are the untrusted ones, so their thresholds are skipped rather
+			// than applied to a zero — a lens whose lag is unknown must not read
+			// as a lens with lag 0. The streak resets with them, exactly as the
+			// auth-plane path does: an unreadable cycle is not evidence either
+			// way, and carrying a partial streak across it would let a lag alert
+			// raise on cycles that never measured anything.
+			alert = "unreadable"
+			unreadable = append(unreadable, fmt.Sprintf("%s (%s)", name, s.Unreadable))
+			h.resetLensLagState(name)
+			metric[name] = map[string]any{
+				"status":          s.Status,
+				"projectionLag":   nil,
+				"lastProjectedAt": "",
+				"alert":           alert,
+				"unreadable":      s.Unreadable,
+			}
+			continue
+		}
 		switch s.Status {
 		case "paused":
 			alert = "paused"
@@ -1045,6 +1078,13 @@ func (h *LatticeHeartbeater) evalLenses(now time.Time) (map[string]map[string]an
 			severity: "warning",
 			message: fmt.Sprintf("lens projection lag exceeds threshold %d; its read model may be stale: %s",
 				threshold, strings.Join(lagging, ", ")),
+		}
+	}
+	if len(unreadable) > 0 {
+		active[issueLensProjectionUnreadable] = capIssue{
+			severity: "warning",
+			message: "lens liveness inputs could not be read, so this lens's read model is unobserved rather than known-healthy: " +
+				strings.Join(unreadable, ", "),
 		}
 	}
 	return metric, h.reconcileLensIssues(active, now)
