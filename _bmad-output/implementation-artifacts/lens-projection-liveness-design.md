@@ -695,3 +695,94 @@ shipped was `go test ./... | grep -E '^(FAIL|--- FAIL)' | head`, whose exit stat
 element of the pipe, never from `go test`. It reported success for a run that had already failed.
 A verification command whose exit code cannot observe the thing it verifies is not a gate — redirect
 to a file and check `$?`.
+
+## 13. Fire 8 — the grant family is guarded in SQL and unguarded in accounting (build note / fire brief)
+
+`8400efd7` settled that the projection-write guard belongs to the **lens**, not to one adapter
+instance, and enforced it through `projection.RequiresGuard`. This fire is the discovery that one
+whole adapter family sits outside that accounting: `GrantWriterAdapter` writes the read-auth source
+of truth under an **unconditional** SQL seq guard, while reporting no guardedness at all — so every
+pipeline path that asks "is this adapter guarded?" is told *no* about an adapter whose writes the
+storage layer is silently ordering.
+
+**Scope sentence (verbatim, from the board row).** *"[Refractor] `GrantWriterAdapter` carries the
+phantom-`Wrote` shape — its SQL guard is UPDATE-conditioned (`rls.go:295-329`), so a present-row
+write at token 0 no-ops and returns nil, which `Reproject` books as a heal. It implements neither
+`RowReader` nor a guardedness signal, so the KV-family refusal cannot see it. Same defect class as
+`eae71b82`, on the read-grant table."*
+
+### 13.1 Scope-diff gate — the row's remedy holds, its mechanism does not
+
+Run item-by-item against the row, narrow-only:
+
+- **`GrantWriterAdapter` implements no guardedness signal** — **CONFIRMED.**
+  `read_path_adapters.go:32-35` asserts `Adapter` + `KeyLister` only; there is no `Guarded()` method,
+  so the `adapter.SeqGuarded` assertion fails for it. **This half is what the fire builds.**
+- **"…which `Reproject` books as a heal"** — **FALSIFIED, and the fire does not build against it.**
+  `Reproject` returns `ErrNotActorAggregate` (`reproject.go:102`) for any lens whose
+  `ProjectionKind != actorAggregate`, and **all seven** shipped `grantTable` lenses declare no
+  projection kind (enumerated over `internal/pkgregistry.All()`: `clinicPatientReadGrants`,
+  `clinicProviderReadGrants`, `providerIdentityReadGrants`, `patientIdentityReadGrants`,
+  `demoOperatorReadGrants`, `consoleOperatorReadGrants`, `staffReadGrants` — every one
+  `projectionKind: ""`). `GrantWriterAdapter` therefore **cannot reach** `out.Wrote = true`. The
+  phantom-heal framing is inherited from §12's NATS-KV case and does not transfer.
+- **`RowReader` is missing** — confirmed but **deliberately NOT built: it has no consumer.**
+  `GetRow` exists for exactly two callers — the Chronicler's event→row merge and `Reproject`'s
+  present/absent test — and neither reaches a grant lens. Adding it would be a speculative interface
+  with no caller, which the deferred-tail rule treats as worse than an honest omission. If a
+  `grantTable` + `actorAggregate` lens is ever declared, that is when `GetRow` earns its place.
+- **Same defect class as `eae71b82`** — **true, and more load-bearing than the row claims.** The
+  class is *"a guard the caller cannot see"*; `eae71b82`/`82f52fc4` fixed it where the caller was the
+  reconciler, and it is unfixed here where the callers are the three live pipeline paths below.
+
+**Net:** the row's **remedy** (give the adapter a guardedness signal) is right and ships; the row's
+**mechanism and consumer list** are corrected here, and the `RowReader` half is dropped as
+consumer-less. Narrowing only — no adjacent mechanism substituted.
+
+### 13.2 Grounded mechanism — why the accounting misses the whole family
+
+`GrantWriterAdapter`'s guard is **unconditional and structural**, not opt-in: `UpsertGrant`
+(`rls.go:295-308`) and `RevokeGrant` (`rls.go:316-330`) both end
+`WHERE EXCLUDED.projection_seq > "actor_read_grants".projection_seq`. There is no `SetGuarded`, no
+flag, no way to build one that is not guarded. Yet nothing reports this upward, because:
+
+- `projection.RequiresGuard` (`driver.go:240`) returns `false` at its first line for any lens that is
+  not `IsActorAggregate` — which is every grant lens. So `ApplyGuard` no-ops for the family.
+- `EnableProjectionGuard` (`driver.go:257`) accepts **only** `*adapter.NatsKVAdapter` and errors on
+  anything else. This is why the family had to fall outside the accounting to activate at all: if
+  `RequiresGuard` ever returned true for a grant lens, `buildAdapter` would fail it closed. The two
+  facts are load-bearing together — the exemption is what keeps grant lenses running, and it is also
+  what hides them.
+
+Three live paths ask `Guarded()` and are told *no* for a grant lens:
+
+1. **`pipeline.go:1397` — the adjacency-watch skip.** `runAdjWatch` is started for **every**
+   pipeline unconditionally (`pipeline.go:515`, no lens-kind condition), and the path carries **no
+   JetStream sequence**, so it writes at the sentinel `seq = 0`. The guarded-skip that exists to stop
+   exactly this does not fire, so a token-less write reaches `UpsertGrant`. Against an **absent** row
+   the plain `INSERT … VALUES (…, 0, false)` **lands** — an unordered, un-sequenced **live read
+   grant** in the table every protected table's RLS policy consults. (A *present* row is safe:
+   `0 > stored` fails, so neither a revoked grant's resurrection nor a fresh row's downgrade is
+   reachable — the exposure is creation, not resurrection.) This is the sharp end of the fire.
+2. **`pipeline.go:577` — rebuild force-truncate.** A guarded target forces truncation so a historical
+   replay does not leave rejected-write holes behind stored watermarks. A grant lens reports
+   unguarded, so the force does not fire, and a rebuild replays writes at sequences below what is
+   stored — silently dropped, leaving **holes in the read-grant table** (fail-closed: legitimate
+   reads denied).
+3. **`pipeline.go:478` — `HotReloadInto`'s refusal + latch.** The refusal cannot see the family, and
+   the "a guarded adapter arms the requirement wherever it arrives from" latch never arms.
+
+### 13.3 Shipped shape (increment 1)
+
+`GrantWriterAdapter` implements `adapter.SeqGuarded` with `Guarded() bool { return true }` — a
+constant, because the guard is a property of the SQL the type always issues, not of a settable flag.
+Compile-time `var _ SeqGuarded` assertions are added for **every** adapter that carries a guard, so a
+future adapter that gains one and forgets the signal fails the build instead of silently escaping
+all three paths. Tests cover the invariant and each of the three consumers.
+
+**Deliberately not in this increment**, filed as rows instead: `GrantWriterAdapter` implements no
+`Truncater`, so consumer (2) now takes the "truncate=true but adapter does not implement Truncater"
+warn-and-continue branch. That is strictly better than today (no force at all) but not the end state
+— a grant lens should truncate its own `grant_source`-scoped rows on rebuild. Filed with its
+consumer rather than improvised here, because truncating read grants is a transient total-denial
+window and wants its own review.
