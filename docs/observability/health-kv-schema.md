@@ -461,7 +461,7 @@ currently reserved-but-unemitted.
       }
     },
     "capabilityLens": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding", "consumerLag": <uint64>, "alert": "ok | paused | lagging | repair-failing", "reconciled": <uint64>, "failingActors": <int>}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | sweep-stalled | lagging", "reconciled": <uint64>, "failingActors": <int>, "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
     },
     "lensLiveness": {
       "<lensCanonicalName>": {"status": "active | paused | rebuilding", "projectionLag": <uint64>, "lastProjectedAt": "<RFC3339>", "alert": "ok | paused | lagging"}
@@ -472,6 +472,8 @@ currently reserved-but-unemitted.
     {"code": "CapabilityLensLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityCoverageDivergence", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
     {"code": "CapabilityRepairFailing", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilitySweepStalled", "severity": "warning | error", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "CapabilityLensUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
@@ -529,6 +531,62 @@ then backs off by doubling to a sixteen-pass ceiling — the backoff suppresses 
 streaks are per-process state (a restart opens a fresh escalation window and re-discovers
 a live failure on its first pass), unlike the cumulative `reconciled` counter, which is
 restored from this document.
+
+`CapabilitySweepStalled` watches the **detector's own liveness**, which is the blind spot
+every code above shares: each of them reports what the sweep's last completed pass found,
+so a sweep that stops passing keeps republishing that finding indefinitely. A tick the
+sweep *skips* records no verdict at all — it is suppressed while a rebuild is in flight,
+while the lens is paused, and (fail-closed) whenever its own health entry is unreadable —
+so a sweep held for hours reads exactly like a converged one: zero divergences, zero
+failures, `alert: "ok"`. `metrics.capabilityLens.<name>.sweepLastPassAt` is the clock that
+contradicts it (the last pass that reached a verdict, empty if none ever has) and
+`sweepSuppression` the reason the most recent tick was skipped (empty when it ran). The
+issue raises once that clock exceeds **10 sweep intervals** (~10 minutes at the 60s sweep
+default; `CapabilitySweepStallCycles` overrides the multiplier), scaled off the sweep's own
+cadence rather than a second tuned duration, and generously, because a suppressed sweep is
+a *detector* outage rather than a data outage.
+
+Severity keys on whether anything explains the stall, and for how long:
+
+- **No fresh suppression reason ⇒ `error` immediately.** The sweep should be ticking and is
+  not — a dead goroutine, or a pass wedged inside a read. Nothing will clear it on its own.
+  `sweepSuppression` is only trusted for ~2 intervals after it was recorded, because the
+  reason describes the *last* tick: a sweep wedged mid-tick keeps publishing the previous
+  tick's reason, and taking that at face value would report a wedged sweep as a merely
+  suppressed one.
+- **A named cause ⇒ `warning`, escalating to `error` at 3× the window** (~30 minutes at the
+  defaults). A named cause is something an operator can clear; still unswept half an hour
+  later, nobody is clearing it.
+- **`status: "rebuilding"` ⇒ `warning`, never escalating.** A rebuild is a *superset* of the
+  sweep (truncate + full rescan), so a long one is not an unverified projection — the read
+  model is mid-refill, which is worth a degrade, but how long a rebuild may legitimately run
+  is the rebuild's own signal to own, not a verdict this detector can reach.
+- **`status: "paused"` ⇒ exempt entirely.** The suppression is deliberate, indefinite by
+  design, and already an error via `CapabilityLensPaused`; reporting it twice would make one
+  operator action look like two failures. The exemption also **re-baselines the clock**, so
+  resuming a lens paused for an hour does not immediately read as stalled for that hour —
+  its first pass after the resume is still an interval away.
+
+A lens with **no sweep plan installed** has no cadence to be late against and is never
+evaluated (`sweepLastPassAt` and `sweepSuppression` stay empty for it). That is every
+non-auth-plane target, and also the auth-plane **operation-aggregate** role-by-operation
+index, which is keyed by `operationType` rather than by an actor anchor and so has no anchor
+walk for a sweep to verify. A lens that has never swept is measured from when the
+heartbeater first saw it, not from process start, so a lens installed mid-run gets its own
+grace window.
+
+`CapabilityLensUnreadable` covers the case where the lens's liveness inputs — its health
+entry, or its consumer's pending count — cannot be read this cycle. Such a lens is reported
+with `status: "unknown"`, `alert: "unreadable"`, a `unreadable` field naming the failed
+read, and `consumerLag: null` — an explicit null, because "we could not read the lag" and
+"the lag is 0" are opposite facts that must not render identically. It is a `warning`, not
+an error: what failed is the observation path, and the projection itself may be perfectly
+healthy. The alert outranks every other value for that lens, since nothing else read this
+cycle is trustworthy — but the sweep verdicts still apply, because they come from the
+in-process sweeper rather than the health entry, so a live repair failure is not lost to an
+unreadable reporter. The one thing that must never happen is the lens *vanishing* from
+`metrics.capabilityLens`: an absent auth-plane lens is indistinguishable from one that was
+never installed, which is the monitoring equivalent of reporting healthy.
 
 ### `health.weaver.<instance>` — Weaver heartbeat
 

@@ -49,6 +49,20 @@ const (
 	// repair that errors heals nothing, so the divergent streak clears and
 	// every other signal reads as converged while the row stays wrong.
 	issueCapabilityRepairFailing = "CapabilityRepairFailing"
+	// issueCapabilitySweepStalled is raised when the sweep has reached no
+	// verdict for longer than its staleness window. It covers the blind spot of
+	// BOTH codes above: they are keyed on what the last pass found, and a sweep
+	// that stops passing keeps republishing that last finding forever. A
+	// suppressed tick (rebuild in flight, unreadable lens status) verifies
+	// nothing, so without this code a lens held suppressed indefinitely reads
+	// converged — the detector's own liveness needs its own signal.
+	issueCapabilitySweepStalled = "CapabilitySweepStalled"
+	// issueCapabilityLensUnreadable is raised when a lens's liveness inputs
+	// cannot be read this cycle. Its purpose is that such a lens is still
+	// REPORTED: an auth-plane lens missing from metrics.capabilityLens is
+	// indistinguishable from one that was never installed, which is the
+	// monitoring equivalent of reporting healthy.
+	issueCapabilityLensUnreadable = "CapabilityLensUnreadable"
 )
 
 // capabilityDivergenceErrorStreak is the number of CONSECUTIVE sweep passes
@@ -69,6 +83,35 @@ const (
 	capabilityRepairWarnStreak  = 2
 	capabilityRepairErrorStreak = 3
 )
+
+// defaultCapabilitySweepStallCycles is how many sweep intervals may elapse with
+// no verdict before CapabilitySweepStalled is raised — 10, so ~10 minutes at the
+// 60s sweep default. The window is scaled off the sweep's own cadence rather
+// than being a second independently-tuned duration, and it is generous on
+// purpose: a suppressed sweep is a *detector* outage, not a data outage, so
+// alerting inside one or two intervals would flag every ordinary rebuild.
+// Deployment-overridable via CapabilitySweepStallCycles.
+const defaultCapabilitySweepStallCycles = 10
+
+// capabilitySweepStallErrorMultiplier escalates a stall that has a named cause
+// from warning to error once it has lasted this many staleness windows — the
+// escalation ladder its sibling codes carry as streak counts. A named cause is
+// something an operator can clear, so the first window is a warning; still
+// unswept 30 minutes later (at the defaults) nobody is clearing it, and the
+// auth-plane read model has gone unverified long enough to outrank a degrade.
+// A rebuild is exempt from the escalation, never from the warning: a rebuild is
+// a SUPERSET of the sweep (truncate + full rescan), so a long one is not an
+// unverified projection — how long a rebuild may legitimately run is the
+// rebuild's own signal to own, not a verdict this detector can reach.
+const capabilitySweepStallErrorMultiplier = 3
+
+// capabilitySweepSuppressionFreshnessCycles bounds how old a recorded
+// suppression reason may be and still count as explaining the current stall.
+// The reason describes the last tick, so a sweep wedged INSIDE a tick keeps
+// publishing the previous tick's reason; without this bound a wedged sweep would
+// present as merely suppressed and be downgraded to a warning. Two intervals,
+// because the reason is refreshed once per interval while suppression holds.
+const capabilitySweepSuppressionFreshnessCycles = 2
 
 // defaultLensLagThreshold / defaultLensLagRaiseCycles mirror the capability-lens
 // defaults (lens-projection-liveness-design.md §5.7 — the cap path's
@@ -96,9 +139,16 @@ const issueLensRegistryIncomplete = "LensRegistryIncomplete"
 type CapabilityLensStatus struct {
 	CanonicalName string
 	RuleID        string
-	Status        string // "active" | "paused" | "rebuilding"
+	Status        string // "active" | "paused" | "rebuilding" | "unknown"
 	PauseReason   string // "" when not paused
 	ConsumerLag   uint64
+	// Unreadable, when non-empty, is the error that stopped this cycle from
+	// reading the lens's liveness inputs (its health entry or its consumer's
+	// pending count). Status/ConsumerLag are then not to be trusted, and the
+	// snapshot exists only so the lens keeps its place in the metric map with an
+	// honest "we cannot tell" — the alternative, dropping it, is indistinguishable
+	// from a lens that no longer exists.
+	Unreadable string
 	// SweepReconciled is the lens's cumulative count of divergent projections
 	// the convergence sweep has healed; SweepDivergentStreak is how many
 	// consecutive sweep passes have each healed at least one. Zero for a lens
@@ -115,6 +165,19 @@ type CapabilityLensStatus struct {
 	SweepFailingActors int
 	SweepFailedStreak  int
 	SweepLastFailure   string
+	// SweepLastPassAt is when the sweep last reached a verdict and SweepInterval
+	// its tick period; SweepSuppression names why the most recent tick was
+	// skipped ("" when it ran). Together they are the sweep's own liveness: every
+	// counter above describes the last pass, so a sweep that stops passing
+	// republishes a stale verdict indefinitely and only this clock contradicts it.
+	// SweepInterval is zero for a lens with no sweeper installed, which is what
+	// gates the staleness evaluation. SweepSuppressionAt is when the reason was
+	// recorded: it describes the LAST tick, so a stale one means the sweep is
+	// wedged rather than suppressed, and only the timestamp separates the two.
+	SweepLastPassAt    time.Time
+	SweepSuppression   string
+	SweepSuppressionAt time.Time
+	SweepInterval      time.Duration
 }
 
 // LensLivenessStatus is one non-auth-plane (business) lens's liveness snapshot,
@@ -249,6 +312,11 @@ type LatticeHeartbeater struct {
 	// clamped down to it (a band cannot invert).
 	CapabilityLensLagClearThreshold uint64
 
+	// CapabilitySweepStallCycles is how many sweep intervals may elapse with no
+	// verdict before CapabilitySweepStalled is raised. Zero selects
+	// defaultCapabilitySweepStallCycles.
+	CapabilitySweepStallCycles uint64
+
 	// LensLagThreshold / LensLagRaiseCycles / LensLagClearThreshold are the
 	// general-lens sibling of the CapabilityLensLag* fields above — same
 	// semantics, applied to non-auth-plane lenses. Zero selects
@@ -266,6 +334,15 @@ type LatticeHeartbeater struct {
 
 	// lagMu guards lagState.
 	lagMu sync.Mutex
+	// sweepBase is the floor under each capability lens's sweep-staleness clock,
+	// keyed by capLensName and guarded by lagMu alongside lagState (same per-lens
+	// cap-path state, pruned in the same place). It is stamped when a lens is
+	// first reported and moved forward while the lens is exempt from the verdict,
+	// so neither a lens that registered a moment ago nor one just resumed from a
+	// long pause is charged for time it could not have swept in. Deliberately NOT
+	// folded into lagState, which resetLagState deletes whenever a lens leaves the
+	// active state — precisely the case (rebuilding) this clock must survive.
+	sweepBase map[string]time.Time
 	// lagState holds the per-lens lag-hysteresis state (over-threshold streak +
 	// raised flag) keyed by capLensName, so the raise-after-N / clear-band debounce
 	// persists across heartbeats. Pruned each cycle to the lenses currently
@@ -509,36 +586,53 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 		clearThreshold = threshold
 	}
 
+	stallCycles := h.CapabilitySweepStallCycles
+	if stallCycles == 0 {
+		stallCycles = defaultCapabilitySweepStallCycles
+	}
+
 	snaps := h.CapabilityLensProvider()
 	metric := make(map[string]map[string]any, len(snaps))
-	var paused, lagging, diverging, unrepaired []string
+	var paused, lagging, diverging, unrepaired, stalled, unreadable []string
 	divergenceSeverity := ""
 	repairSeverity := ""
+	stallSeverity := ""
 	seen := make(map[string]struct{}, len(snaps))
 	for _, s := range snaps {
 		name := capLensName(s)
 		seen[name] = struct{}{}
 		alert := "ok"
-		switch s.Status {
-		case "paused":
-			alert = "paused"
-			reason := s.PauseReason
-			if reason == "" {
-				reason = "unknown"
-			}
-			paused = append(paused, fmt.Sprintf("%s (%s)", name, reason))
-			// A paused lens is a hard error; its lag debounce is irrelevant and
-			// must not carry a stale streak into the next active cycle.
+		if s.Unreadable != "" {
+			// Only the reporter-derived inputs are untrusted (status, pause
+			// reason, consumer lag), so the status/lag thresholds are skipped
+			// rather than applied to a zero — a lens whose lag is unknown must
+			// not read as a lens with lag 0. The sweep verdicts below come from
+			// the in-process sweeper, which is unaffected, so they still count.
+			alert = "unreadable"
+			unreadable = append(unreadable, fmt.Sprintf("%s (%s)", name, s.Unreadable))
 			h.resetLagState(name)
-		case "active":
-			if h.evalLagHysteresis(name, s.ConsumerLag, threshold, clearThreshold, int(raiseCycles)) {
-				alert = "lagging"
-				lagging = append(lagging, fmt.Sprintf("%s (lag %d)", name, s.ConsumerLag))
+		} else {
+			switch s.Status {
+			case "paused":
+				alert = "paused"
+				reason := s.PauseReason
+				if reason == "" {
+					reason = "unknown"
+				}
+				paused = append(paused, fmt.Sprintf("%s (%s)", name, reason))
+				// A paused lens is a hard error; its lag debounce is irrelevant and
+				// must not carry a stale streak into the next active cycle.
+				h.resetLagState(name)
+			case "active":
+				if h.evalLagHysteresis(name, s.ConsumerLag, threshold, clearThreshold, int(raiseCycles)) {
+					alert = "lagging"
+					lagging = append(lagging, fmt.Sprintf("%s (lag %d)", name, s.ConsumerLag))
+				}
+			default:
+				// rebuilding (or any non-active, non-paused state): not lagging; clear
+				// any pending streak.
+				h.resetLagState(name)
 			}
-		default:
-			// rebuilding (or any non-active, non-paused state): not lagging; clear
-			// any pending streak.
-			h.resetLagState(name)
 		}
 		// The sweep's coverage verdict is independent of the consumer's own
 		// state: a lens can be active and caught-up while its projection has a
@@ -582,17 +676,78 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			// beats a read-model that is merely behind. Neither displaced fact
 			// is lost — `consumerLag` carries the lag value in this same map,
 			// and each condition raises its own issue.
-			if alert != "paused" {
+			if alert != "paused" && alert != "unreadable" {
 				alert = "repair-failing"
 			}
 		}
-		metric[name] = map[string]any{
-			"status":        s.Status,
-			"consumerLag":   s.ConsumerLag,
-			"alert":         alert,
-			"reconciled":    s.SweepReconciled,
-			"failingActors": s.SweepFailingActors,
+		// Every verdict above describes the last pass the sweep completed, so a
+		// sweep that has stopped passing keeps republishing them — the detector's
+		// own liveness is the one thing none of them can report. A paused lens is
+		// excluded: its suppression is deliberate, indefinite by design, and
+		// already an error in its own right, so stalling on it is not news. The
+		// exclusion also re-baselines the clock, so resuming a long pause does not
+		// start the lens off already stalled for the length of the pause.
+		stallAfter := time.Duration(stallCycles) * s.SweepInterval
+		stalledFor, isStalled := time.Duration(0), false
+		switch {
+		case s.SweepInterval <= 0 || stallAfter <= 0:
+			// No sweeper installed (or a window so large it overflowed): there is
+			// no cadence to be late against.
+		case s.Status == "paused":
+			h.rebaseSweepClock(name, now)
+		default:
+			stalledFor, isStalled = h.evalSweepStall(name, now, s.SweepLastPassAt, stallAfter)
 		}
+		if isStalled {
+			detail := fmt.Sprintf("%s (no verdict for %s", name, stalledFor.Round(time.Second))
+			// A reason recorded more than a couple of intervals ago does not
+			// describe the current tick — the sweep is wedged, not suppressed.
+			explained := s.SweepSuppression != "" &&
+				now.Sub(s.SweepSuppressionAt) <= time.Duration(capabilitySweepSuppressionFreshnessCycles)*s.SweepInterval
+			switch {
+			case !explained:
+				detail += ", no suppression recorded — the sweep is not ticking"
+				stallSeverity = "error"
+			case s.Status == "rebuilding":
+				detail += ", suppressed: " + s.SweepSuppression
+				if stallSeverity == "" {
+					stallSeverity = "warning"
+				}
+			case stalledFor > time.Duration(capabilitySweepStallErrorMultiplier)*stallAfter:
+				detail += ", suppressed: " + s.SweepSuppression
+				stallSeverity = "error"
+			default:
+				detail += ", suppressed: " + s.SweepSuppression
+				if stallSeverity == "" {
+					stallSeverity = "warning"
+				}
+			}
+			stalled = append(stalled, detail+")")
+			if alert == "ok" || alert == "lagging" {
+				alert = "sweep-stalled"
+			}
+		}
+		lastPassAt := ""
+		if !s.SweepLastPassAt.IsZero() {
+			lastPassAt = substrate.FormatTimestamp(s.SweepLastPassAt)
+		}
+		entryMetric := map[string]any{
+			"status":           s.Status,
+			"alert":            alert,
+			"reconciled":       s.SweepReconciled,
+			"failingActors":    s.SweepFailingActors,
+			"sweepLastPassAt":  lastPassAt,
+			"sweepSuppression": s.SweepSuppression,
+		}
+		if s.Unreadable != "" {
+			// An explicit null, not a zero: "we could not read the lag" and "the
+			// lag is 0" are opposite facts and must not render identically.
+			entryMetric["consumerLag"] = nil
+			entryMetric["unreadable"] = s.Unreadable
+		} else {
+			entryMetric["consumerLag"] = s.ConsumerLag
+		}
+		metric[name] = entryMetric
 	}
 	h.pruneLagState(seen)
 
@@ -624,6 +779,22 @@ func (h *LatticeHeartbeater) evalCapabilityLenses(now time.Time) (map[string]map
 			message: "the convergence sweep could not repair a divergent capability projection; the row stays wrong " +
 				"and no other signal reports it, because a failed repair heals nothing and so clears the divergence " +
 				"streak: " + strings.Join(unrepaired, ", "),
+		}
+	}
+	if len(stalled) > 0 {
+		active[issueCapabilitySweepStalled] = capIssue{
+			severity: stallSeverity,
+			message: "the auth-plane convergence sweep has reached no verdict within its staleness window; every " +
+				"other capability signal reports the last pass that ran, so an indefinitely suppressed sweep " +
+				"publishes a converged verdict over a projection nothing is checking: " + strings.Join(stalled, ", "),
+		}
+	}
+	if len(unreadable) > 0 {
+		active[issueCapabilityLensUnreadable] = capIssue{
+			severity: "warning",
+			message: "a capability lens's liveness inputs could not be read this cycle, so its pause state and " +
+				"consumer lag are unknown rather than healthy (the projection itself may be fine — what failed " +
+				"is the observation path): " + strings.Join(unreadable, ", "),
 		}
 	}
 	return metric, h.reconcileCapIssues(active, now)
@@ -691,6 +862,49 @@ func (h *LatticeHeartbeater) evalLagHysteresis(name string, lag, threshold, clea
 	return st.raised
 }
 
+// sweepClockBase returns the lens's staleness baseline, stamping it at now if it
+// has none yet. The baseline is the floor under the staleness clock: a lens that
+// has never swept, or one whose last pass predates the baseline, is measured from
+// here rather than from the instance's start — a lens installed (or resumed)
+// mid-run has legitimately not swept yet, and its first pass is one interval away
+// from ITS activation, not from boot.
+func (h *LatticeHeartbeater) sweepClockBase(name string, now time.Time) time.Time {
+	h.lagMu.Lock()
+	defer h.lagMu.Unlock()
+	if h.sweepBase == nil {
+		h.sweepBase = map[string]time.Time{}
+	}
+	if base, ok := h.sweepBase[name]; ok {
+		return base
+	}
+	h.sweepBase[name] = now
+	return now
+}
+
+// rebaseSweepClock moves a lens's staleness baseline forward — used while the
+// lens is exempt from the staleness verdict, so the exempt period is not counted
+// against it once the exemption lifts.
+func (h *LatticeHeartbeater) rebaseSweepClock(name string, now time.Time) {
+	h.lagMu.Lock()
+	defer h.lagMu.Unlock()
+	if h.sweepBase == nil {
+		h.sweepBase = map[string]time.Time{}
+	}
+	h.sweepBase[name] = now
+}
+
+// evalSweepStall reports how long the sweep has gone without a verdict and
+// whether that exceeds stallAfter, measured from the later of the lens's last
+// verdict and its staleness baseline.
+func (h *LatticeHeartbeater) evalSweepStall(name string, now, lastPassAt time.Time, stallAfter time.Duration) (time.Duration, bool) {
+	since := h.sweepClockBase(name, now)
+	if lastPassAt.After(since) {
+		since = lastPassAt
+	}
+	elapsed := now.Sub(since)
+	return elapsed, elapsed > stallAfter
+}
+
 // resetLagState clears one lens's lag-debounce state — used when a lens leaves
 // the active state (paused/rebuilding), where lag is not a meaningful signal.
 func (h *LatticeHeartbeater) resetLagState(name string) {
@@ -699,14 +913,20 @@ func (h *LatticeHeartbeater) resetLagState(name string) {
 	delete(h.lagState, name)
 }
 
-// pruneLagState drops debounce state for lenses no longer reported this cycle,
-// keeping the map bounded to live lenses (mirrors reconcileCapIssues).
+// pruneLagState drops per-lens cap-path state — lag debounce and sweep first-seen
+// — for lenses no longer reported this cycle, keeping both maps bounded to live
+// lenses (mirrors reconcileCapIssues).
 func (h *LatticeHeartbeater) pruneLagState(seen map[string]struct{}) {
 	h.lagMu.Lock()
 	defer h.lagMu.Unlock()
 	for name := range h.lagState {
 		if _, ok := seen[name]; !ok {
 			delete(h.lagState, name)
+		}
+	}
+	for name := range h.sweepBase {
+		if _, ok := seen[name]; !ok {
+			delete(h.sweepBase, name)
 		}
 	}
 }

@@ -60,7 +60,26 @@ type SweepStatus struct {
 	Reconciled      uint64
 	DivergentStreak int
 	Cursor          string
-	LastPassAt      time.Time
+	// LastPassAt is when a pass last reached a verdict — a completed tick or a
+	// pass-level fault, never a suppressed one. It is the sweep's liveness
+	// clock: every counter below describes the last pass that ran, so a sweep
+	// that stops running keeps publishing its final verdict forever, and only
+	// this timestamp says the verdict is old. Zero until the first verdict.
+	LastPassAt time.Time
+	// Suppression names why the most recent tick was skipped without verifying
+	// anything ("" when the last tick ran), and SuppressionAt when that was
+	// recorded. A suppressed tick is legitimate — a rebuild supersedes the sweep,
+	// an operator pause outranks it — but it is indefinite: whatever holds the
+	// condition holds the sweep, so the reason travels to the heartbeat rather
+	// than being logged and dropped.
+	//
+	// The timestamp is what makes the reason trustworthy. It describes the last
+	// tick, so a tick that never returns (a read wedged inside the suppression
+	// check itself) leaves the previous tick's reason standing, and a reader
+	// with no clock would take a wedged sweep for a merely-suppressed one. A
+	// consumer must treat a reason older than a couple of intervals as absent.
+	Suppression   string
+	SuppressionAt time.Time
 	// FailingActors is how many anchors currently carry an unrepaired
 	// reprojection failure, and FailedStreak how many consecutive passes ended
 	// with at least one failure (per-actor, or a pass-level fault that stopped
@@ -198,32 +217,42 @@ func (s *Sweeper) restore(ctx context.Context) {
 	s.mu.Unlock()
 }
 
-// suppressed reports whether this tick must be skipped. A rebuild is a superset
-// of the sweep (truncate + full rescan), and a paused pipeline is operator
-// intent that reconciliation must not quietly override.
-func (s *Sweeper) suppressed(ctx context.Context) bool {
+// suppressed reports why this tick must be skipped, or "" to run it. A rebuild
+// is a superset of the sweep (truncate + full rescan), and a paused pipeline is
+// operator intent that reconciliation must not quietly override.
+//
+// The reason is returned rather than a bare bool because every suppression cause
+// is held by something external to the sweep — a rebuild that never finishes, a
+// pause nobody lifts, a health entry that stays unreadable — so "skipped" is not
+// a transient state the next tick clears, and the operator needs the cause.
+func (s *Sweeper) suppressed(ctx context.Context) string {
 	if s.p.RebuildInFlight() {
-		return true
+		return "rebuild in flight"
 	}
 	if s.p.reporter == nil {
-		return false
+		return ""
 	}
 	entry, err := s.p.reporter.GetStatus(ctx)
 	if err != nil {
 		// Fail closed: an unreadable health entry means the pause state is
 		// unknown, and skipping one tick costs a minute of latency where
 		// sweeping through an operator pause costs correctness of intent.
-		return true
+		return "lens status unreadable: " + err.Error()
 	}
-	return entry.Status != "active"
+	if entry.Status != "active" {
+		return "lens status is " + entry.Status
+	}
+	return ""
 }
 
 // pass runs one bounded sweep tick: prefilter, deep verify, heal, then publish
 // the resulting status.
 func (s *Sweeper) pass(ctx context.Context) {
-	if s.suppressed(ctx) {
+	if reason := s.suppressed(ctx); reason != "" {
+		s.noteSuppressed(reason)
 		return
 	}
+	s.noteSuppressed("")
 
 	s.mu.Lock()
 	s.passNo++
@@ -274,6 +303,27 @@ func (s *Sweeper) pass(ctx context.Context) {
 
 	s.record(ctx, healed, nil)
 }
+
+// noteSuppressed records (or clears) the reason the last tick verified nothing.
+// It deliberately does NOT touch LastPassAt: a suppressed tick reached no
+// verdict, so the liveness clock must keep aging — that ageing is the only thing
+// that distinguishes a sweep held indefinitely from one that is simply converged
+// and quiet, since both publish identical counters.
+func (s *Sweeper) noteSuppressed(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.Suppression = truncateFailure(reason)
+	if reason == "" {
+		s.status.SuppressionAt = time.Time{}
+		return
+	}
+	s.status.SuppressionAt = time.Now()
+}
+
+// Interval is the sweep's tick period after defaults are applied. The heartbeat
+// reads it to scale its staleness window off the sweep's own cadence instead of
+// a second, independently-tuned constant.
+func (s *Sweeper) Interval() time.Duration { return s.interval }
 
 // backoffPasses is how many passes an actor sits out after its Nth consecutive
 // repair failure: none after the first (a transient write error deserves the

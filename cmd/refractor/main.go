@@ -289,59 +289,79 @@ func main() {
 	// CapabilityLensProvider for the heartbeater — liveness of the auth-plane
 	// (capability-kv) lenses for the §5.5 capability backstop. Read-only: status
 	// from the lens reporter, lag from the supervised consumer; no authz path,
-	// Core KV, or projection is touched. Errors collapse to a skipped lens.
+	// Core KV, or projection is touched. A read error yields an "unknown" lens,
+	// never a missing one.
+	type capLensEntry struct {
+		lensID string
+		entry  *pipelineEntry
+	}
 	hb.CapabilityLensProvider = func() []health.CapabilityLensStatus {
 		mu.Lock()
-		entries := make([]*pipelineEntry, 0, len(registry))
-		for _, entry := range registry {
+		entries := make([]capLensEntry, 0, len(registry))
+		for lensID, entry := range registry {
 			if entry.authPlane && entry.pipeline != nil && entry.reporter != nil {
-				entries = append(entries, entry)
+				entries = append(entries, capLensEntry{lensID: lensID, entry: entry})
 			}
 		}
 		mu.Unlock()
 
 		out := make([]health.CapabilityLensStatus, 0, len(entries))
-		for _, entry := range entries {
-			st, err := entry.reporter.GetStatus(context.Background())
-			if err != nil {
-				continue
-			}
-			pending, err := entry.pipeline.Pending(context.Background())
-			if err != nil {
-				continue
-			}
-			pauseReason := ""
-			if st.PauseReason != nil {
-				pauseReason = *st.PauseReason
+		for _, ent := range entries {
+			entry := ent.entry
+			// Both names come from the registry, not from the health entry, so
+			// the lens is identifiable in the metric map even on the branch below
+			// where nothing about it could be read — a canonical name is optional
+			// in a lens spec, and an unnamed lens must not land under the empty
+			// key and collide with the next one.
+			snap := health.CapabilityLensStatus{
+				CanonicalName: entry.canonicalName,
+				RuleID:        ent.lensID,
 			}
 			// The sweep's coverage and repair verdicts, read from the in-process
 			// sweeper rather than the persisted entry: the streaks are what
 			// escalate the issues, and they are per-run state the health entry
 			// deliberately does not carry (a restart starts a fresh escalation
 			// window, and re-discovers a live repair failure on its first pass).
-			var reconciled uint64
-			var divergentStreak, failingActors, failedStreak int
-			var lastFailure string
+			// Read before the reporter, because they stay valid even when it does
+			// not: an unreadable health entry is an observation fault, not a
+			// sweep one, and a live repair failure must not be lost to it.
 			if sw := entry.pipeline.Sweeper(); sw != nil {
 				status := sw.Status()
-				reconciled = status.Reconciled
-				divergentStreak = status.DivergentStreak
-				failingActors = status.FailingActors
-				failedStreak = status.FailedStreak
-				lastFailure = status.LastFailure
+				snap.SweepReconciled = status.Reconciled
+				snap.SweepDivergentStreak = status.DivergentStreak
+				snap.SweepFailingActors = status.FailingActors
+				snap.SweepFailedStreak = status.FailedStreak
+				snap.SweepLastFailure = status.LastFailure
+				snap.SweepLastPassAt = status.LastPassAt
+				snap.SweepSuppression = status.Suppression
+				snap.SweepSuppressionAt = status.SuppressionAt
+				snap.SweepInterval = sw.Interval()
 			}
-			out = append(out, health.CapabilityLensStatus{
-				CanonicalName:        entry.canonicalName,
-				RuleID:               st.RuleID,
-				Status:               st.Status,
-				PauseReason:          pauseReason,
-				ConsumerLag:          pending,
-				SweepReconciled:      reconciled,
-				SweepDivergentStreak: divergentStreak,
-				SweepFailingActors:   failingActors,
-				SweepFailedStreak:    failedStreak,
-				SweepLastFailure:     lastFailure,
-			})
+			// A lens whose liveness inputs cannot be read is reported as unknown,
+			// never omitted: dropping it removes the lens from
+			// metrics.capabilityLens entirely, which is indistinguishable from a
+			// lens that was never installed — the auth-plane read model going
+			// unobserved would read as nothing being wrong.
+			st, err := entry.reporter.GetStatus(context.Background())
+			if err != nil {
+				snap.Status = "unknown"
+				snap.Unreadable = "lens health entry: " + err.Error()
+				out = append(out, snap)
+				continue
+			}
+			pending, err := entry.pipeline.Pending(context.Background())
+			if err != nil {
+				snap.Status = "unknown"
+				snap.Unreadable = "consumer pending count: " + err.Error()
+				out = append(out, snap)
+				continue
+			}
+			if st.PauseReason != nil {
+				snap.PauseReason = *st.PauseReason
+			}
+			snap.Status = st.Status
+			snap.ConsumerLag = pending
+			out = append(out, snap)
 		}
 		return out
 	}

@@ -571,9 +571,28 @@ structurally — the driver simply never installs a `SweepPlan` for it.
   that leaves both listings is reaped, so a departed anchor cannot pin the alert open.
   Pass-level faults (unreadable survey, a tick abandoned before it verified anything) raise
   it too.
-- The sweep suppresses itself while a rebuild is in flight (a rebuild is a superset) and
-  while the lens is paused (operator intent wins). The cursor and heal count persist on the
-  lens's existing health entry, so a restart resumes rather than restarts the walk.
+- The sweep suppresses itself while a rebuild is in flight (a rebuild is a superset), while
+  the lens is paused (operator intent wins), and — fail-closed — whenever its own health
+  entry is unreadable. A suppressed tick reaches no verdict, so it records the *reason*
+  (`metrics.capabilityLens.<name>.sweepSuppression`) and deliberately leaves the liveness
+  clock (`sweepLastPassAt`) aging: every verdict above describes the last pass that ran, so
+  a sweep held indefinitely republishes a converged one forever. Past **10 sweep intervals**
+  with no verdict the heartbeat raises `CapabilitySweepStalled` and `alert` reads
+  `sweep-stalled`: `error` at once when no *fresh* suppression reason explains it (the sweep
+  should be ticking and is not — a reason older than ~2 intervals describes a tick that
+  already ended, so it explains nothing), `warning` escalating to `error` at 3× the window
+  when a cause is named, and `warning` without escalation while the lens is `rebuilding` (a
+  rebuild supersedes the sweep, and its own duration is not this detector's verdict). A
+  paused lens is exempt — already an error in its own right — and the exemption re-baselines
+  the clock, so a resume does not read as stalled for the length of the pause. The cursor and
+  heal count persist on the lens's existing health entry, so a restart resumes rather than
+  restarts the walk.
+- A lens whose liveness inputs cannot be read is reported as `status: "unknown"` /
+  `alert: "unreadable"` with `consumerLag: null`, and raises `CapabilityLensUnreadable`
+  (warning — the observation path failed, not necessarily the lens). It is never dropped from
+  the snapshot: an auth-plane lens absent from `metrics.capabilityLens` is indistinguishable
+  from one that was never installed. Its sweep verdicts still apply, since those come from the
+  in-process sweeper rather than the health entry.
 
 ---
 
