@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -365,8 +367,8 @@ func TestSweepRecord_StreakEscalatesAndClears(t *testing.T) {
 }
 
 func TestSweepSurvey_SkipsAspectKeysUnderTheAnchorPrefix(t *testing.T) {
-	// The anchor listing is by key prefix, which also matches every aspect of
-	// every anchor. Only the three-segment vertex root is an anchor.
+	// The anchor prefix also matches every aspect of every anchor. Only the
+	// three-segment vertex root is an anchor.
 	adpt := &listingAdapter{}
 	p := newSweepPipeline(t, adpt, 10)
 	writeAnchor(t, p, sweepActorA, false)
@@ -376,6 +378,121 @@ func TestSweepSurvey_SkipsAspectKeysUnderTheAnchorPrefix(t *testing.T) {
 	anchors, _, err := p.Sweeper().survey(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []string{sweepActorA}, anchors)
+}
+
+// TestSweepSurvey_AspectKeysAreDroppedAtTheSubstrate proves WHERE the aspect
+// keys are dropped, which the test above cannot: it passes either way, because
+// ParseVertexKey rejects an aspect key that already crossed the wire. The cost
+// finding is about the listing, so the filter expression is the thing under
+// test — and it is the substrate's semantics, not a HasPrefix approximation.
+func TestSweepSurvey_AspectKeysAreDroppedAtTheSubstrate(t *testing.T) {
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, 10)
+	writeAnchor(t, p, sweepActorA, false)
+	writeAnchor(t, p, sweepActorB, false)
+	for _, aspect := range []string{".demographics", ".contact", ".preferences"} {
+		_, err := p.coreKV.Put(context.Background(), sweepActorA+aspect, []byte(`{"key":"x"}`))
+		require.NoError(t, err)
+	}
+
+	ctx := context.Background()
+	rootFilter := substrate.VertexPrefix + ".identity.*"
+	filtered, _, err := p.coreKV.ListKeysFilter(ctx, rootFilter, "", 0)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{sweepActorA, sweepActorB}, filtered,
+		"the single-token filter must return roots only, so aspect keys never cross the wire")
+
+	// The unscoped prefix is what the filter replaces — it returns the aspects
+	// too, which is the cost this closed.
+	unfiltered, err := p.coreKV.ListKeysPrefix(ctx, substrate.VertexPrefix+".identity.")
+	require.NoError(t, err)
+	require.Greater(t, len(unfiltered), len(filtered),
+		"precondition: the prefix listing is the one that carries the aspect keys")
+}
+
+// TestSweepCandidates_CoverageWalkBoundsItsExaminations is the anchorLive cost
+// finding. A tombstoned row-less anchor costs a liveness read and yields no
+// slot, so a population of them never fills the batch — bounding only
+// selections let the walk read every anchor on every tick while selecting
+// nothing. The cursor is the observable proof of where the walk stopped.
+func TestSweepCandidates_CoverageWalkBoundsItsExaminations(t *testing.T) {
+	const batch = 5
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, batch)
+	ctx := context.Background()
+
+	// Every anchor is tombstoned and row-less: the walk examines each, reads
+	// each, and selects none.
+	anchors := make([]string, 0, 200)
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("vtx.identity.%020d", i)
+		writeAnchor(t, p, key, true)
+		anchors = append(anchors, key)
+	}
+	sort.Strings(anchors)
+
+	sw := p.Sweeper()
+	// The deep verify walks anchors independently and selects regardless of
+	// liveness (it reprojects a tombstone to the envelope's delete semantics),
+	// so the selection is not empty. What is under test is the COVERAGE
+	// direction's walk, whose cursor records exactly how far it examined.
+	sw.candidates(ctx, anchors, map[string]struct{}{})
+
+	quota := batch / 5
+	if quota < 1 {
+		quota = 1
+	}
+	coverageCap := batch - quota - 0
+	if coverageCap < 1 {
+		coverageCap = 1
+	}
+	wantExamined := coverageCap * coverageExamineMultiple
+	require.Less(t, wantExamined, len(anchors), "precondition: the budget must actually bite")
+
+	sw.mu.Lock()
+	cursor := sw.coverage.cursor
+	sw.mu.Unlock()
+	require.Equal(t, anchors[wantExamined-1], cursor,
+		"the walk must stop at its examination budget, not run the whole anchor list")
+}
+
+// TestSweepCandidates_CoverageWalkReachesTheTailAcrossTicks is the fairness half
+// — the one §11 decision 4 got wrong on this same walk, where sorting without a
+// cursor gave a lost row ~20%% odds of ever being reached. A budget bounds the
+// reads; only the cursor keeps the budget from re-reading the same head forever.
+func TestSweepCandidates_CoverageWalkReachesTheTailAcrossTicks(t *testing.T) {
+	const batch = 5
+	adpt := &listingAdapter{}
+	p := newSweepPipeline(t, adpt, batch)
+	ctx := context.Background()
+
+	// A run of tombstones with ONE live row-less anchor at the very end: it is
+	// reachable only if the walk resumes past what it already examined.
+	anchors := make([]string, 0, 60)
+	for i := 0; i < 59; i++ {
+		key := fmt.Sprintf("vtx.identity.%020d", i)
+		writeAnchor(t, p, key, true)
+		anchors = append(anchors, key)
+	}
+	tail := fmt.Sprintf("vtx.identity.%020d", 59)
+	writeAnchor(t, p, tail, false)
+	anchors = append(anchors, tail)
+	sort.Strings(anchors)
+
+	// The assertion is on the COVERAGE cursor, not on the selection: the deep
+	// verify walks the same anchors from its own cursor and would reach the tail
+	// on its own, so a selection-level assertion passes even with this walk
+	// frozen at the head — it would be vacuous.
+	sw := p.Sweeper()
+	var reached bool
+	for tick := 0; tick < 20 && !reached; tick++ {
+		sw.candidates(ctx, anchors, map[string]struct{}{})
+		sw.mu.Lock()
+		reached = sw.coverage.cursor == tail
+		sw.mu.Unlock()
+	}
+	require.True(t, reached,
+		"the coverage walk must resume past what it already examined and reach the tail within a few ticks")
 }
 
 // unwritableTarget is the adapter posture the repair-failure signal exists for:

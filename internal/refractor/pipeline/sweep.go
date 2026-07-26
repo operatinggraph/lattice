@@ -211,6 +211,15 @@ const (
 	hintRetestPasses      = 8
 )
 
+// coverageExamineMultiple bounds how many anchors the coverage direction may
+// INSPECT per tick, as a multiple of how many it may select. A row-less
+// tombstoned anchor costs a liveness read and yields no slot, so a selection cap
+// alone does not bound the reads — see the walk in candidates. Four keeps a
+// converged lens's cost near the batch it was sized for while leaving room to
+// step over a run of tombstones and still fill the batch with real divergences
+// in the same tick.
+const coverageExamineMultiple = 4
+
 // floored reports whether this hint currently keeps only its reserved floor.
 func (h hintState) floored(passNo uint64) bool {
 	if h.misses < hintMissesBeforeFloor {
@@ -563,12 +572,21 @@ func truncateFailure(s string) string {
 // survey reads both sides of the coverage comparison: the lens's live anchors
 // from Core KV and the target keys this lens owns.
 //
-// The anchor listing is by key prefix and therefore includes logically-deleted
-// vertices (a tombstone is a live NATS-KV key with isDeleted set). They are not
-// filtered here — that would cost one Core KV read per anchor per tick. The
-// prefilter instead defers the liveness check to the point where it changes a
-// decision (see candidates), and the deep verify reprojects a tombstoned anchor
-// to the envelope's own delete semantics anyway.
+// The anchor listing selects root vertex keys at the substrate: `vtx.<type>.*`
+// matches exactly one trailing token, so the four-segment aspect keys sharing
+// the prefix never cross the wire. A vertex carries several aspects, and five
+// shipped lenses share anchorType `identity` with no sharing between them, so
+// filtering them in Go instead meant listing the same discarded keys once per
+// lens per tick. ParseVertexKey still runs on what comes back: the filter is a
+// cost mechanism, and the parse is what decides the key is really a root of this
+// anchor type — the same posture the target listing takes with AnchorFromKey.
+//
+// The listing still includes logically-deleted vertices (a tombstone is a live
+// NATS-KV key with isDeleted set). They are not filtered here — that would cost
+// one Core KV read per anchor per tick. The prefilter instead defers the
+// liveness check to the point where it changes a decision (see candidates), and
+// the deep verify reprojects a tombstoned anchor to the envelope's own delete
+// semantics anyway.
 //
 // The target listing is scoped to the lens's own key prefix, so a bucket shared
 // by a dozen lenses is not streamed in full once per lens per tick. Scoping
@@ -577,15 +595,18 @@ func truncateFailure(s string) string {
 // not a substitute for that test — one lens's prefix can be another's ancestor
 // (cap. and cap.roles.) — and candidates still applies it.
 func (s *Sweeper) survey(ctx context.Context) (anchors []string, targets map[string]struct{}, err error) {
-	prefix := substrate.VertexPrefix + "." + s.plan.AnchorType + "."
-	keys, err := s.p.coreKV.ListKeysPrefix(ctx, prefix)
+	// limit<=0 returns every match in one page: the caller needs the whole anchor
+	// set to build the expected-key map, and a page boundary there would hand the
+	// orphan direction live actors to retract.
+	rootFilter := substrate.VertexPrefix + "." + s.plan.AnchorType + ".*"
+	keys, _, err := s.p.coreKV.ListKeysFilter(ctx, rootFilter, "", 0)
 	if err != nil {
 		return nil, nil, err
 	}
 	anchors = make([]string, 0, len(keys))
 	for _, k := range keys {
-		// The prefix also matches this vertex's aspects (four segments);
-		// ParseVertexKey admits only the three-segment root.
+		// The filter already excludes the four-segment aspect keys; this admits
+		// only a well-formed root of the anchor type the plan names.
 		vtxType, _, ok := substrate.ParseVertexKey(k)
 		if !ok || vtxType != s.plan.AnchorType {
 			continue
@@ -737,11 +758,22 @@ func (s *Sweeper) candidates(ctx context.Context, anchors []string, targets map[
 	// and no target key forever. The liveness check runs here rather than over
 	// every anchor — one Core KV read per candidate examined, not one per
 	// anchor.
+	//
+	// Examinations are budgeted, not just selections. A tombstoned row-less
+	// anchor costs an anchorLive read and then yields no slot, so a population
+	// of them never fills the batch: bounding only selections let the walk read
+	// EVERY row-less anchor on every tick while selecting nothing, against a
+	// cost model of one bounded batch a minute. The budget bounds the reads; the
+	// cursor is what keeps that from starving the tail, since it advances over
+	// examined-and-skipped anchors too and the next tick resumes past them. A
+	// budget without the cursor would re-read the same head forever — the
+	// fairness failure §11 decision 4 already made once on this walk.
 	if len(anchors) > 0 {
+		examineCap := coverageCap * coverageExamineMultiple
 		start := resumeAt(anchors, coverage.cursor)
 		last := coverage.cursor
 		for i := 0; i < len(anchors); i++ {
-			if len(out) >= coverageCap {
+			if len(out) >= coverageCap || i >= examineCap {
 				break
 			}
 			actor := anchors[(start+i)%len(anchors)]
