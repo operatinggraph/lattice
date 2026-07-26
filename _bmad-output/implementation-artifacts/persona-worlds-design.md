@@ -1751,6 +1751,46 @@ staff *writes* are workplace-confined by a `locatedAt`→`containedIn` walk. It 
 opens, a strict improvement on the unauthenticated dump it replaces, and identical in shape to café's shipped
 hat — so the row is broadened to cross-vertical rather than duplicated.
 
+**As-built — W3 Inc 2 SHIPPED (2026-07-25, `5397dd2e`).** The instructor hat can record who showed.
+`SetBookingAttendance` (wellness-domain 0.12.0) moves `.status.value` from `booked` to `attended` or
+`noShow`, granted `[operator, provider]` on the existing scope=any row — front-of-house is deliberately
+excluded, since a plain `frontOfHouse` grant is unconfined authority to restate any member's attendance in
+any studio, the same boundary Inc 1's residual (c) already names.
+
+*Three things this increment turns on, none of them the op itself.*
+
+**1 · The guard is ordered, and the order is the security property.** It is TombstoneSession's two-hop, one
+entity deeper: the caller's OWN `identifiedBy` binding answers first, then the session's `ledBy` link, then
+the booking↔session match. Every bound instructor in the deployment holds the identical scope=any grant, so
+the capability plane cannot separate them — reversed, the pair is an oracle that locates who leads a
+stranger's class by which denial returns. `TestSetBookingAttendance_InstructorConfinedToTheirOwnClass`
+asserts the real leader and a decoy are indistinguishable, which fails if the checks are ever reordered.
+
+**2 · The write merges, and had to.** `.status` carries `{value, rate, seat, booker}`, and CancelBooking
+reads `.seat` to release the seat cell and `.booker` to release the per-(session, booker) double-book guard.
+A write storing `value` alone would strip both: the booking would fail to cancel with `InvalidState` AND
+keep its guard alive, locking that booker out of ever re-booking the session. The op therefore OCC-upserts
+the aspect on its own revision, carrying the three fields forward; the test drives mark→cancel→re-book and
+asserts both cells released.
+
+**3 · Timing and correction.** Attendance before the class begins is `SessionNotStarted`, the exact mirror of
+CreateBooking's `SessionInPast`, on the same rfc3339-normalized lexical compare. Either value corrects the
+other — café's missing charge-correction op is the shape deliberately avoided.
+
+*Read path and consumers.* No lens change: `wellnessBookings` already projected `b.status.data.value`, so
+the mark reaches the roster the moment it commits; `/api/bookings` gained the `status` column it was
+dropping. The Roster tab badges the mark and offers the other value to the bound instructor of a class that
+has started. The op carries an op-meta (`authContext: standing`, `{me.instructor}` + `{entity.sessionKey}`
+auto-fills, `status` the one user-entered field) but is NOT service-catalog wired — matching TombstoneSession,
+the sibling provider-hat op, which Facet reaches through the hat surface rather than a `permitsOperation` path.
+
+*Residual.* Row L32 (`instructor`/`serviceprovider` hats carry no record-administering ops) is UNCHANGED by
+this fire and stays open: both wellness provider-hat ops target a `session`/`booking`, neither targets an
+`instructor` record, so the profile/availability surface that row names is still absent.
+
+**Fire W3 closes with this increment, and with it the persona-worlds initiative** — P1/P2, W0–W5 and W3 Inc 2
+are all shipped. What remains are the named residuals, each already filed as its own board row.
+
 ### Fire W5 (Facet hats + landing) fire brief (build note, 2026-07-25)
 
 **1 · Scope sentence (verbatim, §7.5 + §4).** "Facet — provider hat + hat-grouped landing (§4); demo-persona
