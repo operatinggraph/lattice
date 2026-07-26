@@ -483,7 +483,6 @@ func TestWellnessMembers_JoinsMemberAndCoveringLocations(t *testing.T) {
 	f.edge(t, "applicationFor", "lease", "member")
 	f.edge(t, "appliesToUnit", "lease", "unit12")
 	f.edge(t, "containedIn", "unit12", "building")
-	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
 
 	rows := f.project(t, wellnessMembersSpec)
 	require.Len(t, rows, 1, "the comprehension must not fan the lease into one row per ancestor")
@@ -506,7 +505,6 @@ func TestWellnessMembers_NoUnitEmptyCovering(t *testing.T) {
 	f.vtx(t, "lease", "leaseapp")
 	f.vtx(t, "member", "identity")
 	f.edge(t, "applicationFor", "lease", "member")
-	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
 
 	rows := f.project(t, wellnessMembersSpec)
 	require.Len(t, rows, 1, "the row must project so an unwired lease DENIES rather than going missing")
@@ -533,10 +531,6 @@ func TestWellnessMembers_NoApplicantDropsRow(t *testing.T) {
 	f.vtx(t, "lease", "leaseapp")
 	f.vtx(t, "unit12", "location")
 	f.edge(t, "appliesToUnit", "lease", "unit12")
-	// A real tenancy, so the ONLY thing missing is the applicant. Without this
-	// the row would drop on the .tenancy filter instead and the test would pass
-	// while proving nothing about the applicationFor match.
-	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
 
 	rows := f.project(t, wellnessMembersSpec)
 	require.Empty(t, rows, "a lease naming no applicant is not a member the picker can offer")
@@ -557,7 +551,6 @@ func TestWellnessMembers_DepthBoundMatchesWriteSide(t *testing.T) {
 	unitKey := f.vtx(t, "unit12", "location")
 	f.edge(t, "applicationFor", "lease", "member")
 	f.edge(t, "appliesToUnit", "lease", "unit12")
-	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
 
 	// unit12(0) -> a1(1) -> ... -> a8(8): one level deeper than either side reaches.
 	want := []any{unitKey}
@@ -578,34 +571,33 @@ func TestWellnessMembers_DepthBoundMatchesWriteSide(t *testing.T) {
 		"depths 0..7 cover the member and depth 8 does not — the write side's own reach")
 }
 
-// TestWellnessMembers_PendingOrDeclinedApplicantIsNotAMember proves the
-// `.tenancy` presence filter discriminates: DecideLeaseApplication tombstones
-// neither the leaseapp nor its applicationFor link on a decline, so a rejected
-// applicant keeps a live link to the building they were refused. Without this
-// filter the front desk would be handed their identity and told they were a
-// member. The positive control sits beside it in the same graph, so a pass
-// cannot come from the fixture merely being empty.
-func TestWellnessMembers_PendingOrDeclinedApplicantIsNotAMember(t *testing.T) {
+// TestWellnessMembers_ProjectsTheLandlordDecision proves the column the read
+// boundary drops a refused applicant on. It is projected, not filtered in the
+// cypher, because it is three-state: an application still awaiting a landlord
+// carries null here and stays in the directory, while only 'declined' is
+// disqualifying. Both live states appear in one graph so neither can pass by
+// the fixture being empty.
+func TestWellnessMembers_ProjectsTheLandlordDecision(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newWdFixture(t)
 	f.vtx(t, "unit12", "location")
 
-	tenantLease := f.vtx(t, "tenantLease", "leaseapp")
-	f.vtx(t, "tenant", "identity")
-	f.edge(t, "applicationFor", "tenantLease", "tenant")
-	f.edge(t, "appliesToUnit", "tenantLease", "unit12")
-	f.aspect(t, "tenantLease", "tenancy", "tenancy", map[string]any{"leaseStart": "2026-01-01T00:00:00Z"})
-
-	// Same building, same link shape, no .tenancy — never became a tenancy.
-	f.vtx(t, "refusedLease", "leaseapp")
+	refusedLease := f.vtx(t, "refusedLease", "leaseapp")
 	f.vtx(t, "refused", "identity")
 	f.edge(t, "applicationFor", "refusedLease", "refused")
 	f.edge(t, "appliesToUnit", "refusedLease", "unit12")
+	f.aspect(t, "refusedLease", "decision", "decision", map[string]any{"value": "declined", "reason": "no"})
+
+	pendingLease := f.vtx(t, "pendingLease", "leaseapp")
+	f.vtx(t, "pending", "identity")
+	f.edge(t, "applicationFor", "pendingLease", "pending")
+	f.edge(t, "appliesToUnit", "pendingLease", "unit12")
 
 	rows := f.project(t, wellnessMembersSpec)
-	require.Len(t, rows, 1, "only the actual tenancy is a member")
-	require.Equal(t, tenantLease, rows[0].Values["leaseAppKey"],
-		"an applicant with no .tenancy is not somebody the front desk may be shown")
+	require.Len(t, rows, 2, "the lens carries both; the reader is what drops the refusal")
+	require.Equal(t, "declined", wdRowByKey(rows, refusedLease)["landlordDecision"])
+	require.Nil(t, wdRowByKey(rows, pendingLease)["landlordDecision"],
+		"an undecided application projects null, not a decision the reader could mistake for one")
 }

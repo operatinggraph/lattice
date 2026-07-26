@@ -800,14 +800,25 @@ func TestHandleBookings_Roster_RowWithoutCoveringLocationsDenies(t *testing.T) {
 // staff hat can legitimately reach. Mirrors seedSession's defaulting.
 func seedMember(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerSubject string, coveringLocations ...string) {
 	t.Helper()
+	seedMemberDecided(t, conn, leaseAppKey, bookerSubject, "", coveringLocations...)
+}
+
+// seedMemberDecided is seedMember with the landlord's verdict stated. An empty
+// decision is the undecided application the lens projects as null.
+func seedMemberDecided(t *testing.T, conn *substrate.Conn, leaseAppKey, bookerSubject, decision string, coveringLocations ...string) {
+	t.Helper()
 	if coveringLocations == nil {
 		coveringLocations = []string{staffWorkplace}
 	}
-	putJSON(t, conn, wellnessdomain.WellnessMembersBucket, leaseAppKey, map[string]any{
+	row := map[string]any{
 		"leaseAppKey":       leaseAppKey,
 		"bookerKey":         "vtx.identity." + bookerSubject,
 		"coveringLocations": coveringLocations,
-	})
+	}
+	if decision != "" {
+		row["landlordDecision"] = decision
+	}
+	putJSON(t, conn, wellnessdomain.WellnessMembersBucket, leaseAppKey, row)
 }
 
 const (
@@ -980,7 +991,67 @@ func TestHandleMembers_WithholdsCoveringLocationsFromTheClient(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if body := rec.Body.String(); strings.Contains(body, "coveringLocations") || strings.Contains(body, staffWorkplace) {
+	body := rec.Body.String()
+	if strings.Contains(body, "coveringLocations") || strings.Contains(body, staffWorkplace) {
 		t.Fatalf("the response carries the confinement input; body=%s", body)
+	}
+	// The landlord's verdict is the reader's filter, not the picker's business:
+	// whether a neighbour's lease was approved is nothing a front desk needs to
+	// book them into a yoga class.
+	if strings.Contains(body, "landlordDecision") {
+		t.Fatalf("the response carries the landlord's verdict; body=%s", body)
+	}
+}
+
+// The discriminating pair for the refusal drop: two members at the SAME
+// building, differing only in the landlord's verdict. A refused applicant keeps
+// a live lease and a live applicationFor link, so without this the front desk
+// would be handed the identity of somebody that building turned down and told
+// they were a member.
+func TestHandleMembers_DeclinedApplicantIsNotOffered(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMemberDecided(t, s.conn, leaseHere, memberA, "declined")
+	seedMemberDecided(t, s.conn, leaseElsewhere, memberB, "approved")
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	members := decodeMembers(t, rec)
+	if len(members) != 1 || members[0].BookerKey != "vtx.identity."+memberB {
+		t.Fatalf("got %+v, want only the approved member — a refusal is not a membership", members)
+	}
+}
+
+// An application still awaiting a landlord belongs to somebody living in the
+// building, and is exactly who the front desk books in. Only a REFUSAL
+// disqualifies; the resident RATE is CreateBooking's separate, stricter
+// question, answered from the lease's own .tenancy.
+func TestHandleMembers_UndecidedApplicationStaysInTheDirectory(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMemberDecided(t, s.conn, leaseHere, memberA, "")
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 1 {
+		t.Fatalf("got %d members, want 1 — an undecided lease is not a refusal; %+v", len(got), got)
+	}
+}
+
+// The operator exemption is from CONFINEMENT, not from the refusal drop: root
+// sees every building, not people it was never true to call members.
+func TestHandleMembers_OperatorAlsoSeesNoDeclinedApplicant(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMemberDecided(t, s.conn, leaseHere, memberA, "declined")
+	seedMemberDecided(t, s.conn, leaseElsewhere, memberB, "", otherWorkplace)
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(rootSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := decodeMembers(t, rec); len(got) != 1 || got[0].BookerKey != "vtx.identity."+memberB {
+		t.Fatalf("got %+v, want only the undecided member at the other building", got)
 	}
 }

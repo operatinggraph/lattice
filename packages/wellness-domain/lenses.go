@@ -140,18 +140,27 @@ RETURN
 // absent row and an empty set have to deny alike: an unwired unit is covered by
 // nobody, the same answer require_workplace gives an empty location list.
 //
-// The `.tenancy` presence filter is what makes this a MEMBER directory rather
-// than an applicant one. `DecideLeaseApplication` tombstones neither the
-// leaseapp nor its applicationFor link on a decline (lease-signing/scripts.go),
-// so both a pending and a REJECTED applicant keep a live link — without this
-// filter the front desk would be handed the identity of everyone who ever
-// applied to their building and told they were members. `.tenancy` is stamped
-// CreateOnly on the FIRST approve and is the only signal that an application
-// actually became a tenancy; CreateBooking's own resident-rate check reads
-// exactly this aspect for exactly this reason (ddls.go), and the two sides
-// agreeing is the point. A member with no lease at all is therefore not
-// offerable here — the directory is lease-anchored by construction, as the
-// resident directory it replaces was.
+// `landlordDecision` is projected so the boundary can drop the REJECTED.
+// `DecideLeaseApplication` tombstones neither the leaseapp nor its
+// applicationFor link on a decline (lease-signing/scripts.go), so a refused
+// applicant keeps a live link to the building that refused them — publishing
+// them to that building's front desk as a member is the one disclosure this
+// directory must not make. It is projected rather than filtered in the cypher
+// because the column is THREE-state — approved, declined, and the null of an
+// undecided application — and only the first two are decidable against a
+// literal; the reader drops `declined` and keeps the rest, which is the
+// café front-desk directory's own posture (cafeLeaseWorkplaces filters no
+// decision at all) minus the refusal.
+//
+// Deliberately NOT filtered on `.tenancy`, though that is the stricter signal
+// and the one CreateBooking reads for the resident RATE. A rate is a claim
+// about money and belongs on proof of tenancy; a directory is a claim about
+// who is around, and a signed-but-undecided applicant living in the building is
+// exactly who the front desk books in. The rate still answers separately — the
+// picker passes the lease and CreateBooking re-derives it — so the strict
+// signal keeps its job without emptying the directory of everyone waiting on a
+// landlord. A member with no lease at all is not offerable here: the directory
+// is lease-anchored by construction, as the resident directory it replaces was.
 //
 // Bounds match wellnessSessionsSpec's above for the same reason: zero-hop is
 // load-bearing (a staffer wired to the exact unit matches, not only one wired to
@@ -165,11 +174,11 @@ RETURN
 // passes to CreateBooking.
 const wellnessMembersSpec = `MATCH (l:leaseapp)
 MATCH (l)-[:applicationFor]->(id:identity)
-WHERE l.tenancy.data.leaseStart <> null
 RETURN
   l.key AS key,
   l.key AS leaseAppKey,
   id.key AS bookerKey,
+  l.decision.data.value AS landlordDecision,
   [(l)-[:appliesToUnit]->(u)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // wellnessSessionsSpec projects one row per session, walking atStudio and

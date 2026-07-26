@@ -108,8 +108,16 @@ func (s *server) handleMyResidency(w http.ResponseWriter, r *http.Request) {
 type memberProjection struct {
 	LeaseAppKey       string   `json:"leaseAppKey"`
 	BookerKey         string   `json:"bookerKey"`
+	LandlordDecision  string   `json:"landlordDecision"`
 	CoveringLocations []string `json:"coveringLocations"`
 }
+
+// declinedDecision is the one landlordDecision value that removes somebody from
+// the directory. Compared as an allow-nothing-else test rather than a
+// "keep only approved" one on purpose: the column is three-state, and an
+// application still awaiting a landlord belongs to somebody living in the
+// building whom the front desk books in. Only a REFUSAL is disqualifying.
+const declinedDecision = "declined"
 
 // memberRow is one entry of the front desk's book-a-member picker. The
 // covering set is deliberately NOT carried out to the client: it is the
@@ -140,6 +148,14 @@ func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memb
 		}
 		var p memberProjection
 		if json.Unmarshal(raw, &p) != nil || p.BookerKey == "" || p.LeaseAppKey == "" {
+			continue
+		}
+		// A refused applicant keeps a live lease and a live applicationFor link
+		// (DecideLeaseApplication tombstones neither), so dropping them is this
+		// reader's job. The operator exemption below is from CONFINEMENT, not
+		// from this: root sees every building, not people it was never true to
+		// call members.
+		if strings.EqualFold(strings.TrimSpace(p.LandlordDecision), declinedDecision) {
 			continue
 		}
 		if !hats.isOperator && !hats.covers(p.CoveringLocations) {
@@ -196,7 +212,7 @@ func (s *server) handleMembers(w http.ResponseWriter, r *http.Request) {
 	keys, err := conn.KVListKeys(ctx, bucket)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway,
-			"list "+bucket+": "+err.Error()+" (is wellness-domain 0.15.0 installed and the Refractor projecting?)")
+			"list "+bucket+": "+err.Error()+" (is wellness-domain 0.16.0 installed and the Refractor projecting?)")
 		return
 	}
 	rows := computeCoveredMembers(keys, s.kvGetter(ctx, bucket), hats)
