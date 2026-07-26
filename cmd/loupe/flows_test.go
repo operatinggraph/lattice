@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -271,4 +272,57 @@ func TestLoomInstanceStatuses(t *testing.T) {
 			t.Errorf("malformed reply should yield empty map, got %+v", got)
 		}
 	})
+}
+
+func TestReadLoomPatternSpec(t *testing.T) {
+	store := map[string][]byte{
+		"vtx.meta.pat1.spec": []byte(`{"data":{"patternId":"onboarding","subjectType":"identity","completionDomains":["orchestration"],"steps":[{"kind":"systemOp","operation":"CreateTask"},{"kind":"externalTask","adapter":"email"}]}}`),
+		"vtx.meta.bad.spec":  []byte(`not json`),
+	}
+	get := func(key string) ([]byte, bool) { b, ok := store[key]; return b, ok }
+
+	spec := readLoomPatternSpec(get, "vtx.meta.pat1")
+	if spec == nil {
+		t.Fatal("pat1 spec did not decode")
+	}
+	if spec.PatternID != "onboarding" || spec.SubjectType != "identity" || len(spec.Steps) != 2 {
+		t.Errorf("spec = %+v", spec)
+	}
+	if spec.Steps[1]["adapter"] != "email" {
+		t.Errorf("step 2 adapter = %v — the step list is the half inspect cannot give", spec.Steps[1]["adapter"])
+	}
+	// A missing or malformed spec is not fatal: the engine's answer is the more
+	// important half of the panel and does not depend on this read.
+	if readLoomPatternSpec(get, "vtx.meta.missing") != nil {
+		t.Error("absent spec should yield nil")
+	}
+	if readLoomPatternSpec(get, "vtx.meta.bad") != nil {
+		t.Error("malformed spec should yield nil, never a panic")
+	}
+}
+
+func TestHandleFlowDetail_Validation(t *testing.T) {
+	mux := testServer()
+
+	cases := []struct {
+		method, path string
+		want         int
+	}{
+		// Validation runs BEFORE requireConn (testServer has a nil conn), so a
+		// malformed request answers 400 rather than the misleading 502 a
+		// conn-first check would give.
+		{"GET", "/api/flows/a.b", http.StatusBadRequest},
+		{"GET", "/api/flows/", http.StatusBadRequest},
+		{"GET", "/api/flows/a/b", http.StatusBadRequest},
+		{"POST", "/api/flows/abc", http.StatusBadRequest},
+		// A well-formed id with no NATS gets the honest upstream answer.
+		{"GET", "/api/flows/abcdefghijklmnopqrst", http.StatusBadGateway},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, rec.Code, c.want)
+		}
+	}
 }

@@ -162,3 +162,101 @@ func TestFlowsHeadline(t *testing.T) {
 		t.Errorf("empty headline = %q", s)
 	}
 }
+
+// The cursor is the index of the step the instance is AWAITING, so everything
+// before it has committed. A failed instance marks its cursor step failed, not
+// current: calling it current on a dead instance suggests something is still
+// coming.
+func TestStepRows(t *testing.T) {
+	vm := logicVM(t, "flows.js")
+
+	steps := []any{
+		map[string]any{"kind": "systemOp", "operation": "CreateTask"},
+		map[string]any{"kind": "externalTask", "adapter": "email", "replyOp": "RecordEmail"},
+		map[string]any{"kind": "systemOp", "operation": "CloseTask", "guard": map[string]any{"x": 1}},
+	}
+	states := func(cursor int, status string) []string {
+		out, _ := call(t, vm, "stepRows", steps, cursor, status).([]any)
+		got := make([]string, 0, len(out))
+		for _, r := range out {
+			row, _ := r.(map[string]any)
+			got = append(got, row["state"].(string))
+		}
+		return got
+	}
+
+	want := func(name string, got, expect []string) {
+		t.Helper()
+		for i := range expect {
+			if got[i] != expect[i] {
+				t.Errorf("%s: states = %v, want %v", name, got, expect)
+				return
+			}
+		}
+	}
+	want("running at step 2", states(1, "running"), []string{"done", "current", "pending"})
+	want("failed at step 2", states(1, "failed"), []string{"done", "failed", "pending"})
+	// A completed instance's cursor sits past the last step.
+	want("complete", states(3, "complete"), []string{"done", "done", "done"})
+	// No engine answer means no cursor; nothing may be claimed committed.
+	want("cursor unknown", states(-1, "running"), []string{"pending", "pending", "pending"})
+
+	out, _ := call(t, vm, "stepRows", steps, 1, "running").([]any)
+	second, _ := out[1].(map[string]any)
+	if second["label"] != "email" {
+		t.Errorf("an externalTask is labelled by its adapter, got %v", second["label"])
+	}
+	if second["replyOp"] != "RecordEmail" {
+		t.Errorf("replyOp = %v", second["replyOp"])
+	}
+	third, _ := out[2].(map[string]any)
+	if third["guarded"] != true {
+		t.Errorf("a step carrying a guard must say so, got %v", third["guarded"])
+	}
+	first, _ := out[0].(map[string]any)
+	if first["label"] != "CreateTask" {
+		t.Errorf("a systemOp is labelled by its operation, got %v", first["label"])
+	}
+}
+
+func TestStepSummary(t *testing.T) {
+	vm := logicVM(t, "flows.js")
+
+	steps := []any{map[string]any{"kind": "systemOp"}, map[string]any{"kind": "systemOp"}}
+	cases := []struct {
+		cursor int
+		status string
+		want   string
+	}{
+		{1, "running", "awaiting step 2 of 2"},
+		{1, "failed", "stopped at step 2 of 2"},
+		// A cursor past the last step is what a completed flow looks like; it
+		// must read as done, not as an out-of-range index.
+		{2, "complete", "all 2 steps committed"},
+		{0, "running", "awaiting step 1 of 2"},
+	}
+	for _, c := range cases {
+		if got := call(t, vm, "stepSummary", steps, c.cursor, c.status); got != c.want {
+			t.Errorf("stepSummary(%d,%q) = %v, want %q", c.cursor, c.status, got, c.want)
+		}
+	}
+	if got := call(t, vm, "stepSummary", []any{}, 0, "running"); got != "this pattern declares no steps" {
+		t.Errorf("empty pattern = %v", got)
+	}
+}
+
+// The panel must not manufacture a disagreement out of a missing answer.
+func TestEngineDisagreement(t *testing.T) {
+	vm := logicVM(t, "flows.js")
+
+	got := call(t, vm, "engineDisagreement", map[string]any{"status": "running", "engineStatus": "complete"})
+	if s, _ := got.(string); s == "" {
+		t.Error("running vs complete is a disagreement and must be stated")
+	}
+	if s, _ := call(t, vm, "engineDisagreement", map[string]any{"status": "running", "engineStatus": "running"}).(string); s != "" {
+		t.Errorf("agreement should say nothing, got %q", s)
+	}
+	if s, _ := call(t, vm, "engineDisagreement", map[string]any{"status": "running"}).(string); s != "" {
+		t.Errorf("no engine answer is not a disagreement, got %q", s)
+	}
+}

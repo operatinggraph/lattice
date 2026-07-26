@@ -131,4 +131,60 @@ function flowsHeadline(rows) {
   return attention + " of " + total + " " + word + " need attention";
 }
 
-export { flowSeverity, flowKind, flowLabel, patternLabel, flowRows, groupFlowsByPattern, groupSummary, flowsHeadline };
+// stepRows walks a pattern's step list against an instance's cursor and marks
+// each step's state. The cursor is the index of the step the instance is
+// AWAITING, so everything before it has committed.
+//
+// A failed instance marks its cursor step failed rather than current — that
+// step is where the flow stopped, and calling it "current" on a dead instance
+// would suggest something is still coming. Steps past the cursor stay pending
+// on every status: on a failed flow they are what did not happen, which is
+// worth seeing, not hiding.
+function stepRows(steps, cursor, status) {
+  var at = typeof cursor === "number" ? cursor : -1;
+  return (steps || []).map(function (s, i) {
+    var state;
+    if (i < at) {
+      state = "done";
+    } else if (i === at) {
+      state = status === "failed" ? "failed" : status === "running" ? "current" : "done";
+    } else {
+      state = "pending";
+    }
+    return {
+      index: i,
+      state: state,
+      kind: s.kind || "step",
+      // A step's operation is what an operator recognizes; an externalTask
+      // names its adapter instead, since the op it submits is machinery.
+      label: s.operation || s.adapter || s.instanceOp || s.kind || "step",
+      adapter: s.adapter || "",
+      replyOp: s.replyOp || "",
+      guarded: !!s.guard,
+    };
+  });
+}
+
+// stepSummary is the one-line "where is this flow" answer above the step list.
+// A cursor past the last step is what a completed flow looks like, so it reads
+// as done rather than as an out-of-range index.
+function stepSummary(steps, cursor, status) {
+  var total = (steps || []).length;
+  if (!total) return "this pattern declares no steps";
+  var at = typeof cursor === "number" ? cursor : -1;
+  if (status === "running" && at >= 0 && at < total) return "awaiting step " + (at + 1) + " of " + total;
+  if (status === "failed") return "stopped at step " + Math.min(at + 1, total) + " of " + total;
+  if (at >= total) return "all " + total + " step" + (total === 1 ? "" : "s") + " committed";
+  return at + " of " + total + " step" + (total === 1 ? "" : "s") + " committed";
+}
+
+// engineDisagreement is the sentence the detail panel shows when the history
+// row and the engine tell different stories. Empty when they agree — the panel
+// must not manufacture a disagreement out of a missing answer.
+function engineDisagreement(row) {
+  if (!row || !row.engineStatus || row.status === row.engineStatus) return "";
+  return "The history row reads " + row.status + "; Loom reports this instance " +
+    row.engineStatus + ". The engine is authoritative for what ran.";
+}
+
+export { stepRows, stepSummary, engineDisagreement, flowSeverity, flowKind, flowLabel, patternLabel, flowRows, groupFlowsByPattern, groupSummary, flowsHeadline };

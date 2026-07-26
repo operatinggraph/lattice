@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
@@ -193,6 +194,136 @@ func loomInstanceStatuses(raw json.RawMessage) map[string]string {
 		}
 	}
 	return out
+}
+
+// loomPatternSpec is the pinned pattern definition behind a flow, read from
+// the meta-vertex's `.spec` aspect (pkgmgr's loomPatternSpecBody). The step
+// list is the part `inspect` cannot give: the control plane resolves only the
+// CURRENT step, so the sequence a flow is walking has to come from the
+// definition itself.
+type loomPatternSpec struct {
+	PatternID         string           `json:"patternId,omitempty"`
+	SubjectType       string           `json:"subjectType,omitempty"`
+	CompletionDomains []string         `json:"completionDomains,omitempty"`
+	Steps             []map[string]any `json:"steps,omitempty"`
+}
+
+// readLoomPatternSpec decodes one pattern's `.spec` aspect. A missing or
+// malformed spec yields nil — the detail panel then renders the instance
+// facts alone rather than failing, since the engine's answer is the more
+// important half and does not depend on this read.
+func readLoomPatternSpec(get kvGetter, patternRef string) *loomPatternSpec {
+	data := metaData(get, patternRef+".spec")
+	if data == nil {
+		return nil
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil
+	}
+	var spec loomPatternSpec
+	if json.Unmarshal(raw, &spec) != nil {
+		return nil
+	}
+	return &spec
+}
+
+// handleFlowDetail implements GET /api/flows/<instanceId>: one flow's history
+// row, the engine's own view of the instance, and the pinned pattern's step
+// sequence.
+//
+// Three sources, deliberately kept separate in the reply rather than merged:
+// the durable history row (what the projection believes), the live control
+// read (what Loom believes), and the pattern definition (what was supposed to
+// happen). Merging them would have to pick a winner, and the whole reason this
+// panel is worth having is that when they disagree the disagreement IS the
+// finding — the same reason the list's liveness badge names both voices.
+//
+// The engine read is best-effort: a control-plane outage leaves engineError
+// set and the rest of the panel intact, never a failed request.
+func (s *server) handleFlowDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusBadRequest, "GET required")
+		return
+	}
+	parts := splitNonEmpty(strings.TrimPrefix(r.URL.Path, "/api/flows/"))
+	if len(parts) != 1 {
+		s.writeError(w, http.StatusBadRequest, "expected GET /api/flows/<instanceId>")
+		return
+	}
+	id := parts[0]
+	if err := validateControlName(id); err != nil {
+		s.writeError(w, http.StatusBadRequest, "instance id: "+err.Error())
+		return
+	}
+	conn, ok := s.requireConn(w)
+	if !ok {
+		return
+	}
+	ctx, cancel := s.reqContext(r)
+	defer cancel()
+
+	entry, err := conn.KVGet(ctx, bootstrap.OrchestrationHistoryBucket, id)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "flow "+id+" not found in the history read model: "+err.Error())
+		return
+	}
+	cols, ok := decodeFlowCols(entry.Value)
+	if !ok {
+		s.writeError(w, http.StatusBadGateway, "flow "+id+": malformed read-model row")
+		return
+	}
+
+	out := map[string]any{}
+	engineStatus, engineHas := "", false
+	subject, subjErr := mutateSubject("loom", id, "inspect")
+	if subjErr != nil {
+		out["engineError"] = subjErr.Error()
+	} else if raw, err := s.controlRequest(ctx, conn, subject); err != nil {
+		out["engineError"] = err.Error()
+	} else {
+		var reply struct {
+			Instance *struct {
+				Instance struct {
+					Status string `json:"status"`
+				} `json:"instance"`
+			} `json:"instance"`
+		}
+		if json.Unmarshal(raw, &reply) == nil && reply.Instance != nil {
+			engineStatus, engineHas = reply.Instance.Instance.Status, true
+		}
+		out["engine"] = raw
+	}
+
+	get := func(key string) ([]byte, bool) {
+		e, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, key)
+		if err != nil {
+			return nil, false
+		}
+		return e.Value, true
+	}
+	row := flowRow{
+		InstanceID:    cols.InstanceID,
+		PatternRef:    cols.PatternRef,
+		PatternName:   patternNameFrom(get, cols.PatternRef),
+		SubjectKey:    cols.SubjectKey,
+		Status:        cols.Status,
+		StartedAt:     cols.StartedAt,
+		EndedAt:       cols.EndedAt,
+		FailureReason: cols.FailureReason,
+	}
+	// engineKnown is exactly "the inspect read answered": with no answer the
+	// row stays unbadged rather than borrowing a verdict, the same rule the
+	// list applies when loom.list fails.
+	row.Liveness = flowLiveness(row.Status, engineStatus, out["engineError"] == nil, engineHas)
+	if engineHas {
+		row.EngineStatus = engineStatus
+	}
+	out["row"] = row
+	if spec := readLoomPatternSpec(get, cols.PatternRef); spec != nil {
+		out["pattern"] = spec
+	}
+	s.writeJSON(w, http.StatusOK, out)
 }
 
 // patternNameResolver returns a memoized patternRef → human name lookup over
