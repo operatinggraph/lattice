@@ -1504,9 +1504,16 @@ run-wellness-app:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_WELLNESS_APP) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) WELLNESS_APP_DEV_AUTH=1 ./bin/wellness-app
 
 ## test — Run all Go unit + integration tests.
-## Test packages run concurrently (-p 4). Every embedded NATS/JetStream
-## fixture binds a random port (Port = -1) and owns a private StoreDir
-## under t.TempDir(), so concurrent packages share no JetStream file state.
+## Test packages run concurrently (-p 4). Every embedded NATS/JetStream fixture
+## comes from internal/natstest, which binds a kernel-assigned port and owns a
+## private StoreDir via internal/jsstore (NOT t.TempDir() — the framework's own
+## cleanup races JetStream's final flush), so concurrent packages share no
+## JetStream file state.
+##
+## A failure reading `read tcp 127.0.0.1:A->127.0.0.1:B: i/o timeout` at a
+## fixture's connect, in a package the change never touched, is host contention,
+## not a bug — see internal/natstest's package doc. Re-run that package alone to
+## confirm, and never loosen an assertion to make a suite run go green.
 test:
 	@echo "==> go test ./... -p 4"
 	go test ./... -p 4

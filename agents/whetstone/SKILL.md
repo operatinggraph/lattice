@@ -48,7 +48,9 @@ big pipeline refactor) per fire, then exit (bounded).
   **long poles**; per-package test time (`go test ./... -json` → parse `elapsed`, or `-v` timing) to find the
   **slowest packages/tests**.
 - The memory/known-issues: the `-p 4` parallelism + the `jsstore.Dir(t)` requirement; `test-hello-lattice`
-  flaking locally but green in CI (environmental — don't chase).
+  flaking locally but green in CI (environmental — don't chase); the **embedded-NATS handshake signature**
+  (`read tcp 127.0.0.1:A->B: i/o timeout` at a fixture connect in an untouched package = host memory
+  pressure, not a bug — `internal/natstest` owns the hardened fixture, CLAUDE.md carries the triage rule).
 
 ## 2. Pick one high-leverage speedup (be ambitious)
 

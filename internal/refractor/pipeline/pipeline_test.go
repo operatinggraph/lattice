@@ -10,13 +10,12 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adapter"
 	"github.com/operatinggraph/lattice/internal/refractor/failure"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
@@ -87,25 +86,7 @@ func startPipelineEnv(t *testing.T) *pipelineEnv {
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
 	}
-	opts := &natsserver.Options{
-		JetStream: true,
-		StoreDir:  jsstore.Dir(t),
-		NoLog:     true,
-		NoSigs:    true,
-		Port:      natsserver.RANDOM_PORT,
-	}
-	s, err := natsserver.NewServer(opts)
-	require.NoError(t, err, "create test NATS server")
-	go s.Start()
-	require.True(t, s.ReadyForConnections(5*time.Second), "NATS server not ready within 5s")
-
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		nc.Close()
-		s.Shutdown()
-	})
+	_, nc := natstest.Server(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)

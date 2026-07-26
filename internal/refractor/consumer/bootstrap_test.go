@@ -7,13 +7,12 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natstest"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/consumer"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -23,25 +22,7 @@ import (
 // connected JetStream context and the underlying NATS connection.
 func startJS(t *testing.T) (jetstream.JetStream, *nats.Conn) {
 	t.Helper()
-	opts := &natsserver.Options{
-		JetStream: true,
-		StoreDir:  jsstore.Dir(t),
-		NoLog:     true,
-		NoSigs:    true,
-		Port:      natsserver.RANDOM_PORT,
-	}
-	s, err := natsserver.NewServer(opts)
-	require.NoError(t, err, "create test NATS server")
-	go s.Start()
-	require.True(t, s.ReadyForConnections(5*time.Second), "NATS server not ready within 5s")
-
-	nc, err := nats.Connect(s.ClientURL())
-	require.NoError(t, err, "connect to test NATS server")
-
-	t.Cleanup(func() {
-		nc.Close()
-		s.Shutdown()
-	})
+	_, nc := natstest.Server(t)
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)

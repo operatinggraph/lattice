@@ -7,13 +7,12 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/operatinggraph/lattice/internal/jsstore"
+	"github.com/operatinggraph/lattice/internal/natstest"
 	"github.com/operatinggraph/lattice/internal/refractor/control"
 	"github.com/operatinggraph/lattice/internal/refractor/health"
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
@@ -45,21 +44,7 @@ func startControlTestServerConn(t *testing.T) (*nats.Conn, jetstream.JetStream) 
 	if testing.Short() {
 		t.Skip("skipping NATS integration test in short mode")
 	}
-	opts := &natsserver.Options{
-		JetStream: true,
-		StoreDir:  jsstore.Dir(t),
-		NoLog:     true,
-		NoSigs:    true,
-		Port:      natsserver.RANDOM_PORT,
-	}
-	srv, err := natsserver.NewServer(opts)
-	require.NoError(t, err)
-	go srv.Start()
-	require.True(t, srv.ReadyForConnections(5*time.Second), "NATS server not ready within 5s")
-	t.Cleanup(srv.Shutdown)
-	nc, err := nats.Connect(srv.ClientURL())
-	require.NoError(t, err)
-	t.Cleanup(nc.Close)
+	_, nc := natstest.Server(t)
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
 	return nc, js
