@@ -191,9 +191,27 @@ func Permissions() []pkgmgr.PermissionSpec {
 //   - SetRenewalTerms / VerifyGuarantor / SignRenewal — REQUIRED: the three
 //     assignTask operations the renewalComplete goal's actions catalog binds
 //     (renewal_targets.go); the Weaver Actuator resolves forOperation to each
-//     op-meta when it creates the remediation task. CancelRenewal is
-//     task-less (a directOp/operator action, never an assignTask target) so it
-//     needs no op-meta.
+//     op-meta when it creates the remediation task. CancelRenewal is task-less
+//     (a directOp/operator action, never an assignTask target), so its meta is
+//     owed to S1 rather than to forOperation resolution.
+//
+// Every op a human triggers carries a FULL descriptor (S1) — Presentation +
+// InputSchema + FieldDescriptions + Dispatch. The audience slice is narrower
+// than the owning DDL's merged InputSchema: a descriptor describes ONE op's
+// fields, not the whole vertex type's. The remaining bare `{OperationType}`
+// entries are engine legs — externalTask instanceOp/replyOp/dispatchOp, the
+// assignTask targets a client never builds a form for — and exist only so
+// forOperation resolves.
+//
+// Dispatch.AuthContext names the SELF path wherever an op carries both a
+// standing staff grant and a consumer scope=self grant (clinic-domain's
+// CreateAppointment / RescheduleAppointment / SetAppointmentStatus idiom): a
+// staff FE hardcodes its own dispatch, so the descriptor exists to let a
+// descriptor-driven client walk the path it cannot otherwise infer. The
+// declared Reads/OptionalReads mirror what the bespoke LoftSpace FE proves in
+// production (cmd/loftspace-app/web/app.js) — required (a) reads for the
+// validation links each script verifies, absence-tolerant (d) reads for the
+// aspects a first submission legitimately lacks.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		// DecideLeaseApplication is the front-desk demo beat ("Applications to
@@ -201,11 +219,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		// vocabulary: a staff client builds the entire submission — form, labels,
 		// declared reads — from this vertex alone.
 		//
-		// authContext "standing" is the fourth and oldest authorization case: the
-		// caller sends no authContext object at all, because their authority is a
-		// standing role grant rather than a self / service / task relationship.
-		// Every operator FE has always submitted this way; naming it lets a
-		// data-driven client do the same instead of special-casing the absence.
+		// The op carries TWO grants: operator/frontOfHouse at scope=any, and a
+		// landlord at scope=self. A descriptor names one dispatch, so it names
+		// the SELF path (clinic's dual-grant idiom): the staff FE hardcodes its
+		// own standing submission and needs no descriptor to do it, whereas the
+		// landlord path is the one a descriptor-driven client cannot infer.
+		// A "standing" descriptor tells a client to send no authContext object
+		// at all, which puts a landlord on the staff path and gets them refused.
+		//
+		// The landlord's manages probe is deliberately NOT declared below: the
+		// unit is not knowable until the application's own appliesToUnit link
+		// resolves, so require_manages reads it as an annotated class-(e)
+		// follow-up (scripts.go) rather than a pre-declared key.
 		{
 			OperationType: "DecideLeaseApplication",
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -231,7 +256,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "leaseapp",
-				AuthContext: "standing",
+				AuthContext: "self",
 				TargetField: "leaseAppKey",
 				TargetType:  "leaseapp",
 				Reads:       []string{"{payload.leaseAppKey}"},
@@ -252,6 +277,260 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 			},
 		},
+		// The applicant's own three legs. Each is granted to consumer at
+		// scope=self, so each is a form a real person fills in.
+		{
+			OperationType: "CreateLeaseApplication",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Apply for this unit",
+				ShortLabel:  "Apply",
+				Description: "Submit your own application to lease a unit.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Submit application",
+				Group:       "My applications",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant — your own identity."},` +
+				`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the unit being applied for."},` +
+				`"moveInDate":{"type":"string","description":"Requested move-in date, RFC3339. Optional; supplying it requires leaseTermMonths."},` +
+				`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months. Required when moveInDate is supplied."},` +
+				`"requestedRent":{"type":"number","description":"Optional rent the applicant is offering."}},` +
+				`"required":["applicant","unit"]}`,
+			FieldDescriptions: map[string]string{
+				"applicant":       "Your own identity — filled from the session, never typed. The scope=self grant requires it to equal the acting identity.",
+				"unit":            "The unit being applied for — filled from the listing in view, not typed.",
+				"moveInDate":      "When you would like to move in. Optional, but supplying it also requires a lease term; together they record your requested terms.",
+				"leaseTermMonths": "How many months you are asking to lease for. Required only alongside a move-in date.",
+				"requestedRent":   "Optional — the rent you are offering, when it differs from the listed rent.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "self",
+				TargetField: "unit",
+				TargetType:  "unit",
+				Reads:       []string{"{payload.applicant}", "{payload.unit}"},
+				// The per-(applicant, unit) guard link is absent on a first
+				// application and tombstoned after a withdraw — its absence is
+				// exactly the condition that permits the create, so it can
+				// never be a required read.
+				OptionalReads: []string{
+					"lnk.identity.{payload.applicant:id}.appliedToUnit.unit.{payload.unit:id}",
+				},
+			},
+		},
+		{
+			OperationType: "WithdrawLeaseApplication",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Withdraw application",
+				ShortLabel:  "Withdraw",
+				Description: "Back out of an application you submitted. Frees you to apply for the same unit again later.",
+				Icon:        "clipboard",
+				Tone:        "destructive",
+				SubmitLabel: "Withdraw",
+				Group:       "My applications",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application being withdrawn."},` +
+				`"unit":{"type":"string","description":"vtx.unit.<NanoID> the application is for — verified against the application's own appliesToUnit link."},` +
+				`"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant — verified against the application's own applicationFor link."}},` +
+				`"required":["leaseAppKey","unit","applicant"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The application being withdrawn — filled from the application in view, not typed.",
+				"unit":        "The unit the application is for. Verified against the application's own link, so a mismatched value is rejected rather than trusted.",
+				"applicant":   "Your own identity. Verified against the application's own applicationFor link — you can only withdraw your own application.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "self",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				// Both validation links are required: the script verifies the
+				// unit and the applicant against the application's OWN links
+				// rather than trusting the payload, so their absence is a
+				// caller error, not a tolerable miss.
+				Reads: []string{
+					"{payload.leaseAppKey}",
+					"lnk.leaseapp.{payload.leaseAppKey:id}.appliesToUnit.unit.{payload.unit:id}",
+					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{payload.applicant:id}",
+				},
+				// The guard link being freed may already be tombstoned.
+				OptionalReads: []string{
+					"lnk.identity.{payload.applicant:id}.appliedToUnit.unit.{payload.unit:id}",
+				},
+			},
+		},
+		{
+			OperationType: "SetApplicantProfile",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Complete your application details",
+				ShortLabel:  "Details",
+				Description: "Provide the income, employment and reference details a landlord decides on. Re-submittable.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Submit details",
+				Group:       "My applications",
+			},
+			// The raw financials are captured but NEVER projected — the op
+			// derives the landlord-facing signals (incomeToRentMet,
+			// employmentVerified, referenceCount, guarantorIncomeToRentMet)
+			// and the lens shows only those. This schema describes the INPUT
+			// fields; none of them reads back.
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of your application."},` +
+				`"unit":{"type":"string","description":"vtx.unit.<NanoID> the application is for — verified against the appliesToUnit link."},` +
+				`"annualIncome":{"type":"number","description":"Gross annual income."},` +
+				`"employmentStatus":{"type":"string","description":"Employment status."},` +
+				`"employerName":{"type":"string","description":"Employer name. Optional."},` +
+				`"references":{"type":"integer","description":"Number of references offered. Optional."},` +
+				`"hasCoApplicant":{"type":"boolean","description":"Whether a co-applicant is joining. Optional."},` +
+				`"coApplicantName":{"type":"string","description":"Co-applicant's name. Optional."},` +
+				`"coApplicantContact":{"type":"string","description":"Co-applicant's contact. Optional."},` +
+				`"hasGuarantor":{"type":"boolean","description":"Whether a guarantor is backing the application. Optional."},` +
+				`"guarantorName":{"type":"string","description":"Guarantor's name. Optional."},` +
+				`"guarantorRelationship":{"type":"string","description":"Guarantor's relationship to you. Optional."},` +
+				`"guarantorAnnualIncome":{"type":"number","description":"Guarantor's gross annual income. Optional."}},` +
+				`"required":["leaseAppKey","unit","annualIncome","employmentStatus"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey":           "Your application — filled from the application in view, not typed.",
+				"unit":                  "The unit the application is for. Verified against the application's own appliesToUnit link.",
+				"annualIncome":          "Your gross annual income. Used to derive whether income meets 3x the unit's rent; the figure itself is never shown to the landlord.",
+				"employmentStatus":      "Your employment status. Used to derive an employment-verified signal.",
+				"employerName":          "Optional. Kept as part of the application record; never projected.",
+				"references":            "Optional. How many references you are offering — the landlord sees the count.",
+				"hasCoApplicant":        "Optional. Whether someone is applying jointly with you.",
+				"coApplicantName":       "Optional. Only meaningful alongside a co-applicant.",
+				"coApplicantContact":    "Optional. Only meaningful alongside a co-applicant.",
+				"hasGuarantor":          "Optional. Whether a guarantor backs your application. A landlord may then verify them.",
+				"guarantorName":         "Optional. Only meaningful alongside a guarantor.",
+				"guarantorRelationship": "Optional. How the guarantor is related to you.",
+				"guarantorAnnualIncome": "Optional. Used to derive whether the guarantor's income meets 3x rent; the figure itself is never shown.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "self",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				// The applicationFor link is keyed on the ACTING identity —
+				// it is what the in-script owner guard consults to bind the
+				// actor to their own application.
+				Reads: []string{
+					"{payload.leaseAppKey}",
+					"lnk.leaseapp.{payload.leaseAppKey:id}.appliesToUnit.unit.{payload.unit:id}",
+					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}",
+				},
+				// A unit with no listing yet falls through to an unknown
+				// income-to-rent signal rather than failing the submission.
+				OptionalReads: []string{"{payload.unit}.listing"},
+			},
+		},
+		// The landlord's three renewal legs. Each is consumer scope=self,
+		// bound in-script by the acting identity's manages link.
+		{
+			OperationType: "SetRenewalTerms",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set renewal terms",
+				ShortLabel:  "Set terms",
+				Description: "Set the rent and term for a renewal cycle on a unit you manage.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Set terms",
+				Group:       "Renewals",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle."},` +
+				`"rentAmount":{"type":"number","description":"Monthly rent for the renewed term. Must be greater than zero."},` +
+				`"termMonths":{"type":"integer","description":"Renewed lease term in whole months. Must be at least the package's renewal window."}},` +
+				`"required":["renewalKey","rentAmount","termMonths"]}`,
+			FieldDescriptions: map[string]string{
+				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
+				"rentAmount": "Monthly rent for the renewed term.",
+				"termMonths": "Whole months only — a fractional value is rejected rather than silently truncated. Must not be shorter than the renewal window, which would reopen the next cycle the moment this one signs.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "renewal",
+				AuthContext: "self",
+				TargetField: "renewalKey",
+				TargetType:  "renewal",
+				Reads:       []string{"{payload.renewalKey}"},
+				// Absent until the tenant signs — its presence is what locks
+				// the terms, so absence is the normal case.
+				OptionalReads: []string{"{payload.renewalKey}.renewalSignature"},
+			},
+		},
+		{
+			OperationType: "VerifyGuarantor",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Verify tenant's guarantor",
+				ShortLabel:  "Verify guarantor",
+				Description: "Record that you rechecked the guarantor backing a renewal.",
+				Icon:        "clipboard",
+				Tone:        "neutral",
+				SubmitLabel: "Verify guarantor",
+				Group:       "Renewals",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle."},` +
+				`"leaseApp":{"type":"string","description":"vtx.leaseapp.<NanoID> the renewal is for — verified against the renewal's own renews link."},` +
+				`"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the tenant — verified against the application's own applicationFor link."},` +
+				`"method":{"type":"string","description":"How the guarantor was verified, e.g. phone call, updated pay stub. Optional."}},` +
+				`"required":["renewalKey","leaseApp","applicant"]}`,
+			FieldDescriptions: map[string]string{
+				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
+				"leaseApp":   "The application this cycle renews. Verified against the renewal's own renews link, so a tampered value is rejected.",
+				"applicant":  "The tenant. Verified against the application's own applicationFor link — a payload cannot borrow another applicant's guarantor state.",
+				"method":     "Optional free text recording how you verified, kept alongside the verification timestamp.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "renewal",
+				AuthContext: "self",
+				TargetField: "renewalKey",
+				TargetType:  "renewal",
+				// Both link reads are required — the script verifies the pair
+				// before it trusts the applicant's profile.
+				Reads: []string{
+					"{payload.renewalKey}",
+					"lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{payload.leaseApp:id}",
+					"lnk.leaseapp.{payload.leaseApp:id}.applicationFor.identity.{payload.applicant:id}",
+				},
+				// An applicant who never filled in a profile has none; the op
+				// answers NoGuarantorToVerify rather than failing the read.
+				OptionalReads: []string{"{payload.leaseApp}.profile"},
+			},
+		},
+		{
+			OperationType: "CancelRenewal",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Decline this renewal",
+				ShortLabel:  "Decline renewal",
+				Description: "Decline a renewal cycle on a unit you manage. Terminal — a declined cycle is not reopened.",
+				Icon:        "clipboard",
+				Tone:        "destructive",
+				SubmitLabel: "Decline renewal",
+				Group:       "Renewals",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"renewalKey":{"type":"string","description":"vtx.renewal.<NanoID> of the renewal cycle being declined."},` +
+				`"reason":{"type":"string","description":"Why the renewal is being declined. Optional."}},` +
+				`"required":["renewalKey"]}`,
+			FieldDescriptions: map[string]string{
+				"renewalKey": "The renewal cycle — filled from the renewal in view, not typed.",
+				"reason":     "Optional rationale, recorded with the decline. TERMINAL: a declined cycle counts as this cycle's renewal and is not reopened by the expiry sweep.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "renewal",
+				AuthContext: "self",
+				TargetField: "renewalKey",
+				TargetType:  "renewal",
+				Reads:       []string{"{payload.renewalKey}"},
+				// A signed cycle cannot be cancelled; absence is the normal
+				// case, so this can never be a required read.
+				OptionalReads: []string{"{payload.renewalKey}.renewalSignature"},
+			},
+		},
+		// Engine legs — externalTask instanceOp/replyOp/dispatchOp and the
+		// assignTask targets a client never builds a form for. Bare on
+		// purpose: they exist so forOperation resolves, not to be rendered.
 		{OperationType: "SignLease"},
 		{OperationType: "RecordIdentityPII"},
 		{OperationType: "CreateLeaseServiceInstance"},
@@ -259,9 +538,6 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{OperationType: "RecordServiceDispatch"},
 		{OperationType: "CreateLeaseDocInstance"},
 		{OperationType: "RecordLeaseDocOutcome"},
-		{OperationType: "SetApplicantProfile"},
-		{OperationType: "SetRenewalTerms"},
-		{OperationType: "VerifyGuarantor"},
 		{OperationType: "SignRenewal"},
 	}
 }

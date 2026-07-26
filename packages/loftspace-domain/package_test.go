@@ -173,7 +173,7 @@ func TestPackage_Permissions(t *testing.T) {
 	// D1.5, and a SECURE LENS: the sensitive identity name decrypts at
 	// projection time, so no unprotected roster surface exists; landlordUnitsRead
 	// — the PROTECTED, landlord-anchored occupancy model, portfolio-pulse Inc 2);
-	// no role, weaver target, loom pattern, or op-meta.
+	// no role, weaver target, or loom pattern; one op-meta (pinned below).
 	if got := len(Package.Lenses); got != 3 {
 		t.Fatalf("expected 3 lenses, got %d", got)
 	}
@@ -218,6 +218,31 @@ func TestPackage_Permissions(t *testing.T) {
 	}
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
+	}
+	// One op-meta: SetListingStatus, the package's only user-facing op (the
+	// other four are operator-only, which the trusted admin tool dispatches
+	// itself). It must stay a FULL descriptor — a bare meta would satisfy the
+	// count while leaving the op unrenderable, which is the S1 hole the
+	// Standard exists to close.
+	if got := len(Package.OpMetas); got != 1 {
+		t.Fatalf("expected 1 opMeta, got %d", got)
+	}
+	meta := Package.OpMetas[0]
+	if meta.OperationType != "SetListingStatus" {
+		t.Fatalf("opMeta = %s, want SetListingStatus", meta.OperationType)
+	}
+	if meta.Presentation == nil || meta.Presentation.Title == "" ||
+		meta.InputSchema == "" || len(meta.FieldDescriptions) == 0 || meta.Dispatch == nil {
+		t.Fatalf("SetListingStatus must carry a FULL descriptor, got %+v", meta)
+	}
+	// The landlord path is scope=self, so the descriptor must say so — naming
+	// "standing" here would send a descriptor-driven client down the
+	// operator path and get it refused.
+	if meta.Dispatch.AuthContext != "self" {
+		t.Fatalf("SetListingStatus authContext = %q, want self", meta.Dispatch.AuthContext)
+	}
+	if meta.Dispatch.Class != loftspaceListingDDL || meta.Dispatch.TargetType != "unit" {
+		t.Fatalf("unexpected SetListingStatus dispatch: %+v", meta.Dispatch)
 	}
 }
 

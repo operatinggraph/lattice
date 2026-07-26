@@ -106,13 +106,6 @@ var s1Debt = map[opRef]bool{
 	{"identity-domain", "InitiateCredentialLink", "self"}: true,
 	{"identity-domain", "CompleteCredentialLink", "self"}: true,
 	{"identity-domain", "UnlinkCredential", "self"}:       true,
-	{"lease-signing", "CreateLeaseApplication", "self"}:   true,
-	{"lease-signing", "WithdrawLeaseApplication", "self"}: true,
-	{"lease-signing", "SetApplicantProfile", "self"}:      true,
-	{"lease-signing", "SetRenewalTerms", "self"}:          true,
-	{"lease-signing", "VerifyGuarantor", "self"}:          true,
-	{"lease-signing", "CancelRenewal", "self"}:            true,
-	{"loftspace-domain", "SetListingStatus", "self"}:      true,
 	{"orchestration-base", "ClaimTask", "any"}:            true,
 	{"wellness-domain", "CreateSession", "any"}:           true,
 }
