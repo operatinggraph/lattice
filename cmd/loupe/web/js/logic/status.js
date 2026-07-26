@@ -95,10 +95,8 @@ function sysmapSummary(nodes) {
 
 // sysmapTier derives a node's tier (-1..4) from its kind + id, never hardcoded
 // x/y — so the layout survives backend node-set changes. Tier -1 is the door
-// band: the external-actors marker on its own line, the Gateway + F14
-// declared apps (clinic-app, loftspace-app) on the doors line under it, above
-// core-operations. object-store is the archive sink, bottom band with the
-// read-models.
+// band, which sysmapDoorLine splits into its three rows. object-store is the
+// archive sink, bottom band with the read-models.
 function sysmapTier(node) {
   if (node.kind === "ingress") return -1;
   if (node.kind === "app") return -1;
@@ -114,6 +112,90 @@ function sysmapTier(node) {
   if (node.id === "gateway") return -1; // the door, above the spine
   return node.id === "processor" ? 1 : 3;
 }
+
+// sysmapDoorLine splits the door band (tier -1) into its three rows, top to
+// bottom: who is calling, what they call, and the one door those calls go
+// through.
+//
+// Apps sit ABOVE the Gateway because that is the route: no app publishes to
+// core-operations itself any more — every write is submitted browser-direct
+// through the Gateway — so an apps row level with the Gateway would draw a
+// sideways hop where the real one goes down.
+function sysmapDoorLine(node) {
+  if (node.kind === "ingress") return "ingress";
+  if (node.kind === "app") return "apps";
+  return "gateway";
+}
+
+// sysmapDepth is a node's vertical ORDER for edge routing — the same tiers
+// sysmapTier buckets by, except that the door band's three rows get distinct
+// values. An edge has to know which of its endpoints is above the other, and
+// tier -1 alone cannot say now that an app and the Gateway both live there:
+// read as equal, an app→Gateway write would draw as a sideways same-row arc
+// instead of the downward hop it is.
+function sysmapDepth(node) {
+  var t = sysmapTier(node);
+  if (t !== -1) return t;
+  var line = sysmapDoorLine(node);
+  return line === "ingress" ? -1.2 : line === "apps" ? -1.1 : -1;
+}
+
+// infraTarget is the view an infra tile drills into, or "" for the tiles that
+// have none. Core KV's contents ARE the graph, so the tile is the shortest
+// path from "the store is there" to "here is what is in it" — the map's other
+// nodes all drill somewhere and this one asked visitors to find the tab
+// themselves.
+function infraTarget(id) {
+  return id === "core-kv" ? "#/graph" : "";
+}
+
+// groupApps splits the apps row into the nodes that render on their own and
+// the boxes that hold the rest, keyed by node.group. The server decides the
+// grouping; this only arranges what it declared, so curating an app in or out
+// of a box never touches the view.
+//
+// A box's status is worst-of its members: a box that renders green while one
+// app inside it is down would hide exactly what the map exists to show.
+function groupApps(appNodes) {
+  var standalone = [];
+  var boxes = [];
+  var byGroup = {};
+  (appNodes || []).forEach(function (n) {
+    if (!n.group) { standalone.push(n); return; }
+    if (!byGroup[n.group]) {
+      byGroup[n.group] = { id: "group:" + n.group, group: n.group, members: [] };
+      boxes.push(byGroup[n.group]);
+    }
+    byGroup[n.group].members.push(n);
+  });
+  boxes.forEach(function (b) {
+    var worst = "green";
+    b.members.forEach(function (m) {
+      if (appBoxSeverity[m.status] > appBoxSeverity[worst]) worst = m.status;
+    });
+    b.status = worst;
+  });
+  return { standalone: standalone, boxes: boxes };
+}
+
+// appBoxIndex maps each boxed app id to the box id its edges are re-pointed
+// at. It is derived from the node set rather than from whatever the layout
+// happened to build, because the edge drawing runs in its own pass: a mapping
+// owned by the layout is a mapping the edge pass cannot see.
+function appBoxIndex(nodes) {
+  var index = {};
+  (nodes || []).forEach(function (n) {
+    if (n.kind === "app" && n.group) index[n.id] = "group:" + n.group;
+  });
+  return index;
+}
+
+// appBoxSeverity ranks app statuses for a box's worst-of dot. "offline" is a
+// declared-but-not-running vertical, which is ordinary on a kernel-only stack,
+// so it ranks below the states that mean something broke.
+var appBoxSeverity = {
+  absent: 5, unhealthy: 4, degraded: 3, stale: 2, offline: 1, green: 0, unknown: 1,
+};
 
 // lensSeverity ranks a lens renderedState for a F14 cluster header's
 // worst-of dot — informational/degraded states outrank the healthy
@@ -156,4 +238,4 @@ function groupLenses(nodes) {
   return out;
 }
 
-export { appPointerCopy, componentStatusClass, offlineComponentCopy, offlineComponentPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier, groupLenses };
+export { appPointerCopy, componentStatusClass, offlineComponentCopy, offlineComponentPointer, lensStateDot, lensStateGlyph, pendingReadpathCopy, issueClass, alertLineClass, shapeAlertLines, sysmapSummary, sysmapTier, sysmapDepth, sysmapDoorLine, groupApps, appBoxIndex, infraTarget, groupLenses };

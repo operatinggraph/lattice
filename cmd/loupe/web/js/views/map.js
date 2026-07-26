@@ -6,30 +6,33 @@
 // data change, not new rendering logic.
 
 import { el, api, setStatus } from "../api.js";
-import { appPointerCopy, componentStatusClass, offlineComponentCopy, offlineComponentPointer, groupLenses, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapTier } from "../logic/status.js";
+import { appPointerCopy, componentStatusClass, offlineComponentCopy, offlineComponentPointer, appBoxIndex, groupApps, groupLenses, infraTarget, lensStateDot, lensStateGlyph, pendingReadpathCopy, sysmapSummary, sysmapDepth, sysmapDoorLine, sysmapTier } from "../logic/status.js";
 import { deriveTransitions, ledClass } from "../logic/feed.js";
 import { keyTarget } from "../logic/keys.js";
 import { clockLabel, framesFromFlows, timelineWindow } from "../logic/scrubber.js";
 import { navigate } from "../router.js";
 import * as pulse from "../pulse.js";
 
-// Tier rows 0-4 sit below the door band (tier -1): the external-actors marker
-// on its own line, then the doors row (Gateway + F14 declared apps) below it.
+// Tier rows 0-4 sit below the door band (tier -1), which is three rows: the
+// external-actors marker, the apps that serve them, then the one Gateway
+// every app's writes go through. Top to bottom IS the request path.
+// The apps row is the tall one — a box wraps its chips — so the Gateway row
+// below it is spaced for that, not for a single-line node.
 const SYSMAP_INGRESS_Y = 24;
-const SYSMAP_DOORS_Y = 92;
-const SYSMAP_TIER_Y = [190, 300, 420, 550, 680];
+const SYSMAP_APPS_Y = 90;
+const SYSMAP_DOORS_Y = 214;
+const SYSMAP_TIER_Y = [306, 416, 536, 666, 796];
 const SYSMAP_NODE_H = 58;
 const SVG_NS = "http://www.w3.org/2000/svg";
 const refractorId = "refractor"; // the sole lens parent (see systemmap.go)
 
-// doorRank orders the F14 doors row left-to-right (clinic-app · Gateway ·
-// loftspace-app, loupe-map-scale-ux.md §2); anything uncurated stays beside
-// the Gateway rather than at an arbitrary end.
-function doorRank(id) {
-  if (id === "clinic-app") return 0;
-  if (id === "gateway") return 1;
-  if (id === "loftspace-app") return 2;
-  return 1;
+// appsRank orders the apps row left-to-right: Facet first, since it is the
+// one app singled out of the box, then the box itself. Anything uncurated
+// sorts after both rather than splitting them.
+function appsRank(id) {
+  if (id === "facet") return 0;
+  if (id === "group:apps") return 1;
+  return 2;
 }
 
 // sysmap holds the last-rendered data + transient render state. nodeEls maps a
@@ -324,14 +327,15 @@ function renderSystemMap(data) {
   const width = stage.clientWidth || 1100;
 
   // Tiers 0-3: absolutely positioned, evenly spaced across the stage width.
-  // The door band (tier -1) sits above tier 0, split into two lines: the
-  // plain ingress marker, and the doors row (Gateway + F14 declared apps). A
-  // lateral component (Vault) is placed beside its Core-KV anchor after the
-  // rows are laid out; tier-4 infra (the object store) joins the shelf.
-  // Lenses cluster into cards and runtime-discovered clients render on
-  // shelves, not tiers.
+  // The door band (tier -1) sits above tier 0 as three lines — the ingress
+  // marker, the apps, then the Gateway — so the band reads as the request
+  // path it is. A lateral component (Vault) is placed beside its Core-KV
+  // anchor after the rows are laid out; tier-4 infra (the object store) joins
+  // the shelf. Lenses cluster into cards and runtime-discovered clients
+  // render on shelves, not tiers.
   const tierMembers = [[], [], [], []];
   const ingressMembers = [];
+  const appMembers = [];
   const doorMembers = [];
   const lateralMembers = [];
   const shelfInfra = [];
@@ -340,11 +344,20 @@ function renderSystemMap(data) {
     if (n.kind === "client") { clients.push(n); return; }
     if (n.lateral) { lateralMembers.push(n); return; }
     const t = sysmapTier(n);
-    if (t === -1) { (n.kind === "ingress" ? ingressMembers : doorMembers).push(n); return; }
+    if (t === -1) {
+      const line = sysmapDoorLine(n);
+      (line === "ingress" ? ingressMembers : line === "apps" ? appMembers : doorMembers).push(n);
+      return;
+    }
     if (t === 4) { if (n.kind === "infra") shelfInfra.push(n); return; } // lenses cluster below, not per-node
     tierMembers[t].push(n);
   });
-  doorMembers.sort((a, b) => doorRank(a.id) - doorRank(b.id));
+  // The apps row is standalone nodes plus one box per declared group; the box
+  // is what the edges attach to, so its members need no edges of their own.
+  const grouped = groupApps(appMembers);
+  const appsRow = grouped.standalone.concat(grouped.boxes);
+  appsRow.sort((a, b) => appsRank(a.id) - appsRank(b.id));
+
 
   // Refractor is the left-most tier-3 slot so its project edges drop cleanly
   // into the shelf without crossing the other engines' return paths;
@@ -361,6 +374,15 @@ function renderSystemMap(data) {
     const node = buildSysmapNode(n);
     node.style.left = ((i + 1) / (ingressMembers.length + 1) * width) + "px";
     node.style.top = SYSMAP_INGRESS_Y + "px";
+    node.style.transform = "translateX(-50%)";
+    stage.appendChild(node);
+    sysmap.nodeEls.set(n.id, node);
+  });
+
+  appsRow.forEach((n, i) => {
+    const node = n.members ? buildAppBox(n) : buildSysmapNode(n);
+    node.style.left = ((i + 1) / (appsRow.length + 1) * width) + "px";
+    node.style.top = SYSMAP_APPS_Y + "px";
     node.style.transform = "translateX(-50%)";
     stage.appendChild(node);
     sysmap.nodeEls.set(n.id, node);
@@ -636,16 +658,47 @@ function buildSysmapNode(n) {
     node.appendChild(el("span", "sysmap-dot " + cls));
     node.appendChild(el("span", "sysmap-label", n.label));
     if (n.instances && n.instances.length > 1) node.appendChild(el("span", "sysmap-tag", "×" + n.instances.length));
-  } else { // infra / ingress — a plain labelled chip, no dot, non-interactive
+  } else { // infra / ingress — a plain labelled chip, no dot
     node.appendChild(el("span", "sysmap-label", n.label));
+    if (n.kind === "infra" && infraTarget(n.id)) node.classList.add("drillable");
   }
 
-  if (n.kind === "component" || n.kind === "app" || n.kind === "lens" || n.kind === "client") {
+  if (n.kind === "component" || n.kind === "app" || n.kind === "lens" || n.kind === "client" ||
+      (n.kind === "infra" && infraTarget(n.id))) {
     node.addEventListener("mouseenter", (e) => showSysmapTip(n, e));
     node.addEventListener("mouseleave", hideSysmapTip);
     node.addEventListener("click", () => drillSysmapNode(n));
   }
   return node;
+}
+
+// buildAppBox renders one apps group as a single card whose chips are its
+// members. The card carries the group's worst-of dot, so a box that looks
+// healthy never hides a vertical that is down; each chip keeps its own dot and
+// its own drill-in, so collapsing the row costs no reachability.
+function buildAppBox(boxNode) {
+  const card = el("div", "sysmap-node sysmap-appbox");
+  card.dataset.status = boxNode.status || "";
+  card.dataset.id = boxNode.id;
+  const head = el("div", "sysmap-node-head");
+  head.appendChild(el("span", "sysmap-dot " + (componentStatusClass[boxNode.status] || "unknown")));
+  head.appendChild(el("span", "sysmap-label", "Apps"));
+  head.appendChild(el("span", "sysmap-tag", "×" + boxNode.members.length));
+  card.appendChild(head);
+  const chips = el("div", "sysmap-appbox-chips");
+  boxNode.members.forEach((m) => {
+    const chip = el("div", "sysmap-appchip");
+    chip.dataset.status = m.status || "";
+    if (m.status === "offline") chip.classList.add("offline");
+    chip.appendChild(el("span", "sysmap-dot " + (componentStatusClass[m.status] || "unknown")));
+    chip.appendChild(el("span", "sysmap-label", m.label));
+    chip.addEventListener("mouseenter", (e) => showSysmapTip(m, e));
+    chip.addEventListener("mouseleave", hideSysmapTip);
+    chip.addEventListener("click", (e) => { e.stopPropagation(); drillSysmapNode(m); });
+    chips.appendChild(chip);
+  });
+  card.appendChild(chips);
+  return card;
 }
 
 // drillSysmapNode routes a node click to the owning view: a component/client
@@ -654,6 +707,11 @@ function drillSysmapNode(n) {
   hideSysmapTip();
   if (n.kind === "lens") {
     navigate("#/lens/" + n.id);
+    return;
+  }
+  if (n.kind === "infra") {
+    const target = infraTarget(n.id);
+    if (target) navigate(target);
     return;
   }
   navigate("#/component/" + n.id);
@@ -748,12 +806,14 @@ function drawSysmapEdges(data) {
     const r = e.getBoundingClientRect();
     return { l: r.left - stageBox.left, t: r.top - stageBox.top, w: r.width, h: r.height };
   };
-  // A synthetic lens-cluster card (see renderLensClusterShelf) has no server
-  // node to look up — it lives on the same tier-4 shelf its member lenses do.
+  // A synthetic card has no server node to look up: a lens cluster (see
+  // renderLensClusterShelf) lives on the same tier-4 shelf its member lenses
+  // do, an apps box on the apps row its members came from.
   const tierOf = (id) => {
     if (id.indexOf("cluster:") === 0) return 4;
+    if (id.indexOf("group:") === 0) return sysmapDepth({ kind: "app" });
     const node = (data.nodes || []).find((x) => x.id === id);
-    return node ? sysmapTier(node) : -1;
+    return node ? sysmapDepth(node) : -1;
   };
 
   // The upward "submit ops" returns share one gutter lane near the right edge
@@ -762,7 +822,23 @@ function drawSysmapEdges(data) {
   const returnGutter = Math.max(stageBox.width - 52, 0);
   let returnLabelled = false;
 
+  // An app inside a box has no node of its own on the stage, so its edges are
+  // re-pointed at the box and collapsed — four identical external→app→Gateway
+  // pairs would otherwise draw as one thick smear through the same two points.
+  const boxOf = appBoxIndex(data.nodes);
+  const seenEdge = new Set();
+  const routedEdges = [];
   (data.edges || []).forEach((edge) => {
+    const from = boxOf[edge.from] || edge.from;
+    const to = boxOf[edge.to] || edge.to;
+    if (from === to) return;
+    const k = from + "→" + to;
+    if (seenEdge.has(k)) return;
+    seenEdge.add(k);
+    routedEdges.push({ ...edge, from, to });
+  });
+
+  routedEdges.forEach((edge) => {
     const a = box(edge.from), b = box(edge.to);
     if (!a || !b) return; // edge resolves only when both endpoints exist
     const ta = tierOf(edge.from), tb = tierOf(edge.to);

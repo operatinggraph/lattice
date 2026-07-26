@@ -49,6 +49,10 @@ type mapNode struct {
 	// instead of a package page).
 	Pkg    string `json:"pkg,omitempty"`
 	PkgKey string `json:"pkgKey,omitempty"`
+	// Group buckets an app node into a shared render box (appsGroup); empty
+	// renders the node on its own. It is a curation decision, not live state,
+	// so it comes from the declaration rather than from any heartbeat.
+	Group string `json:"group,omitempty"`
 }
 
 // mapInstance is one heartbeat of a component/client node — the per-instance
@@ -60,15 +64,11 @@ type mapInstance struct {
 	Issues    []string `json:"issues,omitempty"`
 }
 
-// mapEdge is a directed data-flow edge between two node ids. DesignAhead
-// marks a door-band edge that draws dashed — the ratified end-state route
-// (gateway-external-trust-boundary-design.md F5) a vertical's traffic hasn't
-// adopted yet.
+// mapEdge is a directed data-flow edge between two node ids.
 type mapEdge struct {
-	From        string `json:"from"`
-	To          string `json:"to"`
-	Label       string `json:"label,omitempty"`
-	DesignAhead bool   `json:"designAhead,omitempty"`
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Label string `json:"label,omitempty"`
 }
 
 // systemMap is the GET /api/systemmap response: the canonical component
@@ -100,13 +100,16 @@ const refractorID = "refractor"
 // package manifest claims — the bootstrap kernel-seed family.
 const kernelGroup = "kernel"
 
-// The F14 door-band edge labels, applied once across the declaredApps set
-// (the returnLabelled label-once precedent) — every other app's matching
-// edge carries an empty label so the pair doesn't repeat the same text twice.
-const (
-	doorDirectLabel  = "submit ops · direct (today)"
-	doorGatewayLabel = "user writes · end-state"
-)
+// doorGatewayLabel is applied once across the declaredApps set (the
+// returnLabelled label-once precedent) — every other app's matching edge
+// carries an empty label so the row doesn't repeat the same text five times.
+const doorGatewayLabel = "user writes"
+
+// appsGroup is the render group the ordinary vertical apps share: the map
+// draws them as one box rather than five chips, since they differ only in
+// which vertical they serve and all take the identical route in. An app with
+// an empty group renders on its own.
+const appsGroup = "apps"
 
 // declaredComponent is an engine the deployment is expected to run. Its id is
 // the Health KV group name (classifyHealthKey) so the overlay matches by id.
@@ -161,6 +164,11 @@ var ingressNodes = []mapNode{
 type declaredApp struct {
 	id    string
 	label string
+	// group buckets an app into a shared render box; empty renders the app
+	// standalone. Facet stands alone because it is the edge/personal-lens
+	// showcase rather than one more business vertical — it is the app that
+	// demonstrates a different half of the platform.
+	group string
 }
 
 // declaredApps are the vertical apps curated onto the ingress door band.
@@ -168,10 +176,11 @@ type declaredApp struct {
 // "offline" (dim, zero rollup contribution), never absent-red — kernel-only
 // `make up` must stay green regardless of which verticals are running.
 var declaredApps = []declaredApp{
-	{id: "clinic-app", label: "Clinic"},
-	{id: "loftspace-app", label: "LoftSpace"},
-	{id: "cafe-app", label: "Café"},
-	{id: "wellness-app", label: "Wellness"},
+	{id: "facet", label: "Facet"},
+	{id: "clinic-app", label: "Clinic", group: appsGroup},
+	{id: "loftspace-app", label: "LoftSpace", group: appsGroup},
+	{id: "cafe-app", label: "Café", group: appsGroup},
+	{id: "wellness-app", label: "Wellness", group: appsGroup},
 }
 
 // skeletonEdges is the canonical data flow (architecture-overview.md §"data
@@ -357,7 +366,7 @@ func computeSystemMap(
 	for _, da := range declaredApps {
 		declared[da.id] = true
 		taken[da.id] = true
-		node := mapNode{ID: da.id, Label: da.label, Kind: nodeApp}
+		node := mapNode{ID: da.id, Label: da.label, Kind: nodeApp, Group: da.group}
 		if bs, ok := beats[da.id]; ok {
 			worse(applyBeats(&node, bs))
 		} else {
@@ -404,16 +413,19 @@ func computeSystemMap(
 	})
 	nodes = append(nodes, lensNodes...)
 
-	edges := make([]mapEdge, 0, len(skeletonEdges)+len(declaredApps)*3)
+	// Every app's writes enter through the Gateway — no app publishes to
+	// core-operations itself, so the map draws no such edge. The apps sit
+	// ABOVE the Gateway for the same reason: the route reads top to bottom,
+	// browser → app → Gateway → core-operations, with nothing skipping a hop.
+	edges := make([]mapEdge, 0, len(skeletonEdges)+len(declaredApps)*2)
 	edges = append(edges, skeletonEdges...)
 	for i, da := range declaredApps {
 		edges = append(edges, mapEdge{From: "external", To: da.id})
-		direct, gateway := "", ""
+		label := ""
 		if i == 0 {
-			direct, gateway = doorDirectLabel, doorGatewayLabel
+			label = doorGatewayLabel
 		}
-		edges = append(edges, mapEdge{From: da.id, To: "core-operations", Label: direct})
-		edges = append(edges, mapEdge{From: da.id, To: "gateway", Label: gateway, DesignAhead: true})
+		edges = append(edges, mapEdge{From: da.id, To: "gateway", Label: label})
 	}
 
 	if !bootstrapPresent {

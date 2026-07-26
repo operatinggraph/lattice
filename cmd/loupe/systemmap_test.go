@@ -244,11 +244,12 @@ func TestComputeSystemMapClientNodes(t *testing.T) {
 	}
 }
 
-// A declared app (F14 door band) with no heartbeat renders "offline" — dim,
-// zero rollup contribution, never absent-red (verticals are optional
-// workloads). It heartbeats and overlays like any component once live, and
-// gains the door-band edges (solid direct + dashed design-ahead via-Gateway)
-// with the label carried once across the declaredApps pair.
+// A declared app with no heartbeat renders "offline" — dim, zero rollup
+// contribution, never absent-red (verticals are optional workloads). It
+// heartbeats and overlays like any component once live, and its writes enter
+// through the Gateway: exactly one app→gateway edge each, the label carried
+// once across the set, and NO app→core-operations edge at all — no app
+// publishes there.
 func TestComputeSystemMapDeclaredAppsDoorBand(t *testing.T) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	docs := map[string]map[string]any{"health.bootstrap.complete": {}}
@@ -277,27 +278,74 @@ func TestComputeSystemMapDeclaredAppsDoorBand(t *testing.T) {
 		t.Errorf("overall = %q, want green (an offline declared app never degrades the rollup)", m.Overall)
 	}
 
-	var direct, gateway []mapEdge
-	labelled := 0
+	appIDs := map[string]bool{}
+	for _, da := range declaredApps {
+		appIDs[da.id] = true
+	}
+	gateway, labelled := 0, 0
 	for _, e := range m.Edges {
-		if e.To == "core-operations" && (e.From == "clinic-app" || e.From == "loftspace-app") {
-			direct = append(direct, e)
+		if !appIDs[e.From] {
+			continue
+		}
+		if e.To == "core-operations" {
+			t.Errorf("app→core-operations edge %+v: no app publishes to core-operations; every write goes through the Gateway", e)
+		}
+		if e.To == "gateway" {
+			gateway++
 			if e.Label != "" {
 				labelled++
 			}
 		}
-		if e.To == "gateway" && (e.From == "clinic-app" || e.From == "loftspace-app") {
-			gateway = append(gateway, e)
-			if !e.DesignAhead {
-				t.Errorf("app→gateway edge %+v must carry designAhead (end-state route not yet adopted)", e)
-			}
+	}
+	if gateway != len(declaredApps) || labelled != 1 {
+		t.Errorf("app→gateway edges = %d (labelled %d), want %d with exactly 1 labelled", gateway, labelled, len(declaredApps))
+	}
+}
+
+// Facet is an APP on the door band, not a runtime-discovered client on the
+// shelf: it is a curated part of the topology, and a client chip cannot carry
+// the route in that the map is meant to show. It renders outside the shared
+// apps box because it demonstrates the edge/personal-lens half of the platform
+// rather than one more business vertical.
+func TestComputeSystemMapFacetIsADeclaredStandaloneApp(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	docs := map[string]map[string]any{
+		"health.bootstrap.complete": {},
+		"health.facet.node-1":       {"component": "facet", "instance": "node-1", "heartbeatAt": now},
+	}
+	keys := make([]string, 0, len(docs))
+	for k := range docs {
+		keys = append(keys, k)
+	}
+	read := func(k string) (map[string]any, bool) { d, ok := docs[k]; return d, ok }
+
+	m := computeSystemMap(keys, read, nil, nil, time.Minute, nil, nil)
+	byID := nodesByID(m)
+
+	facet := byID["facet"]
+	if facet.Kind != nodeApp {
+		t.Fatalf("facet kind = %q, want %q", facet.Kind, nodeApp)
+	}
+	if facet.Group != "" {
+		t.Errorf("facet group = %q, want empty (renders standalone)", facet.Group)
+	}
+	if facet.Status != "green" || facet.Detail != "node-1" {
+		t.Errorf("facet = %+v, want green/node-1 from its heartbeat", facet)
+	}
+	for _, n := range m.Nodes {
+		if n.Kind == nodeClient && n.ID == "facet" {
+			t.Error("facet still renders as a client chip as well as an app")
 		}
 	}
-	if len(direct) != 2 || labelled != 1 {
-		t.Errorf("direct app→core-operations edges = %+v, want 2 edges with exactly 1 labelled", direct)
-	}
-	if len(gateway) != 2 {
-		t.Errorf("dashed app→gateway edges = %+v, want 2", gateway)
+	// The business verticals share one box; Facet must not be in it.
+	for _, da := range declaredApps {
+		want := appsGroup
+		if da.id == "facet" {
+			want = ""
+		}
+		if byID[da.id].Group != want {
+			t.Errorf("%s group = %q, want %q", da.id, byID[da.id].Group, want)
+		}
 	}
 }
 

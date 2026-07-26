@@ -229,3 +229,144 @@ func TestOptionalComponentRenderTablesJS(t *testing.T) {
 		}
 	}
 }
+
+// The door band is three rows now, and the split is what makes the map read as
+// the request path: who calls, what they call, and the one door those calls go
+// through. sysmapTier alone cannot express it — every one of these is tier -1.
+func TestSysmapDoorLine(t *testing.T) {
+	vm := logicVM(t, "status.js")
+
+	cases := map[string]map[string]any{
+		"ingress": {"kind": "ingress", "id": "external"},
+		"apps":    {"kind": "app", "id": "facet"},
+		"gateway": {"kind": "component", "id": "gateway"},
+	}
+	for want, node := range cases {
+		if got := call(t, vm, "sysmapDoorLine", node); got != want {
+			t.Errorf("sysmapDoorLine(%v) = %v, want %q", node, got, want)
+		}
+	}
+}
+
+// An app is ABOVE the Gateway, so an app→gateway edge must route downward.
+// Read off sysmapTier the two are equal (both -1) and the edge would draw as a
+// sideways same-row arc instead of the hop it is. Depth has to order the whole
+// door band against the spine below it, too.
+func TestSysmapDepth_OrdersTheDoorBandTopToBottom(t *testing.T) {
+	vm := logicVM(t, "status.js")
+
+	// goja exports a whole number as int64 and a fractional one as float64,
+	// and this function deliberately returns both.
+	depth := func(node map[string]any) float64 {
+		switch v := call(t, vm, "sysmapDepth", node).(type) {
+		case float64:
+			return v
+		case int64:
+			return float64(v)
+		default:
+			t.Fatalf("sysmapDepth(%v) = %T, not a number", node, v)
+			return 0
+		}
+	}
+	ingress := depth(map[string]any{"kind": "ingress", "id": "external"})
+	app := depth(map[string]any{"kind": "app", "id": "facet"})
+	gw := depth(map[string]any{"kind": "component", "id": "gateway"})
+	ops := depth(map[string]any{"kind": "infra", "id": "core-operations"})
+
+	if !(ingress < app && app < gw && gw < ops) {
+		t.Errorf("depths ingress=%v app=%v gateway=%v core-operations=%v; want strictly increasing "+
+			"(the band reads browser → app → Gateway → core-operations)", ingress, app, gw, ops)
+	}
+}
+
+func TestGroupApps(t *testing.T) {
+	vm := logicVM(t, "status.js")
+
+	out, _ := call(t, vm, "groupApps", []any{
+		map[string]any{"id": "facet", "label": "Facet", "status": "green"},
+		map[string]any{"id": "clinic-app", "label": "Clinic", "group": "apps", "status": "green"},
+		map[string]any{"id": "cafe-app", "label": "Café", "group": "apps", "status": "offline"},
+	}).(map[string]any)
+
+	standalone, _ := out["standalone"].([]any)
+	if len(standalone) != 1 {
+		t.Fatalf("standalone = %v, want just Facet", standalone)
+	}
+	if s0, _ := standalone[0].(map[string]any); s0["id"] != "facet" {
+		t.Errorf("standalone[0] = %v, want facet", standalone[0])
+	}
+	boxes, _ := out["boxes"].([]any)
+	if len(boxes) != 1 {
+		t.Fatalf("boxes = %v, want one apps box", boxes)
+	}
+	b, _ := boxes[0].(map[string]any)
+	if b["id"] != "group:apps" {
+		t.Errorf("box id = %v, want group:apps (what the edges attach to)", b["id"])
+	}
+	members, _ := b["members"].([]any)
+	if len(members) != 2 {
+		t.Errorf("box members = %v, want the two grouped apps", members)
+	}
+	// offline outranks green: an app that is not running must surface on the box.
+	if b["status"] != "offline" {
+		t.Errorf("box status = %v, want offline (worst-of its members)", b["status"])
+	}
+}
+
+// A box that renders healthy while a member is down hides exactly what the map
+// exists to show, so worst-of has to prefer the real failures over "offline".
+func TestGroupApps_BoxTakesTheWorstMemberStatus(t *testing.T) {
+	vm := logicVM(t, "status.js")
+
+	out, _ := call(t, vm, "groupApps", []any{
+		map[string]any{"id": "a", "group": "apps", "status": "offline"},
+		map[string]any{"id": "b", "group": "apps", "status": "unhealthy"},
+		map[string]any{"id": "c", "group": "apps", "status": "green"},
+	}).(map[string]any)
+	boxes, _ := out["boxes"].([]any)
+	b, _ := boxes[0].(map[string]any)
+	if b["status"] != "unhealthy" {
+		t.Errorf("box status = %v, want unhealthy (a down app outranks an offline one)", b["status"])
+	}
+}
+
+func TestInfraTarget(t *testing.T) {
+	vm := logicVM(t, "status.js")
+
+	if got := call(t, vm, "infraTarget", "core-kv"); got != "#/graph" {
+		t.Errorf("core-kv = %v, want the Graph tab — the tile's contents ARE the graph", got)
+	}
+	for _, id := range []string{"core-operations", "core-events", "object-store", "external"} {
+		if got := call(t, vm, "infraTarget", id); got != "" {
+			t.Errorf("%s = %v, want no drill target", id, got)
+		}
+	}
+}
+
+// The edge pass runs separately from the layout pass, so the boxed-app mapping
+// has to be derivable from the node set alone — a mapping the layout owns is a
+// mapping the edge pass cannot see, and every edge on the map dies with it.
+func TestAppBoxIndex(t *testing.T) {
+	vm := logicVM(t, "status.js")
+
+	out, _ := call(t, vm, "appBoxIndex", []any{
+		map[string]any{"id": "facet", "kind": "app"},
+		map[string]any{"id": "clinic-app", "kind": "app", "group": "apps"},
+		map[string]any{"id": "cafe-app", "kind": "app", "group": "apps"},
+		map[string]any{"id": "gateway", "kind": "component", "group": "apps"},
+		map[string]any{"id": "core-kv", "kind": "infra"},
+	}).(map[string]any)
+
+	if out["clinic-app"] != "group:apps" || out["cafe-app"] != "group:apps" {
+		t.Errorf("boxed apps = %v, want both re-pointed at group:apps", out)
+	}
+	if _, ok := out["facet"]; ok {
+		t.Error("facet is indexed, but a standalone app keeps its own edges")
+	}
+	if _, ok := out["gateway"]; ok {
+		t.Error("a non-app node with a group was indexed; only apps box up")
+	}
+	if _, ok := out["core-kv"]; ok {
+		t.Error("infra was indexed")
+	}
+}

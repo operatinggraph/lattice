@@ -454,10 +454,6 @@ table.grid td { font-family: var(--mono); }
 .sysmap-edge { fill: none; stroke: var(--border); stroke-width: 1.5; }
 .sysmap-edge.secondary { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
 .sysmap-edge.secondary:hover { stroke: var(--text-dim); }
-/* design-ahead (F14 door band): the ratified end-state route a vertical's
-   traffic hasn't adopted yet — dashed, the same informational vocabulary as
-   a design-ahead node. */
-.sysmap-edge.design-ahead { stroke: var(--accent-dim); stroke-dasharray: 4 3; }
 .sysmap-edge-label { fill: var(--text-dim); font-family: var(--mono); font-size: 10px; }
 .sysmap-edge-label-bg { fill: var(--bg); }
 
@@ -478,6 +474,40 @@ table.grid td { font-family: var(--mono); }
   font-family: var(--mono);
   font-size: 12px;
 }
+/* An infra tile that drills somewhere says so: every other clickable node on
+   this map is visibly clickable, and a tile that silently is would be found
+   only by accident. */
+.sysmap-node.infra.drillable { cursor: pointer; }
+.sysmap-node.infra.drillable:hover { border-color: var(--accent); color: var(--text); }
+
+/* The apps box: one card holding the vertical apps that share a route in, so
+   the row stays one row as verticals are added. Wider than a component tile
+   because it carries chips, not a single label. */
+.sysmap-appbox {
+  border-radius: 8px;
+  border-left-width: 3px;
+  border-left-color: var(--green);
+  padding: 8px 12px;
+  width: 230px;
+}
+.sysmap-appbox[data-status="stale"],
+.sysmap-appbox[data-status="degraded"] { border-left-color: var(--yellow); }
+.sysmap-appbox[data-status="unhealthy"],
+.sysmap-appbox[data-status="absent"] { border-left-color: var(--red); }
+.sysmap-appbox[data-status="offline"] { border-left-color: var(--border); }
+.sysmap-appbox-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.sysmap-appchip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.sysmap-appchip:hover { border-color: var(--accent); }
+.sysmap-appchip.offline { opacity: 0.5; }
 
 .sysmap-node.component,
 .sysmap-node.app {
