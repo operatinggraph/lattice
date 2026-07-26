@@ -119,13 +119,10 @@ var readTemplateDebt = map[opRef]bool{
 // s6Debt lists packages below the verification floor, per rule. Same
 // shrink-only discipline as s1Debt.
 var s6Debt = map[string]map[string]bool{
-	"lens-cypher-test": {
-		"augur":            true,
-		"console-operator": true,
-		"demo-operator":    true,
-		"identity-domain":  true,
-		"rbac-domain":      true,
-	},
+	// Empty: every lens-declaring package executes its cypher. The rule now
+	// binds with no exemptions, so a new lens ships with a test that runs it
+	// or reds the gate.
+	"lens-cypher-test": {},
 	// Empty: every registered package pins its structure. The rule now binds
 	// with no exemptions, so a new package ships a pin or reds the gate.
 	"structure-pins": {},
