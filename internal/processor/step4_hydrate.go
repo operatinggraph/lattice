@@ -193,10 +193,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 	tracker := &sensitiveReadTracker{}
 	var egressKeys map[string]struct{}
 	if env.ContextHint != nil {
-		for _, key := range env.ContextHint.Reads {
-			if key == "" {
-				continue
-			}
+		for _, key := range distinctKeys(env.ContextHint.Reads) {
 			entry, err := h.Conn.KVGet(ctx, h.CoreBucket, key)
 			if err != nil {
 				if errors.Is(err, substrate.ErrKeyNotFound) {
@@ -215,10 +212,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			}
 			markHydrated(key, doc)
 		}
-		for _, key := range env.ContextHint.OptionalReads {
-			if key == "" {
-				continue
-			}
+		for _, key := range distinctKeys(env.ContextHint.OptionalReads) {
 			// A key in both lists keeps the fail-closed `reads` semantics: it
 			// either hydrated above or was recorded required-absent, so it is
 			// never demoted to absence-tolerant by a duplicate optionalReads
@@ -257,10 +251,7 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			}
 			markHydrated(key, doc)
 		}
-		for _, key := range env.ContextHint.EgressReads {
-			if key == "" {
-				continue
-			}
+		for _, key := range distinctKeys(env.ContextHint.EgressReads) {
 			if egressKeys == nil {
 				egressKeys = map[string]struct{}{}
 			}
@@ -321,6 +312,40 @@ func (h *HydratorImpl) Hydrate(ctx context.Context, env *OperationEnvelope) (Hyd
 			SensitiveReads: tracker,
 		},
 	}, nil
+}
+
+// distinctKeys returns the declared keys of one contextHint read class in
+// declaration order, with blanks and repeats dropped.
+//
+// It is what makes the declared-read ceiling (opwire.MaxDeclaredReads) a bound
+// on Core KV round trips rather than on mentions: nothing rejects a duplicate
+// declaration and the lists are client-supplied, so a key named N times would
+// otherwise cost N GETs — plus, for a sensitive class, N key-envelope GETs and
+// N decrypts — from a declared set sitting well inside the ceiling. Resolving
+// each key once is also the more consistent snapshot, since a second probe of
+// the same key can straddle a concurrent create or purge and disagree with the
+// first.
+//
+// The blank filter is load-bearing beyond tidiness: "" is the no-fault
+// sentinel used by both the tracker and the mutation check, so it must never
+// reach requiredAbsent.
+func distinctKeys(declared []string) []string {
+	if len(declared) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(declared))
+	out := make([]string, 0, len(declared))
+	for _, key := range declared {
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
 }
 
 // resolveClass extracts the operation's class for DDL lookup. Precedence:

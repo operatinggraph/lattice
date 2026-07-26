@@ -27,6 +27,10 @@ const (
 // ContextHint mirrors Contract #2 §2.5 — the declared read set.
 type ContextHint = opwire.ContextHint
 
+// MaxDeclaredReads bounds the summed length of a contextHint's three read
+// classes (Contract #2 §2.5) — one step-4 Core KV GET is paid per declared key.
+const MaxDeclaredReads = opwire.MaxDeclaredReads
+
 // EnumerationHint is one declared kv.Links enumeration (Contract #2 §2.5.1).
 type EnumerationHint = opwire.EnumerationHint
 

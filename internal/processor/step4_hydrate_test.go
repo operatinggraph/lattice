@@ -266,3 +266,100 @@ func TestHydrate_VertexDocCarriesKey(t *testing.T) {
 		t.Fatalf("VertexDoc.Key = %q, want %q", state.Context.Hydrated[actorKey].Key, actorKey)
 	}
 }
+
+// TestDistinctKeys is what makes the declared-read ceiling
+// (opwire.MaxDeclaredReads) a bound on Core KV round trips rather than on
+// mentions. Nothing rejects a duplicate declaration and the lists are
+// client-supplied, so a key named N times must cost one resolution — otherwise
+// a declared set sitting well inside the ceiling buys arbitrary hydration just
+// by repeating itself.
+//
+// This is asserted on the helper, not through Hydrate: the hydration result is
+// three MAPS, so a per-mention re-GET produces the identical end state and an
+// end-state assertion would pass whether or not the dedup exists.
+func TestDistinctKeys(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		declared []string
+		want     []string
+	}{
+		{"nil is nil", nil, nil},
+		{"empty is nil", []string{}, nil},
+		{"order is declaration order", []string{"c", "a", "b"}, []string{"c", "a", "b"}},
+		{"repeats collapse to the first mention", []string{"a", "b", "a", "a", "b"}, []string{"a", "b"}},
+		{"one key many times is one key", []string{"a", "a", "a", "a", "a", "a", "a", "a"}, []string{"a"}},
+		// "" is the no-fault sentinel for the tracker and the mutation check,
+		// so it must never survive into a resolution.
+		{"blanks are dropped", []string{"", "a", "", "b", ""}, []string{"a", "b"}},
+		{"only blanks is nil", []string{"", "", ""}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := distinctKeys(tc.declared)
+			if len(got) != len(tc.want) {
+				t.Fatalf("distinctKeys(%q) = %q, want %q", tc.declared, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("distinctKeys(%q) = %q, want %q", tc.declared, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestHydrate_RepeatedKeyResolvesOnce is the end-to-end companion: a declared
+// set full of repeats still hydrates correctly through the real loops, in every
+// class and both dispositions. It cannot prove the round-trip count (see
+// TestDistinctKeys for that) — it proves the dedup did not change what the
+// script sees.
+func TestHydrate_RepeatedKeyResolvesOnce(t *testing.T) {
+	t.Parallel()
+	ctx, conn, _, _, _ := setupTestPipeline(t)
+	h := NewHydrator(conn, testCoreBucket, testLogger())
+
+	presentKey := "vtx.identity." + testNanoID2
+	if _, err := conn.KVPut(ctx, testCoreBucket, presentKey,
+		[]byte(`{"class":"identity","isDeleted":false,"data":{"name":"A"}}`)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	absentReadKey := "vtx.identity.AbsentAbsentAbsent1"
+	absentEgressKey := "vtx.identity.AbsentAbsentAbsent2"
+	absentOptionalKey := "vtx.identity.AbsentAbsentAbsent3"
+
+	repeat := func(key string, n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = key
+		}
+		return out
+	}
+
+	env := newTestEnvelope(testNanoID1)
+	env.ContextHint = &ContextHint{
+		Reads:         append(repeat(presentKey, 8), repeat(absentReadKey, 8)...),
+		OptionalReads: repeat(absentOptionalKey, 8),
+		// Disjoint from the other two lists — ParseEnvelope refuses an
+		// overlap, so a repeat within egressReads is the only duplicate that
+		// can reach that loop.
+		EgressReads: repeat(absentEgressKey, 8),
+	}
+
+	state, err := h.Hydrate(ctx, env)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	sc := state.Context
+	if _, ok := sc.Hydrated[presentKey]; !ok || len(sc.Hydrated) != 1 {
+		t.Fatalf("Hydrated = %v, want exactly the present key", sc.Hydrated)
+	}
+	for _, k := range []string{absentReadKey, absentEgressKey} {
+		if _, ok := sc.RequiredAbsent[k]; !ok {
+			t.Fatalf("RequiredAbsent = %v, want it to record %q fail-closed", sc.RequiredAbsent, k)
+		}
+	}
+	if _, ok := sc.KnownAbsent[absentOptionalKey]; !ok || len(sc.KnownAbsent) != 1 {
+		t.Fatalf("KnownAbsent = %v, want exactly the absent optionalReads key", sc.KnownAbsent)
+	}
+}

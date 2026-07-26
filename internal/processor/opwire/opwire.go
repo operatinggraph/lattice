@@ -70,6 +70,39 @@ type ContextHint struct {
 	EgressReads   []string          `json:"egressReads,omitempty"`
 }
 
+// MaxDeclaredReads bounds `Reads` + `OptionalReads` + `EgressReads` summed
+// across the three classes (Contract #2 §2.5). Step 4 resolves each distinct
+// declared key with its own sequential Core KV GET, whether it hydrates or is
+// recorded absent, so the declared set sizes the hydration round trips an
+// envelope buys before a script runs. `contextHint` is client-supplied and step
+// 3 authorizes on `operationType + actor + authContext` without inspecting it,
+// which leaves that count unpriced for any actor holding any operation grant.
+// The bound is on the sum because the cost is the sum of the three lists; a
+// per-class limit would be cleared by spreading the keys across them.
+//
+// The value clears the largest read set the platform actually produces with
+// roughly a factor of two to spare. Every fixed dispatcher declares single
+// digits; the one producer whose set scales with data is MergeIdentity (six
+// literals, four optionalReads, one read per enumerated edge of the secondary
+// identity), and its own ~998-mutation pre-flight holds it near 500 edges,
+// since re-pointing an edge costs mutations in the same batch. Choosing a
+// tighter ceiling would start rejecting merges that the mutation budget still
+// admits; choosing a looser one buys nothing, because a 1 MiB envelope packs
+// keys two orders of magnitude past this.
+//
+// What the bound is and is not: it caps the hydration a single envelope can
+// demand, which is what keeps a hostile envelope's step 4 inside the
+// consumer's AckWait instead of timing out and re-paying the same hydration on
+// every redelivery. It is not a general read budget — a script's own class-(e)
+// `kv.Links` enumerations and their follow-up `kv.Read`s are live reads that
+// this never sees.
+//
+// The number is written here rather than imported because this package links
+// nothing but the standard library and `substrate/keys`; importing `substrate`
+// for a constant would pull a NATS client into the browser-hosted Edge
+// artifact.
+const MaxDeclaredReads = 1000
+
 // EnumerationHint is one declared kv.Links enumeration (Contract #2 §2.5 —
 // `contextHint.enumerations`): the hub vertex key, the link relation, and the
 // direction the hub sits in the link ("out" = hub is source, "in" = hub is
@@ -238,6 +271,14 @@ func ParseEnvelope(data []byte) (*OperationEnvelope, error) {
 		return nil, fmt.Errorf("envelope: payload is required (use {} for empty)")
 	}
 	if env.ContextHint != nil {
+		// The three read classes are bounded together because step 4 pays one
+		// sequential Core KV GET per declared key regardless of which list it
+		// came from. Rejecting here is terminal by design: a redelivery
+		// reproduces the identical over-limit envelope.
+		declared := len(env.ContextHint.Reads) + len(env.ContextHint.OptionalReads) + len(env.ContextHint.EgressReads)
+		if declared > MaxDeclaredReads {
+			return nil, fmt.Errorf("envelope: contextHint declares %d reads across reads/optionalReads/egressReads, exceeding the %d ceiling", declared, MaxDeclaredReads)
+		}
 		for i, e := range env.ContextHint.Enumerations {
 			if e.Hub == "" || e.Relation == "" {
 				return nil, fmt.Errorf("envelope: contextHint.enumerations[%d] requires hub and relation", i)
