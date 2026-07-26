@@ -185,6 +185,31 @@ describes INPUT fields and must not imply they read back.
 **Non-goals.** front-desk / one-bill / location-domain / service-location (later increments); identity-domain
 (§3.4, last); Facet-side rendering; any guard or permission-semantics change.
 
+**Inc 2 (shipped `849ebbd2`).** `cafe-ledger` + `loftspace-ledger` get a `lens_cypher_test.go` executing both
+business lenses over a seeded topology. Each lens's comment made a claim nothing held: ledgerHistory's
+postedTo/heldFor hops are REQUIRED (a dangling transaction must project *nothing*, else a reader summing
+amountCents per account drops rows), leaseAccounts anchors on the LEASE so a never-charged lease still gets a
+row with a null accountKey, and loftspace's authorizedBy hop is OPTIONAL. Both directions are covered so an
+empty result cannot pass for the wrong reason. Idiom: `clinic-ledger/lens_cypher_test.go` — but note theirs is
+an *anchored convergence* lens taking an `actorKey`, while these are non-anchored business lenses where the
+engine enumerates its own roots.
+
+**Inc 3 (shipped `5dbdd84e`).** Structure pins for all eight debt-listed packages; `s6Debt["structure-pins"]`
+is now an **empty map**, so the rule binds with no exemptions. Two things worth carrying forward:
+
+- **The gate greps for the literal `len(Package.`**, so a pin written in an external `_test` package (where it
+  must read `augur.Package.…`) does **not** register. `augur` and `capability-author` therefore get their pins
+  in a new *internal* test file. Any future package with an external test package hits this.
+- **A pin earns its keep only where a count would miss the defect.** Permissions are pinned as (op, scope)
+  PAIRS because a permission *is* its pair (Contract #8 §8.1) — losing a scope=self row removes self-service
+  while every count still matches. lease-signing pins `Protected` per lens (losing it moves identity-bearing
+  rows onto an open surface); wellness pins its five CreateOnly claim aspects by name (no lens reaches them, so
+  dropping one silently re-admits double-booking rather than breaking a read).
+
+**Sweep state after Inc 3:** S7 is clean corpus-wide; `structure-pins` is empty. Remaining debt is **16 S1**
+entries and **5 lens-cypher** (`augur`, `console-operator`, `demo-operator`, `identity-domain`, `rbac-domain`) —
+most of it §3.2/§3.4 territory rather than §3.3's, with identity-domain conforming last by design.
+
 **Adjacent find, filed:** the census covered **15** packages but `git ls-tree fda8019c packages/` shows **29**
 existed at that same pin, and §3's routing was written "mechanical against the census scorecards" — so 14
 packages were never routed by anything. The six swept above are only the subset the *gate* happens to hold
