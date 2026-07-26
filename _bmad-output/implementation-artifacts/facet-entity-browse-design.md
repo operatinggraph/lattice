@@ -240,3 +240,17 @@ task-detail surface that offers task-targeted ops, filed as its own row.
 `CreateSession`) now resolve. `patient` and `visitseries` remain, for the D3 reason stated above. Of the café
 trio only `Settle` and `VoidCharge` are drivable end-to-end from Facet today: `Charge` also requires a
 `menuItemKey`, and no lens projects menu items, so it renders as a free-text vertex key — filed.
+
+**Live on the dev stack.** `edge-manifest` 0.11.0→0.12.0 diff-applied in place (12 created, 5 updated, no
+teardown); Refractor registered both lenses and projected them, the install-time backlog drained (798→0 and
+547→0) and the `CapabilityCoverageDivergence` the two re-shaped producers raised while re-converging 45 + 131
+actors cleared with it — Refractor back to `healthy`, both lenses `alert: ok`. The showcase tenant's live
+manifest carries 1016 `manifest.ent` rows (sessions, providers, bookings) and **no tab row**, which is the
+correct answer: all three of that lease's tabs are settled, and the tail projects open ones only.
+
+A *positive* tab row was not demonstrable live, and the reason is the data, not the code: every identity in
+this stack holding an open tab is a PO-created café walk-in with no Facet control grant
+(`personal.register: actor lacks the control grant`) or no showcase provisioning, and the one provisioned
+tenant's tabs are all settled. The positive path — own open tab projects, a neighbour's does not, a settled
+one clears — is proven deterministically against the real engine in
+`TestEdgeEntityTabs_ProjectsOnlyTheActorsOwnOpenTab`.
