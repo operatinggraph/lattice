@@ -48,7 +48,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
-| **[Refractor] Shared-bucket rebuild truncate wipes sibling lenses** | Guarded rebuild forces truncate (`pipeline.go:577`) and `NatsKVAdapter.Truncate` purges the whole bucket, so rebuilding ONE lens wipes every sibling's keys in the shared `capability` bucket — auth outage until sweeps heal (~25 actors/min). Fix: prefix-scoped truncate (keys the lens's `AnchorFromKey` claims). | ★★ | S–M | 📋 ready · seq: subsumed by [cap-read design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §4.5 Fire 1 if ratified |
+| **[Refractor] Shared-bucket rebuild truncate wipes sibling lenses** | Guarded rebuild forces truncate (`pipeline.go:585-594`) and `NatsKVAdapter.Truncate` purges the whole bucket, so rebuilding ONE lens wipes every sibling's keys in the shared `capability` bucket — auth outage until sweeps heal (~25 actors/min). Fix: prefix-scoped truncate (keys the lens's `AnchorFromKey` claims). | ★★ | S–M | 📋 ready (standalone fire-briefs Fire B; the shelved [cap-read design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) §4.5 inherits it at revive) |
 
 ### Survey log (round-robin rotation)
 
@@ -109,13 +109,17 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top picks needing no new design: the
+> 🎯 **Showcase-period priority (Andrew, 2026-07-25): the Verticals stream has build priority** — the
+> showcase (Facet rendering every archetype world correctly) is the standing goal, and this lane keeps
+> winning the shared build lock over it. Until the showcase is done: prefer S-sized picks, start no M+
+> build when Verticals has work queued, and yield the lock.
+> **Build-ready now** (within that): the
 > **script live-read budget** (★★ M, the bigger sibling of the shipped envelope ceiling), the
 > **MergeIdentity dead collision check** (★★ S–M), the
 > **rebuild-progress signal** (★★ S–M), the **diverged `actor_read_grants` repair path**
-> (★★ S–M), then the two ★ Processor sensitive-predicate rows. The **cap-read size bound** is designed
-> and 📐 awaiting-Andrew; the **appsession** production-IdP design is ratified but 🗄️ shelved (no
-> deployment runs the posture — revive on the first real-IdP deployment).
+> (★★ S–M), then the two ★ Processor sensitive-predicate rows. Both 2026-07-25 ratifications are
+> 🗄️ **shelved with named revives** (cap-read → showcase completion; appsession → first real-IdP
+> deployment) — the Steward does not select them.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
 >
@@ -139,7 +143,7 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Refractor] A refused hot-reload leaves a package upgrade unapplied** | A lens ID is version-independent, so a package upgrade updates the spec in place — and re-authoring an actorAggregate lens's `Output` is refused whole (correctly; the alternative half-applied it). Nothing re-activates the lens, so `lattice-pkg apply` reports success while Refractor serves the old spec until restart. | ★★ | M | 📋 ready · consumer: a package author upgrading an actorAggregate lens's `Output` · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §14.5 |
 | **[Refractor] The sweep's coverage walk reads once per row-less anchor examined** | `anchorLive` is a Core-KV read per *examined* row-less anchor, but only a *selected* one counts against the budget — so a large tombstone population is walked and read every tick while selecting nothing, against a design cost model of "one bounded batch of cypher evaluations a minute". | ★ | S | 📋 ready · consumer: any cell with many tombstoned anchors · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §11.1 |
 | **[Refractor] A long-running rebuild has no progress signal** | A rebuild suppresses the sweep, so `CapabilitySweepStalled` reports it — but only as elapsed time, and cannot tell a rebuild that is draining from one wedged forever (`watchRebuildCompletion` retries an erroring `OutstandingForConsumer` indefinitely). Hence its deliberate no-escalation carve-out. A rebuild-progress signal (outstanding count, monotonic) would let the stall detector escalate a wedged rebuild. | ★★ | S–M | 📋 ready · consumer: operators, via the `sweep-stalled` warning that cannot escalate |
-| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). The hand-chosen `ReadGrantDomain` split is the only lever today. | ★★ | M | 📐 awaiting-Andrew · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) · §6.13/§6.14 contract edit staged uncommitted |
+| **[Refractor] A `cap-read` document has no size bound** | Even deduped, an actor reaching enough distinct anchors renders `cap-read.<domain>.<actor>` past NATS's max payload; the write then fails permanently, freezing that actor's grant set so revocations stop landing (fail-OPEN). Design: per-anchor keys (the Postgres per-row twin). | ★★ | L | 🗄️ shelved (revive: showcase completion) · ✅ design Andrew-ratified 2026-07-25 (Option A) · [design](../../implementation-artifacts/cap-read-per-anchor-grant-keys-design.md) · §6.13/§6.14 contract edit committed |
 | **[appsession] The production IdP posture cannot open a session** | `setCookie` runs only under a non-nil `Signer`, so with `_JWT_PUBLIC_KEY`/`_ISSUER` set nothing can issue the cookie — the verify-only posture is unreachable (401 everywhere), and `/api/session/refresh` 404s so every FE write path dies with it. Design: the kit becomes the OIDC code-flow RP. | ★★ | L | 🗄️ shelved (revive: first real-IdP deployment) · ✅ design Andrew-ratified 2026-07-25 · [design](../../implementation-artifacts/appsession-oidc-production-signin-design.md) |
 | **Multi-hat `scope=any`+`scope=self` first-match over-confines** | `matchPlatformPermission` returns on the first operationType match regardless of scope, and `capabilityRoles` collects roles unordered — so a consumer+staff identity (e.g. seed-showcase `seedSamMultiHat`) can authorize their OWN cafe tab as scope=any, losing the self exemption. Fail-closed; bites a multi-hat who works and lives in different buildings. | ★ | S–M | 📋 ready · no live victim (showcase multi-hat has no leaseapp) |
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |

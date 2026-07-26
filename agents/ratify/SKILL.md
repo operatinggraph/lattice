@@ -64,6 +64,11 @@ when he pushes back, re-derive from "what does it need".
   **commit ratified contract edits promptly** — surgical staging when one contract file carries multiple
   proposals' hunks (`csplit` the diff on `^@@`, `git apply --cached` only the ratified hunks); route
   spun-off consumer rows to the right lane's board.
+- **Ratified-and-shelved** (sound design, no live consumer / capacity says not now): banner records the
+  decisions **plus the named revive trigger and the why**; board row → `🗄️ shelved (revive: <trigger>)`,
+  **never** a bare `✅ ratified` (the Steward selects ratified-build-ready first and would pull capacity);
+  a paired contract edit still **commits at ratification** (build-to target — add a transitional note when
+  the live wire format lags it); deferred-by-choice contract additions ride the revive fire instead.
 - **Held / redesigned**: revert that proposal's staged contract hunks (`git apply -R`), shelve the
   design with a reasoning banner (revive conditions explicit), file the replacement row, and fold the
   generalized lesson into the relevant skill(s) + a feedback memory.

@@ -477,6 +477,7 @@ opts in with a new aspect **`projectionKind: "actorAggregate"`**; Refractor then
   | `emptyBehavior` | `delete` \| `softDelete` \| `emptyDoc` \| `skip` (empty-result handling) |
   | `realnessFilter` | `{ field }` — drop degenerate collect artifacts (e.g. `{taskKey:null}`); generalizes `realEphemeralGrants` / `realOpenTasks` |
   | `freshness` | `auto` — stamp `projectionSeq` (§6.2 guard) + the widened `projectedFromRevisions` (§6.3) |
+  | `entryKeyColumn` | optional; per-entry output mode (§6.14 read-grant slices). Names the field of the (single) list body column that keys each entry: each **real** entry writes its own guarded key `<outputKey>.<entryKeyValue>` instead of one aggregate document, retraction is a per-actor prefix diff with tombstones-first ordering, and write failures retry as **actor re-evaluations, never raw-write replays** (an absent-key replay would resurrect a revoked entry past its revocation). Entry-key values are validated key tokens (fail-closed). |
 
 - **Auth-plane classification (fail closed where it counts):** a lens is **auth-plane** when it projects
   into `capability-kv` (the `cap.*` write-authorization surface) **or** into a Postgres grant table
@@ -550,39 +551,53 @@ key for that op (single GET, boolean). Read auth asks "which rows may I see?" an
 *every* package's read grants for the actor — so it cannot be dispatched away; it must merge. The merge is
 therefore pushed into the **Postgres `actor_read_grants` table** (below), where RLS unions it natively.
 
-**Producer key space (disjoint, same Capability KV bucket — mirrors `cap.roles`/`cap.svc`/`cap.ephemeral`).**
+**Producer key space (disjoint, same Capability KV bucket — mirrors `cap.roles`/`cap.svc`/`cap.ephemeral`).
+One key per (actor, granted anchor)** — the NATS-KV slice is a *keyed set*, not an aggregate document, so no
+single value grows with grant cardinality (an aggregated roster document exceeded NATS `max_payload` for a
+well-connected actor, permanently freezing that actor's grant set — revocations stopped landing, fail-OPEN):
 ```
-cap-read.<actor-vertex-key-suffix>            # core base lens: self + primordial read scope only
-cap-read.roles.<actor-vertex-key-suffix>      # rbac-domain package: role-derived read scope
-cap-read.residence.<actor-vertex-key-suffix>  # loftspace package: residesIn/leases/containedIn → readable units/leases
-cap-read.<domain>.<actor-vertex-key-suffix>   # each package projects its own domain's readable anchors (e.g. clinic provider→patient)
+cap-read.<actor-vertex-key-suffix>.<anchorId>            # core base lens: self-grant (cap-read.identity.<id>.<id>) + primordial read scope
+cap-read.roles.<actor-vertex-key-suffix>.<anchorId>      # rbac-domain package: role-derived read scope
+cap-read.residence.<actor-vertex-key-suffix>.<anchorId>  # loftspace package: residesIn/leases/containedIn → readable units/leases
+cap-read.<domain>.<actor-vertex-key-suffix>.<anchorId>   # each package projects its own domain's readable anchors, one key per anchor
 ```
-Core owns only the **base** `cap-read.<actor>` lens (self-anchor + primordial root scope — references no
-package vocabulary). Every domain read-grant is a **separate `actorAggregate` lens shipped by the package
-that owns the relationship** — the same package→core dependency direction the Epic-12 write-side
-decomposition established. Each such lens is auth-plane and inherits the **`projectionSeq` write-ordering
-guard** (§6.2), the **soft-tombstone on delete** (§6.8), and **fail-closed activation** (§6.13) — verbatim.
+Core owns only the **base** `cap-read.<actor>.<anchorId>` lens (self-anchor + primordial root scope —
+references no package vocabulary). Every domain read-grant is a **separate `actorAggregate` lens shipped by
+the package that owns the relationship** (opting into the §6.13 `entryKeyColumn` per-entry output mode) —
+the same package→core dependency direction the Epic-12 write-side decomposition established. Each such lens
+is auth-plane and inherits the **`projectionSeq` write-ordering guard** (§6.2), the **soft-tombstone on
+delete** (§6.8), and **fail-closed activation** (§6.13) — now **per key**, the exact KV twin of the per-row
+guard `actor_read_grants` carries below. Two obligations are specific to the per-entry mode: **retraction is
+an explicit per-actor prefix diff** (an entry absent from a fresh evaluation is guard-tombstoned,
+tombstones-first, in the same pass — a row-set shrink has no automatic overwrite retraction), and **write
+failures retry as actor re-evaluations, never raw-write replays** (a replayed `Create` at an absent key
+carries no watermark to lose against and would resurrect a revoked grant).
 
-**Per-lens NATS-KV document shape (`cap-read.<source>.<actor>`).** Each producer projects the slice it
-owns; the union across slices is the actor's full readable set.
+> **Transitional:** the legacy per-actor *document* shape remains the live wire format until the
+> per-anchor build lands and drains it (dual-read, actor-by-actor tombstone of legacy parent docs, then a
+> one-shot purge — cap-read-per-anchor-grant-keys-design.md §6). The two shapes are disjoint by
+> construction, so they coexist without reader ambiguity during the drain.
+
+**Per-anchor NATS-KV entry shape (`cap-read[.<source>].<actorSuffix>.<anchorId>`).** Each producer projects
+one entry per anchor it grants; the actor's effective readable set is the union of live (non-tombstoned)
+entries across every slice — membership is a key lookup, never a roster scan.
 ```json
 {
-  "key":           "cap-read.residence.identity.Hj4kPmRtw9nbCxz5vQ2y",
+  "key":           "cap-read.residence.identity.Hj4kPmRtw9nbCxz5vQ2y.Lk2Pn6mQrtwzKbcXvP3T",
   "actor":         "vtx.identity.Hj4kPmRtw9nbCxz5vQ2y",
   "version":       "1.0",
-  "projectedAt":   "2026-06-26T14:32:18.142Z",
+  "projectedAt":   "2026-07-25T14:32:18.142Z",
   "projectionSeq": 10481,
-  "readableAnchors": [
-    { "anchorType": "unit",  "anchorId": "Lk2Pn6mQrtwzKbcXvP3T", "via": ["residesIn"] },
-    { "anchorType": "lease", "anchorId": "Op4Nb2mPq6rTwzKxVyP7", "via": ["leases"] }
-  ]
+  "anchorType":    "unit",
+  "via":           ["residesIn"]
 }
 ```
 
 | Field | Required | Purpose |
 |-------|----------|---------|
-| `readableAnchors` | yes (may be empty `[]`) | The resource anchors **this lens** grants. Each entry: `anchorType` (vertex type — audit/convenience only, see note), `anchorId` (the resource's **bare NanoID**, extracted from its vertex key via `nanoIdFromKey` — see the representation note below), `via` (justifying link path — the read analog of §6.5 `resolvedVia`, for auditability). The actor's effective set is the **union over all `cap-read.*.<actor>` slices**. |
-| `key`/`actor`/`version`/`projectedAt`/`projectionSeq` | yes | As §6.3 (read-path mirror). |
+| *(key suffix)* `anchorId` | yes (in the key) | The granted resource's **bare NanoID** (extracted via `nanoIdFromKey` — see the representation note below). Lives in the key, not the body: the reader answers "may actor read anchor?" with an exact GET (base) plus one `cap-read.*.<actorSuffix>.<anchorId>` filtered listing (domains), skipping `isDeleted` entries. Reader inputs are validated against subject metacharacters fail-closed. |
+| `anchorType` / `via` | yes | Audit-only metadata (vertex type; justifying link path — the read analog of §6.5 `resolvedVia`). Never part of the membership match. |
+| `key`/`actor`/`version`/`projectedAt`/`projectionSeq` | yes | As §6.3 (read-path mirror; `projectionSeq` is the per-key §6.2 guard token; `projectedFromRevisions` is not carried on per-anchor entries — it was aggregate provenance). |
 
 > **Representation note (`anchorId`) — the anchor is an opaque match token = the bare NanoID (Andrew,
 > 2026-06-29).** An RLS anchor is an **opaque membership token**, *not* a dereferenceable address: enforcement
