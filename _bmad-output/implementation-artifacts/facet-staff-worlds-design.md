@@ -324,3 +324,41 @@ written before this column existed, both decode to an empty set and are refused 
 **Non-goals.** `menuCatalog` stays open — it is the member self-order browse catalog, so confining it
 breaks self-order (the same call the wellness schedule grid got). No write guard, no Protected/RLS
 surface, no `operator` change, no `lease-signing` lens edit, and no change to the resident/self branches.
+
+### 9.3 Increment 2 SHIPPED — café confined, F6 CLOSED (`48a06798`, 2026-07-26)
+
+`cafeLeaseWorkplaces` (cafe-domain 0.8.0) projects each lease's covering locations; `readauth.go`
+resolves one `leaseVisibility` per request and all seven read sites — tabs (list + named lease), leases,
+residents, ledger, and the three front-desk grid handlers — intersect on the `leaseAppKey` they already
+carry. The seven repeated `hats.isStaff` tests collapsed into one rule, which is the structural point:
+the workplace term went missing from all seven at once precisely because the test was written seven times.
+
+The rule is `operator ⇒ everything`, else `own ∪ workplace-covered`. Fifteen new handler tests, each a
+positive/negative pair on the same endpoint for the same caller, plus six cypher tests on the lens.
+Mutating `admits()` to always-true reds 15 of them.
+
+**Three findings from the adversarial pass were fixed rather than noted:**
+
+- **The hop bound was off by one, in the direction of over-grant.** `*0..N` admits depths 0..N inclusive,
+  while the Starlark walk's `range(WORKPLACE_MAX_DEPTH)` tests 0..7 — so `*0..8` admitted a staffer nine
+  levels up whose writes `require_workplace` refuses. §9.1 recorded this bound as *closed* in increment 1;
+  it was not, and the wellness lens shipped with it. Both are now `*0..7` and pinned by a chain built one
+  level deeper than either side accepts (`1532a6c5`).
+- **A staffer who also rents lost their own lease.** Resolving the staff half *instead of* the resident
+  half made two complementary hats mutually exclusive — the opposite of what `require_workplace`'s own
+  comment says ("each binds the path the other cannot see"). Now a union.
+- **The operator's discriminating sibling test was inert.** It asserted that a non-operator role confers
+  no exemption while the fixture could only ever emit the operator key, so the caller under test carried
+  *no* roles — and its 403 came from the resident branch, not the role term. The fixture now mints
+  arbitrary role keys and the caller holds a workplace. This is the second time this exact fixture shape
+  has produced a green-but-inert check (cf. §9.1); a fixture that cannot express the wrong answer proves
+  nothing.
+
+**Deliberate asymmetry worth keeping:** the front-desk handlers still tolerate a missing *front-desk*
+bucket (that package is an optional cross-vertical join) but 502 on a missing *workplaces* bucket — an
+empty grid would read as "nobody is here today" rather than "this app cannot tell who you may see."
+
+**Residual, filed:** the multi-parent divergence now runs the other way. Both read lenses union every
+`containedIn` branch; both write-side walks keep only the last parent per level. The union is the correct
+half and the single-branch walk is the bug — it keeps the existing `worksAt_covers` lane row, updated.
+Unreachable in today's single-parent topology.

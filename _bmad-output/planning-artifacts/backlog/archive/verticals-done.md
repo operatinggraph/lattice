@@ -2,6 +2,10 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-07-23 · `29b653c8` · Clinic `StartVisitSeries` rejects a duplicate active series — per-patient+provider guard aspect, live-verified (accept/reject/pause-revival/expiry-revival)
+- 2026-07-22 · `239e3846` · Clinic staff site-management list shows "(unnamed site)" instead of a bare trailing separator for a provider assigned to a building whose `SetSiteProfile` never ran
+- 2026-07-22 · `—` · Facet for staff — front-desk/operations worlds CLOSED — F1–F5 all shipped; F5's `e269c27d` + the live-proven claim beat were the last pieces, board row was stale
+- 2026-07-22 · `78927466` · Facet claim button now reads/submits the Core-KV vertex key (`data.taskKey`), not the manifest row's own storage key — was failing every claim closed with HydrationMiss; live-proven severed-network claim beat
 - 2026-07-22 · `35ca90f5` · `seed-showcase.go`'s `ensureStaff` resolves by `holdsRole` instead of an ambiguous `worksAt` scan — was silently mis-resolving `FACET_STAFF_NANOID` to the maintenance tech once F5 gave it a second `worksAt` link
 - 2026-07-22 · `28c69837` · `RecordIdentityPII` scoped to unclaimed identities for standing frontOfHouse/backOfHouse grants; operator + task/self-scoped submissions exempt — facet-staff-worlds-design.md §3.2
 - 2026-07-22 · `3d98f51c` · Café `VoidCharge` — corrects a mis-tapped charge; mirrors Charge's OCC-conditioned totalCents accumulate but subtracts, clamped at 0; operator/frontOfHouse only, no self-service grant (fraud vector)
