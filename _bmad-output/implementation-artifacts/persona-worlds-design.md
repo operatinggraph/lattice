@@ -2013,7 +2013,30 @@ its own item, filed — substituting it here would be an adjacent mechanism, not
 deterministic and already written, and `kv.Links` enumeration is the sanctioned class-(e) posture, so nothing
 here needs an engine change.
 
-**🏗️ CHECKPOINT (2026-07-26).** Brief committed, **no code yet**. The build was deliberately not started in
-this fire: the CI-reliability role was concurrently running six back-to-back `go test ./... -p 4` suites to
-characterise a contention flake rate, and adding build load would have inflated the very number it was
-measuring. **Next fire: increment 1 (package), then increment 2 (FE).** No worktree yet — start a fresh one.
+**As-built — W3 Inc 3 SHIPPED (2026-07-26, `073e2c8f` package + `ff9c7278` FE).** wellness-domain
+0.13.1→0.14.0. `CreateStudio`, `CreateBooking` and `CancelBooking` widen their scope=any row to
+`frontOfHouse`, and each script binds that standing path with `require_workplace`. Both forks resolved as
+briefed: CreateStudio guards on the single location it is about to link (omitted → empty candidate list →
+operator-only), and the booking pair resolve theirs through a new `session_locations` helper —
+`session -atStudio-> studio -locatedAt-> location`, two class-(e) `kv.Links` enumerations mirroring
+`studio_locations`. No platform primitive was needed, as the brief predicted.
+
+Two things the brief did not anticipate, both decided here as Winston:
+
+- **CancelBooking's guard must answer AFTER `require_matching_session`.** The caller supplies `session`, so
+  confining on it before it is bound to *this* booking would let a staffer name a class at their own building
+  and cancel a seat elsewhere. `workplace_confinement_test.go`'s substitution vector pins the order, asserting
+  the rejection is `WrongSession` — the forSession link declared `optionalReads` so a mismatch reaches the
+  script rather than faulting at hydration.
+- **The `frontOfHouse` widening made `CreateStudio` fail the S1 gate** (a granted non-operator op with no
+  descriptor). It gets a full op-meta whose `location` is the `{me.workplace}` self-anchor with no browsable
+  `targetType` — maintenance-domain's `ReportIssue` shape, and the client-side mirror of the script's own
+  empty-list denial.
+
+**Two of the three FE surfaces are restored** (`cmd/wellness-app/web`), both `worksAt`-gated and live-verified
+on the running stack: a **new-studio** form that asks only for a name and states which building it opens at,
+and a per-seat **Release seat** control on the roster, absent for an instructor (who holds no CancelBooking
+grant). **Book-for-a-resident is NOT restored** and is filed as its own row: its picker was fed by the
+`/api/residents` directory W3 (`d3a7cc7b`) deleted, and republishing an unscoped one would undo the read
+boundary that deletion drew — the clean form needs a workplace-scoped member read, which is a new lens, not a
+UI restore.
