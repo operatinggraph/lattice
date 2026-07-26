@@ -2093,12 +2093,19 @@ platform primitive was filed.
 
 The adversarial review found three things the brief did not, all fixed before the merge:
 
-- **The lens needed a `.tenancy` filter to be a MEMBER directory at all.** `DecideLeaseApplication` tombstones
-  neither the leaseapp nor its `applicationFor` link on a decline, so the first cut would have handed the front
-  desk the identity of everyone who ever applied to their building — refused applicants included — labelled as
-  members. `.tenancy` is stamped CreateOnly on the first approve and is the signal `CreateBooking`'s own
-  resident-rate check already reads; the two sides agreeing is the fix, not a new rule. A discriminating cypher
-  vector (a tenancy and a refused application on the same unit) pins it.
+- **The lens had to drop refused applicants to be a MEMBER directory at all.** `DecideLeaseApplication`
+  tombstones neither the leaseapp nor its `applicationFor` link on a decline, so the first cut would have
+  handed the front desk the identity of everyone who ever applied to their building — refused applicants
+  included — labelled as members. The first fix reached for `.tenancy` presence, the signal `CreateBooking`'s
+  resident-rate check reads, on the reasoning that the two sides should agree. **Driving it against the live
+  stack disproved that** (`8b8f7c8b`): thirteen leases, thirteen applicants, and not one `.tenancy` among
+  them — every demo lease is signed and awaiting a landlord, so the front desk would have opened a picker that
+  could never offer anybody and been correct about it. A rate is a claim about money and belongs on proof of
+  tenancy; a directory is a claim about who is around, and somebody living in the building on an undecided
+  application is exactly who the desk books in. The lens now projects `landlordDecision` and the reader drops
+  only `declined` — projected rather than filtered in the cypher because the column is three-state and only
+  two states are decidable against a literal. The verdict itself stops at the server. Discriminating vectors
+  on both sides pin it (a refusal beside an approval; a refusal beside an undecided).
 - **The Book button was a one-shot.** The first cut re-bound it per render via `cloneNode(true)`, which copies
   the reflected `disabled` attribute — so after one successful booking every later render re-cloned a dead
   button. It is now bound once at init, resolving its class from the session picker at CLICK time, which also
@@ -2112,6 +2119,14 @@ The adversarial review found three things the brief did not, all fixed before th
 Also aligned in passing: `cmd/wellness-app`'s `covers` trimmed a projected location before testing it for
 emptiness but compared the untrimmed value — fail-closed, so a padded key silently denied. `cmd/cafe-app`
 had already fixed exactly this and says why; wellness now matches.
+
+**Live-verified end to end** on the running stack, wellness-domain 0.16.0 diff-applied with no teardown (the
+lens backfilled 13 rows on load — no Refractor restart). A `worksAt` staffer is offered 6 of those 13, the 6
+their building covers; a plain member is 403'd on the same endpoint; the response carries neither the covering
+set nor the landlord's verdict. Booking a member through the picker committed, projected, and came back on the
+roster at the standard rate — correct, since that lease carries no `.tenancy` — with the picker down to 5 and
+the Book button live for the next one, which is the one-shot defect above, disproven in the browser rather
+than only in a test.
 
 **Named residual.** The directory is lease-anchored, so a genuine non-resident guest cannot be booked through
 the FE even though `CreateBooking` itself constrains only the session's location and never the booker. That is
