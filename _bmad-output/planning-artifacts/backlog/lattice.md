@@ -140,6 +140,13 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **NATS write restriction — Fire 4 (production mTLS)** | Fires 1–3 closed the fabricated-KV-write surface at the account level; the remaining fire binds subject permissions to client certificates instead of NKeys, which only matters off the dev stack. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production deployment) · [design](../../implementation-artifacts/nats-account-write-restriction-design.md) §Fire-3-status |
 | **Keyed identity-index hashes (HMAC)** | Unkeyed `sha256NanoID` contact hashes are dictionary-testable with substrate access and persist in JetStream history post-shred; a Vault-keyed HMAC bounds it but needs a MAC primitive + key custody at every hash computer, and must migrate ALL index consumers (identityindex, provision probe, dedup) in one stroke. | ★ now / ★★ prod | M | 🗄️ shelved (revive: production threat model) · [analysis](../../implementation-artifacts/dedup-over-encrypted-pii-design.md) §9.1/§10-C |
 
+### Orchestration & edge — Loupe-routed (2026-07-25 PO pass)
+| Item | What it is | Imp | Size | State |
+|---|---|---|---|---|
+| **[orchestration-base] A re-dispatched flow's history row never clears its terminal** | The `eventStream` projection merges each event onto the stored row and cannot say "this event clears this column", so a re-dispatch under Weaver's STABLE instanceId sets status=running over a row keeping the previous run's `ended_at` (10 live rows read ended-BEFORE-started) and its `failure_reason`. | ★★★ | S–M | 📋 ready · consumer: Loupe Flows · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §1.2 |
+| **[Loom] No per-instance redrive** | `failed` is terminal, `RetryCount` only counts it, pause/resume are consumer-scoped (and the relay/deadline consumers are refused outright), and `StartLoomPattern` is idempotent on instanceId — so a failed flow cannot be resumed or safely re-run. Needs the double-execution question answered by design: resume at cursor, or restart under a new id with the old tombstoned. | ★★ | M | 📋 ready · consumer: Loupe Flows "act on it" · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §2.2 |
+| **[Personal Lens] No operator-initiated device hydration** | A gapped device is fixed by a warm resume, but edge nodes cannot self-report and no connection state is observable, so nothing can push one. A durable per-device hydration flag, consumed on the device's next SYNC attach, is the only shape the asymmetry allows. | ★★ | M | 📋 ready · consumer: Loupe Edge fleet · [why](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) §3.2 |
+
 ### Privacy / Vault
 | Item | What it is | Imp | Size | State |
 |---|---|---|---|---|

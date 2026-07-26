@@ -27,6 +27,23 @@ buildable-first; F11–F13 gated on lattice cross-lane asks (§6 there).
 |---|---|---|---|---|
 | **F13 — Chronicler Time Machine (L2-full + L3)** | L1 is satisfied by the shipped Flows tab and L2 v1 by the flow-liveness scrubber; scrubbing past the live window and browsing the ledger both need history Loupe cannot read yet. | ★★★ | L | 🚧 blocked-on: Chronicler archive mode (lattice, Andrew-deferred) · [UX §4](../../implementation-artifacts/loupe-platform-edges-ux.md) |
 
+## Flows + Edge depth — 2026-07-25 PO pass
+
+Both tabs render tiles and stop. PO assessment, the two live defects it turned up, and the
+fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-flows-edge-depth-ux.md)
+(adjudicated inline, Winston). The act-on-it half is blocked on two platform seams filed to
+[lattice.md](lattice.md); everything else is buildable in-lane.
+
+| Item | What it is | Imp | Size | State |
+|---|---|---|---|---|
+| **F23.0 — the Flows live badge confirms the stale row it exists to catch** | `liveLoomInstances` keys on set membership in Loom's instance list and ignores the `status` beside each id, but the list includes TERMINAL instances — so 10 live rows read `RUNNING · LIVE` while Loom reports them complete. Only non-terminal is live; a read-model/Loom disagreement is its own `stale-history` badge. | ★★★ | XS–S | 📋 ready · [§1.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **F23.2 — the Flows wall is unreadable** | Every card is titled `vtx.meta.<NanoID>`, so a renewal flow and an onboarding flow look identical; 26 cards, no grouping, no exception-first order, pattern ref not linkified. The map and lens page already resolve meta ids to canonical names. | ★★ | XS–S | 📋 ready · [§2.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **F23.1 — a flow has no detail, only a tile** | A flow is a sequence of steps and the card shows none of it. Loom's `inspect` already returns cursor / currentStep / pendingToken / retryCount / terminal and is classified read-only, so the panel needs no cross-lane ask (verified live). | ★★ | S | 📋 ready · seq: F23.0 (badge vocabulary) · [§2.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **F24.1 — Edge states a fleet problem with no triage order** | 26 of 31 devices gapped, sorted by identity, so the worst device is wherever its identity falls; no retention-headroom headline, Interest Set not expandable. | ★★ | XS–S | 📋 ready · [§3.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **F24.2 — no per-device detail on the Edge fleet** | Each device is a flat text block: no Interest Set contents, no ack position against the retention floor in time as well as messages, no registration provenance, no sibling devices. | ★ | S | 📋 ready · seq: F24.1 · [§3.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **Flows stays read-only until Loom can redrive an instance** | Loom exposes no retry: `failed` is terminal, `RetryCount` only counts, pause/resume are consumer-scoped, and `StartLoomPattern` is idempotent on instanceId. A console button minting a fresh instance would double-execute every committed side effect. | ★★ | S | 🚧 blocked-on: Loom per-instance redrive (lattice) · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+| **Edge cannot trigger the remedy it names** | The tab tells the operator a warm resume fixes a gapped device and cannot start one — edge nodes cannot self-report and no connection state is observable, so the console can only mark a device for hydration on its next attach. | ★★ | S | 🚧 blocked-on: operator-initiated device hydration (lattice) · [§3.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
+
 ## Component maintenance
 
 | Item | What it is | Imp | Size | State |
