@@ -48,6 +48,7 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 |---|---|---|---|---|
 | **[Loom] Guardless-step recovery check-before-act probe** | On total `loom-state` loss + a re-triggered `StartLoomPattern`, a fresh instance replays guards from cursor 0 (re-runs an already-applied guarded step). | ★ | S–M | 🗄️ shelved-backup (Andrew: no new engine Core-KV reads) |
 | **[Processor] Tombstone-with-document warn→reject flip (Fire 2)** | Fire 1 (emitter sweep + parser warn) shipped `6b68fde4`; flip the warn to a reject once warn sightings are clean (stale stored scripts clear via world recreation). | ★★ | XS | 🚧 seq behind clean warn-window · [design](../../implementation-artifacts/tombstone-body-preservation-design.md) §6 |
+| **[Refractor] A sweep heal lands in KV before it is counted — `Reconciled` reads 0** | `TestRefractor_ConvergenceSweep_DetectsAndHealsLostProjection_E2E:213` reds CI and fails ~4-in-6 locally. The sweep genuinely heals and logs it, then `Sweeper().Status().Reconciled` is still 0 — fast runs fail, slow ones pass, so the healed doc is observable before the counter it is supposed to be loud through. Same silence would hit the operator-facing signal, not just the test. | ★★★ | S | 📋 ready · CI-red on `main` |
 
 ### Survey log (round-robin rotation)
 

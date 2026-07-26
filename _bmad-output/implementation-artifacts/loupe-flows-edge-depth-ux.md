@@ -166,13 +166,48 @@ deltas, no registration history. The one drill-in is the identity keyLink.
 
 ### 3.1 What can be built now
 
-**F24.1 — Fleet triage (XS–S).** Sort worst-first by messages-aged-out, summarise the fleet by
-retention headroom rather than by identity order, and make each device expandable to its
-Interest Set contents. Read-only, in-lane, no platform dependency.
+**F24.1 — Fleet triage (XS–S) + F24.2 — Device detail (S) — SHIPPED `6ac1523e`, as one fire.**
+They were the same surface: F24.1's "expandable Interest Set" is what F24.2's panel becomes, so
+building them apart would have shipped an expander and then replaced it.
 
-**F24.2 — Device detail (S).** A per-device panel: Interest Set terms, ack position against the
-retention floor with the headroom in messages *and* in time, registration provenance, and the
-identity's other devices. Still read-only.
+The roster orders gapped-by-damage → unmeasured → current-by-tightest-headroom. **Unmeasured above
+current is deliberate**: a device whose gap state nobody could determine is an open question, and
+sinking it below every answered row buries exactly the rows to chase. The fleet summary reports the
+floor's clock, the headroom spread, and the head of each tier — over the *rendered* list, since a
+summary naming a device the "gapped only" filter has hidden points at a row that is not on the page.
+`#/edge/<key>` adds the panel: full Interest Set (anchors linked), position against the floor,
+registration provenance, and the identity's other devices — the list that separates one broken
+device from a whole identity's lens.
+
+**Two corrections found in the build, both worth not re-deriving.**
+
+**`ack_floor.last_active` is an ACTIVITY clock, not a message timestamp.** nats-server 2.14 fills it
+from `o.lat = time.Now()` stamped on each ack (`server/consumer.go`), so it answers *when did this
+device last ack* — the only liveness-adjacent signal this roster can carry, given that edge nodes
+cannot self-report. It is process-local state that `resetLocalStartingSeq` zeroes, so its **absence
+means "no ack seen since this consumer's state was last reset (a server restart included)", never
+"this device has never acked"**, and the label says so.
+
+**There is no exact per-device time-to-gap.** Getting one means reading the SYNC message at the
+device's position — pulling a personal payload into the console for a timestamp. So the time
+headroom is an interpolation across the window's two endpoints, always marked `~`; the floor's own
+clock (`firstTime + MaxAge`) is exact and is stated separately. A device *below* the floor is the
+exception: its next loss is the floor message itself, so it gets that exact clock rather than the
+estimate — which matters, because it is the tightest row on the fleet.
+
+**The review finding that mattered.** An empty stream — a stack idle past the 24h `MaxAge` reports
+`firstSeq = lastSeq+1` — gave every fully-caught-up device a headroom of **0**, rendered red as "on
+the retention floor" directly beneath the page's own line saying the stream holds nothing. That is
+the same fleet-wide false red §1's gap predicate is deliberately written to avoid, reintroduced one
+field over. Headroom is now *unmeasured* there, the same three-valued encoding `gapped` already
+uses. Also fixed: a failed consumer lookup read as "never attached" and a failed registration read
+as a corrupt document (both asserting facts about a device from measurements that never happened);
+a sub-second `MaxAge` truncated to "no age limit"; and clock skew could report more headroom than
+the retention period grants.
+
+**Known departure.** The roster is still grouped by identity, so the order an operator *sees* is
+identities-by-their-worst-device, not one flat worst-first list; the help text says that rather than
+claiming the API's order. Grouping stays because the identity is what the sibling question is about.
 
 ### 3.2 The action needs a platform seam
 
@@ -195,8 +230,8 @@ should say plainly that remediation is the device's own next attach.
 | **F23.0** | Live-badge honesty: terminal instances are not live; read-model-vs-Loom disagreement becomes `stale-history` | XS–S | ✅ SHIPPED `f5eb461c` |
 | **F23.2** | Flows readability: resolved pattern names, grouping, exception-first sort, linkified pattern | XS–S | ✅ SHIPPED `f5eb461c` |
 | **F23.1** | Flow detail panel: steps, cursor, retryCount, failure reason | S | ✅ SHIPPED `1551f31b` |
-| **F24.1** | Edge fleet triage: worst-first, retention-headroom headline, expandable Interest Set | XS–S | — |
-| **F24.2** | Edge device detail panel | S | F24.1 |
+| **F24.1** | Edge fleet triage: worst-first, retention-headroom headline, expandable Interest Set | XS–S | ✅ SHIPPED `6ac1523e` |
+| **F24.2** | Edge device detail panel | S | ✅ SHIPPED `6ac1523e` (same fire) |
 
 F23.0 leads deliberately: every other Flows fire renders state on top of a badge that is
 currently wrong, and building depth over a lying status ships a more convincing lie.
