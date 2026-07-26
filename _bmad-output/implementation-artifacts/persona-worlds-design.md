@@ -1387,6 +1387,71 @@ reachable. The listing is the one addition, and it is required by an op the scop
 adjacent mechanism substituted for it. The staff persona, its Unit 3 beat, and every existing grant, guard and
 role assignment are untouched.
 
+#### Fire W2 Inc 5 — the ownership ops bind their actor (fire brief, 2026-07-26)
+
+**1 · Scope sentence (verbatim, the filed row):** *"`AssignUnitOwner` binds no actor — the op that CONFERS unit
+management never compares `payload.landlord` to `op.actor` and never reads `authContextTarget`, so any holder of
+its grant makes any identity the landlord of any unit. Operator-only today, which is the only thing containing
+it — an ephemeral task grant for it would buy nothing. Consumer: the landlord self-service listing chain
+(`app.js` post-listing flow) can never be opened to a real consumer landlord until this binds."*
+
+**2 · The premise verified.** `loftspaceOwnershipDDLScript` (`ownership.go:171-231`) reads `op.payload` and
+`op.operationType` and nothing else — no `op.actor`, no `op.authContextTarget`, no `op.authTargetValidated`.
+Both ops validate only that the landlord is an alive `vtx.identity` and the unit an alive `class=location`
+`vtx.unit`. The containment is entirely `permissions.go:23-28`: five scope=any grants to `operator`, and
+`opmetas.go:6-12` records that the trusted admin tool is their only dispatcher. Confirmed dispatchers:
+`scripts/seed-showcase.go:1151,1314` and `internal/leaseconvergence/renewal_convergence_test.go:113`, all as
+operator with no `AuthContext`.
+
+**3 · Why the sibling guard is the precedent but not the shape.** `require_manages(unit_key, what)`
+(`ddls.go:316-346`) already answers the same authority question — *does the actor hold
+`lnk.identity.<actorID>.manages.unit.<unitID>`* — for `SetListingStatus`. Its exemption is
+`not op.authTargetValidated or op.authContextTarget != op.actor`, i.e. it binds the **platform scope=self path
+only**. Reused verbatim here that leaves a hole: `authTargetValidated` is also true on the **task** path
+(`internal/processor/operation_context.go:46-58`), where `authContextTarget` is the ephemeral grant's target and
+so ≠ `op.actor` — the guard would return, and a task grant naming a unit would confer unconstrained assignment.
+That is the row's *"an ephemeral task grant for it would buy nothing"* stated as code. The variant therefore
+binds **every** validated path and exempts only the standing scope=any one, and per the S10 doctrine on
+genuinely-differing copies (`scripts/lint-package-standard.go:274-328`, the `enforce_workplace` precedent) it
+takes a different NAME: **`enforce_manages`**.
+
+**4 · Verified touch-list.** `packages/loftspace-domain/ownership.go` — `enforce_manages` + two call sites in
+`execute` (`:175`, `:213`); `permissions.go:5-13,23-35` — the comment states the opposite posture today and two
+`consumer` scope=self grants join it; `package.go:51` version bump (a same-version package edit no-ops on
+install); `package_test.go:130-137` permission matrix, `:268-283` ownership script-guard pins;
+`ownership_integration_test.go` — the `removeUnitOwner` helper hardcodes `lsStaffActorKey`, so it needs an actor
+parameter for the new vectors. `landlord_manages_guard_test.go:20-44` supplies the cap-doc + landlord-key idiom
+to mirror.
+
+**5 · The grant, and the escalation the Inc 3 brief named.** Inc 3 §7 recorded *"`RemoveUnitOwner`/
+`AssignUnitOwner` are deliberately NOT granted to `consumer` — a landlord must not be able to assign themselves
+units"*. The probe discharges exactly that reason: an actor with no `manages` link to the payload unit is denied,
+so no identity can bootstrap management of a unit it does not already hold. The grants therefore open, minimally:
+- **AssignUnitOwner** / consumer scope=self — the actor must already manage the payload unit (additive
+  delegation of a unit they hold; the operator remains the only first-assign path).
+- **RemoveUnitOwner** / consumer scope=self — the actor must already manage the unit **and**
+  `payload.landlord == op.actor`. Self-removal only: a landlord may walk away from a unit, but a co-manager
+  evicting the primary landlord stays operator work. The asymmetry is deliberate — `manages` is a flat set
+  (`ownership.go:32-38`), so symmetric revoke would let any co-manager unseat any other.
+
+**6 · Increment order + green checks:** one increment — guard + grants + version + tests →
+`go test ./packages/loftspace-domain/... ./internal/leaseconvergence/...`. Gates: `go build ./...`, `make vet`,
+`golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`, `go run ./scripts/lint-package-version.go`,
+`go run ./scripts/lint-package-standard.go`.
+
+**7 · In-scope gotchas:** the actor parse must not `fail()` before the validated-path check (the Inc 3 gotcha) —
+`enforce_manages` returns on the unvalidated path first. The probe's `kv.Read` of the actor's own manages link is
+a **different** key from the payload pair's, so a self-path dispatcher declares BOTH in `optionalReads`; not
+`reads`, since absence IS the denial and a required read would `HydrationMiss` first (the Inc 4 lesson recorded
+above). The probe must answer **before** `require_live_unit`, or the op reports whether a unit exists to a caller
+who manages nothing. Negative vectors get a positive sibling in the same test, and the denial is asserted to
+carry `AuthDenied:` rather than any rejection.
+
+**8 · Non-goals:** no convergence to `parts_of` (`ownership.go`'s `vertex_parts` and `ddls.go`'s `unit_parts` are
+the standard §12 row's scope, not this one); no `require_manages` unification; no FE work (the landlord console
+has no assign/revoke surface and this fire adds none); no op-meta descriptors (the ops stay non-user-facing under
+S1 until an FE dispatches them); no contract text.
+
 ### Fire W4 (café) fire brief (build note, 2026-07-25)
 
 **1 · Scope sentence (verbatim, §7.4):** *"Café — hats: resident (own tab, self open/settle), staff (POS,
