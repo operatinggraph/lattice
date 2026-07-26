@@ -36,9 +36,15 @@ is to catch a stale row instead **confirms** it, because the authoritative answe
 payload and went unread. A cross-reference that cannot disagree with the thing it checks is
 not a cross-reference.
 
-**Fix (in-lane, XS–S):** treat only non-terminal instances as live, and reconcile the row's
-status against Loom's — where the read model says running and Loom says complete, the row is
-`stale-history`, which is a third badge, not a synonym for either.
+**Fix (in-lane, XS–S) — SHIPPED `f5eb461c`:** only a non-terminal instance is live, and where
+the read model says running while Loom says complete the row is `stale-history`, a third badge
+naming both voices. The card also suppresses that row's `endedAt`, which belongs to a previous
+run of the same id. All 10 live rows reclassified correctly on the dev stack.
+
+**Found while building it:** a Loom pattern's name is `patternId` on its `.spec` aspect, NOT the
+`.canonicalName` aspect a lens meta-vertex carries — a pattern vertex has no canonicalName at
+all. The first cut copied the lens page's resolver and returned an empty name for every flow.
+Any future surface naming a `vtx.meta.*` must check which meta family it is reading.
 
 ### 1.2 A re-dispatched flow's row never clears its terminal (platform, cross-lane)
 
@@ -182,9 +188,9 @@ should say plainly that remediation is the device's own next attach.
 
 | Fire | What | Size | Depends on |
 |---|---|---|---|
-| **F23.0** | Live-badge honesty: terminal instances are not live; read-model-vs-Loom disagreement becomes `stale-history` | XS–S | — |
-| **F23.2** | Flows readability: resolved pattern names, grouping, exception-first sort, linkified pattern | XS–S | — |
-| **F23.1** | Flow detail panel: steps, cursor, pendingToken, retryCount, failure reason | S | F23.0 (badge vocabulary) |
+| **F23.0** | Live-badge honesty: terminal instances are not live; read-model-vs-Loom disagreement becomes `stale-history` | XS–S | ✅ SHIPPED `f5eb461c` |
+| **F23.2** | Flows readability: resolved pattern names, grouping, exception-first sort, linkified pattern | XS–S | ✅ SHIPPED `f5eb461c` |
+| **F23.1** | Flow detail panel: steps, cursor, pendingToken, retryCount, failure reason | S | F23.0 ✅ |
 | **F24.1** | Edge fleet triage: worst-first, retention-headroom headline, expandable Interest Set | XS–S | — |
 | **F24.2** | Edge device detail panel | S | F24.1 |
 

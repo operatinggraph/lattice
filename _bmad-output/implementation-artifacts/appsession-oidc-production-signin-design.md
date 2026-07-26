@@ -7,7 +7,8 @@ production IdP posture cannot open a session* (`backlog/lattice.md`, Security & 
 
 Today the kit's "production posture" (verify-only JWT) can verify a session cookie but nothing can ever
 **set** one — and `POST /api/session/refresh` 404s, which every FE's write path depends on for its raw
-bearer (`sessionWriteToken` in every `cmd/*/web/app.js`), so production sign-in **and all writes** are
+bearer (`sessionWriteToken` in four of the five `cmd/*/web/app.js`; Facet's equivalent is
+`createTokenRefresher` in `web/boot.mjs`), so production sign-in **and all writes** are
 unreachable. This design makes the kit itself the OIDC **Authorization Code relying party** (the
 token-mediating-backend pattern of the IETF OAuth browser-apps BCP): the kit redirects to the deployment's
 IdP, exchanges the code server-side, verifies the ID token through the existing shared verifier (Contract
@@ -21,18 +22,24 @@ cookie, and holds the IdP refresh token in an HttpOnly `__Host-` cookie so the e
    all five FE shells, tokens exposed to JS, BCP-inferior) and over an auth proxy (cannot serve the
    browser-direct Gateway/NATS bearer the parity invariant §6.2 requires). §4 has the full trade-off.
 2. **One deployment-shaped decision I resolved and want confirmed (§4.2):** **one OIDC client
-   registration for all five apps** (five redirect URIs), so a single `aud` pins every token — and the
-   **Gateway refuses to boot when an external key source is configured with no `GATEWAY_JWT_AUDIENCE`**.
-   Without that pin, *any* ID token from the trusted issuer — including one minted for an unrelated
-   relying party on a shared IdP like Google — is a valid Lattice write bearer. That refusal is a
-   fail-closed hardening to shipped Gateway code; it cannot affect dev/demo (dev-key posture) but it is a
-   posture change on a security boundary, so it is called out rather than slipped in.
+   registration for all five apps** (five redirect URIs), so a single `aud` pins every token — and
+   **every external-key-source verifier refuses to boot with no audience configured** (four construction
+   sites: Gateway, Loupe reader, control plane, the kit itself — a pin enforced at one of four is not the
+   invariant). Without that pin, *any* ID token from the trusted issuer — including one minted for an
+   unrelated relying party on a shared IdP like Google — is a valid Lattice write bearer. The refusal is
+   fail-closed hardening to shipped code; it cannot affect dev/demo (dev-key posture) but it is a posture
+   change on a security boundary, so it is called out rather than slipped in. §4.2 also carries **one
+   open ratify-time choice**: whether the rule additionally lands as a Contract #11 §11.6 invariant
+   bullet, or stays enforcement-only.
 
-**No frozen-contract change.** Builds *to* Contract #11 (§11.2 profile, §11.3 opaque binding, §11.4
-resolution). The backlog row's "needs a per-path origin-gate exemption (`form_post`)" premise **dissolves**:
+**No frozen-contract change** — with one offered exception: §4.2's audience rule can optionally also land
+as a Contract #11 §11.6 invariant bullet (Andrew's ratify-time choice; nothing else touches a contract).
+Builds *to* Contract #11 (§11.2 profile, §11.3 opaque binding, §11.4 resolution). The backlog row's "needs a per-path origin-gate exemption (`form_post`)" premise **dissolves**:
 the code flow's callback is a cross-site top-level GET navigation (OIDC Core returns code responses via the
-**query string**), which `metadataAdmits` already admits — verified in code, with a test pinning that the
-gate still blocks a *scripted* cross-origin fetch of the same path. No gate change, no exemption surface.
+**query string**), which `metadataAdmits` already admits — verified in code. The scripted-fetch refusal is
+test-pinned today for `same-site` (`origin_test.go:167`); the `cross-site` scripted GET shares the same
+fail-closed case arm (`origin.go:245`) and gets its own pinning vector in §7. No gate change, no exemption
+surface.
 (The admitting condition gained a third term after this design was written: a cross-origin navigation must
 also carry `Sec-Fetch-Dest: document`, so a NESTED navigation — an iframe pointed at the callback — is
 refused. A real IdP redirect is top-level and carries it, so the conclusion is unchanged; a test simulating
@@ -75,7 +82,8 @@ JWKS with rotation — `cmd/gateway/main.go`, `auth.JWKSPoller`), Contract #11 f
 | Origin gate admits a cross-origin **top-level GET navigation** (`Sec-Fetch-Mode: navigate` **and** `Sec-Fetch-Dest: document`); blocks everything else cross-origin, nested navigations included | `origin.go` `metadataAdmits` / `OriginGate.Blocked` |
 | Session cookie is `SameSite=Strict` | `session.go:358-368` |
 | `Secure` is conditional on `PublicOrigin != nil \|\| !Loopback` | `session.go:354-356` |
-| Gateway trusts external IdPs: `GATEWAY_JWKS_URL`+`_ISSUER` (live rotation) or `GATEWAY_JWT_KEYS_DIR`+`_ISSUER`; **one optional `GATEWAY_JWT_AUDIENCE`** | `cmd/gateway/main.go:55-64,217` |
+| Gateway trusts external IdPs: `GATEWAY_JWKS_URL`+`GATEWAY_JWKS_ISSUER` (live rotation, `GATEWAY_JWKS_POLL_INTERVAL` cadence) or `GATEWAY_JWT_KEYS_DIR`+`GATEWAY_JWT_KEYS_DIR_ISSUER`; **one optional `GATEWAY_JWT_AUDIENCE`** | `cmd/gateway/main.go:62-63,165,179,217` |
+| The NATS auth-callout **reuses the Gateway's Authenticator**, so a Gateway audience pin covers the NATS-connect surface too | `internal/gateway/natsauth/natsauth.go:16-18,260`; wired `cmd/gateway/main.go:503` |
 | **Verifier construction order: `FetchJWKS` → `NewVerifier(keys)` → `NewJWKSPoller(verifier,…)` → `go poller.Run(ctx)`.** `NewVerifier` errors `ErrNoTrustedKeys` on an empty key set; the poller *requires* a built verifier | `auth.go:282-284`, `jwks_poller.go:84,230`, `cmd/gateway/main.go:189-236` |
 | Audience enforced only when configured; `aud` may be an array | `auth.go:404,510` |
 | Gateway resolves `A → U` itself on the write path | `gateway.go:504` |
@@ -116,10 +124,18 @@ latching failure this codebase has been bitten by before. Malformed *configurati
 missing client id) still refuses to boot, as `ParsePublicOrigin` does — a typo must not read as "not
 configured".
 
-**Secure-context requirement.** The new cookies are unconditionally `Secure` + `__Host-`; a browser
-silently drops them otherwise, which would surface as an unexplained 403 on every callback. So the OIDC
-posture **refuses to boot** unless the deployment is a secure context (a declared `PublicOrigin`, or a
-loopback bind for local IdP testing). This is checkable at construction from config the kit already holds.
+**Secure-context requirement — deliberately stricter than `cookieSecure()`.** The new cookies are
+unconditionally `Secure` + `__Host-`; a browser silently drops them otherwise, which would surface as an
+unexplained 403 on every callback. The kit's existing `Secure` rule (`PublicOrigin != nil || !Loopback`,
+`session.go:354-356`) **fails open in exactly one posture** — loopback bind behind a TLS-terminating proxy
+— and the code's own comments say so (`session.go:346-353`, `origin.go:59-63`). Reusing that disjunction
+here would admit the one posture where the session cookie ships un-`Secure` beside two `Secure` `__Host-`
+cookies and §3.2's `redirect_uri` derives to `http://127.0.0.1:…`, which no IdP registration matches. So
+the OIDC posture's boot rule is stricter: **a declared `PublicOrigin` is required**, with the sole
+exception of a loopback bind whose `redirect_uri` genuinely resolves to that loopback (local IdP testing,
+no proxy in play — the derived URI *is* the registered URI, so a proxy misdeployment fails visibly at the
+IdP, not silently at the cookie jar). Checkable at construction from config the kit already holds; the
+proxied posture's fix is one line of config (declare `PublicOrigin`), named in the deployment matrix.
 
 The kit's verifier is built **`FetchJWKS(discovery.jwks_uri)` → `NewVerifier{Keys, KeyInfo: ModeOpaque
 pinned to the issuer, Audience: client_id}` → `NewJWKSPoller(verifier, …)` → `Run(ctx)`** — the Gateway's
@@ -301,12 +317,26 @@ not close this; it is the classic ID-token-as-API-bearer antipattern.
 URIs), because *Lattice* is the relying party and the apps are its surfaces — they share one Gateway, one
 identity graph, and derive every hat from the graph, so there is no per-app authorization boundary for a
 separate client to express. One client ⇒ one `aud` ⇒ `GATEWAY_JWT_AUDIENCE` is set and enforced.
-**And the omission fails closed:** the Gateway **refuses to boot when an external key source
-(`GATEWAY_JWKS_URL` or `GATEWAY_JWT_KEYS_DIR`) is configured with no `GATEWAY_JWT_AUDIENCE`** — the same
-shape as its existing "keys dir configured with no issuer" refusal (`keysource.go:77-80`). Dev/demo is
-untouched (dev-key posture, no external source). The escape hatch for a deployment that genuinely needs
-per-app clients is a multi-valued `GATEWAY_JWT_AUDIENCE` (accept-any-of), a small extension to
-`auth.Config` — designed for, built only on a real driver.
+**And the omission fails closed — at every external-verifier construction site, not just the Gateway's.**
+The opt-in audience is not one gap but four: the same `Audience`-optional verifier is built at the Gateway
+(`cmd/gateway/main.go:217`), the Loupe reader tier (`LOUPE_JWT_AUDIENCE`, `cmd/loupe/readauth.go:180-183`),
+the control plane (`LATTICE_CONTROL_JWT_AUDIENCE`, `internal/controlauth/wire_actor_verifier.go:68-71`),
+and the kit itself (`<PREFIX>_JWT_AUDIENCE`, `signer.go:157`) — all Contract #11 §11.1 surfaces, and a pin
+enforced at one of four sites is not the invariant. So the refusal is uniform: **any external key source
+configured with no audience refuses to boot** — the same shape as the existing "keys dir configured with no
+issuer" refusal (`keysource.go:77-80`). The Gateway's refusal also covers the NATS-connect surface for
+free (the auth-callout reuses its Authenticator, `natsauth.go:260`). Dev/demo is untouched (dev-key
+posture, no external source). The escape hatch for a deployment that genuinely needs per-app clients is a
+multi-valued audience (accept-any-of), a small extension to `auth.Config` — designed for, built only on a
+real driver.
+
+**One open contract question for ratification (Andrew's, not resolved here).** "External key source ⇒
+audience required" is a fail-closed-omission rule of exactly the family Contract #11 §11.6 already
+enumerates ("no keys ⇒ no verification; unknown `kid` ⇒ reject; …"). This design ships it as
+enforcement-side hardening with **no** contract edit — §11.2's `aud` row is conditional, so nothing is
+contradicted — but if the pin is meant to bind all surfaces permanently, a §11.6 bullet is its honest
+home. Ratify-time choice: (a) enforcement-only (this design as written), or (b) also add the §11.6
+invariant bullet (a one-line frozen-contract amendment, staged on ratification).
 
 ## 5. Reconciliation and honest residuals
 
@@ -324,7 +354,9 @@ per-app clients is a multi-valued `GATEWAY_JWT_AUDIENCE` (accept-any-of), a smal
   cookie, the RT). No platform buckets; no Core-KV reads or writes; P2/P5 untouched.
 - *In-flight collisions?* Checked the open 📐/🏗️ designs: cap-read (Refractor) — disjoint; the appsession
   *fixation* row — adjacent by component and explicitly fenced in §3.6/§5.2; the Loupe lane — Loupe does
-  not adopt the kit (operator tier, own auth).
+  not adopt the session `Manager` (operator tier, own auth), though since `1a0d1849` it does consume the
+  kit's `OriginGate`/`ParsePublicOrigin`/`IsLoopbackHost` (`cmd/loupe/publicorigin.go:28-46`) — reachable
+  only by a gate change, and this design makes none.
 
 ### 5.2 Residuals, stated rather than claimed away
 
@@ -333,10 +365,17 @@ per-app clients is a multi-valued `GATEWAY_JWT_AUDIENCE` (accept-any-of), a smal
   because co-hosted apps share a cookie jar host (`origin.go:12-21`). On a **single-hostname multi-app**
   deployment, a hostile co-hosted page can plant a flow cookie it obtained legitimately and force a victim
   through a callback carrying the attacker's `code`: state matches because the attacker supplied both
-  halves, and the victim is signed into the attacker's account. **Therefore the OIDC posture requires one
-  hostname per kit-adopting app**, checked at boot against `PublicOrigin` and stated in the deployment
-  matrix. (The shipped demo box already gives each app its own hostname —
-  `deploy/demo/demo-bootstrap.sh` — and the all-on-127.0.0.1 local posture runs dev auth, not OIDC.)
+  halves, and the victim is signed into the attacker's account. **No mechanism closes this residual,
+  which is why the mitigation is a deployment rule:** cookies ignore ports, so any browser-side binding a
+  same-host co-host is asked to present is one it can also supply; and server-side flow state (keyed by
+  `state`) binds the *flow*, not the *browser* — the attacker's flow is a legitimate record too. The
+  state↔cookie binding is OIDC's own ceiling here. This is the same *class* as the sibling fixation board
+  row, whose own mechanism (a planted **session** cookie verifying under the shared dev key) cannot fire
+  in this posture — no Signer — so the rows stay separate rather than sequenced. **Therefore the OIDC
+  posture requires one hostname per kit-adopting app**, stated in the deployment matrix (boot cannot
+  verify what else is co-hosted on the name, so this is a stated rule, not a check). (The shipped demo box
+  already gives each app its own hostname — `deploy/demo/demo-bootstrap.sh` — and the all-on-127.0.0.1
+  local posture runs dev auth, not OIDC.)
 - **The RT cookie rides every same-site request.** `__Host-` forces `Path=/`, so the refresh token travels
   on every page load and API call to its own app — not just to `/api/session/refresh`. The trade is taken
   knowingly: planting protection is worth more than path scoping here, since `__Secure-` + a scoped path
@@ -355,17 +394,20 @@ per-app clients is a multi-valued `GATEWAY_JWT_AUDIENCE` (accept-any-of), a smal
   optional `oidc` field), so nothing breaks by shape — but see the TTL work below, which is a real code
   change, not a claim of zero.
 - **Deployment:** a real deployment registers one OIDC client with five redirect URIs, sets each app's
-  `_OIDC_*` block, and sets the Gateway's `GATEWAY_JWKS_URL`/`_ISSUER`/`_JWT_AUDIENCE` to the same IdP and
-  client — Contract #11 §11.3's "all surfaces bind identically" invariant, operationally.
+  `_OIDC_*` block, and sets the Gateway's `GATEWAY_JWKS_URL` / `GATEWAY_JWKS_ISSUER` /
+  `GATEWAY_JWT_AUDIENCE` to the same IdP and client — Contract #11 §11.3's "all surfaces bind identically"
+  invariant, operationally.
 
-**The FE refresh cadence is hardcoded to the dev 30-minute TTL and must change.**
-`facet/web/boot.mjs:158` and `loftspace-app/web/app.js:311` both hardcode a 20-minute loop derived from
+**The FE refresh cadence is hardcoded to the dev 30-minute TTL and must change — three loops, not two.**
+`facet/web/boot.mjs:158`, `loftspace-app/web/app.js:311`, and `clinic-app/web/app.js:160`
+(`KEEPALIVE_INTERVAL_MS`, `startSessionKeepalive` at `:185`) all hardcode a 20-minute loop derived from
 `DevTokenTTL` (`signer.go:27`), and `boot.mjs` never reads `expiresAt` at all. Real IdP ID tokens are
 commonly 5–15 minutes: Facet's cached token would go stale mid-interval and its NATS reconnects would
-present an expired token, and LoftSpace's session cookie would fail strict verification mid-read and bounce
-the user to `/login`. Both loops must be driven by the returned `expiresAt` (renew at a fraction of the
-remaining lifetime, floor'd), and the kit logs a loud operator warning when the first verified ID token's
-TTL is below a workable floor. This is Fire 2 and is scoped as real work.
+present an expired token, and LoftSpace's/Clinic's session cookie would fail strict verification mid-read
+and bounce the user to `/login`. All three loops must be driven by the returned `expiresAt` (renew at a
+fraction of the remaining lifetime, floor'd); Cafe and Wellness cache by `expiresAt` with no keepalive
+loop, so they inherit correctness with no loop change. The kit logs a loud operator warning when the first
+verified ID token's TTL is below a workable floor. This is Fire 2 and is scoped as real work.
 
 ## 7. Test strategy
 
@@ -417,10 +459,12 @@ have caught the resolution split.
   residuals; the adopter list corrected to five). *Green:* `go test ./internal/appsession/... ./cmd/...`,
   every §7 unit vector, all existing kit tests untouched-green, `make vet` + `golangci-lint` + the
   `scripts/lint-*.go` gates.
-- **Fire 2 (S–M) — the audience pin + the FE cadence.** §4.2's Gateway boot refusal (external key source
-  ⇒ `GATEWAY_JWT_AUDIENCE` required) with its vectors; both FE refresh loops driven by `expiresAt`; the
-  short-TTL operator warning; the per-app login pages render the OIDC button. *Green:* Gateway auth tests
-  incl. the new refusal; the FE loop tests (`feed_source.test.mjs` is the precedent); full suite.
+- **Fire 2 (S–M) — the audience pin + the FE cadence.** §4.2's uniform boot refusal (external key source
+  ⇒ audience required) at **all four** verifier construction sites — Gateway, Loupe reader, control plane,
+  kit — with vectors per site; the three FE refresh loops (Facet, LoftSpace, Clinic) driven by
+  `expiresAt`; the short-TTL operator warning; the per-app login pages render the OIDC button. *Green:*
+  auth tests incl. the new refusals; the FE loop tests (`feed_source.test.mjs` is the precedent); full
+  suite.
 - **Fire 3 (S–M) — proof.** The §7 e2e on the ephemeral stack; the deployment matrix (one client, five
   redirect URIs, the app ↔ Gateway env pairing, per-vendor refresh-token rows, the one-hostname-per-app
   requirement) in the component page. *Green:* e2e in CI, `make verify-kernel`, full suite.
