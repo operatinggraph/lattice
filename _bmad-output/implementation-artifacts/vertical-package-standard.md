@@ -13,7 +13,10 @@ normative text alone does not bind future authors; the gate is what does. It run
 hatches: an `[no-op-meta: <reason>]` permission Note for an op no human triggers (S1's own stated
 exemption), and a shrink-only debt baseline enumerating the gaps §3 is scheduled to close — an entry
 that stops violating fails the gate too, so the baseline cannot become a permanent amnesty.
-**Board row:** [verticals lane](../planning-artifacts/backlog/verticals.md) *Vertical Package Standard*.
+**Convergence CLOSED 2026-07-26** (`dc396cb3`, Inc 6): all four §3 routes discharged and **both** the S1 and
+S6 baselines are empty, so S1/S6/S7 bind over all 29 registered packages with zero exemptions. What no gate
+measures — S2–S5/S8 — is carried by the census row in the verticals lane, and the remaining named tails are
+their own rows there. The `readTemplateDebt` baseline (2 entries) is a separate row, not Standard debt.
 **Extends:** [persona-worlds-design.md](persona-worlds-design.md) (archetype ladder §3; W1–W4 build to this
 standard). **Contracts:** builds to #1/#2/#6; **Frozen-contract change: NONE.**
 **Grounds in:** a 15-package census @ `fda8019c` (per-package scorecards in the census transcript; the
@@ -79,7 +82,8 @@ greenfield.
 - **S6 — The verification floor scales with the package.** Every package: manifest↔definition drift test
   (universal today) **plus** structure pins (DDL/op/permission-tuple/lens counts + load-bearing script
   strings — loftspace `ScriptGuards` idiom) **plus** a `lens_cypher_test.go` executing every lens over a
-  seeded topology (cafe-ledger/loftspace-ledger business lenses currently have none). Packages with
+  seeded topology (corpus-wide as of Inc 6 — both S6 baselines are empty, so the rule binds with no
+  exemptions and a new lens ships with a test that executes it). Packages with
   stack-observable invariants add a `verify-package-<x>` script + make target (*idiom:
   service-location's suite*). Platform gap, named: `VerifyAgainstDefinition` does not cover Roles — filed
   with the convergence program.
@@ -487,3 +491,56 @@ is a *column*, so the test asserts on the projected value, not on row presence.
 **Non-goals:** the `Output` descriptor's own wrapping (BuildKey / RealnessFilter / EmptyBehavior) is engine
 machinery with its own tests in `internal/refractor` — these tests drive the **cypher**, exactly as the 19
 precedents do. No `verify-package-*` script, no version bumps (no installed content changes).
+
+### Inc 6 build note — shipped `dc396cb3`
+
+Both S6 baselines are now **empty**, the milestone S1 reached in Inc 5: the rule binds corpus-wide with no
+exemptions, so a new lens ships with a test that executes it or reds the gate. Nine lenses, five files, no
+spec/grant/permission/DDL movement — the scope-diff gate held.
+
+**Three things the brief got wrong, each corrected against the engine rather than around it.**
+
+1. **The degenerate-entry premise is real, but not where the brief looked.** `capabilityRoles`' role-less
+   actor does project one row — and its two collects behave *differently* on the same null binding:
+   `collect(DISTINCT {map literal})` yields the all-null entry, `collect(DISTINCT role.key)` yields `[]`.
+   The first assertion written asserted `[null]` for `roles` and failed. That asymmetry is load-bearing, not
+   trivia: `RealnessFilter` names a field *inside* `platformPermissions` precisely because pointed at
+   `roles` it would find nothing to filter and could never mark the row unreal — and `EnvelopeFn`
+   (`projection/driver.go:99-107`) only emits the retracting `ErrDeleteProjection` when nothing is real. It
+   is pinned now, in both directions.
+2. **identity-domain was never actually uncovered.** `lenses_internal_test.go` already drives
+   `identityAnchorsSpec` relation-by-relation (the Osei provider-binding regression, the landlord `manages`
+   hat, its negative). The S6 rule keys on the **filename** `lens_cypher_test.go`, so a package with real
+   executed-cypher coverage under any other name reads as debt. The new file therefore adds only what was
+   genuinely missing — all four walks *concatenated into one row*, and the all-degenerate empty case — and
+   the duplicate inverse-walk test drafted for it was dropped before commit rather than shipped as
+   redundancy. **The gate's filename key is a proxy for the property, and it can be wrong in both
+   directions**: it credits an empty `lens_cypher_test.go` and discredits coverage living elsewhere.
+   Left as-is (a filename is what makes the rule mechanical and unarguable), named here so the next reader
+   does not mistake the baseline for a measurement.
+3. **`<>` against a null is not the mirror of `=`.** Inverting `augurDispatchPending`'s approved test to
+   `<> "approved"` made a **claim still in flight dispatch** — the absent review state compares true under
+   `<>` where it compares false under `=`. The spec's default-deny therefore depends on the *positive*
+   phrasing, not merely on comparing against the right string.
+
+**Mutation-checked, not assumed.** Two spec mutations were run against the new tests before commit —
+relaxing the console-operator role filter to match any role, and the `<>` inversion above. Each reds the new
+tests (3 and 4 respectively). A test file that ships green without ever being shown to fail is the same
+unmeasured claim S6 exists to end.
+
+**The two operator packages seed each other's role deliberately.** `consoleOperatorReadGrants` and
+`demoOperatorReadGrants` are byte-near-identical, differing only in a role name and a `grant_source`, and
+each emits `anchor_id '*'`. The realistic defect is not a malformed cypher but a copy-paste that leaves the
+sibling's role name in place — so each world seeds a holder of the *other* role and asserts it does not
+project. `actor_id` is pinned bare for the same class of reason: a full `vtx.identity.<id>` there denies
+every row through RLS while the grant table still looks populated.
+
+**Nothing to rebuild (MERGED ≠ RUNNING).** The fire touched five `_test.go` files and one `scripts/` gate;
+no `_test.go` file is compiled into a `cmd/` binary and `lint-package-standard.go` is a CI-invoked tool, so
+no running binary is stale as a result. `make verify-kernel` is not runnable from a worktree (it needs the
+main checkout's generated `lattice.bootstrap.json`) and has no bearing here — no kernel seed moved.
+
+**Named residual, filed as a row:** the ~40-line embedded-NATS harness is now duplicated **24×** across the
+corpus's cypher tests. Extracting it to an `internal/lenstest` helper is a single mechanical sweep, but
+doing it for five files only would have created a second idiom, so it stays a corpus-wide item with a named
+consumer: the next package to declare a lens, which today copies 40 lines to satisfy S6.
