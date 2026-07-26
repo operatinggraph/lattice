@@ -28,11 +28,21 @@ const testTimeout = 5 * time.Second
 // The subjects every test below signs in as. Bare 20-char NanoIDs from the
 // limited alphabet (internal/substrate/nanoid.go).
 const (
-	memberA    = "aaaaaaaaaaaaaaaaaaaa"
-	memberB    = "bbbbbbbbbbbbbbbbbbbb"
-	staffSubj  = "cccccccccccccccccccc"
-	instrSubj  = "dddddddddddddddddddd"
-	doctorSubj = "eeeeeeeeeeeeeeeeeeee"
+	memberA   = "aaaaaaaaaaaaaaaaaaaa"
+	memberB   = "bbbbbbbbbbbbbbbbbbbb"
+	staffSubj = "cccccccccccccccccccc"
+	// staffWorkplace is the one location staffSubj `worksAt`; a session covered
+	// by it is inside that staffer's reach and one covered by otherWorkplace is
+	// not. The pair is what makes the workplace boundary discriminating rather
+	// than merely present.
+	staffWorkplace = "vtx.building.A9jnKK2bGwZNrfHHkLme"
+	otherWorkplace = "vtx.building.T4pQmZbNxKrWvL8dHcyR"
+	instrSubj      = "dddddddddddddddddddd"
+	doctorSubj     = "eeeeeeeeeeeeeeeeeeee"
+	// rootSubj holds the primordial operator role and NO workplace; twoHatSubj
+	// works at both buildings.
+	rootSubj   = "ffffffffffffffffffff"
+	twoHatSubj = "gggggggggggggggggggg"
 )
 
 // The instructor entity instrSubj is identifiedBy-bound to, and the session
@@ -124,7 +134,7 @@ func fakeGatewayActor(t *testing.T) string {
 		case staffSubj:
 			anchors = append(anchors, appsession.ActorAnchor{
 				Relation: "worksAt",
-				Key:      "vtx.building.A9jnKK2bGwZNrfHHkLme",
+				Key:      staffWorkplace,
 				Name:     "Riverside Building",
 			})
 		case instrSubj:
@@ -139,6 +149,11 @@ func fakeGatewayActor(t *testing.T) string {
 				Relation: "identifiedBy",
 				Key:      "vtx.provider.jT3mWqZbNxKrPvL7dHcy",
 			})
+		case twoHatSubj:
+			anchors = append(anchors,
+				appsession.ActorAnchor{Relation: "worksAt", Key: staffWorkplace},
+				appsession.ActorAnchor{Relation: "worksAt", Key: otherWorkplace},
+			)
 		case memberB:
 			// The degenerate unmatched-OPTIONAL-MATCH shape: a relation with
 			// no key. It must confer nothing.
@@ -147,11 +162,15 @@ func fakeGatewayActor(t *testing.T) string {
 				appsession.ActorAnchor{Relation: "identifiedBy"},
 			)
 		}
+		roles := []string{}
+		if claims.Subject == rootSubj {
+			roles = append(roles, "operator")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"actorId":         "vtx.identity." + claims.Subject,
 			"resolvedActorId": "vtx.identity." + claims.Subject,
-			"roles":           []string{},
+			"roles":           roles,
 			"anchors":         anchors,
 		})
 	})
@@ -235,18 +254,30 @@ func muxGET(s *server, path string, c *http.Cookie) *httptest.ResponseRecorder {
 	return rec
 }
 
+// noLocations seeds a session no location covers. It is an EMPTY slice, not a
+// nil one: seedSession reads nil as "say nothing about topology" and defaults
+// to the staffer's own building, so the unwired case has to be stated.
+var noLocations = []string{}
+
 // seedSession seeds one wellnessSessions row, led by instructorKey when
-// non-empty.
-func seedSession(t *testing.T, conn *substrate.Conn, sessionKey, name, instructorKey string) {
+// non-empty and covered by coveringLocations — defaulting to the one building
+// staffSubj works at, so a caller that says nothing about topology gets the
+// session the staff hat can legitimately reach. A session somewhere else, or
+// nowhere at all, is seeded by naming its locations explicitly.
+func seedSession(t *testing.T, conn *substrate.Conn, sessionKey, name, instructorKey string, coveringLocations ...string) {
 	t.Helper()
+	if coveringLocations == nil {
+		coveringLocations = []string{staffWorkplace}
+	}
 	row := map[string]any{
-		"sessionKey": sessionKey,
-		"name":       name,
-		"startsAt":   "2026-08-01T10:00:00Z",
-		"endsAt":     "2026-08-01T11:00:00Z",
-		"capacity":   12.0,
-		"studioKey":  "vtx.studio.kR8mPqZnXvBtL3wHdYcj",
-		"studioName": "Riverside Movement Studio",
+		"sessionKey":        sessionKey,
+		"name":              name,
+		"startsAt":          "2026-08-01T10:00:00Z",
+		"endsAt":            "2026-08-01T11:00:00Z",
+		"capacity":          12.0,
+		"studioKey":         "vtx.studio.kR8mPqZnXvBtL3wHdYcj",
+		"studioName":        "Riverside Movement Studio",
+		"coveringLocations": coveringLocations,
 	}
 	if instructorKey != "" {
 		row["instructorKey"] = instructorKey
@@ -358,7 +389,7 @@ func TestHandleBookings_Roster_MemberForbidden(t *testing.T) {
 	}
 }
 
-func TestHandleBookings_Roster_StaffSeesTheHouse(t *testing.T) {
+func TestHandleBookings_Roster_StaffSeesTheirWorkplace(t *testing.T) {
 	s, cookieFor := devSessionServer(t)
 	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", instructorKeyFixture)
 	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
@@ -370,6 +401,57 @@ func TestHandleBookings_Roster_StaffSeesTheHouse(t *testing.T) {
 	}
 	if rows := decodeBookings(t, rec); len(rows) != 2 {
 		t.Fatalf("staff read %d roster rows, want 2 (every seat, not just their own)", len(rows))
+	}
+}
+
+// The discriminating pair for the staff hat, mirroring the instructor one
+// above: the SAME staffer, the same call, differing only in whether the
+// session sits at a location they work at. Without the workplace term this
+// second call returned 200 and the whole roster.
+func TestHandleBookings_Roster_StaffDeniedOutsideTheirWorkplace(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "")
+	seedSession(t, s.conn, otherSessionKey, "Class at another building", "", otherWorkplace)
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+	seedBooking(t, s.conn, "vtx.booking.bT5qWnZxKvMpL2wHdGcy", otherSessionKey, memberB)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("own workplace: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+otherSessionKey, cookieFor(staffSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("another building: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// A staffer wired to the BUILDING reads a session in a room inside it: the
+// lens projects the whole containment chain, so the depth-0 room and its
+// ancestors all count — the read-side of worksAt_covers walking upward.
+func TestHandleBookings_Roster_StaffCoveredByAContainingLocation(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Vinyasa Flow", "",
+		"vtx.location.rM3kQpZbNxTvW7dHcyLn", staffWorkplace)
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a room inside the staffer's building; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// A session whose studio sits nowhere is covered by nobody. Staff must not
+// read it: an unwired topology denies rather than falling open, the same
+// answer require_workplace gives an empty location list.
+func TestHandleBookings_Roster_UnlocatedSessionDeniesStaff(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Class nowhere", "", noLocations...)
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(staffSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a session no location covers; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -471,8 +553,8 @@ func TestResolveSubjectHats(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveSubjectHats: %v", err)
 			}
-			if got.isStaff != tc.wantStaff {
-				t.Errorf("isStaff = %v, want %v", got.isStaff, tc.wantStaff)
+			if got.isStaff() != tc.wantStaff {
+				t.Errorf("isStaff() = %v, want %v", got.isStaff(), tc.wantStaff)
 			}
 			if got.instructorKey != tc.wantInstrutor {
 				t.Errorf("instructorKey = %q, want %q", got.instructorKey, tc.wantInstrutor)
@@ -500,8 +582,8 @@ func TestResolveSubjectHats_GatewayUnreachable_FailsClosed(t *testing.T) {
 	if err == nil {
 		t.Fatalf("resolveSubjectHats returned %+v, want an error when the Gateway is unreachable", got)
 	}
-	if got.isStaff {
-		t.Errorf("isStaff = true on a failed resolve; the hat must never be granted by default")
+	if got.isStaff() {
+		t.Errorf("isStaff() = true on a failed resolve; the hat must never be granted by default")
 	}
 }
 
@@ -628,5 +710,72 @@ func TestPublicReadPaths_IsExactlyTheSchedule(t *testing.T) {
 		if !want[p] {
 			t.Errorf("%s is exempt from the session gate; only the class schedule may be", p)
 		}
+	}
+}
+
+// An operator reads any roster, workplace or not — the read-side half of the
+// exemption require_workplace gives root on the write side. Without it the
+// break-glass admin that can schedule a class anywhere could not see who is in
+// it.
+func TestHandleBookings_Roster_OperatorReadsAnyWorkplace(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, otherSessionKey, "Class at another building", "", otherWorkplace)
+	seedBooking(t, s.conn, "vtx.booking.bT5qWnZxKvMpL2wHdGcy", otherSessionKey, memberB)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+otherSessionKey, cookieFor(rootSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (an operator holds no workplace and still reads any roster); body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if rows := decodeBookings(t, rec); len(rows) != 1 {
+		t.Fatalf("operator read %d roster rows, want 1", len(rows))
+	}
+}
+
+// A staffer wired to two buildings reads both, and still nothing outside them.
+func TestHandleBookings_Roster_MultipleWorkplaces(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedSession(t, s.conn, ledSessionKey, "Class at home", "")
+	seedSession(t, s.conn, otherSessionKey, "Class at the other building", "", otherWorkplace)
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+	seedBooking(t, s.conn, "vtx.booking.bT5qWnZxKvMpL2wHdGcy", otherSessionKey, memberB)
+
+	for _, key := range []string{ledSessionKey, otherSessionKey} {
+		rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+key, cookieFor(twoHatSubj))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200 for a staffer working at both; body=%s", key, rec.Code, rec.Body.String())
+		}
+	}
+	// The same two-workplace staffer is still refused a third building.
+	third := "vtx.session.pK9rTmZbNxWvL4dHcyQs"
+	putJSON(t, s.conn, wellnessdomain.WellnessSessionsBucket, third, map[string]any{
+		"sessionKey":        third,
+		"name":              "Class at a building they do not work at",
+		"coveringLocations": []string{"vtx.building.Z7mKqPbNxTvW3dHcyRLn"},
+	})
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+third, cookieFor(twoHatSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("third building: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// A row projected by an OLDER version of the lens carries no coveringLocations
+// key at all. That decodes to a nil slice and must DENY — the stale-projection
+// case is the one where a fail-open would hand every roster to any staffer.
+func TestHandleBookings_Roster_RowWithoutCoveringLocationsDenies(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	putJSON(t, s.conn, wellnessdomain.WellnessSessionsBucket, ledSessionKey, map[string]any{
+		"sessionKey": ledSessionKey,
+		"name":       "Projected before the workplace term existed",
+		"startsAt":   "2026-08-01T10:00:00Z",
+		"endsAt":     "2026-08-01T11:00:00Z",
+		"capacity":   12.0,
+		"studioKey":  "vtx.studio.kR8mPqZnXvBtL3wHdYcj",
+	})
+	seedBooking(t, s.conn, "vtx.booking.aR3nKpXvZmBtL7wHdYcj", ledSessionKey, memberA)
+
+	rec := sessionGET(s, s.handleBookings, "/api/bookings?sessionKey="+ledSessionKey, cookieFor(staffSubj))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a row carrying no covering set; body=%s", rec.Code, rec.Body.String())
 	}
 }

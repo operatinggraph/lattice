@@ -322,3 +322,107 @@ func TestWellnessInstructors_RostersNamedInstructors(t *testing.T) {
 	require.Equal(t, "Sam Okafor", v["displayName"])
 	require.Equal(t, studioKey, v["studioKey"])
 }
+
+// TestWellnessSessions_CoveringLocations proves the read-side workplace term:
+// a session's coveringLocations carries its studio's own location AND every
+// containedIn ancestor, so a staff read boundary intersecting it with the
+// caller's `worksAt` keys matches whether that staffer is wired to the exact
+// room or to the building above it — the read-model mirror of the write side's
+// worksAt_covers walk (facet-staff-worlds-design.md §9).
+func TestWellnessSessions_CoveringLocations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	roomKey := f.vtx(t, "room3", "location")
+	campusKey := f.vtx(t, "campus", "location")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "atStudio", "flow", "sunrise")
+	f.edge(t, "locatedAt", "sunrise", "room3")
+	f.edge(t, "containedIn", "room3", "campus")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1, "the comprehension must not fan the session into one row per ancestor")
+	covering := rows[0].Values["coveringLocations"]
+	require.ElementsMatch(t, []any{roomKey, campusKey}, covering,
+		"depth-0 (the studio's own room) and its containedIn ancestor both cover the session")
+}
+
+// TestWellnessSessions_NoLocationEmptyCovering proves a session whose studio
+// sits nowhere projects an EMPTY covering set rather than a null or a missing
+// column: the staff boundary reads that as "no workplace covers this row" and
+// denies, matching require_workplace's empty-location_keys denial.
+func TestWellnessSessions_NoLocationEmptyCovering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "atStudio", "flow", "sunrise")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"an unwired studio covers nothing; the boundary must not read that as unrestricted")
+}
+
+// TestWellnessSessions_MultiLocationStudioUnionsBothChains proves a studio that
+// sits at more than one place contributes BOTH chains to one row — the union
+// the write side's studio_locations builds by enumerating every locatedAt link,
+// and still one row per session rather than one per location.
+func TestWellnessSessions_MultiLocationStudioUnionsBothChains(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	northKey := f.vtx(t, "north", "location")
+	southKey := f.vtx(t, "south", "location")
+	campusKey := f.vtx(t, "campus", "location")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "atStudio", "flow", "sunrise")
+	f.edge(t, "locatedAt", "sunrise", "north")
+	f.edge(t, "locatedAt", "sunrise", "south")
+	f.edge(t, "containedIn", "north", "campus")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1, "two locations must union into one row, not fan into two")
+	require.ElementsMatch(t, []any{northKey, southKey, campusKey}, rows[0].Values["coveringLocations"],
+		"both locatedAt branches and the ancestor of the one that has it")
+}
+
+// TestWellnessSessions_NoStudioEmptyCovering proves a session with no studio at
+// all still projects one row with an EMPTY covering set. The comprehension's
+// head is the OPTIONAL-matched studio, so this is the vector that would catch
+// it seeding the whole keyspace instead of null-binding.
+func TestWellnessSessions_NoStudioEmptyCovering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "orphan", "session")
+	// A studio sitting somewhere, linked to NO session: if the comprehension
+	// ever came unanchored it would pull this location in.
+	f.vtx(t, "elsewhere", "studio")
+	f.vtx(t, "faraway", "location")
+	f.aspect(t, "orphan", "schedule", "sessionSchedule", map[string]any{
+		"name": "Orphan Class", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 5.0,
+	})
+	f.edge(t, "locatedAt", "elsewhere", "faraway")
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.Empty(t, rows[0].Values["coveringLocations"],
+		"a session with no studio is covered by nothing, not by every studio's location")
+}

@@ -118,6 +118,24 @@ RETURN
 // aggregate COUNT; a consuming FE derives it client-side from
 // wellnessBookings, the same client-side aggregation idiom
 // cmd/cafe-app's computeTabs already uses (see wellness-vertical-design.md).
+//
+// coveringLocations is the read-side half of workplace confinement
+// (facet-staff-worlds-design.md §9): every location that COVERS this session —
+// the studio's own `locatedAt` location plus each of that location's
+// `containedIn` ancestors. A staff read boundary intersects it with the
+// caller's `worksAt` keys, which is exactly what the write side's
+// `worksAt_covers` computes by walking up from the location (ddls.go). The
+// zero-hop lower bound is load-bearing: the depth-0 entry is the studio's own
+// location, so a staffer wired to the exact room matches. The list-comprehension
+// form is lease-signing's authz_anchors idiom (lease-signing/lenses.go), which
+// keeps the row one-per-session — an OPTIONAL MATCH on a multi-location studio
+// would fan the session into several rows instead. The hop bound is
+// WORKPLACE_MAX_DEPTH from the write side's own walk, so neither side reaches a
+// depth the other refuses. The location nodes carry no label because a location
+// is any vertex of class `location` whatever its type segment — a building, a
+// floor, a room — the same reason edge-manifest's workplace chains leave them
+// bare; the labelled `(s:studio)` head is what keeps the comprehension anchored
+// rather than seeding the whole keyspace.
 const wellnessSessionsSpec = `MATCH (se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
 OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)
@@ -131,7 +149,8 @@ RETURN
   s.key AS studioKey,
   s.profile.data.name AS studioName,
   i.key AS instructorKey,
-  i.profile.data.displayName AS instructorName`
+  i.profile.data.displayName AS instructorName,
+  [(s)-[:locatedAt]->(pl)-[:containedIn*0..8]->(c) | c.key] AS coveringLocations`
 
 // wellnessBookingsSpec projects one row per booking, walking forSession and
 // bookedBy (each 0..1). bookerKey (not a name) is projected — identity

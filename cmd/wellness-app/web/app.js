@@ -559,9 +559,12 @@ function myClassCard(b) {
 // ---- Roster view --------------------------------------------------------
 //
 // Who is booked into one session. The server serves it to a `worksAt`
-// staffer for any session and to an instructor only for the sessions their
-// own binding leads (persona-worlds-design.md §7.3), so the picker below
-// offers an instructor exactly their own classes.
+// staffer for sessions at a location they work at, and to an instructor only
+// for the sessions their own binding leads (persona-worlds-design.md §7.3), so
+// the picker below offers an instructor exactly their own classes. It offers a
+// staffer every session on the schedule, so one at another building answers
+// 403 rather than being filtered out of the picker — the schedule is the open
+// member catalog and carries no location column to narrow by.
 //
 // Nobody cancels a seat from here: CancelBooking scope=any grants `operator`
 // alone (packages/wellness-domain/permissions.go), so neither hat may cancel

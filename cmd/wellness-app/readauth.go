@@ -34,6 +34,11 @@ const actorFetchTimeout = 10 * time.Second
 // {key: bound.key, relation: 'identifiedBy'}).
 const instructorKeyPrefix = "vtx.instructor."
 
+// operatorRole is the primordial root role. The Gateway reports it by
+// canonical name in /v1/actor's roles array, which is the same fact
+// wellness-domain's `actor_holds_operator` resolves from the graph.
+const operatorRole = "operator"
+
 // errNoSession marks the caller having no usable session, as distinct from
 // this app being unable to resolve one. The two must not be conflated at the
 // handler: a 401 tells the FE the session is over and it navigates to /login
@@ -61,15 +66,48 @@ func (s *server) authenticateRead(r *http.Request) (string, error) {
 }
 
 // subjectHats is the caller's read-boundary role, resolved from the signed-in
-// session. isStaff marks a `worksAt` anchor (the house: any session's roster);
-// instructorKey is the vtx.instructor entity an `identifiedBy` anchor binds
-// this login to, empty for everyone else — an instructor sees the roster of
-// the sessions they lead and no others. Neither is set for a plain member,
-// who is scoped to their own bookings.
+// session. workplaces holds the location keys the caller `worksAt` — a staffer
+// reads the rosters those locations cover and no others; instructorKey is the
+// vtx.instructor entity an `identifiedBy` anchor binds this login to, empty for
+// everyone else — an instructor sees the roster of the sessions they lead and
+// no others. Neither is set for a plain member, who is scoped to their own
+// bookings.
 type subjectHats struct {
 	identityID    string
-	isStaff       bool
+	workplaces    []string
 	instructorKey string
+	// isOperator marks the primordial root role. The write side exempts it
+	// from workplace confinement (`actor_holds_operator`, wellness-domain's
+	// ddls.go), so the read side does too: break-glass admin that can schedule
+	// a class at any building must be able to see who is in it.
+	isOperator bool
+}
+
+// isStaff reports whether the caller carries any workplace at all. It answers
+// "is this a staff surface" — NOT "may this staffer read this row", which is
+// covers()'s question. A staff surface still has to name which rows.
+func (h subjectHats) isStaff() bool { return len(h.workplaces) > 0 }
+
+// covers reports whether any location the caller works at appears in a row's
+// projected covering set — the read-side mirror of wellness-domain's
+// `worksAt_covers`, which walks a location's containedIn chain upward testing
+// the actor's worksAt link at each level (facet-staff-worlds-design.md §9).
+// The lens materializes that chain per row, so the same answer falls out of a
+// set intersection. Fails CLOSED on both empty sides: a caller with no
+// workplace covers nothing, and a row whose topology is unwired is covered by
+// nobody — the denial require_workplace gives an empty location list.
+func (h subjectHats) covers(coveringLocations []string) bool {
+	for _, loc := range coveringLocations {
+		if strings.TrimSpace(loc) == "" {
+			continue
+		}
+		for _, work := range h.workplaces {
+			if work == loc {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // identityKey is the caller's full identity VERTEX key. The session resolves
@@ -96,12 +134,17 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 	if token == "" {
 		return subjectHats{}, fmt.Errorf("%w: no session token to resolve a role from (sign in at %s)", errNoSession, appsession.LoginPagePath)
 	}
-	anchors, err := s.fetchActorAnchors(r.Context(), token)
+	actor, err := s.fetchActorAnchors(r.Context(), token)
 	if err != nil {
 		return subjectHats{}, fmt.Errorf("resolve session role from the Gateway: %w", err)
 	}
 	hats := subjectHats{identityID: identityID}
-	for _, a := range anchors {
+	for _, role := range actor.Roles {
+		if strings.TrimSpace(role) == operatorRole {
+			hats.isOperator = true
+		}
+	}
+	for _, a := range actor.Anchors {
 		// The key must be present, not just the relation. identityAnchors
 		// stamps `relation` as a literal constant on every collected entry,
 		// so an identity with NO workplace still yields a {key:null,
@@ -117,7 +160,7 @@ func (s *server) resolveSubjectHats(r *http.Request) (subjectHats, error) {
 		}
 		switch {
 		case a.Relation == "worksAt":
-			hats.isStaff = true
+			hats.workplaces = append(hats.workplaces, key)
 		case a.Relation == "identifiedBy" && strings.HasPrefix(key, instructorKeyPrefix):
 			hats.instructorKey = key
 		}
@@ -141,33 +184,34 @@ func (s *server) writeAuthError(w http.ResponseWriter, err error) {
 }
 
 // actorAnchorsResponse decodes the Gateway's GET /v1/actor body far enough to
-// read the anchors array; the response also carries actorId/roles, which this
-// read boundary does not need.
+// read the anchors and roles arrays; the response also carries actorId, which
+// this read boundary does not need.
 type actorAnchorsResponse struct {
 	Anchors []appsession.ActorAnchor `json:"anchors"`
+	Roles   []string                 `json:"roles"`
 }
 
 // fetchActorAnchors asks the Gateway which residence/workplace/binding
-// anchors token's actor carries.
-func (s *server) fetchActorAnchors(ctx context.Context, token string) ([]appsession.ActorAnchor, error) {
+// anchors and roles token's actor carries.
+func (s *server) fetchActorAnchors(ctx context.Context, token string) (actorAnchorsResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, actorFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayURL+"/v1/actor", nil)
 	if err != nil {
-		return nil, err
+		return actorAnchorsResponse{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return actorAnchorsResponse{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gateway /v1/actor: HTTP %d", resp.StatusCode)
+		return actorAnchorsResponse{}, fmt.Errorf("gateway /v1/actor: HTTP %d", resp.StatusCode)
 	}
 	var body actorAnchorsResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
-		return nil, err
+		return actorAnchorsResponse{}, err
 	}
-	return body.Anchors, nil
+	return body, nil
 }

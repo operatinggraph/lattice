@@ -19,6 +19,11 @@ type sessionProjection struct {
 	StudioName     string   `json:"studioName"`
 	InstructorKey  string   `json:"instructorKey"`
 	InstructorName string   `json:"instructorName"`
+	// CoveringLocations is the staff read boundary's term: the studio's own
+	// location plus its containedIn ancestors. Consumed by mayReadRoster, not
+	// rendered — sessionRow deliberately does not carry it, so the schedule
+	// grid keeps publishing no topology.
+	CoveringLocations []string `json:"coveringLocations"`
 }
 
 // sessionRow is the schedule-grid row the Schedule view renders. BookedCount

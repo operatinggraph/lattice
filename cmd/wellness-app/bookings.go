@@ -89,9 +89,10 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 // With no sessionKey the answer is the caller's OWN bookings — a member's My
 // Classes, and the same for a staffer or instructor, who are also members.
 // With a sessionKey it is that session's roster, which is a staff or
-// bound-instructor surface: a `worksAt` staffer sees any roster, an
-// instructor only the rosters of sessions their own instructor entity leads
-// (persona-worlds-design.md §7.3), and a plain member none.
+// bound-instructor surface: a `worksAt` staffer sees the rosters of sessions
+// at a location they work at, an instructor only the rosters of sessions their
+// own instructor entity leads (persona-worlds-design.md §7.3), and a plain
+// member none.
 func (s *server) handleBookings(w http.ResponseWriter, r *http.Request) {
 	// The own-bookings answer needs only the session's subject, so it does not
 	// consult the Gateway at all — My Classes keeps serving through a /v1/actor
@@ -126,7 +127,7 @@ func (s *server) handleBookings(w http.ResponseWriter, r *http.Request) {
 		}
 		if !allowed {
 			s.writeError(w, http.StatusForbidden,
-				"a roster is a staff surface, or an instructor's own class; this session is neither")
+				"a roster is a staff surface for the place you work at, or an instructor's own class; this session is neither")
 			return
 		}
 		// A roster is every seat in the session, not the caller's own.
@@ -144,16 +145,19 @@ func (s *server) handleBookings(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"bookings": rows})
 }
 
-// mayReadRoster reports whether hats may read sessionKey's full seat list. A
-// `worksAt` staffer may read any; a bound instructor may read a session their
-// own instructor entity is the projected `ledBy` of; nobody else may. The
-// ledBy fact comes from the wellnessSessions lens (P5) — the same projection
-// the schedule renders — so this needs no Core-KV read.
+// mayReadRoster reports whether hats may read sessionKey's full seat list. An
+// operator reads any, the exemption `require_workplace` gives root on the write
+// side. A `worksAt` staffer may read the rosters their workplace covers — the session's
+// studio location or a location containing it, the same reach
+// `require_workplace` gives that staffer's writes; a bound instructor may read
+// a session their own instructor entity is the projected `ledBy` of; nobody
+// else may. Both facts come from the wellnessSessions lens (P5) — the same
+// projection the schedule renders — so this needs no Core-KV read.
 func (s *server) mayReadRoster(ctx context.Context, hats subjectHats, sessionKey string) (bool, error) {
-	if hats.isStaff {
+	if hats.isOperator {
 		return true, nil
 	}
-	if hats.instructorKey == "" {
+	if !hats.isStaff() && hats.instructorKey == "" {
 		return false, nil
 	}
 	bucket := wellnessdomain.WellnessSessionsBucket
@@ -172,6 +176,9 @@ func (s *server) mayReadRoster(ctx context.Context, hats subjectHats, sessionKey
 	var p sessionProjection
 	if json.Unmarshal(entry.Value, &p) != nil {
 		return false, fmt.Errorf("decode %s from %s", sessionKey, bucket)
+	}
+	if hats.covers(p.CoveringLocations) {
+		return true, nil
 	}
 	return p.InstructorKey != "" && p.InstructorKey == hats.instructorKey, nil
 }
