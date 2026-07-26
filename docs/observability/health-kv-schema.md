@@ -464,7 +464,7 @@ currently reserved-but-unemitted.
       "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "consumerLag": <uint64> | null, "alert": "ok | paused | unreadable | repair-failing | sweep-stalled | lagging", "reconciled": <uint64>, "failingActors": <int>, "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>", "unreadable": "<string>"}
     },
     "lensLiveness": {
-      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | paused | unreadable | lagging", "unreadable": "<string>"}
+      "<lensCanonicalName>": {"status": "active | paused | rebuilding | unknown", "projectionLag": <uint64> | null, "lastProjectedAt": "<RFC3339>" | "", "alert": "ok | paused | unreadable | repair-failing | sweep-stalled | lagging", "unreadable": "<string>", "sweepEnrolled": <bool>, "reconciled": <uint64>, "failingActors": <int>, "sweepLastPassAt": "<RFC3339>" | "", "sweepSuppression": "<string>"}
     }
   },
   "issues": [
@@ -477,6 +477,9 @@ currently reserved-but-unemitted.
     {"code": "LensProjectionPaused", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionLagging", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensProjectionUnreadable", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensCoverageDivergence", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensRepairFailing", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
+    {"code": "LensSweepStalled", "severity": "warning", "message": "<string>", "since": "<RFC3339>"},
     {"code": "LensRegistryIncomplete", "severity": "error", "message": "<string>", "since": "<RFC3339>"}
   ]
 }
@@ -502,6 +505,20 @@ could not be read this cycle is reported `status: "unknown"`, `alert: "unreadabl
 installed, which is the monitoring equivalent of reporting healthy. Each `issues[]`
 entry's `since` persists across heartbeats while the condition holds and is dropped once
 it resolves.
+
+`Lens{CoverageDivergence,RepairFailing,SweepStalled}` are the general-lens mirror of the
+three `Capability*` sweep codes below, raised on the same streaks from the same sweeper —
+the convergence sweep runs for every actor-aggregate lens that can scope a key listing to
+its own rows, not only the auth-plane ones (lens-projection-liveness-design.md §15). Two
+differences, both deliberate: they are **always `severity: warning`**, at every streak
+length, where the capability codes escalate to `error` — a wrong business read model is one
+vertical's outage and must not take the whole instance `unhealthy`; and a business lens
+sweeps on a slower clock (`BusinessSweepInterval`, 5 minutes, against the auth plane's 60
+seconds), which also scales its own staleness window since that window is a multiple of the
+sweep interval. A lens with no sweeper installed reports `sweepEnrolled: false`, omits the
+other sweep fields, raises no sweep verdict and can never read as stalled — the install
+gate declines any lens that cannot scope a key listing to its own rows, round-trip its own
+keys, or whose adapter cannot enumerate under a prefix.
 
 `CapabilityCoverageDivergence` is the auth-plane convergence sweep's alert
 (capability-projection-reconciliation-design.md §3.2), and it is the only capability issue

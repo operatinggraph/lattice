@@ -109,11 +109,10 @@ ratified). Everything here needs design and is fair game **except** 🚧 Andrew-
 **forks** (Gateway, read-path auth, Vault, multi-cell, HA-NATS) and **frozen-contract** changes are
 designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 
-> 🎯 **Build-ready now.** Top picks needing no new design: the **actor-aggregate backfill** row
-> (★★ M — its prefilter blocker cleared `7e6030aa`), the
+> 🎯 **Build-ready now.** Top picks needing no new design: the
 > **unbounded declared-read count** (★★ S–M, carries a Contract #2 §2.4 edit), the
-> **rebuild-progress signal** (★★ S–M), then the two ★ Processor
-> sensitive-predicate rows. The **cap-read size bound** and the **appsession** production-IdP row
+> **rebuild-progress signal** (★★ S–M), the **diverged `actor_read_grants` repair path**
+> (★★ S–M), then the two ★ Processor sensitive-predicate rows. The **cap-read size bound** and the **appsession** production-IdP row
 > are both designed and 📐 awaiting-Andrew.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
@@ -128,7 +127,8 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 | **[Processor] Declared-read count is unbounded at the envelope** | `ParseEnvelope` caps neither `reads`/`optionalReads`/`egressReads` length nor total. A declared read no longer short-circuits hydration, so an envelope naming N absent keys costs N sequential Core-KV GETs and then commits. Needs an envelope-level bound (Contract #2 §2.4 validation). | ★★ | S–M | 📋 ready · consumer: any actor holding any op grant |
 | **[packages] ~20 read-posture comments assert hydration-time fatality** | `packages/*` DDL comments + two READMEs still say a declared-but-absent read faults "before the script runs" (identity-domain, service-domain, privacy-base, objects-base, orchestration-base, clinic/loftspace READMEs), as does `docs/contracts/10-orchestration-substrate.md:238`. Doc-only sweep. | ★ | S | 📋 ready |
 | **Starlark 250ms wall budget fails installs under parallel test load** | `go test ./...` at default `-p` reds a different package-install test each run with `ScriptTimeout: script exceeded wall budget 250ms` — reproduced on unmodified `main`, so it predates any one fire. Costs every fire an investigation to rule out its own change. | ★★ | S–M | 📋 ready |
-| **Actor-aggregate lens rows do not backfill on a lens change** | Adding a walk to an actorAggregate lens reprojects nothing already stored — rows refresh only when a CDC event next touches that actor. Only auth-plane lenses get the convergence sweep; every other actorAggregate has no healer. | ★★ | M | 📋 ready · blockers cleared · [scope](../../implementation-artifacts/lens-projection-liveness-design.md) §12.1 · severity finding moot; add a key-shape install gate |
+| **[Refractor] The sweep's ANCHOR listing is unscoped, and enrolment multiplied it** | `ListKeysPrefix("vtx.<type>.")` returns every aspect key as well as every root, once per lens per tick, with five lenses sharing `anchorType: identity` and no sharing between them. A `vtx.<type>.*` single-token filter drops the aspect keys at the substrate. Cost, not correctness. | ★★ | S–M | 📋 ready · consumer: any cell with many vertices of a swept anchor type · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §15.1 |
+| **[Refractor] A business lens's detect-and-heal has no e2e** | The auth-plane sweep has one and the plane-independent path is covered at the pipeline level, but nothing proves the whole chain — enrolled, scoped, healed, siblings untouched — for a business lens against a real substrate. | ★★ | S | 📋 ready · consumer: the next fire changing sweep selection or enrolment · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §15.1 |
 | **[Refractor] A diverged `actor_read_grants` has no repair path** | A grant lens cannot truncate on rebuild (shared table, correctly no `Truncater`) and the adj-watch bulk re-insert is gone, so rows lost to an out-of-band restore/wipe are re-derived by nothing. A `DiffRetraction` producer heals on its next CDC event; the five non-diff producers wait for one touching their labels. Fail-closed. | ★★ | S–M | 📋 ready · consumer: an operator repairing `actor_read_grants` after a restore · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §13.4 |
 | **[Refractor] A refused hot-reload leaves a package upgrade unapplied** | A lens ID is version-independent, so a package upgrade updates the spec in place — and re-authoring an actorAggregate lens's `Output` is refused whole (correctly; the alternative half-applied it). Nothing re-activates the lens, so `lattice-pkg apply` reports success while Refractor serves the old spec until restart. | ★★ | M | 📋 ready · consumer: a package author upgrading an actorAggregate lens's `Output` · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §14.5 |
 | **[Refractor] The sweep's coverage walk reads once per row-less anchor examined** | `anchorLive` is a Core-KV read per *examined* row-less anchor, but only a *selected* one counts against the budget — so a large tombstone population is walked and read every tick while selecting nothing, against a design cost model of "one bounded batch of cypher evaluations a minute". | ★ | S | 📋 ready · consumer: any cell with many tombstoned anchors · [why](../../implementation-artifacts/lens-projection-liveness-design.md) §11.1 |
@@ -198,6 +198,8 @@ Real but low-value; do **not** spend design or build effort here unless Andrew g
 ## Done log — lattice (newest first)
 
 One line per shipped item (`date · SHA · [tag] title`). Oldest roll to `archive/` past ~25.
+
+- 2026-07-25 · `34b13ffd` · [refractor] every actor-aggregate lens gets the healer, gated on what it can prove it owns — ownership-scoped listing + three-part install gate; business verdicts warning-only
 
 - 2026-07-25 · `298ef8ed` · [refractor] the hot-reload path decides in the open, and says so — refusal set extracted + testable, Output/grantTable/protected pinned (guard sources closed), refusals recorded on health
 

@@ -1123,3 +1123,70 @@ only that the adapter is *a* `KeyLister`. Filed as a row.
 **Non-goals (this fire).** No rebuild-on-MatchChange. No change to auth-plane thresholds, issue names,
 or escalation. No contract change. Not the phantom-heal residual, not the `anchorLive` walk cost, not
 the shared-bucket rebuild truncate — each is its own filed row.
+
+### 15.1 Build outcome — SHIPPED, with the gate rebuilt at review and two vacuous tests exposed
+
+All three increments shipped as one commit. Two adversarial passes ran — a security-refutation
+pass against the auth-plane equivalence claim, and an edge-case/acceptance pass against the ratified
+scope. **Neither could break the two load-bearing claims**, and both found the same real defect
+around them.
+
+**What could not be broken.** Prefix-scoping the target listing leaves auth-plane selection
+byte-for-byte unchanged: `KVListKeysPrefix` becomes `ListKeysFiltered(prefix + ">")`, which in the
+pinned nats.go carries the *same* `IgnoreDeletes()+MetaOnly()` options as the unscoped `ListKeys`, so
+tombstone semantics are identical; and the only keys `prefix + ">"` drops that a full listing
+returned are keys not starting with the prefix and the bare prefix itself — both already rejected by
+`AnchorFromKey`'s `CutPrefix`. The de-dup a filtered listing may produce is absorbed by the
+`map[string]struct{}` accumulator, and `reapDepartedFailures` re-applies the same ownership test, so
+the narrower set is a no-op there too. On wrong-row retraction: all 14 `weaver-targets` prefixes are
+distinct and none is a prefix of another; every one sets `KeyColumn`, so a claim implies
+`BuildKey(AnchorFromKey(k)) == k` — a lens can only claim keys it would itself write. The three
+lens pairs sharing an anchor type (`appointment` ×3, `object` ×2, `leaseapp` ×2) are separated by
+prefix.
+
+**The gate as first written was half of what §15 decision 1 specified, and the missing half was
+the dangerous one.** It checked the key shape and not the adapter. An actor-aggregate lens whose
+`emptyBehavior` is `skip` requires no guard, so nothing forces it onto NATS-KV, and a Postgres /
+Protected / GrantWriter target would have enrolled and then failed `survey` on **every** tick —
+`errSweepNoKeyLister` is a pass-level fault, so the repair streak climbs and never clears. On the
+business path that is a permanent `degraded`; on the auth plane, where the same codes escalate, the
+security reviewer traced it to instance-wide `unhealthy`. Unreachable across today's 19 lenses (all
+`emptyBehavior: delete`) — which is exactly the incidental protection a structural gate was supposed
+to replace. The shipped gate is three-part, and a lens failing any part gets no sweep at all rather
+than one that faults forever.
+
+**A derivable prefix does not imply a working inverse.** The pattern grammar permits a repeated
+`{actorSuffix}`; `BuildKey` substitutes every occurrence while the inverse brackets the first. Such a
+lens enrols with a **silently dead orphan direction** — the only detector for a row whose anchor is
+gone — and claiming nothing is indistinguishable from having nothing to claim. The gate now probes
+the round trip. A NATS wildcard in the prefix is refused for the same class of reason: `*.{actorSuffix}`
+would scope to every 2-token key in a shared target, reaching the full-bucket scan through the
+mechanism meant to prevent it.
+
+**Two of the new tests passed vacuously, proven by mutation.** `ALensWithNoSweeperIsNeverStalled` and
+`APausedLensIsExemptFromTheStallClock` each ran a single beat, and a single beat stamps the staleness
+baseline at the instant it measures from — so `elapsed` is 0 whatever the guard does. Deleting the
+guarded arm left both green. Rewritten to the two-beat sequence the cap path's suite already uses;
+the same mutations now fail. The reviewer also confirmed `TheStallClockIsNotSharedWithTheCapPath` is
+real (pointing it at `sweepBase` makes it fail with its own message) and that the scoping tests are
+not tautological, since reverting `survey` to `ListKeys` fails the recorded-prefix assertion. A
+real-substrate `ListKeysPrefix` test was added because the pipeline fake's `HasPrefix` is subtly more
+permissive than the subject filter it stands in for.
+
+**Also changed in response to review.** The 14 sweepers all started inside one activation loop and so
+ticked in lockstep — a burst of enumerations and up to 350 reprojections every five minutes, then
+idle. Each lens's first tick is now offset by a hash of its rule ID (derived, not drawn, so a lens
+keeps its slot across restarts). And the install gate's refusal was a log line and nothing else, so a
+lens running without its only stale-row detector read exactly like one whose sweep keeps finding
+nothing; `metrics.lensLiveness.<lens>.sweepEnrolled` now carries that decision, alongside the sweep
+fields the cap path already published.
+
+**Filed residuals (rows in the Lattice lane, not deferred silently).** The **anchor** listing is
+still unscoped and is now the dominant cost: `ListKeysPrefix("vtx.<type>.")` returns every aspect key
+as well as every root, five lenses share `anchorType: identity`, and nothing dedupes across lenses —
+a `vtx.<type>.*` single-token filter would drop the aspect keys at the substrate. Steady state is
+also 25 reprojections per tick per lens rather than the reserved quota, since the deep verify fills
+the batch. Both are cost, not correctness, and neither is a regression. The business-lens
+detect-and-heal e2e — the auth-plane one exists and the plane-independent path is covered at the
+pipeline level, but nothing proves the whole chain on a business lens against a real substrate — is
+filed with it.
