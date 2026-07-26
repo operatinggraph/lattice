@@ -179,3 +179,43 @@ Eight load-bearing claims were verified against code before this doc was flagged
 - **Grant-slice union semantics** — §6.14 says union; F2 verifies `capabilityread.IsReadable` honors a second slice with a live vector before relying on it.
 - **Anchor-derivation gaps** (units not `containedIn` a building in older seeds) — rows without a building token are staff-invisible, not wrongly visible; seeds get the links.
 - **Demo exposure** — a hosted staff persona is still gated by the existing demo checklist (Loupe F20 precedent); nothing here changes exposure posture.
+
+## 9. Read-side workplace confinement (F6) — build note (Winston, 2026-07-26)
+
+§3.5 closed the cross-identity read spine for the **Protected/GrantTable** surfaces and F4 closed the
+**write** side for café + wellness (`require_workplace` / `worksAt_covers`, `cafe-domain/ddls.go:441-509`,
+`wellness-domain/ddls.go:973-1041`). What neither reached is the third surface: café's and wellness's own
+read models are **plain open NATS-KV lenses**, so their read boundary lives in the app handler, and that
+handler keeps only the *presence* of a `worksAt` anchor and discards its key
+(`cmd/cafe-app/readauth.go:77`, `cmd/wellness-app/readauth.go:119`). A staffer wired to one building
+therefore reads every building's rows — café's tabs/ledger/front-desk grid and every wellness studio's
+roster. No lens projects the join that would narrow it.
+
+**Scope sentence (verbatim from the lane row).** "A `worksAt` anchor to any location anywhere grants the
+whole house — café's tabs/ledger/front-desk grid, and every wellness studio's roster. Both packages' staff
+*writes* are workplace-confined and Facet's staff *reads* grant-confined; these read paths carry no
+workplace term."
+
+**Shape.** Mirror `worksAt_covers` on the read side by projecting, per row, the **set of locations that
+cover it** — the row's own location plus every `containedIn` ancestor — and intersecting that set with the
+staffer's `worksAt` keys in the handler. This is the read-model analog of the Starlark walk, not a second
+semantic: `worksAt_covers` tests the location then walks up; the projected set is exactly that chain
+materialized. Precedent for the construct in a lens **Spec** (not just an `AnchorWalk` chain):
+`lease-signing/lenses.go:948` projects `[(u)-[:containedIn*1..]->(b:building) | nanoIdFromKey(b.key)]`, and
+`service-location/lenses.go:135` matches `*0..` in a spec. `*0..` gives the depth-0 (own-location) entry the
+`*1..` form would miss, which is what makes a staffer wired to an exact room match.
+
+An empty covering set **denies** (a row whose topology is unwired is invisible to staff, visible to its own
+subject as today) — the same fail-closed answer `require_workplace` gives an empty `location_keys` list.
+
+**Increment order** (each independently green):
+1. **Wellness roster** — `wellnessSessionsSpec` gains `coveringLocations`; `subjectHats` keeps the
+   workplace keys; `mayReadRoster`'s unconditional `if hats.isStaff { return true }`
+   (`cmd/wellness-app/bookings.go:152-155`) becomes an intersection. The instructor branch is untouched —
+   it is already row-scoped by `instructorKey`.
+2. **Café** — tabs, ledger, and the three front-desk handlers, whose location indirection is the lease's
+   unit (`leaseapp_unit`, `cafe-domain/ddls.go:511`); spans `cafe-domain` + `cafe-ledger` lenses.
+
+**Non-goals.** Wellness's `handleSessions` schedule grid stays open — it is the member browse catalog (a
+member must see a session to book it), not a staff surface; confining it would break booking. Nothing here
+touches the write guards, the Protected/RLS spine, or `operator`.
