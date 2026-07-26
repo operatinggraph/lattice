@@ -117,6 +117,10 @@ designed-through, but the *fork decision* + the *contract commit* are Andrew's.
 > are both designed and 📐 awaiting-Andrew.
 > Every `✅ ratified` row is done or driver-blocked; the rest are Whetstone's or parking-lot.
 > A stale callout starves the lane — whoever ships next renames this.
+>
+> 📎 **The nine `[Refractor]` rows are pre-compiled** into six fires with verified touch-lists, precedents and
+> green checks — [refractor-open-rows-fire-briefs.md](../../implementation-artifacts/refractor-open-rows-fire-briefs.md).
+> Suggested order B → A → C → F → E; **D's premise is falsify-first**.
 
 ### Security & trust boundary
 | Item | What it is | Imp | Size | State |
