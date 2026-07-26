@@ -1,7 +1,16 @@
 # appsession — production sign-in: the OIDC code-flow relying party in the kit
 
-**Status: 📐 awaiting-Andrew (ratification)** · Designer fire 2026-07-25 · board row: *[appsession] The
-production IdP posture cannot open a session* (`backlog/lattice.md`, Security & trust boundary)
+**Status: ✅ Andrew-ratified 2026-07-25 — BUILD SHELVED (revive: first real-IdP deployment).**
+Designer fire 2026-07-25 · board row: *[appsession] The production IdP posture cannot open a session*
+(`backlog/lattice.md`, Security & trust boundary).
+**Ratification decisions:** (1) design ratified as written — RP lives in the kit (§4.1), one OIDC client
+registration + the uniform four-site external-key-source⇒audience-required boot refusal (§4.2) both
+confirmed. (2) **The build is shelved, not scheduled**: zero deployments configure any of the postures
+this design fixes (dev/demo runs dev auth; no external key source is set anywhere), so there is no live
+exposure and no nameable value consumer — the Steward must not select this over showcase work. Revive
+trigger: the first deployment that wants a real IdP; fires ship 1→2→3 as decomposed in §9. (3) The
+Contract #11 §11.6 audience-invariant bullet is **deferred to revive** and ships with Fire 2 — the
+contract's invariant list describes enforced behavior, and the edit would otherwise run ahead of the code.
 
 ## For Andrew
 
@@ -28,13 +37,14 @@ cookie, and holds the IdP refresh token in an HttpOnly `__Host-` cookie so the e
    invariant). Without that pin, *any* ID token from the trusted issuer — including one minted for an
    unrelated relying party on a shared IdP like Google — is a valid Lattice write bearer. The refusal is
    fail-closed hardening to shipped code; it cannot affect dev/demo (dev-key posture) but it is a posture
-   change on a security boundary, so it is called out rather than slipped in. §4.2 also carries **one
-   open ratify-time choice**: whether the rule additionally lands as a Contract #11 §11.6 invariant
-   bullet, or stays enforcement-only.
+   change on a security boundary, so it is called out rather than slipped in. **Resolved at ratification
+   (2026-07-25):** the rule also lands as a Contract #11 §11.6 invariant bullet — staged with Fire 2 at
+   revive, so contract and enforcement land together.
 
-**No frozen-contract change** — with one offered exception: §4.2's audience rule can optionally also land
-as a Contract #11 §11.6 invariant bullet (Andrew's ratify-time choice; nothing else touches a contract).
-Builds *to* Contract #11 (§11.2 profile, §11.3 opaque binding, §11.4 resolution). The backlog row's "needs a per-path origin-gate exemption (`form_post`)" premise **dissolves**:
+**No frozen-contract change now** — §4.2's audience rule also lands as a Contract #11 §11.6 invariant
+bullet, **staged with Fire 2 at revive** (ratified 2026-07-25) so contract and enforcement land together;
+nothing else touches a contract. Builds *to* Contract #11 (§11.2 profile, §11.3 opaque binding, §11.4
+resolution). The backlog row's "needs a per-path origin-gate exemption (`form_post`)" premise **dissolves**:
 the code flow's callback is a cross-site top-level GET navigation (OIDC Core returns code responses via the
 **query string**), which `metadataAdmits` already admits — verified in code. The scripted-fetch refusal is
 test-pinned today for `same-site` (`origin_test.go:167`); the `cross-site` scripted GET shares the same
