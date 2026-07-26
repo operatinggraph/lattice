@@ -644,13 +644,61 @@ async function renderRoster() {
 
   summary.textContent = bookings.length + " booked";
   body.innerHTML = bookings.length
-    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, isLeader && started)).join("") + "</div>"
+    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, isLeader && started, isStaff())).join("") + "</div>"
     : '<div class="empty">No one has booked this session yet.</div>';
   if (isLeader && !started && bookings.length) {
     summary.textContent += " — attendance opens when the class starts";
   }
   if (isLeader && started) bindAttendance(sessionKey, mine);
+  if (isStaff() && bookings.length) bindSeatCancels(sessionKey);
   renderCancelClass(sessionKey);
+}
+
+// bindSeatCancels wires the front desk's release-a-seat control. CancelBooking
+// grants frontOfHouse at scope=any and the script confines it to a session
+// whose studio sits at a location the caller worksAt — so an instructor, who
+// holds no such grant, never sees the control even on their own roster.
+function bindSeatCancels(sessionKey) {
+  const buttons = document.querySelectorAll("#roster-body [data-cancel-seat]");
+  buttons.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      buttons.forEach((b) => { b.disabled = true; });
+      try {
+        await cancelSeat(btn.dataset.cancelSeat, sessionKey);
+        toast("Seat released.", true);
+        setTimeout(renderRoster, 700);
+      } catch (e) {
+        toast(e.message, false);
+        buttons.forEach((b) => { b.disabled = false; });
+      }
+    });
+  });
+}
+
+// cancelSeat submits CancelBooking for a member's seat as the front desk. It
+// carries NO authContext.target — that field is the CONSUMER path's binding
+// (the booking's own bookedBy identity), and a staffer releasing someone
+// else's seat is never that identity; the workplace walk binds them instead.
+async function cancelSeat(bookingKey, sessionKey) {
+  await opOrThrow(
+    {
+      operationType: "CancelBooking",
+      class: "booking",
+      // The booking's own .status is an (a)-declared REQUIRED read: the script
+      // rebuilds the seat cell it releases from the seat index it carries.
+      reads: [bookingKey, bookingKey + ".status"],
+      // The session-match probe. An absent link is a meaningful WrongSession
+      // rejection, not a correctness error — and it must answer BEFORE the
+      // workplace guard, since the session this names is what carries the
+      // confinement (packages/wellness-domain/ddls.go).
+      optionalReads: [
+        "lnk.booking." + idOf(bookingKey) + ".forSession.session." + idOf(sessionKey),
+      ],
+      payload: { bookingKey, session: sessionKey },
+    },
+    "release the seat",
+    false,
+  );
 }
 
 // bindAttendance wires each card's Attended / No-show control. The whole set
@@ -794,7 +842,7 @@ const ATTENDANCE_MARKS = {
   noShow: { badge: "settled", label: "no-show" },
 };
 
-function rosterCard(b, markable) {
+function rosterCard(b, markable, cancellable) {
   const mark = ATTENDANCE_MARKS[b.status];
   return (
     '<div class="card">' +
@@ -802,8 +850,18 @@ function rosterCard(b, markable) {
     (mark ? '<span class="badge ' + mark.badge + '">' + mark.label + "</span>" : "") +
     '<div class="who">' + esc(shortKey(b.bookerKey)) + "</div>" +
     (markable ? attendanceActions(b) : "") +
+    (cancellable ? seatCancelAction(b) : "") +
     "</div>"
   );
+}
+
+// seatCancelAction is the front desk's per-seat release. It is its own row
+// rather than a third button beside Attended / No-show: those two correct each
+// other and this one removes the booking they are about, so pairing them would
+// put a destructive control one mis-click from a corrective one.
+function seatCancelAction(b) {
+  return '<div class="card-actions"><button class="danger" data-cancel-seat="' +
+    esc(b.bookingKey) + '">Release seat</button></div>';
 }
 
 // attendanceActions renders the two marks as a pair, with the one already
@@ -818,14 +876,19 @@ function attendanceActions(b) {
 
 // ---- Studios (staff) view ------------------------------------------
 //
-// The staff surface for scheduling a class into an existing studio.
-// CreateSession grants `frontOfHouse` and confines it in-script to studios at
-// a location the caller `worksAt` (packages/wellness-domain/ddls.go), which
-// is the one wellness write §7.3 gives the staff hat.
+// The staff surface for opening a studio and scheduling classes into it.
+// CreateStudio and CreateSession both grant `frontOfHouse` and both confine it
+// in-script to a location the caller `worksAt` (packages/wellness-domain/
+// ddls.go) — for the new studio, the location it is about to sit at; for a
+// class, the location its studio already sits at.
 //
-// Creating a STUDIO is not offered: CreateStudio grants `operator` alone, so
-// no staff hat may submit it — an operator stands studios up through Loupe or
-// the CLI.
+// The new-studio form asks only for a NAME. The location is not the staffer's
+// to choose: the script guards on the location the studio will be linked to,
+// and the only one a staffer can name and pass is the building they work at,
+// so the form fills it from the `worksAt` anchor and says where it is going
+// rather than offering a picker whose every other option would fail closed.
+// (The same call the CreateStudio op-meta makes for descriptor-driven clients,
+// where the field is the `{me.workplace}` self-anchor.)
 
 // toUtcInstant canonicalizes a datetime-local field ("YYYY-MM-DDTHH:MM",
 // grid-stepped) to the whole-second UTC RFC3339 instant CreateSession's grid
@@ -857,7 +920,63 @@ function slotCellKeys(studioKey, startsAt, endsAt) {
 }
 
 async function loadStudiosAdmin() {
+  renderNewStudioForm();
   await renderStudiosAdmin();
+}
+
+// renderNewStudioForm shows where the new studio will be opened, or hides the
+// affordance entirely when this session has no workplace to open one at — the
+// client-side mirror of the script's own denial, where an empty candidate list
+// confines everyone but an operator.
+function renderNewStudioForm() {
+  const toggle = document.getElementById("studio-new-toggle");
+  const form = document.getElementById("studio-new-form");
+  const where = document.getElementById("studio-new-where");
+  const workplace = anchorKey("worksAt");
+  toggle.hidden = !workplace;
+  if (!workplace) {
+    form.hidden = true;
+    return;
+  }
+  where.textContent = "Opens at " + shortKey(workplace) + " — where you work.";
+}
+
+async function createStudio() {
+  const nameEl = document.getElementById("studio-new-name");
+  const submit = document.getElementById("studio-new-create");
+  const name = nameEl.value.trim();
+  const workplace = anchorKey("worksAt");
+  if (!name) { toast("Enter a studio name.", false); return; }
+  if (!workplace) { toast("You have no workplace to open a studio at.", false); return; }
+  submit.disabled = true;
+  try {
+    // A staff submit carries NO authContext.target: CreateStudio's
+    // frontOfHouse grant is scope=any, confined in-script by the caller's own
+    // worksAt walk rather than by a caller-supplied target.
+    //
+    // The location is an (a)-declared REQUIRED read — the script validates it
+    // alive + typed (require_live_typed) before linking the studio to it.
+    await opOrThrow(
+      {
+        operationType: "CreateStudio",
+        class: "studio",
+        reads: [workplace],
+        payload: { name, location: workplace },
+      },
+      "open the studio",
+      false,
+    );
+    toast("Studio opened.", true);
+    nameEl.value = "";
+    document.getElementById("studio-new-form").hidden = true;
+    studiosCache = null;
+    document.getElementById("schedule-studio").dataset.loaded = "";
+    setTimeout(renderStudiosAdmin, 700);
+  } catch (e) {
+    toast(e.message, false);
+  } finally {
+    submit.disabled = false;
+  }
 }
 
 async function renderStudiosAdmin() {
@@ -1008,6 +1127,11 @@ function init() {
     studiosCache = null; instructorsCache = null;
     renderStudiosAdmin();
   });
+  document.getElementById("studio-new-toggle").addEventListener("click", () => {
+    const form = document.getElementById("studio-new-form");
+    form.hidden = !form.hidden;
+  });
+  document.getElementById("studio-new-create").addEventListener("click", createStudio);
   document.getElementById("sign-out").addEventListener("click", signOut);
 
   // Who signed in decides every derived affordance (which hats, which tabs),

@@ -54,8 +54,17 @@
   <section id="view-studios" role="tabpanel" hidden>
     <div class="panel-controls">
       <label>Studios</label>
+      <button id="studio-new-toggle" class="ghost">New studio</button>
       <button id="studios-refresh" class="ghost">Refresh</button>
       <span class="summary" id="studios-summary"></span>
+    </div>
+    <div id="studio-new-form" class="session-form" hidden>
+      <div class="field">
+        <label for="studio-new-name">Studio name</label>
+        <input type="text" id="studio-new-name" placeholder="e.g. Flow Room" maxlength="120" />
+      </div>
+      <div class="meta" id="studio-new-where"></div>
+      <button id="studio-new-create">Open studio</button>
     </div>
     <div id="studios-grid" class="grid" aria-live="polite"></div>
   </section>
