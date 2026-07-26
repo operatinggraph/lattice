@@ -2131,3 +2131,70 @@ than only in a test.
 **Named residual.** The directory is lease-anchored, so a genuine non-resident guest cannot be booked through
 the FE even though `CreateBooking` itself constrains only the session's location and never the booker. That is
 a product question (do wellness classes admit non-residents?), filed as its own row rather than decided here.
+
+### Café confined ledger credit — fire brief (build note, 2026-07-26)
+
+**1 · Scope sentence (verbatim, `backlog/verticals.md` row):** *"`CreditAccount` is `operator`-only in every
+ledger, so W4's mint deletion leaves Record Payment with no authorized hat and it is removed. A plain
+`frontOfHouse` grant would be unconfined credit-any-account authority in a package with no workplace binder;
+needs a confined ledger credit. Consumer: the café front-desk payment flow."*
+
+**2 · Verified touch-list** (`file:line`, checked live at `6f5610d8`):
+
+- `packages/cafe-ledger/permissions.go:24-29` — `CreditAccount` scope=any grants `[operator]` only.
+- `packages/cafe-ledger/manifest.yaml:36` — the same grant; `package_test.go` pins manifest↔Go sync (S6).
+- `packages/cafe-ledger/scripts.go:113-253` — `transactionDDLScript`. Today it references **no** `op.actor`
+  and **no** `kv.` at all: it is a pure known-key, state-only script.
+- `packages/cafe-ledger/scripts.go:249` — the `if ot == "CreditAccount"` branch of `execute`.
+- `packages/cafe-ledger/scripts.go:92-103` — the `heldFor` link (`cafeaccount` → `leaseapp`), written at
+  `CreateAccount`; this is the first hop of the confinement chain.
+- `packages/cafe-ledger/package.go:62` — version `0.2.0` (a package edit needs a bump to diff-apply).
+- `cmd/cafe-app/ledger.go:151-156` — `/api/ledger` already returns `accountKey` + `balanceCents`; the FE
+  needs no new read and no new lens.
+- `cmd/cafe-app/readauth.go:114-140` — `subjectHats.workplaces`; staff ledger reads are already
+  workplace-confined (`facet-staff-worlds-design.md` §9), so the write guard mirrors the read boundary.
+- `cmd/cafe-app/web/index.html` — three panes (`pos` / `frontdesk` / `resident`); no payment control exists.
+
+**3 · Precedents to mirror** (all `packages/cafe-domain/ddls.go`):
+
+- `:414-416` the three `WORKPLACE_*` constants · `:418-439` `actor_holds_operator` · `:441-468`
+  `worksAt_covers` · `:470-478` `workplace_exempt` · `:480-509` `require_workplace` · `:511-522`
+  `leaseapp_unit`.
+- **Call-site ordering** — `:683-691` (`Charge`): gate on `workplace_exempt()` *first*, then
+  `require_workplace([resolver(...)], what)`. Starlark evaluates arguments eagerly, so the gate is what stops
+  an operator paying to walk the target's topology.
+- **Read posture** (Contract #2 §2.5) — every `kv.Links` enumeration and its data-derived follow-up read
+  carries a `# read-posture: (e)` annotation with the relation and why it is bounded.
+
+**4 · The confinement chain.** `CreditAccount` names an account, not a location, so the guard resolves one:
+
+```
+payload.accountKey  -heldFor->  leaseapp  -appliesToUnit->  unit  -containedIn*->  building
+```
+
+`worksAt_covers` then walks that unit's containment chain, testing the actor's deterministic `worksAt` link at
+each level. The account→lease hop is the one resolver `cafe-domain` does not already have; the rest is its
+idiom verbatim. Every hop reads a link the *platform* wrote (`heldFor` at `CreateAccount`, `appliesToUnit` at
+`CreateLeaseApplication`), never a payload field, so the workplace a credit resolves to cannot be forged.
+
+**5 · Increment order + runnable green checks.**
+
+1. **Inc 1 (package)** — widen the `CreditAccount` grant to `frontOfHouse`, add the guard on that branch only,
+   bump to `0.3.0`, sync `manifest.yaml`. Green: `go test ./packages/cafe-ledger/...`, then the full gates.
+2. **Inc 2 (FE)** — a staff-only Record Payment control on the resident-lookup pane, which already renders the
+   lease's balance and carries its `accountKey`. Green: `node --check`, then in-browser against the stack.
+
+**6 · Non-goals.**
+
+- **`loftspace-ledger` stays `operator`-only.** The row's *"in every ledger"* states the general fact; the
+  named consumer is the café front desk. Widening loftspace's credit has no filed consumer and would be the
+  adjacent-mechanism substitution the scope-diff gate exists to catch.
+- **`DebitAccount` stays `operator`-only** and stays unguarded. It is playbook-dispatched (the
+  `cafeTabSettlement` Weaver target) and gains no non-operator path here, so it needs no binder.
+- No new lens, no new endpoint, no `contextHint` change (the chain is entirely class-(e) live reads), no
+  contract change, no café supplier hat (§7.4, named-deferred).
+
+**Scope-diff gate.** Brief vs the row, item-by-item: narrow-only — the row asks for *a confined ledger credit*
+plus its front-desk consumer, and that is exactly Inc 1 + Inc 2. No adjacent mechanism substituted; the
+declared dependency (a café workplace binder to mirror) re-verified both ways — `cafe-domain` has the idiom at
+the six line ranges above, and `cafe-ledger` genuinely has none, which is what made the row's premise true.
