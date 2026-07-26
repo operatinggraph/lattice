@@ -45,6 +45,13 @@ type ApplyResult struct {
 	TombstonedKeys []string
 
 	DependencyWarnings []string
+
+	// ReactivationRequired names lens spec edits this apply committed that a
+	// running Refractor cannot hot-reload. The apply succeeded and the stored
+	// spec is now the new one; these lenses go on serving their ACTIVATED spec
+	// until re-activated, which is the difference between an upgrade that
+	// applied and one that merely landed.
+	ReactivationRequired []string
 }
 
 // Apply is the upgrade-aware entry point for `lattice-pkg install` / `upgrade`
@@ -109,6 +116,8 @@ func (i *Installer) Apply(ctx context.Context, def Definition, opts ApplyOptions
 		Created:     sum.created,
 		Updated:     sum.updated,
 		Tombstoned:  sum.tombstoned,
+
+		ReactivationRequired: sum.reactivation,
 	}
 	if len(mutations) == 0 {
 		res.Action = "skip"

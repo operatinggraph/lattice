@@ -213,6 +213,13 @@ func logApplyResult(cmd string, res *pkgmgr.ApplyResult, logger *slog.Logger) {
 	for _, w := range res.DependencyWarnings {
 		logger.Warn(w)
 	}
+	// Loud, and after the result rather than before it: the upgrade DID land, so
+	// this is not a failure — it is the half of "committed" that a success line
+	// alone would hide, namely that the running Refractor is still serving the
+	// old spec for these lenses.
+	for _, w := range res.ReactivationRequired {
+		logger.Warn("lens change requires re-activation to take effect", "detail", w)
+	}
 	if res.DryRun {
 		logger.Info("dry-run — no changes submitted",
 			"package", res.PackageName,

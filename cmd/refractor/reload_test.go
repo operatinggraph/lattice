@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/refractor/lens"
 	"github.com/operatinggraph/lattice/internal/refractor/pipeline"
 	"github.com/operatinggraph/lattice/internal/refractor/projection"
+	"github.com/operatinggraph/lattice/internal/refractor/reloadpin"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
 	"github.com/operatinggraph/lattice/internal/substrate"
@@ -733,4 +735,40 @@ func TestHotReloadRefusal_NamesAReachableRemedy(t *testing.T) {
 	newLens := authPlaneRule(t)
 	newLens.Output.EmptyBehavior = "softDelete"
 	assert.Contains(t, hotReloadRefusal(runningEntry(), newLens), "restart Refractor")
+}
+
+// ---------------------------------------------------------------------------
+// reloadpin drift guard
+// ---------------------------------------------------------------------------
+
+// TestPinnedFieldsMatchTheRefusalSet is what keeps pkgmgr's apply-time warning
+// honest. pkgmgr cannot import internal/refractor/lens, so reloadpin restates
+// the spec-derived half of hotReloadRefusal over the stored document — and a
+// restatement that drifts stops warning about an edit that is still refused,
+// which is the exact silence the warning exists to break.
+//
+// This asserts the direction that matters: everything reloadpin predicts, this
+// package really does refuse. The reverse is deliberately not asserted — the
+// write-surface pins are runtime-conditional and reloadpin correctly declines to
+// predict them.
+func TestPinnedFieldsMatchTheRefusalSet(t *testing.T) {
+	edits := map[string]func(*lens.Rule){
+		"output":                  func(r *lens.Rule) { r.Output.BodyColumns = append(r.Output.BodyColumns, "extra") },
+		"targetConfig.grantTable": func(r *lens.Rule) { r.Into.GrantTable = !r.Into.GrantTable },
+		"targetConfig.protected":  func(r *lens.Rule) { r.Into.Protected = !r.Into.Protected },
+		"targetConfig.secureColumns": func(r *lens.Rule) {
+			r.Into.SecureColumns = []lens.SecureColumn{{Column: "ssn", IdentityKeyColumn: "identityKey"}}
+		},
+	}
+	for _, f := range reloadpin.PinnedFields {
+		name := strings.Join(f.Path, ".")
+		edit, known := edits[name]
+		if !known {
+			t.Fatalf("reloadpin pins %q with no matching refusal check here — either this package must refuse it too, or it does not belong in PinnedFields", name)
+		}
+		newLens := authPlaneRule(t)
+		edit(newLens)
+		assert.NotEmpty(t, hotReloadRefusal(runningEntry(), newLens),
+			"reloadpin warns that %q is not hot-reloadable, so this package must actually refuse it", name)
+	}
 }

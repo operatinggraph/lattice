@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/refractor/reloadpin"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -34,6 +36,11 @@ type UpgradeResult struct {
 	Tombstoned  int
 	Skipped     bool
 	Reason      string
+	// ReactivationRequired names lens spec edits this upgrade committed that a
+	// running Refractor cannot hot-reload. The upgrade succeeded; these lenses
+	// keep serving their activated spec until re-activated, and saying so is the
+	// difference between an upgrade that applied and one that only landed.
+	ReactivationRequired []string
 }
 
 // Upgrade applies an in-place version upgrade of an already-installed package
@@ -87,6 +94,8 @@ func (i *Installer) Upgrade(ctx context.Context, def Definition) (*UpgradeResult
 		Created:     sum.created + sum.revived,
 		Updated:     sum.updated,
 		Tombstoned:  sum.tombstoned,
+
+		ReactivationRequired: sum.reactivation,
 	}
 	if len(mutations) == 0 {
 		res.Skipped = true
@@ -184,6 +193,11 @@ type diffSummary struct {
 	revived    int
 	updated    int
 	tombstoned int
+	// reactivation names the lens spec edits this upgrade commits that a running
+	// Refractor cannot adopt without re-activating the lens. The upgrade is
+	// correct and lands; what would otherwise be wrong is reporting it as
+	// success with nothing said, while the lens keeps serving its old spec.
+	reactivation []string
 }
 
 // diffManifest partitions the new create-batch against the old key set into the
@@ -259,6 +273,9 @@ func (i *Installer) diffManifest(ctx context.Context, oldKeys []string, newOps [
 		if logicalDocEqual(op.Document, committed) {
 			continue // body-equality skip — no update needed
 		}
+		if note := reactivationNote(op.Key, committed, op.Document); note != "" {
+			sum.reactivation = append(sum.reactivation, note)
+		}
 		out = append(out, installMutation{Op: "update", Key: op.Key, Document: op.Document, ExpectedRevision: &rev})
 		sum.updated++
 	}
@@ -329,6 +346,59 @@ func (i *Installer) readDeclaredKeys(ctx context.Context, pkgKey string) ([]stri
 // read-time revision (the per-subject OCC token diffManifest conditions its
 // update/tombstone mutations on — F-011/Contract #8 §8.6). A missing key
 // returns (nil, 0, nil) so callers can treat it as "absent" rather than an error.
+// reactivationNote reports, for one updated key, whether the edit is a lens spec
+// change a running Refractor will refuse to hot-reload — in which case the
+// upgrade lands in Core KV and the lens keeps serving its old spec until it is
+// re-activated.
+//
+// The refusal itself belongs to Refractor and stays there; this only predicts
+// it, so that the operator who caused the edit hears about it at the moment they
+// caused it rather than in a log of a process they are not watching. A
+// prediction that is wrong in the quiet direction costs a missing warning; the
+// upgrade is committed either way, because the stored spec is the truth and the
+// running pipeline is what is stale.
+func reactivationNote(key string, oldDoc, newDoc map[string]any) string {
+	if !strings.HasSuffix(key, ".spec") {
+		return ""
+	}
+	oldSpec, ok := specBodyOf(oldDoc)
+	if !ok {
+		return ""
+	}
+	newSpec, ok := specBodyOf(newDoc)
+	if !ok {
+		return ""
+	}
+	reason := reloadpin.RefusedChange(oldSpec, newSpec)
+	if reason == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s — the lens keeps serving its activated spec until it is re-activated (restart Refractor, or delete and re-create the lens definition)", key, reason)
+}
+
+// specBodyOf pulls the lens spec out of a stored aspect document, mirroring how
+// Refractor's own loader unwraps it: a bare spec carries cypherRule at the top
+// level, an envelope-wrapped one carries it under `data`. Anything else is not a
+// lens spec and is left alone — the meta keyspace holds DDLs and descriptors too.
+func specBodyOf(doc map[string]any) ([]byte, bool) {
+	if doc == nil {
+		return nil, false
+	}
+	if _, isLens := doc["cypherRule"]; isLens {
+		raw, err := json.Marshal(doc)
+		return raw, err == nil
+	}
+	data, ok := doc["data"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if _, isLens := data["cypherRule"]; !isLens {
+		return nil, false
+	}
+	raw, err := json.Marshal(data)
+	return raw, err == nil
+}
+
 func (i *Installer) getCommitted(ctx context.Context, key string) (map[string]any, uint64, error) {
 	entry, err := i.Conn.KVGet(ctx, CoreBucket, key)
 	if err != nil {
