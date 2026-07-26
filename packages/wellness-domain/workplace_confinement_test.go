@@ -398,3 +398,293 @@ func wcSelfBooking(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	testutil.PublishOp(t, conn, env)
 	return "vtx.booking." + nanoIDFromRequestID(reqID), testutil.DriveOne(t, ctx, cp, cons, "")
 }
+
+// Multi-parent containment. A location may sit under more than one parent (a
+// shared room belonging to two buildings), and the read-side half of this guard
+// unions every branch — `[:containedIn*0..7]` in wellnessSessionsSpec and
+// wellnessMembersSpec. The write side has to compute the same covering set, so
+// staff at EITHER parent may write at the shared room.
+//
+// The pair is what makes this discriminating, and it is deliberately a pair:
+// kv.Links returns the room's two containedIn targets in an order the test does
+// not control, so asserting one staffer alone could pass against a walk that
+// followed a single parent and happened to keep the right one. A walk that keeps
+// one parent per level can accept AT MOST one of these two callers, whichever
+// branch it retained — so the two together red it under either ordering.
+const (
+	wcStaffBID  = "BBWELLWKPLACESTFFBHJ"
+	wcStaffBKey = "vtx.identity." + wcStaffBID
+
+	wcStaffCID  = "BBWELLWKPLACESTFFCHJ"
+	wcStaffCKey = "vtx.identity." + wcStaffCID
+
+	wcBuildingCID  = "BBWELLWKPLACEBLDGCHJ"
+	wcBuildingCKey = "vtx.building." + wcBuildingCID
+
+	wcSharedRoomID  = "BBWELLWKPLACERMXYZHJ"
+	wcSharedRoomKey = "vtx.location." + wcSharedRoomID
+)
+
+// wcSeedStaffAt wires an additional front-of-house identity at one building,
+// with the same scope=any grants wcSeedStaff gives — so the only thing that can
+// separate two such callers is the workplace walk itself.
+func wcSeedStaffAt(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	staffKey, staffID, buildingKey, buildingID string) {
+	t.Helper()
+	seedVertex(t, ctx, conn, staffKey, "identity", map[string]any{})
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.identity."+staffID+".worksAt.building."+buildingID,
+		"worksAt", staffKey, buildingKey)
+	testutil.SeedHoldsRole(t, ctx, conn, staffKey,
+		"vtx.role."+pkgmgr.RoleID("identity-domain", "frontOfHouse"))
+	doc := wcStaffCapDoc()
+	doc.Key = "cap.identity." + staffID
+	doc.Actor = staffKey
+	doc.ProjectedFromRevisions = map[string]uint64{staffKey: 1}
+	testutil.SeedCapDoc(t, ctx, conn, doc)
+}
+
+func TestWorkplace_SharedRoomCoveredByEveryContainmentParent(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcmultiparent")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A; buildings A + B exist
+
+	seedVertex(t, ctx, conn, wcBuildingCKey, "location", map[string]any{})
+	// The shared room sits under BOTH building A and building B — and under
+	// neither C.
+	seedVertex(t, ctx, conn, wcSharedRoomKey, "location", map[string]any{})
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.location."+wcSharedRoomID+".containedIn.building."+wcBuildingAID,
+		"containedIn", wcSharedRoomKey, wcBuildingAKey)
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.location."+wcSharedRoomID+".containedIn.building."+wcBuildingBID,
+		"containedIn", wcSharedRoomKey, wcBuildingBKey)
+
+	wcSeedStaffAt(t, ctx, conn, wcStaffBKey, wcStaffBID, wcBuildingBKey, wcBuildingBID)
+	wcSeedStaffAt(t, ctx, conn, wcStaffCKey, wcStaffCID, wcBuildingCKey, wcBuildingCID)
+
+	// Staff at parent A.
+	studioA, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
+		"wdwcmultiparenta0001", "Shared Room Studio A", wcSharedRoomKey, wcStaffKey)
+	if got != processor.OutcomeAccepted {
+		t.Errorf("staff at containment parent A CreateStudio in the shared room = %v, want Accepted — "+
+			"the room is containedIn their building, and the read side unions every branch", got)
+	} else if !keyExists(t, ctx, conn, studioA) {
+		t.Errorf("%s was not written by the accepted CreateStudio", studioA)
+	}
+
+	// Staff at parent B. One of these two is the branch a single-parent walk
+	// discards; which one depends on kv.Links ordering, so both must pass.
+	studioB, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
+		"wdwcmultiparentb0001", "Shared Room Studio B", wcSharedRoomKey, wcStaffBKey)
+	if got != processor.OutcomeAccepted {
+		t.Errorf("staff at containment parent B CreateStudio in the shared room = %v, want Accepted — "+
+			"a walk that keeps one parent per level accepts at most one of these two callers", got)
+	} else if !keyExists(t, ctx, conn, studioB) {
+		t.Errorf("%s was not written by the accepted CreateStudio", studioB)
+	}
+
+	// NEGATIVE SIBLING: the widened walk still confines. Building C is not a
+	// parent of the shared room, so its staffer is denied — proving the two
+	// acceptances above are the covering set and not the guard falling open.
+	studioC, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcmultiparentc0001", "Shared Room Studio C", wcSharedRoomKey, wcStaffCKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff at an UNRELATED building CreateStudio in the shared room = %v, want Rejected — "+
+			"following every parent must not become following every location", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("staff C was refused with %q, want the confinement guard's own message — "+
+			"a rejection from any other check would leave multi-parent coverage unproven", why)
+	}
+	if keyExists(t, ctx, conn, studioC) {
+		t.Errorf("the denied CreateStudio wrote %s; it must be denied before any mutation", studioC)
+	}
+}
+
+// wcCreateStudioAsWithReason is wcCreateStudioAs plus the script's own failure
+// text, so a negative can assert WHICH check answered. A bare Rejected would
+// stay green if some future check ahead of the confinement guard denied for an
+// unrelated reason, which would let multi-parent coverage rot silently.
+func wcCreateStudioAsWithReason(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	label, name, locationKey, actorKey string) (string, processor.MessageOutcome, string) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payload, _ := json.Marshal(map[string]any{"name": name, "location": locationKey})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateStudio",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "studio",
+		Payload:       payload,
+		ContextHint:   &processor.ContextHint{Reads: []string{locationKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	failure := ""
+	if reply != nil && reply.Error != nil {
+		if i := strings.Index(reply.Error.Message, "fail: "); i >= 0 {
+			failure = reply.Error.Message[i+len("fail: "):]
+		}
+	}
+	return "vtx.studio." + nanoIDFromRequestID(reqID), outcome, failure
+}
+
+const (
+	wcDeadFloorID  = "BBWELLWKPLACEDEADFLR"
+	wcDeadFloorKey = "vtx.location." + wcDeadFloorID
+
+	wcAtticID  = "BBWELLWKPLACEATTCRMH"
+	wcAtticKey = "vtx.location." + wcAtticID
+)
+
+// TestWorkplace_TombstonedAncestorConfersNothing pins the vertex-liveness half of
+// the walk. `TombstoneLocation` does NOT cascade to a location's containedIn
+// links, so decommissioning a floor leaves its links live and only its own
+// isDeleted marks it gone. The read side stops at such a node (the full engine's
+// fetchNode yields nothing for a soft-deleted vertex), so a write-side walk that
+// transited one would hand out authority over everything beneath a floor the
+// operator had just retired — write authority outliving the read it mirrors.
+//
+// The positive sibling is the same call over a LIVE floor, so a denial is the
+// tombstone talking and not the extra hop failing to resolve at all.
+func TestWorkplace_TombstonedAncestorConfersNothing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwctombstone")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A
+
+	// attic -containedIn-> floor -containedIn-> building A, staff A at building A.
+	seedVertex(t, ctx, conn, wcAtticKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcDeadFloorKey, "location", map[string]any{})
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.location."+wcAtticID+".containedIn.location."+wcDeadFloorID,
+		"containedIn", wcAtticKey, wcDeadFloorKey)
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.location."+wcDeadFloorID+".containedIn.building."+wcBuildingAID,
+		"containedIn", wcDeadFloorKey, wcBuildingAKey)
+
+	// POSITIVE SIBLING: while the floor is alive, the two-hop chain authorizes.
+	live, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
+		"wdwctombstonelive001", "Attic Studio", wcAtticKey, wcStaffKey)
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("staff CreateStudio in the attic under a LIVE floor = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative proves nothing)", got)
+	}
+	if !keyExists(t, ctx, conn, live) {
+		t.Fatalf("%s was not written by the accepted CreateStudio", live)
+	}
+
+	// Decommission the floor. Its containedIn links stay live, exactly as
+	// TombstoneLocation leaves them.
+	seedTombstonedVertex(t, ctx, conn, wcDeadFloorKey, "location")
+
+	dead, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
+		"wdwctombstonedead001", "Attic Studio", wcAtticKey, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateStudio in the attic under a TOMBSTONED floor = %v, want Rejected — "+
+			"a retired location must not keep conferring authority over what it contained", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("the tombstoned-ancestor denial said %q, want the confinement guard's message", why)
+	}
+	if keyExists(t, ctx, conn, dead) {
+		t.Errorf("the denied CreateStudio wrote %s; it must be denied before any mutation", dead)
+	}
+}
+
+// TestWorkplace_TombstonedSeedLocationConfersNothing is the level-0 half of the
+// same rule. The candidate locations `require_workplace` receives come from
+// resolvers that test only LINK liveness (studio_locations, session_locations,
+// sites_for_provider, leaseapp_unit, account_unit — none reads the target
+// vertex), so a tombstoned location can reach the walk as its STARTING node. A
+// staffer wired directly to a retired location must not keep writing there
+// either: a guard where a dead ancestor confers nothing but a dead starting
+// point confers everything is the inconsistency the next reader copies wrongly.
+func TestWorkplace_TombstonedSeedLocationConfersNothing(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcdeadseed")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A
+
+	// POSITIVE SIBLING: building A is alive, so the direct level-0 match holds.
+	live, got := wcCreateStudioAs(t, ctx, conn, cp, cons,
+		"wdwcdeadseedlive0001", "Live Studio", wcBuildingAKey, wcStaffKey)
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("staff CreateStudio at their own LIVE building = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative proves nothing)", got)
+	}
+	if !keyExists(t, ctx, conn, live) {
+		t.Fatalf("%s was not written by the accepted CreateStudio", live)
+	}
+
+	// Retire the very building the staffer is wired to. Their worksAt link stays
+	// live — only the location is gone.
+	seedTombstonedVertex(t, ctx, conn, wcBuildingAKey, "location")
+
+	dead, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
+		"wdwcdeadseeddead0001", "Dead Studio", wcBuildingAKey, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateStudio at their own TOMBSTONED building = %v, want Rejected — "+
+			"a retired location confers nothing, whether it is an ancestor or the target itself", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("the tombstoned-seed denial said %q, want the confinement guard's message", why)
+	}
+	if keyExists(t, ctx, conn, dead) {
+		t.Errorf("the denied CreateStudio wrote %s", dead)
+	}
+}
+
+// TestWorkplace_ContainmentCycleTerminates pins the OUTCOME for a cyclic
+// topology: containment is meant to be a DAG, nothing in location-domain enforces
+// acyclicity, and a walk that met a cycle must answer with the guard's own denial
+// rather than raise or burn the script wall budget.
+//
+// What actually guarantees termination here is the DEPTH bound, not the visited
+// set — deleting `nxt in seen` keeps this test green, which is worth stating
+// plainly so nobody reads it as the `seen` guard's proof. `seen` bounds repeated
+// WORK (a diamond would otherwise re-read a shared ancestor once per branch) and
+// feeds the node budget; termination is `range(WORKPLACE_MAX_DEPTH)`'s job. Both
+// bounds are load-bearing, for different reasons.
+func TestWorkplace_ContainmentCycleTerminates(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwccycle")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A — NOT in the cycle
+
+	// A two-node cycle reachable from neither building: attic <-> floor.
+	seedVertex(t, ctx, conn, wcAtticKey, "location", map[string]any{})
+	seedVertex(t, ctx, conn, wcDeadFloorKey, "location", map[string]any{})
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.location."+wcAtticID+".containedIn.location."+wcDeadFloorID,
+		"containedIn", wcAtticKey, wcDeadFloorKey)
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.location."+wcDeadFloorID+".containedIn.location."+wcAtticID,
+		"containedIn", wcDeadFloorKey, wcAtticKey)
+
+	studio, got, why := wcCreateStudioAsWithReason(t, ctx, conn, cp, cons,
+		"wdwccycle0000000001", "Cycle Studio", wcAtticKey, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateStudio inside a containment CYCLE = %v, want Rejected", got)
+	}
+	// The distinction that matters: the guard's own denial, not a ScriptTimeout.
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("the cycle was refused with %q, want the confinement guard's own message — "+
+			"a timeout or a raise here would mean the visited set failed to close the loop", why)
+	}
+	if keyExists(t, ctx, conn, studio) {
+		t.Errorf("the denied CreateStudio wrote %s", studio)
+	}
+}
+
+// seedTombstonedVertex writes a vertex with isDeleted=true — the shape
+// TombstoneLocation leaves behind, which is a present document rather than an
+// absent key, so a guard must test the flag and not merely the read.
+func seedTombstonedVertex(t *testing.T, ctx context.Context, conn *substrate.Conn, key, class string) {
+	t.Helper()
+	doc := map[string]any{"class": class, "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed tombstoned vertex %s: %v", key, err)
+	}
+}

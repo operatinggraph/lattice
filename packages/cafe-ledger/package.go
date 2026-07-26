@@ -59,7 +59,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.3.0",
+	Version: "0.3.1",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
 		"(DebitAccount/CreditCafeAccount, append-only entries linked to the account via postedTo) + the " +

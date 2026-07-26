@@ -411,9 +411,10 @@ def vertex_alive(state, key):
 #
 # 3. The location is resolved from the TARGET's own topology, never from a
 #    payload field -- a caller cannot forge which building it is writing at.
-WORKPLACE_ROLE_PAGE_LIMIT = 50
+ROLE_PAGE_LIMIT = 50
 WORKPLACE_PARENT_PAGE_LIMIT = 20
 WORKPLACE_MAX_DEPTH = 8
+WORKPLACE_MAX_NODES = 64
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -427,7 +428,7 @@ def actor_holds_operator(actor_key):
     # roles, so this is never a keyspace scan. A role granted concurrently with
     # this write is not a race worth closing: it can only widen authority, and
     # the confined branch is the safe one.
-    page, _ = kv.Links(actor_key, "holdsRole", "out", None, WORKPLACE_ROLE_PAGE_LIMIT)
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
     for lk in page:
         if lk.isDeleted:
             continue
@@ -439,32 +440,89 @@ def actor_holds_operator(actor_key):
     return False
 
 def worksAt_covers(actor_id, location_key):
-    # Walks the location's containedIn chain upward, testing the actor's
-    # deterministic worksAt link at each level. The location itself is tested
-    # first, so a staff member wired to an exact unit matches too; one wired to
-    # the building matches everything containedIn it.
-    cur = location_key
+    # Answers "does this actor worksAt this location, or any LIVE location that
+    # contains it?" -- a BREADTH-first walk up the containedIn topology, testing
+    # the actor's deterministic worksAt link at every node. The location itself
+    # is tested first, so a staff member wired to an exact unit matches too; one
+    # wired to any containing building matches everything containedIn it.
+    #
+    # A tombstoned link OR VERTEX is absent. kv.Read returns the tombstone
+    # document rather than None (step4_hydrate routes only ErrKeyNotFound to
+    # knownAbsent), and UnwireWorksAt / TombstoneLocation tombstone rather than
+    # delete, so isDeleted is tested explicitly in three places: the worksAt
+    # link, each containedIn link, and every location VERTEX the walk stands on.
+    # The vertex test is what stops a DECOMMISSIONED location from still
+    # conferring authority -- TombstoneLocation does not cascade to containedIn
+    # links (location-domain), so those links stay live and only the vertex's own
+    # isDeleted marks it gone, while the read side stops dead there (the full
+    # engine's fetchNode yields nothing for a soft-deleted node). Transiting one
+    # would grant a write the reader would never show.
+    #
+    # It is tested on EVERY node, the caller-supplied one included, not just on
+    # ancestors: a guard where a dead ancestor confers nothing but a dead
+    # starting location confers everything would be exactly the kind of
+    # inconsistency the next reader copies wrongly.
+    #
+    # EVERY parent is followed, not one per level: containment is a DAG. A walk
+    # that kept a single parent would deny a staffer wired to whichever branch it
+    # happened to discard, while a read-side lens projecting a covering set
+    # unions every branch of [:containedIn*0..7] (cafe-domain's and
+    # wellness-domain's coveringLocations are the two that do).
+    #
+    # Bounded three ways so an op-time guard cannot fan out: WORKPLACE_MAX_DEPTH
+    # levels (0..7, the read side's hop range), WORKPLACE_PARENT_PAGE_LIMIT
+    # parents per node, and WORKPLACE_MAX_NODES distinct nodes overall, a node
+    # never being enqueued twice. Exhausting a bound falls through to the final
+    # 'return False' -- a DENIAL, never an escape. The node budget is the one
+    # bound the read side does not share (its walk caps hops, not nodes), so a
+    # containment tree wide enough to exhaust it denies a write the reader would
+    # show; it is set far above any real topology, and it fails closed.
+    if location_key == None:
+        return False
+    frontier = [location_key]
+    seen = [location_key]
     for _ in range(WORKPLACE_MAX_DEPTH):
-        if cur == None:
+        if len(frontier) == 0:
             return False
-        parts = cur.split(".")
-        if len(parts) != 3:
-            return False
-        # read-posture: (e) per-candidate follow-up read off the containedIn
-        # enumeration below (data-derived key -- the ancestor chain is not
-        # knowable client-side, so it cannot be pre-declared).
-        lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
-        if lnk != None and not lnk.isDeleted:
-            return True
-        # read-posture: (e) relation=containedIn epoch=none -- a location has at
-        # most a few parents; containment is provisioned topology, not written
-        # concurrently with this op.
-        page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
-        nxt = None
-        for lk in page:
-            if not lk.isDeleted:
+        parents = []
+        for cur in frontier:
+            parts = cur.split(".")
+            if len(parts) != 3:
+                # Not walkable. Stops its OWN branch rather than aborting the
+                # walk, so one malformed ancestor cannot deny a sibling branch
+                # that would have matched. A malformed location_key still
+                # denies: nothing else is queued, so the frontier empties.
+                continue
+            # read-posture: (e) per-candidate follow-up read off the containedIn
+            # enumeration below -- the location VERTEX, so a tombstoned one
+            # neither confers a match nor is walked through.
+            node = kv.Read(cur)
+            if node == None or node.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the same
+            # enumeration (data-derived key -- the ancestor chain is not
+            # knowable client-side, so it cannot be pre-declared).
+            lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+            if lnk != None and not lnk.isDeleted:
+                return True
+            # read-posture: (e) relation=containedIn epoch=none -- a location has
+            # at most a few parents; containment is provisioned topology, not
+            # written concurrently with this op.
+            page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
+            for lk in page:
+                if lk.isDeleted:
+                    continue
                 nxt = lk.targetVertex
-        cur = nxt
+                if nxt in seen:
+                    continue
+                if len(seen) >= WORKPLACE_MAX_NODES:
+                    continue
+                # Charged to the budget at ENQUEUE, so the node count bounds the
+                # walk's reads exactly rather than to within a page, and an
+                # ancestor reachable from several branches is visited once.
+                seen.append(nxt)
+                parents.append(nxt)
+        frontier = parents
     return False
 
 def workplace_exempt():

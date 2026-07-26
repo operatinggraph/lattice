@@ -75,7 +75,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "service-domain",
-	Version:     "0.9.2",
+	Version:     "0.9.3",
 	Description: "Service template + instance vertex type (service DDL + lifecycle ops incl. RequestService, RetireServiceTemplate, WireProvidedBy) plus the lean serviceprovider DDL (the provider-archetype binding, persona-worlds-design.md Fire W0); the instance records its external-call outcome as aspects (D5). RecordServiceOutcome grants operator + a bound serviceprovider (confined in-script to templates they provide). No read-path lens (Phase-3 deferred).",
 	Depends:     []string{"identity-domain", "orchestration-base"},
 	DDLs:        DDLs(),

@@ -43,13 +43,18 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
@@ -168,6 +173,9 @@ func main() {
 	// S9 is corpus-wide: the collision only exists BETWEEN packages, so it
 	// cannot be decided while walking one.
 	checkS9(rep, defs)
+	// S10 is corpus-wide for the same reason and one more: the helpers it pins
+	// are pasted per SCRIPT, so the copies do not line up with packages at all.
+	checkS10(rep)
 
 	for ref := range s1Debt {
 		if !seenS1Debt[ref] {
@@ -261,6 +269,241 @@ func checkS9(rep *report, defs map[string]pkgmgr.Definition) {
 				p.OperationType, strings.Join(others, ", "))
 		}
 	}
+}
+
+// sharedGuardHelpers are the Starlark guard helpers that carry NO
+// package-specific policy: each takes plain arguments and answers a question
+// about the graph, so every copy of one should compute the same answer. They are
+// pasted per SCRIPT rather than per package (there is no Starlark prelude yet),
+// so the corpus holds many copies and a fix applied to one silently leaves the
+// rest defective.
+//
+// That is not hypothetical. `worksAt_covers` shipped a walk that followed only
+// the LAST containedIn parent per level while the read-side lenses unioned every
+// branch, so staff wired to a discarded branch were denied writes they held. The
+// lane row naming the defect named three packages; the corpus held NINE copies
+// across seven. Whoever fixes the next one needs the gate to tell them how many
+// there are.
+//
+// `actor_holds_operator` is here BECAUSE it is the operator escape — the single
+// branch that lets a caller past every workplace guard in the corpus, and so the
+// last helper that should be trusted to drift. It reached this list the hard way:
+// it was first excluded on the claim that identity-domain and service-domain
+// "resolve the operator differently", which was inferred from a digest count and
+// was false. All twelve copies walk `holdsRole` → `.canonicalName == "operator"`
+// identically; the only difference was the NAME of the page-limit constant, five
+// spellings of the same 50. The constants are now one name and the exclusion is
+// gone. An exclusion justified by an unverified premise is worse than no gate,
+// because the recorded reason stops the next reader from re-checking.
+//
+// Deliberately NOT listed: `require_workplace`, whose copies genuinely differ on
+// POLICY, each documented at its site — clinic-reminders omits the
+// validated-target exemption (its ops have no consumer self path, so a self
+// exemption would let a front-desk actor forge target == actor), and
+// maintenance-domain factors the non-exempt half into `enforce_workplace`. Both
+// were read before being excluded. A variant that genuinely differs gets a
+// different NAME, which is what `enforce_workplace` already does; this list binds
+// only helpers where variation has no legitimate meaning.
+var sharedGuardHelpers = []string{"worksAt_covers", "workplace_exempt", "actor_holds_operator"}
+
+// guardConstants are the module-level Starlark constants the pinned helpers read.
+// Pinning helper BODIES is not enough on its own: a body references its bounds by
+// NAME, so the digest is identical whether the constant beside it says 50 or 10.
+// Lowering `ROLE_PAGE_LIMIT` in one script would silently cost an identity with
+// more roles than that its operator escape — a guard weakened without touching a
+// single line the body-digest can see. Each of these must hold ONE value across
+// the corpus.
+var guardConstants = []string{
+	"ROLE_PAGE_LIMIT",
+	"WORKPLACE_PARENT_PAGE_LIMIT",
+	"WORKPLACE_MAX_DEPTH",
+	"WORKPLACE_MAX_NODES",
+}
+
+// guardConstantRe matches a module-level Starlark constant assignment in column 0
+// — `WORKPLACE_MAX_DEPTH = 8`.
+var guardConstantRe = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*) = (.+)$`)
+
+// checkGuardConstants requires each guardConstant to have a single value
+// corpus-wide. WORKPLACE_MAX_DEPTH additionally has to match the read side's hop
+// range: `range(N)` tests depths 0..N-1, and the lenses union `[:containedIn*0..7]`,
+// so 8 is the value that makes the two walks agree (a mismatch here was a real
+// over-grant once — facet-staff-worlds-design.md §9.3).
+func checkGuardConstants(rep *report, sources []string) {
+	values := map[string]map[string][]string{} // const -> value -> sites
+	for _, path := range sources {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, m := range guardConstantRe.FindAllStringSubmatch(string(data), -1) {
+			name, val := m[1], strings.TrimSpace(m[2])
+			for _, want := range guardConstants {
+				if name != want {
+					continue
+				}
+				if values[name] == nil {
+					values[name] = map[string][]string{}
+				}
+				values[name][val] = append(values[name][val], path)
+			}
+		}
+	}
+	for _, name := range guardConstants {
+		byVal := values[name]
+		if len(byVal) < 2 {
+			continue
+		}
+		vals := make([]string, 0, len(byVal))
+		for v := range byVal {
+			vals = append(vals, v)
+		}
+		sort.Strings(vals)
+		var parts []string
+		for _, v := range vals {
+			sites := byVal[v]
+			sort.Strings(sites)
+			parts = append(parts, fmt.Sprintf("%s in %s", v, strings.Join(sites, ", ")))
+		}
+		rep.issuef("S10 — the guard constant %s has %d different values across the corpus (%s). The pinned helpers reference their bounds by NAME, so a body-digest cannot see this: one script quietly enforcing a smaller bound is a guard weakened without any line the digest compares having changed. Give every copy the same value, or give the outlier a different name if it is genuinely a different bound.",
+			name, len(byVal), strings.Join(parts, "; "))
+	}
+}
+
+// minGuardHelperCopies is the floor below which S10 assumes it is looking at the
+// wrong corpus rather than at a clean one. The rule's whole premise is that these
+// helpers are pasted MANY times; finding one copy, or none, means the scan broke
+// (wrong cwd, a moved corpus) or the shared prelude finally landed — and either
+// way a silent pass would be a gate reporting success for work it never did.
+const minGuardHelperCopies = 2
+
+// checkS10 requires every copy of a sharedGuardHelper to have the same CODE.
+// Comments are excluded: each package's copy legitimately explains itself in
+// terms of its own resolver, and prose drift is not a defect. Only the
+// statements have to agree.
+func checkS10(rep *report) {
+	sources := packageSources()
+	checkGuardConstants(rep, sources)
+	for _, helper := range sharedGuardHelpers {
+		bodies := map[string][]string{} // code digest -> sites
+		for _, path := range sources {
+			for _, site := range starlarkFuncBodies(path, helper) {
+				bodies[site.code] = append(bodies[site.code], site.where)
+			}
+		}
+		total := 0
+		for _, sites := range bodies {
+			total += len(sites)
+		}
+		if total < minGuardHelperCopies {
+			rep.issuef("S10 — found %d cop%s of %s under packages/, expected at least %d. Either the scan is looking at the wrong tree (S10 walks packages/ relative to the working directory) or these helpers moved into a shared prelude — in which case point this rule at the prelude instead of deleting it. A consistency gate that silently finds nothing reports success for work it never did.",
+				total, map[bool]string{true: "y", false: "ies"}[total == 1], helper, minGuardHelperCopies)
+			continue
+		}
+		if len(bodies) < 2 {
+			continue
+		}
+		digests := make([]string, 0, len(bodies))
+		for d := range bodies {
+			digests = append(digests, d)
+		}
+		// Report against the majority implementation; the odd ones out are what
+		// an author needs pointed at.
+		sort.Slice(digests, func(i, j int) bool {
+			if len(bodies[digests[i]]) != len(bodies[digests[j]]) {
+				return len(bodies[digests[i]]) > len(bodies[digests[j]])
+			}
+			return digests[i] < digests[j]
+		})
+		majority := bodies[digests[0]]
+		sort.Strings(majority)
+		for _, d := range digests[1:] {
+			sites := bodies[d]
+			sort.Strings(sites)
+			rep.issuef("S10 — %s at %s does not match the %d copies that agree (e.g. %s); %s has %d distinct implementations across %d copies. This helper carries no package-specific policy, so every copy must compute the same answer, indentation included; a divergent one is a guard that disagrees with itself. Apply the fix to ALL %d copies — not just the one you were looking at — or give the variant a different NAME if the difference is deliberate (maintenance-domain's enforce_workplace is the worked example).",
+				helper, strings.Join(sites, ", "), len(majority), majority[0],
+				helper, len(bodies), total, total)
+		}
+	}
+}
+
+// starlarkFuncSite is one `def <name>(...)` occurrence: where it is, and a
+// digest of its statements with comments and blank lines removed.
+type starlarkFuncSite struct {
+	where string
+	code  string
+}
+
+// starlarkFuncBodies finds every top-level `def <name>(` in a Go file's embedded
+// Starlark. A body runs until the next line that starts in column 0 with
+// content — the next def, a module constant, or the raw-string terminator.
+func starlarkFuncBodies(path, name string) []starlarkFuncSite {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	prefix := "def " + name + "("
+	var out []starlarkFuncSite
+	for i, ln := range lines {
+		if !strings.HasPrefix(ln, prefix) {
+			continue
+		}
+		var code []string
+		for j := i + 1; j < len(lines); j++ {
+			s := lines[j]
+			// A body ends at the first line with content in column 0. Decode a
+			// full rune: s[0] on a multibyte leading character is a 0xC2–0xF4
+			// byte, which is not a space, so a byte-wise test would misread an
+			// exotic indent (NBSP, ideographic space) as content and truncate.
+			if r, _ := utf8.DecodeRuneInString(s); strings.TrimSpace(s) != "" && !unicode.IsSpace(r) {
+				break
+			}
+			t := strings.TrimSpace(s)
+			if t == "" || strings.HasPrefix(t, "#") {
+				continue
+			}
+			// Indentation is SEMANTICS in Starlark, so it is hashed, not
+			// stripped. Flattening would let two copies digest alike while one
+			// nests a statement inside the loop above it — which is precisely
+			// how the walk this rule exists to protect went wrong (a
+			// `nxt = lk.targetVertex` at the wrong depth kept the wrong parent).
+			// The depth is normalized to a count of leading whitespace runes so
+			// a tabs-vs-spaces reindent is not reported as a behaviour change,
+			// while a change in nesting is.
+			depth := 0
+			for _, r := range s {
+				if !unicode.IsSpace(r) {
+					break
+				}
+				depth++
+			}
+			code = append(code, fmt.Sprintf("%d\x00%s", depth, t))
+		}
+		sum := sha256.Sum256([]byte(strings.Join(code, "\n")))
+		out = append(out, starlarkFuncSite{
+			where: fmt.Sprintf("%s:%d", path, i+1),
+			code:  hex.EncodeToString(sum[:8]),
+		})
+	}
+	return out
+}
+
+// packageSources lists every non-test Go file under packages/ — where the
+// embedded Starlark lives.
+func packageSources() []string {
+	var out []string
+	_ = filepath.WalkDir("packages", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			out = append(out, filepath.ToSlash(path))
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out
 }
 
 func sortedKeys(m map[string]pkgmgr.Definition) []string {

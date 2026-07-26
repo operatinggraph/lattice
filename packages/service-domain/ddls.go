@@ -839,7 +839,7 @@ def vertex_class(state, key):
         return None
     return getattr(doc, "class")
 
-SERVICE_ROLE_PAGE_LIMIT = 50
+ROLE_PAGE_LIMIT = 50
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -854,7 +854,7 @@ def actor_holds_operator(actor_key):
     # roles, so this is never a keyspace scan. A role granted concurrently with
     # this write is not a race worth closing: it can only widen authority, and
     # the confined branch is the safe one.
-    page, _ = kv.Links(actor_key, "holdsRole", "out", None, SERVICE_ROLE_PAGE_LIMIT)
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, ROLE_PAGE_LIMIT)
     for lk in page:
         if lk.isDeleted:
             continue

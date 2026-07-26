@@ -369,15 +369,14 @@ func TestCafeLeaseWorkplaces_OneRowPerLease(t *testing.T) {
 		"the south lease must not inherit the north building")
 }
 
-// TestCafeLeaseWorkplaces_MultiParentUnitUnionsBothChains proves a unit with
-// two containment parents contributes BOTH to one row. This DIVERGES from the
-// write side, which keeps only the last non-deleted parent per level
-// (`worksAt_covers`, ddls.go) and so follows one branch: a staffer on the
-// dropped branch is admitted here and refused there. The union is the correct
-// half — a staffer at either parent is equally entitled — and the single-branch
-// walk is the bug, filed as its own lane row. Pinned here so the read side's
-// answer is the deliberate one and the write side's fix is a convergence
-// toward it rather than a surprise.
+// TestCafeLeaseWorkplaces_MultiParentUnitUnionsBothChains proves a unit with two
+// containment parents contributes BOTH to one row: a staffer at either parent is
+// equally entitled to the lease. This is the read half of one rule, and
+// `worksAt_covers` (ddls.go) is the write half — it walks every containedIn
+// branch to the same depth, so the covering set a staffer is shown and the one
+// they may write at are the same set. The write side's own multi-parent pin is
+// TestWorkplace_SharedRoomCoveredByEveryContainmentParent
+// (wellness-domain/workplace_confinement_test.go).
 func TestCafeLeaseWorkplaces_MultiParentUnitUnionsBothChains(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
