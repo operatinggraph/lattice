@@ -217,6 +217,75 @@ func TestRLS_GrantSeqGuard_Integration(t *testing.T) {
 	assert.False(t, deletedB, "stale revoke cannot tombstone a fresher grant")
 }
 
+// TestRLS_RebuildReplayRederivesRowsLostOutOfBand_Integration pins the repair
+// path for a diverged actor_read_grants.
+//
+// A grant lens cannot truncate on rebuild — actor_read_grants is shared, so
+// GrantWriterAdapter deliberately implements no Truncater — which reads as
+// leaving an operator who restores or partially wipes the table with no way to
+// re-derive the missing rows. It does not: the §6.14 guard lives entirely in the
+// ON CONFLICT arm, so an ABSENT row takes the plain INSERT at whatever seq the
+// write carries, while a row still present replays against its own stored seq
+// and is correctly a no-op (the comparison is strictly-greater).
+//
+// So `Rebuild(truncate=false)` IS the repair path: resetting the durable replays
+// every Core KV entry carrying its real stream sequence
+// (pipeline.go, results[i].ProjectionSeq = msg.Sequence), which re-creates what
+// is missing and leaves what is not alone. This test pins the property the
+// repair rests on, at the layer that owns it.
+func TestRLS_RebuildReplayRederivesRowsLostOutOfBand_Integration(t *testing.T) {
+	dsn := skipIfNoPostgres(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	w := provisionGrantWriter(t, pool)
+
+	actor := "actor_" + sanitize(t.Name())
+	src := "cap-read.residence"
+	clearActor := func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM "actor_read_grants" WHERE actor_id=$1`, actor)
+	}
+	clearActor()
+	t.Cleanup(clearActor)
+
+	// Steady state: two grants projected at their stream sequences.
+	const seqKept, seqLost = 40, 41
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorKept", src, seqKept))
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorLost", src, seqLost))
+
+	// An out-of-band restore/wipe removes one row entirely — not a tombstone,
+	// which is what makes it invisible to every retraction mechanism.
+	_, err = pool.Exec(ctx, `DELETE FROM "actor_read_grants" WHERE actor_id=$1 AND anchor_id=$2`, actor, "anchorLost")
+	require.NoError(t, err)
+	_, _, found := grantState(t, pool, actor, "anchorLost", src)
+	require.False(t, found, "precondition: the row is gone, not tombstoned")
+
+	// The rebuild replay: every entry re-projected at its own stream sequence,
+	// the same seqs the steady state was written at.
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorKept", src, seqKept))
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorLost", src, seqLost))
+
+	seq, deleted, found := grantState(t, pool, actor, "anchorLost", src)
+	require.True(t, found, "a replay at the row's own stream seq must re-derive a row lost out-of-band")
+	assert.EqualValues(t, seqLost, seq)
+	assert.False(t, deleted, "the re-derived grant is live")
+
+	seq, deleted, found = grantState(t, pool, actor, "anchorKept", src)
+	require.True(t, found)
+	assert.EqualValues(t, seqKept, seq, "a row that survived replays against its own seq and is unchanged")
+	assert.False(t, deleted)
+
+	// The repair must not resurrect a grant that was legitimately revoked at a
+	// higher seq — otherwise the rebuild would be an over-grant, and the reason
+	// a diverged table is safe to rebuild is precisely that it is not.
+	require.NoError(t, w.RevokeGrant(ctx, actor, "anchorKept", src, 99))
+	require.NoError(t, w.UpsertGrant(ctx, actor, "anchorKept", src, seqKept))
+	_, deleted, _ = grantState(t, pool, actor, "anchorKept", src)
+	assert.True(t, deleted, "a replay at a stale seq must not resurrect a revoked grant")
+}
+
 // TestRLS_ForceRLS_DenyAll_Integration proves §6.14 H3: a protected table is
 // fail-closed. A table created WITHOUT a policy denies all rows under FORCE RLS;
 // a table WITH the set-membership policy returns only rows whose authz_anchors

@@ -705,9 +705,21 @@ clears the target store first.
 | Adapter / mode | `truncate` requested | Behavior |
 |----------------|----------------------|----------|
 | NATS-KV, unguarded | `false` | No truncate; the stream replay overwrites each key last-writer-wins. |
-| NATS-KV, unguarded | `true` | `Truncate` purges every key in the bucket, then the stream replays into the empty bucket. (`Truncate` does what the flag promised — it is not a silent skip.) |
-| NATS-KV, **guarded** | `false` or `true` | **Truncate is forced.** A guarded bucket's monotonic `projectionSeq` watermarks would reject the historical lower-seq replays against the live high-seq watermarks, leaving rejected-write holes. The pipeline detects guardedness via `Guarded()` (it never learns lens canonical names), purges the bucket — clearing the watermarks with the data — and logs at info that truncate was forced. The stream then replays from empty, the highest-seq write wins, and the steady state is identical to a from-scratch projection (Contract #6 §6.2). |
-| Postgres (no `Truncater`) | `true` | Truncate is skipped with a warn (the adapter does not implement `Truncater`). |
+| NATS-KV, unguarded | `true` | `Truncate` purges the lens's keys, then the stream replays into the emptied key space. (`Truncate` does what the flag promised — it is not a silent skip.) |
+| NATS-KV, **guarded** | `false` or `true` | **Truncate is forced.** A guarded bucket's monotonic `projectionSeq` watermarks would reject the historical lower-seq replays against the live high-seq watermarks, leaving rejected-write holes. The pipeline detects guardedness via `Guarded()` (it never learns lens canonical names), purges the lens's keys — clearing the watermarks with the data — and logs at info that truncate was forced. The stream then replays from empty, the highest-seq write wins, and the steady state is identical to a from-scratch projection (Contract #6 §6.2). |
+| Postgres (no `Truncater`) | `true` | Truncate is skipped; the replay still repairs absent rows — see **Repairing a diverged shared target** below. |
+
+**Truncate is scoped to the keys the lens owns.** A lens whose output key pattern
+yields a literal prefix (`OutputDescriptor.KeyPrefix` — the same literal
+`AnchorFromKey` matches first) purges only keys under that prefix. Several lenses
+project into one bucket — the auth plane's `capability` is the live case, and
+`weaver-targets` carries 14 — so an unscoped purge there would be a platform-wide
+authorization wipe healed only at sweep pace. A lens with no derivable prefix
+purges its whole bucket, which is what a **dedicated** target needs to reach the
+empty high-water state the guarded replay writes into. The scoping is bound to
+the *rule* (`projection.ApplyTruncateScope`), not to one adapter instance, so a
+replacement adapter built by an INTO-only hot reload carries it too — exactly how
+the §6.2 guard is bound, and for the same reason.
 
 `NatsKVAdapter.Truncate` purges each key (`Purge` per key) rather than deleting:
 a purge drops prior revisions and leaves a delete marker, so a subsequent `Get`
@@ -723,6 +735,36 @@ consistency mid-rebuild (while a guarded bucket is being rebuilt its keys are
 transiently absent, which step-3 denies fail-closed). The retry queue is **not**
 separately quiesced during the rebuild because it does not need to be: the guard
 makes a racing stale write lose on its own.
+
+### Repairing a diverged shared target
+
+A **grant lens** cannot truncate at all: `actor_read_grants` is shared by every
+producer, so `GrantWriterAdapter` deliberately implements no `Truncater` — one
+lens's rebuild must never `TRUNCATE` a table it co-owns. That reads as leaving an
+operator who restored or partially wiped the table with nothing that re-derives
+the missing rows. **It does not.**
+
+`Rebuild(ctx, false)` is the repair. The §6.14 monotonic guard lives entirely in
+the `ON CONFLICT … DO UPDATE … WHERE EXCLUDED.projection_seq > stored` arm, so:
+
+- a row that is **absent** — the out-of-band restore or partial wipe — hits no
+  conflict and is re-created by the plain `INSERT`, at whatever sequence the
+  replay carries;
+- a row still **present** replays against its own stored sequence and is a no-op,
+  because the comparison is strictly-greater;
+- a grant legitimately **revoked** at a higher sequence stays revoked, because the
+  stale replay loses the same comparison.
+
+The replay carries the real stream sequence (`ProjectionSeq = msg.Sequence`), not
+a reconciliation seq-0, so it is not subject to the absent-row seq-0 refusal that
+governs sweep writes. The repair is therefore fail-closed by construction: it can
+restore what was lost but cannot over-grant. Pinned by
+`TestRLS_RebuildReplayRederivesRowsLostOutOfBand_Integration`.
+
+The same reasoning covers any guarded target without a `Truncater`, which is why
+the pipeline logs that case at **info** describing both halves, rather than
+warning that rows "survive the rebuild" — that phrasing describes only the
+no-op half and discourages the action that actually repairs the divergence.
 
 ---
 

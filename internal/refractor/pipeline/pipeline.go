@@ -578,17 +578,26 @@ func (p *Pipeline) Rebuild(ctx context.Context, truncate bool) error {
 	// The force applies only to a target that can actually be truncated. A
 	// guarded target that cannot (the grant family, which shares one table
 	// across every producer and so must never TRUNCATE it) gets the honest
-	// warning instead: forcing there would announce a repair that the
+	// account instead: forcing there would announce a repair that the
 	// Truncater branch below then silently declines, leaving the operator to
 	// believe the watermarks were cleared when a replay is still about to be
 	// rejected against them.
+	//
+	// "Rejected against them" is only half of what happens, and the half an
+	// operator reaching for a rebuild usually does not want. The §6.14 guard
+	// lives in the ON CONFLICT arm, so a row still PRESENT replays against its
+	// own stored seq and is a no-op, while a row ABSENT — the out-of-band
+	// restore or partial wipe a rebuild is the response to — takes the plain
+	// INSERT and is re-derived. So an un-truncatable guarded rebuild is a
+	// repair for exactly the divergence it looks powerless against, and saying
+	// only that rows "survive" discourages the action that fixes it.
 	if g, ok := p.currentAdapter().(interface{ Guarded() bool }); ok && g.Guarded() && !truncate {
 		if _, truncatable := p.currentAdapter().(adapter.Truncater); truncatable {
 			slog.Info("pipeline: rebuild: guarded bucket forces truncate (avoids rejected-write holes)",
 				"ruleId", p.ruleID)
 			truncate = true
 		} else {
-			slog.Warn("pipeline: rebuild: guarded target cannot be truncated — the replay is written against the stored watermarks, so rows at or below them are rejected and survive the rebuild",
+			slog.Info("pipeline: rebuild: guarded target cannot be truncated (shared with other producers) — the replay re-derives rows that are ABSENT and leaves rows already present at or above their stored watermark unchanged; this repairs an out-of-band wipe but does not rewrite live rows",
 				"ruleId", p.ruleID)
 		}
 	}
