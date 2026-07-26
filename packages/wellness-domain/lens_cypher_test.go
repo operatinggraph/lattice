@@ -19,6 +19,7 @@ package wellnessdomain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -425,4 +426,44 @@ func TestWellnessSessions_NoStudioEmptyCovering(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Empty(t, rows[0].Values["coveringLocations"],
 		"a session with no studio is covered by nothing, not by every studio's location")
+}
+
+// TestWellnessSessions_HopBoundMatchesTheWriteSide pins the exact depth the
+// covering set reaches. The write side walks `range(WORKPLACE_MAX_DEPTH)` = 8
+// iterations testing depths 0..7, so the read side must admit depths 0..7 and
+// NO further: `*0..8` would admit a staffer nine levels up whose writes
+// require_workplace refuses — a read the write side would not have allowed.
+// The two bounds are written in different languages with different counting
+// conventions, which is why this needs pinning rather than reading.
+func TestWellnessSessions_HopBoundMatchesTheWriteSide(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "flow", "session")
+	f.vtx(t, "sunrise", "studio")
+	roomKey := f.vtx(t, "room", "location")
+	f.aspect(t, "flow", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "atStudio", "flow", "sunrise")
+	f.edge(t, "locatedAt", "sunrise", "room")
+
+	// room(0) -> a1(1) -> ... -> a8(8): one level deeper than either side reaches.
+	want := []any{roomKey}
+	prev := "room"
+	for i := 1; i <= 8; i++ {
+		name := fmt.Sprintf("a%d", i)
+		key := f.vtx(t, name, "location")
+		f.edge(t, "containedIn", prev, name)
+		if i <= 7 {
+			want = append(want, key)
+		}
+		prev = name
+	}
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 1)
+	require.ElementsMatch(t, want, rows[0].Values["coveringLocations"],
+		"depths 0..7 cover the session and depth 8 does not — the write side's own reach")
 }

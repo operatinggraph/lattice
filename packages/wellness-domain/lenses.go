@@ -129,9 +129,13 @@ RETURN
 // location, so a staffer wired to the exact room matches. The list-comprehension
 // form is lease-signing's authz_anchors idiom (lease-signing/lenses.go), which
 // keeps the row one-per-session — an OPTIONAL MATCH on a multi-location studio
-// would fan the session into several rows instead. The hop bound is
-// WORKPLACE_MAX_DEPTH from the write side's own walk, so neither side reaches a
-// depth the other refuses. The location nodes carry no label because a location
+// would fan the session into several rows instead. The upper bound is
+// WORKPLACE_MAX_DEPTH - 1, not WORKPLACE_MAX_DEPTH, because the two sides count
+// differently and the goal is that neither reaches a depth the other refuses:
+// the Starlark walk runs `range(WORKPLACE_MAX_DEPTH)` testing depths 0..7,
+// while `*0..N` here admits depths 0..N inclusive (the executor matches the
+// zero-hop node and THEN runs hops 1..N). `*0..8` would therefore admit a
+// staffer nine levels up whose writes require_workplace refuses. The location nodes carry no label because a location
 // is any vertex of class `location` whatever its type segment — a building, a
 // floor, a room — the same reason edge-manifest's workplace chains leave them
 // bare; the labelled `(s:studio)` head is what keeps the comprehension anchored
@@ -150,7 +154,7 @@ RETURN
   s.profile.data.name AS studioName,
   i.key AS instructorKey,
   i.profile.data.displayName AS instructorName,
-  [(s)-[:locatedAt]->(pl)-[:containedIn*0..8]->(c) | c.key] AS coveringLocations`
+  [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // wellnessBookingsSpec projects one row per booking, walking forSession and
 // bookedBy (each 0..1). bookerKey (not a name) is projected — identity
