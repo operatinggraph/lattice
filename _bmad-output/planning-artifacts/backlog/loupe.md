@@ -12,6 +12,8 @@ row discipline: [lattice.md → "How this board works"](lattice.md) (lint-board 
 **Concurrency:** this lane runs in PARALLEL with both other streams (Andrew, 2026-07-02) — it does NOT
 take the shared build lock; Loupe fires serialize among themselves on `/tmp/lattice-loupe-build.lock`.
 
+Open items only — shipped demand is in the Done log. 
+
 ## Loupe 2.0 — "the map is the console" (the program)
 
 PO review 2026-07-01 (Andrew session); UX design **adjudicated 2026-07-02** (Winston, Andrew-delegated):
@@ -35,9 +37,6 @@ fire order: [loupe-flows-edge-depth-ux.md](../../implementation-artifacts/loupe-
 [lattice.md](lattice.md); everything else is buildable in-lane.
 
 | Item | What it is | Imp | Size | State |
-|---|---|---|---|---|
-| **F24.1 — Edge states a fleet problem with no triage order** | 26 of 31 devices gapped, sorted by identity, so the worst device is wherever its identity falls; no retention-headroom headline, Interest Set not expandable. | ★★ | XS–S | ✅ shipped · [§3.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
-| **F24.2 — no per-device detail on the Edge fleet** | Each device is a flat text block: no Interest Set contents, no ack position against the retention floor in time as well as messages, no registration provenance, no sibling devices. | ★ | S | ✅ shipped · `#/edge/<key>` · [§3.1](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 | **Flows stays read-only until Loom can redrive an instance** | Loom exposes no retry: `failed` is terminal, `RetryCount` only counts, pause/resume are consumer-scoped, and `StartLoomPattern` is idempotent on instanceId. A console button minting a fresh instance would double-execute every committed side effect. | ★★ | S | 🚧 blocked-on: Loom per-instance redrive (lattice) · [§2.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 | **Edge cannot trigger the remedy it names** | The tab tells the operator a warm resume fixes a gapped device and cannot start one — edge nodes cannot self-report and no connection state is observable, so the console can only mark a device for hydration on its next attach. | ★★ | S | 🚧 blocked-on: operator-initiated device hydration (lattice) · [§3.2](../../implementation-artifacts/loupe-flows-edge-depth-ux.md) |
 

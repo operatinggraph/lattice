@@ -63,7 +63,7 @@ The exact wire shapes, key patterns, and behavioral rules are pinned in the data
 ## Built by an AI agent organization
 
 Lattice is deliberately developed by AI agents — the code, the tests, the contracts, and the
-documentation are agent-written, with one human (Andrew) as architect and supervisor: setting the
+documentation are agent-written, with one human principal as architect and supervisor: setting the
 vision, freezing the data contracts, and ratifying every design and frozen-contract change. Since
 Phase 3 the loop runs autonomously on a schedule — agents survey demand, design, build behind the
 full gate suite, and exercise the shipped apps to file the next round of demand. The paper trail
