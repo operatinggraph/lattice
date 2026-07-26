@@ -207,3 +207,36 @@ put a patient's display name on the broadcast SYNC plane, which is exactly what 
 `6b1c667c` ("patient names out of open clinic nats-kv lenses") deliberately undid; `visitseries` hangs off the
 patient and inherits the question. That is a design call about clinical reachability on the edge plane, not an
 execution step — it stays filed, not freelanced here.
+
+### 6.1 As built (`c84d1eb5`)
+
+Both lenses shipped as scoped, with three corrections the adversarial review forced.
+
+**The tab grant grows without bound, and the grant side cannot narrow with the projection.** The tail filters
+to open tabs; the walk cannot, because a status lives on an *aspect* and an `AnchorWalk` chain expresses node
+patterns only. `Settle` flips `.status.value` and leaves the tab alive rather than tombstoning it, so unlike
+`edgeEntityBookings` — whose cancelled rows self-clear because the vertex tombstones — `edgeManifestReadGrants`
+keeps granting every tab a resident ever opened. The generated producer cross-products its branches before
+`collect(DISTINCT …)`, which is the fan-out `ReadGrantDomainSpec`'s own doc names as the reason domains are
+split. Grant ⊇ projection still holds and nothing is over-read; what grows is the producer's row count per
+resident. Filed as its own row rather than papered over here — the fix is either a terminal-state tombstone in
+cafe-domain or an aspect predicate the walk vocabulary does not have, and both are decisions, not edits.
+
+**The newly-reachable tab ops failed closed for a two-lease resident.** `Charge` and `Settle` carry their
+ownership probe in `dispatch.optionalReads`, and `unresolvableSelfAnchor` scanned only `contextParams` — so an
+unanswerable `{me.leaseapp}` substituted a hole, `wholeKey` dropped the malformed key, the probe was never
+declared and the script refused the visitor's own tab with an `AuthDenied` they could do nothing about. An
+optionalRead is absence-tolerant of the *key*, not of the *template*; both are now scanned, with the `:id`
+rendering modifier stripped rather than read as part of the anchor type. This was pre-existing but only became
+reachable when the tab got a browse row, which is exactly when it became this fire's problem.
+
+**`ClaimTask` does not flow through this path yet, and the build note above overstated it.** `ctx.taskKey` is
+the correct candidate and `openTaskDetail` populates it, but that surface offers the task's own
+`forOperationKey`, and `ClaimTask` is never a task's `forOperation` — it is submitted by the hardcoded
+`claimTask()` affordance, which works. The candidate is right and currently unexercised; its consumer is a
+task-detail surface that offers task-targeted ops, filed as its own row.
+
+**Scope actually discharged.** `tab` (café `Charge` / `Settle` / `VoidCharge`) and `studio` (wellness
+`CreateSession`) now resolve. `patient` and `visitseries` remain, for the D3 reason stated above. Of the café
+trio only `Settle` and `VoidCharge` are drivable end-to-end from Facet today: `Charge` also requires a
+`menuItemKey`, and no lens projects menu items, so it renders as a free-text vertex key — filed.
