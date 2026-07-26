@@ -274,5 +274,46 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{"{payload.instructor}"},
 			},
 		},
+		{
+			OperationType: "CreateStudio",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Open a studio",
+				Description: "Add a studio at the building you work at.",
+				Icon:        "building",
+				Tone:        "primary",
+				SubmitLabel: "Open studio",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"name":{"type":"string","description":"What the studio is called, e.g. Flow Room."},` +
+				`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the building it sits in — auto-filled from where you work."}},` +
+				`"required":["name","location"]}`,
+			FieldDescriptions: map[string]string{
+				"name":     "What the studio is called, as members will see it on the schedule.",
+				"location": "The building the studio sits in — filled by the client from where you work, not typed.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       studioVertexDDL,
+				AuthContext: "standing",
+				// No TargetField/TargetType, and `location` is the submitter's
+				// OWN workplace — the same shape maintenance-domain's
+				// ReportIssue takes, and for the same two reasons. No entity
+				// lens projects places as browsable rows, so declaring a
+				// targetType would make the op permanently unresolvable; and
+				// the location a staffer may open a studio at is precisely the
+				// one they worksAt, which edgeIdentity already projects as the
+				// `workplace` selfAnchor. An identity with no workplace cannot
+				// answer it and the client declines to offer the op — the
+				// client-side mirror of the script's own denial, where an empty
+				// candidate list confines everyone but an operator.
+				//
+				// `location` is REQUIRED here even though the script treats the
+				// payload field as optional: an unlocated studio is an operator
+				// ceremony (nothing but the operator escape can reach it), so
+				// offering it on a descriptor-driven staff form would only ever
+				// render a control that fails closed.
+				ContextParams: map[string]string{"location": "{me.workplace}"},
+				Reads:         []string{"{payload.location}"},
+			},
+		},
 	}
 }

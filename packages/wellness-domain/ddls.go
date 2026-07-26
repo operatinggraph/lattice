@@ -782,19 +782,159 @@ def require_live_typed(state, key, name, want_class):
     if cls != want_class:
         fail("WrongClass: " + name + ": " + key + " has class " + str(cls) + ", required " + want_class)
 
+# --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
+#
+# A staff actor may write only inside the location it worksAt. Three properties
+# make this sound; each is a trap a simpler form falls into.
+#
+# 1. The exemption is ROLE-derived, never worksAt-derived. Exempting "an actor
+#    with no worksAt link" would be perverse: UnwireWorksAt would WIDEN a staff
+#    member's write surface from one building to everywhere. The exemption is
+#    holding the primordial 'operator' role -- the same walk the kernel projects
+#    its own root grant from (internal/bootstrap/lenses.go: MATCH (identity)
+#    -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator'), so
+#    an actor that is genuinely root necessarily has it. Everyone else is
+#    confined, and an actor holding no roles at all is confined to nothing.
+#
+# 2. A tombstoned link is ABSENT. kv.Read returns the tombstone DOCUMENT rather
+#    than None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), and
+#    UnwireWorksAt tombstones rather than deletes, so the '== None' form the
+#    cafe/clinic self-guards use would let a moved-on staff member keep writing.
+#
+# 3. The location is resolved from the TARGET's own topology, never from a
+#    payload field -- a caller cannot forge which building it is writing at.
+WORKPLACE_ROLE_PAGE_LIMIT = 50
+WORKPLACE_PARENT_PAGE_LIMIT = 20
+WORKPLACE_MAX_DEPTH = 8
+
+def actor_holds_operator(actor_key):
+    # Resolved from the GRAPH, not from a compile-time constant: the primordial
+    # role ids are loaded at runtime (bootstrap.LoadPrimordialNanoIDs) while a
+    # package's Definition -- and so its script text -- is built at package-init,
+    # so no substitution can see the operator id. The walk mirrors the kernel's
+    # own root-grant lens exactly (internal/bootstrap/lenses.go: MATCH (identity)
+    # -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator').
+    #
+    # read-posture: (e) relation=holdsRole epoch=none -- an identity holds few
+    # roles, so this is never a keyspace scan. A role granted concurrently with
+    # this write is not a race worth closing: it can only widen authority, and
+    # the confined branch is the safe one.
+    page, _ = kv.Links(actor_key, "holdsRole", "out", None, WORKPLACE_ROLE_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above (data-derived key -- the role is unknown until it resolves).
+        cn = kv.Read(lk.targetVertex + ".canonicalName")
+        if cn != None and not cn.isDeleted and cn.data.get("value") == "operator":
+            return True
+    return False
+
+def worksAt_covers(actor_id, location_key):
+    # Walks the location's containedIn chain upward, testing the actor's
+    # deterministic worksAt link at each level. The location itself is tested
+    # first, so a staff member wired to an exact unit matches too; one wired to
+    # the building matches everything containedIn it.
+    cur = location_key
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if cur == None:
+            return False
+        parts = cur.split(".")
+        if len(parts) != 3:
+            return False
+        # read-posture: (e) per-candidate follow-up read off the containedIn
+        # enumeration below (data-derived key -- the ancestor chain is not
+        # knowable client-side, so it cannot be pre-declared).
+        lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+        if lnk != None and not lnk.isDeleted:
+            return True
+        # read-posture: (e) relation=containedIn epoch=none -- a location has at
+        # most a few parents; containment is provisioned topology, not written
+        # concurrently with this op.
+        page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
+        nxt = None
+        for lk in page:
+            if not lk.isDeleted:
+                nxt = lk.targetVertex
+        cur = nxt
+    return False
+
+def workplace_exempt():
+    # The cheap half of require_workplace, callable BEFORE a domain resolver
+    # runs. Starlark evaluates arguments eagerly, so
+    # require_workplace(resolve(x), ...) would walk the target's topology even
+    # for root -- wasted reads, and worse, a malformed key anywhere in that walk
+    # raises where the op previously succeeded. Call sites therefore gate on
+    # this; require_workplace re-checks it anyway, so a site that forgets the
+    # gate is still CORRECT, only slower.
+    return op.authTargetValidated or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    # Binds the STANDING path only -- operator and staff role grants, which
+    # authorize via scope=any and so carry no target the platform has checked.
+    # A scope=self caller is bound instead by its own op's ownership probe (the
+    # applicationFor / identifiedBy indirection): a resident legitimately holds
+    # no worksAt link, and confining them by a rule written for staff would deny
+    # every self-service write. The two guards are complementary, not
+    # alternatives -- each binds the path the other cannot see.
+    #
+    # The exemption keys on authTargetValidated, NOT on authContextTarget being
+    # non-empty: the raw target is a client-supplied hint that any scope=any
+    # holder can set, so exempting on its presence would let any staff member
+    # opt out of confinement.
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write: a target can legitimately sit at several places
+    # at once (a provider practises at two buildings), and staff at either one
+    # are equally entitled to it. An empty list -- a target whose location
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
+    if op.authTargetValidated:
+        return
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
 
     if ot == "CreateStudio":
         name = required_string(p, "name")
+        loc = optional_string(p, "location")
+
+        # Staff-standing confinement: a studio is opened AT a location, and the
+        # candidate is the one location this op is about to link -- the only
+        # place the new studio will ever sit. An OMITTED location yields an
+        # empty candidate list, which require_workplace denies for anyone but an
+        # operator: a studio with no location is legal but un-browsable, and
+        # minting one stays an operator ceremony rather than a hole a staffer
+        # could open a studio through and locate afterwards.
+        #
+        # It answers ahead of require_live_typed below so a staffer outside the
+        # building learns nothing about which location keys exist; a malformed
+        # key is a denial here too (worksAt_covers rejects a non-3-segment key)
+        # rather than an InvalidArgument that would distinguish the two.
+        # workplace-exempt: (no-validated-path) CreateStudio is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no task
+        # mints it, so nothing but the operator escape reaches the exemption.
+        if not workplace_exempt():
+            loc_candidates = []
+            if loc != None:
+                loc_candidates.append(loc)
+            require_workplace(loc_candidates, "cannot open a studio at " + str(loc))
+
         sid = bare_nanoid_or_mint(p, "studioId")
         skey = "vtx.studio." + sid
         mutations = [
             make_vtx(skey, "studio", {}),
             make_aspect(skey, "profile", "studioProfile", {"name": name}),
         ]
-        loc = optional_string(p, "location")
         if loc != None:
             ltype, lid = parts_of(loc, "location", "")
             require_live_typed(state, loc, "location", "location")
@@ -1388,6 +1528,119 @@ def claim_first_free_seat(session_key, capacity):
             return n, make_aspect_upsert_occ(session_key, "seat" + str(n), "sessionSeatClaim", {}, existing.revision)
     fail("SessionFull: " + session_key + " has no open seats (capacity " + str(capacity) + ")")
 
+# --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
+#
+# A staff actor may write only inside the location it worksAt. Three properties
+# make this sound; each is a trap a simpler form falls into.
+#
+# 1. The exemption is ROLE-derived, never worksAt-derived. Exempting "an actor
+#    with no worksAt link" would be perverse: UnwireWorksAt would WIDEN a staff
+#    member's write surface from one building to everywhere. The exemption is
+#    holding the primordial 'operator' role -- the same walk the kernel projects
+#    its own root grant from (internal/bootstrap/lenses.go: MATCH (identity)
+#    -[:holdsRole]->(role) WHERE role.canonicalName.data.value = 'operator'), so
+#    an actor that is genuinely root necessarily has it. Everyone else is
+#    confined, and an actor holding no roles at all is confined to nothing.
+#
+# 2. A tombstoned link is ABSENT. kv.Read returns the tombstone DOCUMENT rather
+#    than None (step4_hydrate routes only ErrKeyNotFound to knownAbsent), and
+#    UnwireWorksAt tombstones rather than deletes, so the '== None' form the
+#    cafe/clinic self-guards use would let a moved-on staff member keep writing.
+#
+# 3. The location is resolved from the TARGET's own topology, never from a
+#    payload field -- a caller cannot forge which building it is writing at.
+WORKPLACE_PARENT_PAGE_LIMIT = 20
+WORKPLACE_MAX_DEPTH = 8
+
+def worksAt_covers(actor_id, location_key):
+    # Walks the location's containedIn chain upward, testing the actor's
+    # deterministic worksAt link at each level. The location itself is tested
+    # first, so a staff member wired to an exact unit matches too; one wired to
+    # the building matches everything containedIn it.
+    cur = location_key
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if cur == None:
+            return False
+        parts = cur.split(".")
+        if len(parts) != 3:
+            return False
+        # read-posture: (e) per-candidate follow-up read off the containedIn
+        # enumeration below (data-derived key -- the ancestor chain is not
+        # knowable client-side, so it cannot be pre-declared).
+        lnk = kv.Read("lnk.identity." + actor_id + ".worksAt." + parts[1] + "." + parts[2])
+        if lnk != None and not lnk.isDeleted:
+            return True
+        # read-posture: (e) relation=containedIn epoch=none -- a location has at
+        # most a few parents; containment is provisioned topology, not written
+        # concurrently with this op.
+        page, _ = kv.Links(cur, "containedIn", "out", None, WORKPLACE_PARENT_PAGE_LIMIT)
+        nxt = None
+        for lk in page:
+            if not lk.isDeleted:
+                nxt = lk.targetVertex
+        cur = nxt
+    return False
+
+def workplace_exempt():
+    # The cheap half of require_workplace, callable BEFORE a domain resolver
+    # runs. Starlark evaluates arguments eagerly, so
+    # require_workplace(resolve(x), ...) would walk the target's topology even
+    # for root -- wasted reads, and worse, a malformed key anywhere in that walk
+    # raises where the op previously succeeded. Call sites therefore gate on
+    # this; require_workplace re-checks it anyway, so a site that forgets the
+    # gate is still CORRECT, only slower.
+    return op.authTargetValidated or actor_holds_operator(op.actor)
+
+def require_workplace(location_keys, what):
+    # Binds the STANDING path only -- operator and staff role grants, which
+    # authorize via scope=any and so carry no target the platform has checked.
+    # A scope=self caller is bound instead by its own op's ownership probe (the
+    # applicationFor / identifiedBy indirection): a resident legitimately holds
+    # no worksAt link, and confining them by a rule written for staff would deny
+    # every self-service write. The two guards are complementary, not
+    # alternatives -- each binds the path the other cannot see.
+    #
+    # The exemption keys on authTargetValidated, NOT on authContextTarget being
+    # non-empty: the raw target is a client-supplied hint that any scope=any
+    # holder can set, so exempting on its presence would let any staff member
+    # opt out of confinement.
+    #
+    # location_keys is a LIST of candidate locations, and covering ANY ONE of
+    # them authorizes the write: a target can legitimately sit at several places
+    # at once (a provider practises at two buildings), and staff at either one
+    # are equally entitled to it. An empty list -- a target whose location
+    # cannot be resolved at all -- is a DENIAL for anyone but an operator, so an
+    # unwired topology fails closed rather than falling open.
+    if op.authTargetValidated:
+        return
+    if actor_holds_operator(op.actor):
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    for loc in location_keys:
+        if loc != None and worksAt_covers(actor_id, loc):
+            return
+    fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
+         str(location_keys) + "; " + what)
+
+def session_locations(session_key):
+    # A booking's location is where its session's studio sits: the session
+    # -atStudio-> studio link CreateSession writes, then that studio's own
+    # locatedAt links -- the same two-hop shape studio_locations covers in one.
+    # read-posture: (e) relation=atStudio epoch=none -- CreateSession writes
+    # exactly one atStudio link per session, so this resolves a single studio.
+    page, _ = kv.Links(session_key, "atStudio", "out")
+    locs = []
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
+        # handful of locations at most, so this is never a keyspace scan.
+        spage, _ = kv.Links(lk.targetVertex, "locatedAt", "out")
+        for sl in spage:
+            if not sl.isDeleted:
+                locs.append(sl.targetVertex)
+    return locs
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -1413,6 +1666,21 @@ def execute(state, op):
         # only narrows who the caller may book for.
         if op.authContextTarget != "" and op.authContextTarget != booker:
             fail("AuthDenied: a consumer may only book a class for themselves")
+
+        # Staff-standing confinement: the location comes from the SESSION's own
+        # topology (session -atStudio-> studio -locatedAt-> location), never
+        # from a payload field, so a staffer books a member into a class at a
+        # place they work and nowhere else. A session whose studio is wired to
+        # no location is operator-only by construction (an empty candidate list
+        # denies). It answers before the schedule read below, so a staffer at
+        # another building cannot use capacity or start-time errors as an
+        # oracle on a class they may not touch.
+        # workplace-exempt: (resource-bind) the consumer scope=self path is the
+        # only validated one, and the compare directly above binds that target
+        # to payload.booker -- the field that decides whose booking this is --
+        # so an exempted caller is booking for itself.
+        if not workplace_exempt():
+            require_workplace(session_locations(session), "cannot book a seat on " + session)
 
         # read-posture: (a) declared reads at CreateBooking dispatch.
         sched = kv.Read(session + ".schedule")
@@ -1543,6 +1811,19 @@ def execute(state, op):
 
         session = required_string(p, "session")
         require_matching_session(book_id, session)
+
+        # Staff-standing confinement, resolved from the session's own topology
+        # exactly as CreateBooking's is. It answers AFTER require_matching_session
+        # above, and that order is load-bearing: the caller supplies the session
+        # key, so confining on it before it is bound to THIS booking would let a
+        # staffer name a class at their own building and cancel a seat in a
+        # class somewhere else.
+        # workplace-exempt: (ownership-bound) the consumer scope=self path is
+        # the only validated one, and it is discharged above by the bookedBy
+        # link read, which requires the exempted target to be this booking's own
+        # booker.
+        if not workplace_exempt():
+            require_workplace(session_locations(session), "cannot cancel a seat on " + session)
 
         # read-posture: (a) declared reads at CancelBooking dispatch.
         status = kv.Read(book_key + ".status")

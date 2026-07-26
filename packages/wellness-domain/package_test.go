@@ -3,6 +3,7 @@ package wellnessdomain
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -47,7 +48,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Permissions), 12; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 5; got != want {
+	if got, want := len(Package.OpMetas), 6; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -95,14 +96,28 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, got, want)
 		}
 	}
-	wantPerms := []struct{ op, scope string }{
-		{"CreateStudio", "any"}, {"TombstoneStudio", "any"},
-		{"CreateSession", "any"}, {"TombstoneSession", "any"},
-		{"CreateBooking", "any"}, {"CreateBooking", "self"},
-		{"CancelBooking", "any"}, {"CancelBooking", "self"},
-		{"SetBookingAttendance", "any"},
-		{"CreateInstructor", "any"}, {"TombstoneInstructor", "any"},
-		{"BindInstructorIdentity", "any"},
+	// Pinned as (operationType, scope, grantsTo) triples: a permission's
+	// identity is its (operationType, scope) pair (Contract #8 §8.1), and the
+	// grantee list is the security-bearing half — widening a row is how a
+	// front-desk hat appears, so the pin has to see it (clinic-domain's grant
+	// matrix is the precedent). The staff-widened rows are confined inside the
+	// Starlark scripts by the workplace walk; see workplace_confinement_test.go.
+	staff := []string{"operator", "frontOfHouse"}
+	operatorOnly := []string{"operator"}
+	wantPerms := []struct {
+		op, scope string
+		grantsTo  []string
+	}{
+		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", operatorOnly},
+		{"CreateSession", "any", staff}, {"TombstoneSession", "any", []string{"operator", "provider"}},
+		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},
+		{"CancelBooking", "any", staff}, {"CancelBooking", "self", []string{"consumer"}},
+		{"SetBookingAttendance", "any", []string{"operator", "provider"}},
+		{"CreateInstructor", "any", operatorOnly}, {"TombstoneInstructor", "any", operatorOnly},
+		{"BindInstructorIdentity", "any", operatorOnly},
+	}
+	if got := len(Package.Permissions); got != len(wantPerms) {
+		t.Errorf("Permissions: got %d, want %d", got, len(wantPerms))
 	}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
@@ -111,6 +126,9 @@ func TestPackage_StructurePins(t *testing.T) {
 		got := Package.Permissions[i]
 		if got.OperationType != want.op || got.Scope != want.scope {
 			t.Errorf("Permissions[%d]: got %s/%s, want %s/%s", i, got.OperationType, got.Scope, want.op, want.scope)
+		}
+		if !slices.Equal(got.GrantsTo, want.grantsTo) {
+			t.Errorf("Permissions[%d] (%s/%s): grantsTo %v, want %v", i, want.op, want.scope, got.GrantsTo, want.grantsTo)
 		}
 	}
 }

@@ -15,6 +15,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // booking's booker IS an identity directly, not a business vertex a linked
 // identity must resolve through.
 //
+// CreateStudio, CreateSession, CreateBooking and CancelBooking additionally
+// grant `frontOfHouse` at scope=any — the studio front-desk beat: opening a
+// studio, scheduling a class, booking a member in, and releasing a member's
+// seat. scope=any carries no platform-checked target, so each of those scripts
+// binds the standing path itself with the workplace walk (`require_workplace`):
+// a non-operator caller must hold a `worksAt` link covering a location the
+// TARGET sits at — the studio's own `locatedAt` for a studio-scoped op, and
+// `session -atStudio-> studio -locatedAt-> location` for the two booking ops.
+// The location is never taken from the caller's word: CreateStudio guards on
+// the location it is about to link, and an unlocated studio therefore stays
+// operator-only. This is the same confinement CreateSession already carries,
+// and it leaves the scope=self consumer path untouched — `require_workplace`
+// returns early on `op.authTargetValidated`, so a member still books and
+// cancels their own seat while holding no `worksAt` link at all.
+//
 // TombstoneSession additionally grants `provider` at scope=any (widening the
 // EXISTING scope=any row's GrantsTo, never a second row — a permission's
 // identity is its (operationType, scope) pair, Contract #8 §8.1, mirroring
@@ -54,7 +69,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 		}
 	}
 	return []pkgmgr.PermissionSpec{
-		mk("CreateStudio"),
+		{
+			OperationType: "CreateStudio",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit CreateStudio (opens a studio at a location) — the script confines a non-operator caller to a location they worksAt, and a studio named with no location stays operator-only (an empty candidate list denies).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 		mk("TombstoneStudio"),
 		{
 			OperationType: "CreateSession",
@@ -68,14 +88,24 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator the right to submit TombstoneSession operations, and a bound instructor the right to cancel a class THEY lead (the script's standing guard confines a non-operator caller to the session it is ledBy-bound to via its own instructor identifiedBy binding).",
 			GrantsTo:      []string{"operator", "provider"},
 		},
-		mk("CreateBooking"),
+		{
+			OperationType: "CreateBooking",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to book a class for a member — the script confines a non-operator caller to a session whose studio sits at a location they worksAt.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 		{
 			OperationType: "CreateBooking",
 			Scope:         "self",
 			Note:          "Grants a consumer the right to book a class for THEMSELVES (the booking's booker must be the caller's own identity).",
 			GrantsTo:      []string{"consumer"},
 		},
-		mk("CancelBooking"),
+		{
+			OperationType: "CancelBooking",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to cancel a member's seat — the script confines a non-operator caller to a session whose studio sits at a location they worksAt, after binding the supplied session to the booking.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 		{
 			OperationType: "CancelBooking",
 			Scope:         "self",
