@@ -627,14 +627,23 @@ already-pinned helpers combined, and it was measured at **7 distinct implementat
 | `objects-base`, `service-domain` | 2 | calls `split_key(key)` for `key.split(".")` | identical — `split_key` has one implementation |
 | `orchestration-base/mark_expired.go`, `capability-author` | 2 | two-argument: no `want_type` at all | by construction |
 
-`< 3` **accepts a key with four or more segments and silently truncates it**, and orchestration-base holds
-the corpus's only caller that passes an empty `want_type` — `parts_of(scoped_to, "scopedTo", "")`
-(`ddls.go:274`), which is how `CreateTask` decides what a task is scoped to. So an **aspect** key
-(`vtx.leaseapp.<id>.terms` — four segments, Contract #1) is accepted there, truncated to
-`("leaseapp", <id>)`, and a `scopedTo` link is built from the truncation. Nothing else in the corpus is
-this lax; the checked shape is exactly what Contract #1 §1.1 already requires, so this narrows to the
-contract rather than changing it. No 4-segment `scopedTo` exists anywhere (`cmd/loupe/tasks*.go`,
-`cmd/loftspace-app`, `cmd/facet` all build 3-segment keys), so the tightening breaks no live caller.
+`< 3` **accepts a key with four or more segments and silently truncates it**. An **aspect** key
+(`vtx.leaseapp.<id>.terms` — four segments, Contract #1) is accepted, truncated to `("leaseapp", <id>)`,
+and `CreateTask` builds a `scopedTo` link out of the truncation — a link to a vertex the submitter never
+named. Nothing else in the corpus is this lax; the checked shape is exactly what Contract #1 §1.1 already
+requires, so this narrows to the contract rather than changing it. No 4-segment key reaches these fields
+from any live producer (`internal/weaver/strategist.go:229` and `internal/loom/engine.go:951` pass vertex
+roots; `cmd/loupe/tasks*.go`, `cmd/loftspace-app`, `cmd/facet` all build 3-segment keys), so the tightening
+breaks no caller.
+
+**The arity test is the whole guard — a first draft of this brief got that wrong and the correction is the
+point.** It claimed the defect needed `< 3` *combined with* an empty `want_type`, and that `ddls.go:274`
+was the corpus's only untyped caller. Both halves are false: `want_type` is compared against `parts[1]`,
+which a four-segment aspect key still fills correctly, so `parts_of("vtx.meta.<id>.canonicalName",
+"forOperation", "meta")` passes the type check — **all eleven callers of that script were exposed, not one**
+— and thirteen call sites across seven packages passed an empty `want_type` at the time of writing. Two
+independent reviewers caught it. This is the same failure the S10 note (§11) already records against
+`actor_holds_operator`: a premise inferred from a digest rather than read off the bodies.
 
 **The two-argument copies converge rather than get renamed.** S10's escape hatch is renaming, but that is
 for a variant that carries *different policy*; these two carry the same policy with an argument missing.
@@ -662,3 +671,42 @@ which is *stricter*, not weaker. Adding that short-circuit to make a digest agre
 satisfy a linter, which is the wrong direction; deciding it needs the scope=self grant analysis this fire
 does not do. The shared-prelude mechanism itself also stays out of scope — pinning is the ratified pattern
 (S10) and does not preclude a prelude later, which the gate's own error message already anticipates.
+
+### §12 build note — shipped `c35eb3be`
+
+All 31 copies agree and `parts_of` is in `sharedGuardHelpers`. Three things changed beyond the brief, each
+because review found the brief's shape insufficient rather than wrong:
+
+- **The canonical body gained an empty-id check.** The brief converged on the *majority* body, which
+  accepts `vtx.<type>.` and returns `id == ""`. That fails closed everywhere today — every call site either
+  gates liveness first or builds a deterministic key that misses and denies, and `step6_validate` rejects
+  any mutation whose key is not a canonical NanoID (`internal/substrate/keys/keys.go:75`). But the corpus
+  already held the stricter shape under a different name (`vertex_parts` in `clinic-domain/site.go:247` and
+  `loftspace-domain/ownership.go:136` both reject the empty id), so pinning the laxer of two shapes the
+  codebase already had would have made that laxity authoritative and left ~160 call sites each responsible
+  for noticing. It costs nothing: no legitimate caller can pass an empty id, because such a vertex cannot
+  exist.
+- **S10 now digests the `def` line.** The pin compared bodies only, so
+  `def parts_of(key, name, want_type=""):` hashed identically to the strict form while every call in that
+  script could omit the argument and skip the type check — exactly the state the two two-argument copies
+  were in. A body is only pinned if its signature is. All four pinned helpers already had one spelling
+  each, so this bound with no reconciliation.
+- **The one behavioral fix shipped with tests.** `TestCreateTask_ExtraSegmentKey_Rejected` and
+  `TestCreateTask_EmptyIdSegment_Rejected` (`packages/orchestration-base/task_script_test.go`) were run
+  against the pre-fix body and both fail there, so they discriminate rather than merely pass.
+
+Each rule is mutation-tested as §11 requires: reverting one body to `< 3` and adding a default argument to
+one signature are each named by the gate, at the exact site.
+
+**Named residuals** (folded into the lane's prelude row, not dropped):
+
+- **`require_workplace` stays unpinned**, as the brief scoped. Unchanged.
+- **The rename hatch is already exercised, and the renamed copies drift.** `vertex_parts` exists with
+  **two different signatures under one name** — 3-arg in `clinic-domain/site.go:247` and
+  `loftspace-domain/ownership.go:136`, 2-arg in `service-location/ddls.go:213` — plus `unit_parts(key)` in
+  `loftspace-domain/ddls.go:305`. All four are the same validator; none is reachable by S10, because S10
+  keys on the name. Consumer: the next author who copies whichever one they find first.
+- **Two gate-coverage gaps, neither live.** `packageSources()` skips `_test.go`, and embedded Starlark
+  already lives in one (`packages/orchestration-base/external_params_test.go:20`); no pinned helper is
+  defined in a test file today. And `minGuardHelperCopies = 2` is a flat floor, so 29 of 31 copies could
+  disappear silently. Both are gate-design calls, deliberately not made late in a build fire.
