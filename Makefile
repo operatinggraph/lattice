@@ -218,6 +218,23 @@ cycle-refractor: assert-main-checkout
 	@NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_REFRACTOR) REFRACTOR_PG_DSN="postgres://lattice:lattice_dev@localhost:5432/lattice?sslmode=disable" LATTICE_VAULT_MASTER_KEK_FILE=$(VAULT_KEK_FILE) ./bin/refractor >>refractor.log 2>&1 </dev/null & \
 	  sleep 2; pgrep -x refractor >/dev/null && echo "==> refractor running (PID $$(pgrep -x refractor))" || { echo "!! refractor failed to start — see refractor.log"; exit 1; }
 
+## cycle-loupe — Rebuild bin/loupe from the current tree and relaunch it against
+## the STILL-RUNNING stack, the sibling of cycle-refractor above and not a
+## teardown either. Use it after any change that reaches cmd/loupe or an
+## internal package it links (a Refractor or Processor change reaches it too —
+## derive the set with `go list -deps ./cmd/<x>`, never from memory). Env matches
+## the launch in `up-full`, which is the authority for how this component runs;
+## logs continue to loupe.log.
+cycle-loupe: assert-main-checkout
+	@echo "==> Killing the running Loupe..."
+	-pkill -f "bin/loupe" 2>/dev/null || true
+	@echo "==> Rebuilding bin/loupe..."
+	go build -o bin/loupe ./cmd/loupe
+	@echo "==> Starting Loupe in background..."
+	@LOUPE_OP_KEY=$$(jq -r '.operatorActorKey // empty' $(LOUPE_OPERATOR_JSON) 2>/dev/null); \
+	 NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LOUPE) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) LOUPE_PG_DSN=$(LOUPE_PG_DSN) LOUPE_OPERATOR_ACTOR_KEY="$$LOUPE_OP_KEY" LOUPE_DEV_AUTH=1 ./bin/loupe >>loupe.log 2>&1 </dev/null & \
+	  sleep 2; pgrep -f "bin/loupe" >/dev/null && echo "==> Loupe running on http://127.0.0.1:7777" || { echo "!! Loupe failed to start — see loupe.log"; exit 1; }
+
 ## down — Tear down all containers and remove the per-graph dev JSON artifacts
 ## (lattice.bootstrap.json + loupe-operator.json). Both name random NanoIDs seeded
 ## into the now-destroyed graph, so a stale copy dangles a fresh bootstrap (empty
